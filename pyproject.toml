@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra"]
+markers = [
+    "smoke: Fast sanity checks — unit tests, extraction pipeline (<2 min)",
+    "validate: Integration tests — API, reranker, verifier (<15 min)",
+]

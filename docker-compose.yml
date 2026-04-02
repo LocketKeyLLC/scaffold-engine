@@ -1,0 +1,119 @@
+# Scaffold Engine — Docker Compose
+# Milvus runs outside compose (docker run) due to embedEtcd config requirement.
+# Ollama is HOST-installed — reachable at 172.18.0.1:11434
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    ports:
+      - "3000:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://172.18.0.1:11434
+      - OPENAI_API_BASE_URL=http://pipelines:9099
+      - USE_OLLAMA_DOCKER=false
+      - WEBUI_SECRET_KEY=
+    volumes:
+      - open-webui:/app/backend/data
+    restart: always
+    networks:
+      - ai-network
+  pipelines:
+    image: ghcr.io/open-webui/pipelines:main
+    container_name: open-webui-pipelines
+    ports:
+      - "9099:9099"
+    volumes:
+      - ./pipelines:/app/pipelines
+    restart: always
+    networks:
+      - ai-network
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    ports:
+      - "8888:8080"
+    volumes:
+      - /home/aedefruscio/searxng:/etc/searxng
+    restart: always
+    networks:
+      - ai-network
+  scaffold-postgres:
+    image: postgres:16
+    container_name: scaffold-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: scaffold_engine
+      POSTGRES_USER: ${POSTGRES_USER:-scaffold}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scaffold_dev_pw}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scaffold} -d scaffold_engine"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: always
+    networks:
+      - ai-network
+  scaffold-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scaffold-orchestrator
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-scaffold}:${POSTGRES_PASSWORD:-scaffold_dev_pw}@scaffold-postgres:5432/scaffold_engine
+      OLLAMA_BASE_URL: http://172.18.0.1:11434
+      MILVUS_URI: http://milvus-standalone:19530
+      SEARXNG_URL: http://searxng:8080
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_JSON_FORMAT: "true"
+      LOG_FILE: /var/log/scaffold/app.jsonl
+      MODEL_ROUTER: qwen3:4b
+      MODEL_EMBEDDER: qwen3-embedding:0.6b
+      MODEL_EMBEDDER_PIPELINE: qwen3-embedding:8b
+      MODEL_RERANKER: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+      MODEL_CODER: qwen2.5-coder:7b
+      MODEL_GENERAL: qwen2.5:7b
+      MODEL_VERIFIER: qwen2.5:7b
+      MODEL_CLOUD_HEAVY: qwen3-vl:235b-instruct-cloud
+      MODEL_CLOUD_ALT: qwen3.5:397b-cloud
+      MODEL_FALLBACK: qwen3.5:latest
+      CLOUD_TIMEOUT: "600"
+      LOCAL_TIMEOUT: "1800"
+      HF_HOME: /app/.cache/huggingface
+      MAX_RETRIES: "3"
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_VERBOSITY: "error"
+      TOKENIZERS_PARALLELISM: "false"
+      SCAFFOLD_API_KEY: "${SCAFFOLD_API_KEY}"
+    volumes:
+      - ./app:/app/app:ro
+      - ./ground_truths:/app/ground_truths:ro
+      - hf-cache:/app/.cache/huggingface
+      - scaffold-logs:/var/log/scaffold
+    restart: unless-stopped
+    networks:
+      - ai-network
+    depends_on:
+      scaffold-postgres:
+        condition: service_healthy
+
+networks:
+  ai-network:
+    external: true
+    name: ai-network
+
+volumes:
+  open-webui:
+    external: true
+    name: open-webui
+  postgres-data:
+    name: scaffold-postgres-data
+  hf-cache:
+  scaffold-logs:
