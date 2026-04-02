@@ -61,3 +61,19 @@ ci-eval:
 ci-full: ci-local ci-eval
 
 .PHONY: ci-smoke ci-local ci-eval ci-full
+
+# ── Benchmarks ──────────────────────────────────────────────────────────────
+
+.PHONY: bench bench-compare bench-history
+
+bench: ## Run full performance benchmark (raw inference + pipeline)
+	@echo "═══ Running Scaffold Engine benchmark... ═══"
+	python3 tests/benchmarks/bench_pipeline.py
+	@echo ""
+	@echo "Results appended to tests/benchmarks/results.jsonl"
+
+bench-compare: ## Compare last 2 benchmark runs for regressions
+	python3 tests/benchmarks/bench_compare.py --last 2
+
+bench-history: ## Show last 5 benchmark runs
+	python3 tests/benchmarks/bench_compare.py --last 5

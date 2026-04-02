@@ -1,0 +1,73 @@
+{
+  "_comment": "TEMPLATE — this is what a single results.jsonl line looks like (pretty-printed for reference). Actual file is one JSON object per line, no whitespace.",
+  "schema_version": "1.0",
+  "run_id": "bench_20260402_143000_a1b2c3",
+  "timestamp": "2026-04-02T18:30:00.123456+00:00",
+  "hardware": {
+    "cpu": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
+    "cores_physical": 4,
+    "cores_logical": 8,
+    "ram_total_mb": 16384,
+    "platform": "Linux-6.x-x86_64"
+  },
+  "ollama": {
+    "url": "http://172.18.0.1:11434",
+    "models_pre": [],
+    "models_post": ["qwen2.5:7b", "qwen3:4b"]
+  },
+  "raw_inference": [
+    {
+      "model": "qwen2.5:7b",
+      "total_duration_s": 45.2,
+      "load_duration_s": 12.1,
+      "prompt_eval_count": 32,
+      "prompt_eval_duration_s": 3.4,
+      "prompt_eval_tps": 9.4,
+      "eval_count": 128,
+      "eval_duration_s": 29.7,
+      "eval_tps": 4.3,
+      "ttft_approx_s": 15.5
+    },
+    {
+      "model": "qwen3:4b",
+      "total_duration_s": 28.1,
+      "load_duration_s": 8.3,
+      "prompt_eval_count": 32,
+      "prompt_eval_duration_s": 2.1,
+      "prompt_eval_tps": 15.2,
+      "eval_count": 128,
+      "eval_duration_s": 17.7,
+      "eval_tps": 7.2,
+      "ttft_approx_s": 10.4
+    }
+  ],
+  "pipeline": {
+    "idea_submission": {
+      "job_id": "abc123-def456",
+      "duration_s": 45.0
+    },
+    "dag_generation": {
+      "duration_s": 72.5,
+      "node_count": 3
+    },
+    "execution": {
+      "duration_s": 180.0,
+      "total_events": 12,
+      "event_types": ["completed", "executing", "result", "started"],
+      "node_timings": [
+        {"node_key": "T1", "tool": "Milvus", "duration_s": 25.3},
+        {"node_key": "T2", "tool": "LLM", "duration_s": 55.8},
+        {"node_key": "T3", "tool": "LLM", "duration_s": 48.2}
+      ]
+    },
+    "total_pipeline_s": 297.5
+  },
+  "system_metrics": {
+    "avg_cpu_pct": 65.2,
+    "peak_cpu_pct": 98.7,
+    "avg_mem_pct": 72.1,
+    "peak_mem_mb": 12800,
+    "sample_count": 595
+  },
+  "total_bench_time_s": 350.0
+}
