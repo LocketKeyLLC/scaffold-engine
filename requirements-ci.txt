@@ -1,0 +1,17 @@
+# Minimal dependencies for Tier 1 (ci-smoke) cloud CI tests.
+# Must resolve full app import chain for unittest.mock.patch targets.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+pydantic==2.10.3
+pydantic-settings==2.7.0
+httpx==0.28.1
+pymilvus>=2.5.0,<2.6.0
+setuptools>=70.0.0,<72
+json_repair
+requests
+structlog
+pytest>=7.0
+pytest-timeout>=2.0
+pytest-asyncio

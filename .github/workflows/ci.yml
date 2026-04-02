@@ -1,0 +1,103 @@
+# Scaffold Engine CI
+# ──────────────────────────────────────────────────────────
+# Tier 1 (ci-smoke)  → every push & PR   → GitHub cloud runners  → no live services
+# Tier 2 (validate)  → main merges only  → self-hosted / local   → full Docker stack
+# ──────────────────────────────────────────────────────────
+# See docs/CI.md for the full tier breakdown and local testing with `act`.
+
+name: CI
+
+on:
+  push:
+    branches: ["*"]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+# ──────────────────────────────────────────────────────────
+# Tier 1: Cloud-safe smoke tests (no Milvus, no Postgres, no Ollama)
+# 24 unit tests — extraction pipeline, pure Python, <30s
+# ──────────────────────────────────────────────────────────
+jobs:
+  smoke:
+    name: "Tier 1 · Smoke (unit tests)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install test dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pytest pytest-timeout structlog
+
+          # Install app dependencies needed by unit tests (no torch, no pymilvus)
+          # The extraction tests import from app.modules — install the minimal set
+          if [ -f requirements-ci.txt ]; then
+            pip install -r requirements-ci.txt
+          fi
+
+      - name: Run ci-smoke tests
+        env:
+          SCAFFOLD_API_KEY: "test-key-for-ci"
+          PYTHONPATH: "."
+        run: make ci-smoke
+
+  # ──────────────────────────────────────────────────────────
+  # Tier 2: Integration + golden retrieval (requires full service stack)
+  # ──────────────────────────────────────────────────────────
+  # This job is DISABLED in GitHub cloud runners by default.
+  # It requires Milvus 2.4.17 (8GB+ RAM), PostgreSQL, and Ollama.
+  #
+  # To run Tier 2:
+  #   Option A: Local via `make ci-local` (uses docker exec, same as manual)
+  #   Option B: Self-hosted runner with the full Docker stack pre-booted
+  #   Option C: Local via `act -j integration` (see .actrc)
+  #
+  # Uncomment and configure a self-hosted runner to enable:
+  #
+  # integration:
+  #   name: "Tier 2 · Integration + Golden"
+  #   runs-on: self-hosted
+  #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  #   needs: smoke
+  #   timeout-minutes: 15
+  #
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - name: Verify services are running
+  #       run: |
+  #         docker ps | grep -q scaffold-orchestrator || { echo "::error::scaffold-orchestrator not running"; exit 1; }
+  #         docker ps | grep -q milvus-standalone     || { echo "::error::milvus-standalone not running"; exit 1; }
+  #         docker ps | grep -q scaffold-postgres     || { echo "::error::scaffold-postgres not running"; exit 1; }
+  #         curl -sf http://localhost:8000/health > /dev/null || { echo "::error::orchestrator health check failed"; exit 1; }
+  #
+  #     - name: Rebuild orchestrator with latest code
+  #       run: docker compose up -d --build scaffold-orchestrator
+  #
+  #     - name: Wait for healthy
+  #       run: |
+  #         for i in $(seq 1 30); do
+  #           curl -sf http://localhost:8000/health > /dev/null && exit 0
+  #           sleep 2
+  #         done
+  #         echo "::error::orchestrator failed to become healthy"
+  #         exit 1
+  #
+  #     - name: Run validate tests
+  #       env:
+  #         SCAFFOLD_API_KEY: ${{ secrets.SCAFFOLD_API_KEY }}
+  #       run: docker exec scaffold-orchestrator make -C /app validate
+  #
+  #     - name: Run eval (ground-truth retrieval)
+  #       env:
+  #         SCAFFOLD_API_KEY: ${{ secrets.SCAFFOLD_API_KEY }}
+  #       run: docker exec scaffold-orchestrator make -C /app eval
