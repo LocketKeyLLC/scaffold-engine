@@ -289,7 +289,7 @@ class TestDispatchToolMilvus:
         assert "Knowledge Base Results" in ctx
         assert "kb entry 1" in ctx
         assert "base context" in ctx
-        mock_search.assert_awaited_once_with("kb lookup query", node_key="T1")
+        mock_search.assert_awaited_once_with("kb lookup query", node_key="T1", domain=None)
 
 
 # ---------------------------------------------------------------------------
