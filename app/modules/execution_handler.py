@@ -110,7 +110,7 @@ async def retry_node(job_id: UUID, node_key: str, db: AsyncSession) -> dict:
     )
 
     await db.commit()
-    logger.info(f"Reset node {node_key} to pending for retry in job {job_id}")
+    logger.info("node_reset: node=%s job=%s", node_key, job_id)
 
     return {
         "job_id": str(job_id),
