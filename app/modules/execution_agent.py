@@ -18,7 +18,9 @@ Error recovery cascade (per spec):
   4. Log + present to user
 """
 
+import asyncio
 import logging
+import time as _time_mod
 from typing import AsyncGenerator,  Optional
 from uuid import UUID
 import httpx
@@ -32,6 +34,12 @@ from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Configurable constants
+# ---------------------------------------------------------------------------
+NODE_TIMEOUT_SECONDS = 600
+MAX_UPSTREAM_CHARS = 6000
 
 # ---------------------------------------------------------------------------
 # Verify system prompt
@@ -175,6 +183,37 @@ async def _all_nodes_done(db: AsyncSession, job_id: str) -> bool:
 # ---------------------------------------------------------------------------
 # Core execution
 # ---------------------------------------------------------------------------
+
+
+def _truncate_output(text: str, max_chars: int) -> str:
+    """Truncate text preserving first/last 20%, with a marker in the middle."""
+    if len(text) <= max_chars:
+        return text
+    keep = max_chars
+    head_len = int(keep * 0.2)
+    tail_len = int(keep * 0.2)
+    removed = len(text) - head_len - tail_len
+    return (
+        text[:head_len]
+        + f"\n[...truncated {removed} chars...]\n"
+        + text[-tail_len:]
+    )
+
+
+async def _fetch_upstream_outputs(
+    db, job_id: str, depends_on: list[str]
+) -> dict[str, str]:
+    """Fetch output_text for upstream nodes by node_key."""
+    if not depends_on:
+        return {}
+    rows = await db.execute(
+        text(
+            "SELECT node_key, output_text FROM dag_nodes "
+            "WHERE job_id = :jid AND node_key = ANY(:keys) AND status = 'done'"
+        ),
+        {"jid": job_id, "keys": depends_on},
+    )
+    return {r.node_key: (r.output_text or "") for r in rows.fetchall()}
 
 
 async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = None) -> str:
@@ -337,25 +376,65 @@ async def _searxng_search(query: str, max_results: int = 5) -> str:
             lines.append(f"[{i}] {title}\n    {snippet}\n    {url}")
         return "\n\n".join(lines)
     except Exception as e:
-        logger.warning("searxng_search_failed", error=str(e))
+        logger.warning("searxng_search_failed: %s", e)
         return f"SearXNG search failed: {e}"
 
 
-async def _milvus_search(query: str) -> str:
-    """Call query_rag(), return formatted context."""
+async def _milvus_search(query: str, node_key: str = "?", domain: str | None = None) -> str:
+    """Call query_rag(), return formatted context with structured logging."""
     try:
-        rag_result = await query_rag(query, domain=None, top_k=5)
+        rag_result = await query_rag(query, domain=domain, top_k=5)
         results = rag_result.get("results", [])
-        if not results:
-            return "No knowledge base results found."
-        lines = []
+        metadata = rag_result.get("metadata", {})
+
+        # Structured retrieval log
+        domains_found = set(r.get("domain", "unknown") for r in results)
+        formatted_lines = []
         for i, doc in enumerate(results, 1):
             topic = doc.get("topic", "Unknown")
             content = doc.get("content", "")[:500]
-            lines.append(f"[{i}] {topic}\n    {content}")
-        return "\n\n".join(lines)
+            formatted_lines.append(f"[{i}] {topic}\n    {content}")
+        formatted = "\n\n".join(formatted_lines) if formatted_lines else ""
+        total_chars = len(formatted)
+
+        logger.info(
+            "milvus_retrieval",
+            extra=dict(
+                event="milvus_retrieval",
+                node_key=node_key,
+                domain=",".join(sorted(domains_found)) if domains_found else "all",
+                top_k=5,
+                results_returned=len(results),
+                total_chars_injected=total_chars,
+                reranker_used=metadata.get("reranked", False),
+            ),
+        )
+
+        # Structured rerank log (if reranking was used)
+        if metadata.get("reranked", False):
+            top_score = 0.0
+            if results:
+                scores = [r.get("scores", {}).get("rerank", 0.0) for r in results]
+                top_score = max(scores) if scores else 0.0
+            logger.info(
+                "milvus_rerank",
+                extra=dict(
+                    event="milvus_rerank",
+                    node_key=node_key,
+                    candidates_in=metadata.get("fused_count", 0),
+                    candidates_out=len(results),
+                    top_score=round(top_score, 4),
+                ),
+            )
+
+        if not results:
+            return "No knowledge base results found."
+        return formatted
     except Exception as e:
-        logger.warning("milvus_search_failed", error=str(e))
+        logger.warning(
+            "milvus_search_failed",
+            extra=dict(event="milvus_search_failed", node_key=node_key, error=str(e)),
+        )
         return f"Knowledge base search failed: {e}"
 
 
@@ -394,7 +473,8 @@ async def _dispatch_tool(node: dict, task: str, context: str, auto_mode: bool):
 
     if tool == "Milvus":
         logger.info("tool_dispatch: %s rag_search node=%s", tool, nk)
-        rag_results = await _milvus_search(task)
+        node_domain = node.get("domain") if isinstance(node, dict) else None
+        rag_results = await _milvus_search(task, node_key=nk, domain=node_domain)
         augmented = (
             f"{context}\n\n"
             f"## Knowledge Base Results\n"
@@ -443,7 +523,6 @@ async def execute_next_node(
         try:
             partial_result = await _compile_output(job_id, db)
             if partial_result:
-                partial_result = "[PARTIAL — some nodes failed or blocked]\n\n" + partial_result
                 await db.execute(
                     text("UPDATE jobs SET compiled_output = :co, status = 'blocked' WHERE id = :jid"),
                     {"co": partial_result, "jid": job_id}
@@ -454,7 +533,7 @@ async def execute_next_node(
                     {"jid": job_id}
                 )
             await db.commit()
-            logger.info("partial_compile: job=%s chars=%s", job_id, len(partial_result) if partial_result else 0)
+            logger.info("partial_compiled: job=%s chars=%s", job_id, len(partial_result) if partial_result else 0)
         except Exception as exc:
             logger.warning("partial_compile_failed: job=%s error=%s", job_id, str(exc))
         # ── Identify blocked nodes and their failed dependencies ──
@@ -516,7 +595,7 @@ async def execute_next_node(
         exec_model = settings.model_coder
     verifier_model = settings.model_verifier
 
-    logger.info("Executing node '%s' (job %s) with %s", title, job_id, exec_model)
+    logger.info("node_execution_started: node='%s' job=%s model=%s", title, job_id, exec_model)
     await _set_node_status(db, node_id, "running")
 
     # 3. Build prompt with RAG grounding
@@ -547,26 +626,90 @@ async def execute_next_node(
     rag_context = await _fetch_rag_context(rag_query, top_k=2, domain=job_domain)
     if rag_context:
         exec_prompt = f"{exec_prompt}\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}"
-        logger.info("RAG grounding: %d chars injected for node '%s'", len(rag_context), title)
+        logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
     # ── SearXNG / Milvus context injection ──
     if tool == "SearXNG":
         search_results = await _searxng_search(title)
         exec_prompt = f"{exec_prompt}\n\n## Web Search Results\n{search_results}"
-        logger.info("SearXNG: %d chars injected for node '%s'", len(search_results), title)
+        logger.info("searxng_context_injected: chars=%d node='%s'", len(search_results), title)
     elif tool == "Milvus":
-        milvus_results = await _milvus_search(title)
+        node_domain = node.get("domain")
+        milvus_results = await _milvus_search(title, node_key=node["node_key"], domain=node_domain)
         exec_prompt = f"{exec_prompt}\n\n## Knowledge Base Results\n{milvus_results}"
-        logger.info("Milvus: %d chars injected for node '%s'", len(milvus_results), title)
 
-    # 6. Execute
+    # 5b. Inject upstream node outputs (with size management)
+    depends_on = node.get("depends_on") or []
+    if depends_on:
+        upstream_outputs = await _fetch_upstream_outputs(db, job_id, depends_on)
+        if upstream_outputs:
+            total_chars = sum(len(v) for v in upstream_outputs.values())
+            truncated_keys = []
+            if total_chars > MAX_UPSTREAM_CHARS:
+                # Truncate each proportionally
+                for nk in upstream_outputs:
+                    orig_len = len(upstream_outputs[nk])
+                    share = max(200, int(MAX_UPSTREAM_CHARS * orig_len / total_chars))
+                    if orig_len > share:
+                        upstream_outputs[nk] = _truncate_output(upstream_outputs[nk], share)
+                        truncated_keys.append(nk)
+                logger.info(
+                    "upstream_truncated",
+                    extra=dict(
+                        event="upstream_truncated",
+                        node_key=node["node_key"],
+                        original_chars=total_chars,
+                        truncated_chars=sum(len(v) for v in upstream_outputs.values()),
+                        upstream_nodes=truncated_keys,
+                    ),
+                )
+            parts = [f"### {nk}\n{text}" for nk, text in upstream_outputs.items()]
+            exec_prompt = (
+                exec_prompt
+                + "\n\n## Upstream Node Outputs\n"
+                + "\n\n".join(parts)
+            )
+
+    # 6. Execute (with timeout guard)
+    _node_t0 = _time_mod.monotonic()
     try:
-        messages = [{"role": "user", "content": exec_prompt}]
-        resp = await model_router.chat(messages=messages, model=exec_model)
-        if not resp.success:
-            raise RuntimeError(resp.error or "Model returned failure")
-        output = resp.text.strip()
+        async def _run_inference():
+            messages = [{"role": "user", "content": exec_prompt}]
+            resp = await model_router.chat(messages=messages, model=exec_model)
+            if not resp.success:
+                raise RuntimeError(resp.error or "Model returned failure")
+            return resp.text.strip()
+
+        output = await asyncio.wait_for(
+            _run_inference(), timeout=NODE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        elapsed = round(_time_mod.monotonic() - _node_t0, 1)
+        timeout_msg = (
+            f"Node '{node['node_key']}' timed out after {elapsed}s "
+            f"(limit: {NODE_TIMEOUT_SECONDS}s)"
+        )
+        logger.warning(
+            "node_timeout",
+            extra=dict(
+                event="node_timeout",
+                node_key=node["node_key"],
+                tool=tool,
+                elapsed_s=elapsed,
+                timeout_s=NODE_TIMEOUT_SECONDS,
+            ),
+        )
+        await _set_node_status(db, node_id, "failed", output=timeout_msg)
+        await _log_execution(db, job_id, node_id, "error", timeout_msg)
+        return {
+            "status": "failed",
+            "node_key": node["node_key"],
+            "title": title,
+            "error": timeout_msg,
+            "reason": "timeout",
+            "message": "Node timed out. Review timeout settings or retry.",
+        }
     except Exception as e:
-        logger.error("Node '%s' execution failed: %s", title, e)
+        logger.error("node_execution_failed: node='%s' error=%s", title, e)
         await _set_node_status(db, node_id, "failed")
         await _log_execution(db, job_id, node_id, "error", str(e))
         return {
@@ -582,7 +725,24 @@ async def execute_next_node(
     if not skip_verify:
         verified, reason, confidence = await _verify_output(title, output, verifier_model)
         if not verified:
-            logger.warning("Node '%s' failed verification: %s", title, reason)
+            logger.warning("node_verification_failed: node='%s' reason=%s", title, reason)
+
+    # TODO: Populate confidence via logprob extraction when verification escalation is implemented
+    # Set confidence column to NULL explicitly — verifier confidence is not yet trusted
+    await db.execute(
+        text("UPDATE dag_nodes SET confidence = NULL WHERE id = :nid"),
+        {"nid": str(node_id)},
+    )
+    await db.commit()
+    logger.info(
+        "verification_complete",
+        extra=dict(
+            event="verification_complete",
+            node_key=node["node_key"],
+            verified=verified,
+            confidence=None,
+        ),
+    )
 
     # 8. Persist
     final_status = "done" if verified else "failed"
@@ -606,7 +766,7 @@ async def execute_next_node(
         )
         await db.commit()
         job_complete = True
-        logger.info("Job auto-completed — all nodes processed: %s", job_id)
+        logger.info("job_autocompleted: job=%s", job_id)
         # ── Step 9b: Compile final output ──
         compiled = await _compile_output(job_id, db)
         await db.execute(
@@ -614,7 +774,7 @@ async def execute_next_node(
             {"out": compiled, "jid": job_id},
         )
         await db.commit()
-        logger.info("compiled_output stored: %s chars, job %s", len(compiled), job_id)
+        logger.info("compiled_output_stored: chars=%s job=%s", len(compiled), job_id)
 
     return {
         "status": final_status,
@@ -827,12 +987,35 @@ async def execute_all_nodes(
     t0 = _time.monotonic()
     node_results: list[dict] = []
 
+    # ---- concurrent execution guard (atomic check-and-set) ----
+    guard_result = await db.execute(
+        text("""
+            UPDATE jobs SET status = 'running', updated_at = now()
+            WHERE id = :jid AND status != 'running'
+            RETURNING id
+        """),
+        {"jid": job_id},
+    )
+    if guard_result.rowcount == 0:
+        # Job is already running or doesn't exist — check which
+        job_check = await _get_job(db, job_id)
+        if not job_check:
+            yield _sse("error", {"message": f"Job {job_id} not found"})
+        else:
+            yield _sse("error", {
+                "message": "Job is already executing",
+                "job_id": job_id,
+                "http_status": 409,
+            })
+        return
+    await db.commit()
+
     # ---- validate job ----
     job = await _get_job(db, job_id)
     if not job:
         yield _sse("error", {"message": f"Job {job_id} not found"})
         return
-    if job["status"] not in ("executing", "planning", "refining"):
+    if job["status"] not in ("running", "executing", "planning", "refining"):
         yield _sse("error", {
             "message": f"Job status is '{job['status']}' — not executable",
         })
@@ -853,7 +1036,7 @@ async def execute_all_nodes(
                 "strategy": dag_result.get("strategy", "unknown"),
             })
         except Exception as exc:
-            logger.error("Auto DAG generation failed for %s: %s", job_id, exc)
+            logger.error("auto_dag_generation_failed: job=%s error=%s", job_id, exc)
             yield _sse("error", {"message": f"DAG generation failed: {exc}"})
             return
 
@@ -878,16 +1061,28 @@ async def execute_all_nodes(
         if status == "complete":
             elapsed_ms = int((_time.monotonic() - t0) * 1000)
             passed = sum(1 for r in node_results if r.get("verified"))
-            failed = len(node_results) - passed
+            failed_count = len(node_results) - passed
+            is_partial = failed_count > 0
+            failed_node_details = [
+                {
+                    "node_key": r.get("node_key"),
+                    "status": r.get("status", "failed"),
+                    "reason": r.get("error") or r.get("verification_reason", "unknown"),
+                }
+                for r in node_results if not r.get("verified")
+            ]
             summary = {
                 "job_id": job_id,
                 "total_nodes": len(node_results),
                 "passed": passed,
-                "failed": failed,
+                "failed": failed_count,
                 "duration_ms": elapsed_ms,
                 "status": "completed",
+                "compile_status": "partial" if is_partial else "complete",
             }
-            logger.info("pipeline_complete", **summary)
+            if is_partial:
+                summary["failed_nodes"] = failed_node_details
+            logger.info("pipeline_completed: job=%s total=%s passed=%s failed=%s duration_ms=%s", job_id, len(node_results), passed, failed_count, elapsed_ms)
             yield _sse("pipeline_complete", summary)
             return
 
@@ -935,12 +1130,25 @@ async def execute_all_nodes(
         if result.get("job_complete"):
             elapsed_ms = int((_time.monotonic() - t0) * 1000)
             passed = sum(1 for r in node_results if r.get("verified"))
-            failed = len(node_results) - passed
-            yield _sse("pipeline_complete", {
+            failed_count = len(node_results) - passed
+            is_partial = failed_count > 0
+            failed_node_details = [
+                {
+                    "node_key": r.get("node_key"),
+                    "status": r.get("status", "failed"),
+                    "reason": r.get("error") or r.get("verification_reason", "unknown"),
+                }
+                for r in node_results if not r.get("verified")
+            ]
+            early_summary = {
                 "job_id": job_id,
                 "total_nodes": len(node_results),
                 "passed": passed,
-                "failed": failed,
+                "failed": failed_count,
                 "duration_ms": elapsed_ms,
-            })
+                "compile_status": "partial" if is_partial else "complete",
+            }
+            if is_partial:
+                early_summary["failed_nodes"] = failed_node_details
+            yield _sse("pipeline_complete", early_summary)
             return
