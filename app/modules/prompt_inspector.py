@@ -105,7 +105,7 @@ async def update_prompt(job_id: UUID, node_key: str, new_prompt: str, db: AsyncS
     )
     await db.commit()
 
-    logger.info(f"Updated prompt for {node_key} in job {job_id}")
+    logger.info("prompt_updated: node=%s job=%s", node_key, job_id)
 
     return {
         "job_id": str(job_id),

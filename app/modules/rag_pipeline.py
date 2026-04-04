@@ -346,7 +346,7 @@ async def query_rag(
     keyword_results = await _keyword_search(collection, query, top_k * 2, domain=domain)
 
     logger.info(
-        "Search: %d vector hits, %d keyword hits for '%s'",
+        "search_executed: vector_hits=%d keyword_hits=%d query='%s'",
         len(vector_results), len(keyword_results), query[:50],
     )
 
@@ -372,14 +372,8 @@ async def query_rag(
     latency_ms = round((time.monotonic() - t0) * 1000, 1)
     top_score = round(filtered[0].final_score, 4) if filtered else 0.0
     logger.info(
-        "retrieval_complete",
-        extra=dict(
-            query=query[:200],
-            domain=domain or "all",
-            n_results=len(filtered),
-            top_score=top_score,
-            latency_ms=latency_ms,
-        ),
+        "retrieval_completed: query='%s' domain=%s n_results=%d top_score=%.4f latency_ms=%.1f",
+        query[:200], domain or "all", len(filtered), top_score, latency_ms,
     )
 
     # 7. Build response

@@ -25,15 +25,15 @@ def _get_cross_encoder():
     try:
         from sentence_transformers import CrossEncoder
         model_name = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-        logger.info("Loading CrossEncoder: %s", model_name)
+        logger.info("crossencoder_loading: model=%s", model_name)
         t0 = time.monotonic()
         _cross_encoder = CrossEncoder(model_name, trust_remote_code=True)
         elapsed = time.monotonic() - t0
-        logger.info("CrossEncoder loaded in %.1fs", elapsed)
+        logger.info("crossencoder_loaded: elapsed_s=%.1f", elapsed)
         return _cross_encoder
     except Exception as e:
         _load_failed = True
-        logger.error("CrossEncoder load failed: %s", e)
+        logger.error("crossencoder_load_failed: error=%s", e)
         return None
 
 
@@ -108,14 +108,14 @@ def rerank_cross_encoder(
         items = items[:top_k]
 
         logger.info(
-            "CrossEncoder reranked %d docs in %.0fms (top score: %.4f)",
+            "reranker_completed: docs=%d elapsed_ms=%.0f top_score=%.4f",
             len(docs), elapsed_ms, items[0].score if items else 0,
         )
         return RerankResult(
             items=items, backend="CrossEncoder", latency_ms=elapsed_ms,
         )
     except Exception as e:
-        logger.warning("CrossEncoder inference failed: %s", e)
+        logger.warning("crossencoder_inference_failed: error=%s", e)
         return None
 
 
@@ -152,5 +152,5 @@ def rerank(
     if result is not None:
         return result
 
-    logger.warning("Using RRF fallback")
+    logger.warning("reranker_fallback_activated")
     return rerank_rrf(documents, top_k=top_k)
