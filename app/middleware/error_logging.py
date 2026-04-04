@@ -33,7 +33,7 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
             tb = traceback.format_exc()
             error_msg = str(exc)[:1000]
             logger.error(
-                "Unhandled %s on %s %s: %s",
+                "http_request_failed: exception=%s method=%s path=%s error=%s",
                 type(exc).__name__, request.method, request.url.path, error_msg,
             )
 

@@ -79,7 +79,7 @@ async def refine_idea(
         {"title": idea_text[:80], "input_text": idea_text},
     )
     job_id = result.scalar_one()
-    logger.info("Created job %s for refinement", job_id)
+    logger.info("job_created: job=%s", job_id)
 
     # 2. Transition to refining
     await db.execute(
@@ -138,7 +138,7 @@ async def refine_idea(
         },
     )
     await db.commit()
-    logger.info("Job %s refined → planning", job_id)
+    logger.info("job_refined: job=%s", job_id)
 
     return {
         "job_id": str(job_id),
@@ -192,4 +192,4 @@ async def _fail_job(db: AsyncSession, job_id: UUID, error: str) -> None:
         {"error": error[:1000], "id": job_id},
     )
     await db.commit()
-    logger.error("Job %s failed: %s", job_id, error)
+    logger.error("job_failed: job=%s error=%s", job_id, error)

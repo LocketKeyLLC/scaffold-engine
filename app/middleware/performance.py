@@ -36,7 +36,7 @@ class PerformanceMiddleware(BaseHTTPMiddleware):
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
         logger.info(
-            "%s %s → %d (%dms)",
+            "http_request_completed: method=%s path=%s status=%d duration_ms=%d",
             request.method, request.url.path,
             response.status_code, elapsed_ms,
         )
