@@ -1,0 +1,176 @@
+"""
+scaffold_router.py  --  Step 17
+Open WebUI Pipeline: command detection + routing to scaffold orchestrator.
+
+Recognized commands:
+  /idea <text>        -> POST /ideas
+  /dag <job_id>       -> POST /dag
+  /execute <job_id>   -> POST /execute
+  /skip <job_id> <node_key> -> POST /skip
+  /optimize <text>    -> POST /optimize
+  /rag <query>        -> POST /rag
+  /status             -> GET  /status
+  /help               -> show command list
+
+Non-command messages pass through to the default model unchanged.
+"""
+
+from typing import List, Optional, Generator, Iterator
+import requests
+from pydantic import BaseModel, Field
+
+
+
+class Pipeline:
+    class Valves(BaseModel):
+        api_key: str = ""
+        orchestrator_url: str = "http://scaffold-orchestrator:8000"
+
+    def __init__(self):
+        self.id = "scaffold_router"
+        self.name = "Scaffold Router"
+        self.valves = self.Valves()
+
+    def pipe(
+        self,
+        user_message: str,
+        model_id: str,
+        messages: List[dict],
+        body: dict,
+    ) -> str:
+        msg = user_message.strip()
+
+        if not msg.startswith("/"):
+            return self._proxy_ollama(messages, body)
+
+        parts = msg.split(None, 2)
+        cmd = parts[0].lower()
+
+        try:
+            if cmd == "/help":
+                return self._help()
+
+            elif cmd == "/idea":
+                if len(parts) < 2:
+                    return "Usage: /idea <description>"
+                text = " ".join(parts[1:])
+                r = requests.post(
+                    f"{self.valves.orchestrator_url}/ideas",
+                    json={"idea": text},
+                    headers={"X-API-Key": self.valves.api_key},
+                    timeout=1800,
+                )
+                return self._fmt(r)
+
+            elif cmd == "/dag":
+                if len(parts) < 2:
+                    return "Usage: /dag <job_id>"
+                r = requests.post(
+                    f"{self.valves.orchestrator_url}/dag",
+                    json={"job_id": parts[1]},
+                    headers={"X-API-Key": self.valves.api_key},
+                    timeout=1800,
+                )
+                return self._fmt(r)
+
+            elif cmd == "/execute":
+                if len(parts) < 2:
+                    return "Usage: /execute <job_id>"
+                r = requests.post(
+                    f"{self.valves.orchestrator_url}/execute",
+                    json={"job_id": parts[1], "skip_verify": False},
+                    headers={"X-API-Key": self.valves.api_key},
+                    timeout=1800,
+                )
+                return self._fmt(r)
+
+            elif cmd == "/skip":
+                if len(parts) < 3:
+                    return "Usage: /skip <job_id> <node_key>"
+                r = requests.post(
+                    f"{self.valves.orchestrator_url}/skip",
+                    json={"job_id": parts[1], "node_key": parts[2]},
+                    headers={"X-API-Key": self.valves.api_key},
+                    timeout=30,
+                )
+                return self._fmt(r)
+
+            elif cmd == "/optimize":
+                if len(parts) < 2:
+                    return "Usage: /optimize <prompt text>"
+                text = " ".join(parts[1:])
+                r = requests.post(
+                    f"{self.valves.orchestrator_url}/optimize",
+                    json={"prompt": text, "skip_verify": False},
+                    headers={"X-API-Key": self.valves.api_key},
+                    timeout=1800,
+                )
+                return self._fmt(r)
+
+            elif cmd == "/rag":
+                if len(parts) < 2:
+                    return "Usage: /rag <query>"
+                text = " ".join(parts[1:])
+                r = requests.post(
+                    f"{self.valves.orchestrator_url}/rag",
+                    json={"query": text, "top_k": 5},
+                    headers={"X-API-Key": self.valves.api_key},
+                    timeout=60,
+                )
+                return self._fmt(r)
+
+            elif cmd == "/status":
+                r = requests.get(f"{self.valves.orchestrator_url}/status", headers={"X-API-Key": self.valves.api_key}, timeout=10)
+                return self._fmt(r)
+
+            else:
+                return f"Unknown command: `{cmd}`\nType `/help` for available commands."
+
+        except requests.exceptions.Timeout:
+            return f"⚠️ Request timed out. The orchestrator is still processing — check back shortly."
+        except requests.exceptions.ConnectionError:
+            return f"⚠️ Cannot reach orchestrator at {self.valves.orchestrator_url}. Is it running?"
+        except Exception as e:
+            return f"⚠️ Error: {e}"
+
+    def _proxy_ollama(self, messages, body):
+        """Forward non-command messages to Ollama for normal chat."""
+        model = body.get("ollama_model", "qwen2.5:7b")
+        try:
+            r = requests.post(
+                "http://172.18.0.1:11434/api/chat",
+                json={"model": model, "messages": messages, "stream": False},
+                timeout=120,
+            )
+            data = r.json()
+            return data.get("message", {}).get("content", "No response from model.")
+        except Exception as e:
+            return f"⚠️ Ollama error: {e}"
+
+    def _fmt(self, r: requests.Response) -> str:
+        try:
+            data = r.json()
+        except Exception:
+            return f"HTTP {r.status_code}: {r.text[:500]}"
+
+        if r.status_code >= 400:
+            return f"⚠️ Error {r.status_code}: {data.get('message') or data.get('detail') or r.text[:200]}"
+
+        import json
+        return f"```json\n{json.dumps(data, indent=2)}\n```"
+
+    def _help(self) -> str:
+        return """**Scaffold Router Commands**
+
+| Command | Description |
+|---|---|
+| `/idea <text>` | Submit a new idea → refine → create job |
+| `/dag <job_id>` | Generate DAG from refined idea |
+| `/execute <job_id>` | Execute next pending DAG node |
+| `/skip <job_id> <node_key>` | Skip a specific node |
+| `/optimize <prompt>` | Optimize a prompt |
+| `/rag <query>` | Query the knowledge base |
+| `/status` | List active jobs |
+| `/help` | Show this message |
+
+Non-command messages are passed through to the selected model normally."""
