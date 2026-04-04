@@ -60,9 +60,9 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
 }
 
 Rules:
-- Minimum 2 tasks, maximum 15
+- Decompose the idea into exactly 3 to 5 execution steps. Do not create more than 5 steps. If the task is simple, use 3 steps. If it requires research, retrieval, and synthesis, use 4-5 steps.
 - Every task must have a unique id (T1, T2, ...)
-- depends_on references other task ids
+- depends_on references other task ids — only use ids you have defined
 - No circular dependencies
 - First task(s) must have empty depends_on
 - Last task(s) must be type "output" or "validation"
@@ -74,7 +74,18 @@ Rules:
   * FileSystem = file write/read/save operations.
   * Human = human review or approval gate.
   * LLM = general reasoning, summarization, analysis (default for everything else).
-- If complexity is high or ambiguities exist, include a human_review task"""
+- If complexity is high or ambiguities exist, include a human_review task
+
+EXAMPLE (4-node DAG for "Research the history of solar panels and summarize findings"):
+{
+  "strategy": "sequential",
+  "tasks": [
+    {"id": "T1", "name": "Search solar panel history", "type": "research", "inputs": ["solar panel history query"], "outputs": ["raw search results"], "depends_on": [], "tool": "SearXNG", "assigned_model": null, "notes": "Broad web search for timeline and key milestones"},
+    {"id": "T2", "name": "Retrieve internal KB context", "type": "research", "inputs": ["solar panel keywords"], "outputs": ["KB matches"], "depends_on": ["T1"], "tool": "Milvus", "assigned_model": null, "notes": "Check knowledge base for any stored solar energy references"},
+    {"id": "T3", "name": "Synthesize and summarize", "type": "action", "inputs": ["raw search results", "KB matches"], "outputs": ["summary draft"], "depends_on": ["T1", "T2"], "tool": "LLM", "assigned_model": null, "notes": "Combine sources into a coherent summary"},
+    {"id": "T4", "name": "Format final output", "type": "output", "inputs": ["summary draft"], "outputs": ["final summary document"], "depends_on": ["T3"], "tool": "FileSystem", "assigned_model": null, "notes": "Write final summary to file"}
+  ]
+}"""
 
 DAG_PROMPT = """Decompose this refined brief into a DAG of executable tasks:
 
@@ -111,9 +122,31 @@ async def generate_dag(
 
     status, brief = row
     if status != "planning":
-        return {"error": f"Job is in '{status}' state, expected 'planning'"}
+        return {
+            "error": "Job is not in planning status",
+            "job_id": job_id,
+            "current_status": status,
+            "http_status": 409,
+        }
     if not brief:
         return {"error": "Job has no refined_brief — run idea refinement first"}
+
+    # 1b. Idempotency guard — reject if DAG already exists
+    existing = await db.execute(
+        text("SELECT COUNT(*) FROM dag_nodes WHERE job_id = :jid"),
+        {"jid": uid},
+    )
+    node_count = existing.scalar() or 0
+    if node_count > 0:
+        logger.warning(
+            "idempotency_rejected: job=%s existing_nodes=%d", job_id, node_count
+        )
+        return {
+            "error": "DAG already exists for this job",
+            "job_id": job_id,
+            "node_count": node_count,
+            "http_status": 409,
+        }
 
     brief_data = brief if isinstance(brief, dict) else json.loads(brief)
 
@@ -147,15 +180,26 @@ async def generate_dag(
         await _fail_job(db, uid, "DAG must have at least 2 tasks")
         return {"job_id": job_id, "status": "failed", "error": "Less than 2 tasks generated"}
 
+    # 3b. Enforce node count bounds (3-5)
+    tasks = _enforce_node_count(tasks)
+
     # 4. Normalize and validate tasks
     normalized, errors = _normalize_tasks(tasks)
     if errors:
         await _fail_job(db, uid, f"Task validation errors: {'; '.join(errors)}")
         return {"job_id": job_id, "status": "failed", "errors": errors}
 
+    # 4b. Semantic DAG validation (deps, cycles, tools)
+    try:
+        normalized, dag_warnings = validate_dag(normalized)
+    except ValueError as exc:
+        await _fail_job(db, uid, str(exc))
+        return {"job_id": job_id, "status": "failed", "error": str(exc)}
+
     # 5. Build edges and validate graph
     edges = _build_edges(normalized)
     graph_errors, warnings = _validate_graph(normalized, edges)
+    warnings.extend(dag_warnings)
     if graph_errors:
         await _fail_job(db, uid, f"Graph validation errors: {'; '.join(graph_errors)}")
         return {"job_id": job_id, "status": "failed", "errors": graph_errors}
@@ -197,7 +241,7 @@ async def generate_dag(
         {"id": uid},
     )
     await db.commit()
-    logger.info("Job %s: DAG generated with %d nodes → executing", job_id, len(normalized))
+    logger.info("dag_generated: job=%s node_count=%d", job_id, len(normalized))
 
     # 9. Generate Mermaid diagram
     mermaid = _render_mermaid(normalized, edges)
@@ -214,6 +258,43 @@ async def generate_dag(
         "model_used": resp.model,
         "duration_ms": resp.total_duration_ms,
     }
+
+
+# ---------------------------------------------------------------------------
+# Node count enforcement
+# ---------------------------------------------------------------------------
+
+def _enforce_node_count(
+    tasks: list[dict], min_count: int = 3, max_count: int = 5
+) -> list[dict]:
+    """Enforce node count bounds. Truncates excess nodes and cleans dangling refs."""
+    if len(tasks) < min_count:
+        logger.warning(
+            "dag_undercount: node_count=%d", len(tasks)
+        )
+        return tasks
+
+    if len(tasks) > max_count:
+        # Sort by node_key, keep first max_count
+        sorted_tasks = sorted(tasks, key=lambda t: t.get("id", ""))
+        kept = sorted_tasks[:max_count]
+        dropped = sorted_tasks[max_count:]
+        dropped_keys = {t["id"] for t in dropped}
+        kept_keys = {t["id"] for t in kept}
+
+        # Rewrite depends_on to remove references to dropped nodes
+        for task in kept:
+            task["depends_on"] = [
+                d for d in task.get("depends_on", []) if d in kept_keys
+            ]
+
+        logger.warning(
+            "dag_truncated: original_count=%d kept_count=%d dropped_keys=%s",
+            len(tasks), max_count, sorted(dropped_keys),
+        )
+        return kept
+
+    return tasks
 
 
 # ---------------------------------------------------------------------------
@@ -275,14 +356,84 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str]]:
 
         normalized.append(task)
 
-    # Validate dependency references
-    valid_ids = {t["id"] for t in normalized}
-    for task in normalized:
-        for dep in task["depends_on"]:
-            if dep not in valid_ids:
-                errors.append(f"Task {task['id']}: depends_on references unknown '{dep}'")
-
     return normalized, errors
+
+
+# ---------------------------------------------------------------------------
+# DAG semantic validation (standalone, unit-testable)
+# ---------------------------------------------------------------------------
+
+def validate_dag(nodes: list[dict]) -> tuple[list[dict], list[str]]:
+    """Validate and clean a parsed DAG node list.
+
+    Performs:
+      - Dependency reference validation (strips invalid refs)
+      - Self-reference removal
+      - Tool validation (defaults invalid tools to 'LLM')
+      - Cycle detection via topological sort
+
+    Returns (cleaned_nodes, warnings). Raises ValueError on cycles.
+    """
+    warnings: list[str] = []
+    valid_keys = {n["id"] for n in nodes}
+
+    for node in nodes:
+        nk = node["id"]
+
+        # ── Tool validation ──
+        if node.get("tool") not in VALID_TOOLS:
+            original = node.get("tool")
+            node["tool"] = "LLM"
+            msg = f"invalid_tool_defaulted: node_key={nk} original_tool={original} defaulted_to=LLM"
+            logger.warning(msg)
+            warnings.append(msg)
+
+        # ── Self-reference removal ──
+        if nk in node.get("depends_on", []):
+            node["depends_on"] = [d for d in node["depends_on"] if d != nk]
+            msg = f"self_reference_removed: node_key={nk}"
+            logger.warning(msg)
+            warnings.append(msg)
+
+        # ── Invalid dependency removal ──
+        cleaned_deps: list[str] = []
+        for dep in node.get("depends_on", []):
+            if dep in valid_keys:
+                cleaned_deps.append(dep)
+            else:
+                msg = (
+                    f"invalid_dependency: node_key={nk} "
+                    f"invalid_ref={dep} valid_keys={sorted(valid_keys)}"
+                )
+                logger.warning(msg)
+                warnings.append(msg)
+        node["depends_on"] = cleaned_deps
+
+    # ── Cycle detection (Kahn's topological sort) ──
+    in_degree: dict[str, int] = {n["id"]: 0 for n in nodes}
+    adjacency: dict[str, list[str]] = {n["id"]: [] for n in nodes}
+    for node in nodes:
+        for dep in node["depends_on"]:
+            adjacency[dep].append(node["id"])
+            in_degree[node["id"]] += 1
+
+    queue: deque[str] = deque(k for k, v in in_degree.items() if v == 0)
+    sorted_count = 0
+    while queue:
+        cur = queue.popleft()
+        sorted_count += 1
+        for neighbor in adjacency[cur]:
+            in_degree[neighbor] -= 1
+            if in_degree[neighbor] == 0:
+                queue.append(neighbor)
+
+    if sorted_count != len(nodes):
+        cycle_nodes = [k for k, v in in_degree.items() if v > 0]
+        msg = f"dag_cycle_detected: involved_keys={cycle_nodes}"
+        logger.error(msg)
+        raise ValueError(msg)
+
+    return nodes, warnings
 
 
 # ---------------------------------------------------------------------------
@@ -451,4 +602,4 @@ async def _fail_job(db: AsyncSession, job_id: UUID, error: str) -> None:
         {"error": error[:1000], "id": job_id},
     )
     await db.commit()
-    logger.error("Job %s DAG generation failed: %s", job_id, error)
+    logger.error("dag_generation_failed: job=%s error=%s", job_id, error)
