@@ -1,317 +1,325 @@
 #!/usr/bin/env python3
-"""Ground-truth retrieval evaluation for Scaffold Engine.
+"""Retrieval evaluation script for Scaffold Engine RAG pipeline.
 
-Loads ground_truth.json, embeds queries via Ollama, searches Milvus,
-computes Precision@3, MRR, Hit Rate@3, and a 5×5 domain confusion matrix.
+Loads ground_truth.json, queries the /rag endpoint, and computes:
+  - MRR  (Mean Reciprocal Rank)
+  - Hit@3
+  - Domain Purity
 
-Supports .npz embedding cache for deterministic reruns.
+Usage (inside container):
+    python tests/eval_retrieval.py
 
-Usage:
-    python3 eval_retrieval.py                    # full run
-    python3 eval_retrieval.py --no-cache         # force re-embed
-    python3 eval_retrieval.py --domain rag       # filter to one domain
-    python3 eval_retrieval.py --type ambiguous   # filter to query type
+From host:
+    make eval
+
+Environment variables:
+    SCAFFOLD_API_URL   — orchestrator base URL  (default: http://localhost:8000)
+    SCAFFOLD_API_KEY   — API key for auth        (default: from API_KEY env)
+    GROUND_TRUTH_PATH  — path to ground_truth.json (default: tests/ground_truth.json)
+    EVAL_RESULTS_PATH  — output path for JSON results (default: tests/eval_results.json)
 """
+
+from __future__ import annotations
+
 import json
+import os
 import sys
-import hashlib
 import time
-import argparse
+import urllib.error
+import urllib.request
 from pathlib import Path
-from collections import defaultdict
 
-import numpy as np
-import requests
-from pymilvus import MilvusClient
 
-# ── Config ──────────────────────────────────────────────────────────────
-FIXTURE_PATH = Path(__file__).parent / "ground_truth.json"
-CACHE_DIR = Path(__file__).parent / ".eval_cache"
-OLLAMA_URL = "http://172.18.0.1:11434"
-MILVUS_URI = "http://milvus-standalone:19530"
-COLLECTION = "technical_knowledge"
-EMBED_MODEL = "qwen3-embedding:8b"
-EMBED_DIM = 4096
-TOP_K = 5  # retrieve 5 but evaluate at k=3
-DOMAINS = ["prompt", "rag", "eng", "llm", "spec"]
-
-# ── Thresholds ──────────────────────────────────────────────────────────
-THRESHOLDS = {
-    "precision_at_3": {"healthy": 0.70, "broken": 0.50},
-    "mrr": {"healthy": 0.75, "broken": 0.55},
-    "hit_rate_at_3": {"healthy": 0.90, "broken": 0.75},
-    "domain_purity": {"healthy": 0.75, "broken": 0.60},
+# ---------------------------------------------------------------------------
+# Baselines (from smokieRAGs eval — 2026-03-29)
+# ---------------------------------------------------------------------------
+BASELINES = {
+    "mrr": 0.986,
+    "hit_at_3": 1.000,
+    "domain_purity": 1.000,
 }
 
+VALID_DOMAINS = {"prompt", "rag", "eng", "llm", "spec"}
 
-def load_fixture(path: Path) -> dict:
-    with open(path) as f:
-        return json.load(f)
-
-
-def get_model_hash() -> str:
-    """Hash the Ollama model digest for cache invalidation."""
-    try:
-        resp = requests.post(f"{OLLAMA_URL}/api/show", json={"name": EMBED_MODEL})
-        digest = resp.json().get("digest", EMBED_MODEL)
-        return hashlib.sha256(digest.encode()).hexdigest()[:12]
-    except Exception:
-        return hashlib.sha256(EMBED_MODEL.encode()).hexdigest()[:12]
+# Tolerance for pass/fail comparison against baselines
+TOLERANCE = 0.01
 
 
-def embed_query(text: str) -> list[float]:
-    """Embed a single query via Ollama."""
-    resp = requests.post(
-        f"{OLLAMA_URL}/api/embed",
-        json={"model": EMBED_MODEL, "input": text},
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data["embeddings"][0]
+# ---------------------------------------------------------------------------
+# Metric calculations (pure functions — importable for unit testing)
+# ---------------------------------------------------------------------------
+
+def compute_mrr(results_by_query: list[dict]) -> float:
+    """Mean Reciprocal Rank.
+
+    Each entry: {"expected_doc_ids": set[str], "retrieved_doc_ids": list[str]}
+    """
+    if not results_by_query:
+        return 0.0
+
+    reciprocal_ranks = []
+    for entry in results_by_query:
+        expected = entry["expected_doc_ids"]
+        retrieved = entry["retrieved_doc_ids"]
+        rr = 0.0
+        for rank, doc_id in enumerate(retrieved, 1):
+            if doc_id in expected:
+                rr = 1.0 / rank
+                break
+        reciprocal_ranks.append(rr)
+
+    return sum(reciprocal_ranks) / len(reciprocal_ranks)
 
 
-def load_or_build_cache(queries: list[dict], force: bool = False) -> dict:
-    """Load cached embeddings or build them. Returns {query_id: np.ndarray}."""
-    CACHE_DIR.mkdir(exist_ok=True)
-    model_hash = get_model_hash()
-    cache_file = CACHE_DIR / f"embeddings_{model_hash}.npz"
+def compute_hit_at_k(results_by_query: list[dict], k: int = 3) -> float:
+    """Fraction of queries where at least one relevant doc appears in top-k.
 
-    if not force and cache_file.exists():
-        data = np.load(cache_file)
-        cached = {k: data[k] for k in data.files}
-        query_ids = {q["query_id"] for q in queries}
-        if query_ids.issubset(cached.keys()):
-            print(f"  Cache hit: {cache_file.name} ({len(cached)} vectors)")
-            return cached
-        print(f"  Cache partial: {len(cached & query_ids)}/{len(query_ids)} — rebuilding")
+    Each entry: {"expected_doc_ids": set[str], "retrieved_doc_ids": list[str]}
+    """
+    if not results_by_query:
+        return 0.0
 
-    print(f"  Embedding {len(queries)} queries via {EMBED_MODEL}...")
-    embeddings = {}
-    for i, q in enumerate(queries):
-        vec = embed_query(q["text"])
-        embeddings[q["query_id"]] = np.array(vec, dtype=np.float32)
-        if (i + 1) % 10 == 0:
-            print(f"    {i + 1}/{len(queries)} embedded")
+    hits = 0
+    for entry in results_by_query:
+        expected = entry["expected_doc_ids"]
+        top_k = entry["retrieved_doc_ids"][:k]
+        if any(doc_id in expected for doc_id in top_k):
+            hits += 1
 
-    np.savez_compressed(cache_file, **embeddings)
-    print(f"  Cached → {cache_file.name}")
-    return embeddings
+    return hits / len(results_by_query)
 
 
-def search_milvus(client: MilvusClient, vector: list, domain: str = None) -> list[dict]:
-    """Search Milvus with optional domain filter. Returns list of {entry_id, domain, score}."""
-    search_params = {"metric_type": "L2", "params": {"ef": 64}}
+def compute_domain_purity(domain_results: list[dict]) -> float:
+    """Average fraction of results matching the expected domain.
 
-    filter_expr = None
-    if domain and domain not in ("cross_domain", "out_of_domain"):
-        filter_expr = f'domain == "{domain}"'
+    Each entry: {"expected_domain": str, "retrieved_domains": list[str]}
+    Queries with no results count as pure (nothing wrong returned).
+    """
+    if not domain_results:
+        return 0.0
 
-    results = client.search(
-        collection_name=COLLECTION,
-        data=[vector],
-        limit=TOP_K,
-        search_params=search_params,
-        filter=filter_expr,
-        output_fields=["entry_id", "domain"],
-    )
+    purities = []
+    for entry in domain_results:
+        expected = entry["expected_domain"]
+        retrieved = entry["retrieved_domains"]
+        if not retrieved:
+            purities.append(1.0)
+            continue
+        matching = sum(1 for d in retrieved if d == expected)
+        purities.append(matching / len(retrieved))
 
-    hits = []
-    for hit in results[0]:
-        hits.append({
-            "entry_id": hit["entity"]["entry_id"],
-            "domain": hit["entity"]["domain"],
-            "l2_distance": hit["distance"],
-        })
-    return hits
+    return sum(purities) / len(purities)
 
 
-# ── Metrics ─────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# HTTP helper (stdlib only — no external deps)
+# ---------------------------------------------------------------------------
 
-def precision_at_k(retrieved: list[str], relevant: set, k: int = 3) -> float:
-    return sum(1 for doc in retrieved[:k] if doc in relevant) / k
+def _post_json(url: str, payload: dict, api_key: str = "", timeout: int = 60) -> dict:
+    """POST JSON to a URL and return parsed response."""
+    data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
 
-
-def reciprocal_rank(retrieved: list[str], relevant: set) -> float:
-    for i, doc in enumerate(retrieved):
-        if doc in relevant:
-            return 1.0 / (i + 1)
-    return 0.0
-
-
-def hit_at_k(retrieved: list[str], relevant: set, k: int = 3) -> float:
-    return 1.0 if any(doc in relevant for doc in retrieved[:k]) else 0.0
-
-
-def grade(value: float, metric_name: str) -> str:
-    t = THRESHOLDS[metric_name]
-    if value >= t["healthy"]:
-        return "✅"
-    elif value >= t["broken"]:
-        return "⚠️"
-    else:
-        return "❌"
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
-# ── Main ────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Main evaluation
+# ---------------------------------------------------------------------------
 
-def main():
-    parser = argparse.ArgumentParser(description="Evaluate RAG retrieval against ground truth")
-    parser.add_argument("--no-cache", action="store_true", help="Force re-embedding")
-    parser.add_argument("--domain", type=str, help="Filter to specific domain")
-    parser.add_argument("--type", type=str, dest="qtype", help="Filter to query type")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Show per-query results")
-    args = parser.parse_args()
+def run_eval(ground_truth_path: str, base_url: str, api_key: str) -> tuple[dict, list]:
+    """Run full evaluation and return (metrics_dict, errors_list)."""
+    with open(ground_truth_path) as f:
+        gt = json.load(f)
 
-    # Load fixture
-    fixture = load_fixture(FIXTURE_PATH)
-    queries = fixture["queries"]
-    print(f"Loaded {len(queries)} queries from {FIXTURE_PATH.name}")
+    queries = gt["queries"]
+    print(f"  Ground truth:  {ground_truth_path}")
+    print(f"  Queries:       {len(queries)}")
+    print(f"  Endpoint:      {base_url}/rag")
+    print()
 
-    # Filter if requested
-    if args.domain:
-        queries = [q for q in queries if q["domain"] == args.domain]
-        print(f"  Filtered to domain={args.domain}: {len(queries)} queries")
-    if args.qtype:
-        queries = [q for q in queries if q["query_type"] == args.qtype]
-        print(f"  Filtered to type={args.qtype}: {len(queries)} queries")
+    retrieval_data: list[dict] = []   # For MRR / Hit@3
+    domain_data: list[dict] = []      # For Domain Purity
+    negative_data: list[dict] = []    # For negative query tracking
+    errors: list[dict] = []
+    per_query: list[dict] = []        # Detailed per-query results
 
-    if not queries:
-        print("No queries match filters. Exiting.")
-        sys.exit(1)
-
-    # Build / load embeddings
-    embeddings = load_or_build_cache(queries, force=args.no_cache)
-
-    # Connect to Milvus
-    client = MilvusClient(uri=MILVUS_URI)
-    print(f"Connected to Milvus: {MILVUS_URI}")
-
-    # ── Evaluate ────────────────────────────────────────────────────
-    p3_scores = []
-    mrr_scores = []
-    hit3_scores = []
-    confusion = defaultdict(lambda: defaultdict(int))  # [query_domain][retrieved_domain]
-    per_type = defaultdict(lambda: {"p3": [], "mrr": [], "hit3": []})
-    failures = []
-
-    t0 = time.time()
+    t0 = time.monotonic()
 
     for q in queries:
         qid = q["query_id"]
-        vec = embeddings[qid].tolist()
+        text = q["text"]
+        expected_docs = {d["doc_id"] for d in q["expected_docs"]}
+        expected_domain = q.get("domain", "")
 
-        # For domain-scoped queries, search within domain; for cross/out/negative, search all
-        search_domain = q["domain"] if q["domain"] in DOMAINS else None
-        hits = search_milvus(client, vec, domain=search_domain)
+        try:
+            result = _post_json(f"{base_url}/rag", {"query": text, "top_k": 10}, api_key)
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
+            errors.append({"query_id": qid, "error": str(e)})
+            print(f"  [{qid}] ERROR: {e}")
+            continue
+        except Exception as e:
+            errors.append({"query_id": qid, "error": str(e)})
+            print(f"  [{qid}] ERROR: {e}")
+            continue
 
-        retrieved_ids = [h["entry_id"] for h in hits]
-        relevant_ids = {d["doc_id"] for d in q["expected_docs"] if d["relevance"] >= 1}
+        if result.get("status") != "ok":
+            errors.append({"query_id": qid, "error": result.get("error", "unknown")})
+            print(f"  [{qid}] API error: {result.get('error')}")
+            continue
 
-        p3 = precision_at_k(retrieved_ids, relevant_ids, k=3)
-        rr = reciprocal_rank(retrieved_ids, relevant_ids)
-        h3 = hit_at_k(retrieved_ids, relevant_ids, k=3)
+        retrieved_ids = [r["entry_id"] for r in result.get("results", [])]
+        retrieved_domains = [r["domain"] for r in result.get("results", [])]
 
-        p3_scores.append(p3)
-        mrr_scores.append(rr)
-        hit3_scores.append(h3)
+        if expected_docs:
+            # Positive query — compute rank of first relevant doc
+            first_rank = None
+            for rank, rid in enumerate(retrieved_ids, 1):
+                if rid in expected_docs:
+                    first_rank = rank
+                    break
 
-        qt = q["query_type"]
-        per_type[qt]["p3"].append(p3)
-        per_type[qt]["mrr"].append(rr)
-        per_type[qt]["hit3"].append(h3)
+            hit_ids = [rid for rid in retrieved_ids if rid in expected_docs]
 
-        # Confusion matrix: only for non-negative queries
-        if q["domain"] != "out_of_domain":
-            query_domain = q["domain"] if q["domain"] in DOMAINS else "cross"
-            for h in hits[:3]:
-                confusion[query_domain][h["domain"]] += 1
-
-        # Track failures
-        if rr == 0.0 and relevant_ids:
-            failures.append({
-                "query_id": qid,
-                "text": q["text"],
-                "domain": q["domain"],
-                "type": qt,
-                "expected": list(relevant_ids),
-                "got": retrieved_ids[:3],
+            retrieval_data.append({
+                "expected_doc_ids": expected_docs,
+                "retrieved_doc_ids": retrieved_ids,
             })
 
-        if args.verbose:
-            status = "✅" if rr > 0 else ("⬜" if not relevant_ids else "❌")
-            print(f"  {status} {qid} P@3={p3:.2f} RR={rr:.2f} | {q['text'][:60]}")
-            if args.verbose and hits:
-                for h in hits[:3]:
-                    marker = "→" if h["entry_id"] in relevant_ids else " "
-                    print(f"      {marker} L2={h['l2_distance']:.4f} {h['domain']:6s} {h['entry_id']}")
+            # Domain purity (single-domain queries only)
+            if expected_domain in VALID_DOMAINS:
+                domain_data.append({
+                    "expected_domain": expected_domain,
+                    "retrieved_domains": retrieved_domains,
+                })
 
-    elapsed = time.time() - t0
+            status = f"rank={first_rank}" if first_rank else "MISS"
+            print(f"  [{qid}] {status:<10} hits={len(hit_ids)}/{len(expected_docs)}  results={len(retrieved_ids)}")
 
-    # ── Aggregate Metrics ───────────────────────────────────────────
-    mean_p3 = np.mean(p3_scores)
-    mean_mrr = np.mean(mrr_scores)
-    mean_hit3 = np.mean(hit3_scores)
+            per_query.append({
+                "query_id": qid,
+                "query": text,
+                "first_rank": first_rank,
+                "hits": len(hit_ids),
+                "expected": len(expected_docs),
+                "retrieved": len(retrieved_ids),
+            })
+        else:
+            # Negative query
+            negative_data.append({
+                "query_id": qid,
+                "result_count": len(retrieved_ids),
+            })
+            print(f"  [{qid}] negative   results={len(retrieved_ids)}")
 
-    print(f"\n{'='*65}")
-    print(f"  RETRIEVAL EVALUATION RESULTS  ({len(queries)} queries, {elapsed:.1f}s)")
-    print(f"{'='*65}")
-    print(f"  Precision@3:  {mean_p3:.4f}  {grade(mean_p3, 'precision_at_3')}")
-    print(f"  MRR:          {mean_mrr:.4f}  {grade(mean_mrr, 'mrr')}")
-    print(f"  Hit Rate@3:   {mean_hit3:.4f}  {grade(mean_hit3, 'hit_rate_at_3')}")
+    elapsed = time.monotonic() - t0
 
-    # ── Per-Type Breakdown ──────────────────────────────────────────
-    print(f"\n  By Query Type:")
-    for qt in ["factual", "conceptual", "comparative", "multi_hop", "ambiguous", "negative"]:
-        if qt not in per_type:
-            continue
-        tp = per_type[qt]
-        n = len(tp["p3"])
-        print(f"    {qt:12s}  n={n:2d}  P@3={np.mean(tp['p3']):.3f}  MRR={np.mean(tp['mrr']):.3f}  Hit@3={np.mean(tp['hit3']):.3f}")
+    # Compute metrics
+    mrr = compute_mrr(retrieval_data)
+    hit3 = compute_hit_at_k(retrieval_data, k=3)
+    purity = compute_domain_purity(domain_data)
 
-    # ── Domain Confusion Matrix ─────────────────────────────────────
-    print(f"\n  Domain Confusion Matrix (query domain → retrieved domain, top-3):")
-    all_domains = DOMAINS + (["cross"] if "cross" in confusion else [])
-    header = "            " + "  ".join(f"{d:>6s}" for d in DOMAINS)
-    print(f"  {header}")
-    purity_scores = []
-    for qd in all_domains:
-        total = sum(confusion[qd].values())
-        if total == 0:
-            continue
-        row_vals = []
-        for rd in DOMAINS:
-            frac = confusion[qd][rd] / total if total > 0 else 0
-            row_vals.append(frac)
-        row_str = "  ".join(f"{v:6.2f}" for v in row_vals)
-        print(f"  {qd:>10s}  {row_str}")
-        if qd in DOMAINS:
-            diag_idx = DOMAINS.index(qd)
-            purity_scores.append(row_vals[diag_idx])
+    metrics = {
+        "mrr": round(mrr, 4),
+        "hit_at_3": round(hit3, 4),
+        "domain_purity": round(purity, 4),
+        "queries_evaluated": len(retrieval_data),
+        "domain_queries_evaluated": len(domain_data),
+        "negative_queries": len(negative_data),
+        "errors": len(errors),
+        "elapsed_seconds": round(elapsed, 1),
+    }
 
-    if purity_scores:
-        mean_purity = np.mean(purity_scores)
-        print(f"\n  Domain Purity: {mean_purity:.4f}  {grade(mean_purity, 'domain_purity')}")
+    return metrics, errors
 
-    # ── Failures ────────────────────────────────────────────────────
-    if failures:
-        print(f"\n  FAILURES ({len(failures)} queries with no relevant doc in top-{TOP_K}):")
-        for f in failures:
-            print(f"    {f['query_id']} [{f['type']}] {f['text'][:55]}")
-            print(f"      Expected: {f['expected']}")
-            print(f"      Got:      {f['got']}")
 
-    # ── Health Summary ──────────────────────────────────────────────
-    print(f"\n{'='*65}")
-    all_ok = (
-        mean_p3 >= THRESHOLDS["precision_at_3"]["healthy"]
-        and mean_mrr >= THRESHOLDS["mrr"]["healthy"]
-        and mean_hit3 >= THRESHOLDS["hit_rate_at_3"]["healthy"]
-    )
-    if all_ok:
-        print("  ✅ ALL METRICS HEALTHY")
-    else:
-        print("  ⚠️  SOME METRICS BELOW THRESHOLD — review failures above")
-    print(f"{'='*65}")
+# ---------------------------------------------------------------------------
+# Report printer
+# ---------------------------------------------------------------------------
+
+def print_report(metrics: dict, errors: list[dict]) -> int:
+    """Print formatted evaluation report. Returns exit code (0=pass, 1=fail)."""
+    print()
+    print("=" * 62)
+    print("  SCAFFOLD ENGINE — RETRIEVAL EVALUATION")
+    print("=" * 62)
+
+    print(f"\n  Positive queries:   {metrics['queries_evaluated']}")
+    print(f"  Domain queries:     {metrics['domain_queries_evaluated']}")
+    print(f"  Negative queries:   {metrics['negative_queries']}")
+    print(f"  Errors:             {metrics['errors']}")
+    print(f"  Elapsed:            {metrics['elapsed_seconds']}s")
+
+    print(f"\n  {'Metric':<20} {'Score':>8} {'Baseline':>10} {'Delta':>8} {'':>4}")
+    print(f"  {'-' * 20} {'-' * 8} {'-' * 10} {'-' * 8} {'-' * 4}")
+
+    all_pass = True
+    for key, label in [("mrr", "MRR"), ("hit_at_3", "Hit@3"), ("domain_purity", "Domain Purity")]:
+        score = metrics[key]
+        baseline = BASELINES[key]
+        delta = score - baseline
+        passed = delta >= -TOLERANCE
+        if not passed:
+            all_pass = False
+        icon = "PASS" if passed else "FAIL"
+        print(f"  {label:<20} {score:>8.4f} {baseline:>10.4f} {delta:>+8.4f} {icon:>4}")
+
+    print(f"\n  {'PASSED' if all_pass else 'FAILED'}")
+    print("=" * 62)
+
+    if errors:
+        print("\n  Errors:")
+        for e in errors:
+            print(f"    [{e['query_id']}] {e['error']}")
+
+    return 0 if all_pass else 1
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    gt_path = os.environ.get("GROUND_TRUTH_PATH", "tests/ground_truth.json")
+    base_url = os.environ.get("SCAFFOLD_API_URL", "http://localhost:8000")
+    api_key = os.environ.get("SCAFFOLD_API_KEY", "") or os.environ.get("API_KEY", "")
+
+    # Resolve ground truth path
+    if not Path(gt_path).exists():
+        alt = Path(__file__).parent / "ground_truth.json"
+        if alt.exists():
+            gt_path = str(alt)
+        else:
+            print(f"ERROR: ground_truth.json not found at {gt_path}")
+            sys.exit(1)
+
+    print()
+    print("=" * 62)
+    print("  SCAFFOLD ENGINE — RETRIEVAL EVAL")
+    print("=" * 62)
+    print()
+
+    metrics, errors = run_eval(gt_path, base_url, api_key)
+    exit_code = print_report(metrics, errors)
+
+    # Write results to JSON for CI / comparison
+    results_path = os.environ.get("EVAL_RESULTS_PATH", "tests/eval_results.json")
+    try:
+        with open(results_path, "w") as f:
+            json.dump(
+                {"metrics": metrics, "errors": errors, "baselines": BASELINES},
+                f,
+                indent=2,
+            )
+        print(f"\n  Results saved to {results_path}")
+    except OSError as e:
+        print(f"\n  Warning: could not save results to {results_path}: {e}")
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
