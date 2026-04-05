@@ -97,7 +97,7 @@ async def _get_next_node(db: AsyncSession, job_id: str) -> dict | None:
     rows = await db.execute(
         text("""
             SELECT id, node_key, title, node_type, depends_on,
-                   assigned_model, prompt_template, execution_order, tool
+                   assigned_model, prompt_template, execution_order, tool, domain
             FROM dag_nodes
             WHERE job_id = :job_id AND status = 'pending'
             ORDER BY execution_order ASC

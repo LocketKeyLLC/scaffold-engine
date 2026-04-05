@@ -34,6 +34,7 @@ logger = logging.getLogger("scaffold.dag")
 VALID_TASK_TYPES = {"research", "decision", "action", "validation", "output", "human_review"}
 VALID_STRATEGIES = {"sequential", "parallel", "hybrid", "conditional"}
 VALID_TOOLS = {"LLM", "CodeGen", "Human", "FileSystem", "SearXNG", "Milvus"}
+VALID_DOMAINS = {"prompt", "rag", "eng", "llm", "spec"}
 
 # ---------------------------------------------------------------------------
 # DAG generation prompt
@@ -53,6 +54,7 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
       "outputs": ["what this task produces"],
       "depends_on": [],
       "tool": "LLM | SearXNG | Milvus | CodeGen | Human | FileSystem",
+      "domain": "prompt | rag | eng | llm | spec | null",
       "assigned_model": "model name or null",
       "notes": "optional execution hint"
     }
@@ -69,6 +71,8 @@ Rules:
 - Keep task names to max 5 words
 - Tool guide:
   * Milvus = ALWAYS use when the task involves the knowledge base, KB, internal docs, TOON files, or domain-specific lookup. Any mention of "knowledge base", "KB", "look up from", "retrieve from", or stored/internal knowledge MUST use Milvus, NEVER SearXNG.
+    - When tool is Milvus, you MUST set "domain" to the most relevant knowledge domain: "prompt" (prompt engineering), "rag" (retrieval-augmented generation), "eng" (software engineering), "llm" (large language models), "spec" (specifications/architecture). If unsure, set "domain" to null.
+    - When tool is NOT Milvus, set "domain" to null.
   * SearXNG = web search for EXTERNAL, current, or live information NOT in the knowledge base.
   * CodeGen = code generation or script writing.
   * FileSystem = file write/read/save operations.
@@ -80,10 +84,10 @@ EXAMPLE (4-node DAG for "Research the history of solar panels and summarize find
 {
   "strategy": "sequential",
   "tasks": [
-    {"id": "T1", "name": "Search solar panel history", "type": "research", "inputs": ["solar panel history query"], "outputs": ["raw search results"], "depends_on": [], "tool": "SearXNG", "assigned_model": null, "notes": "Broad web search for timeline and key milestones"},
-    {"id": "T2", "name": "Retrieve internal KB context", "type": "research", "inputs": ["solar panel keywords"], "outputs": ["KB matches"], "depends_on": ["T1"], "tool": "Milvus", "assigned_model": null, "notes": "Check knowledge base for any stored solar energy references"},
-    {"id": "T3", "name": "Synthesize and summarize", "type": "action", "inputs": ["raw search results", "KB matches"], "outputs": ["summary draft"], "depends_on": ["T1", "T2"], "tool": "LLM", "assigned_model": null, "notes": "Combine sources into a coherent summary"},
-    {"id": "T4", "name": "Format final output", "type": "output", "inputs": ["summary draft"], "outputs": ["final summary document"], "depends_on": ["T3"], "tool": "FileSystem", "assigned_model": null, "notes": "Write final summary to file"}
+    {"id": "T1", "name": "Search solar panel history", "type": "research", "inputs": ["solar panel history query"], "outputs": ["raw search results"], "depends_on": [], "tool": "SearXNG", "domain": null, "assigned_model": null, "notes": "Broad web search for timeline and key milestones"},
+    {"id": "T2", "name": "Retrieve internal KB context", "type": "research", "inputs": ["solar panel keywords"], "outputs": ["KB matches"], "depends_on": ["T1"], "tool": "Milvus", "domain": "eng", "assigned_model": null, "notes": "Check knowledge base for any stored solar energy references"},
+    {"id": "T3", "name": "Synthesize and summarize", "type": "action", "inputs": ["raw search results", "KB matches"], "outputs": ["summary draft"], "depends_on": ["T1", "T2"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Combine sources into a coherent summary"},
+    {"id": "T4", "name": "Format final output", "type": "output", "inputs": ["summary draft"], "outputs": ["final summary document"], "depends_on": ["T3"], "tool": "FileSystem", "domain": null, "assigned_model": null, "notes": "Write final summary to file"}
   ]
 }"""
 
@@ -216,11 +220,11 @@ async def generate_dag(
                 INSERT INTO dag_nodes
                     (job_id, node_key, title, node_type, status,
                      depends_on, assigned_model, prompt_template,
-                     execution_order, tool)
+                     execution_order, tool, domain)
                 VALUES
                     (:job_id, :node_key, :title, :node_type, 'pending',
                      :depends_on, :assigned_model, :prompt_template,
-                     :execution_order, :tool)
+                     :execution_order, :tool, :domain)
             """),
             {
                 "job_id": uid,
@@ -232,6 +236,7 @@ async def generate_dag(
                 "prompt_template": task.get("notes"),
                 "execution_order": i,
                 "tool": task.get("tool", "LLM"),
+                "domain": task.get("domain"),
             },
         )
 
@@ -343,6 +348,17 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str]]:
             "depends_on": [str(d).strip() for d in depends_on if str(d).strip()],
             "tool": str(raw.get("tool", "LLM")).strip(),
         }
+        # Preserve domain for Milvus nodes (validated against VALID_DOMAINS)
+        raw_domain = raw.get("domain")
+        if raw_domain and str(raw_domain).strip().lower() not in ("none", "null", ""):
+            domain_val = str(raw_domain).strip().lower()
+            if domain_val in VALID_DOMAINS:
+                task["domain"] = domain_val
+            else:
+                logger.warning(
+                    "invalid_domain_defaulted: node_key=%s original_domain=%s",
+                    task_id, raw_domain,
+                )
         if task["tool"] not in VALID_TOOLS:
             logger.warning("Task %s: unknown tool '%s', coercing to 'LLM'", task_id, task["tool"])
             task["tool"] = "LLM"
