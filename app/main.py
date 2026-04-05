@@ -172,7 +172,6 @@ async def health():
                 entry_count = 0
                 if "technical_knowledge" in colls:
                     col = Collection("technical_knowledge")
-                    col.flush()
                     entry_count = col.num_entities
                 return len(colls), entry_count
             coll_count, entries = await asyncio.wait_for(
