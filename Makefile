@@ -19,7 +19,7 @@ agent: ## Run execution agent tests only
 	docker exec $(CONTAINER) pytest tests/test_execution_agent.py -m smoke --timeout=30 -v
 
 eval: ## Run retrieval eval against ground truth
-	docker exec $(CONTAINER) python3 tests/eval_retrieval.py
+	docker exec -e SCAFFOLD_API_KEY=$(API_KEY) $(CONTAINER) python3 tests/eval_retrieval.py
 
 bench: ## Run performance benchmark suite
 	docker exec $(CONTAINER) python3 tests/benchmarks/bench_pipeline.py

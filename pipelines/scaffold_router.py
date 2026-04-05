@@ -85,7 +85,7 @@ class Pipeline:
         while t.is_alive():
             time.sleep(self.valves.keepalive_interval)
             if t.is_alive():
-                yield "."
+                yield "\u200b"
 
         t.join()
 
@@ -147,7 +147,7 @@ class Pipeline:
             time.sleep(self.valves.keepalive_interval)
             elapsed += self.valves.keepalive_interval
             if t.is_alive():
-                yield "."
+                yield "\u200b"
             # Safety: don't wait longer than dag_timeout + buffer
             if elapsed > self.valves.dag_timeout + 30:
                 yield "\n\nPlanning is taking longer than expected. Please try again with a simpler question."
@@ -263,8 +263,8 @@ class Pipeline:
             try:
                 msg_type, field1, field2 = q.get(timeout=10)
             except queue.Empty:
-                # No SSE event in 10s — yield keepalive dot
-                yield "."
+                # No SSE event in 10s — yield invisible keepalive
+                yield "\u200b"
                 continue
 
             if msg_type == "error":
