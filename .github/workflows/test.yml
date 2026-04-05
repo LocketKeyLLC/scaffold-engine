@@ -1,0 +1,86 @@
+name: Scaffold Engine CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  POSTGRES_USER: scaffold
+  POSTGRES_PASSWORD: scaffold_ci_pw
+  POSTGRES_DB: scaffold_engine
+  DATABASE_URL: postgresql+asyncpg://scaffold:scaffold_ci_pw@localhost:5432/scaffold_engine
+  OLLAMA_BASE_URL: http://localhost:11434
+  MILVUS_URI: http://localhost:19530
+  SEARXNG_URL: http://localhost:8080
+  SCAFFOLD_API_KEY: ci-test-key
+  HF_HUB_DISABLE_TELEMETRY: "1"
+  TOKENIZERS_PARALLELISM: "false"
+  PYTHONPATH: /app
+
+jobs:
+  unit-tests:
+    name: Unit Tests (no live services)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: scaffold_engine
+          POSTGRES_USER: scaffold
+          POSTGRES_PASSWORD: scaffold_ci_pw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U scaffold -d scaffold_engine"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply DB schema
+        run: PGPASSWORD=scaffold_ci_pw psql -h localhost -U scaffold -d scaffold_engine -f db/init.sql
+
+      - name: Build orchestrator image
+        run: docker build -t scaffold-orchestrator:ci .
+
+      - name: Run unit tests
+        run: |
+          docker run --rm \
+            --network host \
+            -e DATABASE_URL=$DATABASE_URL \
+            -e OLLAMA_BASE_URL=$OLLAMA_BASE_URL \
+            -e MILVUS_URI=$MILVUS_URI \
+            -e SEARXNG_URL=$SEARXNG_URL \
+            -e SCAFFOLD_API_KEY=$SCAFFOLD_API_KEY \
+            -e PYTHONPATH=/app \
+            scaffold-orchestrator:ci \
+            pytest tests/ --timeout=30 -v \
+              --ignore=tests/eval_retrieval.py \
+              -k "not integration"
+
+  # Full integration tests require Ollama + Milvus + SearXNG.
+  # Enable this job on a self-hosted runner with GPU/CPU inference.
+  # integration-tests:
+  #   name: Integration Tests (full stack)
+  #   runs-on: self-hosted
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Start full stack
+  #       run: docker compose up -d --build
+  #     - name: Wait for services
+  #       run: |
+  #         for i in $(seq 1 30); do
+  #           curl -sf http://localhost:8000/health && break || sleep 10
+  #         done
+  #     - name: Run all tests
+  #       run: make test
+  #     - name: Run eval
+  #       run: make eval
+  #     - name: Teardown
+  #       if: always()
+  #       run: docker compose down -v

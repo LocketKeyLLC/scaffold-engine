@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test agent eval bench build logs clean status health help
+.PHONY: test agent eval bench build logs clean status health ci help
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -23,6 +23,11 @@ eval: ## Run retrieval eval against ground truth
 
 bench: ## Run performance benchmark suite
 	docker exec $(CONTAINER) python3 tests/benchmarks/bench_pipeline.py
+
+ci: ## Run CI-safe tests (no live Ollama/Milvus needed)
+	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v \
+		--ignore=tests/eval_retrieval.py \
+		-k "not integration"
 
 ## ──────────────────────────────────────────────
 ## Build & Ops

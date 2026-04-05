@@ -155,7 +155,7 @@ async def get_logs(
     nodes_result = await db.execute(
         text("""
             SELECT node_key, title, tool, status, domain,
-                   output_text, updated_at
+                   output_text, confidence, updated_at
             FROM dag_nodes
             WHERE job_id = :job_id
             ORDER BY node_key
@@ -184,6 +184,7 @@ async def get_logs(
                 status=row.status,
                 domain=row.domain,
                 output_preview=preview,
+                confidence=row.confidence,
                 updated_at=row.updated_at.isoformat() if row.updated_at else None,
             )
         )

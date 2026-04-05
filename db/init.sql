@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS dag_nodes (
     optimized_prompt TEXT,
     output_text TEXT,
     output_artifact_id UUID,
+    confidence FLOAT DEFAULT NULL,
     retry_count INT NOT NULL DEFAULT 0,
     max_retries INT NOT NULL DEFAULT 3,
     parallel_group INT,

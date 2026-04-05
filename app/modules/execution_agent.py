@@ -727,11 +727,14 @@ async def execute_next_node(
         if not verified:
             logger.warning("node_verification_failed: node='%s' reason=%s", title, reason)
 
-    # TODO: Populate confidence via logprob extraction when verification escalation is implemented
-    # Set confidence column to NULL explicitly — verifier confidence is not yet trusted
+    # Store confidence from verifier (logprob-based confidence requires
+    # migrating to Ollama's OpenAI-compatible /v1/chat/completions endpoint
+    # which supports the logprobs parameter — future work).
+    # Verifier confidence is set to NULL when verification is skipped.
+    db_confidence = confidence if (not skip_verify and confidence > 0.0) else None
     await db.execute(
-        text("UPDATE dag_nodes SET confidence = NULL WHERE id = :nid"),
-        {"nid": str(node_id)},
+        text("UPDATE dag_nodes SET confidence = :conf WHERE id = :nid"),
+        {"conf": db_confidence, "nid": str(node_id)},
     )
     await db.commit()
     logger.info(
@@ -740,7 +743,7 @@ async def execute_next_node(
             event="verification_complete",
             node_key=node["node_key"],
             verified=verified,
-            confidence=None,
+            confidence=db_confidence,
         ),
     )
 
