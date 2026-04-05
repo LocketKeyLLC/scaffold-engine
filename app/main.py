@@ -33,6 +33,7 @@ from app.modules.idea_refinement import refine_idea
 from app.modules.prompt_inspector import list_prompts, get_prompt, update_prompt
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag as _query_rag
+from app.routers.status import router as status_router
 from app.schemas import (
     ExecuteNextInput,
     ExecutionResult,
@@ -114,6 +115,7 @@ app = FastAPI(
 
 app.add_middleware(ErrorLoggingMiddleware)
 app.add_middleware(PerformanceMiddleware)
+app.include_router(status_router)
 
 
 @app.middleware("http")
@@ -470,16 +472,6 @@ async def exec_retry(request: Request, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Invalid job_id format")
 
 
-@app.get("/status")
-async def list_jobs():
-    """List active/recent jobs."""
-    return {"status": "not_implemented"}
-
-
-@app.get("/logs")
-async def get_logs():
-    """Retrieve execution/error/performance logs."""
-    return {"status": "not_implemented"}
 
 
 @app.post("/optimize", response_model=PromptOptimizeResult, tags=["Step 14"])
