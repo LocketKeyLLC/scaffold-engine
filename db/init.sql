@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS dag_nodes (
     output_text TEXT,
     output_artifact_id UUID,
     confidence FLOAT DEFAULT NULL,
+    domain VARCHAR(10) DEFAULT NULL,
+    tool VARCHAR(50) DEFAULT 'LLM',
     retry_count INT NOT NULL DEFAULT 0,
     max_retries INT NOT NULL DEFAULT 3,
     parallel_group INT,
