@@ -1083,6 +1083,16 @@ async def execute_all_nodes(
                 "status": "completed",
                 "compile_status": "partial" if is_partial else "complete",
             }
+            # FB-3: Include compiled_output in SSE payload
+            _co_row = await db.execute(
+                text("SELECT compiled_output FROM jobs WHERE id = :jid"),
+                {"jid": job_id},
+            )
+            _co_val = str(_co_row.scalar() or "")
+            if len(_co_val) <= 50_000:
+                summary["compiled_output"] = _co_val
+            else:
+                summary["compiled_output_available"] = True
             if is_partial:
                 summary["failed_nodes"] = failed_node_details
             logger.info("pipeline_completed: job=%s total=%s passed=%s failed=%s duration_ms=%s", job_id, len(node_results), passed, failed_count, elapsed_ms)
@@ -1151,6 +1161,16 @@ async def execute_all_nodes(
                 "duration_ms": elapsed_ms,
                 "compile_status": "partial" if is_partial else "complete",
             }
+            # FB-3: Include compiled_output in SSE payload
+            _co_row2 = await db.execute(
+                text("SELECT compiled_output FROM jobs WHERE id = :jid"),
+                {"jid": job_id},
+            )
+            _co_val2 = str(_co_row2.scalar() or "")
+            if len(_co_val2) <= 50_000:
+                early_summary["compiled_output"] = _co_val2
+            else:
+                early_summary["compiled_output_available"] = True
             if is_partial:
                 early_summary["failed_nodes"] = failed_node_details
             yield _sse("pipeline_complete", early_summary)

@@ -286,6 +286,8 @@ class Pipeline:
                 try:
                     payload = json.loads(data)
                     compiled_output = payload.get("compiled_output", "")
+                    if not compiled_output and payload.get("compiled_output_available"):
+                        compiled_output = self._poll_compiled_output(job_id, headers)
                     compile_status = payload.get("compile_status", "complete")
                     failed_nodes_list = payload.get("failed_nodes", [])
                     if failed_nodes_list:
@@ -355,7 +357,7 @@ class Pipeline:
 
         elif event_type == "node_failed":
             node_key = payload.get("node_key", "?")
-            reason = payload.get("reason", "unknown")
+            reason = payload.get("error") or payload.get("verification_reason") or "unknown"
             yield f"❌ Step {node_key} failed: {reason}\n"
             failed_nodes.append(payload)
 
@@ -408,6 +410,20 @@ class Pipeline:
     # ------------------------------------------------------------------
     # Slash command dispatcher (returns a single string)
     # ------------------------------------------------------------------
+    def _poll_compiled_output(self, job_id: str, headers: dict) -> str:
+        """Fetch compiled_output via status endpoint when too large for SSE."""
+        try:
+            r = requests.get(
+                f"{self.valves.orchestrator_url}/exec/status/{job_id}",
+                headers=headers,
+                timeout=15,
+            )
+            if r.status_code == 200:
+                return r.json().get("compiled_output", "")
+        except Exception:
+            pass
+        return ""
+
     def _handle_command(self, msg: str) -> str:
         parts = msg.split(None, 2)
         cmd = parts[0].lower()
