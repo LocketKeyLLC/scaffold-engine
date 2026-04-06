@@ -160,6 +160,8 @@ CREATE INDEX IF NOT EXISTS idx_performance_logs_model ON performance_logs(model)
 CREATE INDEX IF NOT EXISTS idx_performance_logs_created ON performance_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_blockers_status ON blockers(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_dag_nodes_domain ON dag_nodes(domain);
+CREATE INDEX IF NOT EXISTS idx_performance_logs_job_id ON performance_logs(job_id);
 
 -- Updated_at trigger function
 CREATE OR REPLACE FUNCTION update_updated_at()
