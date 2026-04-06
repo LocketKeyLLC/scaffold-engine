@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
     error_summary TEXT,
+    compiled_output TEXT,
     metadata JSONB DEFAULT '{}'::jsonb
 );
 
