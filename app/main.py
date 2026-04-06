@@ -20,6 +20,7 @@ from starlette.responses import StreamingResponse
 
 from app.auth import require_api_key
 from app.config import settings
+from app.modules.cleanup import start_cleanup_task
 from app.database import get_db, engine
 from app.logging_config import setup_logging
 from app.middleware.error_logging import ErrorLoggingMiddleware
@@ -98,9 +99,15 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.error('event="startup_cleanup_failed" error=%s', exc)
 
+    _cleanup_task = start_cleanup_task()
     yield
 
     # Shutdown
+    _cleanup_task.cancel()
+    try:
+        await _cleanup_task
+    except asyncio.CancelledError:
+        pass
     milvus_connections.disconnect("default")
     logger.info("engine_stopped")
 
