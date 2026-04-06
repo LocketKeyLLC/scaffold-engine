@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     title TEXT NOT NULL,
     description TEXT,
     status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'refining', 'planning', 'executing', 'completed', 'failed', 'cancelled')),
+        CHECK (status IN ('pending', 'refining', 'planning', 'executing', 'running', 'completed', 'failed', 'cancelled', 'blocked')),
     input_text TEXT,
     refined_brief JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
