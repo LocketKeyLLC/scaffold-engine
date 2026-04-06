@@ -7,7 +7,7 @@ Run:  docker exec scaffold-orchestrator pytest tests/test_execution_agent.py -m 
 import httpx
 import pytest
 import asyncio
-from conftest import make_mock_db
+from tests.conftest import make_mock_db
 
 
 def _run(coro):

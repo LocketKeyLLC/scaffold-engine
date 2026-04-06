@@ -9,8 +9,6 @@ Run:  docker exec scaffold-orchestrator pytest tests/test_retrieval_golden.py -v
 Tier: make validate
 """
 
-import sys
-sys.path.insert(0, "/app")
 
 import pytest
 

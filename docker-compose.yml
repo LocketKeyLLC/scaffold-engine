@@ -77,7 +77,7 @@ services:
       LOG_JSON_FORMAT: "true"
       LOG_FILE: /var/log/scaffold/app.jsonl
       MODEL_ROUTER: qwen3:4b
-      PYTHONPATH: /app
+      PYTHONPATH: /code
       MODEL_EMBEDDER: qwen3-embedding:0.6b
       MODEL_EMBEDDER_PIPELINE: qwen3-embedding:8b
       MODEL_RERANKER: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
@@ -89,7 +89,7 @@ services:
       MODEL_FALLBACK: qwen3.5:latest
       CLOUD_TIMEOUT: "600"
       LOCAL_TIMEOUT: "1800"
-      HF_HOME: /app/.cache/huggingface
+      HF_HOME: /code/.cache/huggingface
       MAX_RETRIES: "3"
       HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
@@ -97,9 +97,9 @@ services:
       TOKENIZERS_PARALLELISM: "false"
       SCAFFOLD_API_KEY: "${SCAFFOLD_API_KEY}"
     volumes:
-      - ./app:/app/app:ro
-      - ./ground_truths:/app/ground_truths:ro
-      - hf-cache:/app/.cache/huggingface
+      - ./app:/code/app:ro
+      - ./ground_truths:/code/ground_truths:ro
+      - hf-cache:/code/.cache/huggingface
       - scaffold-logs:/var/log/scaffold
     restart: unless-stopped
     networks:
