@@ -588,6 +588,8 @@ def _map_node_type(task_type: str) -> str:
 
 def _parse_json(raw: str) -> dict | None:
     """Extract JSON from LLM output."""
+    from app.utils.llm_parsing import strip_think_tags
+    raw = strip_think_tags(raw)
     text = raw.strip()
     if text.startswith("```"):
         lines = text.split("\n")

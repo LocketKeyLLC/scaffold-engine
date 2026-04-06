@@ -151,6 +151,8 @@ async def _llm_verify(original: str, optimized: str, model: str) -> tuple[bool, 
     messages = [{"role": "system", "content": VERIFY_SYSTEM}] + messages
     resp = await model_router.chat(messages=messages, model=model)
     raw = resp.text
+    from app.utils.llm_parsing import strip_think_tags
+    raw = strip_think_tags(raw)
     try:
         data = json.loads(raw.strip())
         return bool(data.get("preserved", False)), str(data.get("reason", ""))
