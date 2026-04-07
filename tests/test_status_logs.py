@@ -174,9 +174,7 @@ class TestGetStatus:
         # Second call is the jobs query — check params include filter
         call_args = db.execute.call_args_list[1]
         params = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("params", {})
-        # The query text should contain :status_filter
-        query_text = str(call_args[0][0])
-        assert "status_filter" in query_text
+        assert params.get("status_filter") == "failed"
 
     @pytest.mark.asyncio
     async def test_timestamp_is_utc_iso(self):
