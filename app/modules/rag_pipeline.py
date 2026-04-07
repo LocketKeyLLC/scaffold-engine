@@ -120,7 +120,7 @@ async def _vector_search(
                     source_url=entity.get("source_url", ""),
                     entry_id=entity.get("entry_id", ""),
                     domain=entity.get("domain", ""),
-                    vector_score=float(hit.score),
+                    vector_score=1.0 / (1.0 + float(hit.score)),
                 ))
             return hits
         except Exception as e:
