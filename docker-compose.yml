@@ -3,7 +3,7 @@
 # Ollama is HOST-installed — reachable at 172.18.0.1:11434
 services:
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui@sha256:b80a96e14bb15ea79aec96fbdad4aeab6b3ee7b61520d83b5dbc8c4f47d433a9
     container_name: open-webui
     ports:
       - "3000:8080"
@@ -21,7 +21,7 @@ services:
     networks:
       - ai-network
   pipelines:
-    image: ghcr.io/open-webui/pipelines:main
+    image: ghcr.io/open-webui/pipelines@sha256:b48e9bc338ce2be0acfbeff01810db72408a12f07739f9e3879c1f2b00952d6e
     container_name: open-webui-pipelines
     ports:
       - "9099:9099"
@@ -31,7 +31,7 @@ services:
     networks:
       - ai-network
   searxng:
-    image: searxng/searxng:latest
+    image: searxng/searxng@sha256:b6db575bb821d35279474090270db9e53e92432a66d19e7da51c0ef1b5ddb806
     container_name: searxng
     ports:
       - "8888:8080"
