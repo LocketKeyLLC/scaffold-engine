@@ -16,6 +16,7 @@ from pymilvus import connections as milvus_connections, utility, Collection
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.model_router import close_client
 from starlette.responses import StreamingResponse
 
 from app.auth import require_api_key
@@ -108,6 +109,7 @@ async def lifespan(app: FastAPI):
         await _cleanup_task
     except asyncio.CancelledError:
         pass
+    await close_client()
     milvus_connections.disconnect("default")
     logger.info("engine_stopped")
 

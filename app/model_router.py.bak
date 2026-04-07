@@ -22,32 +22,6 @@ from app.config import settings
 logger = logging.getLogger("scaffold.router")
 
 # ---------------------------------------------------------------------------
-# Persistent HTTP client for Ollama connection pooling
-# ---------------------------------------------------------------------------
-_client: httpx.AsyncClient | None = None
-
-
-def _get_client() -> httpx.AsyncClient:
-    """Return the module-level AsyncClient, creating one if needed."""
-    global _client
-    if _client is None or _client.is_closed:
-        if _client is not None and _client.is_closed:
-            logger.warning("httpx_client_recreated: client was closed, creating new one")
-        _client = httpx.AsyncClient(
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-        )
-    return _client
-
-
-async def close_client() -> None:
-    """Shut down the persistent HTTP client."""
-    global _client
-    if _client is not None:
-        await _client.aclose()
-        _client = None
-        logger.info("httpx_client_closed")
-
-# ---------------------------------------------------------------------------
 # Cloud model detection
 # ---------------------------------------------------------------------------
 
@@ -108,48 +82,49 @@ async def _call_ollama(
     """Single Ollama API call. Returns ModelResponse regardless of outcome."""
     url = f"{settings.ollama_base_url}{endpoint}"
     start = time.monotonic()
-    try:
-        client = _get_client()
-        resp = await client.post(url, json=payload, timeout=timeout)
-        elapsed_ms = int((time.monotonic() - start) * 1000)
 
-        if resp.status_code != 200:
-            return ModelResponse(
-                model=model,
-                success=False,
-                error=f"HTTP {resp.status_code}: {resp.text[:200]}",
-                total_duration_ms=elapsed_ms,
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload)
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+
+            if resp.status_code != 200:
+                return ModelResponse(
+                    model=model,
+                    success=False,
+                    error=f"HTTP {resp.status_code}: {resp.text[:200]}",
+                    total_duration_ms=elapsed_ms,
+                )
+
+            data = resp.json()
+            # Extract text from the response format
+            text = (
+                data.get("response")            # /api/generate
+                or data.get("message", {}).get("content", "")  # /api/chat
+                or ""
             )
 
-        data = resp.json()
-        # Extract text from the response format
-        text = (
-            data.get("response")            # /api/generate
-            or data.get("message", {}).get("content", "")  # /api/chat
-            or ""
-        )
+            # Extract performance metrics from Ollama response
+            tokens_prompt = data.get("prompt_eval_count")
+            tokens_completion = data.get("eval_count")
+            # Ollama reports durations in nanoseconds
+            ttft_ns = data.get("prompt_eval_duration")
+            ttft_ms = int(ttft_ns / 1_000_000) if ttft_ns else None
+            eval_duration_ns = data.get("eval_duration")
+            tps = None
+            if tokens_completion and eval_duration_ns and eval_duration_ns > 0:
+                tps = round(tokens_completion / (eval_duration_ns / 1e9), 2)
 
-        # Extract performance metrics from Ollama response
-        tokens_prompt = data.get("prompt_eval_count")
-        tokens_completion = data.get("eval_count")
-        # Ollama reports durations in nanoseconds
-        ttft_ns = data.get("prompt_eval_duration")
-        ttft_ms = int(ttft_ns / 1_000_000) if ttft_ns else None
-        eval_duration_ns = data.get("eval_duration")
-        tps = None
-        if tokens_completion and eval_duration_ns and eval_duration_ns > 0:
-            tps = round(tokens_completion / (eval_duration_ns / 1e9), 2)
-
-        return ModelResponse(
-            text=text.strip(),
-            model=model,
-            success=True,
-            ttft_ms=ttft_ms,
-            total_duration_ms=elapsed_ms,
-            tokens_prompt=tokens_prompt,
-            tokens_completion=tokens_completion,
-            tokens_per_sec=tps,
-            raw=data,
+            return ModelResponse(
+                text=text.strip(),
+                model=model,
+                success=True,
+                ttft_ms=ttft_ms,
+                total_duration_ms=elapsed_ms,
+                tokens_prompt=tokens_prompt,
+                tokens_completion=tokens_completion,
+                tokens_per_sec=tps,
+                raw=data,
             )
 
     except httpx.TimeoutException:
