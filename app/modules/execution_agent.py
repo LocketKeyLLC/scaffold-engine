@@ -438,53 +438,6 @@ async def _milvus_search(query: str, node_key: str = "?", domain: str | None = N
         return f"Knowledge base search failed: {e}"
 
 
-async def _dispatch_tool(node: dict, task: str, context: str, auto_mode: bool):
-    """
-    Route by tool type.
-    Returns: (model, context, skip, output)
-    """
-    tool = (node.get("tool") or "LLM").strip()
-    nk = node.get("node_key", "?")
-
-    if tool.lower() in ("human", "human_review"):
-        if auto_mode:
-            logger.info("tool_dispatch: %s auto_skip node=%s", tool, nk)
-            return (None, context, True,
-                    "Skipped: human review not required in auto mode")
-        else:
-            logger.info("tool_dispatch: %s blocked_manual node=%s", tool, nk)
-            return (None, context, True,
-                    "BLOCKED: requires human review. Use /skip or provide input.")
-
-    if tool in ("CodeGen", "FileSystem"):
-        logger.info("tool_dispatch: %s -> model_coder node=%s", tool, nk)
-        return (settings.model_coder, context, False, None)
-
-    if tool == "SearXNG":
-        logger.info("tool_dispatch: %s web_search node=%s", tool, nk)
-        search_results = await _searxng_search(task)
-        augmented = (
-            f"{context}\n\n"
-            f"## Web Search Results\n"
-            f"The following web search results were retrieved for this task:\n\n"
-            f"{search_results}"
-        )
-        return (settings.model_general, augmented, False, None)
-
-    if tool == "Milvus":
-        logger.info("tool_dispatch: %s rag_search node=%s", tool, nk)
-        node_domain = node.get("domain") if isinstance(node, dict) else None
-        rag_results = await _milvus_search(task, node_key=nk, domain=node_domain)
-        augmented = (
-            f"{context}\n\n"
-            f"## Knowledge Base Results\n"
-            f"The following entries were retrieved from the knowledge base:\n\n"
-            f"{rag_results}"
-        )
-        return (settings.model_general, augmented, False, None)
-
-    if tool != "LLM":
-        logger.warning("tool_dispatch_unknown: %s -> model_general node=%s", tool, nk)
     return (settings.model_general, context, False, None)
 
 # ---------------------------------------------------------------------------
