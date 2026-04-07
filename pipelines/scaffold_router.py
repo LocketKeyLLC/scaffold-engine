@@ -71,7 +71,7 @@ class Pipeline:
         def _call_ideas():
             try:
                 ideas_result[0] = requests.post(
-                    f"{self.valves.orchestrator_url}/ideas",
+                    f"{self.valves.orchestrator_url}/ideate",
                     json={"idea": message},
                     headers=headers,
                     timeout=300,
@@ -120,6 +120,25 @@ class Pipeline:
             yield f"\n**{title}**\n\n"
         else:
             yield "\n\n"
+
+        # ---- Check for ideation workflow confirmation ----
+        if ideas_data.get("status") == "awaiting_confirmation":
+            feasibility = ideas_data.get("feasibility", {})
+            is_feasible = feasibility.get("feasible", True)
+            confidence = feasibility.get("confidence", 0)
+            yield f"**Feasibility:** {chr(9989) if is_feasible else chr(9888)} ({confidence:.0%} confidence)\n\n"
+            risks = feasibility.get("risks", [])
+            if risks:
+                yield "**Risks:**\n"
+                for risk in risks:
+                    yield f"- {risk}\n"
+            clarifications = feasibility.get("clarifications_needed", [])
+            if clarifications:
+                yield "\n**Clarifications needed:**\n"
+                for c in clarifications:
+                    yield f"- {c}\n"
+            yield f"\n---\n`/confirm {job_id}` to proceed with research, or `/confirm {job_id} <your feedback>` to adjust.\n"
+            return
 
         # ---- Phase 2: /dag (long wait ~200s, yield keepalive dots) ----
         yield "Planning my approach"
@@ -437,7 +456,7 @@ class Pipeline:
                     return "Usage: /idea <description>"
                 text = " ".join(parts[1:])
                 r = requests.post(
-                    f"{self.valves.orchestrator_url}/ideas",
+                    f"{self.valves.orchestrator_url}/ideate",
                     json={"idea": text},
                     headers={"X-API-Key": self.valves.api_key},
                     timeout=1800,
@@ -499,6 +518,20 @@ class Pipeline:
                     headers={"X-API-Key": self.valves.api_key},
                     timeout=60,
                 )
+
+            elif cmd == "/confirm":
+                if len(parts) < 2:
+                    return "Usage: /confirm <job_id> [feedback]"
+                payload = {"job_id": parts[1]}
+                if len(parts) > 2:
+                    payload["feedback"] = " ".join(parts[2:])
+                r = requests.post(
+                    f"{self.valves.orchestrator_url}/ideate/confirm",
+                    json=payload,
+                    headers={"X-API-Key": self.valves.api_key},
+                    timeout=1800,
+                )
+                return self._fmt(r)
                 return self._fmt(r)
 
             elif cmd == "/status":

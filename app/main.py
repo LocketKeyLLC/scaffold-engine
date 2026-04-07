@@ -32,6 +32,7 @@ from app.modules.execution_handler import execution_status, retry_node
 from app.modules.gt_browser import gt_list, gt_search, gt_detail, gt_stats
 from app.modules.gt_extractor import extract_ground_truths
 from app.modules.idea_refinement import refine_idea
+from app.modules.ideation_workflow import analyze_and_confirm, research_and_compile
 from app.modules.prompt_inspector import list_prompts, get_prompt, update_prompt
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag as _query_rag
@@ -302,6 +303,24 @@ class IdeaInput(BaseModel):
 async def submit_idea(body: IdeaInput, db=Depends(get_db)):
     """Step 10: Submint new idea → trigger refinement."""
     return await refine_idea(body.idea, db, model=body.model, domain=body.domain)
+
+@app.post("/ideate")
+async def ideate_endpoint(body: IdeaInput, db=Depends(get_db)):
+    """Phase 1: Analyze idea, assess feasibility, halt for confirmation."""
+    return await analyze_and_confirm(body.idea, db, model=body.model, domain=body.domain)
+
+@app.post("/ideate/confirm")
+async def ideate_confirm_endpoint(request: Request, db=Depends(get_db)):
+    """Phase 2: User confirms -> research -> ingest -> compile -> present workflow."""
+    body = await request.json()
+    job_id = body.get("job_id")
+    if not job_id:
+        raise HTTPException(400, "job_id required")
+    return await research_and_compile(
+        job_id, db,
+        user_feedback=body.get("feedback"),
+        push_to_github=body.get("push_to_github", False),
+    )
 
 @app.get("/dag/{job_id}")
 async def get_dag(job_id: str, db: AsyncSession = Depends(get_db)):
