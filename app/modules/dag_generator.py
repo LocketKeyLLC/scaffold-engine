@@ -23,6 +23,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from json_repair import repair_json
 from app import model_router
 
 logger = logging.getLogger("scaffold.dag")
@@ -596,18 +597,40 @@ def _parse_json(raw: str) -> dict | None:
         lines = [l for l in lines if not l.strip().startswith("```")]
         text = "\n".join(lines).strip()
 
+    # 1. Direct parse
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
+    # 2. json_repair on full text
+    try:
+        repaired = repair_json(text, return_objects=True)
+        if isinstance(repaired, dict):
+            logger.info("dag_json_repaired: method=full_text")
+            return repaired
+    except Exception:
+        pass
+
+    # 3. Brace extraction + direct parse
     brace_start = text.find("{")
     brace_end = text.rfind("}")
     if brace_start != -1 and brace_end > brace_start:
+        fragment = text[brace_start : brace_end + 1]
         try:
-            return json.loads(text[brace_start : brace_end + 1])
+            return json.loads(fragment)
         except json.JSONDecodeError:
             pass
+
+        # 4. Brace extraction + json_repair
+        try:
+            repaired = repair_json(fragment, return_objects=True)
+            if isinstance(repaired, dict):
+                logger.info("dag_json_repaired: method=brace_extract")
+                return repaired
+        except Exception:
+            pass
+
     return None
 
 
