@@ -1,10 +1,10 @@
-FROM python:3.12-slim
+FROM python:3.12.13-slim
 WORKDIR /code
 RUN apt-get update && apt-get install -y --no-install-recommends curl jq make && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir "setuptools>=70.0.0,<72.0.0"
-COPY requirements.txt .
+RUN pip install --no-cache-dir "setuptools==71.1.0"
+COPY requirements.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements-dev.txt
 
 # Task #16: Pre-download reranker weights at build time so first /rag
 # request doesn't block on a HuggingFace download.
