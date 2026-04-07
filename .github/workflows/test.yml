@@ -17,7 +17,7 @@ env:
   SCAFFOLD_API_KEY: ci-test-key
   HF_HUB_DISABLE_TELEMETRY: "1"
   TOKENIZERS_PARALLELISM: "false"
-  PYTHONPATH: /app
+  PYTHONPATH: /code
 
 jobs:
   unit-tests:
@@ -57,7 +57,7 @@ jobs:
             -e MILVUS_URI=$MILVUS_URI \
             -e SEARXNG_URL=$SEARXNG_URL \
             -e SCAFFOLD_API_KEY=$SCAFFOLD_API_KEY \
-            -e PYTHONPATH=/app \
+            -e PYTHONPATH=/code \
             scaffold-orchestrator:ci \
             pytest tests/ --timeout=30 -v \
               --ignore=tests/eval_retrieval.py \
