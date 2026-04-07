@@ -400,3 +400,52 @@ async def query_rag(
             "reranked": not skip_rerank,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Ingest entries into Milvus
+# ---------------------------------------------------------------------------
+
+async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
+    """Embed and insert knowledge entries into Milvus. Returns count ingested."""
+    if not entries:
+        return 0
+
+    loop = asyncio.get_running_loop()
+    collection = await loop.run_in_executor(None, _get_collection)
+    if collection is None:
+        logger.error("ingest_entries: collection not available")
+        return 0
+
+    count = 0
+    for entry in entries:
+        content = entry.get("content", "")
+        if not content:
+            continue
+
+        vectors = await model_router.embed(content)
+        if not vectors:
+            logger.warning("ingest_embed_failed for topic=%s", entry.get("topic"))
+            continue
+
+        vector = vectors[0]
+        topic = entry.get("topic", "unknown").strip().lower().replace(" ", "-")
+        tags = entry.get("tags", "")
+        source = entry.get("source", "scaffold-engine")
+        entry_id = f"scaffold-{topic}-{count}"
+
+        row = [{"entry_id": entry_id, "content": content, "topic": topic, "tags": tags, "source_file": "scaffold-ideation", "source_url": source, "domain": domain, "vector": vector}]
+
+        try:
+            await loop.run_in_executor(
+                None, lambda r=row: collection.insert(r)
+            )
+            count += 1
+        except Exception as e:
+            logger.warning("ingest_insert_failed: %s", e)
+
+    if count > 0:
+        await loop.run_in_executor(None, collection.flush)
+        logger.info("ingested %d entries into Milvus", count)
+
+    return count

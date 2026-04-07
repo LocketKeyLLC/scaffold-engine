@@ -1,0 +1,20 @@
+[33m1360ffa[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m chore(deps): pin all dependencies and base images [CD-6, CD-7]
+[33mf41432b[m chore: remove model_router backup file
+[33m85d954f[m perf(router): use persistent httpx.AsyncClient for Ollama connection pooling [CD-5]
+[33mcc00145[m fix(tests): correct mock assertion in test_status_filter_passed_to_query [CD-4]
+[33m8d25414[m fix(ci): correct PYTHONPATH from /app to /code [CD-3]
+[33mc601079[m fix(config): align config.py defaults with docker-compose values [CD-2]
+[33mc7d6503[m refactor(exec): consolidate RAG injection to single call per node [CQ-4]
+[33m5a7da30[m chore(cleanup): remove unused _dispatch_tool function and its tests [CQ-3]
+[33m1db8d89[m fix(api): return proper HTTP error codes instead of 200 with error body [CQ-5]
+[33m06d206b[m fix(rag): normalize L2 distance to similarity score in vector search [AC-4]
+[33m6d591ef[m perf(rag): wrap blocking Milvus/reranker calls in run_in_executor, parallelize search [AC-1, AC-2, AC-3, AC-4]
+[33mb7d8cfd[m fix(dag): add json_repair fallback for malformed LLM JSON [CQ-2]
+[33m7996172[m fix(parsing): add shared think-tag stripping for DAG generator and prompt optimizer [CQ-1, CQ-6]
+[33mff77c4e[m fix(sse): include compiled_output in pipeline_complete event [FB-3, FB-4]
+[33ma105fc6[m fix(schema): add migrations 003-006 for compiled_output, job statuses, domain/tool, indexes [SM-1..SM-5]
+[33m2843dc1[m [FB-2] Add 'running' and 'blocked' to jobs status CHECK in init.sql
+[33m582e32b[m fix(schema): add compiled_output column to jobs table in init.sql [FB-1]
+[33m9c2bfad[m feat: add periodic stale-job cleanup every 15 min with GC-safe task registry (Task #12)
+[33m8883b5d[m fix: change WORKDIR /app to /code, resolve 65 test import failures (Task #18)
+[33m11ec78c[m fix: add domain + tool columns to dag_nodes in init.sql (Task #19)
