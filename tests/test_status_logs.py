@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 # ── Bootstrap: stub out app.database before loading the router ─────────
 
@@ -260,15 +261,15 @@ class TestGetLogs:
 
     @pytest.mark.asyncio
     async def test_job_not_found(self):
-        """Returns error dict when job_id doesn't exist."""
+        """Returns 404 HTTPException when job_id doesn't exist."""
         empty_result = _make_result([])
         db = _make_db([empty_result])
 
-        resp = await get_logs(job_id="nonexistent", include_output=False, db=db)
+        with pytest.raises(HTTPException) as exc_info:
+            await get_logs(job_id="nonexistent", include_output=False, db=db)
 
-        assert isinstance(resp, dict)
-        assert resp["error"] == "Job not found"
-        assert resp["http_status"] == 404
+        assert exc_info.value.status_code == 404
+        assert "Job not found" in exc_info.value.detail
 
     @pytest.mark.asyncio
     async def test_output_truncated_by_default(self):
