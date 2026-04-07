@@ -8,7 +8,7 @@ import structlog
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -139,7 +139,7 @@ async def get_logs(
     job_id: str,
     include_output: bool = Query(default=False),
     db=Depends(get_db),
-) -> LogsResponse | dict:
+) -> LogsResponse:
     """Return per-node execution history for a job."""
 
     # 1. Verify job exists, get status + compiled output
@@ -149,7 +149,7 @@ async def get_logs(
     )
     job_row = job_result.first()
     if not job_row:
-        return {"error": "Job not found", "job_id": job_id, "http_status": 404}
+        raise HTTPException(status_code=404, detail="Job not found")
 
     # 2. Node-level execution details
     nodes_result = await db.execute(

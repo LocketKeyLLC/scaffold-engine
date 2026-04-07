@@ -379,7 +379,7 @@ async def gt_list_endpoint(page: int = 1, per_page: int = 20):
         return await gt_list(page=page, per_page=per_page)
     except Exception as e:
         logger.error("/gt/list failed: %s", e)
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/gt/search")
 async def gt_search_endpoint(body: GtSearchInput):
@@ -388,7 +388,7 @@ async def gt_search_endpoint(body: GtSearchInput):
         return await gt_search(query=body.query, top_k=body.top_k)
     except Exception as e:
         logger.error("/gt/search failed: %s", e)
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/gt/detail/{entry_id}")
 async def gt_detail_endpoint(entry_id: str):
@@ -397,7 +397,7 @@ async def gt_detail_endpoint(entry_id: str):
         return await gt_detail(entry_id=entry_id)
     except Exception as e:
         logger.error("/gt/detail failed: %s", e)
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/gt/stats")
 async def gt_stats_endpoint():
@@ -406,7 +406,7 @@ async def gt_stats_endpoint():
         return await gt_stats()
     except Exception as e:
         logger.error("/gt/stats failed: %s", e)
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/prompts/{job_id}")
