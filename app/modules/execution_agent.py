@@ -238,8 +238,8 @@ async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = No
         return ""
 
 
-async def _build_prompt(node: dict, brief: dict, rag_context: str = "") -> str:
-    """Build execution prompt from node template + brief context + RAG grounding."""
+async def _build_prompt(node: dict, brief: dict) -> str:
+    """Build execution prompt from node template + brief context."""
     template = node.get("prompt_template") or ""
     title = node["title"]
     goal = brief.get("description", "") if brief else ""
@@ -247,16 +247,11 @@ async def _build_prompt(node: dict, brief: dict, rag_context: str = "") -> str:
         goals = brief.get("goals", [])
         goal = goals[0] if goals else ""
 
-    grounding = ""
-    if rag_context:
-        grounding = f"\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}\n"
-
     if template:
-        return f"{template}{grounding}\n\nContext: {goal}"
+        return f"{template}\n\nContext: {goal}"
     return (
         f"Execute this task: {title}\n\n"
-        f"Project goal: {goal}\n"
-        f"{grounding}\n"
+        f"Project goal: {goal}\n\n"
         f"Produce a complete, actionable output for this task. "
         f"Base your response on the ground truth provided above where relevant."
     )
@@ -570,25 +565,28 @@ async def execute_next_node(
     else:
         exec_prompt = raw_prompt
 
-    # 5. Inject RAG grounding AFTER optimization — build contextual query
+    # 5. Inject RAG grounding AFTER optimization — single call per node
     project_goal = " ".join(brief.get("goals", [])) if brief else ""
     rag_query = f"{title}"
     if project_goal:
         rag_query = f"{project_goal}: {title}"
     job_domain = brief.get("domain") if brief else None
-    rag_context = await _fetch_rag_context(rag_query, top_k=2, domain=job_domain)
-    if rag_context:
-        exec_prompt = f"{exec_prompt}\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}"
-        logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
-    # ── SearXNG / Milvus context injection ──
-    if tool == "SearXNG":
+
+    if tool == "Milvus":
+        node_domain = node.get("domain")
+        rag_block = await _milvus_search(title, node_key=node["node_key"], domain=node_domain)
+        if rag_block:
+            exec_prompt = f"{exec_prompt}\n\n## Knowledge Base Results\n{rag_block}"
+            logger.info("milvus_context_injected: chars=%d node='%s'", len(rag_block), title)
+    elif tool == "SearXNG":
         search_results = await _searxng_search(title)
         exec_prompt = f"{exec_prompt}\n\n## Web Search Results\n{search_results}"
         logger.info("searxng_context_injected: chars=%d node='%s'", len(search_results), title)
-    elif tool == "Milvus":
-        node_domain = node.get("domain")
-        milvus_results = await _milvus_search(title, node_key=node["node_key"], domain=node_domain)
-        exec_prompt = f"{exec_prompt}\n\n## Knowledge Base Results\n{milvus_results}"
+    else:
+        rag_context = await _fetch_rag_context(rag_query, top_k=2, domain=job_domain)
+        if rag_context:
+            exec_prompt = f"{exec_prompt}\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}"
+            logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
 
     # 5b. Inject upstream node outputs (with size management)
     depends_on = node.get("depends_on") or []
