@@ -13,6 +13,7 @@ Step 13 of 23-step build plan.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -89,38 +90,10 @@ async def _vector_search(
     top_k: int,
     domain: str | None = None,
 ) -> list[RagResult]:
-    """ANN search in Milvus using query embedding."""
-    try:
-        search_kwargs = dict(
-            data=[query_embedding],
-            anns_field="vector",
-            param={"metric_type": "L2", "params": {"nprobe": 16}},
-            limit=top_k,
-            output_fields=["content", "topic", "tags", "source_file", "source_url", "entry_id", "domain"],
-        )
-        if domain:
-            search_kwargs["expr"] = f'domain == "{domain}"'
-        results = collection.search(**search_kwargs)
-
-        hits = []
-        for hit in results[0]:
-            entity = hit.entity
-            hits.append(RagResult(
-                content=entity.get("content", ""),
-                topic=entity.get("topic", ""),
-                tags=entity.get("tags", ""),
-                source_file=entity.get("source_file", ""),
-                source_url=entity.get("source_url", ""),
-                entry_id=entity.get("entry_id", ""),
-                domain=entity.get("domain", ""),
-                vector_score=float(hit.score),
-            ))
-        return hits
-    except Exception as e:
-        # Fall back to L2 if COSINE fails (older index)
-        logger.warning("COSINE search failed, trying L2: %s", e)
+    """ANN search in Milvus using query embedding (off event loop)."""
+    def _sync() -> list[RagResult]:
         try:
-            l2_kwargs = dict(
+            search_kwargs = dict(
                 data=[query_embedding],
                 anns_field="vector",
                 param={"metric_type": "L2", "params": {"nprobe": 16}},
@@ -128,13 +101,17 @@ async def _vector_search(
                 output_fields=["content", "topic", "tags", "source_file", "source_url", "entry_id", "domain"],
             )
             if domain:
-                l2_kwargs["expr"] = f'domain == "{domain}"'
-            results = collection.search(**l2_kwargs)
+                search_kwargs["expr"] = f'domain == "{domain}"'
+
+            col = _get_collection() if collection is None else collection
+            if col is None:
+                return []
+
+            results = col.search(**search_kwargs)
+
             hits = []
             for hit in results[0]:
                 entity = hit.entity
-                # Convert L2 distance to similarity (lower distance = higher similarity)
-                similarity = 1.0 / (1.0 + float(hit.score))
                 hits.append(RagResult(
                     content=entity.get("content", ""),
                     topic=entity.get("topic", ""),
@@ -143,12 +120,15 @@ async def _vector_search(
                     source_url=entity.get("source_url", ""),
                     entry_id=entity.get("entry_id", ""),
                     domain=entity.get("domain", ""),
-                    vector_score=similarity,
+                    vector_score=float(hit.score),
                 ))
             return hits
-        except Exception as e2:
-            logger.error("Vector search failed: %s", e2)
+        except Exception as e:
+            logger.warning("Vector search failed: %s", e)
             return []
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +141,7 @@ async def _keyword_search(
     top_k: int,
     domain: str | None = None,
 ) -> list[RagResult]:
-    """Keyword-based search using Milvus query expressions."""
+    """Keyword-based search using Milvus query expressions (off event loop)."""
     # Extract meaningful keywords (>= 3 chars, not stopwords)
     stopwords = {"the", "and", "for", "are", "but", "not", "you", "all", "can", "has", "was", "one", "our", "out",
                  "how", "what", "when", "where", "which", "who", "why", "with", "this", "that", "from", "into"}
@@ -181,35 +161,42 @@ async def _keyword_search(
     if domain:
         expr = f'domain == "{domain}" and ({expr})'
 
-    try:
-        results = collection.query(
-            expr=expr,
-            output_fields=["content", "topic", "tags", "source_file", "source_url", "entry_id", "domain"],
-            limit=top_k,
-        )
+    def _sync() -> list[RagResult]:
+        try:
+            col = _get_collection() if collection is None else collection
+            if col is None:
+                return []
 
-        hits = []
-        for r in results:
-            # Score by keyword match count
-            content_lower = r.get("content", "").lower()
-            topic_lower = r.get("topic", "").lower()
-            match_count = sum(1 for w in words if w in content_lower or w in topic_lower)
-            score = match_count / len(words) if words else 0.0
+            results = col.query(
+                expr=expr,
+                output_fields=["content", "topic", "tags", "source_file", "source_url", "entry_id", "domain"],
+                limit=top_k,
+            )
 
-            hits.append(RagResult(
-                content=r.get("content", ""),
-                topic=r.get("topic", ""),
-                tags=r.get("tags", ""),
-                source_file=r.get("source_file", ""),
-                source_url=r.get("source_url", ""),
-                entry_id=r.get("entry_id", ""),
-                domain=r.get("domain", ""),
-                keyword_score=score,
-            ))
-        return hits
-    except Exception as e:
-        logger.warning("Keyword search failed: %s", e)
-        return []
+            hits = []
+            for r in results:
+                content_lower = r.get("content", "").lower()
+                topic_lower = r.get("topic", "").lower()
+                match_count = sum(1 for w in words if w in content_lower or w in topic_lower)
+                score = match_count / len(words) if words else 0.0
+
+                hits.append(RagResult(
+                    content=r.get("content", ""),
+                    topic=r.get("topic", ""),
+                    tags=r.get("tags", ""),
+                    source_file=r.get("source_file", ""),
+                    source_url=r.get("source_url", ""),
+                    entry_id=r.get("entry_id", ""),
+                    domain=r.get("domain", ""),
+                    keyword_score=score,
+                ))
+            return hits
+        except Exception as e:
+            logger.warning("Keyword search failed: %s", e)
+            return []
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync)
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +248,9 @@ async def _rerank(
     # Extract texts for reranker (cap at 20)
     docs = [r.content[:500] for r in results[:20]]
 
-    # Run reranker (sync — CrossEncoder is CPU-bound, not async)
-    rr = cross_encoder_rerank(query, docs, top_k=len(docs))
+    # Run CPU-bound reranker off the event loop
+    loop = asyncio.get_running_loop()
+    rr = await loop.run_in_executor(None, cross_encoder_rerank, query, docs, len(docs))
 
     # Map scores back to RagResult objects
     score_map = {item.index: item.score for item in rr.items}
@@ -342,8 +330,10 @@ async def query_rag(
     query_embedding = embeddings[0]
 
     # 3. Parallel search: vector + keyword
-    vector_results = await _vector_search(collection, query_embedding, top_k * 2, domain=domain)
-    keyword_results = await _keyword_search(collection, query, top_k * 2, domain=domain)
+    vector_results, keyword_results = await asyncio.gather(
+        _vector_search(collection, query_embedding, top_k * 2, domain=domain),
+        _keyword_search(collection, query, top_k * 2, domain=domain),
+    )
 
     logger.info(
         "search_executed: vector_hits=%d keyword_hits=%d query='%s'",
