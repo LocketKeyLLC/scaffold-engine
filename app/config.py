@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     # Timeouts (seconds)
     cloud_timeout: int = 600
-    local_timeout = 1800
+    local_timeout: int = 1800
     max_retries: int = 3
 
     # Logging
