@@ -454,7 +454,7 @@ async def execute_next_node(
     job = await _get_job(db, job_id)
     if not job:
         return {"status": "error", "message": f"Job {job_id} not found"}
-    if job["status"] not in ("executing", "planning"):
+    if job["status"] not in ("running", "executing", "planning"):
         return {"status": "error", "message": f"Job status is '{job['status']}' — not executable"}
 
     # 2. Get next node
@@ -615,9 +615,10 @@ async def execute_next_node(
                 )
             parts = [f"### {nk}\n{text}" for nk, text in upstream_outputs.items()]
             exec_prompt = (
-                exec_prompt
-                + "\n\n## Upstream Node Outputs\n"
+                "## Upstream Node Outputs (reference context only — do NOT repeat this)\n"
                 + "\n\n".join(parts)
+                + "\n\n---\n\n## YOUR TASK (focus on this):\n"
+                + exec_prompt
             )
 
     # 6. Execute (with timeout guard)
