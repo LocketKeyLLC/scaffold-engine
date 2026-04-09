@@ -82,7 +82,7 @@ services:
       MODEL_EMBEDDER_PIPELINE: qwen3-embedding:8b
       MODEL_RERANKER: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
       MODEL_CODER: qwen2.5-coder:7b
-      MODEL_GENERAL: qwen2.5:7b
+      MODEL_GENERAL: qwen3-vl:235b-instruct-cloud
       MODEL_VERIFIER: qwen2.5:7b
       MODEL_CLOUD_HEAVY: qwen3-vl:235b-instruct-cloud
       MODEL_CLOUD_ALT: qwen3.5:397b-cloud

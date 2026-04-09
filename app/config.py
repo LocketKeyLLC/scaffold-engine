@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     model_embedder_pipeline: str = "qwen3-embedding:8b"
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
     model_coder: str = "qwen2.5-coder:7b"
-    model_general: str = "qwen2.5:7b"
+    model_general: str = "qwen3-vl:235b-instruct-cloud"
     model_verifier: str = "qwen2.5:7b"
     model_cloud_heavy: str = "qwen3-vl:235b-instruct-cloud"
     model_cloud_alt: str = "qwen3.5:397b-cloud"
