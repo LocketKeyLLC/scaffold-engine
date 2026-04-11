@@ -1,6 +1,6 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 11, 2026 (test fixes)
+**Last Updated:** April 11, 2026 (E2E testing fixes)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
 **Latest Commit:** `cb1ecc1` — `fix: align tests with current signatures and max_nodes=10`
 **Test Suite:** 230 collected, 204 passed, 22 skipped, 4 live golden-retrieval tests excluded
@@ -173,7 +173,7 @@ Each node has:
 - **dependencies** — which nodes must finish before this one can start
 - **prompt** — the actual instruction sent to the assigned model
 
-Nodes execute in dependency order. When a node has upstream dependencies, their outputs are **prepended** as reference context with explicit framing ("reference context only — do NOT repeat this"), and the node's own task instruction is placed **last** under a `## YOUR TASK` header.
+Nodes execute in dependency order. When a node has upstream dependencies, their outputs are **prepended** as mandatory context with explicit framing ("MANDATORY CONTEXT — your output MUST build on and be consistent with this work"), and the node's own task instruction is placed **last** under a `## YOUR TASK` header with instruction to build on upstream outputs.
 
 After each node runs, the verifier model (qwen2.5:7b) checks the output before moving on. If a node fails verification, it is auto-retried up to `max_retries` (default 3). If retries are exhausted, it can be manually retried via `/exec/retry` or skipped with `/skip <job_id> <node_key>`.
 
@@ -411,12 +411,15 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 14. **Concurrent execution guard** — Atomic UPDATE prevents duplicate job execution
 15. **Active-node-aware cleanup** — Stale-job reaper skips jobs with running nodes
 16. **Numeric DAG truncation** — Sorts T1, T2, T3... numerically, not alphabetically
-17. **Upstream-last prompt assembly** — Context prepended, task instruction last under `## YOUR TASK`
+17. **Upstream-last prompt assembly** — Mandatory upstream context prepended, task instruction last under `## YOUR TASK` with explicit instruction to build on upstream work
 18. **Environment-first model configuration** — docker-compose env vars override config.py defaults
 19. **Short-lived database sessions** — `execute_all_nodes()` uses independent sessions per operation, not request-scoped
 20. **importlib-based test loading** — Avoids Docker `/app` package shadowing
 21. **Pipeline tests run independently** — `test_scaffold_router.py` uses `--noconftest`
 22. **Auto-retry on failure** — Failed nodes are automatically retried in `execute_all_nodes()` using existing `retry_failed_node()`, up to `max_retries`
+23. **Tool-constrained DAG generation** — Only LLM, CodeGen, SearXNG, and Milvus are valid tools; Human and FileSystem removed to prevent unexecutable nodes
+24. **Anti-redundancy DAG rules** — Prompt instructs LLM to produce distinct, non-overlapping nodes that extend rather than duplicate prior work
+25. **Clean clarification display** — Feasibility clarifications shown without generic boilerplate suffixes
 
 ---
 
@@ -424,7 +427,7 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 
 1. **Triage model latency on long conversations** — `qwen3:4b` on CPU can take several minutes per turn as context grows
 2. **`/ideate/confirm` returned 500** on one occasion — root cause unknown, may be transient Milvus/LLM error
-3. **End-to-end pipeline under active testing** — Full auto-chain functional but still being validated on CPU-only hardware
+3. **End-to-end pipeline validated** — Full auto-chain (triage → synthesis → Phase 1 → confirm → Phase 2 → DAG → execute) confirmed working on CPU-only hardware (April 11, 2026)
 
 ---
 

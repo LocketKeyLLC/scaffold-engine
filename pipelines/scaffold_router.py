@@ -525,7 +525,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
             if clarifications:
                 yield "**A few things that could be more specific:**\n"
                 for c in clarifications:
-                    yield f"- **{c}** — What exactly do you need here? (e.g., which software, what scale, what OS, what hardware?)\n"
+                    yield f"- **{c}**\n"
                 yield "\n"
 
             yield "---\n\n"

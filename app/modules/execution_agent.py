@@ -615,9 +615,9 @@ async def execute_next_node(
                 )
             parts = [f"### {nk}\n{text}" for nk, text in upstream_outputs.items()]
             exec_prompt = (
-                "## Upstream Node Outputs (reference context only — do NOT repeat this)\n"
+                "## Upstream Node Outputs (MANDATORY CONTEXT — your output MUST build on and be consistent with this work)\n"
                 + "\n\n".join(parts)
-                + "\n\n---\n\n## YOUR TASK (focus on this):\n"
+                + "\n\n---\n\n## YOUR TASK (build on the upstream outputs above — do NOT rewrite or contradict them):\n"
                 + exec_prompt
             )
 
