@@ -1,6 +1,6 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 11, 2026 (usability pass)
+**Last Updated:** April 10, 2026 (post-audit)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
 **Latest Commit:** `156789c` — `chore: full audit — dead code removal, cleanup, TOON docs, new tests`
 **Test Suite:** 248 collected (30 scaffold router smoke tests + 8 ideation workflow smoke tests), 227 passed, 21 skipped (7 from deleted `jobs_cleanup.py`), 4 live golden-retrieval tests excluded
@@ -115,7 +115,7 @@ User reviews feasibility, risks, and clarifications
         ├── Each node: upstream context prepended → task instruction last → tool dispatch → LLM/CodeGen/SearXNG/Milvus
         ├── Verifier model (qwen2.5:7b) validates each output
         ├── RAG context injected as grounding where relevant
-        ├── Failed nodes are auto-retried up to max_retries (default 3), then skipped; blocked downstream nodes reported
+        ├── Failed nodes are skipped; blocked downstream nodes reported
         ├── Progress streamed to chat via SSE
         └── Final compiled output displayed in chat
 ```
@@ -175,9 +175,9 @@ Each node has:
 
 Nodes execute in dependency order. When a node has upstream dependencies, their outputs are **prepended** as reference context with explicit framing ("reference context only — do NOT repeat this"), and the node's own task instruction is placed **last** under a `## YOUR TASK` header.
 
-After each node runs, the verifier model (qwen2.5:7b) checks the output before moving on. If a node fails verification, it is auto-retried up to `max_retries` (default 3). If retries are exhausted, it can be manually retried via `/exec/retry` or skipped with `/skip <job_id> <node_key>`.
+After each node runs, the verifier model (qwen2.5:7b) checks the output before moving on. If a node fails verification, it can be retried via `/exec/retry` or skipped with `/skip <job_id> <node_key>`.
 
-DAG truncation enforces a maximum node count (currently 10). When the LLM generates more nodes than allowed, the truncator keeps the first N by **numeric sort** (T1, T2, T3...) and removes references to dropped nodes from remaining dependency lists.
+DAG truncation enforces a maximum node count (currently 5). When the LLM generates more nodes than allowed, the truncator keeps the first N by **numeric sort** (T1, T2, T3...) and removes references to dropped nodes from remaining dependency lists.
 
 ---
 
@@ -202,7 +202,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 - `scaffold_router.py` triage timeout: **900s** (15 min)
 - `scaffold_router.py` auto-chain `/ideate` timeout: **1800s** (30 min)
 - `scaffold_router.py` `/ideate/confirm` timeout: **1800s**
-- `scaffold_router.py` DAG timeout: configurable via `dag_timeout` valve (default **1800s**)
+- `scaffold_router.py` DAG timeout: configurable via `dag_timeout` valve (default **900s**)
 - Orchestrator Ollama timeout: **600s** for generation model
 
 **Networking:**
@@ -218,7 +218,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 |------|-----------|----------------|-------|
 | Generation | `qwen3-vl:235b-instruct-cloud` | `MODEL_GENERAL` env var in docker-compose.yml | Heavy cloud model, 600s timeout. **Must match** between docker-compose.yml and config.py |
 | Triage | `qwen3:4b` | `triage_model` valve in scaffold_router.py | Conversational triage + idea synthesis |
-| Verifier | `qwen2.5:7b` | `MODEL_VERIFIER` env var | Validates LLM outputs |
+| Verifier | `qwen3:4b` | `MODEL_VERIFIER` env var | Validates LLM outputs |
 | Code | `qwen2.5-coder:7b` | `MODEL_CODER` env var | CodeGen tool nodes |
 | Embeddings | `qwen3-embedding:8b` | `MODEL_EMBEDDER_PIPELINE` env var | 4096-dimensional vectors |
 | Reranker | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` | `MODEL_RERANKER` env var | CrossEncoder, runs in-container |
@@ -251,8 +251,8 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `app/modules/execution_agent.py` | ~1,139 | DAG node execution, SSE streaming, tool dispatch, verification, compiled output, concurrent execution guard, upstream prompt restructuring, auto-retry. Uses short-lived database sessions |
-| `app/modules/dag_generator.py` | ~615 | DAG creation with Kahn's cycle detection, numeric-sort truncation (max 10 nodes). JSON parsing via shared `llm_parsing.py` |
+| `app/modules/execution_agent.py` | ~1,139 | DAG node execution, SSE streaming, tool dispatch, verification, compiled output, concurrent execution guard, upstream prompt restructuring. Uses short-lived database sessions |
+| `app/modules/dag_generator.py` | ~615 | DAG creation with Kahn's cycle detection, numeric-sort truncation. JSON parsing via shared `llm_parsing.py` |
 | `app/modules/rag_pipeline.py` | 451 | RAG retrieval: embed → parallel vector + keyword search → RRF merge → CrossEncoder rerank. Includes `ingest_entries()` |
 | `app/modules/ideation_workflow.py` | ~265 | Ideation-to-Workflow pipeline: Phase 1 (refine + feasibility + confirmation gate), Phase 2 (research → ingest → compile). 8 smoke tests |
 | `app/modules/idea_refinement.py` | ~177 | Refines raw user ideas into structured briefs |
@@ -403,8 +403,8 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 6. **Reproducible builds** — All pip deps pinned, base images pinned by digest, reranker weights pre-downloaded at build time
 7. **Confirmation gate** — Ideation workflow halts at `awaiting_confirmation`, requiring explicit user confirmation
 8. **SSE keepalive in pipelines** — Zero-width spaces emitted at intervals to prevent idle disconnects
-9. **Conversational triage** — Lightweight `qwen3:4b` handles multi-turn planning before the expensive pipeline runs
-10. **Two-model pipeline routing** — Triage uses 4b (fast), full pipeline uses 235b (deep)
+9. **Conversational triage** — Lightweight `qwen2.5:7b` handles multi-turn planning before the expensive pipeline runs
+10. **Two-model pipeline routing** — Triage uses 7b (fast), full pipeline uses 235b (deep)
 11. **Transcript-based synthesis** — Single-message transcript prevents model confusion from replayed chat turns
 12. **Auto-chain after /confirm** — Phase 2 → DAG → execute all in one flow
 13. **Language pinning** — "Respond ONLY in English" in triage/synthesis prompts
@@ -416,15 +416,16 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 19. **Short-lived database sessions** — `execute_all_nodes()` uses independent sessions per operation, not request-scoped
 20. **importlib-based test loading** — Avoids Docker `/app` package shadowing
 21. **Pipeline tests run independently** — `test_scaffold_router.py` uses `--noconftest`
-22. **Auto-retry on failure** — Failed nodes are automatically retried in `execute_all_nodes()` using existing `retry_failed_node()`, up to `max_retries`
 
 ---
 
 ## Known Issues
 
-1. **Triage model latency on long conversations** — `qwen3:4b` on CPU can take several minutes per turn as context grows
+1. **Triage model latency on long conversations** — `qwen2.5:7b` on CPU can take several minutes per turn as context grows. Consider switching to `qwen3:4b` if consistently problematic
 2. **`/ideate/confirm` returned 500** on one occasion — root cause unknown, may be transient Milvus/LLM error
-3. **End-to-end pipeline under active testing** — Full auto-chain functional but still being validated on CPU-only hardware
+3. **DAG node cap at 5** — LLM generates 8–10 nodes but truncator caps at 5. Consider raising cap or smarter truncation
+4. **No automatic retry** — Failed nodes require manual `/exec/retry` or `/skip`. No auto-retry logic
+5. **End-to-end pipeline under active testing** — Full auto-chain functional but still being validated on CPU-only hardware
 
 ---
 
@@ -432,8 +433,8 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 
 | Operation | Observed Duration | Notes |
 |-----------|------------------|-------|
-| Triage turn (qwen3:4b) | ~30s – 300s+ | Scales with conversation length |
-| Idea synthesis (qwen3:4b) | ~30s – 120s | Depends on conversation length |
+| Triage turn (qwen2.5:7b) | ~30s – 300s+ | Scales with conversation length |
+| Idea synthesis (qwen2.5:7b) | ~30s – 120s | Depends on conversation length |
 | `/ideate` (Phase 1) | 100s – 547s | Includes refinement + feasibility LLM calls |
 | `/ideate/confirm` (Phase 2) | ~512s – 1,450s | Research loop, distillation, embedding, ingestion |
 | `/dag` | ~416s – 504s | Close to timeout threshold |
@@ -469,7 +470,7 @@ scaffold-engine/
 │   ├── rerankers.py               # CrossEncoder + RRF
 │   ├── logging_config.py          # structlog config
 │   ├── modules/
-│   │   ├── execution_agent.py     # DAG execution, SSE streaming, auto-retry
+│   │   ├── execution_agent.py     # DAG execution, SSE streaming
 │   │   ├── dag_generator.py       # DAG creation, Kahn's algorithm
 │   │   ├── rag_pipeline.py        # RAG retrieval + ingestion
 │   │   ├── ideation_workflow.py   # Phase 1 + Phase 2
