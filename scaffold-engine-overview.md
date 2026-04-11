@@ -1,9 +1,9 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 11, 2026 (usability pass)
+**Last Updated:** April 11, 2026 (test fixes)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `156789c` — `chore: full audit — dead code removal, cleanup, TOON docs, new tests`
-**Test Suite:** 248 collected (30 scaffold router smoke tests + 8 ideation workflow smoke tests), 227 passed, 21 skipped (7 from deleted `jobs_cleanup.py`), 4 live golden-retrieval tests excluded
+**Latest Commit:** `cb1ecc1` — `fix: align tests with current signatures and max_nodes=10`
+**Test Suite:** 230 collected, 204 passed, 22 skipped, 4 live golden-retrieval tests excluded
 **Codebase:** ~5,900 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
 ---
@@ -452,6 +452,7 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 | D — DevOps Hardening | Config alignment, CI, connection pooling, dependency pinning | `c601079`..`1360ffa` |
 | E — Ideation Workflow | Ideation pipeline with confirmation gate, Milvus ingestion | `897b29a` |
 | F–U — Full Audit | Triage v3.1, synthesis rewrite, execution fixes, model/prompt fixes, dead code removal, schema fixes, async audit, JSON parsing consolidation, retry unification, TOON docs, 38 new tests, file cleanup | `156789c` |
+| V — Test Fixes | Aligned test signatures with `execute_all_nodes()` (removed stale `db` arg, added `async_session` mock), updated DAG truncation tests from max 5→10 | `cb1ecc1` |
 
 ---
 
