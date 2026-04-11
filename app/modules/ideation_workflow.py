@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import model_router
 from app.config import settings
 from app.modules.idea_refinement import refine_idea
+from app.utils.llm_parsing import parse_json_object, parse_json_array
 
 logger = logging.getLogger("scaffold.ideation")
 
@@ -59,7 +60,7 @@ async def analyze_and_confirm(
         max_tokens=2048,
     )
 
-    feasibility = _parse_json(resp.text) if resp.success else None
+    feasibility = parse_json_object(resp.text) if resp.success else None
     if feasibility is None:
         feasibility = {
             "feasible": True,
@@ -89,26 +90,6 @@ async def analyze_and_confirm(
         "feasibility": feasibility,
         "message": "Review the analysis. Reply /confirm <job_id> to proceed, or /confirm <job_id> <feedback> to adjust.",
     }
-
-
-def _parse_json(raw: str) -> dict | None:
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        lines = [ln for ln in lines if not ln.strip().startswith("```")]
-        cleaned = "\n".join(lines).strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end > start:
-        try:
-            return json.loads(cleaned[start:end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +196,7 @@ async def research_and_compile(
             max_tokens=4096,
         )
         if resp.success:
-            entries = _parse_json_array(resp.text) or []
+            entries = parse_json_array(resp.text) or []
 
     # Step 3: TOON format + Milvus ingest
     toon_rows = _format_toon_rows(entries) if entries else []
@@ -245,7 +226,7 @@ async def research_and_compile(
         max_tokens=4096,
     )
 
-    workflow = _parse_json(resp.text) if resp.success else None
+    workflow = parse_json_object(resp.text) if resp.success else None
     if workflow is None:
         workflow = {
             "compiled_prompt": brief.get("description", ""),
@@ -289,25 +270,3 @@ async def research_and_compile(
     }
 
 
-def _parse_json_array(raw: str) -> list[dict] | None:
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        lines = [ln for ln in lines if not ln.strip().startswith("```")]
-        cleaned = "\n".join(lines).strip()
-    try:
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, list):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-    start = cleaned.find("[")
-    end = cleaned.rfind("]")
-    if start != -1 and end > start:
-        try:
-            parsed = json.loads(cleaned[start:end + 1])
-            if isinstance(parsed, list):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-    return None

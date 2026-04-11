@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
 from app.schemas import JobCreate, JobRead
+from app.utils.llm_parsing import parse_json_object
 
 logger = logging.getLogger("scaffold.refine")
 
@@ -107,7 +108,7 @@ async def refine_idea(
         }
 
     # 4. Parse LLM output
-    brief = _parse_brief(resp.text)
+    brief = parse_json_object(resp.text)
     if brief is None:
         await _fail_job(db, job_id, f"Failed to parse LLM output as JSON")
         return {
@@ -152,34 +153,6 @@ async def refine_idea(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _parse_brief(raw: str) -> dict | None:
-    """Extract JSON from LLM output, handling common formatting issues."""
-    text = raw.strip()
-
-    # Strip markdown fences if present
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-
-    # Try direct parse
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Try extracting first JSON object
-    brace_start = text.find("{")
-    brace_end = text.rfind("}")
-    if brace_start != -1 and brace_end > brace_start:
-        try:
-            return json.loads(text[brace_start : brace_end + 1])
-        except json.JSONDecodeError:
-            pass
-
-    return None
-
 
 async def _fail_job(db: AsyncSession, job_id: UUID, error: str) -> None:
     """Mark job as failed with error summary."""

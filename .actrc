@@ -1,2 +1,0 @@
--P ubuntu-latest=catthehacker/ubuntu:act-latest
---env SCAFFOLD_API_KEY=test-key-for-ci

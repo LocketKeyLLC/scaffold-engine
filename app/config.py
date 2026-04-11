@@ -16,7 +16,6 @@ class Settings(BaseSettings):
 
     # Model assignments
     model_router: str = "qwen3:4b"
-    model_embedder: str = "qwen3-embedding:0.6b"
     model_embedder_pipeline: str = "qwen3-embedding:8b"
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
     model_coder: str = "qwen2.5-coder:7b"

@@ -26,6 +26,11 @@ _REAP_SQL: Final[str] = """
         updated_at = NOW()
     WHERE status IN ('running', 'executing')
       AND updated_at < NOW() - INTERVAL '30 minutes'
+      AND NOT EXISTS (
+          SELECT 1 FROM dag_nodes
+          WHERE dag_nodes.job_id = jobs.id
+            AND dag_nodes.status = 'running'
+      )
 """
 
 
