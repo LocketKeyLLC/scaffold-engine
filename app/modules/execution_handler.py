@@ -61,7 +61,6 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
     counts = {}
     for r in rows:
         counts[r.status] = counts.get(r.status, 0) + 1
-
     return {
         "job_id": str(job_id),
         "job_title": job.title,
@@ -71,50 +70,4 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         "total_nodes": len(nodes),
         "next_node": next_node,
         "nodes": nodes,
-    }
-
-
-async def retry_node(job_id: UUID, node_key: str, db: AsyncSession) -> dict:
-    """Reset a failed node back to pending so it can be re-executed."""
-    result = await db.execute(
-        text("""
-            SELECT status FROM dag_nodes
-            WHERE job_id = :job_id AND node_key = :node_key
-        """),
-        {"job_id": str(job_id), "node_key": node_key}
-    )
-    row = result.fetchone()
-
-    if not row:
-        return {"error": f"Node '{node_key}' not found in job {job_id}"}
-
-    if row.status != "failed":
-        return {"error": f"Can only retry failed nodes. '{node_key}' is '{row.status}'."}
-
-    await db.execute(
-        text("""
-            UPDATE dag_nodes
-            SET status = 'pending', output_text = NULL, optimized_prompt = NULL
-            WHERE job_id = :job_id AND node_key = :node_key
-        """),
-        {"job_id": str(job_id), "node_key": node_key}
-    )
-
-    # Also reset job status if it was failed
-    await db.execute(
-        text("""
-            UPDATE jobs SET status = 'executing'
-            WHERE id = :job_id AND status = 'failed'
-        """),
-        {"job_id": str(job_id)}
-    )
-
-    await db.commit()
-    logger.info("node_reset: node=%s job=%s", node_key, job_id)
-
-    return {
-        "job_id": str(job_id),
-        "node_key": node_key,
-        "reset": True,
-        "new_status": "pending",
     }

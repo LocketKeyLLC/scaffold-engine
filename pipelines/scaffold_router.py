@@ -1,24 +1,30 @@
 """
-scaffold_router.py  --  Step 17 (v2 — streaming auto-chain)
-Open WebUI Pipeline: auto-chains /ideas → /dag → /execute/all for plain messages.
+scaffold_router.py  --  Step 17 (v3 — triage + streaming auto-chain)
+Open WebUI Pipeline: conversational triage before auto-chaining
+/ideate → /dag → /execute/all for plain messages.
 
 Slash commands still work:
-  /idea <text>        -> POST /ideas  (manual, returns JSON)
+  /idea <text>        -> POST /ideate  (manual, returns JSON)
   /dag <job_id>       -> POST /dag    (manual, returns JSON)
   /execute <job_id>   -> POST /execute
   /skip <job_id> <node_key> -> POST /skip
   /optimize <text>    -> POST /optimize
   /rag <query>        -> POST /rag
+  /confirm <job_id>   -> POST /ideate/confirm (Phase 2)
+  /go or /run         -> Synthesize conversation → auto-chain
   /status             -> GET  /status
   /help               -> show command list
 
-Non-command messages trigger the full Scaffold Engine pipeline automatically.
+Non-command messages trigger a conversational triage phase via a lightweight
+model (qwen2.5:7b). The user discusses scope and goals, then types /go or
+/run to launch the full Scaffold Engine pipeline.
 """
 
 from typing import List, Optional, Generator, Iterator
 import requests
 import json
 import time
+import re
 import threading
 import queue
 from pydantic import BaseModel, Field
@@ -28,8 +34,11 @@ class Pipeline:
     class Valves(BaseModel):
         api_key: str = ""
         orchestrator_url: str = "http://scaffold-orchestrator:8000"
-        dag_timeout: int = 600          # seconds to wait for DAG generation
+        dag_timeout: int = 1800          # seconds to wait for DAG generation
         keepalive_interval: int = 10    # seconds between keepalive dots
+        triage_model: str = "qwen2.5:7b"
+        triage_timeout: int = 1800       # seconds to wait for triage model response
+        ollama_url: str = "http://172.18.0.1:11434"
 
     def __init__(self):
         self.id = "scaffold_router"
@@ -37,7 +46,153 @@ class Pipeline:
         self.valves = self.Valves()
 
     # ------------------------------------------------------------------
-    # Main entry point — now a sync GENERATOR (yields chunks)
+    # Triage: lightweight conversational phase before workflow launch
+    # ------------------------------------------------------------------
+    TRIAGE_SYSTEM_PROMPT = """You are a hands-on project planning assistant for Scaffold Engine. Respond ONLY in English.
+The user has an idea they want to build. Your job is to actively help them
+shape it into a clear, actionable scope — not just ask questions.
+
+How to help:
+- When the user describes something broad, break it into concrete options.
+  Present 2-3 approaches with brief pros and cons for each.
+- Make recommendations. Say which option you think best fits their stated goals
+  and why.
+- When the user picks a direction, help refine it further. Suggest specific
+  components, technologies, or steps that would be involved.
+- If something is ambiguous, propose a sensible default and ask if it works:
+  "I'd suggest X because Y — does that work for you?"
+- Keep responses focused and concise. No walls of text.
+- One topic per response. Don't try to resolve everything at once.
+
+Before suggesting /go, make sure these details are nailed down:
+- WHAT specifically is being built (not just a category like "game server" —
+  which game? which server software? what mods or plugins?)
+- WHAT hardware or infrastructure it runs on (OS, CPU, RAM, storage, network)
+- WHAT the success criteria are (what does "done" look like?)
+- ANY key constraints (budget, timeline, existing equipment, skill level)
+
+Do NOT suggest /go until the idea is specific enough that someone else could
+start building it from the description alone.
+
+Your goal is to collaboratively arrive at a specific, well-defined idea that
+includes: what is being built, the key components, and the desired outcome.
+
+When the scope is solid, write a clear 2-4 sentence summary of the final idea
+and tell the user: "Type `/go` when you're ready to launch."
+
+Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to."""
+
+    @staticmethod
+    def _extract_text(content) -> str:
+        """Extract plain text from message content (string or multimodal list)."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(
+                c.get("text", "") for c in content
+                if isinstance(c, dict) and c.get("type") == "text"
+            )
+        return str(content) if content else ""
+
+    def _clean_messages(self, messages: List[dict]) -> List[dict]:
+        """Strip zero-width spaces and normalize content to plain text strings."""
+        cleaned = []
+        for m in messages:
+            text = self._extract_text(m.get("content", ""))
+            text = text.replace("\u200b", "").strip()
+            if text:
+                cleaned.append({"role": m["role"], "content": text})
+        return cleaned
+
+    def _call_triage(self, messages: List[dict]) -> str:
+        """Call the lightweight triage model for conversational clarification."""
+        clean = self._clean_messages(messages)
+        payload = {
+            "model": self.valves.triage_model,
+            "messages": [
+                {"role": "system", "content": self.TRIAGE_SYSTEM_PROMPT}
+            ] + clean,
+            "stream": False,
+        }
+        try:
+            r = requests.post(
+                f"{self.valves.ollama_url}/v1/chat/completions",
+                json=payload,
+                timeout=self.valves.triage_timeout,
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"]
+            else:
+                return f"⚠️ Triage model error (HTTP {r.status_code}). You can skip triage by typing `/go` to launch directly."
+        except requests.exceptions.ConnectionError:
+            return "⚠️ Cannot reach Ollama for triage. You can skip triage by typing `/go` to launch directly."
+        except Exception as e:
+            return f"⚠️ Triage error: {e}. You can skip triage by typing `/go` to launch directly."
+
+    def _synthesize_idea(self, messages: List[dict]) -> str:
+        """Use the triage model to extract the final agreed-upon idea from the conversation."""
+        clean_messages = self._clean_messages(messages)
+
+        if not any(m["role"] == "user" for m in clean_messages):
+            return ""
+
+        # Build a plain-text transcript instead of replaying chat turns.
+        # This avoids confusing the model with its own prior assistant outputs.
+        transcript_lines = []
+        for m in clean_messages:
+            label = "User" if m["role"] == "user" else "Assistant"
+            transcript_lines.append(f"{label}: {m['content']}")
+        transcript = "\n\n".join(transcript_lines)
+
+        synthesis_prompt = {
+            "model": self.valves.triage_model,
+            "messages": [
+                {"role": "system", "content": (
+                    "You extract a project description from a planning conversation. "
+                    "Respond ONLY in English. "
+                    "Write 3-6 plain sentences describing what will be built, using only "
+                    "details the user confirmed. Be specific: include technologies, "
+                    "components, architecture, and goals. Write as a direct project "
+                    "description — not 'the user wants' but 'Build a...' or 'Set up a...'. "
+                    "No preamble, no markdown, no labels, no meta-text like 'type /go'."
+                )},
+                {"role": "user", "content": (
+                    "Here is the planning conversation. Extract the final agreed-upon plan:\n\n"
+                    f"{transcript}"
+                )}
+            ],
+            "stream": False,
+        }
+        try:
+            r = requests.post(
+                f"{self.valves.ollama_url}/v1/chat/completions",
+                json=synthesis_prompt,
+                timeout=self.valves.triage_timeout,
+            )
+            if r.status_code == 200:
+                raw = r.json()["choices"][0]["message"]["content"].strip()
+                print(f"[scaffold_router] Synthesis raw ({len(raw)} chars): {raw[:200]}")
+                # Strip think/thinking tags the model may emit
+                cleaned = re.sub(
+                    r"<think(?:ing)?>.*?</think(?:ing)?>",
+                    "", raw, flags=re.DOTALL
+                ).strip()
+                if cleaned:
+                    return cleaned
+                print(f"[scaffold_router] Synthesis cleaned to empty, using fallback")
+            else:
+                print(f"[scaffold_router] Synthesis HTTP {r.status_code}: {r.text[:300]}")
+        except Exception as e:
+            print(f"[scaffold_router] Synthesis error: {e}")
+
+        # Fallback: concatenate user messages only
+        user_texts = [m["content"] for m in clean_messages if m["role"] == "user"]
+        fallback = " ".join(user_texts)
+        print(f"[scaffold_router] Synthesis fallback ({len(fallback)} chars): {fallback[:200]}")
+        return fallback
+
+    # ------------------------------------------------------------------
+    # Main entry point — sync GENERATOR (yields chunks)
     # ------------------------------------------------------------------
     def pipe(
         self,
@@ -48,13 +203,238 @@ class Pipeline:
     ) -> Generator[str, None, None]:
         msg = user_message.strip()
 
-        # --- Slash commands: yield single response, return ---
+        # --- /go or /run: synthesize conversation and launch pipeline ---
+        if msg.lower() in ("/go", "/run"):
+            # Build chat history (exclude the /go itself)
+            chat_history = [m for m in messages
+                            if not (m["role"] == "user"
+                                    and isinstance(m.get("content"), str)
+                                    and m["content"].strip().lower() in ("/go", "/run"))]
+            
+            user_msgs_in_history = [m for m in chat_history if m["role"] == "user"]
+            if not user_msgs_in_history:
+                yield "Nothing to launch yet — describe your idea first, then type `/go`."
+                return
+            
+            # Debug: show what we're working with
+            yield f"📋 Synthesizing from {len(user_msgs_in_history)} user message(s)...\n\n"
+            
+            synthesized = self._synthesize_idea(chat_history)
+            
+            # Guard: don't launch with empty idea
+            if not synthesized or len(synthesized.strip()) < 10:
+                yield (
+                    "⚠️ Synthesis produced an empty or too-short result. "
+                    "Here's what I captured from your messages:\n\n"
+                )
+                for i, m in enumerate(user_msgs_in_history, 1):
+                    content = m.get("content", "")
+                    if isinstance(content, list):
+                        content = " ".join(
+                            c.get("text", "") for c in content if c.get("type") == "text"
+                        )
+                    yield f"{i}. {content[:200]}\n"
+                yield "\nPlease try rephrasing your idea in a single message, then type `/go`."
+                return
+            
+            yield f"> **Launching with:** {synthesized}\n\n---\n\n"
+            yield from self._auto_chain(synthesized)
+            return
+
+        # --- /execute <job_id>: stream full execution ---
+        if msg.lower().startswith("/execute"):
+            parts = msg.split()
+            if len(parts) < 2:
+                yield "Usage: `/execute <job_id>`"
+                return
+            job_id = parts[1]
+            headers = {"X-API-Key": self.valves.api_key}
+            yield f"Executing all nodes for job `{job_id}`...\n\n"
+            yield from self._execute_and_stream(job_id, 0, headers)
+            return
+
+        # --- /confirm <job_id> [feedback]: Phase 2 → auto-chain to /dag → /execute/all ---
+        if msg.lower().startswith("/confirm"):
+            parts = msg.split(None, 2)
+            if len(parts) < 2:
+                yield "Usage: `/confirm <job_id> [feedback]`"
+                return
+            job_id = parts[1]
+            headers = {"X-API-Key": self.valves.api_key}
+            payload = {"job_id": job_id}
+            if len(parts) > 2:
+                payload["feedback"] = parts[2]
+
+            yield "🔬 Starting research and knowledge ingestion — this may take several minutes on CPU...\n\n"
+
+            # Phase 2: /ideate/confirm (long-running — ~10 min on CPU)
+            confirm_result = [None]
+            confirm_error = [None]
+
+            def _call_confirm():
+                try:
+                    confirm_result[0] = requests.post(
+                        f"{self.valves.orchestrator_url}/ideate/confirm",
+                        json=payload,
+                        headers=headers,
+                        timeout=1800,
+                    )
+                except Exception as e:
+                    confirm_error[0] = e
+
+            t = threading.Thread(target=_call_confirm, daemon=True)
+            t.start()
+            while t.is_alive():
+                time.sleep(self.valves.keepalive_interval)
+                if t.is_alive():
+                    yield "\u200b"
+            t.join()
+
+            if confirm_error[0]:
+                yield f"\n⚠️ Research phase error: {confirm_error[0]}"
+                return
+
+            r = confirm_result[0]
+            if r is None:
+                yield "\n⚠️ No response from research phase."
+                return
+            if r.status_code >= 400:
+                try:
+                    err = r.json().get("message") or r.json().get("detail") or r.text[:200]
+                except Exception:
+                    err = r.text[:200]
+                yield f"\n⚠️ Research phase failed: {err}"
+                return
+
+            yield "\n✅ Research complete — generating execution plan...\n\n"
+
+            # DAG generation
+            dag_result = [None]
+            dag_error = [None]
+
+            def _call_dag():
+                try:
+                    dag_result[0] = requests.post(
+                        f"{self.valves.orchestrator_url}/dag",
+                        json={"job_id": job_id},
+                        headers=headers,
+                        timeout=self.valves.dag_timeout,
+                    )
+                except Exception as e:
+                    dag_error[0] = e
+
+            t = threading.Thread(target=_call_dag, daemon=True)
+            t.start()
+            while t.is_alive():
+                time.sleep(self.valves.keepalive_interval)
+                if t.is_alive():
+                    yield "\u200b"
+            t.join()
+
+            if dag_error[0]:
+                yield f"\n⚠️ DAG generation error: {dag_error[0]}"
+                return
+
+            r = dag_result[0]
+            if r is None:
+                yield "\n⚠️ No response from DAG generation."
+                return
+            if r.status_code >= 400:
+                yield f"\n⚠️ DAG generation failed (HTTP {r.status_code})."
+                return
+
+            try:
+                dag_data = r.json()
+                num_nodes = dag_data.get("task_count", len(dag_data.get("tasks", [])))
+            except (ValueError, KeyError):
+                yield "\n⚠️ Unexpected response from DAG generation."
+                return
+
+            yield f"📋 Execution plan ready — running {num_nodes} steps...\n\n"
+
+            # Execute all nodes
+            yield from self._execute_and_stream(job_id, num_nodes, headers)
+            return
+
+        # --- /results <job_id>: fetch and display completed job output ---
+        if msg.lower().startswith("/results"):
+            parts = msg.split()
+            if len(parts) < 2:
+                yield "Usage: `/results <job_id>`"
+                return
+            job_id = parts[1]
+            headers = {"X-API-Key": self.valves.api_key}
+
+            try:
+                r = requests.get(
+                    f"{self.valves.orchestrator_url}/exec/status/{job_id}",
+                    headers=headers,
+                    timeout=30,
+                )
+            except requests.exceptions.ConnectionError:
+                yield f"⚠️ Cannot reach orchestrator at {self.valves.orchestrator_url}."
+                return
+            except Exception as e:
+                yield f"⚠️ Error: {e}"
+                return
+
+            if r.status_code == 404:
+                yield f"⚠️ Job `{job_id}` not found."
+                return
+            if r.status_code >= 400:
+                yield f"⚠️ Error fetching job (HTTP {r.status_code})."
+                return
+
+            try:
+                data = r.json()
+            except ValueError:
+                yield "⚠️ Unexpected response from orchestrator."
+                return
+
+            status = data.get("status", data.get("job_status", "unknown"))
+            yield f"**Job:** `{job_id}`\n"
+            yield f"**Status:** {status}\n\n"
+
+            # Show node results if available
+            nodes = data.get("nodes", data.get("tasks", []))
+            if nodes:
+                yield "---\n\n"
+                for node in nodes:
+                    if isinstance(node, dict):
+                        key = node.get("node_key", node.get("key", ""))
+                        title = node.get("title", "")
+                        node_status = node.get("status", "")
+                        yield f"**{key}: {title}** ({node_status})\n\n"
+                        output = node.get("output", "")
+                        if output:
+                            yield f"{output}\n\n"
+                        yield "---\n\n"
+
+            # Show compiled output
+            compiled = data.get("compiled_output", "")
+            if compiled:
+                yield "## Final Output\n\n"
+                yield compiled
+            elif status in ("completed", "done"):
+                yield "Job completed but no compiled output was stored."
+            elif status == "executing":
+                yield "Job is still running — check back shortly."
+            elif status == "awaiting_confirmation":
+                yield f"Job is waiting for confirmation. Type `/confirm {job_id}` to proceed."
+            else:
+                yield f"Job is in `{status}` state."
+            return
+
+        # --- Other slash commands: yield single response, return ---
         if msg.startswith("/"):
             yield self._handle_command(msg)
             return
 
-        # --- Auto-chain: /ideas → /dag → /execute/all ---
-        yield from self._auto_chain(msg)
+        # --- Triage: conversational phase via lightweight model ---
+        # Filter messages to only include user/assistant turns (no system)
+        chat_messages = [m for m in messages if m["role"] in ("user", "assistant")]
+        triage_response = self._call_triage(chat_messages)
+        yield triage_response
 
     # ------------------------------------------------------------------
     # Auto-chain: full Scaffold Engine flow from a plain message
@@ -62,7 +442,7 @@ class Pipeline:
     def _auto_chain(self, message: str) -> Generator[str, None, None]:
         headers = {"X-API-Key": self.valves.api_key}
 
-        # ---- Phase 1: /ideas (can take ~130s, yield keepalive dots) ----
+        # ---- Phase 1: /ideate (can take ~500s, yield keepalive dots) ----
         yield "Let me think about this"
 
         ideas_result = [None]
@@ -74,7 +454,7 @@ class Pipeline:
                     f"{self.valves.orchestrator_url}/ideate",
                     json={"idea": message},
                     headers=headers,
-                    timeout=300,
+                    timeout=1800,
                 )
             except Exception as e:
                 ideas_error[0] = e
@@ -126,18 +506,34 @@ class Pipeline:
             feasibility = ideas_data.get("feasibility", {})
             is_feasible = feasibility.get("feasible", True)
             confidence = feasibility.get("confidence", 0)
+
+            # Brief summary
+            description = brief.get("description", "") if isinstance(brief, dict) else ""
+            if description:
+                yield f"{description}\n\n"
+
             yield f"**Feasibility:** {chr(9989) if is_feasible else chr(9888)} ({confidence:.0%} confidence)\n\n"
+
             risks = feasibility.get("risks", [])
             if risks:
-                yield "**Risks:**\n"
+                yield "**Risks to consider:**\n"
                 for risk in risks:
                     yield f"- {risk}\n"
+                yield "\n"
+
             clarifications = feasibility.get("clarifications_needed", [])
             if clarifications:
-                yield "\n**Clarifications needed:**\n"
+                yield "**A few things that could be more specific:**\n"
                 for c in clarifications:
-                    yield f"- {c}\n"
-            yield f"\n---\n`/confirm {job_id}` to proceed with research, or `/confirm {job_id} <your feedback>` to adjust.\n"
+                    yield f"- **{c}** — What exactly do you need here? (e.g., which software, what scale, what OS, what hardware?)\n"
+                yield "\n"
+
+            yield "---\n\n"
+            yield "**What would you like to do?**\n\n"
+            yield f"- **Proceed as-is:** Type `/confirm {job_id}`\n"
+            yield f"- **Proceed with changes:** Type `/confirm {job_id}` followed by your adjustments — for example:\n"
+            yield f"  `/confirm {job_id} focus on Docker networking only, skip the storage setup`\n"
+            yield f"- **Start over:** Describe a new idea and type `/go` again\n"
             return
 
         # ---- Phase 2: /dag (long wait ~200s, yield keepalive dots) ----
@@ -474,17 +870,6 @@ class Pipeline:
                 )
                 return self._fmt(r)
 
-            elif cmd == "/execute":
-                if len(parts) < 2:
-                    return "Usage: /execute <job_id>"
-                r = requests.post(
-                    f"{self.valves.orchestrator_url}/execute",
-                    json={"job_id": parts[1], "skip_verify": False},
-                    headers={"X-API-Key": self.valves.api_key},
-                    timeout=1800,
-                )
-                return self._fmt(r)
-
             elif cmd == "/skip":
                 if len(parts) < 3:
                     return "Usage: /skip <job_id> <node_key>"
@@ -518,20 +903,6 @@ class Pipeline:
                     headers={"X-API-Key": self.valves.api_key},
                     timeout=60,
                 )
-
-            elif cmd == "/confirm":
-                if len(parts) < 2:
-                    return "Usage: /confirm <job_id> [feedback]"
-                payload = {"job_id": parts[1]}
-                if len(parts) > 2:
-                    payload["feedback"] = " ".join(parts[2:])
-                r = requests.post(
-                    f"{self.valves.orchestrator_url}/ideate/confirm",
-                    json=payload,
-                    headers={"X-API-Key": self.valves.api_key},
-                    timeout=1800,
-                )
-                return self._fmt(r)
                 return self._fmt(r)
 
             elif cmd == "/status":
@@ -553,7 +924,7 @@ class Pipeline:
             return f"⚠️ Error: {e}"
 
     # ------------------------------------------------------------------
-    # Helpers (unchanged from v1)
+    # Helpers
     # ------------------------------------------------------------------
     def _fmt(self, r: requests.Response) -> str:
         try:
@@ -571,13 +942,17 @@ class Pipeline:
 
 | Command | Description |
 |---|---|
-| `/idea <text>` | Submit a new idea → refine → create job |
+| *(plain message)* | Discuss your idea with the triage assistant |
+| `/go` or `/run` | Launch the pipeline with your discussed idea |
+| `/idea <text>` | Submit idea directly (skip triage) |
 | `/dag <job_id>` | Generate DAG from refined idea |
 | `/execute <job_id>` | Execute next pending DAG node |
+| `/confirm <job_id>` | Confirm ideation Phase 2 (research) |
+| `/results <job_id>` | View a completed job's output |
 | `/skip <job_id> <node_key>` | Skip a specific node |
 | `/optimize <prompt>` | Optimize a prompt |
 | `/rag <query>` | Query the knowledge base |
 | `/status` | List active jobs |
 | `/help` | Show this message |
 
-Plain messages (no `/` prefix) automatically run the full analysis pipeline."""
+**Workflow:** Describe your idea → discuss scope with the assistant → `/go` → review feasibility → `/confirm` → execution."""

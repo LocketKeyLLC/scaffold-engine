@@ -28,7 +28,7 @@ from app.middleware.error_logging import ErrorLoggingMiddleware
 from app.middleware.performance import PerformanceMiddleware
 from app.modules.dag_generator import generate_dag as _generate_dag
 from app.modules.execution_agent import execute_next_node, skip_node, retry_failed_node, execute_all_nodes
-from app.modules.execution_handler import execution_status, retry_node
+from app.modules.execution_handler import execution_status
 from app.modules.gt_browser import gt_list, gt_search, gt_detail, gt_stats
 from app.modules.gt_extractor import extract_ground_truths
 from app.modules.idea_refinement import refine_idea
@@ -87,6 +87,7 @@ async def lifespan(app: FastAPI):
                         compiled_output='Job timed out after 30 minutes of inactivity',
                         updated_at=NOW()
                     WHERE status='running' AND updated_at < NOW() - INTERVAL '30 minutes'
+                      AND NOT EXISTS (SELECT 1 FROM dag_nodes WHERE dag_nodes.job_id = jobs.id AND dag_nodes.status = 'running')
                 """))
                 r2 = await db.execute(text("""
                     UPDATE jobs SET status='cancelled', updated_at=NOW()
@@ -244,6 +245,7 @@ async def cleanup_stale_jobs(db: AsyncSession = Depends(get_db)):
             SELECT id, updated_at FROM jobs
             WHERE status = 'running'
               AND updated_at < NOW() - INTERVAL '30 minutes'
+              AND NOT EXISTS (SELECT 1 FROM dag_nodes WHERE dag_nodes.job_id = jobs.id AND dag_nodes.status = 'running')
         """)
     )
     running_rows = stale_running.fetchall()
@@ -301,13 +303,25 @@ class IdeaInput(BaseModel):
 
 @app.post("/ideas")
 async def submit_idea(body: IdeaInput, db=Depends(get_db)):
-    """Step 10: Submint new idea → trigger refinement."""
-    return await refine_idea(body.idea, db, model=body.model, domain=body.domain)
+    """Step 10: Submit new idea → trigger refinement."""
+    result = await refine_idea(body.idea, db, model=body.model, domain=body.domain)
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(
+            status_code=result.get("http_status", 500),
+            detail=result["error"],
+        )
+    return result
 
 @app.post("/ideate")
 async def ideate_endpoint(body: IdeaInput, db=Depends(get_db)):
     """Phase 1: Analyze idea, assess feasibility, halt for confirmation."""
-    return await analyze_and_confirm(body.idea, db, model=body.model, domain=body.domain)
+    result = await analyze_and_confirm(body.idea, db, model=body.model, domain=body.domain)
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(
+            status_code=result.get("http_status", 500),
+            detail=result["error"],
+        )
+    return result
 
 @app.post("/ideate/confirm")
 async def ideate_confirm_endpoint(request: Request, db=Depends(get_db)):
@@ -316,11 +330,17 @@ async def ideate_confirm_endpoint(request: Request, db=Depends(get_db)):
     job_id = body.get("job_id")
     if not job_id:
         raise HTTPException(400, "job_id required")
-    return await research_and_compile(
+    result = await research_and_compile(
         job_id, db,
         user_feedback=body.get("feedback"),
         push_to_github=body.get("push_to_github", False),
     )
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(
+            status_code=result.get("http_status", 500),
+            detail=result["error"],
+        )
+    return result
 
 @app.get("/dag/{job_id}")
 async def get_dag(job_id: str, db: AsyncSession = Depends(get_db)):
@@ -350,7 +370,13 @@ class DagInput(BaseModel):
 @app.post("/dag")
 async def generate_dag_endpoint(body: DagInput, db=Depends(get_db)):
     """Step 11: Generate DAG from refined idea brief."""
-    return await _generate_dag(body.job_id, db, model=body.model)
+    result = await _generate_dag(body.job_id, db, model=body.model)
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(
+            status_code=result.get("http_status", 500),
+            detail=result["error"],
+        )
+    return result
 
 
 class RagInput(BaseModel):
@@ -491,7 +517,7 @@ async def exec_retry(request: Request, db: AsyncSession = Depends(get_db)):
         node_key = body.get("node_key", "")
         if not job_id or not node_key:
             raise HTTPException(status_code=400, detail="Missing job_id or node_key")
-        result = await retry_node(UUID(job_id), node_key, db)
+        result = await retry_failed_node(UUID(job_id), node_key, db)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         return result
@@ -526,14 +552,14 @@ async def execute_next(body: ExecuteNextInput, db: AsyncSession = Depends(get_db
 
 
 @app.post("/execute/all", tags=["Step 15"])
-async def execute_all_endpoint(body: ExecuteNextInput, db: AsyncSession = Depends(get_db)):
+async def execute_all_endpoint(body: ExecuteNextInput):
     """Execute all DAG nodes in sequence, streaming SSE events.
 
     Auto-generates DAG if none exists.  Failed nodes are skipped;
     downstream nodes blocked by failures are reported at the end.
     """
     return StreamingResponse(
-        execute_all_nodes(body.job_id, db),
+        execute_all_nodes(body.job_id),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},  # disable nginx buffering
     )
@@ -543,9 +569,3 @@ async def execute_all_endpoint(body: ExecuteNextInput, db: AsyncSession = Depend
 async def skip_node_endpoint(body: SkipNodeInput, db: AsyncSession = Depends(get_db)):
     """Step 15: Skip a specific DAG node."""
     return await skip_node(job_id=body.job_id, node_key=body.node_key, db=db)
-
-
-@app.post("/retry", tags=["Step 15"])
-async def retry_node_endpoint(body: SkipNodeInput, db: AsyncSession = Depends(get_db)):
-    """Retry a failed DAG node — resets it and downstream nodes to pending."""
-    return await retry_failed_node(job_id=body.job_id, node_key=body.node_key, db=db)

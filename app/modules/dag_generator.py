@@ -23,8 +23,8 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from json_repair import repair_json
 from app import model_router
+from app.utils.llm_parsing import parse_json_object
 
 logger = logging.getLogger("scaffold.dag")
 
@@ -170,7 +170,7 @@ async def generate_dag(
         return {"job_id": job_id, "status": "failed", "error": resp.error}
 
     # 3. Parse LLM output
-    dag_data = _parse_json(resp.text)
+    dag_data = parse_json_object(resp.text)
     if dag_data is None:
         await _fail_job(db, uid, "Failed to parse DAG JSON from LLM output")
         return {
@@ -282,7 +282,7 @@ def _enforce_node_count(
 
     if len(tasks) > max_count:
         # Sort by node_key, keep first max_count
-        sorted_tasks = sorted(tasks, key=lambda t: t.get("id", ""))
+        sorted_tasks = sorted(tasks, key=lambda t: int(re.sub(r"\D", "", t.get("id", "0")) or "0"))
         kept = sorted_tasks[:max_count]
         dropped = sorted_tasks[max_count:]
         dropped_keys = {t["id"] for t in dropped}
@@ -586,52 +586,6 @@ def _map_node_type(task_type: str) -> str:
     }
     return mapping.get(task_type, "task")
 
-
-def _parse_json(raw: str) -> dict | None:
-    """Extract JSON from LLM output."""
-    from app.utils.llm_parsing import strip_think_tags
-    raw = strip_think_tags(raw)
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-
-    # 1. Direct parse
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # 2. json_repair on full text
-    try:
-        repaired = repair_json(text, return_objects=True)
-        if isinstance(repaired, dict):
-            logger.info("dag_json_repaired: method=full_text")
-            return repaired
-    except Exception:
-        pass
-
-    # 3. Brace extraction + direct parse
-    brace_start = text.find("{")
-    brace_end = text.rfind("}")
-    if brace_start != -1 and brace_end > brace_start:
-        fragment = text[brace_start : brace_end + 1]
-        try:
-            return json.loads(fragment)
-        except json.JSONDecodeError:
-            pass
-
-        # 4. Brace extraction + json_repair
-        try:
-            repaired = repair_json(fragment, return_objects=True)
-            if isinstance(repaired, dict):
-                logger.info("dag_json_repaired: method=brace_extract")
-                return repaired
-        except Exception:
-            pass
-
-    return None
 
 
 async def _fail_job(db: AsyncSession, job_id: UUID, error: str) -> None:

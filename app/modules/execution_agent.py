@@ -27,6 +27,7 @@ import httpx
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.database import async_session
 
 from app import model_router
 from app.config import settings
@@ -433,7 +434,6 @@ async def _milvus_search(query: str, node_key: str = "?", domain: str | None = N
         return f"Knowledge base search failed: {e}"
 
 
-    return (settings.model_general, context, False, None)
 
 # ---------------------------------------------------------------------------
 
@@ -754,7 +754,7 @@ async def _compile_output(job_id: str, db) -> str:
     rows = await db.execute(
         text(
             "SELECT node_key, title, tool, status, output_text "
-            "FROM dag_nodes WHERE job_id = :jid ORDER BY node_key"
+            "FROM dag_nodes WHERE job_id = :jid ORDER BY execution_order"
         ),
         {"jid": job_id},
     )
@@ -916,7 +916,6 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
 # ---------------------------------------------------------------------------
 async def execute_all_nodes(
     job_id: str,
-    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     """
     Execute every pending DAG node in sequence, yielding Server-Sent Events.
@@ -924,6 +923,9 @@ async def execute_all_nodes(
     Auto-generates the DAG if none exists.  On verification failure the node
     is recorded as failed and the loop continues to the next actionable node.
     Nodes whose dependencies include a failed node are naturally blocked.
+
+    Each database operation uses a short-lived session to avoid holding a
+    connection for the full pipeline duration (15-30+ min on CPU hardware).
 
     SSE event types:
         dag_generated    — DAG was auto-created (includes task_count, strategy)
@@ -942,31 +944,33 @@ async def execute_all_nodes(
     t0 = _time.monotonic()
     node_results: list[dict] = []
 
-    # ---- concurrent execution guard (atomic check-and-set) ----
-    guard_result = await db.execute(
-        text("""
-            UPDATE jobs SET status = 'running', updated_at = now()
-            WHERE id = :jid AND status != 'running'
-            RETURNING id
-        """),
-        {"jid": job_id},
-    )
-    if guard_result.rowcount == 0:
-        # Job is already running or doesn't exist — check which
-        job_check = await _get_job(db, job_id)
-        if not job_check:
-            yield _sse("error", {"message": f"Job {job_id} not found"})
-        else:
-            yield _sse("error", {
-                "message": "Job is already executing",
-                "job_id": job_id,
-                "http_status": 409,
-            })
-        return
-    await db.commit()
+    # ---- Session 1: concurrent execution guard (atomic check-and-set) ----
+    async with async_session() as db:
+        guard_result = await db.execute(
+            text("""
+                UPDATE jobs SET status = 'running', updated_at = now()
+                WHERE id = :jid AND status != 'running'
+                RETURNING id
+            """),
+            {"jid": job_id},
+        )
+        if guard_result.rowcount == 0:
+            # Job is already running or doesn't exist — check which
+            job_check = await _get_job(db, job_id)
+            if not job_check:
+                yield _sse("error", {"message": f"Job {job_id} not found"})
+            else:
+                yield _sse("error", {
+                    "message": "Job is already executing",
+                    "job_id": job_id,
+                    "http_status": 409,
+                })
+            return
+        await db.commit()
 
-    # ---- validate job ----
-    job = await _get_job(db, job_id)
+    # ---- Session 2: validate job ----
+    async with async_session() as db:
+        job = await _get_job(db, job_id)
     if not job:
         yield _sse("error", {"message": f"Job {job_id} not found"})
         return
@@ -976,40 +980,44 @@ async def execute_all_nodes(
         })
         return
 
-    # ---- auto-generate DAG if missing ----
-    row = await db.execute(
-        text("SELECT COUNT(*) FROM dag_nodes WHERE job_id = :id"),
-        {"id": job_id},
-    )
-    if row.scalar() == 0:
-        try:
-            from app.modules.dag_generator import generate_dag as _gen_dag
-            dag_result = await _gen_dag(job_id, db)
-            yield _sse("dag_generated", {
-                "job_id": job_id,
-                "task_count": dag_result.get("task_count", 0),
-                "strategy": dag_result.get("strategy", "unknown"),
-            })
-        except Exception as exc:
-            logger.error("auto_dag_generation_failed: job=%s error=%s", job_id, exc)
-            yield _sse("error", {"message": f"DAG generation failed: {exc}"})
-            return
+    # ---- Session 3: auto-generate DAG if missing ----
+    async with async_session() as db:
+        row = await db.execute(
+            text("SELECT COUNT(*) FROM dag_nodes WHERE job_id = :id"),
+            {"id": job_id},
+        )
+        dag_exists = row.scalar() > 0
+        if not dag_exists:
+            try:
+                from app.modules.dag_generator import generate_dag as _gen_dag
+                dag_result = await _gen_dag(job_id, db)
+                yield _sse("dag_generated", {
+                    "job_id": job_id,
+                    "task_count": dag_result.get("task_count", 0),
+                    "strategy": dag_result.get("strategy", "unknown"),
+                })
+            except Exception as exc:
+                logger.error("auto_dag_generation_failed: job=%s error=%s", job_id, exc)
+                yield _sse("error", {"message": f"DAG generation failed: {exc}"})
+                return
 
     # ---- execute loop ----
     while True:
-        # Peek at next node so we can emit a start event before the
-        # multi-minute execution begins.
-        node = await _get_next_node(db, job_id)
-        if node:
-            yield _sse("node_start", {
-                "job_id": job_id,
-                "node_key": node["node_key"],
-                "title": node["title"],
-                "tool": node.get("tool", "LLM"),
-            })
+        # ---- Session 4 (per iteration): peek + execute ----
+        async with async_session() as db:
+            # Peek at next node so we can emit a start event before the
+            # multi-minute execution begins.
+            node = await _get_next_node(db, job_id)
+            if node:
+                yield _sse("node_start", {
+                    "job_id": job_id,
+                    "node_key": node["node_key"],
+                    "title": node["title"],
+                    "tool": node.get("tool", "LLM"),
+                })
 
-        # execute_next_node re-fetches the node internally — safe.
-        result = await execute_next_node(job_id, db)
+            # execute_next_node re-fetches the node internally — safe.
+            result = await execute_next_node(job_id, db)
         status = result.get("status", "unknown")
 
         # -- terminal: all nodes done --
@@ -1036,11 +1044,12 @@ async def execute_all_nodes(
                 "compile_status": "partial" if is_partial else "complete",
             }
             # FB-3: Include compiled_output in SSE payload
-            _co_row = await db.execute(
-                text("SELECT compiled_output FROM jobs WHERE id = :jid"),
-                {"jid": job_id},
-            )
-            _co_val = str(_co_row.scalar() or "")
+            async with async_session() as db:
+                _co_row = await db.execute(
+                    text("SELECT compiled_output FROM jobs WHERE id = :jid"),
+                    {"jid": job_id},
+                )
+                _co_val = str(_co_row.scalar() or "")
             if len(_co_val) <= 50_000:
                 summary["compiled_output"] = _co_val
             else:
@@ -1114,11 +1123,12 @@ async def execute_all_nodes(
                 "compile_status": "partial" if is_partial else "complete",
             }
             # FB-3: Include compiled_output in SSE payload
-            _co_row2 = await db.execute(
-                text("SELECT compiled_output FROM jobs WHERE id = :jid"),
-                {"jid": job_id},
-            )
-            _co_val2 = str(_co_row2.scalar() or "")
+            async with async_session() as db:
+                _co_row2 = await db.execute(
+                    text("SELECT compiled_output FROM jobs WHERE id = :jid"),
+                    {"jid": job_id},
+                )
+                _co_val2 = str(_co_row2.scalar() or "")
             if len(_co_val2) <= 50_000:
                 early_summary["compiled_output"] = _co_val2
             else:

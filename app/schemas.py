@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 JobStatus = Literal[
     "pending", "refining", "awaiting_confirmation", "researching", "planning", "executing",
-    "completed", "failed", "cancelled",
+    "running", "completed", "failed", "cancelled", "blocked",
 ]
 
 NodeStatus = Literal["pending", "running", "done", "failed", "skipped"]
