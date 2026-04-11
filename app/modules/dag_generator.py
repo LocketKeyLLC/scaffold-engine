@@ -32,9 +32,9 @@ logger = logging.getLogger("scaffold.dag")
 # Valid enums (mirrored from WA tool)
 # ---------------------------------------------------------------------------
 
-VALID_TASK_TYPES = {"research", "decision", "action", "validation", "output", "human_review"}
+VALID_TASK_TYPES = {"research", "decision", "action", "validation", "output"}
 VALID_STRATEGIES = {"sequential", "parallel", "hybrid", "conditional"}
-VALID_TOOLS = {"LLM", "CodeGen", "Human", "FileSystem", "SearXNG", "Milvus"}
+VALID_TOOLS = {"LLM", "CodeGen", "SearXNG", "Milvus"}
 VALID_DOMAINS = {"prompt", "rag", "eng", "llm", "spec"}
 
 # ---------------------------------------------------------------------------
@@ -50,11 +50,11 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
     {
       "id": "T1",
       "name": "max 5 words",
-      "type": "research | decision | action | validation | output | human_review",
+      "type": "research | decision | action | validation | output",
       "inputs": ["what this task consumes"],
       "outputs": ["what this task produces"],
       "depends_on": [],
-      "tool": "LLM | SearXNG | Milvus | CodeGen | Human | FileSystem",
+      "tool": "LLM | SearXNG | Milvus | CodeGen",
       "domain": "prompt | rag | eng | llm | spec | null",
       "assigned_model": "model name or null",
       "notes": "optional execution hint"
@@ -76,10 +76,10 @@ Rules:
     - When tool is NOT Milvus, set "domain" to null.
   * SearXNG = web search for EXTERNAL, current, or live information NOT in the knowledge base.
   * CodeGen = code generation or script writing.
-  * FileSystem = file write/read/save operations.
-  * Human = human review or approval gate.
   * LLM = general reasoning, summarization, analysis (default for everything else).
-- If complexity is high or ambiguities exist, include a human_review task
+- Each node must produce DISTINCT output that no other node produces. Do NOT create multiple nodes that generate the same artifact (e.g., do not have separate "design script" and "write script" nodes that both produce the full script).
+- Later nodes must EXTEND or VALIDATE earlier work, never recreate it. For example: T1 writes the code → T2 writes tests for it → T3 validates both — NOT T1 designs code → T2 rewrites the same code → T3 rewrites it again.
+- If a task can be accomplished in one node, use one node. Prefer fewer, focused nodes over many overlapping ones.
 
 EXAMPLE (4-node DAG for "Research the history of solar panels and summarize findings"):
 {
@@ -88,7 +88,7 @@ EXAMPLE (4-node DAG for "Research the history of solar panels and summarize find
     {"id": "T1", "name": "Search solar panel history", "type": "research", "inputs": ["solar panel history query"], "outputs": ["raw search results"], "depends_on": [], "tool": "SearXNG", "domain": null, "assigned_model": null, "notes": "Broad web search for timeline and key milestones"},
     {"id": "T2", "name": "Retrieve internal KB context", "type": "research", "inputs": ["solar panel keywords"], "outputs": ["KB matches"], "depends_on": ["T1"], "tool": "Milvus", "domain": "eng", "assigned_model": null, "notes": "Check knowledge base for any stored solar energy references"},
     {"id": "T3", "name": "Synthesize and summarize", "type": "action", "inputs": ["raw search results", "KB matches"], "outputs": ["summary draft"], "depends_on": ["T1", "T2"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Combine sources into a coherent summary"},
-    {"id": "T4", "name": "Format final output", "type": "output", "inputs": ["summary draft"], "outputs": ["final summary document"], "depends_on": ["T3"], "tool": "FileSystem", "domain": null, "assigned_model": null, "notes": "Write final summary to file"}
+    {"id": "T4", "name": "Format final output", "type": "output", "inputs": ["summary draft"], "outputs": ["final summary document"], "depends_on": ["T3"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Write final summary to file"}
   ]
 }"""
 
@@ -582,7 +582,6 @@ def _map_node_type(task_type: str) -> str:
         "action": "task",
         "validation": "checkpoint",
         "output": "task",
-        "human_review": "checkpoint",
     }
     return mapping.get(task_type, "task")
 
