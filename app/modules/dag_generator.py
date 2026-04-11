@@ -63,7 +63,7 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
 }
 
 Rules:
-- Decompose the idea into exactly 3 to 5 execution steps. Do not create more than 5 steps. If the task is simple, use 3 steps. If it requires research, retrieval, and synthesis, use 4-5 steps.
+- Decompose the idea into exactly 3 to 10 execution steps. Do not create more than 10 steps. If the task is simple, use 3 steps. If it requires research, retrieval, and synthesis, use 4-10 steps.
 - Every task must have a unique id (T1, T2, ...)
 - depends_on references other task ids — only use ids you have defined
 - No circular dependencies
@@ -185,7 +185,7 @@ async def generate_dag(
         await _fail_job(db, uid, "DAG must have at least 2 tasks")
         return {"job_id": job_id, "status": "failed", "error": "Less than 2 tasks generated"}
 
-    # 3b. Enforce node count bounds (3-5)
+    # 3b. Enforce node count bounds (3-10)
     tasks = _enforce_node_count(tasks)
 
     # 4. Normalize and validate tasks
@@ -271,7 +271,7 @@ async def generate_dag(
 # ---------------------------------------------------------------------------
 
 def _enforce_node_count(
-    tasks: list[dict], min_count: int = 3, max_count: int = 5
+    tasks: list[dict], min_count: int = 3, max_count: int = 10
 ) -> list[dict]:
     """Enforce node count bounds. Truncates excess nodes and cleans dangling refs."""
     if len(tasks) < min_count:

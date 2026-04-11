@@ -1082,13 +1082,34 @@ async def execute_all_nodes(
                 "model_used": result.get("model_used"),
             })
         elif status == "failed":
+            _failed_key = result.get("node_key", "")
+            # ── Auto-retry if retries remain ──
+            _retried = False
+            try:
+                async with async_session() as _retry_db:
+                    retry_result = await retry_failed_node(job_id, _failed_key, _retry_db)
+                    if retry_result.get("status") == "reset":
+                        _retried = True
+                        yield _sse("node_retry", {
+                            "job_id": job_id,
+                            "node_key": _failed_key,
+                            "title": result.get("title"),
+                            "retry_count": retry_result.get("retry_count", 0),
+                            "message": "Auto-retrying failed node",
+                        })
+                        node_results.pop()  # remove failed result, will re-run
+                        continue  # retry immediately
+            except Exception as _retry_exc:
+                logger.warning("auto_retry_failed: node=%s error=%s", _failed_key, _retry_exc)
+            # No retries left or retry failed — report and move on
             yield _sse("node_failed", {
                 "job_id": job_id,
-                "node_key": result.get("node_key"),
+                "node_key": _failed_key,
                 "title": result.get("title"),
                 "error": result.get("error"),
                 "verification_reason": result.get("verification_reason"),
                 "model_used": result.get("model_used"),
+                "retries_exhausted": not _retried,
             })
             # skip failed node — continue to next actionable node
         else:

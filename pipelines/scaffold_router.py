@@ -36,7 +36,7 @@ class Pipeline:
         orchestrator_url: str = "http://scaffold-orchestrator:8000"
         dag_timeout: int = 1800          # seconds to wait for DAG generation
         keepalive_interval: int = 10    # seconds between keepalive dots
-        triage_model: str = "qwen2.5:7b"
+        triage_model: str = "qwen3:4b"
         triage_timeout: int = 1800       # seconds to wait for triage model response
         ollama_url: str = "http://172.18.0.1:11434"
 
