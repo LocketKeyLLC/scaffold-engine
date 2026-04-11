@@ -194,18 +194,36 @@ def _collect_sse(coro):
                 events.append((event, data))
         return events
     return asyncio.new_event_loop().run_until_complete(_gather())
-
-
 def _make_sse_db(dag_node_count=2):
-    """Mock db for execute_all_nodes: handles the COUNT(*) query."""
+    """Mock db + async_session for execute_all_nodes."""
     scalar_result = MagicMock()
     scalar_result.scalar.return_value = dag_node_count
-
+    guard_result = MagicMock()
+    guard_result.rowcount = 1
     db = AsyncMock()
-    db.execute.return_value = scalar_result
+    db.execute = AsyncMock(side_effect=[guard_result] + [scalar_result] * 20)
     db.commit = AsyncMock()
-    return db
+    mock_session_ctx = AsyncMock()
+    mock_session_ctx.__aenter__ = AsyncMock(return_value=db)
+    mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_async_session = MagicMock(return_value=mock_session_ctx)
+    return db, mock_async_session
 
+
+def _make_sse_db_guard_fails():
+    """Mock where guard fails (job not found)."""
+    guard_result = MagicMock()
+    guard_result.rowcount = 0
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=guard_result)
+    db.commit = AsyncMock()
+    mock_session_ctx = AsyncMock()
+    mock_session_ctx.__aenter__ = AsyncMock(return_value=db)
+    mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_async_session = MagicMock(return_value=mock_session_ctx)
+    return db, mock_async_session
+
+    return db
 
 @pytest.mark.smoke
 class TestExecuteAllNodesSSESequence:
@@ -213,7 +231,7 @@ class TestExecuteAllNodesSSESequence:
 
     def test_happy_path_event_order(self):
         """node_start → node_done → node_start → node_done → pipeline_complete"""
-        db = _make_sse_db(dag_node_count=2)
+        db, mock_session = _make_sse_db(dag_node_count=2)
 
         mock_get_job = AsyncMock(return_value={
             "status": "executing", "id": "job-1"
@@ -233,11 +251,12 @@ class TestExecuteAllNodesSSESequence:
             {"status": "complete", "message": "All nodes done."},
         ])
 
-        with patch("app.modules.execution_agent._get_job", mock_get_job), \
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job", mock_get_job), \
              patch("app.modules.execution_agent._get_next_node", mock_get_next), \
              patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
             from app.modules.execution_agent import execute_all_nodes
-            events = _collect_sse(execute_all_nodes("job-1", db))
+            events = _collect_sse(execute_all_nodes("job-1"))
 
         event_names = [e[0] for e in events]
         assert event_names == [
@@ -248,7 +267,7 @@ class TestExecuteAllNodesSSESequence:
 
     def test_pipeline_complete_has_summary_fields(self):
         """pipeline_complete event contains total_nodes, passed, failed, duration_ms."""
-        db = _make_sse_db(dag_node_count=1)
+        db, mock_session = _make_sse_db(dag_node_count=1)
 
         mock_get_job = AsyncMock(return_value={"status": "executing", "id": "job-1"})
         mock_get_next = AsyncMock(side_effect=[
@@ -262,11 +281,12 @@ class TestExecuteAllNodesSSESequence:
             {"status": "complete"},
         ])
 
-        with patch("app.modules.execution_agent._get_job", mock_get_job), \
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job", mock_get_job), \
              patch("app.modules.execution_agent._get_next_node", mock_get_next), \
              patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
             from app.modules.execution_agent import execute_all_nodes
-            events = _collect_sse(execute_all_nodes("job-1", db))
+            events = _collect_sse(execute_all_nodes("job-1"))
 
         complete_evt = [e for e in events if e[0] == "pipeline_complete"][0][1]
         assert "total_nodes" in complete_evt
@@ -278,7 +298,7 @@ class TestExecuteAllNodesSSESequence:
 
     def test_node_start_includes_tool(self):
         """node_start event contains node_key, title, and tool."""
-        db = _make_sse_db(dag_node_count=1)
+        db, mock_session = _make_sse_db(dag_node_count=1)
 
         mock_get_job = AsyncMock(return_value={"status": "executing", "id": "job-1"})
         mock_get_next = AsyncMock(side_effect=[
@@ -292,11 +312,12 @@ class TestExecuteAllNodesSSESequence:
             {"status": "complete"},
         ])
 
-        with patch("app.modules.execution_agent._get_job", mock_get_job), \
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job", mock_get_job), \
              patch("app.modules.execution_agent._get_next_node", mock_get_next), \
              patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
             from app.modules.execution_agent import execute_all_nodes
-            events = _collect_sse(execute_all_nodes("job-1", db))
+            events = _collect_sse(execute_all_nodes("job-1"))
 
         start_evt = events[0]
         assert start_evt[0] == "node_start"
@@ -310,7 +331,7 @@ class TestExecuteAllNodesBlocked:
 
     def test_blocked_event_on_upstream_failure(self):
         """T1 fails → execute_next_node returns blocked with blocked_nodes payload."""
-        db = _make_sse_db(dag_node_count=2)
+        db, mock_session = _make_sse_db(dag_node_count=2)
 
         mock_get_job = AsyncMock(return_value={"status": "executing", "id": "job-1"})
         mock_get_next = AsyncMock(side_effect=[
@@ -328,11 +349,12 @@ class TestExecuteAllNodesBlocked:
              ]},
         ])
 
-        with patch("app.modules.execution_agent._get_job", mock_get_job), \
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job", mock_get_job), \
              patch("app.modules.execution_agent._get_next_node", mock_get_next), \
              patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
             from app.modules.execution_agent import execute_all_nodes
-            events = _collect_sse(execute_all_nodes("job-1", db))
+            events = _collect_sse(execute_all_nodes("job-1"))
 
         event_names = [e[0] for e in events]
         assert "node_start" in event_names
@@ -346,12 +368,12 @@ class TestExecuteAllNodesBlocked:
 
     def test_invalid_job_returns_error_event(self):
         """Non-existent job emits a single error SSE event."""
-        db = _make_sse_db()
+        db, mock_session = _make_sse_db_guard_fails()
         mock_get_job = AsyncMock(return_value=None)
-
-        with patch("app.modules.execution_agent._get_job", mock_get_job):
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job", mock_get_job):
             from app.modules.execution_agent import execute_all_nodes
-            events = _collect_sse(execute_all_nodes("bad-id", db))
+            events = _collect_sse(execute_all_nodes("bad-id"))
 
         assert len(events) == 1
         assert events[0][0] == "error"
