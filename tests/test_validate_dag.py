@@ -166,17 +166,17 @@ class TestEnforceNodeCount:
 
     # 11. >5 nodes truncated to 5 by key sort
     def test_truncate_over_5(self):
-        nodes = [_node(f"T{i}") for i in range(1, 8)]
-        # T4 depends on T6 (which will be dropped)
-        nodes[3]["depends_on"] = ["T6"]
+        nodes = [_node(f"T{i}") for i in range(1, 13)]
+        # T4 depends on T11 (which will be dropped)
+        nodes[3]["depends_on"] = ["T11"]
         result = _enforce_node_count(copy.deepcopy(nodes))
-        assert len(result) == 5
+        assert len(result) == 10
         ids = {n["id"] for n in result}
-        assert "T6" not in ids
-        assert "T7" not in ids
+        assert "T11" not in ids
+        assert "T12" not in ids
         # Dangling ref to T6 must be cleaned
         t4 = next(n for n in result if n["id"] == "T4")
-        assert "T6" not in t4["depends_on"]
+        assert "T11" not in t4["depends_on"]
 
     # 12. <3 nodes — accepted, no truncation
     def test_undercount_accepted(self):

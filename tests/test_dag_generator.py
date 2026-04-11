@@ -199,10 +199,10 @@ class TestEnforceNodeCount:
         dag = [
             {"id": f"T{i}", "title": f"Step {i}", "tool": "LLM",
              "depends_on": [f"T{i-1}"] if i > 1 else []}
-            for i in range(1, 8)
+            for i in range(1, 13)
         ]
         result = _dag_gen._enforce_node_count(dag)
-        assert len(result) <= 5
+        assert len(result) <= 10
 
     @pytest.mark.skipif(
         not hasattr(_dag_gen, "_enforce_node_count"),

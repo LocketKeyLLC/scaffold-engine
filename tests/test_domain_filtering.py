@@ -198,11 +198,11 @@ class TestEnforceNodeCountDomain:
         """When truncating, domain is preserved on kept nodes."""
         raw = [
             _make_task(f"T{i}", domain="eng" if i == 1 else None)
-            for i in range(1, 8)
+            for i in range(1, 13)
         ]
         normalized, _ = _normalize_tasks(raw)
         result = _enforce_node_count(normalized)
-        assert len(result) == 5
+        assert len(result) == 10
         t1 = next(t for t in result if t["id"] == "T1")
         assert t1.get("domain") == "eng"
 
