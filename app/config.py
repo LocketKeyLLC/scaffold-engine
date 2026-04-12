@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     model_fallback: str = "qwen3.5:latest"
 
     # Timeouts (seconds)
-    cloud_timeout: int = 600
+    cloud_timeout: int = 3600
     local_timeout: int = 1800
     max_retries: int = 3
 

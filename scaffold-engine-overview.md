@@ -1,6 +1,6 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 11, 2026 (E2E testing fixes)
+**Last Updated:** April 12, 2026 (Triage file-awareness + /go flexibility)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
 **Latest Commit:** `cb1ecc1` — `fix: align tests with current signatures and max_nodes=10`
 **Test Suite:** 230 collected, 204 passed, 22 skipped, 4 live golden-retrieval tests excluded
@@ -513,3 +513,39 @@ scaffold-engine/
 ├── Makefile
 └── .github/workflows/             # CI/CD
 ```
+
+---
+
+## Changelog — April 12, 2026 (Triage file-awareness + /go flexibility)
+
+### Changes to `pipelines/scaffold_router.py`
+
+1. **`_extract_text()` — file/document content handling**
+   - Previously only extracted `type: "text"` blocks from multimodal content lists
+   - Now also captures `type: "file"` and `type: "document"` blocks, plus catch-all for any block with a `text` field (excluding images)
+   - Fixes: triage model now sees uploaded file content instead of ignoring it
+
+2. **Triage system prompt — file awareness**
+   - Added instruction: when user provides a document/file/specification, treat it as primary context
+   - Triage no longer asks user to re-explain what's already in the document
+   - If document defines scope clearly, triage summarizes and suggests `/go` immediately
+
+3. **`/go` command matching — accepts trailing text**
+   - Changed from exact match (`msg in ("/go", "/run")`) to prefix match
+   - `/go keep as the with separate proxy container` now triggers the pipeline
+   - Chat history filter updated to match (excludes all `/go`-prefixed messages)
+
+4. **Context stripping — Open WebUI `<context>` injection**
+   - Open WebUI Model skins prepend file content as `<context>...</context>` to `user_message`
+   - Added regex to extract the real user command after the last `</context>` tag
+   - Without this, `/go` was buried inside context and never matched
+
+### Changes to `app/config.py`
+
+5. **Cloud timeout increased** — `cloud_timeout` bumped from 600s to 3600s (1 hour)
+
+### Known Issues (updated)
+
+4. **Open WebUI file routing intermittent** — after container restarts, Open WebUI sometimes stops forwarding requests to the pipeline. Hard browser refresh (`Ctrl+Shift+R`) and new chat usually resolves. Root cause under investigation.
+5. **Context stripping depends on `</context>` tag** — if Open WebUI changes its context injection format, the regex in `pipe()` will need updating.
+
