@@ -34,10 +34,10 @@ class Pipeline:
     class Valves(BaseModel):
         api_key: str = ""
         orchestrator_url: str = "http://scaffold-orchestrator:8000"
-        dag_timeout: int = 1800          # seconds to wait for DAG generation
+        dag_timeout: int = 3600          # seconds to wait for DAG generation
         keepalive_interval: int = 10    # seconds between keepalive dots
         triage_model: str = "qwen3:4b"
-        triage_timeout: int = 1800       # seconds to wait for triage model response
+        triage_timeout: int = 3600       # seconds to wait for triage model response
         ollama_url: str = "http://172.18.0.1:11434"
 
     def __init__(self):
@@ -53,6 +53,11 @@ The user has an idea they want to build. Your job is to actively help them
 shape it into a clear, actionable scope — not just ask questions.
 
 How to help:
+- If the user provides a document, file, or specification, treat its content
+  as primary project context. Do NOT ask the user to re-explain what is already
+  in the document. Reference the document content directly. If the document
+  already defines what is being built, constraints, and success criteria,
+  summarize the scope from the document and suggest /go immediately.
 - When the user describes something broad, break it into concrete options.
   Present 2-3 approaches with brief pros and cons for each.
 - Make recommendations. Say which option you think best fits their stated goals
@@ -88,10 +93,19 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
         if isinstance(content, str):
             return content
         if isinstance(content, list):
-            return " ".join(
-                c.get("text", "") for c in content
-                if isinstance(c, dict) and c.get("type") == "text"
-            )
+            parts = []
+            for c in content:
+                if not isinstance(c, dict):
+                    continue
+                if c.get("type") == "text" and c.get("text"):
+                    parts.append(c["text"])
+                elif c.get("type") in ("file", "document") and c.get("text"):
+                    parts.append(c["text"])
+                elif c.get("type") in ("file", "document") and c.get("content"):
+                    parts.append(c["content"])
+                elif c.get("text") and c.get("type") not in ("image",):
+                    parts.append(c["text"])
+            return " ".join(parts)
         return str(content) if content else ""
 
     def _clean_messages(self, messages: List[dict]) -> List[dict]:
@@ -202,14 +216,19 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
         body: dict,
     ) -> Generator[str, None, None]:
         msg = user_message.strip()
+        # Strip Open WebUI context injection to find the real user command
+        import re as _re
+        _ctx_match = _re.search(r'.*</context>\s*\n*(.*)', msg, _re.DOTALL)
+        if _ctx_match:
+            msg = _ctx_match.group(1).strip()
 
         # --- /go or /run: synthesize conversation and launch pipeline ---
-        if msg.lower() in ("/go", "/run"):
+        if msg.lower() == "/go" or msg.lower() == "/run" or msg.lower().startswith("/go ") or msg.lower().startswith("/run "):
             # Build chat history (exclude the /go itself)
             chat_history = [m for m in messages
                             if not (m["role"] == "user"
                                     and isinstance(m.get("content"), str)
-                                    and m["content"].strip().lower() in ("/go", "/run"))]
+                                    and (m["content"].strip().lower().startswith("/go") or m["content"].strip().lower().startswith("/run")))]
             
             user_msgs_in_history = [m for m in chat_history if m["role"] == "user"]
             if not user_msgs_in_history:
@@ -277,7 +296,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                         f"{self.valves.orchestrator_url}/ideate/confirm",
                         json=payload,
                         headers=headers,
-                        timeout=1800,
+                        timeout=3600,
                     )
                 except Exception as e:
                     confirm_error[0] = e
@@ -454,7 +473,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                     f"{self.valves.orchestrator_url}/ideate",
                     json={"idea": message},
                     headers=headers,
-                    timeout=1800,
+                    timeout=3600,
                 )
             except Exception as e:
                 ideas_error[0] = e
@@ -855,7 +874,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                     f"{self.valves.orchestrator_url}/ideate",
                     json={"idea": text},
                     headers={"X-API-Key": self.valves.api_key},
-                    timeout=1800,
+                    timeout=3600,
                 )
                 return self._fmt(r)
 
@@ -866,7 +885,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                     f"{self.valves.orchestrator_url}/dag",
                     json={"job_id": parts[1]},
                     headers={"X-API-Key": self.valves.api_key},
-                    timeout=1800,
+                    timeout=3600,
                 )
                 return self._fmt(r)
 
@@ -889,7 +908,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                     f"{self.valves.orchestrator_url}/optimize",
                     json={"prompt": text, "skip_verify": False},
                     headers={"X-API-Key": self.valves.api_key},
-                    timeout=1800,
+                    timeout=3600,
                 )
                 return self._fmt(r)
 
