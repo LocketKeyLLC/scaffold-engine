@@ -109,6 +109,7 @@ async def generate_dag(
     job_id: str,
     db: AsyncSession,
     model: str | None = None,
+    model_overrides: dict | None = None,
 ) -> dict:
     """Generate a DAG from a job's refined brief and persist nodes.
 
@@ -159,7 +160,7 @@ async def generate_dag(
     prompt = DAG_PROMPT.format(brief=json.dumps(brief_data, indent=2))
     resp = await model_router.generate(
         prompt,
-        model=model or model_router.settings.model_general,
+        model=model or (model_overrides or {}).get("model_general", model_router.settings.model_general),
         system=DAG_SYSTEM,
         temperature=0.3,
         max_tokens=4096,

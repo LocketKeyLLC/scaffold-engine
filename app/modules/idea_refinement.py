@@ -65,6 +65,7 @@ async def refine_idea(
     db: AsyncSession,
     model: str | None = None,
     domain: str | None = None,
+    model_overrides: dict | None = None,
 ) -> dict:
     """Refine raw idea text into a structured brief and persist as a job.
 
@@ -93,7 +94,7 @@ async def refine_idea(
     prompt = REFINE_PROMPT.format(idea=idea_text)
     resp = await model_router.generate(
         prompt,
-        model=model or model_router.settings.model_general,
+        model=model or (model_overrides or {}).get("model_general", model_router.settings.model_general),
         system=REFINE_SYSTEM,
         temperature=0.3,
         max_tokens=2048,

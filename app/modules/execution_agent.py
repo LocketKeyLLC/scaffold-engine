@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import async_session
 
 from app import model_router
-from app.config import settings
+from app.config import settings, get_model
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag
 
@@ -443,6 +443,7 @@ async def execute_next_node(
     skip_optimize: bool = False,
     skip_verify: bool = False,
     model_override: Optional[str] = None,
+    model_overrides: dict | None = None,
 ) -> dict:
     """
     Execute the next pending node in the DAG.
@@ -515,7 +516,7 @@ async def execute_next_node(
     title = node["title"]
     _raw_model = node.get("assigned_model", "")
     _assigned = _raw_model if _raw_model and str(_raw_model).lower() not in ("none", "null") else ""
-    exec_model = model_override or _assigned or settings.model_general
+    exec_model = model_override or _assigned or get_model("model_general", model_overrides)
     tool = (node.get("tool") or "LLM").strip()
     # ── Human: short-circuit ──
     if tool.lower() in ("human", "human_review"):
@@ -540,8 +541,8 @@ async def execute_next_node(
         }
     # ── Model routing by tool ──
     if tool in ("CodeGen", "FileSystem"):
-        exec_model = settings.model_coder
-    verifier_model = settings.model_verifier
+        exec_model = get_model("model_coder", model_overrides)
+    verifier_model = get_model("model_verifier", model_overrides)
 
     logger.info("node_execution_started: node='%s' job=%s model=%s", title, job_id, exec_model)
     await _set_node_status(db, node_id, "running")
@@ -916,6 +917,7 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
 # ---------------------------------------------------------------------------
 async def execute_all_nodes(
     job_id: str,
+    model_overrides: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Execute every pending DAG node in sequence, yielding Server-Sent Events.
@@ -1017,7 +1019,7 @@ async def execute_all_nodes(
                 })
 
             # execute_next_node re-fetches the node internally — safe.
-            result = await execute_next_node(job_id, db)
+            result = await execute_next_node(job_id, db, model_overrides=model_overrides)
         status = result.get("status", "unknown")
 
         # -- terminal: all nodes done --
