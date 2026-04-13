@@ -1,9 +1,9 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 12, 2026 (Triage file-awareness + /go flexibility)
+**Last Updated:** April 13, 2026 (Vector DB migration — Milvus 2.5.27, TOON schema, Redis cache)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `cb1ecc1` — `fix: align tests with current signatures and max_nodes=10`
-**Test Suite:** 230 collected, 204 passed, 22 skipped, 4 live golden-retrieval tests excluded
+**Latest Commit:** `d953d79` — `feat: vector DB migration — Milvus 2.5.27, 512d HNSW_SQ8, TOON schema, Redis cache`
+**Test Suite:** 230 collected, 201 passed, 29 skipped, 0 failed
 **Codebase:** ~5,900 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
 ---
@@ -39,8 +39,8 @@ The system runs entirely on local hardware (Pop!_OS, CPU-only inference) with no
                               ▼                  ▼        ▼
                         ┌───────────┐     ┌──────────┐  ┌──────────┐
                         │  Ollama   │     │PostgreSQL│  │  Milvus  │
-                        │  (host)   │     │ 16       │  │  2.4.17  │
-                        │  CPU-only │     │ 8 tables │  │  4096d   │
+                        │  (host)   │     │ 16       │  │  2.5.27  │
+                        │  CPU-only │     │ 8 tables │  │  512d    │
                         └─────┬─────┘     └──────────┘  └──────────┘
                               │
                         ┌─────┴─────┐
@@ -157,7 +157,7 @@ All output displays in the Open WebUI chat. There is no separate output folder. 
 Data stored in the backend (accessible via commands or API):
 
 - **PostgreSQL** — job records, DAG nodes, execution results, status history. Query with `/status` or `/results <job_id>`.
-- **Milvus** — research knowledge entries ingested during Phase 2 (143 entries across 5+ domains). Query with `/rag <query>`.
+- **Milvus** — toon_v2 collection (2 test entries; knowledge base pending repopulation after schema migration). Query with `/rag <query>`.
 - **Orchestrator logs** — detailed timing and error info. Check with `docker logs scaffold-orchestrator`.
 
 ---
@@ -187,10 +187,11 @@ DAG truncation enforces a maximum node count (currently 10). When the LLM genera
 |-----------|----------------|-----------|------|
 | Orchestrator | `python:3.12.13-slim` (custom build) | `scaffold-orchestrator` | 8000 |
 | Database | `postgres:16` | `scaffold-postgres` | 5432 |
-| Vector Store | Milvus 2.4.17 (external, embedEtcd) | `milvus-standalone` | 19530 |
+| Vector Store | Milvus 2.5.27 (standalone, embedEtcd) | `milvus-standalone` | 19530 |
 | UI | Open WebUI (pinned by SHA256 digest) | `open-webui` | 3000→8080 |
 | Pipelines | Open WebUI Pipelines (pinned by SHA256 digest) | `open-webui-pipelines` | 9099 |
 | Web Search | SearXNG (pinned by SHA256 digest) | `searxng` | 8888→8080 |
+| Redis Cache | redis:8-alpine | `scaffold-redis` | 6379 |
 | Inference | Ollama (host-installed, CPU-only) | N/A (host) | 11434 |
 
 All service images are pinned by SHA256 digest in `docker-compose.yml`. The Python base image is pinned to `3.12.13-slim`. All pip dependencies are pinned to exact versions.
@@ -220,7 +221,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | Triage | `qwen3:4b` | `triage_model` valve in scaffold_router.py | Conversational triage + idea synthesis |
 | Verifier | `qwen2.5:7b` | `MODEL_VERIFIER` env var | Validates LLM outputs |
 | Code | `qwen2.5-coder:7b` | `MODEL_CODER` env var | CodeGen tool nodes |
-| Embeddings | `qwen3-embedding:8b` | `MODEL_EMBEDDER_PIPELINE` env var | 4096-dimensional vectors |
+| Embeddings | `qwen3-embedding:8b` | `MODEL_EMBEDDER_PIPELINE` env var | MRL truncated to 512d, L2-normalized |
 | Reranker | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` | `MODEL_RERANKER` env var | CrossEncoder, runs in-container |
 | Query gen | `qwen3:4b` | `MODEL_ROUTER` env var | DAG planning / query routing |
 | Fallback | `qwen3.5:latest` | `MODEL_FALLBACK` env var | Cascade fallback |
@@ -352,7 +353,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 
 ## RAG Pipeline
 
-1. **Embed query** → `qwen3-embedding:8b` (4096d vectors)
+1. **Embed query** → `qwen3-embedding:8b` (MRL truncated to 512d, instruction-prefixed, Redis-cached)
 2. **Parallel search** — vector search + keyword search via `asyncio.gather`
 3. **RRF merge** — Reciprocal Rank Fusion combines results
 4. **CrossEncoder rerank** — `Qwen3-Reranker-0.6B-seq-cls` re-scores (runs in thread executor)
@@ -549,3 +550,36 @@ scaffold-engine/
 4. **Open WebUI file routing intermittent** — after container restarts, Open WebUI sometimes stops forwarding requests to the pipeline. Hard browser refresh (`Ctrl+Shift+R`) and new chat usually resolves. Root cause under investigation.
 5. **Context stripping depends on `</context>` tag** — if Open WebUI changes its context injection format, the regex in `pipe()` will need updating.
 
+
+---
+
+## Changelog — April 13, 2026 (Vector DB migration — Milvus 2.5.27, TOON schema, Redis cache)
+
+### Phase 1: Milvus upgrade + Redis
+1. **Milvus 2.4.17 → 2.5.27** — patches CVE-2026-26190 (CVSS 9.8 auth bypass). Fresh volume (`milvus-data-v2`); old data backed up in `milvus-data-backup-20260413`
+2. **Redis cache added** — `redis:8-alpine` on `ai-network`, 2GB maxmemory, LRU eviction, RDB persistence
+3. **`milvus-config/milvus.yaml`** — embedded etcd configuration for standalone mode
+4. **`app/config.py`** — added `redis_url`, `embedding_dim` (512), `model_embedder_id`
+
+### Phase 2: TOON v2 schema + 512d HNSW_SQ8
+5. **`toon_v2` collection created** — 16 TOON fields, 512d FLOAT_VECTOR, HNSW_SQ8 index (M=16, efConstruction=256, SQ8, BF16 refine), partition key isolation on `domain` (64 partitions), scalar indexes on content_hash/domain_tags/source_type/confidence_score/created_at/version
+6. **`app/utils/embedding_cache.py`** (new) — two-tier cache: in-memory LRU (10K entries) + Redis persistent. Keys include model ID for auto-invalidation on model change
+7. **`app/modules/rag_pipeline.py`** — full rewrite: collection `toon_v2`, 512d MRL-truncated embeddings, COSINE metric, HNSW_SQ8 search params, instruction-prefix query embedding, `_build_embedding_text()` for ingestion, `_content_hash()` for dedup, backward-compatible `ingest_entries()`
+8. **`app/modules/gt_browser.py`** — updated to toon_v2 fields, COSINE search, `_embed_query()` from rag_pipeline
+
+### Phase 3: Hardening
+9. **Content-hash dedup** — exact hash check before embedding; skips insertion if identical content exists
+10. **Semantic near-duplicate detection** — ANN search on new embedding; entries with cosine > 0.95 logged as near-duplicates
+11. **`app/utils/staleness.py`** (new) — TTL-per-source-type sweep (real_time=7d, news=30d, community=90d, tech_docs=180d, curated=1y, official_docs=1y, ai_generated=180d)
+12. **`app/modules/cleanup.py`** — staleness sweep wired into existing 15-min cleanup loop
+13. **`app/main.py`** — health endpoint: Redis status, embedding cache hit stats, toon_v2 collection count
+
+### Test updates
+14. **`tests/test_integration.py`** — `test_rag_query_round_trip` updated to query `domain="eng"`
+15. **`tests/test_tasks_13_14_15_16.py`** — collection name assertion updated to `toon_v2`
+16. **`tests/test_retrieval_golden.py`** — skipped until knowledge base repopulated
+
+### Known Issues (updated)
+6. **Knowledge base empty** — toon_v2 has 2 test entries. Old 143 entries from `technical_knowledge` need re-ingestion through the pipeline. Old data preserved in `milvus-data-backup-20260413` volume.
+7. **Golden retrieval tests skipped** — blocked on knowledge base repopulation (issue 6).
+8. **Milvus 2.5.27 standalone requires env vars** — `ETCD_USE_EMBED=true`, `COMMON_STORAGETYPE=local`, `seccomp:unconfined`. The milvus.yaml port-override approach caused startup panics; env vars are the correct method.
