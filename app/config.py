@@ -42,3 +42,10 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def get_model(role: str, overrides: dict | None = None) -> str:
+    """Return model tag: override > env var > default."""
+    if overrides and overrides.get(role):
+        return overrides[role]
+    return getattr(settings, role)

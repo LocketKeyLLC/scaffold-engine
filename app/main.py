@@ -313,11 +313,12 @@ class IdeaInput(BaseModel):
     idea: str
     domain: str | None = None
     model: str | None = None
+    model_overrides: dict | None = None
 
 @app.post("/ideas")
 async def submit_idea(body: IdeaInput, db=Depends(get_db)):
     """Step 10: Submit new idea → trigger refinement."""
-    result = await refine_idea(body.idea, db, model=body.model, domain=body.domain)
+    result = await refine_idea(body.idea, db, model=body.model, domain=body.domain, model_overrides=body.model_overrides)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
             status_code=result.get("http_status", 500),
@@ -328,7 +329,7 @@ async def submit_idea(body: IdeaInput, db=Depends(get_db)):
 @app.post("/ideate")
 async def ideate_endpoint(body: IdeaInput, db=Depends(get_db)):
     """Phase 1: Analyze idea, assess feasibility, halt for confirmation."""
-    result = await analyze_and_confirm(body.idea, db, model=body.model, domain=body.domain)
+    result = await analyze_and_confirm(body.idea, db, model=body.model, domain=body.domain, model_overrides=body.model_overrides)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
             status_code=result.get("http_status", 500),
@@ -347,6 +348,7 @@ async def ideate_confirm_endpoint(request: Request, db=Depends(get_db)):
         job_id, db,
         user_feedback=body.get("feedback"),
         push_to_github=body.get("push_to_github", False),
+        model_overrides=body.get("model_overrides"),
     )
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
@@ -379,11 +381,12 @@ async def get_dag(job_id: str, db: AsyncSession = Depends(get_db)):
 class DagInput(BaseModel):
     job_id: str
     model: str | None = None
+    model_overrides: dict | None = None
 
 @app.post("/dag")
 async def generate_dag_endpoint(body: DagInput, db=Depends(get_db)):
     """Step 11: Generate DAG from refined idea brief."""
-    result = await _generate_dag(body.job_id, db, model=body.model)
+    result = await _generate_dag(body.job_id, db, model=body.model, model_overrides=body.model_overrides)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
             status_code=result.get("http_status", 500),
@@ -572,7 +575,7 @@ async def execute_all_endpoint(body: ExecuteNextInput):
     downstream nodes blocked by failures are reported at the end.
     """
     return StreamingResponse(
-        execute_all_nodes(body.job_id),
+        execute_all_nodes(body.job_id, model_overrides=body.model_overrides),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},  # disable nginx buffering
     )

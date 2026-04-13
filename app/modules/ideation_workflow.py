@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
-from app.config import settings
+from app.config import settings, get_model
 from app.modules.idea_refinement import refine_idea
 from app.utils.llm_parsing import parse_json_object, parse_json_array
 
@@ -41,10 +41,11 @@ async def analyze_and_confirm(
     db: AsyncSession,
     model: str | None = None,
     domain: str | None = None,
+    model_overrides: dict | None = None,
 ) -> dict:
     """Phase 1: Refine idea, assess feasibility, halt at awaiting_confirmation."""
 
-    refine_result = await refine_idea(idea_text, db, model=model, domain=domain)
+    refine_result = await refine_idea(idea_text, db, model=model, domain=domain, model_overrides=model_overrides)
 
     if refine_result["status"] == "failed":
         return refine_result
@@ -54,7 +55,7 @@ async def analyze_and_confirm(
 
     resp = await model_router.generate(
         "Assess this brief:\n" + json.dumps(brief, indent=2),
-        model=model or settings.model_general,
+        model=model or get_model("model_general", model_overrides),
         system=FEASIBILITY_SYSTEM,
         temperature=0.2,
         max_tokens=2048,
@@ -133,6 +134,7 @@ async def research_and_compile(
     user_feedback: str | None = None,
     model: str | None = None,
     push_to_github: bool = False,
+    model_overrides: dict | None = None,
 ) -> dict:
     """Phase 2: Research via SearXNG, ingest to Milvus, compile prompt, present workflow."""
 
@@ -190,7 +192,7 @@ async def research_and_compile(
         topic_str = brief.get("title", "unknown")
         resp = await model_router.generate(
             DISTILL_PROMPT.format(topic=topic_str, results=results_text),
-            model=model or settings.model_general,
+            model=model or get_model("model_general", model_overrides),
             system=DISTILL_SYSTEM,
             temperature=0.2,
             max_tokens=4096,
@@ -220,7 +222,7 @@ async def research_and_compile(
 
     resp = await model_router.generate(
         "Compile an execution plan from this context:\n" + compile_context,
-        model=model or settings.model_general,
+        model=model or get_model("model_general", model_overrides),
         system=COMPILE_SYSTEM,
         temperature=0.3,
         max_tokens=4096,

@@ -39,11 +39,33 @@ class Pipeline:
         triage_model: str = "qwen3:4b"
         triage_timeout: int = 3600       # seconds to wait for triage model response
         ollama_url: str = "http://172.18.0.1:11434"
+        # --- Model Valves (sent to orchestrator as overrides) ---
+        model_general: str = "qwen3-vl:235b-instruct-cloud"
+        model_verifier: str = "qwen2.5:7b"
+        model_coder: str = "qwen2.5-coder:7b"
+        model_embedder: str = "qwen3-embedding:8b"
+        model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
+        model_router: str = "qwen3:4b"
+        model_fallback: str = "qwen3.5:latest"
+        model_cloud_alt: str = "qwen3.5:397b-cloud"
 
     def __init__(self):
         self.id = "scaffold_router"
         self.name = "Scaffold Router"
         self.valves = self.Valves()
+
+    def _model_overrides(self) -> dict:
+        """Build model overrides dict from current valve values."""
+        return {
+            "model_general": self.valves.model_general,
+            "model_verifier": self.valves.model_verifier,
+            "model_coder": self.valves.model_coder,
+            "model_embedder": self.valves.model_embedder,
+            "model_reranker": self.valves.model_reranker,
+            "model_router": self.valves.model_router,
+            "model_fallback": self.valves.model_fallback,
+            "model_cloud_alt": self.valves.model_cloud_alt,
+        }
 
     # ------------------------------------------------------------------
     # Triage: lightweight conversational phase before workflow launch
@@ -283,7 +305,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                 return
             job_id = parts[1]
             headers = {"X-API-Key": self.valves.api_key}
-            payload = {"job_id": job_id}
+            payload = {"job_id": job_id, "model_overrides": self._model_overrides()}
             if len(parts) > 2:
                 payload["feedback"] = parts[2]
 
@@ -338,7 +360,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                 try:
                     dag_result[0] = requests.post(
                         f"{self.valves.orchestrator_url}/dag",
-                        json={"job_id": job_id},
+                        json={"job_id": job_id, "model_overrides": self._model_overrides()},
                         headers=headers,
                         timeout=self.valves.dag_timeout,
                     )
@@ -474,7 +496,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
             try:
                 ideas_result[0] = requests.post(
                     f"{self.valves.orchestrator_url}/ideate",
-                    json={"idea": message},
+                    json={"idea": message, "model_overrides": self._model_overrides()},
                     headers=headers,
                     timeout=3600,
                 )
@@ -568,7 +590,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
             try:
                 dag_result[0] = requests.post(
                     f"{self.valves.orchestrator_url}/dag",
-                    json={"job_id": job_id},
+                    json={"job_id": job_id, "model_overrides": self._model_overrides()},
                     headers=headers,
                     timeout=self.valves.dag_timeout,
                 )
@@ -634,7 +656,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
         try:
             r = requests.post(
                 f"{self.valves.orchestrator_url}/execute/all",
-                json={"job_id": job_id},
+                json={"job_id": job_id, "model_overrides": self._model_overrides()},
                 headers=headers,
                 stream=True,
                 timeout=(10, None),
@@ -875,7 +897,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                 text = " ".join(parts[1:])
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/ideate",
-                    json={"idea": text},
+                    json={"idea": text, "model_overrides": self._model_overrides()},
                     headers={"X-API-Key": self.valves.api_key},
                     timeout=3600,
                 )
@@ -886,7 +908,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                     return "Usage: /dag <job_id>"
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/dag",
-                    json={"job_id": parts[1]},
+                    json={"job_id": parts[1], "model_overrides": self._model_overrides()},
                     headers={"X-API-Key": self.valves.api_key},
                     timeout=3600,
                 )
@@ -909,7 +931,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                 text = " ".join(parts[1:])
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/optimize",
-                    json={"prompt": text, "skip_verify": False},
+                    json={"prompt": text, "skip_verify": False, "model_overrides": self._model_overrides()},
                     headers={"X-API-Key": self.valves.api_key},
                     timeout=3600,
                 )
@@ -921,7 +943,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                 text = " ".join(parts[1:])
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/rag",
-                    json={"query": text, "top_k": 5},
+                    json={"query": text, "top_k": 5, "model_overrides": self._model_overrides()},
                     headers={"X-API-Key": self.valves.api_key},
                     timeout=60,
                 )
