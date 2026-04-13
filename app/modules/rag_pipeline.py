@@ -25,6 +25,9 @@ from app import model_router
 from app.config import settings
 from app.utils.embedding_cache import get_cache, truncate_and_normalize
 
+from sqlalchemy import text
+from app.database import async_session
+
 logger = logging.getLogger("scaffold.rag")
 
 COLLECTION_NAME = "toon_v2"
@@ -494,7 +497,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
         if vector is None:
             logger.warning("ingest_embed_failed for title=%s", title)
             continue
-# --- Dedup: semantic similarity check ---
+# --- Dedup: semantic similarity check — auto-reject above threshold ---
         try:
             sim_results = await loop.run_in_executor(
                 None,
@@ -509,11 +512,25 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
             if sim_results and sim_results[0]:
                 top_hit = sim_results[0][0]
                 sim_score = float(top_hit.score)
-                if sim_score > 0.95 and top_hit.entity.get("content_hash") != ch:
-                    logger.info("dedup_near_duplicate: sim=%.4f title='%s' supersedes='%s'",
-                                sim_score, title[:50], top_hit.entity.get("entry_id", ""))
-                    # Mark as version update — supersede the old entry
-                    confidence = max(confidence, 0.60)
+                if sim_score > settings.semantic_dedup_threshold and top_hit.entity.get("content_hash") != ch:
+                    existing_eid = top_hit.entity.get("entry_id", str(top_hit.id))
+                    logger.info(
+                        "dedup_rejected: sim=%.4f title='%s' existing='%s'",
+                        sim_score, title[:50], existing_eid,
+                    )
+                    try:
+                        async with async_session() as session:
+                            await session.execute(
+                                text(
+                                    "INSERT INTO dedup_log (new_content_hash, existing_entry_id, similarity_score, action_taken) "
+                                    "VALUES (:hash, :eid, :score, 'rejected')"
+                                ),
+                                {"hash": ch, "eid": existing_eid, "score": sim_score},
+                            )
+                            await session.commit()
+                    except Exception as db_err:
+                        logger.error("dedup_log_write_failed: %s", db_err)
+                    continue  # Skip insertion
         except Exception as e:
             logger.debug("semantic_dedup_failed: %s", e)
 
