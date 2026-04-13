@@ -1,19 +1,18 @@
 """Scaffold Engine -- RAG pipeline module.
 
 Query flow:
-  1. Embed query (qwen3-embedding:8b, 4096d)
-  2. Milvus ANN search (vector similarity)
-  3. Keyword search (content/topic filter)
+  1. Embed query (qwen3-embedding:8b, MRL truncated to 512d)
+  2. Milvus ANN search (HNSW_SQ8 COSINE on toon_v2)
+  3. Keyword search (canonical_text/title filter)
   4. RRF fusion of both result sets
   5. Cross-encoder rerank (Qwen3-Reranker-0.6B via sentence-transformers)
   6. Confidence filter + dynamic top-k
-
-Step 13 of 23-step build plan.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -24,11 +23,12 @@ from app.rerankers import rerank as cross_encoder_rerank
 
 from app import model_router
 from app.config import settings
+from app.utils.embedding_cache import get_cache, truncate_and_normalize
 
 logger = logging.getLogger("scaffold.rag")
 
-COLLECTION_NAME = "technical_knowledge"
-EMBED_DIM = 4096
+COLLECTION_NAME = "toon_v2"
+EMBED_DIM = 512
 DEFAULT_TOP_K = 10
 CONFIDENCE_THRESHOLD = 0.8
 RRF_K = 60  # RRF smoothing constant
@@ -42,6 +42,7 @@ RRF_K = 60  # RRF smoothing constant
 class RagResult:
     """Single retrieval result."""
     content: str = ""
+    title: str = ""
     topic: str = ""
     tags: str = ""
     source_file: str = ""
@@ -62,7 +63,6 @@ class RagResult:
 def _get_collection() -> Collection | None:
     """Get Milvus collection, connecting if needed."""
     try:
-        # Ensure connected
         try:
             utility.list_collections()
         except Exception:
@@ -81,6 +81,44 @@ def _get_collection() -> Collection | None:
 
 
 # ---------------------------------------------------------------------------
+# Embedding helper
+# ---------------------------------------------------------------------------
+
+async def _embed_query(query: str) -> list[float] | None:
+    """Embed query with instruction prefix, MRL truncation, and cache."""
+    query_text = f"Instruct: Given a query, retrieve relevant knowledge entries\nQuery: {query}"
+
+    cache = get_cache()
+    cached = await cache.get(query_text)
+    if cached:
+        return cached
+
+    embeddings = await model_router.embed(query_text, model=settings.model_embedder_pipeline)
+    if not embeddings or not embeddings[0]:
+        return None
+
+    truncated = truncate_and_normalize(embeddings[0])
+    await cache.put(query_text, truncated)
+    return truncated
+
+
+async def _embed_content(text: str) -> list[float] | None:
+    """Embed content text (no instruction prefix), MRL truncation, and cache."""
+    cache = get_cache()
+    cached = await cache.get(text)
+    if cached:
+        return cached
+
+    embeddings = await model_router.embed(text, model=settings.model_embedder_pipeline)
+    if not embeddings or not embeddings[0]:
+        return None
+
+    truncated = truncate_and_normalize(embeddings[0])
+    await cache.put(text, truncated)
+    return truncated
+
+
+# ---------------------------------------------------------------------------
 # Vector search
 # ---------------------------------------------------------------------------
 
@@ -95,10 +133,10 @@ async def _vector_search(
         try:
             search_kwargs = dict(
                 data=[query_embedding],
-                anns_field="vector",
-                param={"metric_type": "L2", "params": {"nprobe": 16}},
+                anns_field="dense_vector",
+                param={"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}},
                 limit=top_k,
-                output_fields=["content", "topic", "tags", "source_file", "source_url", "entry_id", "domain"],
+                output_fields=["canonical_text", "title", "domain_tags", "source_url", "entry_id", "domain", "confidence_score"],
             )
             if domain:
                 search_kwargs["expr"] = f'domain == "{domain}"'
@@ -112,15 +150,16 @@ async def _vector_search(
             hits = []
             for hit in results[0]:
                 entity = hit.entity
+                tags_list = entity.get("domain_tags", [])
+                tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
                 hits.append(RagResult(
-                    content=entity.get("content", ""),
-                    topic=entity.get("topic", ""),
-                    tags=entity.get("tags", ""),
-                    source_file=entity.get("source_file", ""),
+                    content=entity.get("canonical_text", ""),
+                    title=entity.get("title", ""),
+                    tags=tags_str,
                     source_url=entity.get("source_url", ""),
                     entry_id=entity.get("entry_id", ""),
                     domain=entity.get("domain", ""),
-                    vector_score=1.0 / (1.0 + float(hit.score)),
+                    vector_score=float(hit.score),
                 ))
             return hits
         except Exception as e:
@@ -132,7 +171,7 @@ async def _vector_search(
 
 
 # ---------------------------------------------------------------------------
-# Keyword search (content/topic filter via Milvus expressions)
+# Keyword search (canonical_text/title filter via Milvus expressions)
 # ---------------------------------------------------------------------------
 
 async def _keyword_search(
@@ -142,7 +181,6 @@ async def _keyword_search(
     domain: str | None = None,
 ) -> list[RagResult]:
     """Keyword-based search using Milvus query expressions (off event loop)."""
-    # Extract meaningful keywords (>= 3 chars, not stopwords)
     stopwords = {"the", "and", "for", "are", "but", "not", "you", "all", "can", "has", "was", "one", "our", "out",
                  "how", "what", "when", "where", "which", "who", "why", "with", "this", "that", "from", "into"}
     words = [w.strip().lower() for w in query.split() if len(w.strip()) >= 3 and w.strip().lower() not in stopwords]
@@ -150,12 +188,11 @@ async def _keyword_search(
     if not words:
         return []
 
-    # Build OR expression for content and topic fields
     conditions = []
-    for word in words[:5]:  # Limit to 5 keywords
+    for word in words[:5]:
         safe_word = word.replace("'", "\\'").replace('"', '\\"')
-        conditions.append(f'content like "%{safe_word}%"')
-        conditions.append(f'topic like "%{safe_word}%"')
+        conditions.append(f'canonical_text like "%{safe_word}%"')
+        conditions.append(f'title like "%{safe_word}%"')
 
     expr = " or ".join(conditions)
     if domain:
@@ -169,22 +206,23 @@ async def _keyword_search(
 
             results = col.query(
                 expr=expr,
-                output_fields=["content", "topic", "tags", "source_file", "source_url", "entry_id", "domain"],
+                output_fields=["canonical_text", "title", "domain_tags", "source_url", "entry_id", "domain"],
                 limit=top_k,
             )
 
             hits = []
             for r in results:
-                content_lower = r.get("content", "").lower()
-                topic_lower = r.get("topic", "").lower()
-                match_count = sum(1 for w in words if w in content_lower or w in topic_lower)
+                content_lower = r.get("canonical_text", "").lower()
+                title_lower = r.get("title", "").lower()
+                match_count = sum(1 for w in words if w in content_lower or w in title_lower)
                 score = match_count / len(words) if words else 0.0
+                tags_list = r.get("domain_tags", [])
+                tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
 
                 hits.append(RagResult(
-                    content=r.get("content", ""),
-                    topic=r.get("topic", ""),
-                    tags=r.get("tags", ""),
-                    source_file=r.get("source_file", ""),
+                    content=r.get("canonical_text", ""),
+                    title=r.get("title", ""),
+                    tags=tags_str,
                     source_url=r.get("source_url", ""),
                     entry_id=r.get("entry_id", ""),
                     domain=r.get("domain", ""),
@@ -197,8 +235,6 @@ async def _keyword_search(
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _sync)
-
-
 # ---------------------------------------------------------------------------
 # RRF fusion
 # ---------------------------------------------------------------------------
@@ -209,18 +245,15 @@ def _rrf_fuse(
     k: int = RRF_K,
 ) -> list[RagResult]:
     """Reciprocal Rank Fusion of vector and keyword result sets."""
-    # Index by content (dedup key)
     merged: dict[str, RagResult] = {}
 
-    # Score vector results by rank
     for rank, result in enumerate(vector_results):
-        key = result.content[:200]  # Use content prefix as dedup key
+        key = result.content[:200]
         if key not in merged:
             merged[key] = result
         merged[key].rrf_score += 1.0 / (k + rank + 1)
         merged[key].vector_score = max(merged[key].vector_score, result.vector_score)
 
-    # Score keyword results by rank
     for rank, result in enumerate(sorted(keyword_results, key=lambda r: r.keyword_score, reverse=True)):
         key = result.content[:200]
         if key not in merged:
@@ -228,7 +261,6 @@ def _rrf_fuse(
         merged[key].rrf_score += 1.0 / (k + rank + 1)
         merged[key].keyword_score = max(merged[key].keyword_score, result.keyword_score)
 
-    # Sort by RRF score descending
     fused = sorted(merged.values(), key=lambda r: r.rrf_score, reverse=True)
     return fused
 
@@ -245,14 +277,11 @@ async def _rerank(
     if not results:
         return []
 
-    # Extract texts for reranker (cap at 20)
     docs = [r.content[:500] for r in results[:20]]
 
-    # Run CPU-bound reranker off the event loop
     loop = asyncio.get_running_loop()
     rr = await loop.run_in_executor(None, cross_encoder_rerank, query, docs, len(docs))
 
-    # Map scores back to RagResult objects
     score_map = {item.index: item.score for item in rr.items}
     for i, r in enumerate(results[:20]):
         if i in score_map:
@@ -262,7 +291,6 @@ async def _rerank(
             r.rerank_score = r.rrf_score
             r.final_score = r.rrf_score
 
-    # Entries beyond top 20 keep RRF scores
     for r in results[20:]:
         r.rerank_score = r.rrf_score
         r.final_score = r.rrf_score
@@ -297,20 +325,9 @@ async def query_rag(
     confidence_threshold: float = CONFIDENCE_THRESHOLD,
     skip_rerank: bool = False,
 ) -> dict[str, Any]:
-    """Full RAG pipeline: embed -> search -> fuse -> rerank -> filter.
-
-    Args:
-        query: Natural language query
-        top_k: Maximum results to return
-        confidence_threshold: Minimum final score to include
-        skip_rerank: If True, skip cross-encoder reranking (faster)
-
-    Returns:
-        Dict with results, scores, and metadata
-    """
+    """Full RAG pipeline: embed -> search -> fuse -> rerank -> filter."""
     t0 = time.monotonic()
 
-    # 1. Get collection
     collection = _get_collection()
     if collection is None:
         return {
@@ -319,17 +336,14 @@ async def query_rag(
             "results": [],
         }
 
-    # 2. Embed query
-    embeddings = await model_router.embed(query, model=settings.model_embedder_pipeline)
-    if not embeddings or not embeddings[0]:
+    query_embedding = await _embed_query(query)
+    if query_embedding is None:
         return {
             "status": "error",
             "error": "Failed to generate query embedding",
             "results": [],
         }
-    query_embedding = embeddings[0]
 
-    # 3. Parallel search: vector + keyword
     vector_results, keyword_results = await asyncio.gather(
         _vector_search(collection, query_embedding, top_k * 2, domain=domain),
         _keyword_search(collection, query, top_k * 2, domain=domain),
@@ -340,10 +354,8 @@ async def query_rag(
         len(vector_results), len(keyword_results), query[:50],
     )
 
-    # 4. RRF fusion
     fused = _rrf_fuse(vector_results, keyword_results)
 
-    # 5. Rerank (optional)
     if skip_rerank or not fused:
         for r in fused:
             r.final_score = r.rrf_score
@@ -351,10 +363,8 @@ async def query_rag(
     else:
         ranked = await _rerank(query, fused, top_k)
 
-    # 6. Confidence filter
     filtered = [r for r in ranked if r.final_score >= confidence_threshold]
 
-    # If filter is too aggressive, return top results anyway with a warning
     too_strict = len(filtered) == 0 and len(ranked) > 0
     if too_strict:
         filtered = ranked[:3]
@@ -366,14 +376,13 @@ async def query_rag(
         query[:200], domain or "all", len(filtered), top_score, latency_ms,
     )
 
-    # 7. Build response
     result_dicts = []
     for r in filtered:
         result_dicts.append({
             "content": r.content,
+            "title": r.title,
             "topic": r.topic,
             "tags": r.tags,
-            "source_file": r.source_file,
             "source_url": r.source_url,
             "entry_id": r.entry_id,
             "domain": r.domain,
@@ -403,11 +412,30 @@ async def query_rag(
 
 
 # ---------------------------------------------------------------------------
-# Ingest entries into Milvus
+# Ingest entries into Milvus (TOON schema)
 # ---------------------------------------------------------------------------
 
+def _build_embedding_text(entry: dict) -> str:
+    """Construct embedding text from title + domain_tags + canonical_text."""
+    parts = []
+    if entry.get("title"):
+        parts.append(entry["title"])
+    tags = entry.get("domain_tags", [])
+    if tags:
+        parts.append(f"Topics: {', '.join(tags)}")
+    if entry.get("canonical_text"):
+        parts.append(entry["canonical_text"])
+    return "\n".join(parts)
+
+
+def _content_hash(text: str) -> str:
+    """SHA-256 hash of normalized text for dedup."""
+    normalized = " ".join(text.lower().split())
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
 async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
-    """Embed and insert knowledge entries into Milvus. Returns count ingested."""
+    """Embed and insert knowledge entries into toon_v2. Returns count ingested."""
     if not entries:
         return 0
 
@@ -417,24 +445,100 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
         logger.error("ingest_entries: collection not available")
         return 0
 
+    now = int(time.time())
     count = 0
+
     for entry in entries:
-        content = entry.get("content", "")
+        content = entry.get("content", "") or entry.get("canonical_text", "")
         if not content:
             continue
 
-        vectors = await model_router.embed(content)
-        if not vectors:
-            logger.warning("ingest_embed_failed for topic=%s", entry.get("topic"))
+        title = entry.get("title", entry.get("topic", "unknown")).strip()
+        tags_raw = entry.get("tags", entry.get("domain_tags", ""))
+        if isinstance(tags_raw, str):
+            domain_tags = [t.strip() for t in tags_raw.split(",") if t.strip()][:20]
+        elif isinstance(tags_raw, list):
+            domain_tags = tags_raw[:20]
+        else:
+            domain_tags = []
+
+        source_url = entry.get("source", entry.get("source_url", "scaffold-engine"))
+        source_type = entry.get("source_type", "ai_generated")
+        confidence = entry.get("confidence_score", 0.60)
+
+        ch = _content_hash(content)
+
+        # --- Dedup: exact hash check ---
+        try:
+            existing = await loop.run_in_executor(
+                None,
+                lambda: collection.query(
+                    expr=f'content_hash == "{ch}"',
+                    output_fields=["entry_id"],
+                    limit=1,
+                ),
+            )
+            if existing:
+                logger.debug("dedup_skip: exact hash match for '%s'", title[:50])
+                continue
+        except Exception as e:
+            logger.debug("dedup_check_failed: %s", e)
+
+        embedding_text = _build_embedding_text({
+            "title": title,
+            "domain_tags": domain_tags,
+            "canonical_text": content,
+        })
+
+        vector = await _embed_content(embedding_text)
+        if vector is None:
+            logger.warning("ingest_embed_failed for title=%s", title)
             continue
+# --- Dedup: semantic similarity check ---
+        try:
+            sim_results = await loop.run_in_executor(
+                None,
+                lambda v=vector: collection.search(
+                    data=[v],
+                    anns_field="dense_vector",
+                    param={"metric_type": "COSINE", "params": {"ef": 32}},
+                    limit=1,
+                    output_fields=["entry_id", "content_hash"],
+                ),
+            )
+            if sim_results and sim_results[0]:
+                top_hit = sim_results[0][0]
+                sim_score = float(top_hit.score)
+                if sim_score > 0.95 and top_hit.entity.get("content_hash") != ch:
+                    logger.info("dedup_near_duplicate: sim=%.4f title='%s' supersedes='%s'",
+                                sim_score, title[:50], top_hit.entity.get("entry_id", ""))
+                    # Mark as version update — supersede the old entry
+                    confidence = max(confidence, 0.60)
+        except Exception as e:
+            logger.debug("semantic_dedup_failed: %s", e)
 
-        vector = vectors[0]
-        topic = entry.get("topic", "unknown").strip().lower().replace(" ", "-")
-        tags = entry.get("tags", "")
-        source = entry.get("source", "scaffold-engine")
-        entry_id = f"scaffold-{topic}-{count}"
+        topic_slug = title.lower().replace(" ", "-")[:60]
+        topic_slug = title.lower().replace(" ", "-")[:60]
+        entry_id = f"scaffold-{topic_slug}-{ch[:8]}"
 
-        row = [{"entry_id": entry_id, "content": content, "topic": topic, "tags": tags, "source_file": "scaffold-ideation", "source_url": source, "domain": domain, "vector": vector}]
+        row = [{
+            "entry_id": entry_id,
+            "title": title,
+            "canonical_text": content,
+            "domain": domain,
+            "domain_tags": domain_tags,
+            "confidence_score": float(confidence),
+            "source_type": source_type,
+            "source_url": source_url,
+            "content_hash": ch,
+            "model_id": settings.model_embedder_id,
+            "version": 1,
+            "supersedes_id": "",
+            "created_at": now,
+            "updated_at": now,
+            "expires_at": 0,
+            "dense_vector": vector,
+        }]
 
         try:
             await loop.run_in_executor(
@@ -446,6 +550,6 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
 
     if count > 0:
         await loop.run_in_executor(None, collection.flush)
-        logger.info("ingested %d entries into Milvus", count)
+        logger.info("ingested %d entries into Milvus (toon_v2)", count)
 
     return count

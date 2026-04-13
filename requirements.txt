@@ -11,3 +11,4 @@ json_repair==0.58.7
 sentence-transformers==5.3.0
 requests==2.33.1
 structlog==25.5.0
+redis>=5.0.0

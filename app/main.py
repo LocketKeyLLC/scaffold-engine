@@ -181,8 +181,8 @@ async def health():
             def _sync():
                 colls = utility.list_collections()
                 entry_count = 0
-                if "technical_knowledge" in colls:
-                    col = Collection("technical_knowledge")
+                if "toon_v2" in colls:
+                    col = Collection("toon_v2")
                     entry_count = col.num_entities
                 return len(colls), entry_count
             coll_count, entries = await asyncio.wait_for(
@@ -213,7 +213,20 @@ async def health():
     if isinstance(milvus, Exception):
         milvus = {"status": "down", "latency_ms": 0, "collection_count": 0, "entry_count": 0}
 
-    checks = {"postgresql": pg, "ollama": ollama, "milvus": milvus}
+    # Redis + cache stats
+    try:
+        import redis as _redis
+        _r = _redis.from_url(settings.redis_url, socket_timeout=2)
+        _r.ping()
+        redis_info = {"status": "up", "keys": _r.dbsize()}
+    except Exception:
+        redis_info = {"status": "down", "keys": 0}
+    try:
+        from app.utils.embedding_cache import get_cache
+        cache_stats = get_cache().stats
+    except Exception:
+        cache_stats = {}
+    checks = {"postgresql": pg, "ollama": ollama, "milvus": milvus, "redis": redis_info, "embedding_cache": cache_stats}
     pg_up = pg["status"] == "up"
     ollama_up = ollama["status"] == "up"
     milvus_up = milvus["status"] == "up"

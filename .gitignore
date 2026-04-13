@@ -9,3 +9,5 @@ logs/
 *.bak
 patches/
 *.bak
+docker-compose.yml.bak*
+*.bak.*
