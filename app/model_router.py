@@ -304,3 +304,43 @@ async def list_models() -> list[str]:
     except Exception as e:
         logger.error("Failed to list models: %s", e)
         return []
+
+
+async def validate_models(overrides: dict | None = None) -> list[str]:
+    """
+    Check that all Ollama-routed model roles resolve to tags
+    that actually exist in Ollama. Returns list of missing tags.
+    """
+    from app.config import get_model
+
+    OLLAMA_ROLES = [
+        "model_general", "model_verifier", "model_coder",
+        "model_router", "model_fallback", "model_cloud_alt",
+    ]
+
+    needed = {}
+    for role in OLLAMA_ROLES:
+        needed[role] = get_model(role, overrides)
+
+    try:
+        resp = await _get_client().get(
+            f"{settings.ollama_base_url}/api/tags", timeout=10.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return []
+
+    available = set()
+    for model in data.get("models", []):
+        name = model.get("name", "")
+        available.add(name)
+        if name.endswith(":latest"):
+            available.add(name.removesuffix(":latest"))
+
+    missing = []
+    for role, tag in needed.items():
+        if tag not in available and f"{tag}:latest" not in available:
+            missing.append(f"{role}={tag}")
+
+    return missing

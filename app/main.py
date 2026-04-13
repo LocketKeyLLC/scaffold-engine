@@ -16,7 +16,7 @@ from pymilvus import connections as milvus_connections, utility, Collection
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.model_router import close_client
+from app.model_router import close_client, validate_models
 from starlette.responses import StreamingResponse
 
 from app.auth import require_api_key
@@ -315,6 +315,21 @@ class IdeaInput(BaseModel):
     model: str | None = None
     model_overrides: dict | None = None
 
+
+
+async def _require_valid_models(overrides: dict | None = None):
+    """Raise 422 if any Ollama-routed models are missing."""
+    missing = await validate_models(overrides)
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "model_validation_failed",
+                "missing_models": missing,
+                "hint": "Check Ollama with: curl http://localhost:11434/api/tags",
+            },
+        )
+
 @app.post("/ideas")
 async def submit_idea(body: IdeaInput, db=Depends(get_db)):
     """Step 10: Submit new idea → trigger refinement."""
@@ -329,6 +344,7 @@ async def submit_idea(body: IdeaInput, db=Depends(get_db)):
 @app.post("/ideate")
 async def ideate_endpoint(body: IdeaInput, db=Depends(get_db)):
     """Phase 1: Analyze idea, assess feasibility, halt for confirmation."""
+    await _require_valid_models(body.model_overrides)
     result = await analyze_and_confirm(body.idea, db, model=body.model, domain=body.domain, model_overrides=body.model_overrides)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
@@ -341,6 +357,7 @@ async def ideate_endpoint(body: IdeaInput, db=Depends(get_db)):
 async def ideate_confirm_endpoint(request: Request, db=Depends(get_db)):
     """Phase 2: User confirms -> research -> ingest -> compile -> present workflow."""
     body = await request.json()
+    await _require_valid_models(body.get("model_overrides"))
     job_id = body.get("job_id")
     if not job_id:
         raise HTTPException(400, "job_id required")
@@ -386,6 +403,7 @@ class DagInput(BaseModel):
 @app.post("/dag")
 async def generate_dag_endpoint(body: DagInput, db=Depends(get_db)):
     """Step 11: Generate DAG from refined idea brief."""
+    await _require_valid_models(body.model_overrides)
     result = await _generate_dag(body.job_id, db, model=body.model, model_overrides=body.model_overrides)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
@@ -570,10 +588,10 @@ async def execute_next(body: ExecuteNextInput, db: AsyncSession = Depends(get_db
 @app.post("/execute/all", tags=["Step 15"])
 async def execute_all_endpoint(body: ExecuteNextInput):
     """Execute all DAG nodes in sequence, streaming SSE events.
-
     Auto-generates DAG if none exists.  Failed nodes are skipped;
     downstream nodes blocked by failures are reported at the end.
     """
+    await _require_valid_models(body.model_overrides)
     return StreamingResponse(
         execute_all_nodes(body.job_id, model_overrides=body.model_overrides),
         media_type="text/event-stream",
