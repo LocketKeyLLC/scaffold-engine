@@ -74,8 +74,8 @@ class TestMilvusHealthNoFlush:
         )
 
     def test_collection_name_unchanged(self):
-        """Should still check 'technical_knowledge' collection."""
-        assert '"technical_knowledge"' in _main_source
+        """Should still check 'toon_v2' collection."""
+        assert '"toon_v2"' in _main_source
 
 
 # =====================================================================

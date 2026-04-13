@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://172.18.0.1:11434"
     milvus_uri: str = "http://milvus-standalone:19530"
     searxng_url: str = "http://searxng:8080"
+    # Redis cache
+    redis_url: str = "redis://scaffold-redis:6379/0"
+    # Embedding config
+    embedding_dim: int = 512
+    model_embedder_id: str = "qwen3-embedding-8b-mrl512"
 
     # Model assignments
     model_router: str = "qwen3:4b"

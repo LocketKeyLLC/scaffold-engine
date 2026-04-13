@@ -12,6 +12,8 @@ from sqlalchemy import text
 
 from app.database import get_db
 
+from app.utils.staleness import sweep_expired
+
 logger = logging.getLogger(__name__)
 
 _background_tasks: Set[asyncio.Task] = set()
@@ -52,6 +54,12 @@ async def _cleanup_loop() -> None:
         try:
             await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
             await _reap_stale_jobs()
+            try:
+                result = await sweep_expired()
+                if result.get("expired_count", 0) > 0:
+                    logger.info("staleness_sweep expired=%d", result["expired_count"])
+            except Exception:
+                logger.debug("staleness_sweep_skipped")
         except asyncio.CancelledError:
             logger.info("cleanup_loop_cancelled")
             raise

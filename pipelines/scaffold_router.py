@@ -222,6 +222,9 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
         if _ctx_match:
             msg = _ctx_match.group(1).strip()
 
+        # Force streaming — pipe() always yields chunks
+        body["stream"] = True
+
         # --- /go or /run: synthesize conversation and launch pipeline ---
         if msg.lower() == "/go" or msg.lower() == "/run" or msg.lower().startswith("/go ") or msg.lower().startswith("/run "):
             # Build chat history (exclude the /go itself)

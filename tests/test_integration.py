@@ -70,7 +70,7 @@ async def test_rag_query_round_trip():
     """query_rag returns results with expected fields for a known domain."""
     from app.modules.rag_pipeline import query_rag
 
-    result = await query_rag("TOON pipeline format", domain="spec", top_k=3)
+    result = await query_rag("HNSW vector search", domain="eng", top_k=3)
 
     assert "results" in result
     docs = result["results"]

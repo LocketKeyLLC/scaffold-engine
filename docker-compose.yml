@@ -11,6 +11,7 @@ services:
       - OLLAMA_BASE_URL=http://172.18.0.1:11434
       - OPENAI_API_BASE_URLS=http://pipelines:9099
       - OPENAI_API_KEYS=0p3n-w3bu!
+      - RESET_CONFIG_ON_START=true
       - USE_OLLAMA_DOCKER=false
       - WEBUI_SECRET_KEY=
       - AIOHTTP_CLIENT_TIMEOUT=7200
@@ -107,6 +108,23 @@ services:
     depends_on:
       scaffold-postgres:
         condition: service_healthy
+  scaffold-redis:
+    image: redis:8-alpine
+    container_name: scaffold-redis
+    command: >
+      redis-server --save 60 1000
+      --loglevel warning --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    restart: always
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
 networks:
   ai-network:
@@ -121,3 +139,4 @@ volumes:
     name: scaffold-postgres-data
   hf-cache:
   scaffold-logs:
+  redis-data:

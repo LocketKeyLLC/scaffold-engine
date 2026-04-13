@@ -1,0 +1,28 @@
+etcd:
+  use:
+    embed: true
+  data:
+    dir: /var/lib/milvus/etcd
+  config:
+    path: /milvus/configs/embedEtcd.yaml
+
+rootCoord:
+  port: 53100
+
+dataCoord:
+  port: 13333
+
+queryCoord:
+  port: 19531
+
+dataNode:
+  port: 21124
+
+indexNode:
+  port: 21121
+
+queryNode:
+  port: 21123
+
+proxy:
+  port: 19530
