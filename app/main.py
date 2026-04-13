@@ -22,7 +22,7 @@ from starlette.responses import StreamingResponse
 from app.auth import require_api_key
 from app.config import settings
 from app.modules.cleanup import start_cleanup_task
-from app.database import get_db, engine
+from app.database import get_db, engine, async_session
 from app.logging_config import setup_logging
 from app.middleware.error_logging import ErrorLoggingMiddleware
 from app.middleware.performance import PerformanceMiddleware
@@ -428,7 +428,29 @@ async def query_rag(body: RagInput):
         confidence_threshold=body.confidence_threshold,
         skip_rerank=body.skip_rerank,
     )
+@app.get("/rag/dedup")
+async def list_dedup_log(limit: int = 50, offset: int = 0):
+    """List logged near-duplicate rejections for manual review."""
+    async with async_session() as session:
+        result = await session.execute(
+            text(
+                "SELECT id, new_content_hash, existing_entry_id, similarity_score, "
+                "action_taken, created_at FROM dedup_log "
+                "ORDER BY created_at DESC LIMIT :limit OFFSET :offset"
+            ),
+            {"limit": limit, "offset": offset},
+        )
+        rows = result.mappings().all()
 
+        count_result = await session.execute(text("SELECT COUNT(*) FROM dedup_log"))
+        total = count_result.scalar()
+
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "entries": [dict(r) for r in rows],
+    }
 
 class GtInput(BaseModel):
     topic: str
