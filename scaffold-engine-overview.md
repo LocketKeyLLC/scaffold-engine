@@ -2,7 +2,7 @@
 
 **Last Updated:** April 13, 2026 (Vector DB migration — Milvus 2.5.27, TOON schema, Redis cache)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `a128bbc` — `feat: model valve system — valve definitions, model_overrides threading through orchestrator`
+**Latest Commit:** `e114662` — `feat: model validation — pre-flight check against Ollama /api/tags, 422 on missing models`
 **Test Suite:** 230 collected, 201 passed, 29 skipped, 0 failed
 **Codebase:** ~5,900 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
@@ -623,4 +623,20 @@ scaffold-engine/
 
 ### Known Issues (updated)
 9. **Backup volume empty** — `milvus-data-backup-20260413` contains orphaned segments with no collection metadata in etcd. The 143 old entries are not recoverable from this volume. Knowledge base will be repopulated through the pipeline.
-10. **Model validation not yet implemented** — no pre-flight check that valve-selected models exist in Ollama. Planned for Step 2E.
+
+---
+
+## Changelog — April 13, 2026 (Model Validation)
+
+### Orchestrator
+1. **`app/model_router.py`** — `validate_models(overrides)` queries Ollama `/api/tags`, resolves all 6 Ollama-routed roles (`model_general`, `model_verifier`, `model_coder`, `model_router`, `model_fallback`, `model_cloud_alt`) via `get_model()`, returns list of missing tags. Handles `:latest` suffix matching both directions
+2. **`app/main.py`** — `_require_valid_models(overrides)` helper raises HTTP 422 with `missing_models` list and hint. Wired into `/ideate`, `/ideate/confirm`, `/dag`, `/execute/all`
+
+### Design decisions
+- **Validate at job start, not per-node** — avoids redundant Ollama calls during execution
+- **Embedder and reranker excluded** — embedder is dimension-locked (512d), reranker is a HuggingFace CrossEncoder singleton; neither routes through Ollama generate
+- **Silent pass on Ollama unreachable** — returns empty list so health check handles connectivity separately
+- **Uses persistent `_get_client()`** — no new HTTP connections
+
+### Known Issues (updated)
+- Removed #10 (model validation not implemented) — resolved by this commit
