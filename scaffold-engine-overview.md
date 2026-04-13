@@ -2,7 +2,7 @@
 
 **Last Updated:** April 13, 2026 (Vector DB migration — Milvus 2.5.27, TOON schema, Redis cache)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `d953d79` — `feat: vector DB migration — Milvus 2.5.27, 512d HNSW_SQ8, TOON schema, Redis cache`
+**Latest Commit:** `a128bbc` — `feat: model valve system — valve definitions, model_overrides threading through orchestrator`
 **Test Suite:** 230 collected, 201 passed, 29 skipped, 0 failed
 **Codebase:** ~5,900 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
@@ -217,19 +217,19 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 
 | Role | Model Tag | Configured Via | Notes |
 |------|-----------|----------------|-------|
-| Generation | `qwen3-vl:235b-instruct-cloud` | `MODEL_GENERAL` env var in docker-compose.yml | Heavy cloud model, 600s timeout. **Must match** between docker-compose.yml and config.py |
-| Triage | `qwen3:4b` | `triage_model` valve in scaffold_router.py | Conversational triage + idea synthesis |
-| Verifier | `qwen2.5:7b` | `MODEL_VERIFIER` env var | Validates LLM outputs |
-| Code | `qwen2.5-coder:7b` | `MODEL_CODER` env var | CodeGen tool nodes |
-| Embeddings | `qwen3-embedding:8b` | `MODEL_EMBEDDER_PIPELINE` env var | MRL truncated to 512d, L2-normalized |
-| Reranker | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` | `MODEL_RERANKER` env var | CrossEncoder, runs in-container |
-| Query gen | `qwen3:4b` | `MODEL_ROUTER` env var | DAG planning / query routing |
-| Fallback | `qwen3.5:latest` | `MODEL_FALLBACK` env var | Cascade fallback |
-| Cloud alt | `qwen3.5:397b-cloud` | `MODEL_CLOUD_ALT` env var | Alternative heavy model |
+| Generation | `qwen3-vl:235b-instruct-cloud` | `model_general` valve + `MODEL_GENERAL` env var | Valve overrides env var per-request. 600s timeout |
+| Triage | `qwen3:4b` | `triage_model` valve in scaffold_router.py | Direct to Ollama, not via orchestrator |
+| Verifier | `qwen2.5:7b` | `model_verifier` valve + `MODEL_VERIFIER` env var | Validates LLM outputs |
+| Code | `qwen2.5-coder:7b` | `model_coder` valve + `MODEL_CODER` env var | CodeGen tool nodes |
+| Embeddings | `qwen3-embedding:8b` | `model_embedder` valve + `MODEL_EMBEDDER_PIPELINE` env var | Config-level only (512d dimension constraint). MRL truncated, L2-normalized |
+| Reranker | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` | `model_reranker` valve + `MODEL_RERANKER` env var | Config-level only (singleton loaded at startup). CrossEncoder, runs in-container |
+| Query gen | `qwen3:4b` | `model_router` valve + `MODEL_ROUTER` env var | DAG planning / query routing |
+| Fallback | `qwen3.5:latest` | `model_fallback` valve + `MODEL_FALLBACK` env var | Cascade fallback |
+| Cloud alt | `qwen3.5:397b-cloud` | `model_cloud_alt` valve + `MODEL_CLOUD_ALT` env var | Alternative heavy model |
 
 > ⚠️ Short tag `qwen3-vl:235b` does **not** exist — always use full tag `qwen3-vl:235b-instruct-cloud`
 
-> ⚠️ `MODEL_GENERAL` in `docker-compose.yml` **overrides** the `model_general` default in `config.py`. Always check the env var first when debugging model assignment issues.
+> ⚠️ **Model override priority:** Open WebUI valve > `docker-compose.yml` env var > `config.py` default. The `get_model()` helper in `config.py` enforces this chain. Embedder and reranker valves are config-level references only — they do not override per-request due to dimension and singleton constraints.
 
 ---
 
@@ -303,6 +303,14 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | `triage_model` | `qwen3:4b` | Model for conversational triage and synthesis |
 | `triage_timeout` | `900` | Seconds to wait for triage model responses |
 | `ollama_url` | `http://172.18.0.1:11434` | Ollama endpoint (host via bridge gateway) |
+| `model_general` | `qwen3-vl:235b-instruct-cloud` | Generation model (overrides env var per-request) |
+| `model_verifier` | `qwen2.5:7b` | Verifier model |
+| `model_coder` | `qwen2.5-coder:7b` | Code generation model |
+| `model_embedder` | `qwen3-embedding:8b` | Embedding model (config-level only) |
+| `model_reranker` | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` | Reranker model (config-level only) |
+| `model_router` | `qwen3:4b` | Query/DAG planning model |
+| `model_fallback` | `qwen3.5:latest` | Cascade fallback model |
+| `model_cloud_alt` | `qwen3.5:397b-cloud` | Alternative cloud model |
 
 ---
 
@@ -421,6 +429,7 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 23. **Tool-constrained DAG generation** — Only LLM, CodeGen, SearXNG, and Milvus are valid tools; Human and FileSystem removed to prevent unexecutable nodes
 24. **Anti-redundancy DAG rules** — Prompt instructs LLM to produce distinct, non-overlapping nodes that extend rather than duplicate prior work
 25. **Clean clarification display** — Feasibility clarifications shown without generic boilerplate suffixes
+26. **Model valve system** — All model roles switchable via Open WebUI admin valves; overrides threaded per-request through `model_overrides` dict with `get_model()` helper enforcing priority chain (valve > env var > default). Embedder/reranker are config-level only due to dimension and singleton constraints
 
 ---
 
@@ -583,3 +592,35 @@ scaffold-engine/
 6. **Knowledge base empty** — toon_v2 has 2 test entries. Old 143 entries from `technical_knowledge` need re-ingestion through the pipeline. Old data preserved in `milvus-data-backup-20260413` volume.
 7. **Golden retrieval tests skipped** — blocked on knowledge base repopulation (issue 6).
 8. **Milvus 2.5.27 standalone requires env vars** — `ETCD_USE_EMBED=true`, `COMMON_STORAGETYPE=local`, `seccomp:unconfined`. The milvus.yaml port-override approach caused startup panics; env vars are the correct method.
+
+---
+
+## Changelog — April 13, 2026 (Model Valve System)
+
+### Pipeline — scaffold_router.py
+1. **8 new model valves** — `model_general`, `model_verifier`, `model_coder`, `model_embedder`, `model_reranker`, `model_router`, `model_fallback`, `model_cloud_alt`. All switchable from Open WebUI admin panel
+2. **`_model_overrides()` helper** — builds override dict from current valve values
+3. **All 9 orchestrator API calls** now pass `model_overrides` in request body (`/ideate`, `/ideate/confirm`, `/dag` ×2, `/execute/all`, `/idea`, `/dag` manual, `/optimize`, `/rag`)
+
+### Orchestrator
+4. **`app/config.py`** — `get_model(role, overrides)` helper: valve override > env var > default
+5. **`app/main.py`** — `IdeaInput`, `DagInput` accept `model_overrides`; all endpoints extract and pass downstream
+6. **`app/schemas.py`** — `ExecuteNextInput` gains `model_overrides: dict | None`
+7. **`app/modules/ideation_workflow.py`** — `analyze_and_confirm()` and `research_and_compile()` accept and use overrides via `get_model()`
+8. **`app/modules/dag_generator.py`** — `generate_dag()` accepts overrides
+9. **`app/modules/execution_agent.py`** — `execute_all_nodes()` and `execute_next_node()` thread overrides to generation, verifier, and coder model selection
+10. **`app/modules/idea_refinement.py`** — `refine_idea()` accepts overrides
+
+### Design decisions
+- **Embedder and reranker are config-level only** — embedder is tied to 512d vector dimensions (per-request swap risks dimension mismatch); reranker is a CrossEncoder singleton loaded at startup. Valves exist for these as configuration reference but do not override per-request
+- **Override priority chain:** Open WebUI valve > docker-compose env var > config.py default
+- **Backward compatible** — all `model_overrides` fields are optional; omitting them preserves existing behavior
+
+### Test results
+- **162 passed, 45 skipped, 0 failed** in container
+- **30 passed** for scaffold_router.py locally
+- No regressions from valve changes
+
+### Known Issues (updated)
+9. **Backup volume empty** — `milvus-data-backup-20260413` contains orphaned segments with no collection metadata in etcd. The 143 old entries are not recoverable from this volume. Knowledge base will be repopulated through the pipeline.
+10. **Model validation not yet implemented** — no pre-flight check that valve-selected models exist in Ollama. Planned for Step 2E.
