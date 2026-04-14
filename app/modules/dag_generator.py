@@ -469,38 +469,12 @@ def _build_edges(tasks: list[dict]) -> list[dict]:
 
 
 def _validate_graph(tasks: list[dict], edges: list[dict]) -> tuple[list[str], list[str]]:
-    """Validate DAG structure using Kahn's algorithm. Returns (errors, warnings)."""
+    """Validate DAG structure (roots, leaves, connectivity). Returns (errors, warnings)."""
     errors: list[str] = []
     warnings: list[str] = []
     ids = [t["id"] for t in tasks]
     id_set = set(ids)
 
-    # Build adjacency and in-degree
-    in_degree: dict[str, int] = {tid: 0 for tid in ids}
-    adjacency: dict[str, list[str]] = {tid: [] for tid in ids}
-    for edge in edges:
-        src, tgt = edge["from"], edge["to"]
-        if src in adjacency and tgt in id_set:
-            adjacency[src].append(tgt)
-            in_degree[tgt] = in_degree.get(tgt, 0) + 1
-
-    # Kahn's algorithm for cycle detection
-    queue: deque[str] = deque()
-    for tid in ids:
-        if in_degree[tid] == 0:
-            queue.append(tid)
-
-    sorted_count = 0
-    while queue:
-        node = queue.popleft()
-        sorted_count += 1
-        for neighbor in adjacency[node]:
-            in_degree[neighbor] -= 1
-            if in_degree[neighbor] == 0:
-                queue.append(neighbor)
-
-    if sorted_count != len(ids):
-        errors.append("Circular dependency detected — DAG contains a cycle")
 
     # Check for roots and leaves
     sources = {e["from"] for e in edges}

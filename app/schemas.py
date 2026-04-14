@@ -367,4 +367,5 @@ class ExecutionResult(BaseModel):
     prompt_used: str | None = None
     awaiting_approval: bool | None = None
     message: str | None = None
+    tool: str | None = None
     error: str | None = None
