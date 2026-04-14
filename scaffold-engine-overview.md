@@ -2,8 +2,8 @@
 
 **Last Updated:** April 14, 2026 (Milvus moved into docker-compose)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `e114662` — `feat: model validation — pre-flight check against Ollama /api/tags, 422 on missing models`
-**Test Suite:** 248 collected, 219 passed, 29 skipped, 0 failed
+**Latest Commit:** `c43b3c4` — `fix: add domain expr to all Milvus searches — partition key isolation requires it`
+**Test Suite:** 249 collected, 219 passed, 30 skipped, 0 failed (+ 30 pipeline + 17 valve locally)
 **Codebase:** ~5,900 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
 ---
@@ -693,3 +693,34 @@ scaffold-engine/
 
 ### Test count
 - **248 collected, 219 passed, 29 skipped, 0 failed** (17 new tests added)
+
+---
+
+## Changelog — April 14, 2026 (E2E Verification + Partition Key Fix)
+
+### Pre-flight
+1. **toon_v2 collection missing** — lost when Milvus moved into docker-compose (volume survived but collection metadata did not). Recreated via `scripts/create_toon_v2.py`. Consider adding auto-create logic to `_get_collection()` for resilience against future volume resets.
+
+### E2E Pipeline Verification
+2. **Full auto-chain verified** — triage → `/go` → synthesis → Phase 1 (ideate, 27s) → `/confirm` → Phase 2 (research, 110s, 3 SearXNG queries, 8 entries ingested) → DAG (4 nodes, 9s) → execute (T1–T4, ~33min total) → compiled output (3,722 chars). All on CPU-only hardware.
+3. **T1 auto-retry exercised** — verifier rejected T1's first attempt (scope mismatch: generated full CLI tool instead of HTML structure design). Auto-retry produced correct output on second attempt. Working as designed.
+4. **RAG pipeline validated** — vector search (top scores 0.99+), keyword search, CrossEncoder reranker (13.6s cold load, ~4-6s warm), upstream context injection all functioning.
+5. **Reranker cold-load** — `Qwen3-Reranker-0.6B-seq-cls` took 13.6s on first invocation (HuggingFace cache check + CPU load), ~4-6s on subsequent calls.
+
+### Bug fix: partition key isolation
+6. **`app/modules/rag_pipeline.py`** — three search paths were missing the required `domain` filter expression for Milvus partition key isolation (`partitionkey.isolation: true`):
+   - **Vector search** in `_vector_search()` (~line 146): `if domain:` → `search_domain = domain or "eng"`; always includes `domain == "{search_domain}"` in expr
+   - **Keyword search** in `_keyword_search()` (~line 205): same pattern
+   - **Semantic dedup search** in `ingest_entries()` (~line 522): added `expr=f'domain == "{domain}"'` to the ANN search call
+   - Without these, Milvus rejected every search with `partition key not found in expr`, silently disabling semantic dedup and degrading retrieval (keyword-only fallback)
+7. **Commit:** `c43b3c4` — `fix: add domain expr to all Milvus searches — partition key isolation requires it`
+
+### Test results
+8. **In-container:** 202 passed, 30 skipped, 0 failed (26.98s)
+9. **Pipeline (local):** 30 passed (0.11s)
+10. **Model valves (local):** 17 passed (0.12s)
+11. **Total:** 249 passed, 30 skipped, 0 failed — no regressions from partition key fix
+
+### Known Issues (updated)
+12. **Knowledge base has 8 entries** — toon_v2 now contains 8 entries from the E2E test run. Old 143 entries are not recoverable (backup volume had orphaned segments). Knowledge base will grow organically through pipeline usage.
+13. **Collection not auto-created** — `_get_collection()` logs an error and returns `None` if `toon_v2` is missing. A future hardening pass should add auto-create with the full TOON schema so the collection survives volume resets without manual intervention via `scripts/create_toon_v2.py`.
