@@ -1,10 +1,10 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 14, 2026 (Milvus moved into docker-compose)
+**Last Updated:** April 14, 2026 (code quality refactor — issues 9, 13, 14, 15, 16)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `b409575` — `fix: add node_retry SSE handler + extract _build_pipeline_summary helper`
-**Test Suite:** 249 collected, 219 passed, 30 skipped, 0 failed (+ 31 pipeline + 17 valve locally)
-**Codebase:** ~5,900 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
+**Latest Commit:** `06dd410` — `refactor: consolidate model selection, stale cleanup, JSON parsing, and endpoint validation`
+**Test Suite:** 250 collected, 202 passed, 30 skipped, 0 failed (+ 31 pipeline + 17 valve locally)
+**Codebase:** ~6,400 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
 ---
 
@@ -239,7 +239,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `app/main.py` | ~575 | FastAPI app with lifespan, health checks, middleware, all endpoints |
+| `app/main.py` | ~571 | FastAPI app with lifespan, health checks, middleware, all endpoints |
 | `app/model_router.py` | 306 | Ollama API routing with retry cascade, persistent `httpx.AsyncClient` connection pool |
 | `app/config.py` | ~38 | Pydantic Settings configuration (all env vars with defaults aligned to docker-compose) |
 | `app/auth.py` | 33 | API key authentication via `X-API-Key` header |
@@ -256,13 +256,13 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | `app/modules/dag_generator.py` | ~615 | DAG creation with Kahn's cycle detection, numeric-sort truncation (max 10 nodes). JSON parsing via shared `llm_parsing.py` |
 | `app/modules/rag_pipeline.py` | 451 | RAG retrieval: embed → parallel vector + keyword search → RRF merge → CrossEncoder rerank. Includes `ingest_entries()` |
 | `app/modules/ideation_workflow.py` | ~265 | Ideation-to-Workflow pipeline: Phase 1 (refine + feasibility + confirmation gate), Phase 2 (research → ingest → compile). 8 smoke tests |
-| `app/modules/idea_refinement.py` | ~177 | Refines raw user ideas into structured briefs |
+| `app/modules/idea_refinement.py` | ~172 | Refines raw user ideas into structured briefs |
 | `app/modules/prompt_optimizer.py` | 210 | Prompt optimization: strip → LLM optimize → verify |
-| `app/modules/gt_extractor.py` | 457 | Ground truth extraction: SearXNG → LLM distillation → TOON formatting → optional GitHub push |
+| `app/modules/gt_extractor.py` | 434 | Ground truth extraction: SearXNG → LLM distillation → TOON formatting → optional GitHub push |
 | `app/modules/gt_browser.py` | ~170 | Ground truth browsing and search. All Milvus calls wrapped in `run_in_executor` |
 | `app/modules/prompt_inspector.py` | 116 | Prompt analysis and inspection |
 | `app/modules/execution_handler.py` | ~75 | Execution status only (`execution_status()`). Dead code (`retry_node()`) removed in audit |
-| `app/modules/cleanup.py` | 65 | Periodic stale-job reaper (15-min interval), active-node-aware |
+| `app/modules/cleanup.py` | 108 | Periodic stale-job reaper (15-min interval), unified reap_stale_jobs(), active-node-aware |
 
 ### Routers & Middleware
 
@@ -847,3 +847,34 @@ scaffold-engine/
 
 ### Commit
 - `feat: add /model command system — list/set/reset/available from chat`
+
+---
+
+## Changelog — April 14, 2026 (Code Quality Refactor — Issues 9, 13, 14, 15, 16)
+
+### Issue 9: Model selection consolidation
+1. **`app/modules/idea_refinement.py`** — replaced manual override chain `model or (model_overrides or {}).get("model_general", model_router.settings.model_general)` with `get_model("model_general", model_overrides)` from `app/config.py`
+2. **`app/modules/dag_generator.py`** — same replacement
+
+### Issue 13: ConfirmInput Pydantic model
+3. **`app/main.py`** — added `ConfirmInput(BaseModel)` with fields: `job_id` (str), `feedback` (str|None), `push_to_github` (bool=False), `model_overrides` (dict|None). `/ideate/confirm` endpoint now uses typed model instead of raw `request.json()`
+
+### Issue 14: refine_idea target_status parameter
+4. **`app/modules/idea_refinement.py`** — `refine_idea()` gains `target_status: str = "planning"` parameter; hardcoded `'planning'` in UPDATE SQL replaced with parameterized `:target_status`
+5. **`app/modules/ideation_workflow.py`** — `analyze_and_confirm()` passes `target_status="awaiting_confirmation"` to `refine_idea()`, removing redundant status overwrite UPDATE
+
+### Issue 15: Stale cleanup consolidation
+6. **`app/modules/cleanup.py`** — new `reap_stale_jobs(db)` function covers all status sets: running/executing > 30min → failed (with active-node guard), planning > 60min → cancelled. Returns `{"running_to_failed": N, "planning_to_cancelled": N}`
+7. **`app/main.py`** — startup cleanup block and `/jobs/cleanup` endpoint both call `reap_stale_jobs()` instead of inline SQL
+
+### Issue 16: _parse_entries consolidation
+8. **`app/modules/gt_extractor.py`** — 26-line `_parse_entries()` replaced with 1-line call to `parse_json_array()` from `app/utils/llm_parsing`, gaining `json_repair` fallback
+
+### Commit
+- `06dd410` — `refactor: consolidate model selection, stale cleanup, JSON parsing, and endpoint validation`
+
+### Test results
+- **In-container:** 202 passed, 30 skipped, 0 failed (23.20s)
+- **Pipeline (local):** 31 passed (0.06s)
+- **Model valves (local):** 17 passed (0.04s)
+- **Total:** 250 passed, 30 skipped, 0 failed — no regressions
