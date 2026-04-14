@@ -79,7 +79,6 @@ services:
       LOG_FILE: /var/log/scaffold/app.jsonl
       MODEL_ROUTER: qwen3:4b
       PYTHONPATH: /code
-      MODEL_EMBEDDER: qwen3-embedding:0.6b
       MODEL_EMBEDDER_PIPELINE: qwen3-embedding:8b
       MODEL_RERANKER: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
       MODEL_CODER: qwen2.5-coder:7b
