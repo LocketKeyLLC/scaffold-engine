@@ -60,10 +60,10 @@ async def lifespan(app: FastAPI):
 
     # Verify Ollama
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{settings.ollama_base_url}/api/tags")
-            models = [m["name"] for m in resp.json().get("models", [])]
-            logger.info("ollama_connected: models_available=%d", len(models))
+        from app.model_router import _get_client
+        resp = await _get_client().get(f"{settings.ollama_base_url}/api/tags")
+        models = [m["name"] for m in resp.json().get("models", [])]
+        logger.info("ollama_connected: models_available=%d", len(models))
     except Exception as e:
         logger.warning("ollama_connection_failed: url=%s error=%s", settings.ollama_base_url, e)
 
@@ -101,6 +101,8 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     await close_client()
+    from app.utils.http_clients import close_clients
+    await close_clients()
     milvus_connections.disconnect("default")
     logger.info("engine_stopped")
 
@@ -202,19 +204,18 @@ async def health():
     if isinstance(milvus, Exception):
         milvus = {"status": "down", "latency_ms": 0, "collection_count": 0, "entry_count": 0}
 
-    # Redis + cache stats
-    try:
-        import redis as _redis
-        _r = _redis.from_url(settings.redis_url, socket_timeout=2)
-        _r.ping()
-        redis_info = {"status": "up", "keys": _r.dbsize()}
-    except Exception:
-        redis_info = {"status": "down", "keys": 0}
+    # Redis + cache stats (reuse async connection from embedding cache)
     try:
         from app.utils.embedding_cache import get_cache
-        cache_stats = get_cache().stats
+        _cache = get_cache()
+        cache_stats = _cache.stats
+        _redis_conn = await _cache._get_redis()
+        await asyncio.wait_for(_redis_conn.ping(), timeout=2.0)
+        _key_count = await asyncio.wait_for(_redis_conn.dbsize(), timeout=2.0)
+        redis_info = {"status": "up", "keys": _key_count}
     except Exception:
-        cache_stats = {}
+        redis_info = {"status": "down", "keys": 0}
+        cache_stats = cache_stats if 'cache_stats' in dir() else {}
     checks = {"postgresql": pg, "ollama": ollama, "milvus": milvus, "redis": redis_info, "embedding_cache": cache_stats}
     pg_up = pg["status"] == "up"
     ollama_up = ollama["status"] == "up"

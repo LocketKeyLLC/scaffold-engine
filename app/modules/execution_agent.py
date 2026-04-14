@@ -354,13 +354,14 @@ _SEARXNG_URL = _os.environ.get("SEARXNG_URL", "http://searxng:8080")
 async def _searxng_search(query: str, max_results: int = 5) -> str:
     """Call SearXNG JSON API, return formatted results."""
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                f"{_SEARXNG_URL}/search",
-                params={"q": query, "format": "json", "categories": "general"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        from app.utils.http_clients import get_searxng_client
+        client = get_searxng_client()
+        resp = await client.get(
+            "/search",
+            params={"q": query, "format": "json", "categories": "general"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
         results = data.get("results", [])[:max_results]
         if not results:
             return "No search results found."

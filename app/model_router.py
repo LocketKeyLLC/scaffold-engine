@@ -275,11 +275,9 @@ async def embed(
         "model": model,
         "input": inputs,
     }
-    resp = await _call_ollama(
-        "/api/embed", payload, model, _timeout_for(model),
-    )
+    resp = await _dispatch_with_retry("/api/embed", payload, model, fallback=None)
     if not resp.success:
-        logger.error("Embedding failed: %s", resp.error)
+        logger.error("Embedding failed after retries: %s", resp.error)
         return []
     return resp.raw.get("embeddings", [])
 
@@ -298,9 +296,9 @@ async def classify(
 async def list_models() -> list[str]:
     """Return list of available Ollama models."""
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{settings.ollama_base_url}/api/tags")
-            return [m["name"] for m in resp.json().get("models", [])]
+        client = _get_client()
+        resp = await client.get(f"{settings.ollama_base_url}/api/tags")
+        return [m["name"] for m in resp.json().get("models", [])]
     except Exception as e:
         logger.error("Failed to list models: %s", e)
         return []
