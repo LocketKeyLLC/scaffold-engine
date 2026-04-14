@@ -357,7 +357,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | `benchmark_results` | Performance benchmarking data |
 | `dedup_log` | Near-duplicate rejection log (content_hash, existing_entry_id, similarity_score, action_taken) |
 
-8 incremental migrations in `db/migrations/` (002–009).
+9 incremental migrations in `db/migrations/` (002–009).
 
 ---
 
