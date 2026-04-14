@@ -951,7 +951,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                 text = " ".join(parts[1:])
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/rag",
-                    json={"query": text, "top_k": 5, "model_overrides": self._model_overrides()},
+                    json={"query": text, "top_k": 5},
                     headers={"X-API-Key": self.valves.api_key},
                     timeout=60,
                 )

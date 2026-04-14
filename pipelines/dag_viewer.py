@@ -22,7 +22,7 @@ class Pipeline:
         self.name = "DAG Viewer"
         self.valves = self.Valves()
 
-    def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> str:
+    def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Optional[str]:
         msg = user_message.strip()
 
         if not msg.startswith("/dag"):

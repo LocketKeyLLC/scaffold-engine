@@ -132,11 +132,11 @@ def sanitize_toon_content(text: str) -> str:
     return sanitized
 
 
-def _format_toon_rows(entries: list[dict], start_id: int = 1) -> list[str]:
+def _format_toon_rows(entries: list[dict]) -> list[str]:
     """Convert knowledge entries to TOON data rows."""
     rows = []
     for i, entry in enumerate(entries):
-        eid = start_id + i
+        eid = i + 1
         topic = entry.get("topic", "unknown").strip().lower().replace(" ", "-")
         content = sanitize_toon_content(entry.get("content", ""))
         tags = ",".join(t.strip().lower() for t in entry.get("tags", "").split(","))
