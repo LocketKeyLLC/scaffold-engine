@@ -159,7 +159,7 @@ class Pipeline:
         job_id, node_key = parts[2], parts[3]
         try:
             resp = requests.post(
-                f"{self.valves.orchestrator_url}/retry",
+                f"{self.valves.orchestrator_url}/exec/retry",
                 json={"job_id": job_id, "node_key": node_key},
                 headers={"X-API-Key": self.valves.api_key},
                 timeout=30
