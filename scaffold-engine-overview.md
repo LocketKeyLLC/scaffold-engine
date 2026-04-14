@@ -2,7 +2,7 @@
 
 **Last Updated:** April 14, 2026 (Milvus moved into docker-compose)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `c43b3c4` — `fix: add domain expr to all Milvus searches — partition key isolation requires it`
+**Latest Commit:** `671214f` — `refactor: consolidate _get_collection into shared milvus_utils with auto-create`
 **Test Suite:** 249 collected, 219 passed, 30 skipped, 0 failed (+ 30 pipeline + 17 valve locally)
 **Codebase:** ~5,900 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
@@ -277,6 +277,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | File | Lines | Purpose |
 |------|-------|---------|
 | `app/utils/llm_parsing.py` | 120 | Shared LLM output parsing: `strip_think_tags()`, `parse_json_object()` and `parse_json_array()` with 4-step fallback chain |
+| `app/utils/milvus_utils.py` | 114 | Shared Milvus collection accessor: `get_collection(raise_on_missing)` with auto-creation of toon_v2 schema |
 
 ---
 
@@ -506,7 +507,8 @@ scaffold-engine/
 │   │   ├── performance.py         # Request timing
 │   │   └── error_logging.py       # Error capture
 │   └── utils/
-│       └── llm_parsing.py         # Shared JSON parsing
+│       ├── llm_parsing.py         # Shared JSON parsing
+│       └── milvus_utils.py        # Shared Milvus collection accessor + auto-create
 ├── pipelines/
 │   ├── scaffold_router.py         # Main pipeline (v3.1)
 │   ├── gt_browser.py
@@ -723,4 +725,27 @@ scaffold-engine/
 
 ### Known Issues (updated)
 12. **Knowledge base has 8 entries** — toon_v2 now contains 8 entries from the E2E test run. Old 143 entries are not recoverable (backup volume had orphaned segments). Knowledge base will grow organically through pipeline usage.
-13. **Collection not auto-created** — `_get_collection()` logs an error and returns `None` if `toon_v2` is missing. A future hardening pass should add auto-create with the full TOON schema so the collection survives volume resets without manual intervention via `scripts/create_toon_v2.py`.
+13. **~~Collection not auto-created~~** — RESOLVED in `671214f`. `get_collection()` in `app/utils/milvus_utils.py` auto-creates toon_v2 with full TOON schema if missing.
+
+---
+
+## Changelog — April 14, 2026 (Code Quality — Issues 5, 8, 25)
+
+### Issue 8: Pydantic config fix
+1. **`app/config.py`** — `semantic_dedup_threshold` replaced raw `os.getenv()` with a standard Pydantic `float` field (`default=0.95`). Pydantic Settings auto-reads `SEMANTIC_DEDUP_THRESHOLD` from env. Removed unused `import os`
+2. **Commit:** `a3bd8f0`
+
+### Issue 25: Dead env var
+3. **`docker-compose.yml`** — removed `MODEL_EMBEDDER: qwen3-embedding:0.6b` (never read by any code). `MODEL_EMBEDDER_PIPELINE` retained (used by orchestrator)
+4. **Commit:** `589feee`
+
+### Issue 5: Consolidated `_get_collection()` + auto-create (resolves Known Issue #13)
+5. **`app/utils/milvus_utils.py`** (new, 114 lines) — single `get_collection(raise_on_missing=False)` function:
+   - Connects to Milvus if needed
+   - Auto-creates `toon_v2` with full TOON schema (16 fields, 512d HNSW_SQ8 COSINE, partition key isolation, 6 scalar indexes) if collection is missing — replicates `scripts/create_toon_v2.py` exactly
+   - `raise_on_missing=True`: raises `RuntimeError` on failure (gt_browser pattern)
+   - `raise_on_missing=False` (default): returns `None` on failure (rag_pipeline/staleness pattern)
+6. **`app/modules/rag_pipeline.py`** — old `_get_collection()` replaced with `_get_collection = get_collection` alias. Removed direct `connections`/`utility` imports
+7. **`app/modules/gt_browser.py`** — old `_get_collection()` now delegates to `get_collection(raise_on_missing=True)`. Removed direct `connections`/`utility` imports
+8. **`app/utils/staleness.py`** — old `_get_collection()` replaced with `_get_collection = get_collection` alias. Removed direct `connections`/`utility` imports
+9. **Commit:** `671214f`
