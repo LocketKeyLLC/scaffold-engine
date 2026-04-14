@@ -2,8 +2,8 @@
 
 **Last Updated:** April 14, 2026 (Milvus moved into docker-compose)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `671214f` — `refactor: consolidate _get_collection into shared milvus_utils with auto-create`
-**Test Suite:** 249 collected, 219 passed, 30 skipped, 0 failed (+ 30 pipeline + 17 valve locally)
+**Latest Commit:** `b409575` — `fix: add node_retry SSE handler + extract _build_pipeline_summary helper`
+**Test Suite:** 249 collected, 219 passed, 30 skipped, 0 failed (+ 31 pipeline + 17 valve locally)
 **Codebase:** ~5,900 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
 ---
@@ -287,7 +287,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 
 | Pipeline | Lines | Purpose |
 |----------|-------|---------|
-| `scaffold_router.py` | ~974 | Main pipeline (v3.1): conversational triage, transcript-based synthesis, auto-chains `/go` → Phase 1 → confirmation gate, and `/confirm` → Phase 2 → DAG → execute. SSE streaming with keepalive. **30 smoke tests** |
+| `scaffold_router.py` | ~974 | Main pipeline (v3.1): conversational triage, transcript-based synthesis, auto-chains `/go` → Phase 1 → confirmation gate, and `/confirm` → Phase 2 → DAG → execute. SSE streaming with keepalive. **31 smoke tests** |
 | `gt_browser.py` | 205 | Ground truth browsing |
 | `execution_handler.py` | 201 | Direct execution control |
 | `prompt_inspector.py` | 178 | Prompt analysis |
@@ -390,7 +390,7 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 248 tests collected (excluding 4 flaky live golden-retrieval tests):
 
 - **227 passed, 21 skipped** (skips: files not in container, 7 from deleted `jobs_cleanup.py`)
-- **`test_scaffold_router.py`** — 30 smoke tests (pure functions, SSE parsing, command dispatch). Run with `--noconftest`
+- **`test_scaffold_router.py`** — 31 smoke tests (pure functions, SSE parsing, command dispatch). Run with `--noconftest`
 - **`test_ideation_workflow.py`** — 8 smoke tests (Phase 1 + Phase 2 with full dep mocking)
 - **`test_model_valves.py`** — 17 tests (get_model priority chain, _model_overrides mapping, payload inclusion). Run with `--noconftest`
 - CI via GitHub Actions (`.github/workflows/test.yml` and `ci.yml`)
@@ -801,3 +801,25 @@ scaffold-engine/
 ### Test results
 - Container restart confirmed (`docker restart open-webui-pipelines`)
 - All field names now match orchestrator response schemas
+
+---
+
+## Changelog — April 14, 2026 (SSE node_retry handler + pipeline summary refactor)
+
+### Pipeline — pipelines/scaffold_router.py
+1. **`_handle_sse_event()` — `node_retry` handler added** — when `execution_agent.py` auto-retries a failed node, the user now sees `🔄 Step T1: Retrying — <title> (attempt 2)...` instead of a confusing fail-then-silent-rerun sequence
+2. **Test added** — `test_node_retry` in `TestHandleSSEEvent` (31 smoke tests total)
+
+### Orchestrator — app/modules/execution_agent.py
+3. **`_build_pipeline_summary()` extracted** — async helper that builds the `pipeline_complete` SSE payload (fetches compiled_output, computes pass/fail counts, assembles failed_node_details). Replaces two near-identical ~30-line blocks:
+   - "terminal: all nodes done" path — calls with `extra_fields={"status": "completed"}`
+   - "early exit: auto-completion" path — calls without extra fields
+4. **Net change:** +76 / -63 lines — added a feature while reducing duplication
+
+### Test results
+5. **Pipeline (local):** 31 passed (0.09s)
+6. **Model valves (local):** 17 passed (0.04s)
+7. **In-container:** 202 passed, 30 skipped, 0 failed (20.91s)
+
+### Commit
+- `b409575` — `fix: add node_retry SSE handler + extract _build_pipeline_summary helper`
