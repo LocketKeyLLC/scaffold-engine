@@ -143,8 +143,8 @@ async def _vector_search(
                 limit=top_k,
                 output_fields=["canonical_text", "title", "domain_tags", "source_url", "entry_id", "domain", "confidence_score", "version", "supersedes_id"],
             )
-            if domain:
-                search_kwargs["expr"] = f'domain == "{domain}"'
+            search_domain = domain or "eng"
+            search_kwargs["expr"] = f'domain == "{search_domain}"'
 
             col = _get_collection() if collection is None else collection
             if col is None:
@@ -202,8 +202,8 @@ async def _keyword_search(
         conditions.append(f'title like "%{safe_word}%"')
 
     expr = " or ".join(conditions)
-    if domain:
-        expr = f'domain == "{domain}" and ({expr})'
+    search_domain = domain or "eng"
+    expr = f'domain == "{search_domain}" and ({expr})'
 
     def _sync() -> list[RagResult]:
         try:
@@ -490,7 +490,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
             existing = await loop.run_in_executor(
                 None,
                 lambda: collection.query(
-                    expr=f'content_hash == "{ch}"',
+                    expr=f'content_hash == "{ch}" and domain == "{domain}"',
                     output_fields=["entry_id"],
                     limit=1,
                 ),
@@ -524,6 +524,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
                     anns_field="dense_vector",
                     param={"metric_type": "COSINE", "params": {"ef": 32}},
                     limit=1,
+                    expr=f'domain == "{domain}"',
                     output_fields=["entry_id", "content_hash", "version", "supersedes_id"],
                 ),
             )
