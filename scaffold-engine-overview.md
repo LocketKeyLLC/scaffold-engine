@@ -432,6 +432,8 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 24. **Anti-redundancy DAG rules** — Prompt instructs LLM to produce distinct, non-overlapping nodes that extend rather than duplicate prior work
 25. **Clean clarification display** — Feasibility clarifications shown without generic boilerplate suffixes
 26. **Model valve system** — All model roles switchable via Open WebUI admin valves; overrides threaded per-request through `model_overrides` dict with `get_model()` helper enforcing priority chain (valve > env var > default). Embedder/reranker are config-level only due to dimension and singleton constraints
+27. **Three-tier ingestion logic** — dedup threshold (>0.95) rejects, version-chain window (0.90–0.95) creates linked versions, everything below is a new entry. Version check runs after content-hash dedup and after embedding.
+28. **Latest-version-by-default retrieval** — `query_rag()` strips superseded entries from results unless `include_history=True`, keeping responses current without breaking callers that don't pass the flag.
 
 ---
 
@@ -468,6 +470,7 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 | E — Ideation Workflow | Ideation pipeline with confirmation gate, Milvus ingestion | `897b29a` |
 | F–U — Full Audit | Triage v3.1, synthesis rewrite, execution fixes, model/prompt fixes, dead code removal, schema fixes, async audit, JSON parsing consolidation, retry unification, TOON docs, 38 new tests, file cleanup | `156789c` |
 | V — Test Fixes | Aligned test signatures with `execute_all_nodes()` (removed stale `db` arg, added `async_session` mock), updated DAG truncation tests from max 5→10 | `cb1ecc1` |
+| W — Version Chains | Version chain ingestion (0.90–0.95 similarity), latest-version retrieval filtering, include_history param | `05f040a` |
 
 ---
 
@@ -642,3 +645,26 @@ scaffold-engine/
 
 ### Known Issues (updated)
 - Removed #10 (model validation not implemented) — resolved by this commit
+11. **Version chain filter is result-set scoped** — `query_rag()` only filters superseded entries when both old and new versions appear in the same result set. If only the old version is retrieved (new one outside top-K), it still returns. Acceptable for now; stricter Milvus-side filtering deferred.
+
+---
+
+## Changelog — April 13, 2026 (Version Chains)
+
+### `app/modules/rag_pipeline.py`
+1. **`RagResult` dataclass** — added `version: int = 1` and `supersedes_id: str = ""` fields
+2. **Vector + keyword search** — both now fetch `version` and `supersedes_id` from Milvus and populate `RagResult`
+3. **`ingest_entries()` — 3-branch dedup/version logic:**
+   - cosine > 0.95 → reject (semantic duplicate, unchanged)
+   - cosine 0.90–0.95 → version chain: `version = old.version + 1`, `supersedes_id = old.entry_id`
+   - cosine < 0.90 → new entry (`version=1`, `supersedes_id=""`)
+4. **`query_rag()` — latest-version filtering:** filters out entries whose `entry_id` appears as a `supersedes_id` in another result. New `include_history: bool = False` parameter returns all versions when True
+
+### `app/main.py`
+5. **`RagInput`** — added `include_history: bool = False`, passed through to `query_rag()`
+
+### Commit
+- `05f040a` — `feat: version chains`
+
+### Test results
+- **202 passed, 29 skipped, 0 failed** — no regressions
