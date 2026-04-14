@@ -823,3 +823,27 @@ scaffold-engine/
 
 ### Commit
 - `b409575` — `fix: add node_retry SSE handler + extract _build_pipeline_summary helper`
+
+---
+
+## Changelog — April 14, 2026 (Model Command System)
+
+### Pipeline — scaffold_router.py
+1. **`/model list`** — Shows current model assignments for all 8 roles with default status
+2. **`/model available`** — Queries Ollama `/api/tags` and lists all available models
+3. **`/model set <role> <model>`** — Validates model exists on Ollama, updates valve in-memory, shows old → new value. Accepts short role names (e.g., `general` instead of `model_general`)
+4. **`/model reset`** — Resets all 8 roles to their default values, shows what changed
+5. **`/model help`** — Usage instructions
+6. **`_MODEL_DEFAULTS` class attribute** — Single source of truth for default model values
+7. **`_SINGLETON_ROLES` class attribute** — Identifies embedder and reranker as singleton/dimension-locked; `/model set` warns that changes require container restart
+8. **`_handle_command()` routing** — Added `/model` branch dispatching to `_handle_model()`
+9. **`_help()` updated** — `/model <sub>` added to command table
+
+### Design decisions
+- **Ollama validation before set** — Prevents assigning nonexistent models (skipped for reranker since it's a HuggingFace model)
+- **In-memory only** — Valve changes persist for the session but reset on container restart (consistent with Open WebUI valve behavior)
+- **No orchestrator changes** — Purely pipeline-side; model overrides flow through existing `_model_overrides()` dict
+- **`:latest` suffix matching** — Accepts both `qwen3` and `qwen3:latest` when validating against Ollama tags
+
+### Commit
+- `feat: add /model command system — list/set/reset/available from chat`

@@ -896,6 +896,8 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
         try:
             if cmd == "/help":
                 return self._help()
+            elif cmd == "/model":
+                return self._handle_model(msg)
 
             elif cmd == "/idea":
                 if len(parts) < 2:
@@ -987,6 +989,134 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
 
         return f"```json\n{json.dumps(data, indent=2)}\n```"
 
+    # ------------------------------------------------------------------
+    # /model command system
+    # ------------------------------------------------------------------
+    _MODEL_DEFAULTS = {
+        "model_general": "qwen3-vl:235b-instruct-cloud",
+        "model_verifier": "qwen2.5:7b",
+        "model_coder": "qwen2.5-coder:7b",
+        "model_embedder": "qwen3-embedding:8b",
+        "model_reranker": "tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
+        "model_router": "qwen3:4b",
+        "model_fallback": "qwen3.5:latest",
+        "model_cloud_alt": "qwen3.5:397b-cloud",
+    }
+
+    _SINGLETON_ROLES = {"model_embedder", "model_reranker"}
+
+    def _handle_model(self, msg: str) -> str:
+        parts = msg.split()
+        if len(parts) < 2:
+            return self._model_help()
+
+        sub = parts[1].lower()
+
+        if sub == "list":
+            return self._model_list()
+        elif sub == "available":
+            return self._model_available()
+        elif sub == "set":
+            return self._model_set(parts)
+        elif sub == "reset":
+            return self._model_reset()
+        elif sub == "help":
+            return self._model_help()
+        else:
+            return f"Unknown subcommand: `{sub}`\n\n{self._model_help()}"
+
+    def _model_list(self) -> str:
+        lines = ["| Role | Current Model | Default? |", "|---|---|---|"]
+        for role, default in self._MODEL_DEFAULTS.items():
+            current = getattr(self.valves, role, default)
+            is_default = "yes" if current == default else "no"
+            display_role = role.replace("model_", "")
+            lines.append(f"| `{display_role}` | `{current}` | {is_default} |")
+        return "**Current Model Assignments**\n\n" + "\n".join(lines)
+
+    def _model_available(self) -> str:
+        try:
+            r = requests.get(f"{self.valves.ollama_url}/api/tags", timeout=10)
+            r.raise_for_status()
+            models = r.json().get("models", [])
+            if not models:
+                return "No models found on Ollama."
+            names = sorted(m["name"] for m in models)
+            lines = [f"- `{n}`" for n in names]
+            return f"**Available Ollama Models** ({len(names)}):\n\n" + "\n".join(lines)
+        except requests.exceptions.ConnectionError:
+            return f"Cannot reach Ollama at `{self.valves.ollama_url}`."
+        except Exception as e:
+            return f"Error querying Ollama: {e}"
+
+    def _model_set(self, parts: list) -> str:
+        if len(parts) < 4:
+            return "Usage: `/model set <role> <model>`\nExample: `/model set general qwen3:8b`"
+
+        role_input = parts[2].lower()
+        model_tag = parts[3]
+
+        if not role_input.startswith("model_"):
+            role_key = f"model_{role_input}"
+        else:
+            role_key = role_input
+
+        if role_key not in self._MODEL_DEFAULTS:
+            valid = ", ".join(r.replace("model_", "") for r in self._MODEL_DEFAULTS)
+            return f"Unknown role: `{role_input}`\nValid roles: {valid}"
+
+        # Validate model exists on Ollama (skip for reranker — HuggingFace model)
+        if role_key != "model_reranker":
+            try:
+                r = requests.get(f"{self.valves.ollama_url}/api/tags", timeout=10)
+                r.raise_for_status()
+                available = {m["name"] for m in r.json().get("models", [])}
+                available_bare = {n.replace(":latest", "") for n in available}
+                if model_tag not in available and model_tag not in available_bare:
+                    return f"Model `{model_tag}` not found on Ollama.\nRun `/model available` to see available models."
+            except requests.exceptions.ConnectionError:
+                return f"Cannot reach Ollama to validate. Model not set."
+            except Exception as e:
+                return f"Validation error: {e}"
+
+        old_value = getattr(self.valves, role_key)
+        setattr(self.valves, role_key, model_tag)
+        display_role = role_key.replace("model_", "")
+
+        result = f"**Updated `{display_role}`**\n`{old_value}` -> `{model_tag}`"
+
+        if role_key in self._SINGLETON_ROLES:
+            result += "\n\nThis role is singleton/dimension-locked. Change takes effect after container restart."
+
+        return result
+
+    def _model_reset(self) -> str:
+        changes = []
+        for role, default in self._MODEL_DEFAULTS.items():
+            current = getattr(self.valves, role)
+            if current != default:
+                setattr(self.valves, role, default)
+                display_role = role.replace("model_", "")
+                changes.append(f"- `{display_role}`: `{current}` -> `{default}`")
+
+        if not changes:
+            return "All roles are already at default values."
+        return "**Reset to defaults:**\n\n" + "\n".join(changes)
+
+    def _model_help(self) -> str:
+        return """**Model Commands**
+| Command | Description |
+|---|---|
+| `/model list` | Show current model assignments |
+| `/model available` | List models available on Ollama |
+| `/model set <role> <model>` | Assign a model to a role |
+| `/model reset` | Reset all roles to defaults |
+| `/model help` | Show this message |
+
+**Roles:** general, verifier, coder, embedder, reranker, router, fallback, cloud_alt
+**Example:** `/model set general qwen3:8b`"""
+
+
     def _help(self) -> str:
         return """**Scaffold Router Commands**
 
@@ -1003,6 +1133,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
 | `/optimize <prompt>` | Optimize a prompt |
 | `/rag <query>` | Query the knowledge base |
 | `/status` | List active jobs |
+| `/model <sub>` | Manage model assignments (list/set/reset/available) |
 | `/help` | Show this message |
 
 **Workflow:** Describe your idea → discuss scope with the assistant → `/go` → review feasibility → `/confirm` → execution."""
