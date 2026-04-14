@@ -253,6 +253,23 @@ class TestHandleSSEEvent:
         assert "T3" in chunks[0]
         assert "T1" in chunks[0]
 
+    def test_node_retry(self, pipe):
+        """A 'node_retry' event should show retry info to the user."""
+        data = json.dumps({
+            "job_id": "job-1",
+            "node_key": "T1",
+            "title": "Research phase",
+            "retry_count": 2,
+            "message": "Auto-retrying failed node",
+        })
+        failed = []
+        chunks = list(pipe._handle_sse_event("node_retry", data, failed))
+        assert len(chunks) == 1
+        assert "T1" in chunks[0]
+        assert "Retrying" in chunks[0]
+        assert "attempt 2" in chunks[0]
+        assert len(failed) == 0  # retries are not failures
+
     def test_pipeline_complete(self, pipe):
         """A 'pipeline_complete' event produces no output (handled elsewhere)."""
         data = json.dumps({"status": "completed"})

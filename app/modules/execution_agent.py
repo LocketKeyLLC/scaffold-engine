@@ -915,6 +915,51 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
 # ---------------------------------------------------------------------------
 # Full-DAG auto-execution (SSE streaming)
 # ---------------------------------------------------------------------------
+async def _build_pipeline_summary(
+    job_id: str,
+    node_results: list[dict],
+    elapsed_ms: int,
+    async_session,
+    extra_fields: dict | None = None,
+) -> dict:
+    """Build the pipeline_complete SSE payload. Used by both terminal paths."""
+    passed = sum(1 for r in node_results if r.get("verified"))
+    failed_count = len(node_results) - passed
+    is_partial = failed_count > 0
+    failed_node_details = [
+        {
+            "node_key": r.get("node_key"),
+            "status": r.get("status", "failed"),
+            "reason": r.get("error") or r.get("verification_reason", "unknown"),
+        }
+        for r in node_results if not r.get("verified")
+    ]
+    summary = {
+        "job_id": job_id,
+        "total_nodes": len(node_results),
+        "passed": passed,
+        "failed": failed_count,
+        "duration_ms": elapsed_ms,
+        "compile_status": "partial" if is_partial else "complete",
+    }
+    if extra_fields:
+        summary.update(extra_fields)
+    # FB-3: Include compiled_output in SSE payload
+    async with async_session() as db:
+        _co_row = await db.execute(
+            text("SELECT compiled_output FROM jobs WHERE id = :jid"),
+            {"jid": job_id},
+        )
+        _co_val = str(_co_row.scalar() or "")
+    if len(_co_val) <= 50_000:
+        summary["compiled_output"] = _co_val
+    else:
+        summary["compiled_output_available"] = True
+    if is_partial:
+        summary["failed_nodes"] = failed_node_details
+    return summary
+
+
 async def execute_all_nodes(
     job_id: str,
     model_overrides: dict | None = None,
@@ -1027,38 +1072,11 @@ async def execute_all_nodes(
             elapsed_ms = int((_time.monotonic() - t0) * 1000)
             passed = sum(1 for r in node_results if r.get("verified"))
             failed_count = len(node_results) - passed
-            is_partial = failed_count > 0
-            failed_node_details = [
-                {
-                    "node_key": r.get("node_key"),
-                    "status": r.get("status", "failed"),
-                    "reason": r.get("error") or r.get("verification_reason", "unknown"),
-                }
-                for r in node_results if not r.get("verified")
-            ]
-            summary = {
-                "job_id": job_id,
-                "total_nodes": len(node_results),
-                "passed": passed,
-                "failed": failed_count,
-                "duration_ms": elapsed_ms,
-                "status": "completed",
-                "compile_status": "partial" if is_partial else "complete",
-            }
-            # FB-3: Include compiled_output in SSE payload
-            async with async_session() as db:
-                _co_row = await db.execute(
-                    text("SELECT compiled_output FROM jobs WHERE id = :jid"),
-                    {"jid": job_id},
-                )
-                _co_val = str(_co_row.scalar() or "")
-            if len(_co_val) <= 50_000:
-                summary["compiled_output"] = _co_val
-            else:
-                summary["compiled_output_available"] = True
-            if is_partial:
-                summary["failed_nodes"] = failed_node_details
-            logger.info("pipeline_completed: job=%s total=%s passed=%s failed=%s duration_ms=%s", job_id, len(node_results), passed, failed_count, elapsed_ms)
+            summary = await _build_pipeline_summary(
+                job_id, node_results, elapsed_ms, async_session,
+                extra_fields={"status": "completed"},
+            )
+            logger.info("pipeline_completed: job=%s total=%s passed=%s failed=%s duration_ms=%s", job_id, summary["total_nodes"], summary["passed"], summary["failed"], elapsed_ms)
             yield _sse("pipeline_complete", summary)
             return
 
@@ -1127,36 +1145,8 @@ async def execute_all_nodes(
         if result.get("job_complete"):
             elapsed_ms = int((_time.monotonic() - t0) * 1000)
             passed = sum(1 for r in node_results if r.get("verified"))
-            failed_count = len(node_results) - passed
-            is_partial = failed_count > 0
-            failed_node_details = [
-                {
-                    "node_key": r.get("node_key"),
-                    "status": r.get("status", "failed"),
-                    "reason": r.get("error") or r.get("verification_reason", "unknown"),
-                }
-                for r in node_results if not r.get("verified")
-            ]
-            early_summary = {
-                "job_id": job_id,
-                "total_nodes": len(node_results),
-                "passed": passed,
-                "failed": failed_count,
-                "duration_ms": elapsed_ms,
-                "compile_status": "partial" if is_partial else "complete",
-            }
-            # FB-3: Include compiled_output in SSE payload
-            async with async_session() as db:
-                _co_row2 = await db.execute(
-                    text("SELECT compiled_output FROM jobs WHERE id = :jid"),
-                    {"jid": job_id},
-                )
-                _co_val2 = str(_co_row2.scalar() or "")
-            if len(_co_val2) <= 50_000:
-                early_summary["compiled_output"] = _co_val2
-            else:
-                early_summary["compiled_output_available"] = True
-            if is_partial:
-                early_summary["failed_nodes"] = failed_node_details
+            early_summary = await _build_pipeline_summary(
+                job_id, node_results, elapsed_ms, async_session,
+            )
             yield _sse("pipeline_complete", early_summary)
             return

@@ -820,6 +820,12 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
             yield f"❌ Step {node_key} failed: {reason}\n"
             failed_nodes.append(payload)
 
+        elif event_type == "node_retry":
+            node_key = payload.get("node_key", "?")
+            retry_count = payload.get("retry_count", 0)
+            title = payload.get("title", "")
+            yield f"🔄 Step {node_key}: Retrying{' — ' + title if title else ''} (attempt {retry_count})...\n"
+
         elif event_type == "blocked":
             node_key = payload.get("node_key", "?")
             blocked_by = payload.get("blocked_by", [])
