@@ -227,12 +227,12 @@ async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = No
         for r in rag["results"]:
             vec_score = r.get("scores", {}).get("vector", 0.0)
             rrf_score = r.get("scores", {}).get("rrf", 0.0)
-            if vec_score == 0.0 or vec_score > 1.0:
-                logger.info("RAG skip irrelevant doc: %s (L2=%.3f, rrf=%.4f)", r.get("topic", "?"), vec_score, rrf_score)
+            if vec_score < 0.3:
+                logger.info("RAG skip low-relevance doc: %s (cosine=%.3f, rrf=%.4f)", r.get("title", "?"), vec_score, rrf_score)
                 continue
-            entries.append(f"[{r['topic']}] {r['content']}")
+            entries.append(f"[{r['title']}] {r['content']}")
         if not entries:
-            logger.info("RAG: all results below relevance threshold (0.4)")
+            logger.info("RAG: all results below cosine relevance threshold (0.3)")
         return "\n\n".join(entries)
     except Exception as e:
         logger.warning("RAG grounding failed: %s", e)
@@ -387,7 +387,7 @@ async def _milvus_search(query: str, node_key: str = "?", domain: str | None = N
         domains_found = set(r.get("domain", "unknown") for r in results)
         formatted_lines = []
         for i, doc in enumerate(results, 1):
-            topic = doc.get("topic", "Unknown")
+            topic = doc.get("title", "Unknown")
             content = doc.get("content", "")[:500]
             formatted_lines.append(f"[{i}] {topic}\n    {content}")
         formatted = "\n\n".join(formatted_lines) if formatted_lines else ""
