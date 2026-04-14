@@ -103,7 +103,7 @@ class Pipeline:
 
         for i, e in enumerate(entries, start=(page - 1) * 20 + 1):
             eid = e.get("entry_id", "—")
-            topic = e.get("topic", "—")
+            topic = e.get("title", "—")
             tags = e.get("tags", "—")
             snippet = e.get("snippet", "—")[:60]
             lines.append(f"| {i} | `{eid}` | {topic} | {tags} | {snippet} |")
@@ -129,7 +129,7 @@ class Pipeline:
 
         for i, r in enumerate(results, 1):
             eid = r.get("entry_id", "—")
-            topic = r.get("topic", "—")
+            topic = r.get("title", "—")
             score = r.get("score", 0)
             snippet = r.get("snippet", "—")[:60]
             lines.append(f"| {i} | `{eid}` | {topic} | {score:.4f} | {snippet} |")
@@ -148,9 +148,9 @@ class Pipeline:
 
         lines = [
             f"📄 **Entry:** `{data.get('entry_id', '—')}`\n",
-            f"**Topic:** {data.get('topic', '—')}",
+            f"**Topic:** {data.get('title', '—')}",
             f"**Tags:** {data.get('tags', '—')}",
-            f"**Source:** {data.get('source_file', '—')}",
+            f"**Source:** {data.get('source_url', '—')}",
         ]
 
         url = data.get("source_url", "")
@@ -168,9 +168,9 @@ class Pipeline:
             return f"❌ {data['error']}"
 
         total = data.get("total_entries", 0)
-        topics = data.get("topics", {})
+        topics = data.get("domains", {})
         tags = data.get("tags", {})
-        sources = data.get("source_files", {})
+        sources = data.get("source_types", {})
 
         lines = [f"📊 **Knowledge Base Stats** — {total} entries\n"]
 
