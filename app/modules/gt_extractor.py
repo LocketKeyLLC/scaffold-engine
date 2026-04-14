@@ -92,29 +92,30 @@ Return ONLY the JSON array."""
 async def _search_searxng(query: str, max_results: int = 10) -> list[dict]:
     """Query SearXNG and return result list."""
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{settings.searxng_url}/search",
-                params={
-                    "q": query,
-                    "format": "json",
-                    "categories": "general",
-                },
-            )
-            if resp.status_code != 200:
-                logger.warning("SearXNG returned %d for query: %s", resp.status_code, query)
-                return []
+        from app.utils.http_clients import get_searxng_client
+        client = get_searxng_client()
+        resp = await client.get(
+            "/search",
+            params={
+                "q": query,
+                "format": "json",
+                "categories": "general",
+            },
+        )
+        if resp.status_code != 200:
+            logger.warning("SearXNG returned %d for query: %s", resp.status_code, query)
+            return []
 
-            data = resp.json()
-            results = data.get("results", [])[:max_results]
-            return [
-                {
-                    "title": r.get("title", ""),
-                    "url": r.get("url", ""),
-                    "content": r.get("content", ""),
-                }
-                for r in results
-            ]
+        data = resp.json()
+        results = data.get("results", [])[:max_results]
+        return [
+            {
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "content": r.get("content", ""),
+            }
+            for r in results
+        ]
     except Exception as e:
         logger.error("SearXNG search failed: %s", e)
         return []

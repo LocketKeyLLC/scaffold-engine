@@ -33,15 +33,6 @@ FILLER_PATTERNS: list[tuple[str, str]] = [
     (r"\brather\b\s*", ""),
     (r"\bquite\b\s*", ""),
     (r"\bvery\b\s*", ""),
-    (r"\bjust\b\s*", ""),
-    (r"\bbasically\b\s*", ""),
-    (r"\bessentially\b\s*", ""),
-    (r"\bactually\b\s*", ""),
-    (r"\bsimply\b\s*", ""),
-    (r"\bmaybe\b\s*", ""),
-    (r"\bperhaps\b\s*", ""),
-    (r"\btry to\b\s*", ""),
-    (r"\battempt to\b\s*", ""),
 ]
 
 _FILLER_RE: list[tuple[re.Pattern, str]] = [
