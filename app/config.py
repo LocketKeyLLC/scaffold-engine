@@ -1,5 +1,4 @@
 """Scaffold Engine configuration — loaded from environment variables."""
-import os
 from pydantic_settings import BaseSettings
 
 
@@ -18,7 +17,7 @@ class Settings(BaseSettings):
     # Embedding config
     embedding_dim: int = 512
     model_embedder_id: str = "qwen3-embedding-8b-mrl512"
-    semantic_dedup_threshold: float = float(os.getenv("SEMANTIC_DEDUP_THRESHOLD", "0.95"))
+    semantic_dedup_threshold: float = 0.95
 
     # Model assignments
     model_router: str = "qwen3:4b"
