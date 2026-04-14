@@ -3,7 +3,7 @@
 **Last Updated:** April 13, 2026 (Vector DB migration — Milvus 2.5.27, TOON schema, Redis cache)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
 **Latest Commit:** `e114662` — `feat: model validation — pre-flight check against Ollama /api/tags, 422 on missing models`
-**Test Suite:** 230 collected, 201 passed, 29 skipped, 0 failed
+**Test Suite:** 231 collected, 202 passed, 29 skipped, 0 failed
 **Codebase:** ~5,900 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
 ---
@@ -326,6 +326,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | `POST` | `/execute` | Execute next pending DAG node (single node) |
 | `POST` | `/execute/all` | Execute all pending DAG nodes (SSE streaming) |
 | `POST` | `/rag` | Query the RAG knowledge base |
+| `GET` | `/rag/dedup` | List near-duplicate rejection log for manual review |
 | `POST` | `/optimize` | Optimize a prompt |
 | `POST` | `/gt` | Extract ground truths via SearXNG + LLM |
 | `GET` | `/gt/list` | List ground truth entries |
@@ -342,7 +343,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 
 ## Database Schema (PostgreSQL 16)
 
-8 tables in the `scaffold_engine` database:
+9 tables in the `scaffold_engine` database:
 
 | Table | Purpose |
 |-------|---------|
@@ -354,8 +355,9 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | `artifacts` | Generated artifacts from node execution |
 | `blockers` | Dependency blockers between nodes |
 | `benchmark_results` | Performance benchmarking data |
+| `dedup_log` | Near-duplicate rejection log (content_hash, existing_entry_id, similarity_score, action_taken) |
 
-8 incremental migrations in `db/migrations/` (002–008).
+8 incremental migrations in `db/migrations/` (002–009).
 
 ---
 
@@ -509,7 +511,7 @@ scaffold-engine/
 │   └── dag_viewer.py
 ├── db/
 │   ├── init.sql
-│   └── migrations/                # 002–008
+│   └── migrations/                # 002–009
 ├── docs/
 │   ├── toon/                      # TOON spec + validator reference
 │   ├── CI.md
