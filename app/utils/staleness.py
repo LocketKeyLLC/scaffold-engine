@@ -9,7 +9,8 @@ import asyncio
 import logging
 import time
 
-from pymilvus import Collection, connections, utility
+from pymilvus import Collection
+from app.utils.milvus_utils import get_collection
 
 from app.config import settings
 
@@ -28,21 +29,7 @@ TTL_POLICY = {
     "ai_generated": 180 * 86400,   # 6 months
 }
 
-
-def _get_collection() -> Collection | None:
-    try:
-        try:
-            utility.list_collections()
-        except Exception:
-            connections.connect(alias="default", uri=settings.milvus_uri)
-        if not utility.has_collection(COLLECTION_NAME):
-            return None
-        col = Collection(COLLECTION_NAME)
-        col.load()
-        return col
-    except Exception as e:
-        logger.error("staleness: failed to get collection: %s", e)
-        return None
+_get_collection = get_collection
 
 
 async def sweep_expired() -> dict:

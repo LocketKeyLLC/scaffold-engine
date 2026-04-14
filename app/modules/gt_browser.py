@@ -8,7 +8,8 @@ import asyncio
 import logging
 from typing import Optional
 
-from pymilvus import connections, Collection, utility
+from pymilvus import Collection
+from app.utils.milvus_utils import get_collection
 
 from app.config import settings
 from app.modules.rag_pipeline import _embed_query
@@ -19,19 +20,9 @@ COLLECTION_NAME = "toon_v2"
 OUTPUT_FIELDS = ["entry_id", "title", "domain_tags", "canonical_text",
                  "source_url", "domain", "confidence_score", "source_type"]
 
-
 def _get_collection() -> Collection:
     """Connect to Milvus and return the collection handle."""
-    try:
-        utility.list_collections()
-    except Exception:
-        connections.connect(alias="default", uri=settings.milvus_uri)
-
-    if not utility.has_collection(COLLECTION_NAME):
-        raise RuntimeError(f"Collection '{COLLECTION_NAME}' not found in Milvus")
-    col = Collection(COLLECTION_NAME)
-    col.load()
-    return col
+    return get_collection(raise_on_missing=True)  # type: ignore[return-value]
 
 
 async def gt_list(page: int = 1, per_page: int = 20) -> dict:

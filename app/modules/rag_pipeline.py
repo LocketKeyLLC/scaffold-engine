@@ -18,7 +18,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from pymilvus import Collection, connections, utility
+from pymilvus import Collection
+from app.utils.milvus_utils import get_collection
 from app.rerankers import rerank as cross_encoder_rerank
 
 from app import model_router
@@ -62,30 +63,10 @@ class RagResult:
 
 
 # ---------------------------------------------------------------------------
-# Milvus connection helper
 # ---------------------------------------------------------------------------
-
-def _get_collection() -> Collection | None:
-    """Get Milvus collection, connecting if needed."""
-    try:
-        try:
-            utility.list_collections()
-        except Exception:
-            connections.connect(alias="default", uri=settings.milvus_uri)
-
-        if not utility.has_collection(COLLECTION_NAME):
-            logger.error("Collection '%s' not found in Milvus", COLLECTION_NAME)
-            return None
-
-        col = Collection(COLLECTION_NAME)
-        col.load()
-        return col
-    except Exception as e:
-        logger.error("Failed to get Milvus collection: %s", e)
-        return None
-
-
+# Milvus collection (delegates to shared utility)
 # ---------------------------------------------------------------------------
+_get_collection = get_collection
 # Embedding helper
 # ---------------------------------------------------------------------------
 
