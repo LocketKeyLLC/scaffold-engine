@@ -1,6 +1,6 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 13, 2026 (Vector DB migration — Milvus 2.5.27, TOON schema, Redis cache)
+**Last Updated:** April 14, 2026 (Milvus moved into docker-compose)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
 **Latest Commit:** `e114662` — `feat: model validation — pre-flight check against Ollama /api/tags, 422 on missing models`
 **Test Suite:** 231 collected, 202 passed, 29 skipped, 0 failed
@@ -187,7 +187,7 @@ DAG truncation enforces a maximum node count (currently 10). When the LLM genera
 |-----------|----------------|-----------|------|
 | Orchestrator | `python:3.12.13-slim` (custom build) | `scaffold-orchestrator` | 8000 |
 | Database | `postgres:16` | `scaffold-postgres` | 5432 |
-| Vector Store | Milvus 2.5.27 (standalone, embedEtcd) | `milvus-standalone` | 19530 |
+| Vector Store | Milvus 2.5.27 (standalone, embedEtcd, compose-managed) | `milvus-standalone` | 19530 |
 | UI | Open WebUI (pinned by SHA256 digest) | `open-webui` | 3000→8080 |
 | Pipelines | Open WebUI Pipelines (pinned by SHA256 digest) | `open-webui-pipelines` | 9099 |
 | Web Search | SearXNG (pinned by SHA256 digest) | `searxng` | 8888→8080 |
@@ -572,7 +572,7 @@ scaffold-engine/
 ### Phase 1: Milvus upgrade + Redis
 1. **Milvus 2.4.17 → 2.5.27** — patches CVE-2026-26190 (CVSS 9.8 auth bypass). Fresh volume (`milvus-data-v2`); old data backed up in `milvus-data-backup-20260413`
 2. **Redis cache added** — `redis:8-alpine` on `ai-network`, 2GB maxmemory, LRU eviction, RDB persistence
-3. **`milvus-config/milvus.yaml`** — embedded etcd configuration for standalone mode
+3. **`milvus-config/milvus.yaml`** — embedded etcd configuration for standalone mode (file retained as reference; bind-mount removed from compose due to segfault — env vars are the correct method)
 4. **`app/config.py`** — added `redis_url`, `embedding_dim` (512), `model_embedder_id`
 
 ### Phase 2: TOON v2 schema + 512d HNSW_SQ8
@@ -596,7 +596,7 @@ scaffold-engine/
 ### Known Issues (updated)
 6. **Knowledge base empty** — toon_v2 has 2 test entries. Old 143 entries from `technical_knowledge` need re-ingestion through the pipeline. Old data preserved in `milvus-data-backup-20260413` volume.
 7. **Golden retrieval tests skipped** — blocked on knowledge base repopulation (issue 6).
-8. **Milvus 2.5.27 standalone requires env vars** — `ETCD_USE_EMBED=true`, `COMMON_STORAGETYPE=local`, `seccomp:unconfined`. The milvus.yaml port-override approach caused startup panics; env vars are the correct method.
+8. **Milvus 2.5.27 standalone config** — runs in docker-compose with `ETCD_USE_EMBED=true`, `COMMON_STORAGETYPE=local`, `seccomp:unconfined`. The `milvus.yaml` bind-mount causes segfaults and has been removed; env vars are the correct method. `milvus-config/milvus.yaml` retained as reference only.
 
 ---
 
@@ -668,3 +668,14 @@ scaffold-engine/
 
 ### Test results
 - **202 passed, 29 skipped, 0 failed** — no regressions
+
+---
+
+## Changelog — April 14, 2026 (Milvus into docker-compose)
+
+### Migration
+1. **Milvus moved into `docker-compose.yml`** — previously ran via standalone `docker run`; now compose-managed with digest-pinned image (`sha256:ea3b924dfb2129fa2daca569eab657b4fcebc4baaed5706cf30d51e19d99b0c9`), healthcheck (`curl -f http://localhost:9091/healthz`), `start_period: 60s`
+2. **`milvus.yaml` bind-mount removed** — caused segfault (SIGSEGV) on startup. `ETCD_USE_EMBED=true` and `COMMON_STORAGETYPE=local` env vars handle all required config. File retained in `milvus-config/` as reference
+3. **`milvus-data-v2` volume declared `external: true`** — preserves existing data across compose lifecycle
+4. **Orchestrator `depends_on` updated** — now waits for `milvus-standalone` and `scaffold-redis` healthy conditions (in addition to existing `scaffold-postgres`)
+5. **Compose comment updated** — removed outdated note about Milvus running outside compose
