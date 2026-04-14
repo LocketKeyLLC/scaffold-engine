@@ -749,3 +749,30 @@ scaffold-engine/
 7. **`app/modules/gt_browser.py`** — old `_get_collection()` now delegates to `get_collection(raise_on_missing=True)`. Removed direct `connections`/`utility` imports
 8. **`app/utils/staleness.py`** — old `_get_collection()` replaced with `_get_collection = get_collection` alias. Removed direct `connections`/`utility` imports
 9. **Commit:** `671214f`
+
+---
+
+## Changelog — April 14, 2026 (Bug Fixes — Prompt 2)
+
+### Issue 1 (CRITICAL): RAG context used wrong field name
+1. **`app/modules/execution_agent.py`** — `r['topic']` → `r['title']` in three locations: `_fetch_rag_context()` (lines 231, 233) and `_milvus_search()` (line 390). The `query_rag()` response dict has both `topic` (always `""`) and `title` (actual value); all three references were reading the empty field
+2. **`tests/test_execution_agent.py`** — updated mock data in `test_success_formats_results` to use `title` key
+
+### Issue 12: Dead L2 distance check replaced with COSINE threshold
+3. **`app/modules/execution_agent.py`** — `_fetch_rag_context()`: removed `if vec_score == 0.0 or vec_score > 1.0` (impossible under COSINE metric, leftover from L2 era). Replaced with `if vec_score < 0.3` to skip low-relevance results. Log message updated from `L2=` to `cosine=`
+
+### Issue 4: Reranker model name hardcoded
+4. **`app/rerankers.py`** — `_get_cross_encoder()` now reads `settings.model_reranker` instead of hardcoding `"tomaarsen/Qwen3-Reranker-0.6B-seq-cls"`. Import added for `app.config.settings`
+
+### Issue 3: Ingested entries never expired
+5. **`app/modules/rag_pipeline.py`** — `ingest_entries()`: replaced `"expires_at": 0` with `"expires_at": compute_expires_at(source_type, now)`. Import added for `app.utils.staleness.compute_expires_at`. Entries now get TTLs based on source_type (real_time=7d, news=30d, community=90d, tech_docs=180d, curated=1y, official_docs=1y, ai_generated=180d)
+
+### Housekeeping
+6. **`pipelines/failed/`** — stale backup of `scaffold_router.py` removed from repo, path added to `.gitignore`
+
+### Commits
+- `e914ad8` — `fix: topic→title in RAG context, cosine threshold, config-driven reranker, computed expires_at`
+- `9142080` — `chore: remove stale pipelines/failed/ from repo`
+
+### Test results
+- **202 passed, 30 skipped, 0 failed** — no regressions
