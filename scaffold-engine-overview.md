@@ -911,3 +911,30 @@ scaffold-engine/
 
 ### Commit
 - `db85efa` — `refactor: consolidate HTTP clients, add embed retry, fix filler patterns`
+
+---
+
+## Changelog — April 14, 2026 (API Schema & Code Quality — Issues 6, 19, 20, 23, 24)
+
+### Issue 6: RagInput missing domain parameter
+1. **`app/main.py`** — Added `domain: str | None = None` to `RagInput` Pydantic model. Passed `domain=body.domain` through to `query_rag()`. Users can now query non-"eng" partitions via the `/rag` API
+
+### Issue 19: ExecutionResult missing tool field
+2. **`app/schemas.py`** — Added `tool: str | None = None` to `ExecutionResult`. Pydantic was silently dropping the `tool` key from `execute_next_node()` return dicts via `response_model`
+
+### Issue 20: Silent auth disable warning
+3. **`app/auth.py`** — Added `logging.getLogger(__name__)` and a module-level `_logger.warning()` when `SCAFFOLD_API_KEY` is empty. Previously auth was silently disabled with no indication in logs
+
+### Issue 23: Dead FileSystem tool routing
+4. **`app/modules/execution_agent.py`** — Changed `if tool in ("CodeGen", "FileSystem")` to `if tool == "CodeGen"`. FileSystem was removed from `VALID_TOOLS` in the DAG generator; the routing case was unreachable dead code
+
+### Issue 24: Duplicate Kahn's cycle detection
+5. **`app/modules/dag_generator.py`** — Removed the full Kahn's algorithm block (adjacency build, in-degree tracking, cycle check) from `_validate_graph()`. `validate_dag()` already runs Kahn's and raises `ValueError` on cycles before `_validate_graph()` is called, making its cycle check unreachable. Retained roots/leaves and disconnected-node checks. Updated docstring accordingly
+
+### Test results
+- **202 passed, 30 skipped, 0 failed** in container (24.61s)
+- `/rag` endpoint verified with `domain="eng"` — returns results correctly
+- No regressions
+
+### Commit
+- `4516306` — `fix: RagInput domain param, ExecutionResult tool field, auth warning, dead FileSystem route, dedup cycle detection (#6, #19, #20, #23, #24)`
