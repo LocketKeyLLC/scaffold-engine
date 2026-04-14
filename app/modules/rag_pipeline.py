@@ -24,6 +24,7 @@ from app.rerankers import rerank as cross_encoder_rerank
 
 from app import model_router
 from app.config import settings
+from app.utils.staleness import compute_expires_at
 from app.utils.embedding_cache import get_cache, truncate_and_normalize
 
 from sqlalchemy import text
@@ -564,7 +565,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
             "supersedes_id": new_supersedes,
             "created_at": now,
             "updated_at": now,
-            "expires_at": 0,
+            "expires_at": compute_expires_at(source_type, now),
             "dense_vector": vector,
         }]
 

@@ -24,7 +24,8 @@ def _get_cross_encoder():
         return _cross_encoder
     try:
         from sentence_transformers import CrossEncoder
-        model_name = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
+        from app.config import settings
+        model_name = settings.model_reranker
         logger.info("crossencoder_loading: model=%s", model_name)
         t0 = time.monotonic()
         _cross_encoder = CrossEncoder(model_name, trust_remote_code=True)

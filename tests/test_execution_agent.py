@@ -469,8 +469,8 @@ class TestMilvusSearchErrorHandling:
     def test_success_formats_results(self):
         from app.modules.execution_agent import _milvus_search
         mock_query = AsyncMock(return_value={"results": [
-            {"topic": "RAG Architecture", "content": "Retrieval-augmented generation..."},
-            {"topic": "Embeddings", "content": "Vector representations..."},
+            {"title": "RAG Architecture", "content": "Retrieval-augmented generation..."},
+            {"title": "Embeddings", "content": "Vector representations..."},
         ]})
 
         with patch("app.modules.execution_agent.query_rag", mock_query):
