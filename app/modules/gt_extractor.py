@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import base64
+from app.utils.llm_parsing import parse_json_array
 from datetime import datetime, timezone
 from typing import Any
 
@@ -430,28 +431,4 @@ async def extract_ground_truths(
 
 def _parse_entries(raw: str) -> list[dict] | None:
     """Parse JSON array from LLM output."""
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, list):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-
-    # Try extracting array
-    bracket_start = text.find("[")
-    bracket_end = text.rfind("]")
-    if bracket_start != -1 and bracket_end > bracket_start:
-        try:
-            parsed = json.loads(text[bracket_start : bracket_end + 1])
-            if isinstance(parsed, list):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-
-    return None
+    return parse_json_array(raw)

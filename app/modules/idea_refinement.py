@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
+from app.config import get_model
 from app.schemas import JobCreate, JobRead
 from app.utils.llm_parsing import parse_json_object
 
@@ -66,6 +67,7 @@ async def refine_idea(
     model: str | None = None,
     domain: str | None = None,
     model_overrides: dict | None = None,
+    target_status: str = "planning",
 ) -> dict:
     """Refine raw idea text into a structured brief and persist as a job.
 
@@ -94,7 +96,7 @@ async def refine_idea(
     prompt = REFINE_PROMPT.format(idea=idea_text)
     resp = await model_router.generate(
         prompt,
-        model=model or (model_overrides or {}).get("model_general", model_router.settings.model_general),
+        model=model or get_model("model_general", model_overrides),
         system=REFINE_SYSTEM,
         temperature=0.3,
         max_tokens=2048,
@@ -130,13 +132,14 @@ async def refine_idea(
             UPDATE jobs
             SET title = :title,
                 refined_brief = :brief,
-                status = 'planning'
+                status = :target_status
             WHERE id = :id
         """),
         {
             "title": title,
             "brief": json.dumps(brief),
             "id": job_id,
+            "target_status": target_status,
         },
     )
     await db.commit()

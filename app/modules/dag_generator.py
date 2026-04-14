@@ -24,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
+from app.config import get_model
 from app.utils.llm_parsing import parse_json_object
 
 logger = logging.getLogger("scaffold.dag")
@@ -160,7 +161,7 @@ async def generate_dag(
     prompt = DAG_PROMPT.format(brief=json.dumps(brief_data, indent=2))
     resp = await model_router.generate(
         prompt,
-        model=model or (model_overrides or {}).get("model_general", model_router.settings.model_general),
+        model=model or get_model("model_general", model_overrides),
         system=DAG_SYSTEM,
         temperature=0.3,
         max_tokens=4096,
