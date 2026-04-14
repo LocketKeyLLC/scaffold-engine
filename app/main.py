@@ -362,6 +362,7 @@ class RagInput(BaseModel):
     confidence_threshold: float = 0.8
     skip_rerank: bool = False
     include_history: bool = False
+    domain: str | None = None
 
 @app.post("/rag")
 async def query_rag(body: RagInput):
@@ -372,6 +373,7 @@ async def query_rag(body: RagInput):
         confidence_threshold=body.confidence_threshold,
         skip_rerank=body.skip_rerank,
         include_history=body.include_history,
+        domain=body.domain,
     )
 @app.get("/rag/dedup")
 async def list_dedup_log(limit: int = 50, offset: int = 0):

@@ -6,7 +6,13 @@ import secrets
 from fastapi import Request, Security, HTTPException, status
 from fastapi.security import APIKeyHeader
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 _API_KEY = os.environ.get("SCAFFOLD_API_KEY", "")
+if not _API_KEY:
+    _logger.warning("SCAFFOLD_API_KEY is not set — authentication is disabled")
 
 api_key_header = APIKeyHeader(
     name="X-API-Key",

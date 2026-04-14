@@ -541,7 +541,7 @@ async def execute_next_node(
             "tool": tool,
         }
     # ── Model routing by tool ──
-    if tool in ("CodeGen", "FileSystem"):
+    if tool == "CodeGen":
         exec_model = get_model("model_coder", model_overrides)
     verifier_model = get_model("model_verifier", model_overrides)
 
