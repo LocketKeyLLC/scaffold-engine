@@ -158,7 +158,7 @@ async def optimize_prompt(
     model_verifier: Optional[str] = None,
     skip_verify: bool = False,
 ) -> OptimizationResult:
-    opt_model = model_optimizer or settings.model_general
+    opt_model = model_optimizer or settings.model_verifier
     ver_model = model_verifier or settings.model_verifier
 
     analysis = _analyze(prompt)

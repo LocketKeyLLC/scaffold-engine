@@ -11,7 +11,7 @@ from typing import Final, Set
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import async_session
 from app.utils.staleness import sweep_expired
 
 logger = logging.getLogger(__name__)
@@ -81,9 +81,8 @@ async def _cleanup_loop() -> None:
     while True:
         try:
             await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
-            async for db in get_db():
+            async with async_session() as db:
                 await reap_stale_jobs(db)
-                break
             try:
                 result = await sweep_expired()
                 if result.get("expired_count", 0) > 0:

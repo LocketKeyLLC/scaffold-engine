@@ -15,6 +15,13 @@ _cross_encoder = None
 _load_failed = False
 
 
+def reset_reranker():
+    """Reset reranker state so next call retries loading."""
+    global _cross_encoder, _load_failed
+    _cross_encoder = None
+    _load_failed = False
+
+
 def _get_cross_encoder():
     """Load model once, on first call. Returns None if unavailable."""
     global _cross_encoder, _load_failed

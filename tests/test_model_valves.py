@@ -233,7 +233,7 @@ class TestPayloadInclusion:
             self._run_command(pipe, "/rag kubernetes networking", mock_post)
             assert mock_post.called
             payload = mock_post.call_args[1].get("json", {})
-            assert "model_overrides" in payload
+            assert "model_overrides" not in payload
 
     def test_overrides_reflect_custom_valves(self, pipe):
         pipe.valves.model_general = "my-custom:13b"

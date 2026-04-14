@@ -547,7 +547,6 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
             logger.debug("semantic_dedup_failed: %s", e)
 
         topic_slug = title.lower().replace(" ", "-")[:60]
-        topic_slug = title.lower().replace(" ", "-")[:60]
         entry_id = f"scaffold-{topic_slug}-{ch[:8]}"
 
         row = [{

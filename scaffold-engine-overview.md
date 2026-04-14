@@ -1,8 +1,8 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 14, 2026 (HTTP client consolidation — issues 10, 11, 17, 22, 29)
+**Last Updated:** April 14, 2026 (code quality — issues 21, 27, 28, 30, 31, 32, 34, 36, 43)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `db85efa` — `refactor: consolidate HTTP clients, add embed retry, fix filler patterns`
+**Latest Commit:** `9c2ca34` — `fix: remove dup topic_slug, reset_reranker, cleanup async_session, gt_stats limit, prompt opt default, dag_viewer typing, drop dead start_id/model_overrides, doc timeouts`
 **Test Suite:** 250 collected, 202 passed, 30 skipped, 0 failed (+ 31 pipeline + 17 valve locally)
 **Codebase:** ~6,400 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
@@ -200,10 +200,10 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 
 **Timeout configuration:**
 - Open WebUI `AIOHTTP_CLIENT_TIMEOUT=7200` (2 hours)
-- `scaffold_router.py` triage timeout: **900s** (15 min)
+- `scaffold_router.py` triage timeout: **3600s** (60 min)
 - `scaffold_router.py` auto-chain `/ideate` timeout: **1800s** (30 min)
 - `scaffold_router.py` `/ideate/confirm` timeout: **1800s**
-- `scaffold_router.py` DAG timeout: configurable via `dag_timeout` valve (default **1800s**)
+- `scaffold_router.py` DAG timeout: configurable via `dag_timeout` valve (default **3600s**)
 - Orchestrator Ollama timeout: **600s** for generation model
 
 **Networking:**
@@ -245,7 +245,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | `app/auth.py` | 33 | API key authentication via `X-API-Key` header |
 | `app/database.py` | 26 | Async SQLAlchemy engine and session management |
 | `app/schemas.py` | ~369 | Pydantic request/response models for all endpoints |
-| `app/rerankers.py` | 156 | CrossEncoder reranker with RRF (Reciprocal Rank Fusion) fallback |
+| `app/rerankers.py` | 164 | CrossEncoder reranker with RRF (Reciprocal Rank Fusion) fallback |
 | `app/logging_config.py` | 86 | Structured JSON logging via structlog |
 
 ### Execution Pipeline
@@ -254,15 +254,15 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 |------|-------|---------|
 | `app/modules/execution_agent.py` | ~1,153 | DAG node execution, SSE streaming, tool dispatch, verification, compiled output, concurrent execution guard, upstream prompt restructuring, auto-retry. Uses short-lived database sessions |
 | `app/modules/dag_generator.py` | ~615 | DAG creation with Kahn's cycle detection, numeric-sort truncation (max 10 nodes). JSON parsing via shared `llm_parsing.py` |
-| `app/modules/rag_pipeline.py` | 451 | RAG retrieval: embed → parallel vector + keyword search → RRF merge → CrossEncoder rerank. Includes `ingest_entries()` |
+| `app/modules/rag_pipeline.py` | 583 | RAG retrieval: embed → parallel vector + keyword search → RRF merge → CrossEncoder rerank. Includes `ingest_entries()` |
 | `app/modules/ideation_workflow.py` | ~265 | Ideation-to-Workflow pipeline: Phase 1 (refine + feasibility + confirmation gate), Phase 2 (research → ingest → compile). 8 smoke tests |
 | `app/modules/idea_refinement.py` | ~172 | Refines raw user ideas into structured briefs |
 | `app/modules/prompt_optimizer.py` | 201 | Prompt optimization: strip → LLM optimize → verify |
-| `app/modules/gt_extractor.py` | 434 | Ground truth extraction: SearXNG → LLM distillation → TOON formatting → optional GitHub push |
-| `app/modules/gt_browser.py` | ~170 | Ground truth browsing and search. All Milvus calls wrapped in `run_in_executor` |
+| `app/modules/gt_extractor.py` | 435 | Ground truth extraction: SearXNG → LLM distillation → TOON formatting → optional GitHub push |
+| `app/modules/gt_browser.py` | 178 | Ground truth browsing and search. All Milvus calls wrapped in `run_in_executor` |
 | `app/modules/prompt_inspector.py` | 116 | Prompt analysis and inspection |
 | `app/modules/execution_handler.py` | ~75 | Execution status only (`execution_status()`). Dead code (`retry_node()`) removed in audit |
-| `app/modules/cleanup.py` | 108 | Periodic stale-job reaper (15-min interval), unified reap_stale_jobs(), active-node-aware |
+| `app/modules/cleanup.py` | 107 | Periodic stale-job reaper (15-min interval), unified reap_stale_jobs(), active-node-aware |
 
 ### Routers & Middleware
 
@@ -300,10 +300,10 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 |-------|---------|---------|
 | `api_key` | `""` | Scaffold Engine API key |
 | `orchestrator_url` | `http://scaffold-orchestrator:8000` | Orchestrator endpoint |
-| `dag_timeout` | `1800` | Seconds to wait for DAG generation |
+| `dag_timeout` | `3600` | Seconds to wait for DAG generation |
 | `keepalive_interval` | `10` | Seconds between keepalive zero-width spaces |
 | `triage_model` | `qwen3:4b` | Model for conversational triage and synthesis |
-| `triage_timeout` | `900` | Seconds to wait for triage model responses |
+| `triage_timeout` | `3600` | Seconds to wait for triage model responses |
 | `ollama_url` | `http://172.18.0.1:11434` | Ollama endpoint (host via bridge gateway) |
 | `model_general` | `qwen3-vl:235b-instruct-cloud` | Generation model (overrides env var per-request) |
 | `model_verifier` | `qwen2.5:7b` | Verifier model |
@@ -938,3 +938,34 @@ scaffold-engine/
 
 ### Commit
 - `4516306` — `fix: RagInput domain param, ExecutionResult tool field, auth warning, dead FileSystem route, dedup cycle detection (#6, #19, #20, #23, #24)`
+
+---
+
+## Changelog — April 14, 2026 (Code Quality — Issues 21, 27, 28, 30, 31, 32, 34, 36, 43)
+
+### Bug fixes
+1. **Issue 21: `app/modules/rag_pipeline.py`** — removed duplicate `topic_slug = title.lower().replace(" ", "-")[:60]` line (~line 550)
+2. **Issue 28: `pipelines/scaffold_router.py`** — removed `model_overrides` from `/rag` POST payload. RAG uses config-level embedder only; overrides were accepted but never consumed. Test updated to assert absence
+3. **Issue 31: `app/modules/prompt_optimizer.py`** — default optimizer model changed from `model_general` (235b) to `model_verifier` (7b). Prompt rewriting doesn't need the heavy model
+4. **Issue 34: `app/modules/gt_extractor.py`** — removed unused `start_id` parameter from `_format_toon_rows()`, hardcoded `eid = i + 1`
+
+### Improvements
+5. **Issue 27: `app/rerankers.py`** — added `reset_reranker()` function that clears `_cross_encoder` and resets `_load_failed`, allowing retry after transient load failures
+6. **Issue 32: `app/modules/gt_browser.py`** — `gt_stats()` query limit increased from 16,384 to 100,000 with a log warning if results are truncated
+7. **Issue 36: `app/modules/cleanup.py`** — replaced `async for db in get_db()` with `async with async_session() as db`, consistent with `execute_all_nodes()` pattern
+
+### Typing / docs
+8. **Issue 43: `pipelines/dag_viewer.py`** — `pipe()` return type changed from `str` to `Optional[str]` (returns `None` for non-matching messages)
+9. **Issue 30: `scaffold-engine-overview.md`** — corrected `triage_timeout` (900→3600) and `dag_timeout` (1800→3600) to match actual valve defaults
+
+### Housekeeping
+10. **`pipelines/failed/`** — stale backup directory removed from git tracking (994 lines deleted)
+
+### Commit
+- `9c2ca34` — `fix: remove dup topic_slug, reset_reranker, cleanup async_session, gt_stats limit, prompt opt default, dag_viewer typing, drop dead start_id/model_overrides, doc timeouts`
+
+### Test results
+- **In-container:** 202 passed, 30 skipped, 0 failed
+- **Pipeline (local):** 31 passed
+- **Model valves (local):** 17 passed
+- **Total:** 250 passed, 30 skipped, 0 failed — no regressions

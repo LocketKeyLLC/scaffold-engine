@@ -145,13 +145,15 @@ async def gt_stats() -> dict:
         all_entries = col.query(
             expr="entry_id != ''",
             output_fields=["title", "domain", "domain_tags", "source_type"],
-            limit=16384,
+            limit=100_000,
         )
 
         domains: dict[str, int] = {}
         tags_dist: dict[str, int] = {}
         sources: dict[str, int] = {}
 
+        if len(all_entries) >= 100_000:
+            logger.warning("gt_stats_truncated: results capped at 100k entries")
         for entry in all_entries:
             domain = entry.get("domain", "unknown") or "unknown"
             domains[domain] = domains.get(domain, 0) + 1
