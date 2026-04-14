@@ -9,9 +9,9 @@ import logging
 from typing import Final, Set
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-
 from app.utils.staleness import sweep_expired
 
 logger = logging.getLogger(__name__)
@@ -21,10 +21,10 @@ _background_tasks: Set[asyncio.Task] = set()
 CLEANUP_INTERVAL_SECONDS: Final[int] = 900
 STALE_THRESHOLD_MINUTES: Final[int] = 30
 
-_REAP_SQL: Final[str] = """
+_REAP_RUNNING_SQL: Final[str] = """
     UPDATE jobs
     SET status = 'failed',
-        compiled_output = 'Reaped by scheduled cleanup: exceeded stale threshold',
+        compiled_output = :msg,
         updated_at = NOW()
     WHERE status IN ('running', 'executing')
       AND updated_at < NOW() - INTERVAL '30 minutes'
@@ -33,19 +33,47 @@ _REAP_SQL: Final[str] = """
           WHERE dag_nodes.job_id = jobs.id
             AND dag_nodes.status = 'running'
       )
+    RETURNING id
+"""
+
+_REAP_PLANNING_SQL: Final[str] = """
+    UPDATE jobs
+    SET status = 'cancelled',
+        updated_at = NOW()
+    WHERE status = 'planning'
+      AND updated_at < NOW() - INTERVAL '60 minutes'
+    RETURNING id
 """
 
 
-async def _reap_stale_jobs() -> int:
-    """Mark stale running/executing jobs as failed. Returns reaped count."""
-    async for db in get_db():
-        result = await db.execute(text(_REAP_SQL))
-        await db.commit()
-        count: int = result.rowcount
-        if count:
-            logger.info("stale_job_cleaned count=%d", count)
-        return count
-    return 0
+async def reap_stale_jobs(db: AsyncSession) -> dict:
+    """Unified stale-job reaper. Returns counts of reaped jobs.
+
+    Covers:
+      - running/executing > 30 min (with active-node guard) -> failed
+      - planning > 60 min -> cancelled
+    """
+    r1 = await db.execute(
+        text(_REAP_RUNNING_SQL),
+        {"msg": "Job timed out after 30 minutes of inactivity"},
+    )
+    running_failed = r1.rowcount
+
+    r2 = await db.execute(text(_REAP_PLANNING_SQL))
+    planning_cancelled = r2.rowcount
+
+    await db.commit()
+
+    if running_failed or planning_cancelled:
+        logger.info(
+            "stale_jobs_reaped running_to_failed=%d planning_to_cancelled=%d",
+            running_failed, planning_cancelled,
+        )
+
+    return {
+        "running_to_failed": running_failed,
+        "planning_to_cancelled": planning_cancelled,
+    }
 
 
 async def _cleanup_loop() -> None:
@@ -53,7 +81,9 @@ async def _cleanup_loop() -> None:
     while True:
         try:
             await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
-            await _reap_stale_jobs()
+            async for db in get_db():
+                await reap_stale_jobs(db)
+                break
             try:
                 result = await sweep_expired()
                 if result.get("expired_count", 0) > 0:

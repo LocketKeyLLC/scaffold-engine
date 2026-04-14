@@ -21,7 +21,7 @@ from starlette.responses import StreamingResponse
 
 from app.auth import require_api_key
 from app.config import settings
-from app.modules.cleanup import start_cleanup_task
+from app.modules.cleanup import start_cleanup_task, reap_stale_jobs
 from app.database import get_db, engine, async_session
 from app.logging_config import setup_logging
 from app.middleware.error_logging import ErrorLoggingMiddleware
@@ -82,21 +82,10 @@ async def lifespan(app: FastAPI):
         logger.info('event="startup_cleanup_begin"')
         try:
             async for db in get_db():
-                r1 = await db.execute(text("""
-                    UPDATE jobs SET status='failed',
-                        compiled_output='Job timed out after 30 minutes of inactivity',
-                        updated_at=NOW()
-                    WHERE status='running' AND updated_at < NOW() - INTERVAL '30 minutes'
-                      AND NOT EXISTS (SELECT 1 FROM dag_nodes WHERE dag_nodes.job_id = jobs.id AND dag_nodes.status = 'running')
-                """))
-                r2 = await db.execute(text("""
-                    UPDATE jobs SET status='cancelled', updated_at=NOW()
-                    WHERE status='planning' AND updated_at < NOW() - INTERVAL '60 minutes'
-                """))
-                await db.commit()
+                result = await reap_stale_jobs(db)
                 logger.info(
                     'event="startup_cleanup_complete" running_to_failed=%s planning_to_cancelled=%s',
-                    r1.rowcount, r2.rowcount,
+                    result["running_to_failed"], result["planning_to_cancelled"],
                 )
                 break
         except Exception as exc:
@@ -250,59 +239,10 @@ async def health():
 @app.post("/jobs/cleanup", tags=["ops"])
 async def cleanup_stale_jobs(db: AsyncSession = Depends(get_db)):
     """Find and resolve stale/orphaned jobs. Requires API key (global auth)."""
-    now = datetime.now(timezone.utc)
-
-    # Running > 30 min → failed
-    stale_running = await db.execute(
-        text("""
-            SELECT id, updated_at FROM jobs
-            WHERE status = 'running'
-              AND updated_at < NOW() - INTERVAL '30 minutes'
-              AND NOT EXISTS (SELECT 1 FROM dag_nodes WHERE dag_nodes.job_id = jobs.id AND dag_nodes.status = 'running')
-        """)
-    )
-    running_rows = stale_running.fetchall()
-    for row in running_rows:
-        job_id, updated_at = row[0], row[1]
-        age_min = round((now - updated_at.replace(tzinfo=timezone.utc)).total_seconds() / 60, 1)
-        await db.execute(
-            text("UPDATE jobs SET status='failed', compiled_output=:msg, updated_at=NOW() WHERE id=:jid"),
-            {"jid": str(job_id), "msg": "Job timed out after 30 minutes of inactivity"},
-        )
-        logger.info(
-            'event="stale_job_cleaned" job_id=%s old_status=running new_status=failed age_minutes=%s',
-            job_id, age_min,
-        )
-
-    # Planning > 60 min → cancelled
-    stale_planning = await db.execute(
-        text("""
-            SELECT id, updated_at FROM jobs
-            WHERE status = 'planning'
-              AND updated_at < NOW() - INTERVAL '60 minutes'
-        """)
-    )
-    planning_rows = stale_planning.fetchall()
-    for row in planning_rows:
-        job_id, updated_at = row[0], row[1]
-        age_min = round((now - updated_at.replace(tzinfo=timezone.utc)).total_seconds() / 60, 1)
-        await db.execute(
-            text("UPDATE jobs SET status='cancelled', updated_at=NOW() WHERE id=:jid"),
-            {"jid": str(job_id)},
-        )
-        logger.info(
-            'event="stale_job_cleaned" job_id=%s old_status=planning new_status=cancelled age_minutes=%s',
-            job_id, age_min,
-        )
-
-    await db.commit()
-
+    result = await reap_stale_jobs(db)
     return {
-        "cleaned": {
-            "running_to_failed": len(running_rows),
-            "planning_to_cancelled": len(planning_rows),
-        },
-        "timestamp": now.isoformat(),
+        "cleaned": result,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -313,6 +253,12 @@ class IdeaInput(BaseModel):
     idea: str
     domain: str | None = None
     model: str | None = None
+    model_overrides: dict | None = None
+
+class ConfirmInput(BaseModel):
+    job_id: str
+    feedback: str | None = None
+    push_to_github: bool = False
     model_overrides: dict | None = None
 
 
@@ -354,18 +300,14 @@ async def ideate_endpoint(body: IdeaInput, db=Depends(get_db)):
     return result
 
 @app.post("/ideate/confirm")
-async def ideate_confirm_endpoint(request: Request, db=Depends(get_db)):
+async def ideate_confirm_endpoint(body: ConfirmInput, db=Depends(get_db)):
     """Phase 2: User confirms -> research -> ingest -> compile -> present workflow."""
-    body = await request.json()
-    await _require_valid_models(body.get("model_overrides"))
-    job_id = body.get("job_id")
-    if not job_id:
-        raise HTTPException(400, "job_id required")
+    await _require_valid_models(body.model_overrides)
     result = await research_and_compile(
-        job_id, db,
-        user_feedback=body.get("feedback"),
-        push_to_github=body.get("push_to_github", False),
-        model_overrides=body.get("model_overrides"),
+        body.job_id, db,
+        user_feedback=body.feedback,
+        push_to_github=body.push_to_github,
+        model_overrides=body.model_overrides,
     )
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(

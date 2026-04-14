@@ -45,7 +45,7 @@ async def analyze_and_confirm(
 ) -> dict:
     """Phase 1: Refine idea, assess feasibility, halt at awaiting_confirmation."""
 
-    refine_result = await refine_idea(idea_text, db, model=model, domain=domain, model_overrides=model_overrides)
+    refine_result = await refine_idea(idea_text, db, model=model, domain=domain, model_overrides=model_overrides, target_status="awaiting_confirmation")
 
     if refine_result["status"] == "failed":
         return refine_result
@@ -74,7 +74,7 @@ async def analyze_and_confirm(
 
     await db.execute(
         text(
-            "UPDATE jobs SET status = 'awaiting_confirmation', "
+            "UPDATE jobs SET "
             "research_data = :data WHERE id = :id"
         ),
         {
