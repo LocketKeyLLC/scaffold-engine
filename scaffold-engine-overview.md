@@ -776,3 +776,28 @@ scaffold-engine/
 
 ### Test results
 - **202 passed, 30 skipped, 0 failed** — no regressions
+
+---
+
+## Changelog — April 14, 2026 (Secondary Pipeline Bug Fixes)
+
+### Issue 39: execution_handler.py — Wrong retry endpoint
+1. **`_retry()` method** — endpoint was `/retry` (404), corrected to `/exec/retry` matching the orchestrator's actual route
+
+### Issue 40: gt_browser.py — Field name mismatches
+2. **`_handle_list()`** — `e.get("topic")` → `e.get("title")`
+3. **`_handle_search()`** — `r.get("topic")` → `r.get("title")`
+4. **`_handle_detail()`** — `data.get('topic')` → `data.get('title')`
+5. **`_handle_detail()`** — `data.get('source_file')` → `data.get('source_url')`
+
+### Issue 41: gt_browser.py — Wrong stats keys
+6. **`_handle_stats()`** — `data.get("topics")` → `data.get("domains")`
+7. **`_handle_stats()`** — `data.get("source_files")` → `data.get("source_types")`
+
+### Commit
+- `2ceba26` — `fix: correct endpoint and field names in secondary pipelines (#39, #40, #41)`
+- 2 files changed, 7 insertions, 7 deletions
+
+### Test results
+- Container restart confirmed (`docker restart open-webui-pipelines`)
+- All field names now match orchestrator response schemas
