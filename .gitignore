@@ -11,3 +11,4 @@ patches/
 *.bak
 docker-compose.yml.bak*
 *.bak.*
+pipelines/failed/
