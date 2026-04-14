@@ -57,6 +57,8 @@ class RagResult:
     rrf_score: float = 0.0
     rerank_score: float = 0.0
     final_score: float = 0.0
+    version: int = 1
+    supersedes_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +141,7 @@ async def _vector_search(
                 anns_field="dense_vector",
                 param={"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}},
                 limit=top_k,
-                output_fields=["canonical_text", "title", "domain_tags", "source_url", "entry_id", "domain", "confidence_score"],
+                output_fields=["canonical_text", "title", "domain_tags", "source_url", "entry_id", "domain", "confidence_score", "version", "supersedes_id"],
             )
             if domain:
                 search_kwargs["expr"] = f'domain == "{domain}"'
@@ -163,6 +165,8 @@ async def _vector_search(
                     entry_id=entity.get("entry_id", ""),
                     domain=entity.get("domain", ""),
                     vector_score=float(hit.score),
+                    version=entity.get("version", 1),
+                    supersedes_id=entity.get("supersedes_id", ""),
                 ))
             return hits
         except Exception as e:
@@ -209,7 +213,7 @@ async def _keyword_search(
 
             results = col.query(
                 expr=expr,
-                output_fields=["canonical_text", "title", "domain_tags", "source_url", "entry_id", "domain"],
+                output_fields=["canonical_text", "title", "domain_tags", "source_url", "entry_id", "domain", "version", "supersedes_id"],
                 limit=top_k,
             )
 
@@ -230,6 +234,8 @@ async def _keyword_search(
                     entry_id=r.get("entry_id", ""),
                     domain=r.get("domain", ""),
                     keyword_score=score,
+                    version=r.get("version", 1),
+                    supersedes_id=r.get("supersedes_id", ""),
                 ))
             return hits
         except Exception as e:
@@ -327,6 +333,7 @@ async def query_rag(
     top_k: int = DEFAULT_TOP_K,
     confidence_threshold: float = CONFIDENCE_THRESHOLD,
     skip_rerank: bool = False,
+    include_history: bool = False,
 ) -> dict[str, Any]:
     """Full RAG pipeline: embed -> search -> fuse -> rerank -> filter."""
     t0 = time.monotonic()
@@ -379,6 +386,11 @@ async def query_rag(
         query[:200], domain or "all", len(filtered), top_score, latency_ms,
     )
 
+    # Filter to latest versions unless history requested
+    if not include_history:
+        superseded_ids = {r.supersedes_id for r in filtered if r.supersedes_id}
+        filtered = [r for r in filtered if r.entry_id not in superseded_ids]
+
     result_dicts = []
     for r in filtered:
         result_dicts.append({
@@ -389,6 +401,8 @@ async def query_rag(
             "source_url": r.source_url,
             "entry_id": r.entry_id,
             "domain": r.domain,
+            "version": r.version,
+            "supersedes_id": r.supersedes_id,
             "scores": {
                 "vector": round(r.vector_score, 4),
                 "keyword": round(r.keyword_score, 4),
@@ -497,6 +511,10 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
         if vector is None:
             logger.warning("ingest_embed_failed for title=%s", title)
             continue
+        # Version chain tracking
+        new_version = 1
+        new_supersedes = ""
+
 # --- Dedup: semantic similarity check — auto-reject above threshold ---
         try:
             sim_results = await loop.run_in_executor(
@@ -506,7 +524,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
                     anns_field="dense_vector",
                     param={"metric_type": "COSINE", "params": {"ef": 32}},
                     limit=1,
-                    output_fields=["entry_id", "content_hash"],
+                    output_fields=["entry_id", "content_hash", "version", "supersedes_id"],
                 ),
             )
             if sim_results and sim_results[0]:
@@ -531,6 +549,17 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
                     except Exception as db_err:
                         logger.error("dedup_log_write_failed: %s", db_err)
                     continue  # Skip insertion
+                elif sim_score >= 0.90:
+                    # VERSION CHAIN: same topic, updated content
+                    old_entry = top_hit.entity
+                    old_version = old_entry.get("version", 1)
+                    old_entry_id = old_entry.get("entry_id", str(top_hit.id))
+                    new_version = old_version + 1
+                    new_supersedes = old_entry_id
+                    logger.info(
+                        "version_chain_created: v%d supersedes='%s' sim=%.4f title='%s'",
+                        new_version, old_entry_id, sim_score, title[:50],
+                    )
         except Exception as e:
             logger.debug("semantic_dedup_failed: %s", e)
 
@@ -549,8 +578,8 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
             "source_url": source_url,
             "content_hash": ch,
             "model_id": settings.model_embedder_id,
-            "version": 1,
-            "supersedes_id": "",
+            "version": new_version,
+            "supersedes_id": new_supersedes,
             "created_at": now,
             "updated_at": now,
             "expires_at": 0,
