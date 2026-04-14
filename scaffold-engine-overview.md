@@ -1,8 +1,8 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 14, 2026 (code quality refactor — issues 9, 13, 14, 15, 16)
+**Last Updated:** April 14, 2026 (HTTP client consolidation — issues 10, 11, 17, 22, 29)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `06dd410` — `refactor: consolidate model selection, stale cleanup, JSON parsing, and endpoint validation`
+**Latest Commit:** `db85efa` — `refactor: consolidate HTTP clients, add embed retry, fix filler patterns`
 **Test Suite:** 250 collected, 202 passed, 30 skipped, 0 failed (+ 31 pipeline + 17 valve locally)
 **Codebase:** ~6,400 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
@@ -240,7 +240,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | File | Lines | Purpose |
 |------|-------|---------|
 | `app/main.py` | ~571 | FastAPI app with lifespan, health checks, middleware, all endpoints |
-| `app/model_router.py` | 306 | Ollama API routing with retry cascade, persistent `httpx.AsyncClient` connection pool |
+| `app/model_router.py` | 344 | Ollama API routing with retry cascade, persistent `httpx.AsyncClient` connection pool |
 | `app/config.py` | ~38 | Pydantic Settings configuration (all env vars with defaults aligned to docker-compose) |
 | `app/auth.py` | 33 | API key authentication via `X-API-Key` header |
 | `app/database.py` | 26 | Async SQLAlchemy engine and session management |
@@ -252,12 +252,12 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `app/modules/execution_agent.py` | ~1,139 | DAG node execution, SSE streaming, tool dispatch, verification, compiled output, concurrent execution guard, upstream prompt restructuring, auto-retry. Uses short-lived database sessions |
+| `app/modules/execution_agent.py` | ~1,153 | DAG node execution, SSE streaming, tool dispatch, verification, compiled output, concurrent execution guard, upstream prompt restructuring, auto-retry. Uses short-lived database sessions |
 | `app/modules/dag_generator.py` | ~615 | DAG creation with Kahn's cycle detection, numeric-sort truncation (max 10 nodes). JSON parsing via shared `llm_parsing.py` |
 | `app/modules/rag_pipeline.py` | 451 | RAG retrieval: embed → parallel vector + keyword search → RRF merge → CrossEncoder rerank. Includes `ingest_entries()` |
 | `app/modules/ideation_workflow.py` | ~265 | Ideation-to-Workflow pipeline: Phase 1 (refine + feasibility + confirmation gate), Phase 2 (research → ingest → compile). 8 smoke tests |
 | `app/modules/idea_refinement.py` | ~172 | Refines raw user ideas into structured briefs |
-| `app/modules/prompt_optimizer.py` | 210 | Prompt optimization: strip → LLM optimize → verify |
+| `app/modules/prompt_optimizer.py` | 201 | Prompt optimization: strip → LLM optimize → verify |
 | `app/modules/gt_extractor.py` | 434 | Ground truth extraction: SearXNG → LLM distillation → TOON formatting → optional GitHub push |
 | `app/modules/gt_browser.py` | ~170 | Ground truth browsing and search. All Milvus calls wrapped in `run_in_executor` |
 | `app/modules/prompt_inspector.py` | 116 | Prompt analysis and inspection |
@@ -277,6 +277,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | File | Lines | Purpose |
 |------|-------|---------|
 | `app/utils/llm_parsing.py` | 120 | Shared LLM output parsing: `strip_think_tags()`, `parse_json_object()` and `parse_json_array()` with 4-step fallback chain |
+| `app/utils/http_clients.py` | 44 | Shared SearXNG async client with connection pooling, lazy init, clean shutdown |
 | `app/utils/milvus_utils.py` | 114 | Shared Milvus collection accessor: `get_collection(raise_on_missing)` with auto-creation of toon_v2 schema |
 
 ---
@@ -878,3 +879,35 @@ scaffold-engine/
 - **Pipeline (local):** 31 passed (0.06s)
 - **Model valves (local):** 17 passed (0.04s)
 - **Total:** 250 passed, 30 skipped, 0 failed — no regressions
+
+---
+
+## Changelog — April 14, 2026 (HTTP Client Consolidation)
+
+### Issue 10: `list_models()` ephemeral client
+1. **`app/model_router.py`** — `list_models()` replaced `async with httpx.AsyncClient(timeout=10)` with persistent `_get_client()`. Eliminates per-call connection overhead
+
+### Issue 11: `embed()` retry
+2. **`app/model_router.py`** — `embed()` switched from `_call_ollama()` (single attempt) to `_dispatch_with_retry()`. Transient Ollama failures now retry with the same cascade as `generate()` and `chat()`
+
+### Issue 17: Overly-aggressive filler patterns
+3. **`app/modules/prompt_optimizer.py`** — Removed 9 patterns from `FILLER_PATTERNS` that stripped semantically meaningful words: `just`, `basically`, `essentially`, `actually`, `simply`, `maybe`, `perhaps`, `try to`, `attempt to`. These can be meaningful in technical prompts (e.g., "just return the first 5", "simply output JSON"). Remaining patterns target genuine filler (politeness phrases, AI self-references)
+
+### Issue 22: Shared SearXNG client
+4. **`app/utils/http_clients.py`** (new) — Module-level `httpx.AsyncClient` with `base_url`, connection pooling (`max_connections=10`, `max_keepalive=5`), lazy initialization, and `close_clients()` shutdown hook
+5. **`app/modules/execution_agent.py`** — `_searxng_search()` replaced ephemeral client with `get_searxng_client()`, paths changed to relative (`/search`)
+6. **`app/modules/gt_extractor.py`** — `_search_searxng()` replaced ephemeral client with `get_searxng_client()`, fixed indentation bug from migration
+7. **`app/main.py`** — `close_clients()` wired into lifespan shutdown
+
+### Issue 29: Redis health check
+8. **`app/main.py`** — Health endpoint replaced sync `redis.from_url()` with async Redis connection from `EmbeddingCache._get_redis()`. Eliminates sync `redis` import and per-call connection
+
+### Bonus: Startup Ollama check
+9. **`app/main.py`** — Lifespan startup Ollama verification replaced ephemeral `httpx.AsyncClient` with `_get_client()` from `model_router`
+
+### Test results
+- **202 passed, 30 skipped, 0 failed** in container (33.05s)
+- No regressions from any changes
+
+### Commit
+- `db85efa` — `refactor: consolidate HTTP clients, add embed retry, fix filler patterns`
