@@ -3,7 +3,7 @@
 **Last Updated:** April 14, 2026 (Milvus moved into docker-compose)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
 **Latest Commit:** `e114662` — `feat: model validation — pre-flight check against Ollama /api/tags, 422 on missing models`
-**Test Suite:** 231 collected, 202 passed, 29 skipped, 0 failed
+**Test Suite:** 248 collected, 219 passed, 29 skipped, 0 failed
 **Codebase:** ~5,900 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
 ---
@@ -391,6 +391,7 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 - **227 passed, 21 skipped** (skips: files not in container, 7 from deleted `jobs_cleanup.py`)
 - **`test_scaffold_router.py`** — 30 smoke tests (pure functions, SSE parsing, command dispatch). Run with `--noconftest`
 - **`test_ideation_workflow.py`** — 8 smoke tests (Phase 1 + Phase 2 with full dep mocking)
+- **`test_model_valves.py`** — 17 tests (get_model priority chain, _model_overrides mapping, payload inclusion). Run with `--noconftest`
 - CI via GitHub Actions (`.github/workflows/test.yml` and `ci.yml`)
 
 ---
@@ -679,3 +680,16 @@ scaffold-engine/
 3. **`milvus-data-v2` volume declared `external: true`** — preserves existing data across compose lifecycle
 4. **Orchestrator `depends_on` updated** — now waits for `milvus-standalone` and `scaffold-redis` healthy conditions (in addition to existing `scaffold-postgres`)
 5. **Compose comment updated** — removed outdated note about Milvus running outside compose
+
+---
+
+## Changelog — April 13, 2026 (Model Valve Tests)
+
+### Tests
+1. **`tests/test_model_valves.py`** (new) — 17 tests across 3 classes, all run with `--noconftest`
+   - `TestGetModel` (8 tests) — `get_model()` priority chain: override > settings default, falsy values (None, `""`) fall through, partial dicts work, valve-only keys (`model_embedder`) work via override
+   - `TestModelOverrides` (4 tests) — `_model_overrides()` returns all 8 keys, values match valves, reflects changes, no extras
+   - `TestPayloadInclusion` (5 tests) — `/idea`, `/dag`, `/optimize`, `/rag` payloads include `model_overrides`; custom valve values propagate
+
+### Test count
+- **248 collected, 219 passed, 29 skipped, 0 failed** (17 new tests added)
