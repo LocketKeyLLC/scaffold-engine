@@ -1,9 +1,9 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 14, 2026 (behavioral test rewrite — issues 48, 49, 50, 60, 61, 65)
+**Last Updated:** April 14, 2026 (v0.2.0 — 65 issues resolved, /model command, behavioral test rewrites)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
 **Latest Commit:** `23c64d2` — `test: add /model command tests, valve-override test, gt_browser field mapping smoke tests`
-**Test Suite:** 263 collected, 215 passed, 20 skipped, 0 failed (+ 43 pipeline + 18 valve + 3 gt_browser locally)
+**Test Suite:** 210 passed, 20 skipped, 0 failed in container (+ 43 pipeline + 18 valve + 3 gt_browser locally = 274 total)
 **Codebase:** ~6,400 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
 ---
@@ -141,6 +141,7 @@ All interaction happens through the Open WebUI chat interface.
 | `/skip <job_id> <node_key>` | Skip a specific DAG node |
 | `/optimize <prompt>` | Optimize a prompt (independent of any job) |
 | `/rag <query>` | Query the Milvus knowledge base directly |
+| `/model <sub>` | Manage models: `list`, `available`, `set <role> <model>`, `reset`, `help` |
 | `/status` | List active jobs |
 | `/help` | Show command list |
 
@@ -279,6 +280,8 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | `app/utils/llm_parsing.py` | 120 | Shared LLM output parsing: `strip_think_tags()`, `parse_json_object()` and `parse_json_array()` with 4-step fallback chain |
 | `app/utils/http_clients.py` | 44 | Shared SearXNG async client with connection pooling, lazy init, clean shutdown |
 | `app/utils/milvus_utils.py` | 114 | Shared Milvus collection accessor: `get_collection(raise_on_missing)` with auto-creation of toon_v2 schema |
+| `app/utils/embedding_cache.py` | ~80 | Two-tier embedding cache: in-memory LRU (10K entries) + Redis persistent |
+| `app/utils/staleness.py` | ~60 | TTL-per-source-type sweep and `compute_expires_at()` helper |
 
 ---
 
@@ -444,8 +447,11 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 ## Known Issues
 
 1. **Triage model latency on long conversations** — `qwen3:4b` on CPU can take several minutes per turn as context grows
-2. **`/ideate/confirm` returned 500** on one occasion — root cause unknown, may be transient Milvus/LLM error
-3. **End-to-end pipeline validated** — Full auto-chain (triage → synthesis → Phase 1 → confirm → Phase 2 → DAG → execute) confirmed working on CPU-only hardware (April 11, 2026)
+2. **Knowledge base has 8 entries** — toon_v2 contains 8 entries from E2E test runs. Old 143 entries not recoverable; grows organically through pipeline usage
+3. **Golden retrieval tests skipped** — 7 tests blocked on knowledge base repopulation
+4. **Version chain filter is result-set scoped** — `query_rag()` only filters superseded entries when both versions appear in the same result set. Stricter Milvus-side filtering deferred
+5. **Open WebUI file routing intermittent** — after container restarts, Open WebUI sometimes stops forwarding to the pipeline. Hard browser refresh + new chat resolves
+6. **Context stripping depends on `</context>` tag** — if Open WebUI changes its context injection format, the regex in `pipe()` needs updating
 
 ---
 
@@ -475,6 +481,9 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 | F–U — Full Audit | Triage v3.1, synthesis rewrite, execution fixes, model/prompt fixes, dead code removal, schema fixes, async audit, JSON parsing consolidation, retry unification, TOON docs, 38 new tests, file cleanup | `156789c` |
 | V — Test Fixes | Aligned test signatures with `execute_all_nodes()` (removed stale `db` arg, added `async_session` mock), updated DAG truncation tests from max 5→10 | `cb1ecc1` |
 | W — Version Chains | Version chain ingestion (0.90–0.95 similarity), latest-version retrieval filtering, include_history param | `05f040a` |
+| X — Refactoring | 65 issues: bug fixes, code quality, HTTP client consolidation, API schema fixes, dead code removal | `c43b3c4`..`9c2ca34` |
+| Y — Test Rewrites | Behavioral tests replacing source-grep, test fixes, /model + valve + gt_browser coverage | `25f573e`..`23c64d2` |
+| Z — /model Command | Chat-based model management: list, set, reset, available | `b409575` |
 
 ---
 
@@ -510,6 +519,9 @@ scaffold-engine/
 │   │   └── error_logging.py       # Error capture
 │   └── utils/
 │       ├── llm_parsing.py         # Shared JSON parsing
+│       ├── http_clients.py        # Shared SearXNG async client with connection pooling
+│       ├── embedding_cache.py     # Two-tier embedding cache (LRU + Redis)
+│       ├── staleness.py           # TTL-per-source-type sweep
 │       └── milvus_utils.py        # Shared Milvus collection accessor + auto-create
 ├── pipelines/
 │   ├── scaffold_router.py         # Main pipeline (v3.1)
@@ -1038,51 +1050,6 @@ scaffold-engine/
 - **Model valves (local):** 17 passed
 - **Total:** 258 passed, 20 skipped, 0 failed — no regressions
 
-
----
-
-## Changelog — April 14, 2026 (Behavioral Test Rewrite — Issues 48, 49, 50, 60, 61, 65)
-
-### test_sse_streaming.py (Issues 48/49/50)
-1. **Replaced 18 source-grep tests with 16 behavioral tests** — all tests now call `execute_all_nodes()` with mocked dependencies and parse actual SSE output
-2. **TestSSEWireFormat** (3 tests) — verifies `event:`/`data:` lines, valid JSON, double-newline termination
-3. **TestEventSequenceContract** (3 tests) — happy path ordering, `node_failed` emission, `pipeline_complete` always last
-4. **TestPipelineCompleteStructure** (6 tests) — `total_nodes`, `passed`/`failed` counts, `duration_ms`, `compile_status`, `failed_nodes` array on partial
-5. **TestConcurrentGuard** (2 tests) — guard failure yields error, error references job ID
-6. **TestNodeStartEvent** (1 test) — verifies `node_key`, `title`, `tool` fields
-7. **TestHeartbeatCharacter** (1 test) — verifies zero-width space in router (skipped in container)
-
-### test_idea_refinement.py (Issue 60)
-8. **Replaced 6 signature-inspection tests with 12 behavioral tests** — all tests call `refine_idea()` with mocked `model_router.generate` and DB
-9. **TestRefineIdeaHappyPath** (5 tests) — output dict structure, `status=planning`, `refined_brief`, `model_used`, prompt contains idea text
-10. **TestRefineIdeaLLMFailure** (2 tests) — LLM error returns `status=failed`, unparseable JSON returns `status=failed`
-11. **TestRefineIdeaDomainOverride** (2 tests) — user-supplied domain applied, absent domain keeps LLM value
-12. **TestRefineIdeaTargetStatus** (1 test) — custom `target_status` parameter
-13. **TestRefineIdeaModelOverrides** (1 test) — `model_overrides` passed through to `get_model()`
-14. **TestRefineIdeaDBInteractions** (1 test) — verifies INSERT + UPDATEs + commits
-
-### test_rag_pipeline.py (Issue 61)
-15. **Replaced 10 AST/source-analysis tests with 12 behavioral tests** — all tests call `query_rag()` or `_rrf_fuse()` with mocked Milvus, embedder, and reranker
-16. **TestQueryRagHappyPath** (4 tests) — result structure, required fields, score sub-fields, metadata
-17. **TestQueryRagErrors** (2 tests) — collection unavailable, embedding failure
-18. **TestRRFFusion** (3 tests) — combines both sources, preserves disjoint results, sorted by RRF score
-19. **TestConfidenceThreshold** (1 test) — `too_strict` fallback returns up to 3 results
-20. **TestVersionFiltering** (2 tests) — superseded entries removed, `include_history=True` keeps all
-
-### test_health_cleanup.py (Issue 65)
-21. **Replaced 20 source-grep tests (7 targeting nonexistent `jobs_cleanup.py`) with 15 behavioral tests**
-22. **TestHealthEndpointResponse** (6 tests) — calls `health()` directly with mocked PG/Ollama/Milvus/Redis; verifies dict structure, status, timestamp, checks dict
-23. **TestHealthDegradedStates** (3 tests) — `degraded` when Milvus down, `unhealthy` when PG or Ollama down
-24. **TestReapStaleJobs** (6 tests) — calls `reap_stale_jobs()` with mocked DB; verifies counts, both types, commits
-
-### Commit
-- `25f573e` — `test: replace source-grep tests with behavioral tests (#48, #49, #50, #60, #61, #65)`
-
-### Test results
-- **In-container:** 210 passed, 20 skipped, 0 failed (26.78s)
-- **Pipeline (local):** 31 passed
-- **Model valves (local):** 17 passed
-- **Total:** 258 passed, 20 skipped, 0 failed — no regressions
 
 ---
 
