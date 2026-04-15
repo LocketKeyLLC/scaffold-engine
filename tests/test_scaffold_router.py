@@ -421,3 +421,191 @@ class TestHandleCommand:
         mock_get.side_effect = req_lib.exceptions.ConnectionError()
         result = pipe._handle_command("/status")
         assert "cannot reach" in result.lower() or "orchestrator" in result.lower()
+
+
+
+# ===================================================================
+# STEP 5: Command flow tests — /go, /confirm, context stripping
+# ===================================================================
+
+@pytest.mark.smoke
+class TestGoCommand:
+    """/go command flow in pipe()."""
+
+    def test_go_with_empty_history(self, pipe):
+        """If no user messages exist in history, /go yields Nothing to launch yet."""
+        messages = [
+            {"role": "system", "content": "You are helpful"},
+            {"role": "user", "content": "/go"},
+        ]
+        body = {}
+        chunks = list(pipe.pipe("/go", "test-model", messages, body))
+        combined = "".join(chunks)
+        assert "Nothing to launch yet" in combined
+
+    def test_go_triggers_synthesis(self, pipe):
+        """When history exists, /go calls _synthesize_idea and proceeds."""
+        messages = [
+            {"role": "user", "content": "Build a homelab dashboard"},
+            {"role": "assistant", "content": "Sounds good."},
+            {"role": "user", "content": "/go"},
+        ]
+        body = {}
+        with patch.object(pipe, "_synthesize_idea", return_value="Build a homelab dashboard for Docker") as mock_synth, \
+             patch.object(_mod, "requests") as mock_requests:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "job_id": "job-123",
+                "status": "awaiting_confirmation",
+                "confidence": 0.85,
+                "risks": [],
+                "clarifications": [],
+            }
+            mock_requests.post.return_value = mock_resp
+            chunks = list(pipe.pipe("/go", "test-model", messages, body))
+        mock_synth.assert_called_once()
+        combined = "".join(chunks)
+        assert "Synthesizing" in combined
+
+
+@pytest.mark.smoke
+class TestConfirmCommand:
+    """/confirm command flow in pipe()."""
+
+    def test_confirm_usage_error(self, pipe):
+        """/confirm with no job_id yields usage message."""
+        messages = [{"role": "user", "content": "/confirm"}]
+        body = {}
+        chunks = list(pipe.pipe("/confirm", "test-model", messages, body))
+        combined = "".join(chunks)
+        assert "Usage" in combined
+        assert "/confirm" in combined
+
+
+@pytest.mark.smoke
+class TestContextStripping:
+    """Open WebUI injects <context>...</context> before the real command."""
+
+    def test_context_tags_stripped(self, pipe):
+        """Command buried after </context> is extracted and /go is recognized."""
+        raw_msg = "<context>some file content here</context>" + chr(10) + "/go"
+        messages = [
+            {"role": "user", "content": raw_msg},
+        ]
+        body = {}
+        with patch.object(pipe, "_synthesize_idea", return_value="Test idea from context") as mock_synth, \
+             patch.object(_mod, "requests") as mock_requests:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "job_id": "j1", "status": "awaiting_confirmation",
+                "confidence": 0.9, "risks": [], "clarifications": [],
+            }
+            mock_requests.post.return_value = mock_resp
+            chunks = list(pipe.pipe(raw_msg, "test-model", messages, body))
+        # Context stripping worked — /go was recognized and synthesis ran
+        mock_synth.assert_called_once()
+        combined = "".join(chunks)
+        assert "Synthesizing" in combined
+
+    def test_no_context_tags_passes_through(self, pipe):
+        """Message without context tags is used as-is."""
+        messages = [{"role": "user", "content": "/help"}]
+        body = {}
+        chunks = list(pipe.pipe("/help", "test-model", messages, body))
+        combined = "".join(chunks)
+        assert "/go" in combined
+
+
+# ===================================================================
+# STEP 5: Command flow tests — /go, /confirm, context stripping
+# ===================================================================
+
+@pytest.mark.smoke
+class TestGoCommand:
+    """/go command flow in pipe()."""
+
+    def test_go_with_empty_history(self, pipe):
+        """If no user messages exist in history, /go yields Nothing to launch yet."""
+        messages = [
+            {"role": "system", "content": "You are helpful"},
+            {"role": "user", "content": "/go"},
+        ]
+        body = {}
+        chunks = list(pipe.pipe("/go", "test-model", messages, body))
+        combined = "".join(chunks)
+        assert "Nothing to launch yet" in combined
+
+    def test_go_triggers_synthesis(self, pipe):
+        """When history exists, /go calls _synthesize_idea and proceeds."""
+        messages = [
+            {"role": "user", "content": "Build a homelab dashboard"},
+            {"role": "assistant", "content": "Sounds good."},
+            {"role": "user", "content": "/go"},
+        ]
+        body = {}
+        with patch.object(pipe, "_synthesize_idea", return_value="Build a homelab dashboard for Docker") as mock_synth, \
+             patch.object(_mod, "requests") as mock_requests:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "job_id": "job-123",
+                "status": "awaiting_confirmation",
+                "confidence": 0.85,
+                "risks": [],
+                "clarifications": [],
+            }
+            mock_requests.post.return_value = mock_resp
+            chunks = list(pipe.pipe("/go", "test-model", messages, body))
+        mock_synth.assert_called_once()
+        combined = "".join(chunks)
+        assert "Synthesizing" in combined
+
+
+@pytest.mark.smoke
+class TestConfirmCommand:
+    """/confirm command flow in pipe()."""
+
+    def test_confirm_usage_error(self, pipe):
+        """/confirm with no job_id yields usage message."""
+        messages = [{"role": "user", "content": "/confirm"}]
+        body = {}
+        chunks = list(pipe.pipe("/confirm", "test-model", messages, body))
+        combined = "".join(chunks)
+        assert "Usage" in combined
+        assert "/confirm" in combined
+
+
+@pytest.mark.smoke
+class TestContextStripping:
+    """Open WebUI injects <context>...</context> before the real command."""
+
+    def test_context_tags_stripped(self, pipe):
+        """Command buried after </context> is extracted and /go is recognized."""
+        raw_msg = '<context>some file content here</context>' + chr(10) + '/go'
+        messages = [
+            {"role": "user", "content": raw_msg},
+        ]
+        body = {}
+        with patch.object(pipe, "_synthesize_idea", return_value="Test idea from context") as mock_synth, \
+             patch.object(_mod, "requests") as mock_requests:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "job_id": "j1", "status": "awaiting_confirmation",
+                "confidence": 0.9, "risks": [], "clarifications": [],
+            }
+            mock_requests.post.return_value = mock_resp
+            chunks = list(pipe.pipe(raw_msg, "test-model", messages, body))
+        mock_synth.assert_called_once()
+        combined = "".join(chunks)
+        assert "Synthesizing" in combined
+
+    def test_no_context_tags_passes_through(self, pipe):
+        """Message without context tags is used as-is."""
+        messages = [{"role": "user", "content": "/help"}]
+        body = {}
+        chunks = list(pipe.pipe("/help", "test-model", messages, body))
+        combined = "".join(chunks)
+        assert "/go" in combined
