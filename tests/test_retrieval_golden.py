@@ -83,11 +83,11 @@ async def test_golden_retrieval(query: str, domain: str, expected_substr: str):
     """Assert the expected document appears in top-3 for a golden query."""
     result = await query_rag(query, domain=domain, top_k=3)
 
-    topics = [r["topic"] for r in result["results"]]
+    topics = [r["title"] for r in result["results"]]
     assert len(topics) > 0, f"No results returned for query: {query!r}"
 
     matched = any(expected_substr.lower() in t.lower() for t in topics)
     assert matched, (
-        f"Expected topic containing {expected_substr!r} in top-3, "
+        f"Expected title containing {expected_substr!r} in top-3, "
         f"got: {topics}"
     )

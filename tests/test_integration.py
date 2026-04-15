@@ -79,7 +79,7 @@ async def test_rag_query_round_trip():
     first = docs[0]
     # Every result must carry scoring info and a topic
     assert "scores" in first
-    assert "topic" in first or "title" in first
+    assert "title" in first
     # Scores dict should have the three scoring layers
     scores = first["scores"]
     assert "vector" in scores

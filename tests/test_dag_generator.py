@@ -73,7 +73,7 @@ pytestmark = pytest.mark.skipif(
 # Constants
 # ===========================================================================
 
-VALID_TOOLS = {"LLM", "CodeGen", "Human", "FileSystem", "SearXNG", "Milvus"}
+VALID_TOOLS = {"LLM", "CodeGen", "SearXNG", "Milvus"}
 VALID_DOMAINS = {"prompt", "rag", "eng", "llm", "spec"}
 
 
