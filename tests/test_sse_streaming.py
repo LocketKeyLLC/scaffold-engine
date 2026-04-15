@@ -1,232 +1,350 @@
 """
-tests/test_sse_streaming.py — SSE streaming smoke tests
+tests/test_sse_streaming.py - SSE streaming behavioral tests
 
-Uses importlib to avoid WORKDIR /app package collision (Task #18).
-Tests SSE event format, event sequence contract, heartbeat behavior,
-and pipeline_complete event structure.
+Run:  docker exec scaffold-orchestrator pytest tests/test_sse_streaming.py -m smoke --timeout=30 -v
 """
 
-import importlib.util
-import os
-import sys
 import json
+import asyncio
+import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+
 # ---------------------------------------------------------------------------
-# importlib loader for execution_agent (SSE source)
+# Helpers (same pattern as test_execution_agent.py)
 # ---------------------------------------------------------------------------
 
-_MODULE_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "app", "modules", "execution_agent.py"
-)
-_ABS_PATH = os.path.abspath(_MODULE_PATH)
+def _collect_sse(async_gen):
+    """Run an async generator and return list of (event_name, data_dict) tuples."""
+    async def _gather():
+        events = []
+        async for chunk in async_gen:
+            for block in chunk.strip().split("\n\n"):
+                lines = block.strip().split("\n")
+                event = None
+                data = None
+                for line in lines:
+                    if line.startswith("event: "):
+                        event = line[7:]
+                    elif line.startswith("data: "):
+                        data = json.loads(line[6:])
+                events.append((event, data))
+        return events
+    return asyncio.new_event_loop().run_until_complete(_gather())
 
-_ROUTER_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "pipelines", "scaffold_router.py"
-)
-_ROUTER_ABS = os.path.abspath(_ROUTER_PATH)
+
+def _collect_sse_raw(async_gen):
+    """Run an async generator and return raw SSE strings."""
+    async def _gather():
+        chunks = []
+        async for chunk in async_gen:
+            chunks.append(chunk)
+        return chunks
+    return asyncio.new_event_loop().run_until_complete(_gather())
+
+
+def _make_sse_db(dag_node_count=2):
+    """Mock db + async_session for execute_all_nodes."""
+    scalar_result = MagicMock()
+    scalar_result.scalar.return_value = dag_node_count
+    guard_result = MagicMock()
+    guard_result.rowcount = 1
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[guard_result] + [scalar_result] * 20)
+    db.commit = AsyncMock()
+    mock_session_ctx = AsyncMock()
+    mock_session_ctx.__aenter__ = AsyncMock(return_value=db)
+    mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_async_session = MagicMock(return_value=mock_session_ctx)
+    return db, mock_async_session
+
+
+def _make_sse_db_guard_fails():
+    """Mock where concurrent guard fails (job already running or not found)."""
+    guard_result = MagicMock()
+    guard_result.rowcount = 0
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=guard_result)
+    db.commit = AsyncMock()
+    mock_session_ctx = AsyncMock()
+    mock_session_ctx.__aenter__ = AsyncMock(return_value=db)
+    mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_async_session = MagicMock(return_value=mock_session_ctx)
+    return db, mock_async_session
+
+
+def _node(key, title, tool):
+    return {"node_key": key, "title": title, "tool": tool}
+
+
+def _done(key, title):
+    return {
+        "status": "done", "node_key": key, "title": title,
+        "output": "ok", "verified": True, "confidence": 0.9,
+        "model_used": "m",
+    }
+
+
+def _failed(key, title):
+    return {
+        "status": "failed", "node_key": key, "title": title,
+        "error": "verification failed",
+    }
+
+
+_COMPLETE = {"status": "complete"}
 
 
 # ===========================================================================
-# SSE Format Tests (source-code based)
+# SSE Wire Format
 # ===========================================================================
 
-class TestSSEEventFormat:
-    """Tests for SSE event format compliance."""
+@pytest.mark.smoke
+class TestSSEWireFormat:
+    """Verify SSE events conform to the text/event-stream spec."""
 
-    def test_execution_agent_yields_sse_format(self):
-        """execution_agent.py yields events in SSE data: format."""
-        with open(_ABS_PATH, "r") as f:
-            source = f.read()
-        # SSE events should be yielded as JSON with event type
-        assert "yield" in source, "execution_agent should yield SSE events"
-        assert "json.dumps" in source or "json_dumps" in source, (
-            "SSE events should be JSON-serialized"
-        )
+    def test_each_chunk_has_event_and_data_lines(self):
+        """Every yielded chunk contains 'event: ...' and 'data: ...' lines."""
+        db, mock_session = _make_sse_db(dag_node_count=1)
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job",
+                   AsyncMock(return_value={"status": "executing", "id": "j1"})), \
+             patch("app.modules.execution_agent._get_next_node",
+                   AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
+             patch("app.modules.execution_agent.execute_next_node",
+                   AsyncMock(side_effect=[_done("T1", "X"), _COMPLETE])):
+            from app.modules.execution_agent import execute_all_nodes
+            raw = _collect_sse_raw(execute_all_nodes("j1"))
+        for chunk in raw:
+            assert "event: " in chunk, "Missing event: line in chunk"
+            assert "data: " in chunk, "Missing data: line in chunk"
 
-    def test_pipeline_complete_event_exists(self):
-        """execution_agent.py yields a pipeline_complete event."""
-        with open(_ABS_PATH, "r") as f:
-            source = f.read()
-        assert "pipeline_complete" in source, (
-            "execution_agent should emit pipeline_complete SSE event"
-        )
+    def test_data_lines_are_valid_json(self):
+        """Every data: line parses as valid JSON."""
+        db, mock_session = _make_sse_db(dag_node_count=1)
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job",
+                   AsyncMock(return_value={"status": "executing", "id": "j1"})), \
+             patch("app.modules.execution_agent._get_next_node",
+                   AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
+             patch("app.modules.execution_agent.execute_next_node",
+                   AsyncMock(side_effect=[_done("T1", "X"), _COMPLETE])):
+            from app.modules.execution_agent import execute_all_nodes
+            raw = _collect_sse_raw(execute_all_nodes("j1"))
+        for chunk in raw:
+            for line in chunk.strip().split("\n"):
+                if line.startswith("data: "):
+                    parsed = json.loads(line[6:])
+                    assert isinstance(parsed, dict)
 
-    def test_node_complete_event_exists(self):
-        """execution_agent.py yields node-level completion events."""
-        with open(_ABS_PATH, "r") as f:
-            source = f.read()
-        assert any(term in source for term in [
-            "node_done", "node_complete", "node_completed",
-        ]), "execution_agent should emit node completion events"
-
-
-# ===========================================================================
-# Pipeline Complete Event Structure
-# ===========================================================================
-
-class TestPipelineCompleteEvent:
-    """Tests for pipeline_complete SSE event structure."""
-
-    def test_compile_status_field(self):
-        """pipeline_complete event includes compile_status field."""
-        with open(_ABS_PATH, "r") as f:
-            source = f.read()
-        assert "compile_status" in source, (
-            "pipeline_complete should include compile_status"
-        )
-
-    def test_failed_nodes_field(self):
-        """pipeline_complete event includes failed_nodes field."""
-        with open(_ABS_PATH, "r") as f:
-            source = f.read()
-        assert "failed_nodes" in source, (
-            "pipeline_complete should include failed_nodes array"
-        )
-
-    def test_duration_ms_field(self):
-        """pipeline_complete event includes duration_ms field."""
-        with open(_ABS_PATH, "r") as f:
-            source = f.read()
-        assert "duration" in source, (
-            "pipeline_complete should include duration information"
-        )
-
-    def test_both_completion_paths_emit_event(self):
-        """pipeline_complete is emitted in both normal and early-exit paths."""
-        with open(_ABS_PATH, "r") as f:
-            source = f.read()
-        # Count occurrences of pipeline_complete yield
-        count = source.count("pipeline_complete")
-        assert count >= 2, (
-            f"pipeline_complete should appear in 2+ paths (normal + early exit), "
-            f"found {count}"
-        )
+    def test_chunks_end_with_double_newline(self):
+        """SSE spec requires each event block ends with \\n\\n."""
+        db, mock_session = _make_sse_db(dag_node_count=1)
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job",
+                   AsyncMock(return_value={"status": "executing", "id": "j1"})), \
+             patch("app.modules.execution_agent._get_next_node",
+                   AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
+             patch("app.modules.execution_agent.execute_next_node",
+                   AsyncMock(side_effect=[_done("T1", "X"), _COMPLETE])):
+            from app.modules.execution_agent import execute_all_nodes
+            raw = _collect_sse_raw(execute_all_nodes("j1"))
+        for chunk in raw:
+            assert chunk.endswith("\n\n"), "SSE chunk must end with double newline"
 
 
 # ===========================================================================
 # Event Sequence Contract
 # ===========================================================================
 
-class TestEventSequence:
-    """Tests for SSE event ordering contract."""
+@pytest.mark.smoke
+class TestEventSequenceContract:
+    """Verify SSE events arrive in the correct order."""
 
-    def test_blocked_event_exists(self):
-        """execution_agent emits blocked events for blocked nodes."""
-        with open(_ABS_PATH, "r") as f:
-            source = f.read()
-        assert "blocked" in source
+    def test_happy_path_2_nodes(self):
+        """node_start -> node_done -> node_start -> node_done -> pipeline_complete"""
+        db, mock_session = _make_sse_db(dag_node_count=2)
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job",
+                   AsyncMock(return_value={"status": "executing", "id": "j1"})), \
+             patch("app.modules.execution_agent._get_next_node",
+                   AsyncMock(side_effect=[
+                       _node("T1", "A", "LLM"),
+                       _node("T2", "B", "SearXNG"),
+                       None])), \
+             patch("app.modules.execution_agent.execute_next_node",
+                   AsyncMock(side_effect=[
+                       _done("T1", "A"), _done("T2", "B"), _COMPLETE])):
+            from app.modules.execution_agent import execute_all_nodes
+            events = _collect_sse(execute_all_nodes("j1"))
+        names = [e[0] for e in events]
+        assert names == [
+            "node_start", "node_done",
+            "node_start", "node_done",
+            "pipeline_complete",
+        ]
 
-    def test_error_event_exists(self):
-        """execution_agent emits error events on failure."""
-        with open(_ABS_PATH, "r") as f:
-            source = f.read()
-        assert "error" in source or "failed" in source
+    def test_failed_node_emits_node_failed(self):
+        """A node that fails verification yields node_failed, not node_done."""
+        db, mock_session = _make_sse_db(dag_node_count=1)
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job",
+                   AsyncMock(return_value={"status": "executing", "id": "j1"})), \
+             patch("app.modules.execution_agent._get_next_node",
+                   AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
+             patch("app.modules.execution_agent.execute_next_node",
+                   AsyncMock(side_effect=[_failed("T1", "X"), _COMPLETE])):
+            from app.modules.execution_agent import execute_all_nodes
+            events = _collect_sse(execute_all_nodes("j1"))
+        names = [e[0] for e in events]
+        assert "node_start" in names
+        assert "node_failed" in names
+        assert "pipeline_complete" in names
+        assert "node_done" not in names
 
-    def test_execute_all_nodes_is_generator(self):
-        """execute_all_nodes is an async generator (yields SSE events)."""
-        with open(_ABS_PATH, "r") as f:
-            source = f.read()
-        # Should be an async generator (async def + yield)
-        assert "async def execute_all_nodes" in source
-        assert "yield" in source
-
-
-# ===========================================================================
-# Scaffold Router SSE Relay
-# ===========================================================================
-
-class TestScaffoldRouterRelay:
-    """Tests for scaffold_router.py SSE relay behavior."""
-
-    @pytest.mark.skipif(
-        not os.path.exists(_ROUTER_ABS),
-        reason="scaffold_router.py not found",
-    )
-    def test_router_handles_pipeline_complete(self):
-        """scaffold_router.py handles pipeline_complete event."""
-        with open(_ROUTER_ABS, "r") as f:
-            source = f.read()
-        assert "pipeline_complete" in source, (
-            "scaffold_router should handle pipeline_complete event"
-        )
-
-    @pytest.mark.skipif(
-        not os.path.exists(_ROUTER_ABS),
-        reason="scaffold_router.py not found",
-    )
-    def test_router_has_heartbeat(self):
-        """scaffold_router.py implements keepalive heartbeats."""
-        with open(_ROUTER_ABS, "r") as f:
-            source = f.read()
-        assert any(term in source for term in [
-            "heartbeat", "keepalive", "keep_alive",
-        ]), "scaffold_router should implement heartbeats"
-
-    @pytest.mark.skipif(
-        not os.path.exists(_ROUTER_ABS),
-        reason="scaffold_router.py not found",
-    )
-    def test_router_has_fallback_poll(self):
-        """scaffold_router.py has fallback polling mechanism."""
-        with open(_ROUTER_ABS, "r") as f:
-            source = f.read()
-        assert any(term in source for term in [
-            "fallback", "poll", "timeout",
-        ]), "scaffold_router should have fallback mechanism"
+    def test_pipeline_complete_is_always_last(self):
+        """pipeline_complete is the final event in every run."""
+        db, mock_session = _make_sse_db(dag_node_count=1)
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job",
+                   AsyncMock(return_value={"status": "executing", "id": "j1"})), \
+             patch("app.modules.execution_agent._get_next_node",
+                   AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
+             patch("app.modules.execution_agent.execute_next_node",
+                   AsyncMock(side_effect=[_done("T1", "X"), _COMPLETE])):
+            from app.modules.execution_agent import execute_all_nodes
+            events = _collect_sse(execute_all_nodes("j1"))
+        assert events[-1][0] == "pipeline_complete"
 
 
 # ===========================================================================
-# Heartbeat Tests
+# pipeline_complete Event Structure
 # ===========================================================================
 
-class TestHeartbeat:
-    """Tests for SSE heartbeat/keepalive behavior."""
+@pytest.mark.smoke
+class TestPipelineCompleteStructure:
+    """Verify pipeline_complete payload contains required fields."""
 
-    @pytest.mark.skipif(
-        not os.path.exists(_ROUTER_ABS),
-        reason="scaffold_router.py not found",
-    )
-    def test_heartbeat_character(self):
-        """Heartbeat uses dot or empty string."""
-        with open(_ROUTER_ABS, "r") as f:
-            source = f.read()
-        # Current implementation uses dots (known issue #11)
-        # or might use empty string / zero-width space
-        has_heartbeat = any(char in source for char in [
-            '"."', "'.'", '""', "''", '"\\u200b"',
-        ])
-        assert has_heartbeat or "heartbeat" in source
+    def _run_single_node(self, verified=True):
+        db, mock_session = _make_sse_db(dag_node_count=1)
+        result = _done("T1", "X") if verified else _failed("T1", "X")
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job",
+                   AsyncMock(return_value={"status": "executing", "id": "j1"})), \
+             patch("app.modules.execution_agent._get_next_node",
+                   AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
+             patch("app.modules.execution_agent.execute_next_node",
+                   AsyncMock(side_effect=[result, _COMPLETE])):
+            from app.modules.execution_agent import execute_all_nodes
+            events = _collect_sse(execute_all_nodes("j1"))
+        return [e for e in events if e[0] == "pipeline_complete"][0][1]
+
+    def test_has_total_nodes(self):
+        data = self._run_single_node()
+        assert "total_nodes" in data
+        assert data["total_nodes"] == 1
+
+    def test_has_passed_and_failed_counts(self):
+        data = self._run_single_node()
+        assert data["passed"] == 1
+        assert data["failed"] == 0
+
+    def test_has_duration_ms(self):
+        data = self._run_single_node()
+        assert "duration_ms" in data
+        assert isinstance(data["duration_ms"], (int, float))
+
+    def test_has_compile_status(self):
+        data = self._run_single_node()
+        assert data["compile_status"] in ("complete", "partial")
+
+    def test_partial_includes_failed_nodes(self):
+        data = self._run_single_node(verified=False)
+        assert data["compile_status"] == "partial"
+        assert "failed_nodes" in data
+        assert len(data["failed_nodes"]) == 1
+        assert data["failed_nodes"][0]["node_key"] == "T1"
+
+    def test_complete_has_no_failed_nodes_key(self):
+        data = self._run_single_node(verified=True)
+        assert data["compile_status"] == "complete"
+        assert "failed_nodes" not in data
 
 
 # ===========================================================================
-# Error Handling Tests
+# Concurrent Execution Guard
 # ===========================================================================
 
-class TestErrorHandling:
-    """Tests for SSE error handling in execution agent."""
+@pytest.mark.smoke
+class TestConcurrentGuard:
+    """Verify the atomic check-and-set guard prevents duplicate runs."""
 
-    def test_node_timeout_handling(self):
-        """execution_agent handles node timeouts."""
-        with open(_ABS_PATH, "r") as f:
-            source = f.read()
-        assert "timeout" in source.lower(), (
-            "execution_agent should handle node timeouts"
-        )
+    def test_guard_failure_yields_error(self):
+        """When guard UPDATE matches 0 rows, an error event is yielded."""
+        _, mock_session = _make_sse_db_guard_fails()
+        with patch("app.modules.execution_agent.async_session", mock_session):
+            from app.modules.execution_agent import execute_all_nodes
+            events = _collect_sse(execute_all_nodes("job-1"))
+        names = [e[0] for e in events]
+        assert "error" in names
+        assert "pipeline_complete" not in names
 
-    def test_concurrent_guard(self):
-        """execution_agent has concurrent execution guard."""
-        with open(_ABS_PATH, "r") as f:
-            source = f.read()
-        assert any(term in source for term in [
-            "concurrent", "guard", "running",
-        ]), "execution_agent should guard against concurrent execution"
+    def test_guard_error_message_references_job(self):
+        """Guard failure error message includes the job ID."""
+        _, mock_session = _make_sse_db_guard_fails()
+        with patch("app.modules.execution_agent.async_session", mock_session):
+            from app.modules.execution_agent import execute_all_nodes
+            events = _collect_sse(execute_all_nodes("job-99"))
+        error_events = [e[1] for e in events if e[0] == "error"]
+        assert len(error_events) >= 1
+        assert "job-99" in error_events[0].get("message", "")
 
-    def test_partial_compile_on_failure(self):
-        """execution_agent produces partial compile on node failure."""
-        with open(_ABS_PATH, "r") as f:
+
+# ===========================================================================
+# node_start Event Fields
+# ===========================================================================
+
+@pytest.mark.smoke
+class TestNodeStartEvent:
+    """Verify node_start events contain required fields."""
+
+    def test_node_start_has_key_title_tool(self):
+        db, mock_session = _make_sse_db(dag_node_count=1)
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job",
+                   AsyncMock(return_value={"status": "executing", "id": "j1"})), \
+             patch("app.modules.execution_agent._get_next_node",
+                   AsyncMock(side_effect=[
+                       _node("T1", "Research", "Milvus"), None])), \
+             patch("app.modules.execution_agent.execute_next_node",
+                   AsyncMock(side_effect=[_done("T1", "Research"), _COMPLETE])):
+            from app.modules.execution_agent import execute_all_nodes
+            events = _collect_sse(execute_all_nodes("j1"))
+        start_evt = [e for e in events if e[0] == "node_start"][0][1]
+        assert start_evt["node_key"] == "T1"
+        assert start_evt["title"] == "Research"
+        assert start_evt["tool"] == "Milvus"
+
+
+# ===========================================================================
+# Heartbeat Character
+# ===========================================================================
+
+@pytest.mark.smoke
+class TestHeartbeatCharacter:
+    """Verify the SSE keepalive uses zero-width space."""
+
+    def test_keepalive_is_zero_width_space(self):
+        """scaffold_router.py uses the zero-width space as keepalive."""
+        router_path = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "pipelines", "scaffold_router.py"
+        ))
+        if not os.path.exists(router_path):
+            pytest.skip("scaffold_router.py not in container")
+        with open(router_path, "r") as f:
             source = f.read()
-        assert "partial" in source.lower() or "PARTIAL" in source, (
-            "execution_agent should support partial compilation"
+        # Zero-width space U+200B should be present as the keepalive char
+        assert "\u200b" in source or "\\u200b" in source, (
+            "Keepalive should use zero-width space"
         )

@@ -1,364 +1,193 @@
 """
-tests/test_health_cleanup.py — Health check and stale job cleanup tests
+tests/test_health_cleanup.py - Behavioral tests for /health and reap_stale_jobs
 
-Uses importlib to avoid WORKDIR /app package collision (Task #18).
-Tests /health endpoint structure, degraded/unhealthy states, no-auth requirement.
-Tests /jobs/cleanup transitions and auth requirement.
+Tests health() by calling it directly with mocked backends.
+Tests reap_stale_jobs() via mocked DB session.
+
+Run:  docker exec scaffold-orchestrator pytest tests/test_health_cleanup.py -m smoke --timeout=30 -v
 """
 
-import importlib.util
-import os
-import sys
-import json
-import time
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime, timezone, timedelta
+from tests.conftest import make_mock_db
+
+
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
 
 # ---------------------------------------------------------------------------
-# importlib loaders
+# /health tests - call the function directly
 # ---------------------------------------------------------------------------
 
-_HEALTH_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "app", "routers", "health.py"
-)
-_HEALTH_ABS = os.path.abspath(_HEALTH_PATH)
+def _call_health(pg_up=True, ollama_up=True, milvus_up=True):
+    """Call health() with mocked dependency checks, return response dict."""
 
-_CLEANUP_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "app", "routers", "jobs_cleanup.py"
-)
-_CLEANUP_ABS = os.path.abspath(_CLEANUP_PATH)
+    # Mock engine for PG check
+    mock_conn = AsyncMock()
+    mock_conn.execute = AsyncMock()
+    mock_connect = AsyncMock()
+    mock_connect.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_connect.__aexit__ = AsyncMock(return_value=False)
+    mock_engine = MagicMock()
+    if pg_up:
+        mock_engine.connect.return_value = mock_connect
+    else:
+        mock_engine.connect.side_effect = ConnectionError("PG down")
 
-_MAIN_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "app", "main.py"
-)
-_MAIN_ABS = os.path.abspath(_MAIN_PATH)
+    # Mock httpx for Ollama check
+    mock_http_resp = MagicMock()
+    mock_http_resp.raise_for_status = MagicMock()
+    mock_http_resp.json.return_value = {"models": [{"name": "qwen3:4b"}]}
 
+    mock_http_client = AsyncMock()
+    mock_http_client.__aenter__ = AsyncMock(return_value=mock_http_client)
+    mock_http_client.__aexit__ = AsyncMock(return_value=False)
+    if ollama_up:
+        mock_http_client.get = AsyncMock(return_value=mock_http_resp)
+    else:
+        mock_http_client.get = AsyncMock(side_effect=ConnectionError("Ollama down"))
 
-def _load_module(name, path):
-    """Load a module via importlib, stubbing heavy deps."""
-    stubs = {}
-    for mod_name in [
-        "app", "app.database", "app.modules", "app.config",
-        "app.routers", "app.routers.health", "app.routers.jobs_cleanup",
-        "app.routers.status",
-        "sqlalchemy", "sqlalchemy.ext", "sqlalchemy.ext.asyncio",
-        "sqlalchemy.orm", "sqlalchemy.sql", "sqlalchemy.text",
-        "structlog", "aiohttp", "asyncpg",
-        "pymilvus", "pymilvus.utility", "pymilvus.Collection",
-        "fastapi", "fastapi.responses",
-    ]:
-        if mod_name not in sys.modules:
-            stubs[mod_name] = MagicMock()
+    # Mock Milvus utility + Collection
+    mock_utility = MagicMock()
+    mock_collection_cls = MagicMock()
+    if milvus_up:
+        mock_utility.list_collections.return_value = ["toon_v2"]
+        mock_col_instance = MagicMock()
+        mock_col_instance.num_entities = 8
+        mock_collection_cls.return_value = mock_col_instance
+    else:
+        mock_utility.list_collections.side_effect = ConnectionError("Milvus down")
 
-    # Make FastAPI stubs work
-    mock_fastapi = MagicMock()
-    mock_fastapi.APIRouter.return_value = MagicMock()
-    mock_fastapi.Depends = MagicMock()
-    stubs["fastapi"] = mock_fastapi
+    # Mock Redis/cache (inline import in health())
+    mock_cache = MagicMock()
+    mock_cache.stats = {"hits": 5, "misses": 2}
+    mock_redis_conn = AsyncMock()
+    mock_redis_conn.ping = AsyncMock()
+    mock_redis_conn.dbsize = AsyncMock(return_value=10)
+    mock_cache._get_redis = AsyncMock(return_value=mock_redis_conn)
 
-    mock_structlog = MagicMock()
-    mock_structlog.get_logger.return_value = MagicMock()
-    stubs["structlog"] = mock_structlog
+    async def do_call():
+        with patch("app.main.engine", mock_engine), \
+             patch("app.main.httpx.AsyncClient", return_value=mock_http_client), \
+             patch("app.main.utility", mock_utility), \
+             patch("app.main.Collection", mock_collection_cls), \
+             patch("app.utils.embedding_cache.get_cache", return_value=mock_cache):
+            from app.main import health
+            return await health()
 
-    with patch.dict(sys.modules, stubs):
-        spec = importlib.util.spec_from_file_location(name, path)
-        mod = importlib.util.module_from_spec(spec)
-        try:
-            spec.loader.exec_module(mod)
-        except Exception:
-            pass
-        return mod
-
-
-# ===========================================================================
-# Health Endpoint — Source Code Structure Tests
-# ===========================================================================
-
-class TestHealthEndpointStructure:
-    """Tests for /health endpoint structure and behavior."""
-
-    @pytest.mark.skipif(
-        not os.path.exists(_HEALTH_ABS) and not os.path.exists(_MAIN_ABS),
-        reason="Health endpoint source not found",
-    )
-    def test_health_endpoint_exists(self):
-        """Health endpoint is defined in health.py or main.py."""
-        found = False
-        for path in [_HEALTH_ABS, _MAIN_ABS]:
-            if os.path.exists(path):
-                with open(path, "r") as f:
-                    source = f.read()
-                if "/health" in source or "health" in source:
-                    found = True
-                    break
-        assert found, "Health endpoint should be defined"
-
-    @pytest.mark.skipif(
-        not os.path.exists(_MAIN_ABS),
-        reason="main.py not found",
-    )
-    def test_health_checks_postgres(self):
-        """Health endpoint checks PostgreSQL connectivity."""
-        # Health check is in main.py per carryover docs
-        with open(_MAIN_ABS, "r") as f:
-            source = f.read()
-        assert any(term in source for term in [
-            "postgres", "PostgreSQL", "_check_postgres", "database",
-        ]), "Health should check PostgreSQL"
-
-    @pytest.mark.skipif(
-        not os.path.exists(_MAIN_ABS),
-        reason="main.py not found",
-    )
-    def test_health_checks_milvus(self):
-        """Health endpoint checks Milvus connectivity."""
-        with open(_MAIN_ABS, "r") as f:
-            source = f.read()
-        assert any(term in source for term in [
-            "milvus", "Milvus", "_check_milvus",
-        ]), "Health should check Milvus"
-
-    @pytest.mark.skipif(
-        not os.path.exists(_MAIN_ABS),
-        reason="main.py not found",
-    )
-    def test_health_checks_ollama(self):
-        """Health endpoint checks Ollama connectivity."""
-        with open(_MAIN_ABS, "r") as f:
-            source = f.read()
-        assert any(term in source for term in [
-            "ollama", "Ollama", "_check_ollama",
-        ]), "Health should check Ollama"
-
-    @pytest.mark.skipif(
-        not os.path.exists(_MAIN_ABS),
-        reason="main.py not found",
-    )
-    def test_health_uses_concurrent_checks(self):
-        """Health endpoint runs dependency checks concurrently."""
-        with open(_MAIN_ABS, "r") as f:
-            source = f.read()
-        assert "asyncio.gather" in source or "gather" in source, (
-            "Health should use asyncio.gather for concurrent checks"
-        )
-
-    @pytest.mark.skipif(
-        not os.path.exists(_MAIN_ABS),
-        reason="main.py not found",
-    )
-    def test_health_no_auth_required(self):
-        """Health endpoint is exempt from global auth."""
-        with open(_MAIN_ABS, "r") as f:
-            source = f.read()
-        # Health endpoint should have dependencies=[] to exempt from global auth
-        assert "dependencies=[]" in source or "dependencies = []" in source, (
-            "Health endpoint should be exempt from auth (dependencies=[])"
-        )
-
-    @pytest.mark.skipif(
-        not os.path.exists(_MAIN_ABS),
-        reason="main.py not found",
-    )
-    def test_health_returns_latency(self):
-        """Health endpoint includes latency_ms for each dependency."""
-        with open(_MAIN_ABS, "r") as f:
-            source = f.read()
-        assert "latency" in source, (
-            "Health should report latency for each dependency"
-        )
-
-    @pytest.mark.skipif(
-        not os.path.exists(_MAIN_ABS),
-        reason="main.py not found",
-    )
-    def test_health_returns_timestamp(self):
-        """Health endpoint includes a timestamp."""
-        with open(_MAIN_ABS, "r") as f:
-            source = f.read()
-        assert "timestamp" in source or "datetime" in source, (
-            "Health should include timestamp"
-        )
+    return _run(do_call())
 
 
-# ===========================================================================
-# Health Status Logic Tests
-# ===========================================================================
+@pytest.mark.smoke
+class TestHealthEndpointResponse:
+    """Test health() returns correct structure."""
 
-class TestHealthStatusLogic:
-    """Tests for health status determination logic."""
+    def test_health_returns_dict(self):
+        result = _call_health()
+        assert isinstance(result, dict)
 
-    @pytest.mark.skipif(
-        not os.path.exists(_MAIN_ABS),
-        reason="main.py not found",
-    )
-    def test_healthy_when_all_deps_up(self):
-        """Status is 'healthy' when all dependencies respond."""
-        with open(_MAIN_ABS, "r") as f:
-            source = f.read()
-        assert "healthy" in source, "Should return 'healthy' status"
+    def test_health_has_status_field(self):
+        result = _call_health()
+        assert "status" in result
+        assert result["status"] in ("healthy", "degraded", "unhealthy")
 
-    @pytest.mark.skipif(
-        not os.path.exists(_MAIN_ABS),
-        reason="main.py not found",
-    )
-    def test_degraded_status_exists(self):
-        """Status 'degraded' is used when non-critical deps fail."""
-        with open(_MAIN_ABS, "r") as f:
-            source = f.read()
-        assert "degraded" in source, (
-            "Should return 'degraded' when Milvus is down"
-        )
+    def test_health_has_timestamp(self):
+        result = _call_health()
+        assert "timestamp" in result
 
-    @pytest.mark.skipif(
-        not os.path.exists(_MAIN_ABS),
-        reason="main.py not found",
-    )
-    def test_unhealthy_status_exists(self):
-        """Status 'unhealthy' is used when critical deps fail."""
-        with open(_MAIN_ABS, "r") as f:
-            source = f.read()
-        assert "unhealthy" in source, (
-            "Should return 'unhealthy' when PostgreSQL is down"
-        )
+    def test_health_has_checks_dict(self):
+        result = _call_health()
+        assert "checks" in result
+        assert isinstance(result["checks"], dict)
+
+    def test_healthy_when_all_up(self):
+        result = _call_health()
+        assert result["status"] == "healthy"
+
+    def test_checks_include_pg_ollama_milvus(self):
+        result = _call_health()
+        checks = result["checks"]
+        assert "postgresql" in checks
+        assert "ollama" in checks
+        assert "milvus" in checks
 
 
-# ===========================================================================
-# Cleanup Endpoint — Source Code Structure Tests
-# ===========================================================================
+@pytest.mark.smoke
+class TestHealthDegradedStates:
+    """Test health status logic for degraded/unhealthy."""
 
-class TestCleanupEndpointStructure:
-    """Tests for /jobs/cleanup endpoint structure."""
+    def test_degraded_when_milvus_down(self):
+        result = _call_health(milvus_up=False)
+        assert result["status"] == "degraded"
 
-    @pytest.mark.skipif(
-        not os.path.exists(_CLEANUP_ABS),
-        reason="jobs_cleanup.py not found",
-    )
-    def test_cleanup_endpoint_exists(self):
-        """Cleanup endpoint is defined in jobs_cleanup.py."""
-        with open(_CLEANUP_ABS, "r") as f:
-            source = f.read()
-        assert "cleanup" in source, "Cleanup endpoint should be defined"
+    def test_unhealthy_when_pg_down(self):
+        result = _call_health(pg_up=False)
+        assert result["status"] == "unhealthy"
 
-    @pytest.mark.skipif(
-        not os.path.exists(_CLEANUP_ABS),
-        reason="jobs_cleanup.py not found",
-    )
-    def test_cleanup_is_post(self):
-        """Cleanup endpoint uses POST method."""
-        with open(_CLEANUP_ABS, "r") as f:
-            source = f.read()
-        assert ".post" in source or "POST" in source, (
-            "Cleanup should be a POST endpoint"
-        )
-
-    @pytest.mark.skipif(
-        not os.path.exists(_CLEANUP_ABS),
-        reason="jobs_cleanup.py not found",
-    )
-    def test_cleanup_transitions_running_to_failed(self):
-        """Cleanup transitions stale running jobs to failed."""
-        with open(_CLEANUP_ABS, "r") as f:
-            source = f.read()
-        assert "running" in source and "failed" in source, (
-            "Cleanup should transition running→failed"
-        )
-
-    @pytest.mark.skipif(
-        not os.path.exists(_CLEANUP_ABS),
-        reason="jobs_cleanup.py not found",
-    )
-    def test_cleanup_transitions_planning_to_cancelled(self):
-        """Cleanup transitions stale planning jobs to cancelled."""
-        with open(_CLEANUP_ABS, "r") as f:
-            source = f.read()
-        assert "planning" in source and "cancelled" in source, (
-            "Cleanup should transition planning→cancelled"
-        )
-
-    @pytest.mark.skipif(
-        not os.path.exists(_CLEANUP_ABS),
-        reason="jobs_cleanup.py not found",
-    )
-    def test_cleanup_has_age_thresholds(self):
-        """Cleanup uses age thresholds (30 min running, 60 min planning)."""
-        with open(_CLEANUP_ABS, "r") as f:
-            source = f.read()
-        assert "30" in source or "1800" in source, (
-            "Cleanup should have 30-min threshold for running jobs"
-        )
-        assert "60" in source or "3600" in source, (
-            "Cleanup should have 60-min threshold for planning jobs"
-        )
-
-    @pytest.mark.skipif(
-        not os.path.exists(_CLEANUP_ABS),
-        reason="jobs_cleanup.py not found",
-    )
-    def test_cleanup_logs_stale_job_cleaned(self):
-        """Cleanup emits stale_job_cleaned structured log event."""
-        with open(_CLEANUP_ABS, "r") as f:
-            source = f.read()
-        assert "stale_job_cleaned" in source, (
-            "Cleanup should emit stale_job_cleaned log event"
-        )
+    def test_unhealthy_when_ollama_down(self):
+        result = _call_health(ollama_up=False)
+        assert result["status"] == "unhealthy"
 
 
-# ===========================================================================
-# Cleanup Auth Tests
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# reap_stale_jobs tests via mocked DB
+# ---------------------------------------------------------------------------
 
-class TestCleanupAuth:
-    """Tests for cleanup endpoint auth requirement."""
-
-    @pytest.mark.skipif(
-        not os.path.exists(_CLEANUP_ABS),
-        reason="jobs_cleanup.py not found",
-    )
-    def test_cleanup_requires_auth(self):
-        """Cleanup endpoint should NOT exempt auth (no dependencies=[])."""
-        with open(_CLEANUP_ABS, "r") as f:
-            source = f.read()
-        # Cleanup should NOT have dependencies=[] (that exempts auth)
-        # It relies on the global auth from FastAPI constructor
-        # If it explicitly sets dependencies=[], that's a bug
-        lines = source.split("\n")
-        cleanup_routes = [
-            l for l in lines if "cleanup" in l and "dependencies=[]" in l
-        ]
-        assert len(cleanup_routes) == 0, (
-            "Cleanup endpoint should NOT exempt auth with dependencies=[]"
-        )
+def _make_reap_db(running_reaped=0, planning_reaped=0):
+    """Mock DB for reap_stale_jobs."""
+    r1 = MagicMock()
+    r1.rowcount = running_reaped
+    r2 = MagicMock()
+    r2.rowcount = planning_reaped
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[r1, r2])
+    db.commit = AsyncMock()
+    return db
 
 
-# ===========================================================================
-# Startup Cleanup Tests
-# ===========================================================================
+@pytest.mark.smoke
+class TestReapStaleJobs:
+    """Test reap_stale_jobs() returns correct counts."""
 
-class TestStartupCleanup:
-    """Tests for automatic cleanup on container startup."""
+    def test_no_stale_jobs(self):
+        db = _make_reap_db(running_reaped=0, planning_reaped=0)
+        from app.modules.cleanup import reap_stale_jobs
+        result = _run(reap_stale_jobs(db))
+        assert result == {"running_to_failed": 0, "planning_to_cancelled": 0}
 
-    @pytest.mark.skipif(
-        not os.path.exists(_MAIN_ABS),
-        reason="main.py not found",
-    )
-    def test_startup_cleanup_exists(self):
-        """main.py runs cleanup on startup."""
-        with open(_MAIN_ABS, "r") as f:
-            source = f.read()
-        assert any(term in source for term in [
-            "startup_cleanup", "startup", "on_event",
-            "lifespan", "@app.on_event",
-        ]), "main.py should run cleanup on startup"
+    def test_running_jobs_reaped(self):
+        db = _make_reap_db(running_reaped=3, planning_reaped=0)
+        from app.modules.cleanup import reap_stale_jobs
+        result = _run(reap_stale_jobs(db))
+        assert result["running_to_failed"] == 3
+        assert result["planning_to_cancelled"] == 0
 
-    @pytest.mark.skipif(
-        not os.path.exists(_MAIN_ABS),
-        reason="main.py not found",
-    )
-    def test_startup_cleanup_logging(self):
-        """Startup cleanup emits structured log events."""
-        with open(_MAIN_ABS, "r") as f:
-            source = f.read()
-        assert "startup_cleanup" in source, (
-            "Startup cleanup should emit structured log events"
-        )
+    def test_planning_jobs_reaped(self):
+        db = _make_reap_db(running_reaped=0, planning_reaped=2)
+        from app.modules.cleanup import reap_stale_jobs
+        result = _run(reap_stale_jobs(db))
+        assert result["running_to_failed"] == 0
+        assert result["planning_to_cancelled"] == 2
+
+    def test_both_types_reaped(self):
+        db = _make_reap_db(running_reaped=1, planning_reaped=4)
+        from app.modules.cleanup import reap_stale_jobs
+        result = _run(reap_stale_jobs(db))
+        assert result["running_to_failed"] == 1
+        assert result["planning_to_cancelled"] == 4
+
+    def test_commits_after_reap(self):
+        db = _make_reap_db(running_reaped=1, planning_reaped=0)
+        from app.modules.cleanup import reap_stale_jobs
+        _run(reap_stale_jobs(db))
+        db.commit.assert_called_once()
+
+    def test_returns_dict(self):
+        db = _make_reap_db()
+        from app.modules.cleanup import reap_stale_jobs
+        result = _run(reap_stale_jobs(db))
+        assert isinstance(result, dict)
+        assert "running_to_failed" in result
+        assert "planning_to_cancelled" in result
