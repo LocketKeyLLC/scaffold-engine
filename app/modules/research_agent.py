@@ -417,8 +417,15 @@ async def run_research(
             })
             break
 
-        # Extract
-        entries = await _extract_entries(results, topic, model=extract_model)
+        # Extract (with heartbeat to keep SSE alive during long LLM calls)
+        extract_task = asyncio.create_task(
+            _extract_entries(results, topic, model=extract_model)
+        )
+        while not extract_task.done():
+            await asyncio.sleep(8)
+            if not extract_task.done():
+                yield _sse("heartbeat", {"status": "extracting", "iteration": state.iteration})
+        entries = extract_task.result()
 
         yield _sse("extraction_complete", {
             "iteration": state.iteration,
@@ -459,8 +466,13 @@ async def run_research(
             })
             break
 
-        # Gap analysis for next iteration
-        gaps = await _analyze_gaps(state, model=decompose_model)
+        # Gap analysis for next iteration (with heartbeat)
+        gap_task = asyncio.create_task(_analyze_gaps(state, model=decompose_model))
+        while not gap_task.done():
+            await asyncio.sleep(8)
+            if not gap_task.done():
+                yield _sse("heartbeat", {"status": "analyzing_gaps"})
+        gaps = gap_task.result()
         coverage = gaps.get("coverage_pct", 100)
         state.covered_facets.update(gaps.get("covered_facets", []))
 
@@ -485,8 +497,13 @@ async def run_research(
         if not queries:
             break
 
-    # ---- Final summary ----
-    summary = await _generate_summary(state, model=summary_model)
+    # ---- Final summary (with heartbeat) ----
+    summary_task = asyncio.create_task(_generate_summary(state, model=summary_model))
+    while not summary_task.done():
+        await asyncio.sleep(8)
+        if not summary_task.done():
+            yield _sse("heartbeat", {"status": "summarizing"})
+    summary = summary_task.result()
     elapsed_ms = int((time.monotonic() - t0) * 1000)
 
     yield _sse("research_complete", {
