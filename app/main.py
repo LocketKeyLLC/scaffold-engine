@@ -419,6 +419,7 @@ async def extract_gt(body: GtInput):
 
 
 class GtSearchInput(BaseModel):
+    domain: str | None = None
     query: str
     top_k: int = 10
 
@@ -435,7 +436,7 @@ async def gt_list_endpoint(page: int = 1, per_page: int = 20):
 async def gt_search_endpoint(body: GtSearchInput):
     """Step 19: Semantic search TOON entries."""
     try:
-        return await gt_search(query=body.query, top_k=body.top_k)
+        return await gt_search(query=body.query, top_k=body.top_k, domain=body.domain)
     except Exception as e:
         logger.error("/gt/search failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))

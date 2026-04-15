@@ -26,6 +26,10 @@ def _get_collection() -> Collection:
 
 
 async def gt_list(page: int = 1, per_page: int = 20) -> dict:
+    # NOTE: Offset-based pagination — performance degrades at high page numbers
+    # (Milvus scans and discards rows). Fine for current scale (<1K entries).
+    # For larger datasets, switch to cursor-based pagination using a sorted
+    # field (e.g., created_at) with a "last seen" marker.
     """Paginated list of all TOON entries."""
     def _sync() -> dict:
         col = _get_collection()
@@ -66,7 +70,7 @@ async def gt_list(page: int = 1, per_page: int = 20) -> dict:
     return await loop.run_in_executor(None, _sync)
 
 
-async def gt_search(query: str, top_k: int = 10) -> dict:
+async def gt_search(query: str, top_k: int = 10, domain: str | None = None) -> dict:
     """Semantic search against TOON entries."""
     vector = await _embed_query(query)
     if vector is None:
@@ -75,12 +79,14 @@ async def gt_search(query: str, top_k: int = 10) -> dict:
     def _sync() -> dict:
         col = _get_collection()
         search_params = {"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}}
+        expr = f'domain == "{domain}"' if domain else None
         results = col.search(
             data=[vector],
             anns_field="dense_vector",
             param=search_params,
             limit=top_k,
             output_fields=OUTPUT_FIELDS,
+            expr=expr,
         )
 
         entries = []
