@@ -33,6 +33,7 @@ from app.modules.gt_browser import gt_list, gt_search, gt_detail, gt_stats
 from app.modules.gt_extractor import extract_ground_truths
 from app.modules.idea_refinement import refine_idea
 from app.modules.ideation_workflow import analyze_and_confirm, research_and_compile
+from app.modules.research_agent import run_research
 from app.modules.prompt_inspector import list_prompts, get_prompt, update_prompt
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag as _query_rag
@@ -42,6 +43,7 @@ from app.schemas import (
     ExecutionResult,
     PromptOptimizeInput,
     PromptOptimizeResult,
+    ResearchInput,
     SkipNodeInput,
 )
 
@@ -568,6 +570,20 @@ async def execute_all_endpoint(body: ExecuteNextInput):
         headers={"X-Accel-Buffering": "no"},  # disable nginx buffering
     )
 
+@app.post("/research", tags=["Research"])
+async def research_endpoint(body: ResearchInput):
+    """Autonomous research: decompose topic → search → extract → ingest → iterate."""
+    await _require_valid_models(body.model_overrides)
+    return StreamingResponse(
+        run_research(
+            topic=body.topic,
+            depth=body.depth,
+            domain=body.domain,
+            model_overrides=body.model_overrides,
+        ),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no"},
+    )
 
 @app.post("/skip", response_model=ExecutionResult, tags=["Step 15"])
 async def skip_node_endpoint(body: SkipNodeInput, db: AsyncSession = Depends(get_db)):
