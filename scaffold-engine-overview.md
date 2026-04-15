@@ -2,8 +2,8 @@
 
 **Last Updated:** April 14, 2026 (behavioral test rewrite — issues 48, 49, 50, 60, 61, 65)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `6cc2e15` — `test: fix test issues #46, #47, #57, #62, #63, #64`
-**Test Suite:** 263 collected, 215 passed, 20 skipped, 0 failed (+ 36 pipeline + 17 valve locally)
+**Latest Commit:** `23c64d2` — `test: add /model command tests, valve-override test, gt_browser field mapping smoke tests`
+**Test Suite:** 263 collected, 215 passed, 20 skipped, 0 failed (+ 43 pipeline + 18 valve + 3 gt_browser locally)
 **Codebase:** ~6,400 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
 ---
@@ -391,9 +391,10 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 263 tests collected (excluding 4 flaky live golden-retrieval tests):
 
 - **210 passed, 20 skipped** (skips: files not in container, router/valve tests outside container, golden retrieval pending repopulation)
-- **`test_scaffold_router.py`** — 36 smoke tests (pure functions, SSE parsing, command dispatch, /go + /confirm flow, context stripping). Run with `--noconftest`
+- **`test_scaffold_router.py`** — 43 smoke tests (pure functions, SSE parsing, command dispatch, /go + /confirm flow, context stripping, /model commands). Run with `--noconftest`
 - **`test_ideation_workflow.py`** — 8 smoke tests (Phase 1 + Phase 2 with full dep mocking)
-- **`test_model_valves.py`** — 17 tests (get_model priority chain, _model_overrides mapping, payload inclusion). Run with `--noconftest`
+- **`test_model_valves.py`** — 18 tests (get_model priority chain, _model_overrides mapping, payload inclusion). Run with `--noconftest`
+- **`test_gt_browser.py`** — 3 smoke tests (field name mappings post-fix). Run with `--noconftest`
 - CI via GitHub Actions (`.github/workflows/test.yml` and `ci.yml`)
 
 ---
@@ -523,7 +524,7 @@ scaffold-engine/
 │   ├── toon/                      # TOON spec + validator reference
 │   ├── CI.md
 │   └── logging-events.md
-├── tests/                         # 263 tests
+├── tests/                         # 274 tests
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt               # Production deps (pinned)
@@ -1110,3 +1111,35 @@ scaffold-engine/
 - **Model valves (local):** 17 passed
 - **Integration/golden:** syntax verified (require container for execution)
 - **Total local:** 68 passed, 0 failed — no regressions
+
+---
+
+## Changelog — April 14, 2026 (Test Coverage — /model commands, valve overrides, gt_browser field mappings)
+
+### tests/test_scaffold_router.py
+1. **`TestModelCommand`** (7 tests) — covers all `/model` subcommands:
+   - `test_model_help`: verifies all 8 roles mentioned in help output
+   - `test_model_list`: markdown table with all role assignments
+   - `test_model_set_valid`: mocked Ollama, valve updated
+   - `test_model_set_invalid_role`: error with valid role list
+   - `test_model_set_model_not_found`: mocked Ollama missing model, valve unchanged
+   - `test_model_reset`: restores defaults, reports changes
+   - `test_model_available`: mocked Ollama, lists models with count
+
+### tests/test_model_valves.py
+2. **`test_model_set_updates_overrides`** — after valve change, `_model_overrides()` reflects new value while other roles stay at defaults
+
+### tests/test_gt_browser.py (new)
+3. **`TestFieldMappings`** (3 tests) — verifies Prompt 3 fixes (Issues 40, 41):
+   - `test_handle_list_uses_title`: data reads from `title` key, not `topic`
+   - `test_handle_search_uses_title`: search results use `title`
+   - `test_handle_stats_uses_domains`: stats use `domains`/`source_types`, not `topics`/`source_files`
+
+### Commit
+- `23c64d2` — `test: add /model command tests, valve-override test, gt_browser field mapping smoke tests`
+
+### Test results
+- **Pipeline (local):** 43 passed (0.07s)
+- **Model valves (local):** 18 passed (0.05s)
+- **gt_browser (local):** 3 passed (0.03s)
+- **Total local:** 64 passed, 0 failed — no regressions
