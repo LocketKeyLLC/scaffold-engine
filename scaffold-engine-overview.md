@@ -1,9 +1,9 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 14, 2026 (issues 18, 26, 33 — gt_search domain, distillation model, pagination)
+**Last Updated:** April 14, 2026 (behavioral test rewrite — issues 48, 49, 50, 60, 61, 65)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `8d58b50` — `fix: gt_search domain filter, distillation model_router, pagination comment (#18, #26, #33)`
-**Test Suite:** 250 collected, 202 passed, 30 skipped, 0 failed (+ 31 pipeline + 17 valve locally)
+**Latest Commit:** `25f573e` — `test: replace source-grep tests with behavioral tests (#48, #49, #50, #60, #61, #65)`
+**Test Suite:** 258 collected, 210 passed, 20 skipped, 0 failed (+ 31 pipeline + 17 valve locally)
 **Codebase:** ~6,400 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
 ---
@@ -388,9 +388,9 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 
 ## Test Suite
 
-248 tests collected (excluding 4 flaky live golden-retrieval tests):
+258 tests collected (excluding 4 flaky live golden-retrieval tests):
 
-- **227 passed, 21 skipped** (skips: files not in container, 7 from deleted `jobs_cleanup.py`)
+- **210 passed, 20 skipped** (skips: files not in container, router/valve tests outside container, golden retrieval pending repopulation)
 - **`test_scaffold_router.py`** — 31 smoke tests (pure functions, SSE parsing, command dispatch). Run with `--noconftest`
 - **`test_ideation_workflow.py`** — 8 smoke tests (Phase 1 + Phase 2 with full dep mocking)
 - **`test_model_valves.py`** — 17 tests (get_model priority chain, _model_overrides mapping, payload inclusion). Run with `--noconftest`
@@ -523,7 +523,7 @@ scaffold-engine/
 │   ├── toon/                      # TOON spec + validator reference
 │   ├── CI.md
 │   └── logging-events.md
-├── tests/                         # 248 tests
+├── tests/                         # 258 tests
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt               # Production deps (pinned)
@@ -991,3 +991,94 @@ scaffold-engine/
 - **In-container:** 202 passed, 30 skipped, 0 failed
 - **Pipeline (local):** 31 passed
 - **Total:** 233 passed, 30 skipped, 0 failed — no regressions
+
+---
+
+## Changelog — April 14, 2026 (Behavioral Test Rewrite — Issues 48, 49, 50, 60, 61, 65)
+
+### test_sse_streaming.py (Issues 48/49/50)
+1. **Replaced 18 source-grep tests with 16 behavioral tests** — all tests now call `execute_all_nodes()` with mocked dependencies and parse actual SSE output
+2. **TestSSEWireFormat** (3 tests) — verifies `event:`/`data:` lines, valid JSON, double-newline termination
+3. **TestEventSequenceContract** (3 tests) — happy path ordering, `node_failed` emission, `pipeline_complete` always last
+4. **TestPipelineCompleteStructure** (6 tests) — `total_nodes`, `passed`/`failed` counts, `duration_ms`, `compile_status`, `failed_nodes` array on partial
+5. **TestConcurrentGuard** (2 tests) — guard failure yields error, error references job ID
+6. **TestNodeStartEvent** (1 test) — verifies `node_key`, `title`, `tool` fields
+7. **TestHeartbeatCharacter** (1 test) — verifies zero-width space in router (skipped in container)
+
+### test_idea_refinement.py (Issue 60)
+8. **Replaced 6 signature-inspection tests with 12 behavioral tests** — all tests call `refine_idea()` with mocked `model_router.generate` and DB
+9. **TestRefineIdeaHappyPath** (5 tests) — output dict structure, `status=planning`, `refined_brief`, `model_used`, prompt contains idea text
+10. **TestRefineIdeaLLMFailure** (2 tests) — LLM error returns `status=failed`, unparseable JSON returns `status=failed`
+11. **TestRefineIdeaDomainOverride** (2 tests) — user-supplied domain applied, absent domain keeps LLM value
+12. **TestRefineIdeaTargetStatus** (1 test) — custom `target_status` parameter
+13. **TestRefineIdeaModelOverrides** (1 test) — `model_overrides` passed through to `get_model()`
+14. **TestRefineIdeaDBInteractions** (1 test) — verifies INSERT + UPDATEs + commits
+
+### test_rag_pipeline.py (Issue 61)
+15. **Replaced 10 AST/source-analysis tests with 12 behavioral tests** — all tests call `query_rag()` or `_rrf_fuse()` with mocked Milvus, embedder, and reranker
+16. **TestQueryRagHappyPath** (4 tests) — result structure, required fields, score sub-fields, metadata
+17. **TestQueryRagErrors** (2 tests) — collection unavailable, embedding failure
+18. **TestRRFFusion** (3 tests) — combines both sources, preserves disjoint results, sorted by RRF score
+19. **TestConfidenceThreshold** (1 test) — `too_strict` fallback returns up to 3 results
+20. **TestVersionFiltering** (2 tests) — superseded entries removed, `include_history=True` keeps all
+
+### test_health_cleanup.py (Issue 65)
+21. **Replaced 20 source-grep tests (7 targeting nonexistent `jobs_cleanup.py`) with 15 behavioral tests**
+22. **TestHealthEndpointResponse** (6 tests) — calls `health()` directly with mocked PG/Ollama/Milvus/Redis; verifies dict structure, status, timestamp, checks dict
+23. **TestHealthDegradedStates** (3 tests) — `degraded` when Milvus down, `unhealthy` when PG or Ollama down
+24. **TestReapStaleJobs** (6 tests) — calls `reap_stale_jobs()` with mocked DB; verifies counts, both types, commits
+
+### Commit
+- `25f573e` — `test: replace source-grep tests with behavioral tests (#48, #49, #50, #60, #61, #65)`
+
+### Test results
+- **In-container:** 210 passed, 20 skipped, 0 failed (26.78s)
+- **Pipeline (local):** 31 passed
+- **Model valves (local):** 17 passed
+- **Total:** 258 passed, 20 skipped, 0 failed — no regressions
+
+
+---
+
+## Changelog — April 14, 2026 (Behavioral Test Rewrite — Issues 48, 49, 50, 60, 61, 65)
+
+### test_sse_streaming.py (Issues 48/49/50)
+1. **Replaced 18 source-grep tests with 16 behavioral tests** — all tests now call `execute_all_nodes()` with mocked dependencies and parse actual SSE output
+2. **TestSSEWireFormat** (3 tests) — verifies `event:`/`data:` lines, valid JSON, double-newline termination
+3. **TestEventSequenceContract** (3 tests) — happy path ordering, `node_failed` emission, `pipeline_complete` always last
+4. **TestPipelineCompleteStructure** (6 tests) — `total_nodes`, `passed`/`failed` counts, `duration_ms`, `compile_status`, `failed_nodes` array on partial
+5. **TestConcurrentGuard** (2 tests) — guard failure yields error, error references job ID
+6. **TestNodeStartEvent** (1 test) — verifies `node_key`, `title`, `tool` fields
+7. **TestHeartbeatCharacter** (1 test) — verifies zero-width space in router (skipped in container)
+
+### test_idea_refinement.py (Issue 60)
+8. **Replaced 6 signature-inspection tests with 12 behavioral tests** — all tests call `refine_idea()` with mocked `model_router.generate` and DB
+9. **TestRefineIdeaHappyPath** (5 tests) — output dict structure, `status=planning`, `refined_brief`, `model_used`, prompt contains idea text
+10. **TestRefineIdeaLLMFailure** (2 tests) — LLM error returns `status=failed`, unparseable JSON returns `status=failed`
+11. **TestRefineIdeaDomainOverride** (2 tests) — user-supplied domain applied, absent domain keeps LLM value
+12. **TestRefineIdeaTargetStatus** (1 test) — custom `target_status` parameter
+13. **TestRefineIdeaModelOverrides** (1 test) — `model_overrides` passed through to `get_model()`
+14. **TestRefineIdeaDBInteractions** (1 test) — verifies INSERT + UPDATEs + commits
+
+### test_rag_pipeline.py (Issue 61)
+15. **Replaced 10 AST/source-analysis tests with 12 behavioral tests** — all tests call `query_rag()` or `_rrf_fuse()` with mocked Milvus, embedder, and reranker
+16. **TestQueryRagHappyPath** (4 tests) — result structure, required fields, score sub-fields, metadata
+17. **TestQueryRagErrors** (2 tests) — collection unavailable, embedding failure
+18. **TestRRFFusion** (3 tests) — combines both sources, preserves disjoint results, sorted by RRF score
+19. **TestConfidenceThreshold** (1 test) — `too_strict` fallback returns up to 3 results
+20. **TestVersionFiltering** (2 tests) — superseded entries removed, `include_history=True` keeps all
+
+### test_health_cleanup.py (Issue 65)
+21. **Replaced 20 source-grep tests (7 targeting nonexistent `jobs_cleanup.py`) with 15 behavioral tests**
+22. **TestHealthEndpointResponse** (6 tests) — calls `health()` directly with mocked PG/Ollama/Milvus/Redis; verifies dict structure, status, timestamp, checks dict
+23. **TestHealthDegradedStates** (3 tests) — `degraded` when Milvus down, `unhealthy` when PG or Ollama down
+24. **TestReapStaleJobs** (6 tests) — calls `reap_stale_jobs()` with mocked DB; verifies counts, both types, commits
+
+### Commit
+- `25f573e` — `test: replace source-grep tests with behavioral tests (#48, #49, #50, #60, #61, #65)`
+
+### Test results
+- **In-container:** 210 passed, 20 skipped, 0 failed (26.78s)
+- **Pipeline (local):** 31 passed
+- **Model valves (local):** 17 passed
+- **Total:** 258 passed, 20 skipped, 0 failed — no regressions
