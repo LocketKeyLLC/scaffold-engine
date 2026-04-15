@@ -55,7 +55,7 @@ async def analyze_and_confirm(
 
     resp = await model_router.generate(
         "Assess this brief:\n" + json.dumps(brief, indent=2),
-        model=model or get_model("model_general", model_overrides),
+        model=model or get_model("model_router", model_overrides),  # 4b suffices for snippet distillation
         system=FEASIBILITY_SYSTEM,
         temperature=0.2,
         max_tokens=2048,
