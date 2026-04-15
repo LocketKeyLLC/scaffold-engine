@@ -241,3 +241,12 @@ class TestPayloadInclusion:
             self._run_command(pipe, "/idea test idea", mock_post)
             payload = mock_post.call_args[1].get("json", {})
             assert payload["model_overrides"]["model_general"] == "my-custom:13b"
+
+    def test_model_set_updates_overrides(self, pipe):
+        """After /model set, _model_overrides() reflects the new value."""
+        # Simulate what /model set does: directly update the valve
+        pipe.valves.model_verifier = "custom-verifier:3b"
+        overrides = pipe._model_overrides()
+        assert overrides["model_verifier"] == "custom-verifier:3b"
+        # Other roles unchanged
+        assert overrides["model_general"] == "qwen3-vl:235b-instruct-cloud"

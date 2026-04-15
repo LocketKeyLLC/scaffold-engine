@@ -609,3 +609,87 @@ class TestContextStripping:
         chunks = list(pipe.pipe("/help", "test-model", messages, body))
         combined = "".join(chunks)
         assert "/go" in combined
+
+
+# ===================================================================
+# STEP 7: /model command system
+# ===================================================================
+@pytest.mark.smoke
+class TestModelCommand:
+    """_handle_model: /model list, set, reset, available, help."""
+
+    def test_model_help(self, pipe):
+        """'/model help' returns help text mentioning all 8 roles."""
+        result = pipe._handle_model("/model help")
+        for role in ("general", "verifier", "coder", "embedder",
+                     "reranker", "router", "fallback", "cloud_alt"):
+            assert role in result, f"Missing role '{role}' in help output"
+
+    def test_model_list(self, pipe):
+        """'/model list' returns a markdown table with all role assignments."""
+        result = pipe._handle_model("/model list")
+        assert "Current Model Assignments" in result
+        assert "| Role |" in result
+        # All 8 roles present
+        for role in ("general", "verifier", "coder", "embedder",
+                     "reranker", "router", "fallback", "cloud_alt"):
+            assert role in result
+
+    @patch("requests.get")
+    def test_model_set_valid(self, mock_get, pipe):
+        """'/model set general qwen3:8b' with valid Ollama response updates the valve."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"models": [{"name": "qwen3:8b"}, {"name": "qwen2.5:7b"}]},
+            raise_for_status=lambda: None,
+        )
+        result = pipe._handle_model("/model set general qwen3:8b")
+        assert "Updated" in result
+        assert "qwen3:8b" in result
+        assert pipe.valves.model_general == "qwen3:8b"
+
+    def test_model_set_invalid_role(self, pipe):
+        """'/model set bogus qwen3:8b' returns error listing valid roles."""
+        result = pipe._handle_model("/model set bogus qwen3:8b")
+        assert "Unknown role" in result
+        assert "general" in result  # valid roles listed
+
+    @patch("requests.get")
+    def test_model_set_model_not_found(self, mock_get, pipe):
+        """If model isn't on Ollama, return error without changing valve."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"models": [{"name": "qwen2.5:7b"}]},
+            raise_for_status=lambda: None,
+        )
+        old_val = pipe.valves.model_general
+        result = pipe._handle_model("/model set general nonexistent:99b")
+        assert "not found" in result
+        assert pipe.valves.model_general == old_val  # unchanged
+
+    def test_model_reset(self, pipe):
+        """'/model reset' restores defaults and reports changes."""
+        pipe.valves.model_general = "custom:13b"
+        pipe.valves.model_verifier = "custom:1b"
+        result = pipe._handle_model("/model reset")
+        assert "Reset to defaults" in result
+        assert "general" in result
+        assert pipe.valves.model_general == "qwen3-vl:235b-instruct-cloud"
+        assert pipe.valves.model_verifier == "qwen2.5:7b"
+
+    @patch("requests.get")
+    def test_model_available(self, mock_get, pipe):
+        """'/model available' lists models from Ollama."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"models": [
+                {"name": "qwen3:8b"},
+                {"name": "qwen2.5:7b"},
+                {"name": "llama3:8b"},
+            ]},
+            raise_for_status=lambda: None,
+        )
+        result = pipe._handle_model("/model available")
+        assert "Available Ollama Models" in result
+        assert "(3)" in result
+        assert "qwen3:8b" in result
