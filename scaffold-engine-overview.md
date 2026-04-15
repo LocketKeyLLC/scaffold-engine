@@ -1,8 +1,8 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 14, 2026 (code quality — issues 21, 27, 28, 30, 31, 32, 34, 36, 43)
+**Last Updated:** April 14, 2026 (issues 18, 26, 33 — gt_search domain, distillation model, pagination)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `9c2ca34` — `fix: remove dup topic_slug, reset_reranker, cleanup async_session, gt_stats limit, prompt opt default, dag_viewer typing, drop dead start_id/model_overrides, doc timeouts`
+**Latest Commit:** `8d58b50` — `fix: gt_search domain filter, distillation model_router, pagination comment (#18, #26, #33)`
 **Test Suite:** 250 collected, 202 passed, 30 skipped, 0 failed (+ 31 pipeline + 17 valve locally)
 **Codebase:** ~6,400 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
@@ -969,3 +969,25 @@ scaffold-engine/
 - **Pipeline (local):** 31 passed
 - **Model valves (local):** 17 passed
 - **Total:** 250 passed, 30 skipped, 0 failed — no regressions
+
+---
+
+## Changelog — April 14, 2026 (Issues 18, 26, 33)
+
+### Issue 18: gt_search domain filter
+1. **`app/modules/gt_browser.py`** — `gt_search()` gains `domain: str | None = None` parameter. When provided, adds `expr=f'domain == "{domain}"'` to the Milvus search call for partition key isolation compliance. When `None` (default), no expr is set — searches all partitions. Backward-compatible
+2. **`app/main.py`** — `GtSearchInput` gains `domain: str | None = None` field; `/gt/search` endpoint passes `domain=body.domain` through to `gt_search()`
+
+### Issue 26: Distillation model downgrade
+3. **`app/modules/ideation_workflow.py`** — `research_and_compile()` distillation LLM call changed from `get_model("model_general", ...)` (235b, ~500s on CPU) to `get_model("model_router", ...)` (4b). Summarizing web snippets doesn't need the heavy model. Compilation call remains on `model_general`
+
+### Issue 33: Pagination scaling comment
+4. **`app/modules/gt_browser.py`** — added comment to `gt_list()` documenting offset-based pagination scaling limitation and suggesting cursor-based pagination for future growth beyond ~1K entries
+
+### Commit
+- `8d58b50` — `fix: gt_search domain filter, distillation model_router, pagination comment (#18, #26, #33)`
+
+### Test results
+- **In-container:** 202 passed, 30 skipped, 0 failed
+- **Pipeline (local):** 31 passed
+- **Total:** 233 passed, 30 skipped, 0 failed — no regressions
