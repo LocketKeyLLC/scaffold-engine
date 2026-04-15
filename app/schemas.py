@@ -369,3 +369,13 @@ class ExecutionResult(BaseModel):
     message: str | None = None
     tool: str | None = None
     error: str | None = None
+
+# ---------------------------------------------------------------------------
+# Research Agent
+# ---------------------------------------------------------------------------
+
+class ResearchInput(BaseModel):
+    topic: str
+    depth: str = "medium"  # shallow | medium | deep
+    domain: str | None = None
+    model_overrides: dict | None = None

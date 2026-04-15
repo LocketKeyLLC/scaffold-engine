@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     local_timeout: int = 1800
     max_retries: int = 3
 
+    # Research agent
+    research_max_iterations: int = 3
+    research_max_queries: int = 8
+    research_max_urls_per_iteration: int = 20
+    research_searxng_delay: float = 1.5
+    research_chunk_size: int = 1500
+    research_timeout: int = 3600
+
     # Logging
     log_level: str = "info"
 
