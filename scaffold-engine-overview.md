@@ -1,8 +1,13 @@
 # Scaffold Engine — Project Overview
-
-**Last Updated:** April 14, 2026 (v0.2.0 — 65 issues resolved, /model command, behavioral test rewrites)
+**Last Updated:** April 15, 2026 (v0.3.0 — /research command, autonomous topic research agent)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `23c64d2` — `test: add /model command tests, valve-override test, gt_browser field mapping smoke tests`
+**Latest Commit:** `f6a72c2` — `feat: add /research command`
+**Test Suite:** 210 passed, 20 skipped, 0 failed in container (+ 43 pipeline + 18 valve + 3 gt_browser locally = 274 total)
+**Codebase:** ~6,700 lines of application Python across 27 source files + ~1,050 lines in `scaffold_router.py` (pipeline)
+
+
+
+
 **Test Suite:** 210 passed, 20 skipped, 0 failed in container (+ 43 pipeline + 18 valve + 3 gt_browser locally = 274 total)
 **Codebase:** ~6,400 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
@@ -142,6 +147,7 @@ All interaction happens through the Open WebUI chat interface.
 | `/optimize <prompt>` | Optimize a prompt (independent of any job) |
 | `/rag <query>` | Query the Milvus knowledge base directly |
 | `/model <sub>` | Manage models: `list`, `available`, `set <role> <model>`, `reset`, `help` |
+| `/research <topic>` | Research a topic autonomously and ingest into knowledge base |
 | `/status` | List active jobs |
 | `/help` | Show command list |
 
@@ -257,6 +263,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | `app/modules/dag_generator.py` | ~615 | DAG creation with Kahn's cycle detection, numeric-sort truncation (max 10 nodes). JSON parsing via shared `llm_parsing.py` |
 | `app/modules/rag_pipeline.py` | 583 | RAG retrieval: embed → parallel vector + keyword search → RRF merge → CrossEncoder rerank. Includes `ingest_entries()` |
 | `app/modules/ideation_workflow.py` | ~265 | Ideation-to-Workflow pipeline: Phase 1 (refine + feasibility + confirmation gate), Phase 2 (research → ingest → compile). 8 smoke tests |
+| `app/modules/research_agent.py` | ~350 | Autonomous research loop: decompose → SearXNG search → LLM extraction → Milvus ingestion → gap analysis → iterate. SSE streaming with heartbeat keepalives |
 | `app/modules/idea_refinement.py` | ~172 | Refines raw user ideas into structured briefs |
 | `app/modules/prompt_optimizer.py` | 201 | Prompt optimization: strip → LLM optimize → verify |
 | `app/modules/gt_extractor.py` | 435 | Ground truth extraction: SearXNG → LLM distillation → TOON formatting → optional GitHub push |
@@ -331,6 +338,7 @@ All service images are pinned by SHA256 digest in `docker-compose.yml`. The Pyth
 | `POST` | `/execute` | Execute next pending DAG node (single node) |
 | `POST` | `/execute/all` | Execute all pending DAG nodes (SSE streaming) |
 | `POST` | `/rag` | Query the RAG knowledge base |
+| `POST` | `/research` | Autonomous research: decompose → search → extract → ingest → iterate (SSE streaming) |
 | `GET` | `/rag/dedup` | List near-duplicate rejection log for manual review |
 | `POST` | `/optimize` | Optimize a prompt |
 | `POST` | `/gt` | Extract ground truths via SearXNG + LLM |
@@ -441,6 +449,9 @@ TOON formatting is used in `gt_extractor.py` and `ideation_workflow.py` for inge
 26. **Model valve system** — All model roles switchable via Open WebUI admin valves; overrides threaded per-request through `model_overrides` dict with `get_model()` helper enforcing priority chain (valve > env var > default). Embedder/reranker are config-level only due to dimension and singleton constraints
 27. **Three-tier ingestion logic** — dedup threshold (>0.95) rejects, version-chain window (0.90–0.95) creates linked versions, everything below is a new entry. Version check runs after content-hash dedup and after embedding.
 28. **Latest-version-by-default retrieval** — `query_rag()` strips superseded entries from results unless `include_history=True`, keeping responses current without breaking callers that don't pass the flag.
+29. **Autonomous research agent** — `/research` decomposes topics via LLM, fans out SearXNG searches, distills facts through 7b model, ingests into Milvus with existing dedup pipeline, then gap-analyzes for iterative deepening
+30. **Two-tier research model strategy** — 4b for decomposition/gap analysis (fast), 7b for extraction/summary (accurate). Avoids 235b model entirely for research to keep runtime under 30 min
+31. **SSE heartbeat keepalives** — research agent emits heartbeat events every 8s during long LLM calls; pipeline renders as zero-width spaces to prevent Open WebUI's aiohttp proxy from timing out
 
 ---
 
@@ -766,7 +777,7 @@ scaffold-engine/
 
 ---
 
-## Changelog — April 14, 2026 (Bug Fixes — Prompt 2)
+## Changelog — April 14, 2026 (Bug Fixes)
 
 ### Issue 1 (CRITICAL): RAG context used wrong field name
 1. **`app/modules/execution_agent.py`** — `r['topic']` → `r['title']` in three locations: `_fetch_rag_context()` (lines 231, 233) and `_milvus_search()` (line 390). The `query_rag()` response dict has both `topic` (always `""`) and `title` (actual value); all three references were reading the empty field
@@ -1110,3 +1121,49 @@ scaffold-engine/
 - **Model valves (local):** 18 passed (0.05s)
 - **gt_browser (local):** 3 passed (0.03s)
 - **Total local:** 64 passed, 0 failed — no regressions
+
+---
+
+## Changelog — April 15, 2026 (/research Command — Autonomous Topic Research Agent)
+
+### New file: `app/modules/research_agent.py` (~350 lines)
+1. **`run_research()` async generator** — main research loop yielding SSE events. Phases: decompose → search → extract → ingest → gap analyze → iterate
+2. **`_decompose_topic()`** — LLM decomposes topic into 3-8 keyword-based SearXNG queries with facet tracking. Uses `model_router` (4b) for speed
+3. **`_search_queries()`** — sequential SearXNG searches with 1.5s delay, URL dedup, max 20 URLs per iteration
+4. **`_extract_entries()`** — LLM distills search results into atomic knowledge entries with confidence scores. Uses `model_verifier` (7b). Batches of 10 results
+5. **`_analyze_gaps()`** — LLM compares collected knowledge against topic outline, identifies uncovered facets, generates follow-up queries
+6. **`_generate_summary()`** — produces human-readable summary of all collected research. Uses `model_verifier` (7b)
+7. **`ResearchState` dataclass** — tracks iteration count, search/URL history, entries, coverage, gap queries
+8. **Heartbeat keepalives** — `asyncio.create_task()` wrapper emits SSE heartbeat events every 8s during long LLM calls to prevent proxy timeouts
+9. **Convergence detection** — stops iterating when: all entries are duplicates, coverage ≥ 85%, or max iterations reached
+10. **Depth control** — `shallow=1`, `medium=2`, `deep=4` max iterations
+
+### Orchestrator changes
+11. **`app/main.py`** — `POST /research` endpoint with SSE streaming, model validation via `_require_valid_models()`
+12. **`app/schemas.py`** — `ResearchInput(topic, depth, domain, model_overrides)`
+13. **`app/config.py`** — 6 new settings: `research_max_iterations`, `research_max_queries`, `research_max_urls_per_iteration`, `research_searxng_delay`, `research_chunk_size`, `research_timeout`
+
+### Pipeline changes
+14. **`pipelines/scaffold_router.py`** — `/research <topic> [--depth shallow|medium|deep]` command routing
+15. **`_research_and_stream()`** — SSE consumer with threaded reader, heartbeat rendering as zero-width spaces, progress display for all research phases
+16. **`/help` updated** — `/research` added to command table
+
+### Design decisions
+- **Two-tier model strategy** — `model_router` (4b) for decomposition/gap analysis, `model_verifier` (7b) for extraction/summary. Keeps total research time under 30 min on CPU
+- **Reuses existing `ingest_entries()`** — inherits 3-tier dedup (>0.95 reject, 0.90-0.95 version chain, <0.90 new entry), content-hash dedup, TTL-per-source-type, partition key isolation
+- **model_overrides threaded through** — same valve system as all other commands
+- **No job/DB tracking** — research runs are stateless; results persist only in Milvus. Job-based tracking deferred
+
+### Test results
+- **E2E verified** — `/research HNSW index tuning for Milvus --depth shallow`: 9 entries extracted, 9 ingested, 22 min
+- **E2E verified** — `/research Python asyncio patterns --depth shallow`: 10 entries extracted, 10 ingested, 27 min
+- **RAG retrieval confirmed** — ingested entries retrievable via `/rag` with 0.9999 rerank scores
+- **Knowledge base** — grew from 8 to 27 entries across test runs
+
+### Known Issues
+14. **Research duration on CPU** — shallow runs take 20-30 min (dominated by 7b extraction LLM calls). Medium/deep runs proportionally longer
+15. **SearXNG snippets only** — extraction uses ~200-char search snippets, not full page content. Trafilatura integration would improve quality significantly
+16. **No concurrent research guard** — multiple `/research` calls can run simultaneously. Atomic check-and-set (like `execute_all_nodes`) deferred
+
+### Commit
+- `f6a72c2` — `feat: add /research command`
