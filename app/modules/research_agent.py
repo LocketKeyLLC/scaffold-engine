@@ -427,18 +427,125 @@ Search results:
 Return ONLY the JSON array."""
 
 
+# ---------------------------------------------------------------------------
+# Step 2.5: Full-page fetch + extraction via trafilatura
+# ---------------------------------------------------------------------------
+
+async def _fetch_and_extract(results: list[dict]) -> list[dict]:
+    """Fetch URLs concurrently, extract clean text via trafilatura.
+
+    Returns [{"url", "content"}] for pages where extracted text >= 100 chars.
+    trafilatura.extract is synchronous/CPU-bound, so runs in a thread executor.
+    One short-lived httpx.AsyncClient is reused across all URLs in the batch.
+    """
+    if not results:
+        return []
+
+    import httpx
+    import trafilatura
+
+    sem = asyncio.Semaphore(5)
+    urls = [r["url"] for r in results if r.get("url")]
+
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async def _fetch_one(url: str) -> dict | None:
+            async with sem:
+                try:
+                    resp = await client.get(url)
+                    if resp.status_code != 200 or not resp.text:
+                        return None
+                    text = await asyncio.to_thread(
+                        trafilatura.extract,
+                        resp.text,
+                        output_format="txt",
+                        with_metadata=False,
+                    )
+                    if not text or len(text) < 100:
+                        return None
+                    return {"url": url, "content": text}
+                except Exception as e:
+                    logger.debug("trafilatura_fetch_failed: url=%s error=%s", url, e)
+                    return None
+
+        fetched = await asyncio.gather(*[_fetch_one(u) for u in urls])
+
+    return [f for f in fetched if f is not None]
+
+
+def _chunk_text(text: str, max_tokens: int = 1500, overlap_tokens: int = 200) -> list[str]:
+    """Split text at paragraph boundaries, ~4 chars/token estimate, with overlap."""
+    max_chars = max_tokens * 4
+    overlap_chars = overlap_tokens * 4
+
+    if len(text) <= max_chars:
+        return [text]
+
+    paragraphs = text.split("\n\n")
+    chunks: list[str] = []
+    current = ""
+
+    for p in paragraphs:
+        if len(current) + len(p) + 2 <= max_chars:
+            current = f"{current}\n\n{p}" if current else p
+        else:
+            if current:
+                chunks.append(current)
+            if chunks and overlap_chars > 0:
+                tail = chunks[-1][-overlap_chars:]
+                current = f"{tail}\n\n{p}"
+            else:
+                current = p
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
 async def _extract_entries(
     results: list[dict],
     topic: str,
     model: str,
 ) -> list[dict]:
-    """Distill search results into knowledge entries via LLM."""
+    """Distill search results into knowledge entries via LLM.
+
+    Fetches full-page text via trafilatura where available; chunks long pages;
+    falls back to SearXNG snippet when fetch/extract fails for a given URL.
+    """
     if not results:
         return []
 
-    # Batch results to stay within context limits
-    batch_size = 10
+    # Full-page fetch; map url -> extracted text. Empty dict = total failure,
+    # in which case we fall through to snippet-only behavior.
+    fetched = await _fetch_and_extract(results)
+    url_to_text: dict[str, str] = {f["url"]: f["content"] for f in fetched}
+    if fetched:
+        logger.info("research_fetch: %d/%d URLs extracted via trafilatura",
+                    len(fetched), len(results))
+    else:
+        logger.warning("research_fetch: trafilatura returned nothing; snippet fallback")
+
+    # Expand results: each becomes 1+ chunks. Missing full-page -> single snippet chunk.
+    expanded: list[dict] = []
+    for r in results:
+        url = r.get("url", "")
+        full = url_to_text.get(url)
+        if full:
+            for chunk in _chunk_text(full):
+                expanded.append({
+                    "title": r.get("title", ""),
+                    "url": url,
+                    "content": chunk,
+                    "facet": r.get("facet", ""),
+                })
+        else:
+            expanded.append(r)  # snippet fallback
+
+    # Batch to stay within context limits. Full-page chunks are larger than
+    # snippets, so reduce batch size when we have real content.
+    batch_size = 5 if fetched else 10
     all_entries = []
+    results = expanded
 
     for i in range(0, len(results), batch_size):
         batch = results[i:i + batch_size]
