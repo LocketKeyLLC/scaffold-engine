@@ -1167,3 +1167,61 @@ scaffold-engine/
 
 ### Commit
 - `f6a72c2` — `feat: add /research command`
+
+---
+
+## Changelog — April 16, 2026 (Trafilatura Full-Page Extraction)
+
+### app/modules/research_agent.py
+1. **`_fetch_and_extract(results)`** (new) — fetches URLs concurrently via `httpx.AsyncClient` with `asyncio.Semaphore(5)`, 15s timeout, `follow_redirects=True`. Extracts clean text via `trafilatura.extract(output_format='txt', with_metadata=False)` in `asyncio.to_thread()`. Skips results with `len(text) < 100`. Returns `[{"url", "content"}]`
+2. **`_chunk_text(text, max_tokens=1500, overlap_tokens=200)`** (new) — splits long articles at `\n\n` paragraph boundaries, ~4 chars/token estimate, with 200-token overlap between chunks
+3. **`_extract_entries()` modified** — before batching, calls `_fetch_and_extract()` to get full-page text. Builds `url_to_text` map; for each result, chunks full-page text or falls back to SearXNG snippet. Batch size reduced from 10→5 when full-page content is available (larger per-item context). If all URLs fail, falls back to snippet-only behavior (existing path unchanged)
+
+### requirements.txt
+4. **`trafilatura==2.0.0`** pinned
+
+### Design decisions
+- **Short-lived httpx client for external URLs** — acceptable per constraints (not an internal service); reused across all URLs within a single `_fetch_and_extract()` call
+- **Snippet fallback is per-URL** — if trafilatura fails for one URL but succeeds for others, only the failed URL uses its snippet
+- **Total fallback preserved** — if `_fetch_and_extract()` returns empty, `_extract_entries()` behaves identically to pre-patch (batch_size=10, raw snippets)
+
+### Verification
+- **Tests:** 227 passed, 21 skipped, 0 failed in container — no regressions
+- **Live smoke test:** `research_fetch: 19/20 URLs extracted via trafilatura` on "httpx connection pooling" shallow research. 16 entries extracted and ingested
+
+### Commit
+- `6a0167b` — `feat: trafilatura full-page extraction for research loop (#3.1)`
+
+### Test suite totals (updated)
+- **In-container:** 227 passed, 21 skipped, 0 failed
+- **Pipeline (local):** 43 passed
+- **Model valves (local):** 18 passed
+- **gt_browser (local):** 3 passed
+- **Total:** 291 passed, 21 skipped, 0 failed
+---
+
+## Changelog — April 16, 2026 (Research Agent Performance — #3.5)
+
+### `app/modules/research_agent.py`
+1. **Extraction snippet truncation** — `r['content']` → `r['content'][:600]` in batch prompts. Smaller prompts = faster 7b inference per batch
+2. **Extraction `max_tokens`: 4096 → 1024** — extraction rarely produces >1K tokens; saves generation time
+3. **Dict guard in entry loop** — `entries = [e for e in entries if isinstance(e, dict)]` before `entry.get()`. Fixes `AttributeError: 'str' object has no attribute 'get'` crash when LLM returned a list of strings
+4. **Redis SearXNG cache** — new `_searxng_cache_key/get/set` helpers; `searxng:{sha256(query)[:16]}` key namespace; 1h TTL; reuses `EmbeddingCache._get_redis()` connection
+5. **`_search_queries` cache-first path** — checks Redis before HTTP; on cache hit, skips both the SearXNG request and the `research_searxng_delay` sleep; on miss, persists result after successful fetch
+
+### Measurements (shallow depth, CPU-only Ollama)
+- Baseline: 22:40
+- After (cache miss): 18:34 (**−18%**, 4m6s faster)
+- After (cache hit): 23:31 — post-extraction variance dominates; cache itself saves ~10s per repeated query
+
+### Design decisions
+- **Cache keys are content-hashed**, not literal query strings — keeps Redis keys short and collision-safe
+- **No new Redis client** — `get_cache()._get_redis()` reused to avoid a second connection pool
+- **Silent cache errors** (debug-level log, return `None`) — Redis being down should not break research
+- **Cache hit skips rate-limit sleep** — the `asyncio.sleep(research_searxng_delay)` only matters when actually hitting SearXNG
+
+### Known post-extraction bottleneck (unchanged, tracked for future)
+- Embedding loop + dedup search + ingest + gap analysis + summary = ~15–23 min of a shallow run. Target of 15 min total is not reachable without touching this path. Candidates for future work: batch embedding, skip gap analysis on `depth=shallow`, reduce summary `max_tokens`.
+
+### Commit
+- `ee5d6ba` — `perf: reduce batch size, token limits, add SearXNG cache (#3.5)`
