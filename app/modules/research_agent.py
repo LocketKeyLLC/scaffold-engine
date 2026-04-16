@@ -55,6 +55,31 @@ def _detect_domain(topic: str) -> str:
 # ---------------------------------------------------------------------------
 # SearXNG category -> engine routing
 # ---------------------------------------------------------------------------
+# SearXNG result cache (Redis, 1h TTL)
+_SEARXNG_CACHE_TTL = 3600
+
+def _searxng_cache_key(query: str) -> str:
+    h = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
+    return f"searxng:{h}"
+
+async def _searxng_cache_get(query: str):
+    try:
+        from app.utils.embedding_cache import get_cache
+        r = await get_cache()._get_redis()
+        raw = await r.get(_searxng_cache_key(query))
+        if raw:
+            return json.loads(raw)
+    except Exception as e:
+        logger.debug("searxng_cache_get_failed: query=%s error=%s", query, e)
+    return None
+
+async def _searxng_cache_set(query: str, results) -> None:
+    try:
+        from app.utils.embedding_cache import get_cache
+        r = await get_cache()._get_redis()
+        await r.setex(_searxng_cache_key(query), _SEARXNG_CACHE_TTL, json.dumps(results))
+    except Exception as e:
+        logger.debug("searxng_cache_set_failed: query=%s error=%s", query, e)
 
 CATEGORY_ENGINES: dict[str, str] = {
     "it": "github,stackoverflow,pypi,google",
@@ -357,7 +382,22 @@ async def _search_queries(
         query_text = q["query"]
         if query_text in state.search_history:
             continue
-
+        # Check Redis cache first
+        cached = await _searxng_cache_get(query_text)
+        if cached is not None:
+            logger.info("searxng_cache_hit: query=%s results=%d", query_text, len(cached))
+            for r in cached:
+                url = r.get("url", "")
+                if url and url not in state.url_history:
+                    state.url_history.add(url)
+                    all_results.append({
+                        "title": r.get("title", ""),
+                        "url": url,
+                        "content": r.get("content", ""),
+                        "facet": q.get("facet", ""),
+                    })
+            state.search_history.add(query_text)
+            continue
         try:
             resp = await client.get(
                 "/search",
@@ -370,6 +410,8 @@ async def _search_queries(
             )
             if resp.status_code == 200:
                 results = resp.json().get("results", [])[:10]
+                await _searxng_cache_set(query_text, results)
+                logger.info("searxng_cache_miss: query=%s results=%d", query_text, len(results))
                 for r in results:
                     url = r.get("url", "")
                     if url and url not in state.url_history:
@@ -551,7 +593,7 @@ async def _extract_entries(
         batch = results[i:i + batch_size]
         entries = []
         results_text = "\n\n".join(
-            f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['content']}"
+            f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['content'][:600]}"
             for r in batch
         )
 
@@ -560,11 +602,12 @@ async def _extract_entries(
             model=model,
             system=EXTRACT_SYSTEM,
             temperature=0.1,
-            max_tokens=4096,
+            max_tokens=1024,
         )
 
         if resp.success and resp.text and len(resp.text.strip()) > 5:
             entries = parse_json_array(resp.text) or []
+            entries = [e for e in entries if isinstance(e, dict)]
             if entries:
                 for entry in entries:
                     source_url = entry.get("source", "")
