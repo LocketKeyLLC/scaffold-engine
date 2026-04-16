@@ -5,7 +5,7 @@ fetches and extracts content, distills facts via LLM, ingests into Milvus,
 then runs gap analysis and iterates until coverage converges.
 
 Architecture: planner-executor loop with fan-out search / fan-in extraction.
-Two-tier model strategy: model_router (fast 4b) for decomposition/extraction,
+Two-tier model strategy: model_verifier (7b) for decomposition/extraction,
 model_general (heavy) reserved for final synthesis only.
 """
 
@@ -67,16 +67,42 @@ DECOMPOSE_SYSTEM = """You are a research planner. Decompose the given topic into
 keyword-based search engine queries (3-8 words each, NOT natural language questions).
 
 Rules:
+- Produce 3-8 distinct facets covering DIFFERENT aspects of the topic
 - Each query targets DIFFERENT information (no overlap)
 - Include the topic's core terms for relevance
 - Mix overview queries with specific detail queries
 - Simple topics: 3-4 queries. Medium: 5-6. Complex: 7-8.
 - search_category must be one of: general, news, science, it
 
+EXAMPLE 1 — Topic: "Redis caching strategies"
+{
+  "topic_complexity": "medium",
+  "facets": ["eviction policies", "cache patterns", "persistence", "cluster scaling", "monitoring"],
+  "queries": [
+    {"query": "Redis eviction policy LRU LFU comparison", "facet": "eviction policies", "search_category": "it"},
+    {"query": "Redis cache aside write through patterns", "facet": "cache patterns", "search_category": "it"},
+    {"query": "Redis RDB AOF persistence tradeoffs", "facet": "persistence", "search_category": "it"},
+    {"query": "Redis cluster sharding horizontal scaling", "facet": "cluster scaling", "search_category": "it"},
+    {"query": "Redis monitoring latency metrics tools", "facet": "monitoring", "search_category": "it"}
+  ]
+}
+
+EXAMPLE 2 — Topic: "WebAssembly serverless edge computing"
+{
+  "topic_complexity": "complex",
+  "facets": ["wasm runtimes", "cold start performance", "edge platforms", "language support"],
+  "queries": [
+    {"query": "WebAssembly runtime wasmtime wasmer comparison", "facet": "wasm runtimes", "search_category": "it"},
+    {"query": "WASM serverless cold start latency benchmarks", "facet": "cold start performance", "search_category": "it"},
+    {"query": "Cloudflare Workers Fastly edge WASM deployment", "facet": "edge platforms", "search_category": "it"},
+    {"query": "WebAssembly Rust Go language compile support", "facet": "language support", "search_category": "it"}
+  ]
+}
+
 OUTPUT FORMAT (strict JSON, no markdown fences):
 {
   "topic_complexity": "simple|medium|complex",
-  "facets": ["facet1", "facet2", "..."],
+  "facets": ["facet1", "facet2", "facet3", "..."],
   "queries": [
     {"query": "keyword search terms", "facet": "which facet this covers", "priority": "high|medium|low", "search_category": "general"}
   ]
@@ -107,7 +133,30 @@ async def _decompose_topic(
     if resp.success:
         parsed = parse_json_object(resp.text)
         if parsed and "queries" in parsed:
-            return parsed
+            facets = parsed.get("facets", [])
+            if len(facets) >= 2:
+                return parsed
+            # Retry once — model produced too few facets
+            logger.info("decomposition_retry: got %d facets, retrying with explicit instruction", len(facets))
+            retry_prompt = (
+                f"Decompose this research topic into search queries:\n\n"
+                f"TOPIC: {topic}\n\n"
+                f"IMPORTANT: Break into at least 3 distinct subtopics. "
+                f"Your previous attempt only produced {len(facets)} facet(s). "
+                f"Each facet must cover a DIFFERENT aspect of the topic."
+            )
+            retry_resp = await model_router.generate(
+                retry_prompt,
+                model=model,
+                system=DECOMPOSE_SYSTEM,
+                temperature=0.5,
+                max_tokens=2048,
+            )
+            if retry_resp.success:
+                retry_parsed = parse_json_object(retry_resp.text)
+                if retry_parsed and "queries" in retry_parsed:
+                    return retry_parsed
+            # If retry also fails, fall through to fallback below
 
     # Fallback: generate basic queries
     return {
@@ -224,6 +273,7 @@ async def _extract_entries(
 
     for i in range(0, len(results), batch_size):
         batch = results[i:i + batch_size]
+        entries = []
         results_text = "\n\n".join(
             f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['content']}"
             for r in batch
@@ -248,6 +298,24 @@ async def _extract_entries(
         else:
             logger.warning("extraction_llm_failed: batch=%d success=%s raw_len=%d error=%s",
                            i // batch_size + 1, resp.success, len(resp.text or ""), resp.error)
+
+        # Fallback: if LLM returned nothing for this batch, create entries from snippets
+        if not entries:
+            for r in batch:
+                content = r.get("content", "")
+                if len(content) > 50:
+                    fallback_entry = {
+                        "title": r.get("title", "")[:100],
+                        "content": content,
+                        "tags": "",
+                        "source": r.get("url", ""),
+                        "confidence_score": 0.5,
+                        "source_type": "community",
+                        "facet": r.get("facet", ""),
+                    }
+                    all_entries.append(fallback_entry)
+                    logger.info("extraction_fallback: title='%s' url='%s'", fallback_entry["title"], fallback_entry["source"])
+
     return all_entries
 
 
@@ -368,7 +436,7 @@ async def run_research(
         domain=domain or "eng",
     )
 
-    decompose_model = get_model("model_router", model_overrides)
+    decompose_model = get_model("model_verifier", model_overrides)
     extract_model = get_model("model_verifier", model_overrides)
     summary_model = get_model("model_verifier", model_overrides)
 
@@ -392,110 +460,119 @@ async def run_research(
 
     # ---- Research loop ----
     while state.iteration < state.max_iterations:
-        state.iteration += 1
+        try:
+            state.iteration += 1
 
-        yield _sse("iteration_started", {
-            "iteration": state.iteration,
-            "query_count": len(queries),
-        })
+            yield _sse("iteration_started", {
+                "iteration": state.iteration,
+                "query_count": len(queries),
+            })
 
-        # Search
-        results = await _search_queries(queries, state)
+            # Search
+            results = await _search_queries(queries, state)
 
-        yield _sse("search_complete", {
-            "iteration": state.iteration,
-            "results_found": len(results),
-            "total_urls": len(state.url_history),
-        })
+            yield _sse("search_complete", {
+                "iteration": state.iteration,
+                "results_found": len(results),
+                "total_urls": len(state.url_history),
+            })
 
-        if not results:
+            if not results:
+                yield _sse("iteration_complete", {
+                    "iteration": state.iteration,
+                    "entries_extracted": 0,
+                    "entries_ingested": 0,
+                    "reason": "no_results",
+                })
+                break
+
+            # Extract (with heartbeat to keep SSE alive during long LLM calls)
+            extract_task = asyncio.create_task(
+                _extract_entries(results, topic, model=extract_model)
+            )
+            while not extract_task.done():
+                await asyncio.sleep(8)
+                if not extract_task.done():
+                    yield _sse("heartbeat", {"status": "extracting", "iteration": state.iteration})
+            entries = extract_task.result()
+
+            yield _sse("extraction_complete", {
+                "iteration": state.iteration,
+                "entries_extracted": len(entries),
+            })
+
+            # Ingest
+            ingested = 0
+            if entries:
+                pre_count = len(state.all_entries)
+                state.all_entries.extend(entries)
+                ingested = await ingest_entries(entries, domain=state.domain)
+                state.total_ingested += ingested
+                state.total_rejected += len(entries) - ingested
+
+            yield _sse("ingestion_complete", {
+                "iteration": state.iteration,
+                "entries_ingested": ingested,
+                "total_ingested": state.total_ingested,
+                "total_rejected": state.total_rejected,
+            })
+
             yield _sse("iteration_complete", {
                 "iteration": state.iteration,
-                "entries_extracted": 0,
-                "entries_ingested": 0,
-                "reason": "no_results",
+                "entries_extracted": len(entries),
+                "entries_ingested": ingested,
             })
-            break
 
-        # Extract (with heartbeat to keep SSE alive during long LLM calls)
-        extract_task = asyncio.create_task(
-            _extract_entries(results, topic, model=extract_model)
-        )
-        while not extract_task.done():
-            await asyncio.sleep(8)
-            if not extract_task.done():
-                yield _sse("heartbeat", {"status": "extracting", "iteration": state.iteration})
-        entries = extract_task.result()
+            # Convergence check: last iteration or no new entries
+            if state.iteration >= state.max_iterations:
+                break
 
-        yield _sse("extraction_complete", {
-            "iteration": state.iteration,
-            "entries_extracted": len(entries),
-        })
+            # Diminishing returns check
+            if ingested == 0 and len(entries) > 0:
+                yield _sse("convergence", {
+                    "reason": "all_duplicates",
+                    "message": "All extracted entries were duplicates — topic appears well covered.",
+                })
+                break
 
-        # Ingest
-        ingested = 0
-        if entries:
-            pre_count = len(state.all_entries)
-            state.all_entries.extend(entries)
-            ingested = await ingest_entries(entries, domain=state.domain)
-            state.total_ingested += ingested
-            state.total_rejected += len(entries) - ingested
+            # Gap analysis for next iteration (with heartbeat)
+            gap_task = asyncio.create_task(_analyze_gaps(state, model=decompose_model))
+            while not gap_task.done():
+                await asyncio.sleep(8)
+                if not gap_task.done():
+                    yield _sse("heartbeat", {"status": "analyzing_gaps"})
+            gaps = gap_task.result()
+            coverage = gaps.get("coverage_pct", 100)
+            state.covered_facets.update(gaps.get("covered_facets", []))
 
-        yield _sse("ingestion_complete", {
-            "iteration": state.iteration,
-            "entries_ingested": ingested,
-            "total_ingested": state.total_ingested,
-            "total_rejected": state.total_rejected,
-        })
-
-        yield _sse("iteration_complete", {
-            "iteration": state.iteration,
-            "entries_extracted": len(entries),
-            "entries_ingested": ingested,
-        })
-
-        # Convergence check: last iteration or no new entries
-        if state.iteration >= state.max_iterations:
-            break
-
-        # Diminishing returns check
-        if ingested == 0 and len(entries) > 0:
-            yield _sse("convergence", {
-                "reason": "all_duplicates",
-                "message": "All extracted entries were duplicates — topic appears well covered.",
-            })
-            break
-
-        # Gap analysis for next iteration (with heartbeat)
-        gap_task = asyncio.create_task(_analyze_gaps(state, model=decompose_model))
-        while not gap_task.done():
-            await asyncio.sleep(8)
-            if not gap_task.done():
-                yield _sse("heartbeat", {"status": "analyzing_gaps"})
-        gaps = gap_task.result()
-        coverage = gaps.get("coverage_pct", 100)
-        state.covered_facets.update(gaps.get("covered_facets", []))
-
-        yield _sse("gap_analysis", {
-            "iteration": state.iteration,
-            "coverage_pct": coverage,
-            "covered_facets": list(state.covered_facets),
-            "gap_facets": gaps.get("gap_facets", []),
-            "assessment": gaps.get("assessment", ""),
-        })
-
-        # Check if well covered
-        if coverage >= 85 and not gaps.get("gap_queries"):
-            yield _sse("convergence", {
-                "reason": "coverage_threshold",
+            yield _sse("gap_analysis", {
+                "iteration": state.iteration,
                 "coverage_pct": coverage,
+                "covered_facets": list(state.covered_facets),
+                "gap_facets": gaps.get("gap_facets", []),
+                "assessment": gaps.get("assessment", ""),
             })
-            break
 
-        # Prepare next iteration queries from gaps
-        queries = gaps.get("gap_queries", [])
-        if not queries:
-            break
+            # Check if well covered
+            if coverage >= 85 and not gaps.get("gap_queries"):
+                yield _sse("convergence", {
+                    "reason": "coverage_threshold",
+                    "coverage_pct": coverage,
+                })
+                break
+
+            # Prepare next iteration queries from gaps
+            queries = gaps.get("gap_queries", [])
+            if not queries:
+                break
+
+        except Exception as exc:
+            logger.error("research_loop_error: iteration=%d error=%s", state.iteration, exc, exc_info=True)
+            yield _sse("error", {
+                "message": f"Research iteration {state.iteration} failed: {exc}",
+                "topic": topic,
+            })
+            return
 
     # ---- Final summary (with heartbeat) ----
     summary_task = asyncio.create_task(_generate_summary(state, model=summary_model))
