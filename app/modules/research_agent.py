@@ -544,6 +544,33 @@ def _chunk_text(text: str, max_tokens: int = 1500, overlap_tokens: int = 200) ->
     return chunks
 
 
+async def _check_contradictions(entries: list[dict]) -> list[dict]:
+    """Scan entry pairs for potential conflicts via title word overlap.
+
+    Heuristic: two entries whose titles share 2+ words (lowercased, whitespace-split)
+    are flagged as candidates. Informational only — caller decides what to do.
+    Capped at 5 pairs to avoid O(n^2) blowup on large batches.
+    """
+    contradictions: list[dict] = []
+    for i, e1 in enumerate(entries):
+        for e2 in entries[i + 1:]:
+            t1 = e1.get("title", "")
+            t2 = e2.get("title", "")
+            if not t1 or not t2:
+                continue
+            shared = set(t1.lower().split()) & set(t2.lower().split())
+            if len(shared) < 2:
+                continue
+            contradictions.append({
+                "entry_a": t1,
+                "entry_b": t2,
+                "shared_concepts": sorted(shared),
+            })
+            if len(contradictions) >= 5:
+                return contradictions[:5]
+    return contradictions[:5]
+
+
 async def _extract_entries(
     results: list[dict],
     topic: str,
@@ -841,6 +868,14 @@ async def run_research(
                 "entries_extracted": len(entries),
             })
 
+            # Contradiction check (informational — ingestion proceeds regardless)
+            if entries:
+                contradictions = await _check_contradictions(entries)
+                if contradictions:
+                    yield _sse("contradictions_detected", {
+                        "count": len(contradictions),
+                        "pairs": contradictions,
+                    })
             # Ingest
             ingested = 0
             if entries:

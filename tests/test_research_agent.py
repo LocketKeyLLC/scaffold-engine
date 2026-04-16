@@ -483,3 +483,39 @@ class TestRunResearch:
             iter_complete = [e for e in events if e["type"] == "iteration_complete"]
             assert len(iter_complete) == 1
             assert iter_complete[0]["data"]["reason"] == "no_results"
+
+
+# --- Contradiction detection (#3.4) ---
+
+import pytest
+from app.modules.research_agent import _check_contradictions
+
+
+@pytest.mark.asyncio
+async def test_check_contradictions_flags_shared_words():
+    entries = [
+        {"title": "Python is a compiled language"},
+        {"title": "Python is an interpreted language"},
+    ]
+    result = await _check_contradictions(entries)
+    assert len(result) == 1
+    assert result[0]["entry_a"] == entries[0]["title"]
+    assert result[0]["entry_b"] == entries[1]["title"]
+    assert set(result[0]["shared_concepts"]) >= {"python", "is", "language"}
+
+
+@pytest.mark.asyncio
+async def test_check_contradictions_skips_low_overlap():
+    entries = [
+        {"title": "Python memory management"},
+        {"title": "Rust ownership model"},
+    ]
+    assert await _check_contradictions(entries) == []
+
+
+@pytest.mark.asyncio
+async def test_check_contradictions_caps_at_five():
+    # 6 entries all sharing "shared words here" → C(6,2)=15 candidate pairs
+    entries = [{"title": f"shared words here {i}"} for i in range(6)]
+    result = await _check_contradictions(entries)
+    assert len(result) == 5
