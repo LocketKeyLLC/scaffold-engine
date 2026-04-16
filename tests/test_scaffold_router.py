@@ -693,3 +693,81 @@ class TestModelCommand:
         assert "Available Ollama Models" in result
         assert "(3)" in result
         assert "qwen3:8b" in result
+
+
+# ===================================================================
+# /research command tests
+# ===================================================================
+
+class TestResearchCommand:
+    """Tests for /research command parsing and dispatch."""
+
+    def test_research_usage_error(self, pipe):
+        """'/research' with no topic yields usage message."""
+        output = list(pipe.pipe(
+            user_message="/research",
+            model_id="test",
+            messages=[{"role": "user", "content": "/research"}],
+            body={"messages": [{"role": "user", "content": "/research"}]},
+        ))
+        combined = "".join(output)
+        assert "Usage" in combined
+        assert "/research <topic>" in combined
+
+    def test_research_depth_flag_parsed(self, pipe):
+        """'--depth deep' is extracted and topic is cleaned."""
+        called_with = {}
+
+        def fake_stream(topic, depth):
+            called_with["topic"] = topic
+            called_with["depth"] = depth
+            yield "done"
+
+        pipe._research_and_stream = fake_stream
+        output = list(pipe.pipe(
+            user_message="/research Docker networking --depth deep",
+            model_id="test",
+            messages=[{"role": "user", "content": "/research Docker networking --depth deep"}],
+            body={"messages": [{"role": "user", "content": "/research Docker networking --depth deep"}]},
+        ))
+        assert called_with["topic"] == "Docker networking"
+        assert called_with["depth"] == "deep"
+
+    def test_research_default_depth_medium(self, pipe):
+        """No --depth flag defaults to 'medium'."""
+        called_with = {}
+
+        def fake_stream(topic, depth):
+            called_with["topic"] = topic
+            called_with["depth"] = depth
+            yield "done"
+
+        pipe._research_and_stream = fake_stream
+        output = list(pipe.pipe(
+            user_message="/research Python asyncio patterns",
+            model_id="test",
+            messages=[{"role": "user", "content": "/research Python asyncio patterns"}],
+            body={"messages": [{"role": "user", "content": "/research Python asyncio patterns"}]},
+        ))
+        assert called_with["depth"] == "medium"
+        assert called_with["topic"] == "Python asyncio patterns"
+
+    def test_research_stream_triggered(self, pipe):
+        """Valid /research triggers header + _research_and_stream."""
+        stream_called = [False]
+
+        def fake_stream(topic, depth):
+            stream_called[0] = True
+            yield "streaming..."
+
+        pipe._research_and_stream = fake_stream
+        output = list(pipe.pipe(
+            user_message="/research Redis caching",
+            model_id="test",
+            messages=[{"role": "user", "content": "/research Redis caching"}],
+            body={"messages": [{"role": "user", "content": "/research Redis caching"}]},
+        ))
+        combined = "".join(output)
+        assert stream_called[0] is True
+        assert "Researching" in combined
+        assert "Redis caching" in combined
