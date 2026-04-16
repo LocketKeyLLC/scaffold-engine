@@ -349,6 +349,14 @@ class TestRunResearch:
              patch("app.modules.research_agent._search_queries", new_callable=AsyncMock, return_value=[]), \
              patch("app.modules.research_agent._generate_summary", new_callable=AsyncMock, return_value="Done."), \
              patch("app.modules.research_agent.get_model", return_value="qwen3:4b"), \
+             patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
+             patch("app.modules.research_agent._create_session", new_callable=AsyncMock, return_value="test-session-id"), \
+             patch("app.modules.research_agent._update_session_iteration", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
+             patch("app.modules.research_agent._create_session", new_callable=AsyncMock, return_value="test-session-id"), \
+             patch("app.modules.research_agent._update_session_iteration", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.create_task") as mock_task:
             mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
@@ -374,6 +382,14 @@ class TestRunResearch:
              patch("app.modules.research_agent._search_queries", new_callable=AsyncMock, return_value=[]), \
              patch("app.modules.research_agent._generate_summary", new_callable=AsyncMock, return_value="Done."), \
              patch("app.modules.research_agent.get_model", return_value="qwen3:4b"), \
+             patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
+             patch("app.modules.research_agent._create_session", new_callable=AsyncMock, return_value="test-session-id"), \
+             patch("app.modules.research_agent._update_session_iteration", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
+             patch("app.modules.research_agent._create_session", new_callable=AsyncMock, return_value="test-session-id"), \
+             patch("app.modules.research_agent._update_session_iteration", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.create_task") as mock_task:
             mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
@@ -401,6 +417,14 @@ class TestRunResearch:
              patch("app.modules.research_agent.ingest_entries", new_callable=AsyncMock, return_value=1), \
              patch("app.modules.research_agent._generate_summary", new_callable=AsyncMock, return_value="Done."), \
              patch("app.modules.research_agent.get_model", return_value="qwen3:4b"), \
+             patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
+             patch("app.modules.research_agent._create_session", new_callable=AsyncMock, return_value="test-session-id"), \
+             patch("app.modules.research_agent._update_session_iteration", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
+             patch("app.modules.research_agent._create_session", new_callable=AsyncMock, return_value="test-session-id"), \
+             patch("app.modules.research_agent._update_session_iteration", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.create_task") as mock_task:
             mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
@@ -433,6 +457,14 @@ class TestRunResearch:
              patch("app.modules.research_agent._search_queries", new_callable=AsyncMock, return_value=[]), \
              patch("app.modules.research_agent._generate_summary", new_callable=AsyncMock, return_value="No data."), \
              patch("app.modules.research_agent.get_model", return_value="qwen3:4b"), \
+             patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
+             patch("app.modules.research_agent._create_session", new_callable=AsyncMock, return_value="test-session-id"), \
+             patch("app.modules.research_agent._update_session_iteration", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
+             patch("app.modules.research_agent._create_session", new_callable=AsyncMock, return_value="test-session-id"), \
+             patch("app.modules.research_agent._update_session_iteration", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.create_task") as mock_task:
             mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))

@@ -23,6 +23,8 @@ from app import model_router
 from app.config import settings, get_model
 from app.modules.rag_pipeline import ingest_entries, _embed_query
 from app.utils.llm_parsing import parse_json_object, parse_json_array
+from app.database import async_session
+from sqlalchemy import text
 
 logger = logging.getLogger("scaffold.research")
 
@@ -57,6 +59,91 @@ class ResearchState:
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+# ---------------------------------------------------------------------------
+# Session tracking helpers
+# ---------------------------------------------------------------------------
+
+async def _guard_concurrent() -> dict | None:
+    """Check for running research sessions. Returns existing row dict or None."""
+    async with async_session() as db:
+        row = await db.execute(
+            text("SELECT id, topic FROM research_sessions WHERE status = 'running' LIMIT 1")
+        )
+        existing = row.mappings().first()
+        return dict(existing) if existing else None
+
+
+async def _create_session(topic: str, depth: str, domain: str) -> str:
+    """Insert a new research_sessions row. Returns session UUID as string."""
+    async with async_session() as db:
+        result = await db.execute(
+            text("""
+                INSERT INTO research_sessions (topic, depth, domain, status)
+                VALUES (:topic, :depth, :domain, 'running')
+                RETURNING id
+            """),
+            {"topic": topic, "depth": depth, "domain": domain},
+        )
+        session_id = str(result.scalar_one())
+        await db.commit()
+        return session_id
+
+
+async def _update_session_iteration(
+    session_id: str,
+    state: "ResearchState",
+    coverage: float | None = None,
+) -> None:
+    """Update session counters after an iteration."""
+    async with async_session() as db:
+        await db.execute(
+            text("""
+                UPDATE research_sessions
+                SET iterations_completed = :iters,
+                    total_entries_extracted = :extracted,
+                    total_entries_ingested = :ingested,
+                    total_entries_rejected = :rejected,
+                    total_urls_searched = :urls,
+                    total_queries = :queries,
+                    coverage_pct = COALESCE(:coverage, coverage_pct)
+                WHERE id = :sid
+            """),
+            {
+                "sid": session_id,
+                "iters": state.iteration,
+                "extracted": len(state.all_entries),
+                "ingested": state.total_ingested,
+                "rejected": state.total_rejected,
+                "urls": len(state.url_history),
+                "queries": len(state.search_history),
+                "coverage": coverage,
+            },
+        )
+        await db.commit()
+
+
+async def _finalize_session(
+    session_id: str,
+    status: str,
+    duration_ms: int,
+    summary: str | None = None,
+) -> None:
+    """Mark session completed or failed."""
+    async with async_session() as db:
+        await db.execute(
+            text("""
+                UPDATE research_sessions
+                SET status = :status,
+                    completed_at = NOW(),
+                    duration_ms = :dur,
+                    summary = :summary
+                WHERE id = :sid
+            """),
+            {"sid": session_id, "status": status, "dur": duration_ms, "summary": summary},
+        )
+        await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -430,10 +517,25 @@ async def run_research(
 ) -> AsyncGenerator[str, None]:
     """Execute the full research loop, yielding SSE events."""
     t0 = time.monotonic()
+    research_domain = domain or "eng"
+
+    # ---- Concurrent research guard ----
+    existing = await _guard_concurrent()
+    if existing:
+        yield _sse("error", {
+            "message": f"Research already in progress: '{existing['topic']}'",
+            "existing_session": str(existing["id"]),
+            "http_status": 409,
+        })
+        return
+
+    # ---- Create session row ----
+    session_id = await _create_session(topic, depth, research_domain)
+
     state = ResearchState(
         topic=topic,
         depth=depth,
-        domain=domain or "eng",
+        domain=research_domain,
     )
 
     decompose_model = get_model("model_verifier", model_overrides)
@@ -445,22 +547,24 @@ async def run_research(
         "depth": depth,
         "domain": state.domain,
         "max_iterations": state.max_iterations,
+        "session_id": session_id,
     })
 
-    # Initial decomposition
-    decomposition = await _decompose_topic(topic, model=decompose_model)
-    state.outline_facets = decomposition.get("facets", [topic])
-    queries = decomposition.get("queries", [])
+    try:
+        # Initial decomposition
+        decomposition = await _decompose_topic(topic, model=decompose_model)
+        state.outline_facets = decomposition.get("facets", [topic])
+        queries = decomposition.get("queries", [])
 
-    yield _sse("decomposition_complete", {
-        "complexity": decomposition.get("topic_complexity", "medium"),
-        "facets": state.outline_facets,
-        "query_count": len(queries),
-    })
+        yield _sse("decomposition_complete", {
+            "complexity": decomposition.get("topic_complexity", "medium"),
+            "facets": state.outline_facets,
+            "query_count": len(queries),
+        })
 
-    # ---- Research loop ----
-    while state.iteration < state.max_iterations:
-        try:
+        # ---- Research loop ----
+        coverage = None
+        while state.iteration < state.max_iterations:
             state.iteration += 1
 
             yield _sse("iteration_started", {
@@ -504,7 +608,6 @@ async def run_research(
             # Ingest
             ingested = 0
             if entries:
-                pre_count = len(state.all_entries)
                 state.all_entries.extend(entries)
                 ingested = await ingest_entries(entries, domain=state.domain)
                 state.total_ingested += ingested
@@ -522,6 +625,9 @@ async def run_research(
                 "entries_extracted": len(entries),
                 "entries_ingested": ingested,
             })
+
+            # Update session after each iteration
+            await _update_session_iteration(session_id, state, coverage)
 
             # Convergence check: last iteration or no new entries
             if state.iteration >= state.max_iterations:
@@ -566,33 +672,40 @@ async def run_research(
             if not queries:
                 break
 
-        except Exception as exc:
-            logger.error("research_loop_error: iteration=%d error=%s", state.iteration, exc, exc_info=True)
-            yield _sse("error", {
-                "message": f"Research iteration {state.iteration} failed: {exc}",
-                "topic": topic,
-            })
-            return
+        # ---- Final summary (with heartbeat) ----
+        summary_task = asyncio.create_task(_generate_summary(state, model=summary_model))
+        while not summary_task.done():
+            await asyncio.sleep(8)
+            if not summary_task.done():
+                yield _sse("heartbeat", {"status": "summarizing"})
+        summary = summary_task.result()
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-    # ---- Final summary (with heartbeat) ----
-    summary_task = asyncio.create_task(_generate_summary(state, model=summary_model))
-    while not summary_task.done():
-        await asyncio.sleep(8)
-        if not summary_task.done():
-            yield _sse("heartbeat", {"status": "summarizing"})
-    summary = summary_task.result()
-    elapsed_ms = int((time.monotonic() - t0) * 1000)
+        # Finalize session — completed
+        await _update_session_iteration(session_id, state, coverage)
+        await _finalize_session(session_id, "completed", elapsed_ms, summary)
 
-    yield _sse("research_complete", {
-        "topic": topic,
-        "total_entries": len(state.all_entries),
-        "total_ingested": state.total_ingested,
-        "total_rejected": state.total_rejected,
-        "iterations": state.iteration,
-        "total_urls_searched": len(state.url_history),
-        "total_queries": len(state.search_history),
-        "duration_ms": elapsed_ms,
-        "summary": summary,
-        "domain": state.domain,
-        "depth": depth,
-    })
+        yield _sse("research_complete", {
+            "topic": topic,
+            "session_id": session_id,
+            "total_entries": len(state.all_entries),
+            "total_ingested": state.total_ingested,
+            "total_rejected": state.total_rejected,
+            "iterations": state.iteration,
+            "total_urls_searched": len(state.url_history),
+            "total_queries": len(state.search_history),
+            "duration_ms": elapsed_ms,
+            "summary": summary,
+            "domain": state.domain,
+            "depth": depth,
+        })
+
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        logger.error("research_failed: session=%s error=%s", session_id, exc, exc_info=True)
+        await _finalize_session(session_id, "failed", elapsed_ms)
+        yield _sse("error", {
+            "message": f"Research failed: {exc}",
+            "session_id": session_id,
+            "topic": topic,
+        })
