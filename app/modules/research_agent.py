@@ -22,11 +22,92 @@ from typing import AsyncGenerator
 from app import model_router
 from app.config import settings, get_model
 from app.modules.rag_pipeline import ingest_entries, _embed_query
+from urllib.parse import urlparse
+
 from app.utils.llm_parsing import parse_json_object, parse_json_array
 from app.database import async_session
 from sqlalchemy import text
+from app.modules.gt_extractor import _detect_topic_id
 
 logger = logging.getLogger("scaffold.research")
+
+
+# ---------------------------------------------------------------------------
+# Domain auto-detection (reuses gt_extractor topic classifier)
+# ---------------------------------------------------------------------------
+
+TOPIC_TO_DOMAIN: dict[int, str] = {
+    1: "llm",
+    2: "rag",
+    3: "eng",
+    4: "eng",
+    5: "eng",
+    6: "eng",
+}
+
+
+def _detect_domain(topic: str) -> str:
+    """Map a research topic to a Milvus partition domain via keyword scoring."""
+    topic_id = _detect_topic_id(topic)
+    return TOPIC_TO_DOMAIN.get(topic_id, "eng")
+
+
+# ---------------------------------------------------------------------------
+# SearXNG category -> engine routing
+# ---------------------------------------------------------------------------
+
+CATEGORY_ENGINES: dict[str, str] = {
+    "it": "github,stackoverflow,pypi,google",
+    "science": "arxiv,crossref,semantic_scholar,google",
+    "news": "google news,bing news",
+    "general": "google,bing,duckduckgo,brave",
+}
+
+
+def _engines_for_category(category: str) -> str:
+    """Return a comma-separated engine string for a SearXNG search category."""
+    return CATEGORY_ENGINES.get(category, "google,bing,duckduckgo")
+
+
+# ---------------------------------------------------------------------------
+# Source reliability scoring
+# ---------------------------------------------------------------------------
+
+DOMAIN_SCORES: dict[str, float] = {
+    "arxiv.org": 0.95,
+    "ieee.org": 0.95,
+    "acm.org": 0.95,
+    "docs.python.org": 0.90,
+    "docs.microsoft.com": 0.90,
+    "learn.microsoft.com": 0.90,
+    "developer.mozilla.org": 0.90,
+    "kubernetes.io": 0.90,
+    "docs.docker.com": 0.90,
+    "pytorch.org": 0.90,
+    "huggingface.co": 0.90,
+    "github.com": 0.80,
+    "stackoverflow.com": 0.80,
+    "wiki.archlinux.org": 0.80,
+    "medium.com": 0.60,
+    "dev.to": 0.60,
+    "towardsdatascience.com": 0.60,
+    "reddit.com": 0.50,
+}
+
+DEFAULT_SOURCE_SCORE: float = 0.50
+
+
+def _score_source(url: str) -> float:
+    """Return a reliability score for a URL based on its domain."""
+    try:
+        hostname = urlparse(url).hostname or ""
+    except Exception:
+        return DEFAULT_SOURCE_SCORE
+    hostname = hostname.lower().removeprefix("www.")
+    for domain_key, score in DOMAIN_SCORES.items():
+        if domain_key in hostname:
+            return score
+    return DEFAULT_SOURCE_SCORE
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +365,7 @@ async def _search_queries(
                     "q": query_text,
                     "format": "json",
                     "categories": q.get("search_category", "general"),
+                    "engines": _engines_for_category(q.get("search_category", "general")),
                 },
             )
             if resp.status_code == 200:
@@ -377,6 +459,10 @@ async def _extract_entries(
         if resp.success and resp.text and len(resp.text.strip()) > 5:
             entries = parse_json_array(resp.text) or []
             if entries:
+                for entry in entries:
+                    source_url = entry.get("source", "")
+                    if source_url:
+                        entry["confidence_score"] = _score_source(source_url)
                 all_entries.extend(entries)
                 logger.info("extraction_batch: %d entries from batch %d", len(entries), i // batch_size + 1)
             else:
@@ -396,7 +482,7 @@ async def _extract_entries(
                         "content": content,
                         "tags": "",
                         "source": r.get("url", ""),
-                        "confidence_score": 0.5,
+                        "confidence_score": _score_source(r.get("url", "")),
                         "source_type": "community",
                         "facet": r.get("facet", ""),
                     }
@@ -517,7 +603,7 @@ async def run_research(
 ) -> AsyncGenerator[str, None]:
     """Execute the full research loop, yielding SSE events."""
     t0 = time.monotonic()
-    research_domain = domain or "eng"
+    research_domain = domain or _detect_domain(topic)
 
     # ---- Concurrent research guard ----
     existing = await _guard_concurrent()
