@@ -88,6 +88,9 @@ services:
       MODEL_CLOUD_ALT: qwen3.5:397b-cloud
       MODEL_FALLBACK: qwen3.5:latest
       CLOUD_TIMEOUT: "600"
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_MAX_FILES: "50"
+      GITHUB_TIMEOUT: "30"
       LOCAL_TIMEOUT: "1800"
       HF_HOME: /code/.cache/huggingface
       MAX_RETRIES: "3"

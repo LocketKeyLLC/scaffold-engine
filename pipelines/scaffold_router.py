@@ -289,7 +289,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
         if msg.lower().startswith("/research"):
             parts = msg.split(None, 1)
             if len(parts) < 2:
-                yield "Usage: `/research <topic>` — research a topic and ingest into the knowledge base.\n\nOptions: append `--depth shallow|medium|deep` to control iteration count."
+                yield "Usage: `/research <topic>` — research a topic and ingest into the knowledge base.\n\nSources:\n- `/research <topic>` — web search via SearXNG\n- `/research <url>` — fetch and extract one URL\n- `/research github:owner/repo` — ingest README + docs + module docstrings\n\nOptions: append `--depth shallow|medium|deep` to control iteration count."
                 return
             raw_args = parts[1]
             # Parse --depth flag
@@ -1317,7 +1317,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
 | `/status` | List active jobs |
 | `/model <sub>` | Manage model assignments (list/set/reset/available) |
 | `/schedule <sub>` | Manage scheduled research jobs (list/add/delete) |
-| `/research <topic>` | Research a topic and ingest into knowledge base |
+| `/research <topic>` | Research a topic (web), URL, or `github:owner/repo` and ingest into knowledge base |
 | `/help` | Show this message |
 
 **Workflow:** Describe your idea → discuss scope with the assistant → `/go` → review feasibility → `/confirm` → execution."""

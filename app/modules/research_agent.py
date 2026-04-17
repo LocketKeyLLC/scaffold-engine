@@ -804,7 +804,28 @@ async def run_research(
         domain=research_domain,
     )
 
-    # URL-mode short-circuit: if topic is a URL, skip decompose/search
+    # GitHub-mode short-circuit: github:owner/repo
+    if _is_github_ref(topic):
+        owner, repo = _parse_github_ref(topic)
+        yield _sse("research_started", {
+            "topic": topic,
+            "depth": "direct_github",
+            "domain": state.domain,
+            "max_iterations": 1,
+            "session_id": session_id,
+            "mode": "github",
+        })
+        async for _evt in _run_research_github_mode(
+            owner=owner,
+            repo=repo,
+            state=state,
+            session_id=session_id,
+            t0=t0,
+        ):
+            yield _evt
+        return
+
+        # URL-mode short-circuit: if topic is a URL, skip decompose/search
     if _is_url(topic):
         _extract_m = get_model("model_verifier", model_overrides)
         _summary_m = get_model("model_verifier", model_overrides)
@@ -1080,6 +1101,141 @@ async def _fetch_url_bounded(url: str, max_bytes: int = _MAX_URL_BYTES) -> str |
     except Exception as e:
         logger.warning("url_fetch_failed: url=%s error=%s", url, e)
         return None
+
+
+def _is_github_ref(s: str) -> bool:
+    """Match `github:owner/repo` prefix."""
+    if not s.startswith("github:"):
+        return False
+    rest = s[len("github:"):].strip()
+    parts = rest.split("/")
+    return len(parts) == 2 and all(parts) and "." not in parts[0]
+
+
+def _parse_github_ref(s: str) -> tuple[str, str]:
+    owner, repo = s[len("github:"):].strip().split("/", 1)
+    return owner.strip(), repo.strip()
+
+
+async def _run_research_github_mode(
+    owner: str,
+    repo: str,
+    state: "ResearchState",
+    session_id,
+    t0: float,
+):
+    """GitHub-mode: fetch README + docs/**/*.md + top-level Py docstrings, ingest as tech_docs."""
+    from app.utils.github_ingest import (
+        fetch_repo_content,
+        GitHubRepoNotFoundError,
+        GitHubRateLimitError,
+    )
+
+    state.outline_facets = ["github_repo"]
+    yield _sse("decomposition_complete", {
+        "complexity": "direct",
+        "facets": state.outline_facets,
+        "query_count": 0,
+    })
+
+    state.iteration = 1
+    yield _sse("iteration_started", {
+        "iteration": 1,
+        "query_count": 0,
+        "mode": "github",
+    })
+
+    # Fetch with heartbeat wrapper
+    task = asyncio.create_task(fetch_repo_content(owner, repo))
+    while not task.done():
+        await asyncio.sleep(8)
+        if not task.done():
+            yield _sse("heartbeat", {"status": "fetching_github", "iteration": 1})
+
+    try:
+        files = task.result()
+    except GitHubRepoNotFoundError as e:
+        yield _sse("error", {
+            "message": f"GitHub repo not found: {e}. Check owner/repo and GITHUB_TOKEN for private repos.",
+            "session_id": session_id,
+            "topic": f"{owner}/{repo}",
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+    except GitHubRateLimitError as e:
+        yield _sse("error", {
+            "message": f"GitHub rate limit: {e}",
+            "session_id": session_id,
+            "topic": f"{owner}/{repo}",
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+
+    if not files:
+        yield _sse("error", {
+            "message": f"No ingestible content found in {owner}/{repo}",
+            "session_id": session_id,
+            "topic": f"{owner}/{repo}",
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+
+    yield _sse("search_complete", {
+        "iteration": 1,
+        "results_found": len(files),
+        "total_urls": len(files),
+        "mode": "github",
+    })
+
+    # Build entries (mirror url_mode shape + source_type tech_docs)
+    all_entries: list[dict] = []
+    for f in files:
+        source_url = f"https://github.com/{owner}/{repo}/blob/HEAD/{f['path']}"
+        state.url_history.add(source_url)
+        all_entries.append({
+            "title": f"{owner}/{repo}: {f['path']}",
+            "content": f["content"][:8000],
+            "source": source_url,
+            "source_type": "tech_docs",
+            "confidence_score": 0.9,
+            "facet": "github_repo",
+        })
+
+    yield _sse("extraction_complete", {
+        "iteration": 1,
+        "entries": len(all_entries),
+        "mode": "github",
+    })
+
+    # Ingest via shared pipeline (inherits dedup, TTL, partition key)
+    stats = await ingest_entries(all_entries, domain=state.domain)
+    state.total_new += stats.get("new", 0)
+    state.total_versioned += stats.get("versioned", 0)
+    state.total_rejected += stats.get("rejected", 0)
+    state.total_skipped_hash += stats.get("skipped_hash", 0)
+    state.total_ingested = state.total_new + state.total_versioned
+
+    yield _sse("ingestion_complete", {
+        "iteration": 1,
+        "new": stats.get("new", 0),
+        "versioned": stats.get("versioned", 0),
+        "rejected": stats.get("rejected", 0),
+        "skipped_hash": stats.get("skipped_hash", 0),
+    })
+
+    yield _sse("research_complete", {
+        "topic": f"github:{owner}/{repo}",
+        "mode": "github",
+        "files_fetched": len(files),
+        "new": state.total_new,
+        "versioned": state.total_versioned,
+        "rejected": state.total_rejected,
+        "skipped_hash": state.total_skipped_hash,
+        "duration_ms": int((time.monotonic() - t0) * 1000),
+        "session_id": session_id,
+    })
+
+    await _finalize_session(session_id, "completed", int((time.monotonic() - t0) * 1000))
 
 
 async def _run_research_url_mode(

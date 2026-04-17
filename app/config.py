@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     research_searxng_delay: float = 1.5
     research_chunk_size: int = 1500
     research_timeout: int = 3600
+    github_token: str = ""
+    github_max_files: int = 50
+    github_timeout: int = 30
+    github_api_base: str = "https://api.github.com"
 
     # Logging
     log_level: str = "info"
