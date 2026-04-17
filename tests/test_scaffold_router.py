@@ -771,3 +771,27 @@ class TestResearchCommand:
         assert stream_called[0] is True
         assert "Researching" in combined
         assert "Redis caching" in combined
+
+    def test_research_complete_suggests_go(self, pipe, monkeypatch):
+        """After research_complete, output should prompt the user to type /go."""
+        class FakeResponse:
+            status_code = 200
+            def iter_lines(self, decode_unicode=True):
+                yield "event: research_complete"
+                yield (
+                    'data: {"topic": "Docker networking", "total_ingested": 12, '
+                    '"total_entries": 15, "iterations": 2, "duration_ms": 120000, '
+                    '"summary": "Docker uses bridge networks by default."}'
+                )
+                yield ""
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            _mod.requests, "post", lambda *a, **kw: FakeResponse()
+        )
+
+        output = "".join(pipe._research_and_stream("Docker networking", "medium"))
+        assert "/go" in output
+        assert "build a project plan" in output
+        assert "Research Complete" in output
