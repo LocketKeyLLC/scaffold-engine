@@ -804,7 +804,27 @@ async def run_research(
         domain=research_domain,
     )
 
-    # GitHub-mode short-circuit: github:owner/repo
+    # OpenAPI-mode short-circuit: openapi:<url>
+    if _is_openapi_ref(topic):
+        spec_url = _parse_openapi_ref(topic)
+        yield _sse("research_started", {
+            "topic": topic,
+            "depth": "direct_openapi",
+            "domain": state.domain,
+            "max_iterations": 1,
+            "session_id": session_id,
+            "mode": "openapi",
+        })
+        async for _evt in _run_research_openapi_mode(
+            spec_url=spec_url,
+            state=state,
+            session_id=session_id,
+            t0=t0,
+        ):
+            yield _evt
+        return
+
+        # GitHub-mode short-circuit: github:owner/repo
     if _is_github_ref(topic):
         owner, repo = _parse_github_ref(topic)
         yield _sse("research_started", {
@@ -1227,6 +1247,161 @@ async def _run_research_github_mode(
         "topic": f"github:{owner}/{repo}",
         "mode": "github",
         "files_fetched": len(files),
+        "new": state.total_new,
+        "versioned": state.total_versioned,
+        "rejected": state.total_rejected,
+        "skipped_hash": state.total_skipped_hash,
+        "duration_ms": int((time.monotonic() - t0) * 1000),
+        "session_id": session_id,
+    })
+
+    await _finalize_session(session_id, "completed", int((time.monotonic() - t0) * 1000))
+
+
+def _is_openapi_ref(s: str) -> bool:
+    """Match `openapi:<url>` prefix with http(s) URL."""
+    if not s.startswith("openapi:"):
+        return False
+    rest = s[len("openapi:"):].strip()
+    return rest.startswith("http://") or rest.startswith("https://")
+
+
+def _parse_openapi_ref(s: str) -> str:
+    return s[len("openapi:"):].strip()
+
+
+async def _run_research_openapi_mode(
+    spec_url: str,
+    state: "ResearchState",
+    session_id,
+    t0: float,
+):
+    """OpenAPI-mode: fetch + validate spec, ingest one entry per endpoint."""
+    from app.utils.openapi_ingest import (
+        fetch_and_parse_spec,
+        OpenAPIFetchError,
+        OpenAPIParseError,
+        OpenAPIValidationError,
+    )
+
+    state.outline_facets = ["openapi_spec"]
+    yield _sse("decomposition_complete", {
+        "complexity": "direct",
+        "facets": state.outline_facets,
+        "query_count": 0,
+    })
+
+    state.iteration = 1
+    yield _sse("iteration_started", {
+        "iteration": 1,
+        "query_count": 0,
+        "mode": "openapi",
+    })
+
+    # Fetch + validate with heartbeat
+    task = asyncio.create_task(fetch_and_parse_spec(spec_url))
+    while not task.done():
+        await asyncio.sleep(8)
+        if not task.done():
+            yield _sse("heartbeat", {"status": "fetching_openapi", "iteration": 1})
+
+    try:
+        endpoints, meta = task.result()
+    except OpenAPIFetchError as e:
+        yield _sse("error", {
+            "message": f"OpenAPI fetch failed: {e}",
+            "session_id": session_id,
+            "topic": spec_url,
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+    except OpenAPIParseError as e:
+        yield _sse("error", {
+            "message": f"OpenAPI parse failed: {e}",
+            "session_id": session_id,
+            "topic": spec_url,
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+    except OpenAPIValidationError as e:
+        yield _sse("error", {
+            "message": f"OpenAPI validation failed: {e}",
+            "session_id": session_id,
+            "topic": spec_url,
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+
+    if not endpoints:
+        yield _sse("error", {
+            "message": f"No endpoints found in spec at {spec_url}",
+            "session_id": session_id,
+            "topic": spec_url,
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+
+    yield _sse("search_complete", {
+        "iteration": 1,
+        "results_found": len(endpoints),
+        "total_urls": 1,
+        "mode": "openapi",
+        "spec_title": meta["title"],
+        "spec_version": meta["spec_version"],
+        "openapi_version": meta["version"],
+        "truncated": meta["truncated"],
+    })
+
+    state.url_history.add(spec_url)
+
+    # Build entries (one per endpoint)
+    all_entries: list[dict] = []
+    for ep in endpoints:
+        source_url = f"{spec_url}#{ep['method']} {ep['path']}"
+        tags = ep.get("tags") or []
+        # Primary tag goes into facet; all tags preserved as domain_tags
+        primary_facet = tags[0] if tags else "openapi_spec"
+        all_entries.append({
+            "title": ep["title"],
+            "content": ep["content"][:8000],
+            "source": source_url,
+            "source_type": "tech_docs",
+            "confidence_score": 0.95,
+            "facet": primary_facet,
+            "domain_tags": tags,
+        })
+
+    yield _sse("extraction_complete", {
+        "iteration": 1,
+        "entries": len(all_entries),
+        "mode": "openapi",
+    })
+
+    # Ingest via shared pipeline
+    stats = await ingest_entries(all_entries, domain=state.domain)
+    state.total_new += stats.get("new", 0)
+    state.total_versioned += stats.get("versioned", 0)
+    state.total_rejected += stats.get("rejected", 0)
+    state.total_skipped_hash += stats.get("skipped_hash", 0)
+    state.total_ingested = state.total_new + state.total_versioned
+
+    yield _sse("ingestion_complete", {
+        "iteration": 1,
+        "new": stats.get("new", 0),
+        "versioned": stats.get("versioned", 0),
+        "rejected": stats.get("rejected", 0),
+        "skipped_hash": stats.get("skipped_hash", 0),
+    })
+
+    yield _sse("research_complete", {
+        "topic": f"openapi:{spec_url}",
+        "mode": "openapi",
+        "spec_title": meta["title"],
+        "spec_version": meta["spec_version"],
+        "openapi_version": meta["version"],
+        "endpoints_found": meta["total_endpoints"],
+        "endpoints_ingested": meta["ingested_endpoints"],
+        "truncated": meta["truncated"],
         "new": state.total_new,
         "versioned": state.total_versioned,
         "rejected": state.total_rejected,
