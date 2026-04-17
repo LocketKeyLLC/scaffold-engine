@@ -417,6 +417,14 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                 return
 
             yield f"📋 Execution plan ready — running {num_nodes} steps...\n\n"
+            return
+
+        # --- All other slash commands dispatch to _handle_command ---
+        if msg.startswith("/"):
+            result = self._handle_command(msg)
+            if result:
+                yield result
+            return
 
 # ------------------------------------------------------------------
     # /research: SSE consumer for research agent
@@ -993,7 +1001,8 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                 return self._help()
             elif cmd == "/model":
                 return self._handle_model(msg)
-
+            elif cmd == "/schedule":
+                return self._handle_schedule(msg)
             elif cmd == "/idea":
                 if len(parts) < 2:
                     return "Usage: /idea <description>"
@@ -1119,7 +1128,84 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
             return self._model_help()
         else:
             return f"Unknown subcommand: `{sub}`\n\n{self._model_help()}"
+    def _handle_schedule(self, msg: str) -> str:
+        """
+        /schedule list                            — show all schedules
+        /schedule add <cron> <topic>              — create (cron in quotes if spaces)
+        /schedule delete <id>                     — remove by id
+        /schedule help                            — this message
+        """
+        parts = msg.split(None, 2)
+        sub = parts[1].lower() if len(parts) > 1 else "help"
+        base = self.valves.orchestrator_url
+        hdr = {"X-API-Key": self.valves.api_key}
 
+        if sub == "help" or sub not in ("list", "add", "delete"):
+            return (
+                "**Schedule commands:**\n"
+                "- `/schedule list` — show all schedules\n"
+                "- `/schedule add <cron> <topic>` — e.g. `/schedule add \"0 9 * * 1\" kubernetes news`\n"
+                "- `/schedule delete <id>`\n\n"
+                "Cron format: `minute hour day month weekday` (UTC)"
+            )
+
+        if sub == "list":
+            try:
+                r = requests.get(f"{base}/schedule", headers=hdr, timeout=30)
+                r.raise_for_status()
+                rows = r.json().get("schedules", [])
+            except Exception as exc:
+                return f"❌ Failed to list schedules: {exc}"
+            if not rows:
+                return "No schedules yet. Try `/schedule add \"0 9 * * 1\" kubernetes news`"
+            lines = ["| ID | Topic | Cron | Depth | Next Run | Runs | Failures |",
+                     "|----|-------|------|-------|----------|------|----------|"]
+            for s in rows:
+                lines.append(f"| {s['id']} | {s['topic']} | `{s['cron_expression']}` | "
+                             f"{s['depth']} | {s.get('next_run_at') or '—'} | "
+                             f"{s['run_count']} | {s['failure_count']} |")
+            return "\n".join(lines)
+
+        if sub == "add":
+            if len(parts) < 3:
+                return "Usage: `/schedule add <cron> <topic>` (quote the cron expression)"
+            rest = parts[2]
+            # Expect quoted cron: "0 9 * * 1" topic words here
+            import shlex
+            try:
+                tokens = shlex.split(rest)
+            except ValueError as exc:
+                return f"❌ Parse error: {exc}"
+            if len(tokens) < 2:
+                return "Usage: `/schedule add \"<cron>\" <topic>`"
+            cron_expr = tokens[0]
+            topic = " ".join(tokens[1:])
+            try:
+                r = requests.post(f"{base}/schedule", headers=hdr, timeout=60,
+                                  json={"topic": topic, "cron_expression": cron_expr,
+                                        "depth": "medium",
+                                        "model_overrides": self._model_overrides()})
+                if r.status_code == 422:
+                    return f"❌ {r.json().get('detail', 'validation failed')}"
+                r.raise_for_status()
+                s = r.json()
+                return (f"✅ Scheduled **#{s['id']}**: {s['topic']}\n"
+                        f"Cron: `{s['cron_expression']}` — depth: {s['depth']}")
+            except Exception as exc:
+                return f"❌ Failed to create schedule: {exc}"
+
+        # delete
+        if len(parts) < 3 or not parts[2].strip().isdigit():
+            return "Usage: `/schedule delete <id>`"
+        sid = int(parts[2].strip())
+        try:
+            r = requests.delete(f"{base}/schedule/{sid}", headers=hdr, timeout=30)
+            if r.status_code == 404:
+                return f"❌ Schedule #{sid} not found"
+            r.raise_for_status()
+            return f"🗑️ Deleted schedule #{sid}"
+        except Exception as exc:
+            return f"❌ Failed to delete: {exc}"
     def _model_list(self) -> str:
         lines = ["| Role | Current Model | Default? |", "|---|---|---|"]
         for role, default in self._MODEL_DEFAULTS.items():
@@ -1229,6 +1315,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
 | `/rag <query>` | Query the knowledge base |
 | `/status` | List active jobs |
 | `/model <sub>` | Manage model assignments (list/set/reset/available) |
+| `/schedule <sub>` | Manage scheduled research jobs (list/add/delete) |
 | `/research <topic>` | Research a topic and ingest into knowledge base |
 | `/help` | Show this message |
 

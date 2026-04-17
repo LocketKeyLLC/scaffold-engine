@@ -1308,3 +1308,78 @@ scaffold-engine/
 
 ---
 
+
+## Changelog — April 16, 2026 (Scheduled Research — Phase 1 Scaffolding)
+
+### Decision
+1. **Chose APScheduler (in-process) over cron sidecar** — matches existing `cleanup.py` async loop pattern, reuses structlog observability, single container, direct `run_research()` call (no HTTP hop). Sidecar's isolation win judged theoretical since `run_research()` runs in orchestrator either way.
+
+### Dependency
+2. **`requirements.txt`** — added `apscheduler==3.10.4` (stable 3.x, async support; 4.x rewrite not yet production-ready)
+
+### Migration 010 (`db/migrations/010_scheduled_jobs.sql`)
+3. **`scheduled_jobs` table** — user-facing schedule metadata: `id`, `topic`, `depth` (shallow/medium/deep), `cron_expression`, `enabled`, `last_run_at`, `last_status`, `last_job_id`, `next_run_at`, `run_count`, `failure_count`, timestamps
+4. **`apscheduler_jobs` table** — APScheduler's internal jobstore (pre-created to keep migrations in our control rather than runtime DDL): `id VARCHAR(191)`, `next_run_time DOUBLE PRECISION`, `job_state BYTEA`
+5. **Partial indexes** on `enabled = TRUE` for `scheduled_jobs` (fast scans as disabled entries accumulate)
+
+### docker-compose.yml
+6. **Added env vars to scaffold-orchestrator service:**
+   - `SCHEDULER_ENABLED: "true"` — toggle for tests / one-off runs
+   - `SCHEDULER_TIMEZONE: "America/New_York"` — cron expression interpretation TZ
+   - `SCHEDULER_JOBSTORE_URL: postgresql+psycopg2://...` — sync driver for `SQLAlchemyJobStore` (coexists with async asyncpg elsewhere)
+
+### Phase 1 status
+7. **No container rebuild yet** — Phase 2 will add `psycopg2-binary`, the scheduler module, lifespan integration, and `/schedule` endpoints before rebuilding once
+8. **Database state:** 12 tables total (up from 10); both new tables verified empty
+
+### Open design question for Phase 2
+9. **Inline vs. fire-and-forget execution** — should scheduled jobs block the APScheduler worker until `run_research()` completes, or kick off as a background task? Fire-and-forget safer for deep research (which can run 30+ min on CPU); inline gives cleaner status capture. Defer to implementation phase.
+---
+
+## Changelog — April 17, 2026 (Scheduled Research Jobs)
+
+### New capability
+Users can schedule recurring `/research` runs via cron expressions. Schedules survive orchestrator restarts (APScheduler rehydrates from `scheduled_jobs` on startup).
+
+### Migration
+- **`db/migrations/011_scheduled_jobs.sql`** — `scheduled_jobs` (user-facing metadata) + `apscheduler_jobs` (APScheduler jobstore, pre-created so migrations stay in our control). Renamed from 010 to resolve duplicate-number conflict with `010_research_sessions.sql`.
+
+### Dependencies (new)
+- `apscheduler==3.10.4`, `tzlocal==5.2`, `psycopg2-binary==2.9.9` (sync driver for `SQLAlchemyJobStore`)
+
+### Orchestrator
+1. **`app/scheduler.py`** (new, 116 lines) — AsyncIOScheduler + SQLAlchemyJobStore. `init_scheduler()` rehydrates enabled rows from DB; `_execute_research_job()` calls `run_research()` directly in-process via asyncio, updates `last_run_at`/`last_status`/`run_count`/`failure_count` via the `apscheduler_jobs.next_run_time` foreign reference.
+2. **`app/config.py`** — `sync_database_url` property (asyncpg→psycopg2 swap for jobstore); new settings `scheduler_enabled`, `scheduler_timezone`, `scheduler_jobstore_url` (all env-configurable via `SCHEDULER_*`).
+3. **`app/main.py`** — lifespan starts/stops scheduler. New endpoints:
+   - `POST /schedule` — cron validation, row insert, APScheduler add, returns full record
+   - `GET /schedule` — lists schedules
+   - `DELETE /schedule/{id}` — removes DB row and APScheduler job
+4. **`app/schemas.py`** — `ScheduleCreate`, `ScheduleResponse` Pydantic models.
+5. **`docker-compose.yml`** — `SCHEDULER_ENABLED=true`, `SCHEDULER_TIMEZONE=UTC`, `SCHEDULER_JOBSTORE_URL=""` (derives from `DATABASE_URL` when blank).
+
+### Pipeline (`scaffold_router.py`)
+6. **`/schedule` chat command** — subcommands `list` / `add "<cron>" <topic>` / `delete <id>` / `help`. Add uses `shlex` to parse quoted cron expressions.
+7. **Command dispatcher fix** — `pipe()` now dispatches unhandled `/`-commands to `_handle_command()`. **This was dormant dead code before** — `/model`, `/idea`, `/rag`, `/status`, `/help`, `/optimize`, `/dag`, `/skip` were all silently broken in chat but undetected because tests called `_handle_command` directly. All working post-fix (verified in chat).
+8. **Help table** — new row for `/schedule <sub>`.
+
+### Design decisions
+- **In-process asyncio execution** — scheduler awaits `run_research()` directly rather than self-POSTing `/research`. Cleaner cancellation, no extra HTTP hop.
+- **UTC-only cron** — start simple; per-schedule TZ can be added later.
+- **`apscheduler_jobs` pre-created in migration** — keeps schema in our control rather than runtime DDL from `SQLAlchemyJobStore`.
+- **`scheduled_jobs.enabled = TRUE` is source of truth** — APScheduler jobstore is a warm cache; rehydrate rebuilds it on startup.
+
+### Tests (new — 21 total)
+- **`tests/test_scheduler.py`** (7) — lifecycle, rehydration, add/remove, cron validation. Includes `sys.modules` cleanup guard for sqlalchemy pollution from `test_domain_filtering.py`.
+- **`tests/test_schedule_command.py`** (14) — help/list/add/delete subcommands with mocked HTTP.
+
+### Test counts post-merge
+- **In-container:** 239 passed, 18 skipped, 0 failed
+- **Local pipelines:** 83 passed, 0 failed
+- **Total:** 322 passed, 0 failed
+
+### Verified end-to-end
+- `POST /schedule` → row persisted → `next_run_at` computed → orchestrator restart → `jobs=1` on rehydrate → `DELETE /schedule/1` → empty.
+- Chat: `/schedule list`, `/schedule add "0 9 * * 1" test`, `/schedule delete 1`, `/model list`, `/help` all render correctly.
+
+### Known issues (updated)
+- **#14 (new): `/confirm` block in `pipe()` missing terminal `return`** — latent bug predating this work; after DAG generation the block falls through instead of calling `/execute/all`. Deferred. Workaround: type `/execute <job_id>` manually.

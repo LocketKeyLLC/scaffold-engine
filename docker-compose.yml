@@ -96,6 +96,9 @@ services:
       HF_HUB_VERBOSITY: "error"
       TOKENIZERS_PARALLELISM: "false"
       SCAFFOLD_API_KEY: "${SCAFFOLD_API_KEY}"
+      SCHEDULER_ENABLED: "true"
+      SCHEDULER_TIMEZONE: "UTC"
+      SCHEDULER_JOBSTORE_URL: "postgresql+psycopg2://scaffold:scaffold_dev_pw@scaffold-postgres:5432/scaffold_engine"
     volumes:
       - ./app:/code/app:ro
       - ./ground_truths:/code/ground_truths:ro

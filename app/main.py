@@ -45,6 +45,8 @@ from app.schemas import (
     PromptOptimizeResult,
     ResearchInput,
     SkipNodeInput,
+    ScheduleCreate,
+    ScheduleResponse,
 )
 
 logger = logging.getLogger("scaffold")
@@ -94,6 +96,12 @@ async def lifespan(app: FastAPI):
             logger.error('event="startup_cleanup_failed" error=%s', exc)
 
     _cleanup_task = start_cleanup_task()
+    # Start APScheduler (rehydrates scheduled_jobs from DB)
+    try:
+        from app.scheduler import init_scheduler
+        await init_scheduler()
+    except Exception as exc:
+        logger.error('event="scheduler_init_failed" error=%s', exc)
     yield
 
     # Shutdown
@@ -102,6 +110,11 @@ async def lifespan(app: FastAPI):
         await _cleanup_task
     except asyncio.CancelledError:
         pass
+    try:
+        from app.scheduler import shutdown_scheduler
+        await shutdown_scheduler()
+    except Exception as exc:
+        logger.warning('event="scheduler_shutdown_failed" error=%s', exc)
     await close_client()
     from app.utils.http_clients import close_clients
     await close_clients()
@@ -632,3 +645,58 @@ async def research_history_detail(session_id: str):
 async def skip_node_endpoint(body: SkipNodeInput, db: AsyncSession = Depends(get_db)):
     """Step 15: Skip a specific DAG node."""
     return await skip_node(job_id=body.job_id, node_key=body.node_key, db=db)
+
+
+# ---------------- Scheduled research jobs ----------------
+
+@app.post("/schedule", response_model=ScheduleResponse)
+async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_db)):
+    """Create a recurring research schedule."""
+    from apscheduler.triggers.cron import CronTrigger
+    from app.scheduler import add_schedule
+
+    try:
+        CronTrigger.from_crontab(body.cron_expression, timezone="UTC")
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"invalid cron expression: {exc}")
+
+    if body.depth not in ("shallow", "medium", "deep"):
+        raise HTTPException(status_code=422, detail="depth must be shallow|medium|deep")
+
+    _require_valid_models(body.model_overrides)
+
+    result = await db.execute(text("""
+        INSERT INTO scheduled_jobs (topic, depth, cron_expression, enabled)
+        VALUES (:topic, :depth, :cron, TRUE)
+        RETURNING id, topic, depth, cron_expression, enabled,
+                  last_run_at, last_status, last_job_id, next_run_at,
+                  run_count, failure_count, created_at
+    """), {"topic": body.topic, "depth": body.depth, "cron": body.cron_expression})
+    row = result.mappings().first()
+    await db.commit()
+
+    await add_schedule(row["id"], row["topic"], row["depth"], row["cron_expression"])
+    return dict(row)
+
+
+@app.get("/schedule")
+async def list_schedules(db: AsyncSession = Depends(get_db)):
+    rows = (await db.execute(text("""
+        SELECT id, topic, depth, cron_expression, enabled,
+               last_run_at, last_status, last_job_id, next_run_at,
+               run_count, failure_count, created_at
+        FROM scheduled_jobs ORDER BY created_at DESC
+    """))).mappings().all()
+    return {"schedules": [dict(r) for r in rows]}
+
+
+@app.delete("/schedule/{schedule_id}")
+async def delete_schedule(schedule_id: int, db: AsyncSession = Depends(get_db)):
+    from app.scheduler import remove_schedule
+    result = await db.execute(text("DELETE FROM scheduled_jobs WHERE id = :id RETURNING id"),
+                              {"id": schedule_id})
+    if not result.mappings().first():
+        raise HTTPException(status_code=404, detail="schedule not found")
+    await db.commit()
+    await remove_schedule(schedule_id)
+    return {"deleted": schedule_id}
