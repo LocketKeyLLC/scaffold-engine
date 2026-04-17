@@ -1225,3 +1225,56 @@ scaffold-engine/
 
 ### Commit
 - `ee5d6ba` — `perf: reduce batch size, token limits, add SearXNG cache (#3.5)`
+
+---
+
+## Changelog — April 16, 2026 (Contradiction Detection — #3.4)
+
+### `app/modules/research_agent.py`
+1. **`_check_contradictions(entries)`** (new) — async helper placed before `_extract_entries()`. Scans entry pairs; two entries whose titles share 2+ words (lowercased, whitespace-split) are flagged as candidates. Returns `[{"entry_a", "entry_b", "shared_concepts"}]`. Capped at 5 pairs to avoid O(n²) blowup on large batches.
+2. **`run_research()` — wire-in** — after `extraction_complete` / before `ingest_entries()` call, runs contradiction check on the batch. When pairs are found, emits `contradictions_detected` SSE event with `count` and `pairs` payload. Entries are ingested regardless — informational only, user decides.
+
+### Design decisions
+- **Heuristic over ML** — title word overlap is cheap, deterministic, and good enough for human review. No embedding, no LLM call.
+- **Informational only** — ingestion proceeds unconditionally. Contradictions surface via SSE for user visibility; no auto-resolution.
+- **Capped at 5 pairs** — prevents large batches from producing unbounded candidate lists. Worst case: C(n,2) comparisons, short-circuited on 5th hit.
+
+### Tests
+3. **`tests/test_research_agent.py`** — 3 new tests:
+   - `test_check_contradictions_flags_shared_words` — 2 entries sharing "python is language" → 1 pair returned
+   - `test_check_contradictions_skips_low_overlap` — disjoint titles → empty list
+   - `test_check_contradictions_caps_at_five` — 6 entries with shared words → exactly 5 pairs
+
+### Test results
+- **In-container:** 20 passed (5.24s) — 17 pre-existing + 3 new, 0 regressions
+- Full test suite not re-run; no changes outside `research_agent.py` + test file
+
+### Commit
+- `c5451b0` — `feat: lightweight contradiction detection in research loop (#3.4)`
+
+
+---
+
+## Changelog — April 16, 2026 (Pipeline Handoff: /research → /go)
+
+### `pipelines/scaffold_router.py`
+1. **`research_complete` SSE handler** — replaced single vague "continue with your project" line with a three-option next-steps block:
+   - `/go` — build a project plan from this research
+   - `/research <subtopic> --depth deep` — explore further
+   - `/rag <query>` — query the ingested knowledge
+
+### Design decisions
+- **Zero new code paths** — the research summary is already streamed to chat during `research_complete`, so when the user later types `/go`, `_synthesize_idea()` picks it up from the chat transcript naturally. No new commands, no orchestrator changes, no schema changes.
+- **Informational, not coercive** — suggestion only. User can still type anything; `/go` is just surfaced as the obvious default.
+- **Reuses Phase 1 entry point** — `_synthesize_idea()` → `/ideate` → confirmation gate flow is unchanged.
+
+### Tests
+2. **`tests/test_scaffold_router.py`** — 1 new test added to `TestResearchCommand`:
+   - `test_research_complete_suggests_go` — mocks `requests.post` with a fake SSE stream carrying `research_complete`, asserts output contains `/go`, "build a project plan", and "Research Complete"
+
+### Test results
+- **Pipeline (local):** 48 collected, 47 passed, 1 pre-existing failure (`TestContextStripping::test_no_context_tags_passes_through` — unrelated; `/help` yields empty `combined` under the importlib-loaded module, root cause not in this scope)
+- No regressions from this change
+
+### Commit
+- `bea6a33` — `feat: suggest /go after /research completes`
