@@ -379,3 +379,25 @@ class ResearchInput(BaseModel):
     depth: str = "medium"  # shallow | medium | deep
     domain: str | None = None
     model_overrides: dict | None = None
+# ---------------- Scheduled research jobs ----------------
+
+class ScheduleCreate(BaseModel):
+    topic: str
+    cron_expression: str  # e.g. "0 9 * * 1" = Mondays at 09:00 UTC
+    depth: str = "medium"  # shallow | medium | deep
+    model_overrides: dict | None = None
+
+
+class ScheduleResponse(BaseModel):
+    id: int
+    topic: str
+    depth: str
+    cron_expression: str
+    enabled: bool
+    last_run_at: datetime | None = None
+    last_status: str | None = None
+    last_job_id: str | None = None
+    next_run_at: datetime | None = None
+    run_count: int
+    failure_count: int
+    created_at: datetime

@@ -8,6 +8,15 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://scaffold:scaffold_dev_pw@scaffold-postgres:5432/scaffold_engine"
 
+    @property
+    def sync_database_url(self) -> str:
+        """Sync DSN for APScheduler's SQLAlchemyJobStore (no asyncpg)."""
+        return self.database_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+
+    scheduler_enabled: bool = True
+    scheduler_timezone: str = "UTC"
+    scheduler_jobstore_url: str = ""  # empty = derive from sync_database_url
+
     # External services
     ollama_base_url: str = "http://172.18.0.1:11434"
     milvus_uri: str = "http://milvus-standalone:19530"
