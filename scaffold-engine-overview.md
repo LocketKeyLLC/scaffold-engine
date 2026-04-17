@@ -1400,3 +1400,41 @@ Users can schedule recurring `/research` runs via cron expressions. Schedules su
 
 ### Commit
 - `78376ad` — `fix: /confirm auto-chains into /execute/all (#14)`
+
+---
+
+## Changelog — April 17, 2026 (/research <url> — Direct URL Ingestion)
+
+### New capability
+`/research <url>` skips SearXNG discovery and ingests a specific page directly. URL vs topic detected automatically inside `run_research()`; no new endpoint, no schema change.
+
+### `app/modules/research_agent.py`
+1. **`_is_url(s)`** (new) — validates `http(s)://` + netloc via `urllib.parse`. Rejects bare domains, non-http schemes, empty strings; tolerates leading/trailing whitespace
+2. **`_robots_allowed(url, user_agent)`** (new) — stdlib `urllib.robotparser` check. Fail-open on any error (missing robots.txt = allowed). Fetches `/robots.txt` via short-lived `httpx.AsyncClient` (10s timeout)
+3. **`_fetch_url_bounded(url, max_bytes=5MB)`** (new) — streaming fetch with hard byte cap. Checks `content-length` header first, aborts mid-stream if exceeded. 30s timeout, `User-Agent: ScaffoldEngine/1.0`, follows redirects
+4. **`_run_research_url_mode(url, state, session_id, extract_model, summary_model, t0)`** (new, ~150 lines) — URL-mode pipeline: robots check → bounded fetch → trafilatura extract → chunk → LLM distill (batches of 5) → ingest → summary → finalize. Single iteration, no gap analysis
+5. **`run_research()` branch** — inserted at top, after `ResearchState` construction: if `_is_url(topic)`, emits `research_started` with `mode="direct_url"`, delegates to `_run_research_url_mode()`, returns. Normal topic flow untouched
+
+### Design decisions
+- **Auto-detect in `run_research()`** — no new endpoint, no schema change. Router passes URL through as `topic`; orchestrator branches transparently
+- **Stdlib `urllib.robotparser`** — no new dependency. Fail-open (missing robots.txt = allowed per RFC)
+- **5MB cap via streaming** — both `content-length` pre-check and mid-stream abort via `aiter_bytes()` accumulator
+- **Reuses `_chunk_text`, `ingest_entries`, `_generate_summary`, `_score_source`** — all existing infrastructure (dedup >0.95 reject, version chain 0.90-0.95, TTL by source_type, partition key isolation)
+- **Batch size 5** — same as topic-mode full-page path. `facet="direct_url"` tags all entries
+- **Skips decompose/search/gap-analysis** — single URL = nothing to discover
+
+### Tests — `tests/test_research_url_mode.py` (new, 20 tests)
+- `TestIsUrl` (8) — http/https/path+query accepted; bare domain, non-URL text, empty, ftp rejected; whitespace tolerated
+- `TestRobotsAllowed` (4) — fail-open on 404, fail-open on exception, disallowed path blocked, allowed path passes
+- `TestFetchUrlBounded` (4) — oversize `content-length` rejected, small page fetched, non-200 rejected, mid-stream cap enforced
+- `TestRunResearchUrlMode` (4) — happy path reaches `research_complete` with `depth=direct_url`, robots-blocked emits error + no ingest, fetch-failed emits error, non-URL topic still hits `_decompose_topic`
+
+### Commit
+- `da9e2ae` — `feat: /research <url> direct URL ingestion (#4.5a)`
+
+### Test results
+- **In-container:** 259 passed, 21 skipped, 0 failed (20 new + 239 existing)
+- **Pre-existing collection error in `test_schedule_command.py`** (unrelated): file-path-based pipeline load fails in container; same pattern as 3 other pipeline tests but lacks their `FileNotFoundError` guard. Tracked for future cleanup
+
+### Known Issues (new)
+- **#15 (new)**: `test_schedule_command.py` fails collection in container (missing `FileNotFoundError` guard around pipeline file read at import time). Pre-existing; unrelated to this change. Workaround: `--ignore=tests/test_schedule_command.py`
