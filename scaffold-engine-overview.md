@@ -1383,3 +1383,20 @@ Users can schedule recurring `/research` runs via cron expressions. Schedules su
 
 ### Known issues (updated)
 - **#14 (new): `/confirm` block in `pipe()` missing terminal `return`** — latent bug predating this work; after DAG generation the block falls through instead of calling `/execute/all`. Deferred. Workaround: type `/execute <job_id>` manually.
+
+---
+
+## Changelog — April 17, 2026 (Fix /confirm auto-chain — #14)
+
+### `pipelines/scaffold_router.py`
+1. **`/confirm` handler in `pipe()` — missing `/execute/all` call** — after DAG generation the handler yielded "running N steps..." and returned without invoking execution. Jobs stuck in `planning`. Added `yield from self._execute_and_stream(job_id, num_nodes, headers)` before the terminal `return`.
+
+### Tests
+2. **`tests/test_scaffold_router.py`** — new `test_confirm_invokes_execute_all` asserts three POSTs fire in sequence: `/ideate/confirm`, `/dag`, `/execute/all`. Suite: 49 passed, 0 failed.
+
+### Known Issues (updated)
+- Removed #14 (/confirm block missing terminal execute call) — resolved.
+- **Pre-existing:** `TestConfirmCommand` is defined twice in `tests/test_scaffold_router.py` (lines 473 and 567); second shadows first. Non-blocking; worth a separate cleanup pass.
+
+### Commit
+- `78376ad` — `fix: /confirm auto-chains into /execute/all (#14)`
