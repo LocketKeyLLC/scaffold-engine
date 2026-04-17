@@ -414,7 +414,7 @@ class TestRunResearch:
     async def test_shallow_depth_one_iteration(self):
         with patch("app.modules.research_agent.model_router") as mock_mr, \
              patch("app.modules.research_agent._search_queries", new_callable=AsyncMock, return_value=MOCK_SEARCH_RESULTS), \
-             patch("app.modules.research_agent.ingest_entries", new_callable=AsyncMock, return_value=1), \
+             patch("app.modules.research_agent.ingest_entries", new_callable=AsyncMock, return_value={"new": 1, "versioned": 0, "rejected": 0, "skipped_hash": 0}), \
              patch("app.modules.research_agent._generate_summary", new_callable=AsyncMock, return_value="Done."), \
              patch("app.modules.research_agent.get_model", return_value="qwen3:4b"), \
              patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
@@ -519,3 +519,96 @@ async def test_check_contradictions_caps_at_five():
     entries = [{"title": f"shared words here {i}"} for i in range(6)]
     result = await _check_contradictions(entries)
     assert len(result) == 5
+
+
+# ---------------------------------------------------------------------------
+# Ingestion breakdown (new / versioned / rejected / skipped_hash)
+# ---------------------------------------------------------------------------
+
+class TestIngestionBreakdown:
+    """Verify /research surfaces the three-bucket ingest classification."""
+
+    @pytest.mark.asyncio
+    async def test_research_complete_contains_breakdown_fields(self):
+        """Final research_complete SSE includes new, versioned, rejected, skipped_hash."""
+        from unittest.mock import AsyncMock, patch
+        from app.modules.research_agent import run_research
+
+        fake_entries = [{"content": "fact", "facet": "x", "source": "http://a"}]
+        fake_stats = {"new": 3, "versioned": 2, "rejected": 1, "skipped_hash": 4}
+
+        with patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
+             patch("app.modules.research_agent._create_session", new_callable=AsyncMock, return_value="sess-1"), \
+             patch("app.modules.research_agent._update_session_iteration", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._decompose_topic", new_callable=AsyncMock,
+                   return_value={"facets": ["x"], "queries": ["q"], "topic_complexity": "simple"}), \
+             patch("app.modules.research_agent._search_queries", new_callable=AsyncMock,
+                   return_value=[{"url": "http://a", "title": "t", "content": "c"}]), \
+             patch("app.modules.research_agent._extract_entries", new_callable=AsyncMock,
+                   return_value=fake_entries), \
+             patch("app.modules.research_agent._analyze_gaps", new_callable=AsyncMock,
+                   return_value={"coverage_pct": 100, "gap_queries": []}), \
+             patch("app.modules.research_agent._generate_summary", new_callable=AsyncMock,
+                   return_value="summary"), \
+             patch("app.modules.research_agent.ingest_entries", new_callable=AsyncMock,
+                   return_value=fake_stats):
+
+            events = []
+            async for sse in run_research("test topic", depth="shallow"):
+                events.append(sse)
+
+        complete_events = [e for e in events if "research_complete" in e]
+        assert len(complete_events) == 1, f"expected 1 research_complete, got {len(complete_events)}"
+        payload = complete_events[0]
+        assert '"new": 3' in payload, f"missing new=3 in payload: {payload[:400]}"
+        assert '"versioned": 2' in payload
+        assert '"rejected": 1' in payload
+        assert '"skipped_hash": 4' in payload
+
+    @pytest.mark.asyncio
+    async def test_breakdown_totals_accumulate_across_iterations(self):
+        """Multiple ingest calls sum into the final totals."""
+        from unittest.mock import AsyncMock, patch
+        from app.modules.research_agent import run_research
+
+        # Two iterations: first returns {new:2, versioned:1, rejected:0, skipped_hash:0},
+        # second returns {new:1, versioned:0, rejected:3, skipped_hash:2}
+        call_returns = [
+            {"new": 2, "versioned": 1, "rejected": 0, "skipped_hash": 0},
+            {"new": 1, "versioned": 0, "rejected": 3, "skipped_hash": 2},
+        ]
+        ingest_mock = AsyncMock(side_effect=call_returns)
+
+        # Two iterations: first analyze_gaps returns gap queries, second returns empty (converges)
+        gap_returns = [
+            {"coverage_pct": 50, "gap_queries": ["next-q"]},
+            {"coverage_pct": 100, "gap_queries": []},
+        ]
+
+        with patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
+             patch("app.modules.research_agent._create_session", new_callable=AsyncMock, return_value="sess-2"), \
+             patch("app.modules.research_agent._update_session_iteration", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
+             patch("app.modules.research_agent._decompose_topic", new_callable=AsyncMock,
+                   return_value={"facets": ["x"], "queries": ["q"], "topic_complexity": "medium"}), \
+             patch("app.modules.research_agent._search_queries", new_callable=AsyncMock,
+                   return_value=[{"url": "http://a", "title": "t", "content": "c"}]), \
+             patch("app.modules.research_agent._extract_entries", new_callable=AsyncMock,
+                   return_value=[{"content": "fact", "facet": "x", "source": "http://a"}]), \
+             patch("app.modules.research_agent._analyze_gaps", new_callable=AsyncMock,
+                   side_effect=gap_returns), \
+             patch("app.modules.research_agent._generate_summary", new_callable=AsyncMock,
+                   return_value="summary"), \
+             patch("app.modules.research_agent.ingest_entries", ingest_mock):
+
+            events = []
+            async for sse in run_research("test topic", depth="medium"):
+                events.append(sse)
+
+        payload = [e for e in events if "research_complete" in e][0]
+        assert '"new": 3' in payload, payload[:500]       # 2 + 1
+        assert '"versioned": 1' in payload                # 1 + 0
+        assert '"rejected": 3' in payload                 # 0 + 3
+        assert '"skipped_hash": 2' in payload             # 0 + 2
+

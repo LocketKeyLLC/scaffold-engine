@@ -204,7 +204,8 @@ async def research_and_compile(
     toon_rows = _format_toon_rows(entries) if entries else []
     ingest_count = 0
     if entries:
-        ingest_count = await ingest_entries(entries, domain=brief.get("domain", "eng"))
+        _ingest_stats = await ingest_entries(entries, domain=brief.get("domain", "eng"))
+        ingest_count = _ingest_stats["new"] + _ingest_stats["versioned"]
 
     # Optional GitHub push
     gh_result = None

@@ -52,8 +52,9 @@ async def test_near_duplicate_rejected():
         from app.modules.rag_pipeline import ingest_entries
         result = await ingest_entries([test_entry], domain="eng")
 
-    # Should have inserted 0 entries
-    assert result == 0, f"Expected 0 ingested, got {result}"
+    # Should have inserted 0 entries; dedup should have logged 1 rejection
+    assert result["new"] + result["versioned"] == 0, f"Expected 0 inserted, got {result}"
+    assert result["rejected"] == 1, f"Expected 1 rejection, got {result}"
 
     # insert() should never have been called
     collection.insert.assert_not_called()
