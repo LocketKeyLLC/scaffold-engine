@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     github_max_files: int = 50
     github_timeout: int = 30
     github_api_base: str = "https://api.github.com"
+    openapi_max_endpoints: int = 200
+    openapi_timeout: int = 30
 
     # Logging
     log_level: str = "info"
