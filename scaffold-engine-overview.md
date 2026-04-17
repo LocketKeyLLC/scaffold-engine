@@ -1495,3 +1495,111 @@ All tests use a dep-free inline raw-PDF byte generator — no reportlab required
 - **#16**: First LLM call on PDF content is slow (~3 min for 1-page on CPU, cold-start on qwen2.5:7b). Subsequent calls faster. Batched warm-up deferred.
 - **#17**: Large multi-page PDFs (50+ pages) will produce multi-hour runtimes on CPU. Consider `?async=true` mode next iteration.
 - **OCR for scanned PDFs** explicitly deferred — `_extract_pdf_text` surfaces "scanned or unreadable" error; tesseract/paddleocr integration tracked as future work.
+
+---
+
+## Changelog — April 17, 2026 (/research github:owner/repo)
+
+### New capability
+`/research github:owner/repo` ingests a GitHub repo's README, `docs/**/*.md`, and top-level Python module docstrings as TOON entries with `source_type="tech_docs"` (180-day TTL). Respects GitHub rate limits (60/hr unauth, 5000/hr with `GITHUB_TOKEN`).
+
+### New module: `app/utils/github_ingest.py` (~135 lines)
+1. **`fetch_repo_content(owner, repo)`** — returns `[{path, content}]`, capped at `settings.github_max_files` (50)
+2. **Rate-limit guard** — `_check_rate_limit()` inspects `X-RateLimit-Remaining` on every response; raises `GitHubRateLimitError` at 0, warns at <10
+3. **File selection** — README via dedicated `/repos/{owner}/{repo}/readme` endpoint, then `docs/**/*.md` + top-level `*.py` from recursive tree
+4. **Python docstring extraction** — `ast.get_docstring()` on module-level; files without docstrings are skipped
+5. **Custom exceptions** — `GitHubRepoNotFoundError` (404), `GitHubRateLimitError` (rate exhausted)
+
+### `app/utils/http_clients.py`
+6. **`get_github_client()`** — lazy-init async client mirroring SearXNG pattern; `api.github.com` base URL, `Authorization: Bearer` header when `GITHUB_TOKEN` is set, 10/5 connection pool
+7. **`close_clients()`** — extended to close GitHub client on shutdown
+
+### `app/modules/research_agent.py`
+8. **`_is_github_ref(s)`** — validates `github:owner/repo` pattern (rejects URLs, triple-segment, dots in owner)
+9. **`_parse_github_ref(s)`** — returns `(owner, repo)` tuple
+10. **`_run_research_github_mode()`** — short-circuit flow: fetch → build entries with `source_type="tech_docs"` → `ingest_entries()` → `research_complete` SSE. Inherits existing 3-tier dedup, partition key isolation, and TTL-by-source-type
+11. **Dispatch** — inserted before the `_is_url` branch in `run_research()`; yields `research_started` with `mode="github"`
+
+### `app/config.py`
+12. Added `github_token`, `github_max_files=50`, `github_timeout=30`, `github_api_base="https://api.github.com"`
+
+### `docker-compose.yml`
+13. Orchestrator env: `GITHUB_TOKEN: ${GITHUB_TOKEN:-}`, `GITHUB_MAX_FILES: "50"`, `GITHUB_TIMEOUT: "30"`
+
+### `pipelines/scaffold_router.py`
+14. `/research` usage text lists all three source modes (web, URL, github:)
+15. Help table row updated
+
+### Design decisions
+- **Reuses existing ingestion pipeline** — no parallel code path. All entries flow through `ingest_entries()`, inheriting dedup/TTL/partition isolation
+- **README via dedicated endpoint** — handles case and extension variants automatically (README, readme.md, README.rst)
+- **Module docstrings only** — cleanest signal vs. comment blocks or full source. Files without docstrings are silently skipped
+- **Single shared client** — module-level `httpx.AsyncClient` with connection pooling, consistent with SearXNG pattern
+- **Rate-limit guard on every response** — fail loud at 0 rather than rely on 403 response
+
+### Tests
+16. **`tests/test_github_ingest.py`** (8 tests) — happy path with 3 file types, 404 handling, rate limit exhaustion, file cap enforcement, Python-without-docstring skipping, prefix parser validation (both directions)
+
+### Known Issues (updated)
+15. **`tests/test_schedule_command.py` has no skip guard** — pre-existing bug unrelated to this work. File errors on collection in-container because `pipelines/scaffold_router.py` isn't copied into the image. Other pipeline tests already skip via guard at file top (see `test_scaffold_router.py:39`). One-line fix deferred.
+
+### Commit
+- `b38d1f0` — `feat: /research github:owner/repo — ingest README + docs + module docstrings (#4.5c)`
+
+### Test counts
+- **In-container:** 284 passed, 21 skipped, 0 failed (+8 new)
+- **Local pipeline:** 49 passed (no change — no pipeline behavior added, only help text)
+- **Total:** 333 passed, 21 skipped, 0 failed
+
+
+---
+
+## Changelog — April 17, 2026 (/research openapi:<url>)
+
+### New capability
+`/research openapi:<url>` fetches an OpenAPI 3.0 or Swagger 2.0 spec, validates it, and ingests one TOON entry per endpoint with `source_type="tech_docs"` (180-day TTL). Each entry carries the method + path + description + parameter schemas. Tags become `domain_tags`; primary tag becomes `facet`.
+
+### New module: `app/utils/openapi_ingest.py` (~240 lines)
+1. **`fetch_and_parse_spec(url)`** — returns `(entries, metadata)`. Entries capped at `settings.openapi_max_endpoints` (200)
+2. **Dual format support** — OpenAPI 3.x (`openapi: 3.x.x`) and Swagger 2.0 (`swagger: 2.0`) recognized via top-level field
+3. **JSON/YAML auto-detect** — tries `json.loads()` first, falls back to `yaml.safe_load()`
+4. **Validation via `openapi-spec-validator==0.7.1`** — strict schema check before walking `paths`
+5. **Parameter merging** — path-level `parameters` merged into each operation (Swagger 2.0 and OpenAPI 3 pattern)
+6. **Request body + responses formatted** — readable text blocks with description + content-type + response codes
+7. **Custom exceptions** — `OpenAPIFetchError` (network), `OpenAPIParseError` (bad JSON/YAML or missing version), `OpenAPIValidationError` (schema invalid)
+
+### `app/modules/research_agent.py`
+8. **`_is_openapi_ref(s)`** — matches `openapi:http(s)://...` prefix; rejects non-http schemes and bare topics
+9. **`_parse_openapi_ref(s)`** — strips `openapi:` prefix, returns URL
+10. **`_run_research_openapi_mode()`** — short-circuit flow: fetch → validate → walk paths → one entry per endpoint → `ingest_entries()` → `research_complete` SSE. Inherits existing 3-tier dedup, partition key isolation, and TTL
+11. **Dispatch** — inserted before the github branch in `run_research()`; yields `research_started` with `mode="openapi"` and emits spec metadata in `search_complete`/`research_complete` events
+
+### `app/config.py`
+12. Added `openapi_max_endpoints=200`, `openapi_timeout=30`
+
+### `requirements.txt`
+13. Added `openapi-spec-validator==0.7.1`
+
+### `pipelines/scaffold_router.py`
+14. `/research` usage text now lists all four source modes (web, URL, github, openapi)
+15. Help table row updated
+
+### Design decisions
+- **Chose `openapi-spec-validator` over `prance`/raw YAML** — validates spec conformance strictly; lighter than `prance` (which pulls `$ref` resolution we don't need for typical `/research` usage). Swapping to `prance` later is a one-line requirements change if `$ref`-heavy specs become common
+- **One entry per (path, method)** — not per-path, because GET and POST on the same endpoint have different semantics
+- **Tags → facet + domain_tags** — primary tag (first) becomes `facet` for grouping; full tag list preserved as `domain_tags` for filtered retrieval
+- **Dispatch order: openapi → github → url** — most-specific prefix first, avoiding false matches (an `openapi:` URL won't accidentally match the generic URL branch)
+- **Source URL with fragment** — `{spec_url}#{METHOD} {path}` gives each endpoint a stable, deep-linkable source identifier
+- **Request body + param schemas included** — models can reason about "what do I send to POST /users" from a single entry
+
+### Tests
+16. **`tests/test_openapi_ingest.py`** (9 tests) — OpenAPI 3.0 happy path with 3 endpoints + path-level param merging, Swagger 2.0 happy path, 200-endpoint cap enforcement, missing version field rejection, schema validation failure, HTTP fetch error, prefix parser validation (both directions)
+
+### Commit
+- `b26469e` — `feat: /research openapi:<url> — ingest OpenAPI/Swagger spec as per-endpoint entries (#4.5d)`
+
+### Test counts
+- **In-container:** 293 passed, 21 skipped, 0 failed (+9 new)
+- **Local pipeline:** 49 passed (no change — help text only)
+- **Total:** 342 passed, 21 skipped, 0 failed
+
