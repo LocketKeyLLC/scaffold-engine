@@ -577,6 +577,26 @@ class TestConfirmCommand:
         assert "/confirm" in combined
 
 
+
+    @patch("pipelines.scaffold_router.requests.post")
+    def test_confirm_invokes_execute_all(self, mock_post, pipe):
+        """/confirm must auto-chain into /execute/all (regression for known issue #14)."""
+        from unittest.mock import MagicMock
+        confirm_resp = MagicMock(status_code=200)
+        confirm_resp.json.return_value = {"status": "planning", "job_id": "job-42"}
+        dag_resp = MagicMock(status_code=200)
+        dag_resp.json.return_value = {"task_count": 3, "tasks": []}
+        exec_resp = MagicMock(status_code=200)
+        exec_resp.iter_lines.return_value = iter([])
+        exec_resp.close = MagicMock()
+        mock_post.side_effect = [confirm_resp, dag_resp, exec_resp]
+        messages = [{"role": "user", "content": "/confirm job-42"}]
+        list(pipe.pipe("/confirm job-42", "test-model", messages, {}))
+        urls = [c.args[0] for c in mock_post.call_args_list]
+        assert any("/ideate/confirm" in u for u in urls)
+        assert any("/dag" in u for u in urls)
+        assert any("/execute/all" in u for u in urls), f"/execute/all never called — got {urls}"
+
 @pytest.mark.smoke
 class TestContextStripping:
     """Open WebUI injects <context>...</context> before the real command."""

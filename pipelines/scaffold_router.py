@@ -417,6 +417,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                 return
 
             yield f"📋 Execution plan ready — running {num_nodes} steps...\n\n"
+            yield from self._execute_and_stream(job_id, num_nodes, headers)
             return
 
         # --- All other slash commands dispatch to _handle_command ---
