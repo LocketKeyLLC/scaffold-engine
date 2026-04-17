@@ -11,13 +11,13 @@ from uuid import UUID
 
 import httpx
 import structlog
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, Query
 from pymilvus import connections as milvus_connections, utility, Collection
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.model_router import close_client, validate_models
-from starlette.responses import StreamingResponse
+from starlette.responses import StreamingResponse, HTMLResponse
 
 from app.auth import require_api_key
 from app.config import settings
@@ -33,7 +33,7 @@ from app.modules.gt_browser import gt_list, gt_search, gt_detail, gt_stats
 from app.modules.gt_extractor import extract_ground_truths
 from app.modules.idea_refinement import refine_idea
 from app.modules.ideation_workflow import analyze_and_confirm, research_and_compile
-from app.modules.research_agent import run_research
+from app.modules.research_agent import run_research, run_research_pdf
 from app.modules.prompt_inspector import list_prompts, get_prompt, update_prompt
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag as _query_rag
@@ -599,6 +599,43 @@ async def research_endpoint(body: ResearchInput):
     )
 
 
+@app.post("/research/pdf", tags=["Research"])
+async def research_pdf_endpoint(
+    file: UploadFile = File(...),
+    extractor: str = Query("auto", regex="^(auto|pypdf|plumber)$"),
+    domain: str | None = Query(None),
+):
+    """PDF ingestion: upload PDF → extract → ingest → stream SSE."""
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+
+    pdf_bytes = await file.read()
+    if not pdf_bytes:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(pdf_bytes) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"PDF exceeds 20MB cap ({len(pdf_bytes)} bytes)")
+
+    await _require_valid_models(None)
+
+    return StreamingResponse(
+        run_research_pdf(
+            pdf_bytes=pdf_bytes,
+            filename=file.filename,
+            extractor=extractor,
+            domain=domain,
+            model_overrides=None,
+        ),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/research/pdf", tags=["Research"], response_class=HTMLResponse)
+async def research_pdf_upload_page():
+    """Drag-and-drop HTML upload page for PDF ingestion."""
+    return _PDF_UPLOAD_HTML
+
+
 
 @app.get("/research/history", tags=["Research"])
 async def research_history():
@@ -700,3 +737,92 @@ async def delete_schedule(schedule_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await remove_schedule(schedule_id)
     return {"deleted": schedule_id}
+
+
+_PDF_UPLOAD_HTML = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Scaffold Engine — PDF Research Upload</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; background: #111; color: #eee; }
+  h1 { font-size: 1.4rem; }
+  .drop { border: 2px dashed #555; border-radius: 8px; padding: 3rem 1rem; text-align: center; cursor: pointer; transition: all 0.2s; }
+  .drop.hover { border-color: #4a9eff; background: #1a2030; }
+  input[type=file] { display: none; }
+  select, button { background: #222; color: #eee; border: 1px solid #555; padding: 0.4rem 0.8rem; border-radius: 4px; margin: 0.3rem; }
+  button { background: #2a5; cursor: pointer; }
+  button:disabled { background: #555; cursor: not-allowed; }
+  #log { background: #000; color: #0f0; padding: 1rem; margin-top: 1rem; height: 400px; overflow-y: scroll; white-space: pre-wrap; font-family: monospace; font-size: 12px; border-radius: 4px; }
+  label { font-size: 0.9rem; }
+</style></head>
+<body>
+<h1>📄 Scaffold Engine — PDF Research</h1>
+<p>Drop a PDF to extract, chunk, and ingest into the knowledge base.</p>
+<div id="drop" class="drop">Drop PDF here, or click to choose file</div>
+<input type="file" id="fileinput" accept="application/pdf">
+<div style="margin-top: 1rem;">
+  <label>Extractor:
+    <select id="extractor">
+      <option value="auto">auto (pypdf → plumber fallback)</option>
+      <option value="pypdf">pypdf (force)</option>
+      <option value="plumber">plumber (force)</option>
+    </select>
+  </label>
+  <label>Domain:
+    <select id="domain">
+      <option value="">(auto-detect)</option>
+      <option value="eng">eng</option>
+      <option value="rag">rag</option>
+      <option value="llm">llm</option>
+      <option value="prompt">prompt</option>
+      <option value="spec">spec</option>
+    </select>
+  </label>
+  <button id="upload" disabled>Upload & Ingest</button>
+</div>
+<pre id="log"></pre>
+<script>
+const drop = document.getElementById('drop');
+const inp = document.getElementById('fileinput');
+const btn = document.getElementById('upload');
+const log = document.getElementById('log');
+let file = null;
+function setFile(f) {
+  file = f;
+  drop.textContent = f ? `Selected: ${f.name} (${(f.size/1024).toFixed(1)} KB)` : 'Drop PDF here, or click to choose file';
+  btn.disabled = !f;
+}
+drop.onclick = () => inp.click();
+inp.onchange = e => setFile(e.target.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('hover'); };
+drop.ondragleave = () => drop.classList.remove('hover');
+drop.ondrop = e => {
+  e.preventDefault();
+  drop.classList.remove('hover');
+  if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+};
+btn.onclick = async () => {
+  if (!file) return;
+  log.textContent = '';
+  btn.disabled = true;
+  const fd = new FormData();
+  fd.append('file', file);
+  const params = new URLSearchParams({extractor: document.getElementById('extractor').value});
+  const domVal = document.getElementById('domain').value;
+  if (domVal) params.set('domain', domVal);
+  try {
+    const res = await fetch('/research/pdf?' + params, { method: 'POST', body: fd });
+    if (!res.ok) { log.textContent += `HTTP ${res.status}: ${await res.text()}\\n`; btn.disabled = false; return; }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      log.textContent += dec.decode(value);
+      log.scrollTop = log.scrollHeight;
+    }
+  } catch (e) { log.textContent += `Error: ${e}\\n`; }
+  btn.disabled = false;
+};
+</script></body></html>"""
