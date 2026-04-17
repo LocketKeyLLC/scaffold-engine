@@ -200,12 +200,40 @@ async def _create_session(topic: str, depth: str, domain: str) -> str:
         return session_id
 
 
+def _build_snapshot(state: "ResearchState") -> dict:
+    """JSON-safe snapshot of ResearchState for persistence.
+
+    Sets -> sorted lists. Entries projected to title + content_hash only
+    (full content lives in Milvus).
+    """
+    return {
+        "iteration": state.iteration,
+        "search_history": sorted(state.search_history),
+        "url_history": sorted(state.url_history),
+        "entries_projection": [
+            {"title": e.get("title", ""), "content_hash": e.get("content_hash", "")}
+            for e in state.all_entries
+        ],
+        "outline_facets": state.outline_facets,
+        "covered_facets": sorted(state.covered_facets),
+        "gap_queries": state.gap_queries,
+        "totals": {
+            "ingested": state.total_ingested,
+            "rejected": state.total_rejected,
+            "new": state.total_new,
+            "versioned": state.total_versioned,
+            "skipped_hash": state.total_skipped_hash,
+        },
+    }
+
+
 async def _update_session_iteration(
     session_id: str,
     state: "ResearchState",
     coverage: float | None = None,
 ) -> None:
-    """Update session counters after an iteration."""
+    """Update session counters + snapshot after an iteration."""
+    snapshot = _build_snapshot(state)
     async with async_session() as db:
         await db.execute(
             text("""
@@ -216,7 +244,9 @@ async def _update_session_iteration(
                     total_entries_rejected = :rejected,
                     total_urls_searched = :urls,
                     total_queries = :queries,
-                    coverage_pct = COALESCE(:coverage, coverage_pct)
+                    coverage_pct = COALESCE(:coverage, coverage_pct),
+                    state_snapshot = CAST(:snapshot AS JSONB),
+                    updated_at = NOW()
                 WHERE id = :sid
             """),
             {
@@ -228,6 +258,7 @@ async def _update_session_iteration(
                 "urls": len(state.url_history),
                 "queries": len(state.search_history),
                 "coverage": coverage,
+                "snapshot": json.dumps(snapshot),
             },
         )
         await db.commit()
@@ -272,8 +303,13 @@ async def _finalize_session(
     status: str,
     duration_ms: int,
     summary: str | None = None,
+    error_message: str | None = None,
 ) -> None:
-    """Mark session completed or failed."""
+    """Mark session completed or failed.
+
+    error_message is optional; None preserves prior value via COALESCE,
+    so existing failure-path callers don't need to be touched.
+    """
     async with async_session() as db:
         await db.execute(
             text("""
@@ -281,10 +317,18 @@ async def _finalize_session(
                 SET status = :status,
                     completed_at = NOW(),
                     duration_ms = :dur,
-                    summary = :summary
+                    summary = :summary,
+                    error_message = COALESCE(:error_message, error_message),
+                    updated_at = NOW()
                 WHERE id = :sid
             """),
-            {"sid": session_id, "status": status, "dur": duration_ms, "summary": summary},
+            {
+                "sid": session_id,
+                "status": status,
+                "dur": duration_ms,
+                "summary": summary,
+                "error_message": error_message,
+            },
         )
         await db.commit()
 
