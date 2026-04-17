@@ -804,6 +804,29 @@ async def run_research(
         domain=research_domain,
     )
 
+    # URL-mode short-circuit: if topic is a URL, skip decompose/search
+    if _is_url(topic):
+        _extract_m = get_model("model_verifier", model_overrides)
+        _summary_m = get_model("model_verifier", model_overrides)
+        yield _sse("research_started", {
+            "topic": topic,
+            "depth": "direct_url",
+            "domain": state.domain,
+            "max_iterations": 1,
+            "session_id": session_id,
+            "mode": "direct_url",
+        })
+        async for _evt in _run_research_url_mode(
+            url=topic,
+            state=state,
+            session_id=session_id,
+            extract_model=_extract_m,
+            summary_model=_summary_m,
+            t0=t0,
+        ):
+            yield _evt
+        return
+
     decompose_model = get_model("model_verifier", model_overrides)
     extract_model = get_model("model_verifier", model_overrides)
     summary_model = get_model("model_verifier", model_overrides)
@@ -991,3 +1014,261 @@ async def run_research(
             "session_id": session_id,
             "topic": topic,
         })
+
+
+# ---------------------------------------------------------------------------
+# URL-mode: direct ingestion of a single URL (bypasses SearXNG discovery)
+# ---------------------------------------------------------------------------
+
+_MAX_URL_BYTES = 5 * 1024 * 1024  # 5 MB cap per page
+
+
+def _is_url(s: str) -> bool:
+    """True iff s is a valid absolute http(s) URL."""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(s.strip())
+        return p.scheme in ("http", "https") and bool(p.netloc)
+    except Exception:
+        return False
+
+
+async def _robots_allowed(url: str, user_agent: str = "ScaffoldEngine/1.0") -> bool:
+    """Check robots.txt. Fail-open on any error (missing robots.txt = allowed)."""
+    import httpx
+    from urllib.parse import urlparse
+    from urllib.robotparser import RobotFileParser
+    try:
+        p = urlparse(url)
+        robots_url = f"{p.scheme}://{p.netloc}/robots.txt"
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+            r = await c.get(robots_url)
+            if r.status_code >= 400:
+                return True
+            rp = RobotFileParser()
+            rp.parse(r.text.splitlines())
+            return rp.can_fetch(user_agent, url)
+    except Exception as e:
+        logger.debug("robots_check_failed: url=%s error=%s", url, e)
+        return True
+
+
+async def _fetch_url_bounded(url: str, max_bytes: int = _MAX_URL_BYTES) -> str | None:
+    """Stream-fetch with hard byte cap. Returns text or None on failure/cap."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
+            async with c.stream("GET", url, headers={"User-Agent": "ScaffoldEngine/1.0"}) as resp:
+                if resp.status_code != 200:
+                    logger.warning("url_fetch_status: url=%s status=%d", url, resp.status_code)
+                    return None
+                cl = resp.headers.get("content-length")
+                if cl and cl.isdigit() and int(cl) > max_bytes:
+                    logger.warning("url_fetch_content_length_exceeded: url=%s bytes=%s", url, cl)
+                    return None
+                buf = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    buf.extend(chunk)
+                    if len(buf) > max_bytes:
+                        logger.warning("url_fetch_cap_exceeded: url=%s bytes=%d", url, len(buf))
+                        return None
+                enc = resp.encoding or "utf-8"
+                try:
+                    return bytes(buf).decode(enc, errors="replace")
+                except LookupError:
+                    return bytes(buf).decode("utf-8", errors="replace")
+    except Exception as e:
+        logger.warning("url_fetch_failed: url=%s error=%s", url, e)
+        return None
+
+
+async def _run_research_url_mode(
+    url: str,
+    state: "ResearchState",
+    session_id,
+    extract_model: str,
+    summary_model: str,
+    t0: float,
+):
+    """URL-mode: fetch one URL, extract via trafilatura, ingest, summarize."""
+    import trafilatura
+
+    state.outline_facets = ["direct_url"]
+    yield _sse("decomposition_complete", {
+        "complexity": "direct",
+        "facets": state.outline_facets,
+        "query_count": 0,
+    })
+
+    state.iteration = 1
+    yield _sse("iteration_started", {
+        "iteration": 1,
+        "query_count": 0,
+        "mode": "direct_url",
+    })
+
+    # 1. Robots check
+    if not await _robots_allowed(url):
+        yield _sse("error", {
+            "message": f"robots.txt disallows fetching {url}",
+            "session_id": session_id,
+            "topic": url,
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+
+    # 2. Bounded fetch
+    html = await _fetch_url_bounded(url)
+    if not html:
+        yield _sse("error", {
+            "message": f"Failed to fetch {url} (or exceeded 5MB cap)",
+            "session_id": session_id,
+            "topic": url,
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+
+    # 3. Trafilatura extract
+    text = await asyncio.to_thread(
+        trafilatura.extract, html, output_format="txt", with_metadata=False,
+    )
+    if not text or len(text) < 100:
+        yield _sse("error", {
+            "message": f"No extractable content at {url} (got {len(text or '')} chars)",
+            "session_id": session_id,
+            "topic": url,
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+
+    # Page title (best-effort)
+    try:
+        meta = await asyncio.to_thread(trafilatura.extract_metadata, html)
+        page_title = (getattr(meta, "title", None) or url)[:200]
+    except Exception:
+        page_title = url[:200]
+
+    yield _sse("search_complete", {
+        "iteration": 1,
+        "results_found": 1,
+        "total_urls": 1,
+        "mode": "direct_url",
+    })
+
+    state.url_history.add(url)
+    state.search_history.add(f"direct:{url}")
+
+    # 4. Chunk + LLM extract
+    chunks = _chunk_text(text)
+    prompt_topic = page_title if page_title and page_title != url[:200] else f"content at {url}"
+    batch_size = 5
+    all_entries: list[dict] = []
+
+    for i in range(0, len(chunks), batch_size):
+        batch_chunks = chunks[i:i + batch_size]
+        results_text = "\n\n".join(
+            f"Title: {page_title}\nURL: {url}\nSnippet: {c[:600]}"
+            for c in batch_chunks
+        )
+        task = asyncio.create_task(model_router.generate(
+            EXTRACT_PROMPT.format(topic=prompt_topic, results=results_text),
+            model=extract_model,
+            system=EXTRACT_SYSTEM,
+            temperature=0.1,
+            max_tokens=1024,
+        ))
+        while not task.done():
+            await asyncio.sleep(8)
+            if not task.done():
+                yield _sse("heartbeat", {"status": "extracting", "iteration": 1})
+        resp = task.result()
+
+        entries = []
+        if resp.success and resp.text and len(resp.text.strip()) > 5:
+            entries = parse_json_array(resp.text) or []
+            entries = [e for e in entries if isinstance(e, dict)]
+            for entry in entries:
+                src_url = entry.get("source", "") or url
+                entry["source"] = src_url
+                entry["confidence_score"] = _score_source(src_url)
+                entry["facet"] = "direct_url"
+            all_entries.extend(entries)
+        else:
+            logger.warning("url_mode_extract_failed: batch=%d success=%s error=%s",
+                           i // batch_size, resp.success if resp else None,
+                           resp.error if resp else "no-resp")
+
+        # Fallback: one entry per chunk if LLM produced nothing
+        if not entries:
+            for c in batch_chunks:
+                if len(c) > 50:
+                    all_entries.append({
+                        "title": page_title,
+                        "content": c,
+                        "tags": "",
+                        "source": url,
+                        "confidence_score": _score_source(url),
+                        "source_type": "community",
+                        "facet": "direct_url",
+                    })
+
+    yield _sse("extraction_complete", {
+        "iteration": 1,
+        "entries_extracted": len(all_entries),
+    })
+
+    # 5. Ingest
+    ingested = 0
+    if all_entries:
+        state.all_entries.extend(all_entries)
+        stats = await ingest_entries(all_entries, domain=state.domain)
+        ingested = stats["new"] + stats["versioned"]
+        state.total_new += stats["new"]
+        state.total_versioned += stats["versioned"]
+        state.total_rejected += stats["rejected"]
+        state.total_skipped_hash += stats["skipped_hash"]
+        state.total_ingested += ingested
+
+    yield _sse("ingestion_complete", {
+        "iteration": 1,
+        "entries_ingested": ingested,
+        "total_ingested": state.total_ingested,
+        "total_rejected": state.total_rejected,
+    })
+
+    yield _sse("iteration_complete", {
+        "iteration": 1,
+        "entries_extracted": len(all_entries),
+        "entries_ingested": ingested,
+    })
+
+    # 6. Summary + finalize
+    summary_task = asyncio.create_task(_generate_summary(state, model=summary_model))
+    while not summary_task.done():
+        await asyncio.sleep(8)
+        if not summary_task.done():
+            yield _sse("heartbeat", {"status": "summarizing"})
+    summary = summary_task.result()
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+    await _update_session_iteration(session_id, state, 100)
+    await _finalize_session(session_id, "completed", elapsed_ms, summary)
+
+    yield _sse("research_complete", {
+        "topic": url,
+        "session_id": session_id,
+        "total_entries": len(state.all_entries),
+        "total_ingested": state.total_ingested,
+        "total_rejected": state.total_rejected,
+        "new": state.total_new,
+        "versioned": state.total_versioned,
+        "rejected": state.total_rejected,
+        "skipped_hash": state.total_skipped_hash,
+        "iterations": 1,
+        "total_urls_searched": 1,
+        "total_queries": 1,
+        "duration_ms": elapsed_ms,
+        "summary": summary,
+        "domain": state.domain,
+        "depth": "direct_url",
+    })
