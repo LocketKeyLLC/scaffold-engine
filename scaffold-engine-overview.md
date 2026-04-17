@@ -1603,3 +1603,35 @@ All tests use a dep-free inline raw-PDF byte generator — no reportlab required
 - **Local pipeline:** 49 passed (no change — help text only)
 - **Total:** 342 passed, 21 skipped, 0 failed
 
+
+---
+
+## Changelog — April 17, 2026 (GitHub/OpenAPI Research Mode Fixes)
+
+### Bugs surfaced during live E2E testing of 4.5c + 4.5d
+1. **301 redirect crash** — `github.com/anthropics/anthropic-cookbook` permanently redirects to `/repositories/{id}`. The GitHub client was built without `follow_redirects=True` (SearXNG doesn't need it), so the first API call raised `httpx.HTTPStatusError` mid-SSE-stream. Fix: add `follow_redirects=True` to `get_github_client()`
+2. **Session stats never persisted** — `_run_research_github_mode()` and `_run_research_openapi_mode()` only called `_finalize_session()` which writes `status` + `duration_ms`. The `research_sessions` row retained `total_entries_extracted=0 / total_entries_ingested=0 / iterations_completed=0` despite successful ingestion. Fix: new `_persist_session_stats()` helper writes the 5 counter columns, called before `_finalize_session()`
+3. **Per-iteration SSE key mismatch** — github/openapi modes emitted `"entries": N` and `"new"/"rejected"` keys; pipeline renderer reads `entries_extracted`, `entries_ingested`, `total_rejected`. Chat showed `📝 Extracted 0 knowledge entries` even when the orchestrator logged `ingested 1 (new=1)`. Fix: add the renderer-expected keys to both `extraction_complete` and `ingestion_complete` events (legacy keys retained for log consumers)
+4. **Final summary SSE key mismatch** — same pattern for `research_complete`. Fix: add `total_entries`, `total_ingested`, `iterations` keys
+
+### Files changed
+- `app/utils/http_clients.py` — one-line add: `follow_redirects=True`
+- `app/modules/research_agent.py` — new `_persist_session_stats()` helper; 6 SSE payload field updates in github + openapi modes
+
+### Design notes
+- **Backward compat preserved** — `new`/`versioned`/`rejected`/`skipped_hash` keys still emitted alongside the new ones. Any external SSE consumer using the granular keys keeps working
+- **Session stats persisted before finalize** — `UPDATE` runs before status transitions to `completed`, so a concurrent `/status` query during the brief window between statement and commit won't see inconsistent state
+
+### Verification
+- Live E2E: `/research github:anthropics/courses` → README ingested as `source_type="tech_docs"`, retrievable via `/rag` with rerank=0.9996
+- Live E2E: `/research github:anthropics/anthropic-cookbook` → 301 redirect followed correctly, README ingested
+- Chat display: per-iteration + summary lines both show correct counts
+- Tests: 293 passed in container, 0 failed
+
+### Commit
+- `f698ebe` — `fix: github/openapi research mode bugs (#4.5c, #4.5d follow-up)`
+
+### Test counts (unchanged from 4.5d; fixes covered by existing behavioral tests)
+- **In-container:** 293 passed, 21 skipped, 0 failed
+- **Total:** 342 passed, 21 skipped, 0 failed
+
