@@ -233,6 +233,40 @@ async def _update_session_iteration(
         await db.commit()
 
 
+async def _persist_session_stats(
+    session_id,
+    entries_extracted: int,
+    entries_ingested: int,
+    entries_rejected: int,
+    urls_searched: int,
+    iterations: int,
+) -> None:
+    """Write final counts to research_sessions for the short-circuit modes."""
+    from app.database import async_session
+    from sqlalchemy import text
+    async with async_session() as db:
+        await db.execute(
+            text("""
+                UPDATE research_sessions
+                SET total_entries_extracted = :ext,
+                    total_entries_ingested = :ing,
+                    total_entries_rejected = :rej,
+                    total_urls_searched = :urls,
+                    iterations_completed = :iters
+                WHERE id = :sid
+            """),
+            {
+                "ext": entries_extracted,
+                "ing": entries_ingested,
+                "rej": entries_rejected,
+                "urls": urls_searched,
+                "iters": iterations,
+                "sid": session_id,
+            },
+        )
+        await db.commit()
+
+
 async def _finalize_session(
     session_id: str,
     status: str,
@@ -1223,7 +1257,7 @@ async def _run_research_github_mode(
 
     yield _sse("extraction_complete", {
         "iteration": 1,
-        "entries": len(all_entries),
+        "entries_extracted": len(all_entries),
         "mode": "github",
     })
 
@@ -1237,25 +1271,41 @@ async def _run_research_github_mode(
 
     yield _sse("ingestion_complete", {
         "iteration": 1,
+        "entries_ingested": stats.get("new", 0) + stats.get("versioned", 0),
+        "total_rejected": stats.get("rejected", 0) + stats.get("skipped_hash", 0),
         "new": stats.get("new", 0),
         "versioned": stats.get("versioned", 0),
         "rejected": stats.get("rejected", 0),
         "skipped_hash": stats.get("skipped_hash", 0),
     })
 
+    # PATCH_GITHUB_OPENAPI_DISPLAY
+    duration_ms = int((time.monotonic() - t0) * 1000)
+    total_ingested = state.total_new + state.total_versioned
+    await _persist_session_stats(
+        session_id,
+        entries_extracted=len(all_entries),
+        entries_ingested=total_ingested,
+        entries_rejected=state.total_rejected,
+        urls_searched=len(state.url_history),
+        iterations=1,
+    )
     yield _sse("research_complete", {
         "topic": f"github:{owner}/{repo}",
         "mode": "github",
         "files_fetched": len(files),
+        "total_entries": len(all_entries),
+        "total_ingested": total_ingested,
+        "iterations": 1,
         "new": state.total_new,
         "versioned": state.total_versioned,
         "rejected": state.total_rejected,
         "skipped_hash": state.total_skipped_hash,
-        "duration_ms": int((time.monotonic() - t0) * 1000),
+        "duration_ms": duration_ms,
         "session_id": session_id,
     })
 
-    await _finalize_session(session_id, "completed", int((time.monotonic() - t0) * 1000))
+    await _finalize_session(session_id, "completed", duration_ms)
 
 
 def _is_openapi_ref(s: str) -> bool:
@@ -1373,7 +1423,7 @@ async def _run_research_openapi_mode(
 
     yield _sse("extraction_complete", {
         "iteration": 1,
-        "entries": len(all_entries),
+        "entries_extracted": len(all_entries),
         "mode": "openapi",
     })
 
@@ -1387,12 +1437,24 @@ async def _run_research_openapi_mode(
 
     yield _sse("ingestion_complete", {
         "iteration": 1,
+        "entries_ingested": stats.get("new", 0) + stats.get("versioned", 0),
+        "total_rejected": stats.get("rejected", 0) + stats.get("skipped_hash", 0),
         "new": stats.get("new", 0),
         "versioned": stats.get("versioned", 0),
         "rejected": stats.get("rejected", 0),
         "skipped_hash": stats.get("skipped_hash", 0),
     })
 
+    duration_ms = int((time.monotonic() - t0) * 1000)
+    total_ingested = state.total_new + state.total_versioned
+    await _persist_session_stats(
+        session_id,
+        entries_extracted=len(all_entries),
+        entries_ingested=total_ingested,
+        entries_rejected=state.total_rejected,
+        urls_searched=1,
+        iterations=1,
+    )
     yield _sse("research_complete", {
         "topic": f"openapi:{spec_url}",
         "mode": "openapi",
@@ -1402,15 +1464,18 @@ async def _run_research_openapi_mode(
         "endpoints_found": meta["total_endpoints"],
         "endpoints_ingested": meta["ingested_endpoints"],
         "truncated": meta["truncated"],
+        "total_entries": len(all_entries),
+        "total_ingested": total_ingested,
+        "iterations": 1,
         "new": state.total_new,
         "versioned": state.total_versioned,
         "rejected": state.total_rejected,
         "skipped_hash": state.total_skipped_hash,
-        "duration_ms": int((time.monotonic() - t0) * 1000),
+        "duration_ms": duration_ms,
         "session_id": session_id,
     })
 
-    await _finalize_session(session_id, "completed", int((time.monotonic() - t0) * 1000))
+    await _finalize_session(session_id, "completed", duration_ms)
 
 
 async def _run_research_url_mode(
