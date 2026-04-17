@@ -150,6 +150,9 @@ class ResearchState:
     all_entries: list = field(default_factory=list)
     total_ingested: int = 0
     total_rejected: int = 0
+    total_new: int = 0
+    total_versioned: int = 0
+    total_skipped_hash: int = 0
     outline_facets: list = field(default_factory=list)
     covered_facets: set = field(default_factory=set)
     gap_queries: list = field(default_factory=list)
@@ -880,9 +883,13 @@ async def run_research(
             ingested = 0
             if entries:
                 state.all_entries.extend(entries)
-                ingested = await ingest_entries(entries, domain=state.domain)
+                stats = await ingest_entries(entries, domain=state.domain)
+                ingested = stats["new"] + stats["versioned"]
+                state.total_new += stats["new"]
+                state.total_versioned += stats["versioned"]
+                state.total_rejected += stats["rejected"]
+                state.total_skipped_hash += stats["skipped_hash"]
                 state.total_ingested += ingested
-                state.total_rejected += len(entries) - ingested
 
             yield _sse("ingestion_complete", {
                 "iteration": state.iteration,
@@ -962,6 +969,10 @@ async def run_research(
             "total_entries": len(state.all_entries),
             "total_ingested": state.total_ingested,
             "total_rejected": state.total_rejected,
+            "new": state.total_new,
+            "versioned": state.total_versioned,
+            "rejected": state.total_rejected,
+            "skipped_hash": state.total_skipped_hash,
             "iterations": state.iteration,
             "total_urls_searched": len(state.url_history),
             "total_queries": len(state.search_history),

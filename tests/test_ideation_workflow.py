@@ -341,7 +341,7 @@ def test_research_happy_path():
     )
 
     # -- Fake: Milvus ingest succeeds --
-    _mod.ingest_entries = AsyncMock(return_value=2)
+    _mod.ingest_entries = AsyncMock(return_value={"new": 2, "versioned": 0, "rejected": 0, "skipped_hash": 0})
 
     # -- Fake: TOON formatting --
     _mod._format_toon_rows = MagicMock(return_value=["row1", "row2"])
@@ -445,7 +445,7 @@ def test_research_user_feedback_included():
             })),
         ]
     )
-    _mod.ingest_entries = AsyncMock(return_value=1)
+    _mod.ingest_entries = AsyncMock(return_value={"new": 1, "versioned": 0, "rejected": 0, "skipped_hash": 0})
     _mod._format_toon_rows = MagicMock(return_value=["row1"])
 
     feedback = "Focus on Python examples, not Java."
@@ -505,7 +505,7 @@ def test_research_empty_search_results():
     # has: if all_results: ... call LLM).
     _mod.model_router.generate = AsyncMock(return_value=_llm_response(compiled))
 
-    _mod.ingest_entries = AsyncMock(return_value=0)
+    _mod.ingest_entries = AsyncMock(return_value={"new": 0, "versioned": 0, "rejected": 0, "skipped_hash": 0})
     _mod._format_toon_rows = MagicMock(return_value=[])
 
     result = _run(_mod.research_and_compile(

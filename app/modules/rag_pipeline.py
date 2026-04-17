@@ -433,19 +433,23 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
-async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
-    """Embed and insert knowledge entries into toon_v2. Returns count ingested."""
+async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
+    """Embed and insert knowledge entries into toon_v2.
+
+    Returns breakdown: {"new": N, "versioned": M, "rejected": K, "skipped_hash": S}.
+    new + versioned = successfully inserted rows.
+    """
+    stats = {"new": 0, "versioned": 0, "rejected": 0, "skipped_hash": 0}
     if not entries:
-        return 0
+        return stats
 
     loop = asyncio.get_running_loop()
     collection = await loop.run_in_executor(None, _get_collection)
     if collection is None:
         logger.error("ingest_entries: collection not available")
-        return 0
+        return stats
 
     now = int(time.time())
-    count = 0
 
     for entry in entries:
         content = entry.get("content", "") or entry.get("canonical_text", "")
@@ -479,6 +483,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
             )
             if existing:
                 logger.debug("dedup_skip: exact hash match for '%s'", title[:50])
+                stats["skipped_hash"] += 1
                 continue
         except Exception as e:
             logger.debug("dedup_check_failed: %s", e)
@@ -531,6 +536,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
                             await session.commit()
                     except Exception as db_err:
                         logger.error("dedup_log_write_failed: %s", db_err)
+                    stats["rejected"] += 1
                     continue  # Skip insertion
                 elif sim_score >= 0.90:
                     # VERSION CHAIN: same topic, updated content
@@ -572,12 +578,19 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> int:
             await loop.run_in_executor(
                 None, lambda r=row: collection.insert(r)
             )
-            count += 1
+            if new_supersedes:
+                stats["versioned"] += 1
+            else:
+                stats["new"] += 1
         except Exception as e:
             logger.warning("ingest_insert_failed: %s", e)
 
-    if count > 0:
+    inserted = stats["new"] + stats["versioned"]
+    if inserted > 0:
         await loop.run_in_executor(None, collection.flush)
-        logger.info("ingested %d entries into Milvus (toon_v2)", count)
+        logger.info(
+            "ingested %d (new=%d versioned=%d rejected=%d hash_skipped=%d) into toon_v2",
+            inserted, stats["new"], stats["versioned"], stats["rejected"], stats["skipped_hash"],
+        )
 
-    return count
+    return stats
