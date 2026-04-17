@@ -53,6 +53,7 @@ def get_github_client() -> httpx.AsyncClient:
             base_url=settings.github_api_base,
             timeout=float(settings.github_timeout),
             headers=headers,
+            follow_redirects=True,
             limits=httpx.Limits(
                 max_connections=10,
                 max_keepalive_connections=5,
