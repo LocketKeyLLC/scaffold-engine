@@ -45,6 +45,17 @@ _REAP_PLANNING_SQL: Final[str] = """
     RETURNING id
 """
 
+_REAP_RESEARCH_SESSIONS_SQL: Final[str] = """
+    UPDATE research_sessions
+    SET status = 'failed',
+        error_message = COALESCE(error_message, :msg),
+        updated_at = NOW(),
+        completed_at = NOW()
+    WHERE status IN ('pending', 'running')
+      AND updated_at < NOW() - INTERVAL '30 minutes'
+    RETURNING id
+"""
+
 
 async def reap_stale_jobs(db: AsyncSession) -> dict:
     """Unified stale-job reaper. Returns counts of reaped jobs.
@@ -61,18 +72,23 @@ async def reap_stale_jobs(db: AsyncSession) -> dict:
 
     r2 = await db.execute(text(_REAP_PLANNING_SQL))
     planning_cancelled = r2.rowcount
-
+    r3 = await db.execute(
+        text(_REAP_RESEARCH_SESSIONS_SQL),
+        {"msg": "Research session timed out after 30 minutes of inactivity"},
+    )
+    research_failed = r3.rowcount
     await db.commit()
 
-    if running_failed or planning_cancelled:
+    if running_failed or planning_cancelled or research_failed:
         logger.info(
-            "stale_jobs_reaped running_to_failed=%d planning_to_cancelled=%d",
-            running_failed, planning_cancelled,
+            "stale_jobs_reaped running_to_failed=%d planning_to_cancelled=%d research_to_failed=%d",
+            running_failed, planning_cancelled, research_failed,
         )
 
     return {
         "running_to_failed": running_failed,
         "planning_to_cancelled": planning_cancelled,
+        "research_to_failed": research_failed,
     }
 
 
