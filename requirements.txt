@@ -16,3 +16,8 @@ trafilatura==2.0.0
 tzlocal==5.2
 uvicorn[standard]==0.34.0
 psycopg2-binary==2.9.9
+
+# --- PDF ingestion (4.5b) ---
+pypdf==5.1.0
+pdfplumber==0.11.4
+python-multipart==0.0.17

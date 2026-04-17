@@ -1272,3 +1272,343 @@ async def _run_research_url_mode(
         "domain": state.domain,
         "depth": "direct_url",
     })
+
+
+# ---------------------------------------------------------------------------
+# PDF-mode: direct ingestion of a single uploaded PDF (#4.5b)
+# ---------------------------------------------------------------------------
+
+_MAX_PDF_BYTES = 20 * 1024 * 1024  # 20 MB cap
+
+
+def _extract_pypdf(pdf_bytes: bytes) -> tuple[str, int]:
+    """Extract text via pypdf. Returns (text, page_count)."""
+    import io
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    pages = len(reader.pages)
+    parts = []
+    for page in reader.pages:
+        try:
+            t = page.extract_text() or ""
+            if t.strip():
+                parts.append(t)
+        except Exception as e:
+            logger.debug("pypdf_page_fail: error=%s", e)
+    return ("\n\n".join(parts), pages)
+
+
+def _extract_pdfplumber(pdf_bytes: bytes) -> tuple[str, int]:
+    """Extract text via pdfplumber (better for structured/multi-column). Returns (text, page_count)."""
+    import io
+    import pdfplumber
+    parts = []
+    pages = 0
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        pages = len(pdf.pages)
+        for page in pdf.pages:
+            try:
+                t = page.extract_text() or ""
+                if t.strip():
+                    parts.append(t)
+            except Exception as e:
+                logger.debug("pdfplumber_page_fail: error=%s", e)
+    return ("\n\n".join(parts), pages)
+
+
+def _extract_threshold(page_count: int) -> int:
+    """Minimum char count to consider extraction successful."""
+    return max(200, page_count * 50)
+
+
+async def _extract_pdf_text(
+    pdf_bytes: bytes,
+    extractor: str = "auto",
+) -> tuple[str, int, str]:
+    """Extract text from PDF bytes.
+
+    extractor: 'auto' (pypdf → plumber fallback), 'pypdf' (force), 'plumber' (force).
+    Returns (text, page_count, extractor_used).
+    Raises RuntimeError on scanned/unreadable PDFs (both extractors return too little).
+    """
+    extractor = (extractor or "auto").lower()
+    if extractor not in ("auto", "pypdf", "plumber"):
+        extractor = "auto"
+
+    # Force pypdf
+    if extractor == "pypdf":
+        text, pages = await asyncio.to_thread(_extract_pypdf, pdf_bytes)
+        return (text, pages, "pypdf")
+
+    # Force plumber
+    if extractor == "plumber":
+        text, pages = await asyncio.to_thread(_extract_pdfplumber, pdf_bytes)
+        return (text, pages, "plumber")
+
+    # Auto: try pypdf first
+    text, pages = await asyncio.to_thread(_extract_pypdf, pdf_bytes)
+    if len(text) >= _extract_threshold(pages):
+        return (text, pages, "pypdf")
+
+    # Fallback to plumber
+    logger.info("pdf_extract_fallback: pypdf_chars=%d pages=%d threshold=%d",
+                len(text), pages, _extract_threshold(pages))
+    plumber_text, _ = await asyncio.to_thread(_extract_pdfplumber, pdf_bytes)
+    if len(plumber_text) >= _extract_threshold(pages):
+        return (plumber_text, pages, "plumber")
+
+    # Both failed — likely scanned
+    raise RuntimeError(
+        f"PDF appears to be scanned or unreadable: "
+        f"pypdf={len(text)} chars, plumber={len(plumber_text)} chars, pages={pages}"
+    )
+
+
+async def _run_research_pdf_mode(
+    pdf_bytes: bytes,
+    filename: str,
+    extractor: str,
+    state: "ResearchState",
+    session_id,
+    extract_model: str,
+    summary_model: str,
+    t0: float,
+):
+    """PDF-mode: extract text from uploaded bytes, ingest like URL-mode."""
+    if len(pdf_bytes) > _MAX_PDF_BYTES:
+        yield _sse("error", {
+            "message": f"PDF exceeds {_MAX_PDF_BYTES // (1024*1024)}MB cap ({len(pdf_bytes)} bytes)",
+            "session_id": session_id,
+            "topic": filename,
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+
+    state.outline_facets = ["direct_pdf"]
+    yield _sse("decomposition_complete", {
+        "complexity": "direct",
+        "facets": state.outline_facets,
+        "query_count": 0,
+    })
+
+    state.iteration = 1
+    yield _sse("iteration_started", {
+        "iteration": 1,
+        "query_count": 0,
+        "mode": "direct_pdf",
+    })
+
+    # 1. Extract text (pypdf → plumber fallback by default)
+    try:
+        text, page_count, used = await _extract_pdf_text(pdf_bytes, extractor=extractor)
+    except RuntimeError as e:
+        yield _sse("error", {
+            "message": str(e),
+            "session_id": session_id,
+            "topic": filename,
+            "hint": "Scanned PDFs require OCR (not yet supported)",
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+    except Exception as e:
+        yield _sse("error", {
+            "message": f"PDF extraction failed: {e}",
+            "session_id": session_id,
+            "topic": filename,
+        })
+        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
+        return
+
+    yield _sse("search_complete", {
+        "iteration": 1,
+        "results_found": 1,
+        "total_urls": 1,
+        "mode": "direct_pdf",
+        "page_count": page_count,
+        "extractor_used": used,
+        "char_count": len(text),
+    })
+
+    virtual_url = f"pdf://{filename}"
+    state.url_history.add(virtual_url)
+    state.search_history.add(f"direct_pdf:{filename}")
+
+    # 2. Chunk + LLM extract
+    chunks = _chunk_text(text)
+    batch_size = 5
+    all_entries: list[dict] = []
+
+    for i in range(0, len(chunks), batch_size):
+        batch_chunks = chunks[i:i + batch_size]
+        results_text = "\n\n".join(
+            f"Title: {filename} (p. {page_count})\nURL: {virtual_url}\nSnippet: {c[:600]}"
+            for c in batch_chunks
+        )
+        task = asyncio.create_task(model_router.generate(
+            EXTRACT_PROMPT.format(topic=filename, results=results_text),
+            model=extract_model,
+            system=EXTRACT_SYSTEM,
+            temperature=0.1,
+            max_tokens=1024,
+        ))
+        while not task.done():
+            await asyncio.sleep(8)
+            if not task.done():
+                yield _sse("heartbeat", {"status": "extracting", "iteration": 1})
+        resp = task.result()
+
+        entries = []
+        if resp.success and resp.text and len(resp.text.strip()) > 5:
+            entries = parse_json_array(resp.text) or []
+            entries = [e for e in entries if isinstance(e, dict)]
+            for entry in entries:
+                entry["source"] = virtual_url
+                entry["confidence_score"] = 0.8  # local upload, reasonably trusted
+                entry["facet"] = "direct_pdf"
+                entry["source_type"] = entry.get("source_type") or "tech_docs"
+            all_entries.extend(entries)
+        else:
+            logger.warning("pdf_mode_extract_failed: batch=%d success=%s error=%s",
+                           i // batch_size, resp.success if resp else None,
+                           resp.error if resp else "no-resp")
+
+        # Fallback: one entry per chunk if LLM produced nothing
+        if not entries:
+            for c in batch_chunks:
+                if len(c) > 50:
+                    all_entries.append({
+                        "title": filename,
+                        "content": c,
+                        "tags": "",
+                        "source": virtual_url,
+                        "confidence_score": 0.8,
+                        "source_type": "tech_docs",
+                        "facet": "direct_pdf",
+                    })
+
+    yield _sse("extraction_complete", {
+        "iteration": 1,
+        "entries_extracted": len(all_entries),
+    })
+
+    # 3. Ingest
+    ingested = 0
+    if all_entries:
+        state.all_entries.extend(all_entries)
+        stats = await ingest_entries(all_entries, domain=state.domain)
+        ingested = stats["new"] + stats["versioned"]
+        state.total_new += stats["new"]
+        state.total_versioned += stats["versioned"]
+        state.total_rejected += stats["rejected"]
+        state.total_skipped_hash += stats["skipped_hash"]
+        state.total_ingested += ingested
+
+    yield _sse("ingestion_complete", {
+        "iteration": 1,
+        "entries_ingested": ingested,
+        "total_ingested": state.total_ingested,
+        "total_rejected": state.total_rejected,
+    })
+
+    yield _sse("iteration_complete", {
+        "iteration": 1,
+        "entries_extracted": len(all_entries),
+        "entries_ingested": ingested,
+    })
+
+    # 4. Summary + finalize
+    summary_task = asyncio.create_task(_generate_summary(state, model=summary_model))
+    while not summary_task.done():
+        await asyncio.sleep(8)
+        if not summary_task.done():
+            yield _sse("heartbeat", {"status": "summarizing"})
+    summary = summary_task.result()
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+    await _update_session_iteration(session_id, state, 100)
+    await _finalize_session(session_id, "completed", elapsed_ms, summary)
+
+    yield _sse("research_complete", {
+        "topic": filename,
+        "session_id": session_id,
+        "total_entries": len(state.all_entries),
+        "total_ingested": state.total_ingested,
+        "total_rejected": state.total_rejected,
+        "new": state.total_new,
+        "versioned": state.total_versioned,
+        "rejected": state.total_rejected,
+        "skipped_hash": state.total_skipped_hash,
+        "iterations": 1,
+        "total_urls_searched": 1,
+        "total_queries": 1,
+        "duration_ms": elapsed_ms,
+        "summary": summary,
+        "domain": state.domain,
+        "depth": "direct_pdf",
+        "page_count": page_count,
+        "extractor_used": used,
+    })
+
+
+async def run_research_pdf(
+    pdf_bytes: bytes,
+    filename: str,
+    extractor: str = "auto",
+    domain: str | None = None,
+    model_overrides: dict | None = None,
+):
+    """Entry point for PDF-mode research. Yields SSE events like run_research()."""
+    t0 = time.monotonic()
+    research_domain = domain or _detect_domain(filename)
+
+    existing = await _guard_concurrent()
+    if existing:
+        yield _sse("error", {
+            "message": f"Research already in progress: '{existing['topic']}'",
+            "existing_session": str(existing["id"]),
+            "http_status": 409,
+        })
+        return
+
+    session_id = await _create_session(filename, "direct_pdf", research_domain)
+
+    state = ResearchState(
+        topic=filename,
+        depth="direct_pdf",
+        domain=research_domain,
+    )
+
+    extract_model = get_model("model_verifier", model_overrides)
+    summary_model = get_model("model_verifier", model_overrides)
+
+    yield _sse("research_started", {
+        "topic": filename,
+        "depth": "direct_pdf",
+        "domain": state.domain,
+        "max_iterations": 1,
+        "session_id": session_id,
+        "mode": "direct_pdf",
+        "bytes": len(pdf_bytes),
+    })
+
+    try:
+        async for evt in _run_research_pdf_mode(
+            pdf_bytes=pdf_bytes,
+            filename=filename,
+            extractor=extractor,
+            state=state,
+            session_id=session_id,
+            extract_model=extract_model,
+            summary_model=summary_model,
+            t0=t0,
+        ):
+            yield evt
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        logger.error("pdf_research_failed: session=%s error=%s", session_id, exc, exc_info=True)
+        await _finalize_session(session_id, "failed", elapsed_ms)
+        yield _sse("error", {
+            "message": f"PDF research failed: {exc}",
+            "session_id": session_id,
+            "topic": filename,
+        })
