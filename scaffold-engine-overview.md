@@ -1438,3 +1438,60 @@ Users can schedule recurring `/research` runs via cron expressions. Schedules su
 
 ### Known Issues (new)
 - **#15 (new)**: `test_schedule_command.py` fails collection in container (missing `FileNotFoundError` guard around pipeline file read at import time). Pre-existing; unrelated to this change. Workaround: `--ignore=tests/test_schedule_command.py`
+
+---
+
+## Changelog — April 17, 2026 (/research/pdf — Direct PDF Ingestion)
+
+### New capability
+Users can upload a PDF directly to the orchestrator (bypassing Open WebUI's built-in document RAG, which intercepts file blocks before they reach the pipeline). PDFs are extracted, chunked, LLM-distilled, and ingested into Milvus with the same dedup + version chain + TTL infrastructure as `/research <url>`.
+
+### Architectural context — why a new endpoint
+Diagnostic instrumentation confirmed Open WebUI's RAG layer captures PDF uploads on its side and sends the pipeline only post-composed meta-prompts (query generation, citation-based response, follow-up suggestions). The raw PDF bytes never reach the scaffold router. To retain control over extraction quality, scanned-PDF detection, and table handling, upload goes directly to the orchestrator via a new multipart endpoint — no new router-side changes required.
+
+### New endpoints (`app/main.py`)
+1. **`POST /research/pdf`** — multipart upload (`file` field, required). Query params: `extractor` (`auto`/`pypdf`/`plumber`, default `auto`), `domain` (optional partition key). Validates `.pdf` extension, 20MB cap, non-empty. Returns SSE stream (same event vocabulary as `/research`).
+2. **`GET /research/pdf`** — renders a self-contained drag-and-drop HTML upload page (inline CSS/JS, no frameworks). Streams SSE events live into a terminal-style log. Dropdowns for extractor + domain.
+
+### New helpers (`app/modules/research_agent.py`)
+3. **`_extract_pypdf(pdf_bytes) -> (text, page_count)`** — text extraction via pypdf. Per-page try/except skips malformed pages without aborting.
+4. **`_extract_pdfplumber(pdf_bytes) -> (text, page_count)`** — same contract, pdfplumber implementation for multi-column / structured PDFs.
+5. **`_extract_threshold(page_count) -> int`** — `max(200, page_count * 50)`. Floors at 200 chars; scales linearly for multi-page docs.
+6. **`_extract_pdf_text(pdf_bytes, extractor="auto")`** — cascade: `"auto"` tries pypdf first, falls back to pdfplumber if below threshold; `"pypdf"`/`"plumber"` force. Both sync libs run via `asyncio.to_thread`. Both failing → raises `RuntimeError` with "scanned or unreadable" message.
+7. **`_run_research_pdf_mode(pdf_bytes, filename, extractor, state, session_id, ...)`** — PDF-mode pipeline: 20MB check → extract → chunk → LLM distill (batches of 5) → ingest → summary → finalize. Single iteration, no gap analysis, no search. Entries tagged `facet="direct_pdf"`, source `pdf://<filename>`, source_type `tech_docs`, confidence 0.8.
+8. **`run_research_pdf(pdf_bytes, filename, extractor, domain, model_overrides)`** — entry point symmetric with `run_research`. Concurrent-research guard, session creation, `_run_research_pdf_mode` dispatch, error finalize.
+
+### Design decisions
+- **Bypass Open WebUI entirely** — multipart upload straight to the orchestrator. Diagnostic showed OWU's RAG layer absorbs all file blocks before the pipeline sees them.
+- **pypdf default, pdfplumber opt-in fallback** — pypdf is 5-10× faster on prose and zero transitive deps; pdfplumber only runs when pypdf underproduces. LLM distillation downstream flattens structured data anyway.
+- **Threshold `max(200, pages*50)`** — catches both fully-scanned PDFs and partially-degraded extractions.
+- **20MB cap enforced twice** — at endpoint boundary (HTTP 413) and inside `_run_research_pdf_mode` (SSE error).
+- **`pdf://<filename>` virtual URL** — keeps TOON schema consistent, avoids collision with real http URLs.
+- **Sync SSE default, same pattern as `/research`** — fire-and-forget variant (`?async=true`) can be added later without endpoint changes.
+
+### Dependencies (new, pinned)
+- `pypdf==5.1.0`, `pdfplumber==0.11.4`, `python-multipart==0.0.17`
+
+### Tests — `tests/test_research_pdf_mode.py` (new, 17 tests)
+- `TestExtractThreshold` (2), `TestExtractPypdf` (2), `TestExtractPdfplumber` (1)
+- `TestExtractPdfTextCascade` (6) — pypdf success, auto-fallback, force pypdf, force plumber, both-fail raises, invalid-extractor defaults
+- `TestRunResearchPdf` (6) — happy path, oversize rejection, scanned error, concurrent blocked, extractor propagation, domain override
+
+All tests use a dep-free inline raw-PDF byte generator — no reportlab required.
+
+### E2E verification (live)
+- `scaffold_test.pdf` (2 KB, 1 page, 577 chars extracted) via curl
+- SSE flow: `research_started → decomposition → search → extraction (5 entries) → ingestion (5 new) → summary → research_complete`
+- Total duration: **5m 54s** on CPU
+- RAG query `"HNSW index Milvus"` → top result cites `pdf://scaffold_test.pdf` with rerank score **0.9998**
+
+### Test results
+- **In-container:** 276 passed, 21 skipped, 0 failed (+17 new, no regressions)
+
+### Commit
+- `51f308c` — `feat: /research/pdf direct PDF ingestion (#4.5b)`
+
+### Known Issues (new)
+- **#16**: First LLM call on PDF content is slow (~3 min for 1-page on CPU, cold-start on qwen2.5:7b). Subsequent calls faster. Batched warm-up deferred.
+- **#17**: Large multi-page PDFs (50+ pages) will produce multi-hour runtimes on CPU. Consider `?async=true` mode next iteration.
+- **OCR for scanned PDFs** explicitly deferred — `_extract_pdf_text` surfaces "scanned or unreadable" error; tesseract/paddleocr integration tracked as future work.
