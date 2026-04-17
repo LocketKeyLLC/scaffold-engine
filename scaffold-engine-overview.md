@@ -1278,3 +1278,33 @@ scaffold-engine/
 
 ### Commit
 - `bea6a33` — `feat: suggest /go after /research completes`
+
+## Changelog — April 16, 2026 (Ingestion breakdown in /research SSE)
+
+### `app/modules/rag_pipeline.py`
+1. **`ingest_entries()` return type** — changed from `int` to `dict` with shape `{"new": N, "versioned": M, "rejected": K, "skipped_hash": S}`. `new + versioned` = successfully inserted rows. Existing dedup logic untouched; counters added at the four decision points (exact-hash skip, semantic reject, version chain insert, new insert).
+
+### `app/modules/research_agent.py`
+2. **`ResearchState`** — gained `total_new`, `total_versioned`, `total_skipped_hash` (existing `total_ingested` / `total_rejected` retained for back-compat; `total_ingested` now = new + versioned)
+3. **Ingest call site** — unpacks dict into per-bucket state counters. Fixes prior accounting bug where hash-skipped entries were lumped into `total_rejected`
+4. **`research_complete` SSE event** — adds `new`, `versioned`, `rejected`, `skipped_hash` fields so users see the three-bucket breakdown per research run
+5. Per-iteration `ingestion_complete` event left unchanged (final rollup only, per spec)
+
+### `app/modules/ideation_workflow.py`
+6. **Caller updated** — `ingest_count = _ingest_stats["new"] + _ingest_stats["versioned"]` preserves the existing `milvus_ingested` semantics in Phase 2 output
+
+### Tests
+7. **`tests/test_research_agent.py`** — new `TestIngestionBreakdown` class (2 tests): `test_research_complete_contains_breakdown_fields` asserts final SSE payload shape with mocked stats; `test_breakdown_totals_accumulate_across_iterations` asserts counters sum correctly across a 2-iteration run
+8. **`tests/test_dedup_rejection.py`** — assertion updated from `result == 0` to `result["new"] + result["versioned"] == 0` and `result["rejected"] == 1`
+9. **`tests/test_ideation_workflow.py`** — 3 `AsyncMock(return_value=N)` mocks updated to return the new dict shape
+10. **Mock in `test_research_agent.py` `TestRunResearch`** — updated from `return_value=1` to dict shape
+
+### Test results
+- **232 passed, 21 skipped, 0 failed** (container)
+- 2 new behavioral tests added; no regressions
+
+### Commit
+- `2c8598c` — `feat: surface ingestion breakdown (new/versioned/rejected) in /research SSE`
+
+---
+
