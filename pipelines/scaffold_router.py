@@ -571,7 +571,10 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                 if summary:
                     yield f"**Summary:**\n\n{summary}\n\n"
                 yield "---\n\n"
-                yield "Would you like to go deeper on any aspect? Type `/research <subtopic> --depth deep` or continue with your project.\n"
+                yield "**Next steps:**\n\n"
+                yield "- Type `/go` to build a project plan from this research\n"
+                yield "- Type `/research <subtopic> --depth deep` to explore further\n"
+                yield "- Type `/rag <query>` to query what was ingested\n"
 
         reader_thread.join(timeout=5)
 
