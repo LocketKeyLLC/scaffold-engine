@@ -142,7 +142,9 @@ def _make_reap_db(running_reaped=0, planning_reaped=0):
     r2 = MagicMock()
     r2.rowcount = planning_reaped
     db = AsyncMock()
-    db.execute = AsyncMock(side_effect=[r1, r2])
+    r3 = MagicMock()
+    r3.rowcount = 0
+    db.execute = AsyncMock(side_effect=[r1, r2, r3])
     db.commit = AsyncMock()
     return db
 
@@ -155,7 +157,7 @@ class TestReapStaleJobs:
         db = _make_reap_db(running_reaped=0, planning_reaped=0)
         from app.modules.cleanup import reap_stale_jobs
         result = _run(reap_stale_jobs(db))
-        assert result == {"running_to_failed": 0, "planning_to_cancelled": 0}
+        assert result == {"running_to_failed": 0, "planning_to_cancelled": 0, "research_to_failed": 0}
 
     def test_running_jobs_reaped(self):
         db = _make_reap_db(running_reaped=3, planning_reaped=0)

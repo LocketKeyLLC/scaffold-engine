@@ -33,7 +33,7 @@ from app.modules.gt_browser import gt_list, gt_search, gt_detail, gt_stats
 from app.modules.gt_extractor import extract_ground_truths
 from app.modules.idea_refinement import refine_idea
 from app.modules.ideation_workflow import analyze_and_confirm, research_and_compile
-from app.modules.research_agent import run_research, run_research_pdf
+from app.modules.research_agent import run_research, run_research_pdf, resume_research
 from app.modules.prompt_inspector import list_prompts, get_prompt, update_prompt
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag as _query_rag
@@ -44,6 +44,7 @@ from app.schemas import (
     PromptOptimizeInput,
     PromptOptimizeResult,
     ResearchInput,
+    ResearchReplyInput,
     SkipNodeInput,
     ScheduleCreate,
     ScheduleResponse,
@@ -596,6 +597,20 @@ async def research_endpoint(body: ResearchInput):
         ),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/research/reply", tags=["Research"])
+async def research_reply_endpoint(body: ResearchReplyInput):
+    """Resume a paused research session with the user's clarification reply."""
+    await _require_valid_models(body.model_overrides)
+    return StreamingResponse(
+        resume_research(
+            session_id=body.session_id,
+            user_reply=body.reply,
+            model_overrides=body.model_overrides,
+        ),
+        media_type="text/event-stream",
     )
 
 
