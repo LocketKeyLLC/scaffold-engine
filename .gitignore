@@ -12,3 +12,4 @@ patches/
 docker-compose.yml.bak*
 *.bak.*
 pipelines/failed/
+tests/fixtures/kb_entries.txt
