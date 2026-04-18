@@ -815,3 +815,63 @@ class TestResearchCommand:
         assert "/go" in output
         assert "build a project plan" in output
         assert "Research Complete" in output
+
+    def test_awaiting_reply_renders_paused_block(self, pipe, monkeypatch):
+        """awaiting_reply SSE event renders the pause block with session id + hints."""
+        class FakeResponse:
+            status_code = 200
+            def iter_lines(self, decode_unicode=True):
+                yield "event: awaiting_reply"
+                yield (
+                    'data: {"session_id": "sess_abc123", '
+                    '"question": "Do you mean Docker Swarm or Kubernetes?", '
+                    '"topic": "container orchestration", '
+                    '"iteration": 2, "expires_in_seconds": 3600}'
+                )
+                yield ""
+            def close(self):
+                pass
+        monkeypatch.setattr(
+            _mod.requests, "post", lambda *a, **kw: FakeResponse()
+        )
+        output = "".join(pipe._research_and_stream("container orchestration", "medium"))
+        # Pause header rendered
+        assert "Research paused" in output
+        # Question surfaced
+        assert "Do you mean Docker Swarm or Kubernetes?" in output
+        # Session ID shown so user can copy it
+        assert "sess_abc123" in output
+        # Resume hint with the exact command
+        assert "/research/reply sess_abc123" in output
+        # Expiry converted to minutes (3600s = 60 min)
+        assert "60 min" in output
+
+    def test_research_reply_posts_to_reply_endpoint(self, pipe, monkeypatch):
+        """/research/reply dispatch posts to /research/reply with session_id + reply."""
+        captured = {}
+        class FakeResponse:
+            status_code = 200
+            def iter_lines(self, decode_unicode=True):
+                yield "event: research_resumed"
+                yield 'data: {"session_id": "sess_xyz", "reply": "Kubernetes", "iteration": 3}'
+                yield ""
+            def close(self):
+                pass
+        def fake_post(url, *a, **kw):
+            captured["url"] = url
+            captured["json"] = kw.get("json", {})
+            return FakeResponse()
+        monkeypatch.setattr(_mod.requests, "post", fake_post)
+
+        output = "".join(
+            pipe._research_reply_and_stream("sess_xyz", "Kubernetes")
+        )
+
+        # Posted to the reply endpoint, not /research
+        assert captured["url"].endswith("/research/reply")
+        # Correct schema: session_id + reply (not job_id / not answer)
+        assert captured["json"].get("session_id") == "sess_xyz"
+        assert captured["json"].get("reply") == "Kubernetes"
+        # Resume event rendered to chat
+        assert "Resuming session" in output
+        assert "sess_xyz" in output
