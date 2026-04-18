@@ -285,6 +285,21 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
             yield from self._auto_chain(synthesized)
             return
 
+# --- /research/reply <session_id> <msg>: resume paused research ---
+        if msg.lower().startswith("/research/reply"):
+            parts = msg.split(None, 2)
+            if len(parts) < 3:
+                yield "Usage: `/research/reply <session_id> <your reply>`"
+                return
+            session_id = parts[1].strip()
+            user_reply = parts[2].strip()
+            if not user_reply:
+                yield "Reply cannot be empty."
+                return
+            yield f"▶️ Resuming session `{session_id}` ...\n\n"
+            yield from self._research_reply_and_stream(session_id, user_reply)
+            return
+
 # --- /research <topic>: autonomous research loop ---
         if msg.lower().startswith("/research"):
             parts = msg.split(None, 1)
@@ -430,19 +445,40 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
 # ------------------------------------------------------------------
     # /research: SSE consumer for research agent
     # ------------------------------------------------------------------
+    def _research_reply_and_stream(
+        self, session_id: str, user_reply: str
+    ) -> Generator[str, None, None]:
+        """Delegate to _research_and_stream but POST to /research/reply."""
+        yield from self._research_and_stream_raw(
+            url_path="/research/reply",
+            body={
+                "session_id": session_id,
+                "reply": user_reply,
+                "model_overrides": self._model_overrides(),
+            },
+        )
+
     def _research_and_stream(
         self, topic: str, depth: str = "medium"
+    ) -> Generator[str, None, None]:
+        yield from self._research_and_stream_raw(
+            url_path="/research",
+            body={
+                "topic": topic,
+                "depth": depth,
+                "model_overrides": self._model_overrides(),
+            },
+        )
+
+    def _research_and_stream_raw(
+        self, url_path: str, body: dict
     ) -> Generator[str, None, None]:
         headers = {"X-API-Key": self.valves.api_key}
 
         try:
             r = requests.post(
-                f"{self.valves.orchestrator_url}/research",
-                json={
-                    "topic": topic,
-                    "depth": depth,
-                    "model_overrides": self._model_overrides(),
-                },
+                f"{self.valves.orchestrator_url}{url_path}",
+                json=body,
                 headers=headers,
                 stream=True,
                 timeout=(10, None),
@@ -560,6 +596,26 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
             elif event_type == "convergence":
                 reason = payload.get("reason", "")
                 yield f"✅ Research converged: {reason}\n\n"
+
+            elif event_type == "awaiting_reply":
+                sid = payload.get("session_id", "?")
+                question = payload.get("question", "")
+                expires = payload.get("expires_in_seconds", 3600)
+                mins = expires // 60
+                yield "---\n\n"
+                yield "⏸️ **Research paused — need your input**\n\n"
+                yield f"**Question:** {question}\n\n"
+                yield f"**Session:** `{sid}` (expires in {mins} min)\n\n"
+                yield "**To continue:** type `/research/reply " + sid + " <your answer>`\n"
+                yield "**To abandon:** do nothing — the session auto-cancels on expiry.\n\n"
+                return
+
+            elif event_type == "research_resumed":
+                sid = payload.get("session_id", "?")
+                reply = payload.get("reply", "")
+                it = payload.get("iteration", "?")
+                yield f"▶️ **Resuming session** `{sid}` from iteration {it}\n"
+                yield f"   Reply injected: _{reply}_\n\n"
 
             elif event_type == "research_complete":
                 total = payload.get("total_ingested", 0)
@@ -1318,6 +1374,7 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
 | `/model <sub>` | Manage model assignments (list/set/reset/available) |
 | `/schedule <sub>` | Manage scheduled research jobs (list/add/delete) |
 | `/research <topic>` | Research a topic (web), URL, `github:owner/repo`, or `openapi:<url>` and ingest into knowledge base |
+| `/research/reply <session_id> <msg>` | Resume a paused research session with clarification |
 | `/help` | Show this message |
 
 **Workflow:** Describe your idea → discuss scope with the assistant → `/go` → review feasibility → `/confirm` → execution."""
