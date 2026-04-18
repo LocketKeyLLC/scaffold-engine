@@ -1,0 +1,36 @@
+name: Retrieval Quality (non-blocking)
+
+on:
+  pull_request:
+    paths:
+      - 'app/modules/rag_pipeline.py'
+      - 'app/rerankers.py'
+      - 'scripts/score_retrieval.py'
+      - 'tests/fixtures/golden_set.json'
+      - 'tests/test_score_retrieval.py'
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test deps
+        run: pip install pytest pytest-asyncio
+
+      - name: Run scoring unit tests
+        run: pytest tests/test_score_retrieval.py -v
+
+      - name: Upload report if present
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-report
+          path: retrieval_report.json
+          if-no-files-found: ignore
