@@ -1,8 +1,8 @@
 # Scaffold Engine — Project Overview
-**Last Updated:** April 15, 2026 (v0.3.0 — /research command, autonomous topic research agent)
+**Last Updated:** April 17, 2026 (v0.4.0 — pausable research: LLM-gated clarification + /research/reply resume)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `f6a72c2` — `feat: add /research command`
-**Test Suite:** 210 passed, 20 skipped, 0 failed in container (+ 43 pipeline + 18 valve + 3 gt_browser locally = 274 total)
+**Latest Commit:** `a8fc4bb` — `feat(pipeline): /research/reply command + pause-UI rendering (#4.2h)`
+**Test Suite:** 306 passed, 21 skipped, 0 failed in container (+ 49 pipeline local)
 **Codebase:** ~6,700 lines of application Python across 27 source files + ~1,050 lines in `scaffold_router.py` (pipeline)
 
 
@@ -1635,3 +1635,125 @@ All tests use a dep-free inline raw-PDF byte generator — no reportlab required
 - **In-container:** 293 passed, 21 skipped, 0 failed
 - **Total:** 342 passed, 21 skipped, 0 failed
 
+
+---
+
+## Changelog — April 17, 2026 (Pausable Research — Phase 1: Persistence Foundation)
+
+### Decision
+Chose bidirectional SSE (B) over polling (A) for the pausable /research architecture, with graceful degradation to reconnect-via-GET when SSE drops. Phase 1 lays the persistence foundation so Phase 2 can build pause mechanics on solid ground. Planned phases: 1 (persistence) -> 2 (pause mechanics) -> 3 (reconnect) -> 4 (pipeline UI) -> 5 (pause-trigger design).
+
+### Migration 012 (`db/migrations/012_research_sessions_state.sql`)
+1. **`research_sessions.state_snapshot JSONB`** -- rehydration payload for Phase 2. Projects `ResearchState` to JSON-safe dict; sets -> sorted lists; entries projected to title + content_hash (full content lives in Milvus). Written at each iteration boundary.
+2. **`research_sessions.updated_at TIMESTAMPTZ`** -- reaper threshold + snapshot write cadence. Backfilled to `COALESCE(completed_at, created_at)` for existing rows.
+3. **`research_sessions.error_message TEXT`** -- failure context for reaper and future error surfaces.
+4. **Partial index** `idx_research_sessions_active_updated` on `(status, updated_at DESC) WHERE status IN ('pending','running')` -- keeps reaper scans cheap as completed rows accumulate.
+
+### Orchestrator (`app/modules/research_agent.py`)
+5. **`_build_snapshot(state)`** -- JSON-safe projection helper (sets -> sorted lists, lightweight entry projection). Called by `_update_session_iteration()`.
+6. **`_update_session_iteration()`** -- extended SET clause with `state_snapshot = CAST(:snapshot AS JSONB), updated_at = NOW()`. No call-site changes (all 4 existing call sites inherit snapshot writes).
+7. **`_finalize_session()`** -- gains optional `error_message` param with `COALESCE(:error_message, error_message)`. Backward-compatible: 15 existing call sites unchanged; new param is opt-in at failure sites in future phases.
+
+### Reaper (`app/modules/cleanup.py`)
+8. **`_REAP_RESEARCH_SESSIONS_SQL`** -- marks pending/running rows stale > 30 min as `failed` with default error_message.
+9. **`reap_stale_jobs()`** -- now runs 3 SQL statements in one transaction. Returns `{running_to_failed, planning_to_cancelled, research_to_failed}`.
+
+### Design decisions
+- **Snapshot written at iteration boundary only** -- cheap, coarse enough for resume-from-iteration-N. Finer-grained mid-iteration checkpoints deferred.
+- **Entries projected, not copied** -- title + content_hash only. Full content already in Milvus; fat JSONB payload would grow unbounded.
+- **`error_message` opt-in** -- avoids touching 13 failure paths. Plumbing can be added per-site as Phase 2 needs it.
+- **Reaper threshold matches DAG jobs** -- 30 min stale -> failed. Consistent operator mental model.
+
+### Verified
+- Shallow research run completes, snapshot populates with `search_history` (2 queries), `url_history` (19 URLs), `entries_projection` (12 titles), `outline_facets`, `gap_queries`, `totals {new: 11, versioned: 1, rejected: 0, skipped_hash: 0, ingested: 12}`.
+- Reaper caught a prior orphaned session (client disconnect mid-run) correctly: `research_to_failed=1` at 30 min + error_message populated.
+- Pre-existing migration `010_research_sessions.sql` + endpoints + lifecycle helpers discovered during inspection; Phase 1 extended rather than duplicating.
+
+### Known follow-ups (not blocking Phase 2)
+- **`content_hash` empty in snapshot** -- hash is computed inside `ingest_entries()` and not propagated back to entry dicts; snapshot shows `"content_hash": ""`. Cosmetic; URLs + titles still unique enough for resume.
+- **Client-disconnect leaves orphan sessions** -- `curl | head` or browser close cancels the generator silently; session sits in `running` until reaper catches it. A `try/finally` in `run_research()` calling `_finalize_session(status='cancelled')` is the clean fix.
+
+### Commit
+- `3485ce7` -- `feat: persist research_sessions state_snapshot + reaper coverage (#4.1)`
+
+### Known Issues (updated — April 17, 2026)
+
+- **Resolved #16** -- concurrent research guard exists (`_guard_concurrent()`), called at `run_research()` entry (lines 823, 1960). Previously marked "not implemented"; verified working.
+- **Updated KB count** -- toon_v2 contains **179 entries** as of April 17, 2026 (up from 27 in prior changelogs). Grows organically via `/research` runs and scheduled jobs.
+- **New #17: Client disconnect leaves orphan research sessions** -- `curl | head`, browser close, or any SSE consumer that terminates mid-stream cancels the `run_research()` generator without calling `_finalize_session()`. Session sits in `running` until the reaper catches it at 30 min. Reaper is the backstop; `try/finally` in `run_research()` is the proper fix. Deferred.
+- **Model stack drift** -- `/health` shows additional loaded models not in the documented Model Stack table: `qwen3.5:4b`, `qwen3.5:0.8b`, `qwen3.5:latest`, `qwen3.5:397b-cloud`, `glm-5.1:cloud`, `sam860/qwen3-reranker:0.6b-Q8_0`, `qwen3-embedding:0.6b`. Either Ollama has stale models cached or valve defaults drifted from the documented table. Worth a reconciliation pass before next changelog -- not a bug, just documentation lag.
+
+---
+
+## Changelog — April 17, 2026 (Pausable Research — Phase 2: Pause Mechanics)
+
+### New capability
+Research loop can pause mid-run to request user clarification, persist full
+state to DB, and resume from snapshot when the user replies. LLM-gated: the
+gap analyzer decides whether a question is worth asking. Default is no-pause;
+only fires when analyzer produces a concrete question AND iterations remain.
+
+### Migration 013 (`db/migrations/013_research_pause.sql`)
+1. **`research_sessions.pause_question TEXT`** — prompt surfaced to user
+2. **`research_sessions.pause_expires_at TIMESTAMPTZ`** — 1h TTL from pause
+3. **`research_sessions.pause_reply TEXT`** — user's clarification (persisted for debugging/audit)
+4. **Partial index rebuilt** — `idx_research_sessions_active_updated` extended to cover `paused_awaiting_reply` so reaper scans stay cheap
+
+### Orchestrator — `app/modules/research_agent.py`
+5. **`GAP_SYSTEM` prompt extended** — analyzer may return `needs_clarification: true` + `clarifying_question: str` when topic ambiguity is actively blocking coverage. Prompt explicitly instructs the model to default to no-pause
+6. **`_pause_session(session_id, state, question, ttl_seconds=3600)`** — writes `status='paused_awaiting_reply'`, persists snapshot, sets `pause_expires_at = NOW() + ttl`
+7. **`_load_session_for_resume(session_id)`** — fetches row with pause fields; returns `None` if missing
+8. **`_rehydrate_state(row)`** — reconstructs `ResearchState` from `state_snapshot` JSONB. Sets restored from sorted lists. Entries projected (title + content_hash only; full content in Milvus)
+9. **Pause gate in `run_research()` main loop** — runs after `gap_analysis` event. Emits `awaiting_reply` SSE event, persists via `_pause_session()`, returns cleanly. Only fires when: `iteration < max_iterations` AND `needs_clarification is True` AND question non-empty
+10. **`resume_research(session_id, user_reply, model_overrides=None)`** async generator — mirrors `run_research()` tail. Guards: 404 (missing session), 409 (wrong status), 410 (expired pause → finalize as `cancelled`), 400 (empty reply). Marks session running again, injects reply as two top-priority gap_queries (raw reply + `{topic} {reply}`), skips decomposition. **No nested pauses on resume** — resumed iterations do not check `needs_clarification` to prevent pause/reply loops
+
+### Orchestrator — new endpoint + schema
+11. **`POST /research/reply`** — accepts `ResearchReplyInput`, streams `resume_research()` as SSE. Same `_require_valid_models()` gate as `/research`
+12. **`app/schemas.py`** — `ResearchReplyInput(session_id, reply, model_overrides=None)`
+
+### Reaper — `app/modules/cleanup.py`
+13. **`_REAP_PAUSED_RESEARCH_SQL`** — transitions `paused_awaiting_reply → cancelled` when `pause_expires_at < NOW()`. Distinct from the 30-min stale rule since paused sessions are legitimately idle
+14. **`reap_stale_jobs()` return dict extended** — `paused_to_cancelled: int` added; logger emits the new count
+
+### Pipeline — `pipelines/scaffold_router.py`
+15. **`awaiting_reply` SSE handler** — renders a paused-research block with the clarifying question, session id, copy-pasteable `/research/reply <sid> <msg>` command, and expiry countdown
+16. **`research_resumed` SSE handler** — one-line status showing session id, iteration, and reply text
+17. **`/research/reply <session_id> <msg>` command** — dispatched before `/research` in `pipe()` (longer prefix wins). Delegates to `_research_reply_and_stream()`
+18. **Refactor: `_research_and_stream_raw(url_path, body)`** — shared SSE consumer and renderer now used by both `/research` and `/research/reply`. Deduplicated ~150 lines
+19. **`/help` table row** added for `/research/reply`
+
+### Design decisions
+- **LLM-gated pause over user-triggered** — analyzer already has the context to judge ambiguity; a user-triggered pause button would need mid-stream bidirectional SSE which we explicitly deferred
+- **Full resume over warm restart** — keeps entries, URL history, search_history intact; the reply is additive information, not a reset. Minimizes duplicate work on CPU-bound runs
+- **Reply injected as gap_query** — reuses existing search/extract/ingest path. No new code paths in the hot loop
+- **No pause on resume** — deliberate. Multi-turn clarification is out of scope; one question per run keeps the state machine simple and terminal states reachable
+- **Expired pause → `cancelled`, not `failed`** — semantically accurate (user chose not to reply); distinct error_message: "Pause expired before reply received"
+- **Projected entries in snapshot** — full content lives in Milvus; snapshot stores title + content_hash only. Keeps JSONB small and unbounded-growth-proof
+
+### Tests — `tests/test_research_pause_resume.py` (new, 12 tests)
+- `TestRehydrateState` (3) — core field roundtrip, empty snapshot defaults, JSON-string snapshot parsed
+- `TestResumeGuards` (4) — 404 missing session, 409 wrong status, 410 expired pause (with `_finalize_session('cancelled')` verified), 400 empty reply
+- `TestResumeHappyPath` (1) — `research_resumed` event emitted, `research_complete` payload includes `resumed_from_pause: true`
+- `TestPauseGateInLoop` (3) — pause emitted when LLM requests it (and `research_complete` NOT reached); no pause when `needs_clarification=False`; no pause when question is whitespace-only (guard)
+- `TestPauseSession` (1) — `_pause_session()` writes correct SQL params, includes snapshot JSON with state, commits
+
+### Tests — `tests/test_health_cleanup.py` (updated)
+20. **`_make_reap_db()` fixture extended** — now returns `r1, r2, r3, r4` (was 2) to match reaper SQL statement count
+21. **`test_no_stale_jobs` assertion updated** — dict includes `paused_to_cancelled`
+22. **`test_expired_paused_sessions_reaped`** (new) — verifies `r4.rowcount=2` surfaces as `paused_to_cancelled=2` in return dict
+
+### Test counts post-merge
+- **In-container:** 306 passed, 21 skipped, 0 failed (+13 new)
+- **Pipeline (local):** 49 passed (no new pipeline tests; refactor covered by existing 48)
+- **Total:** 355 passed, 21 skipped, 0 failed
+
+### Commits
+- `81e68d4` — `feat(db): migration 013 — pause columns for resumable research (#4.2a)`
+- `0210780` — `feat(research): pause mechanics + /research/reply resume (#4.2)`
+- `1936da4` — `feat(research): reap expired paused sessions → cancelled (#4.2g)`
+- `a8fc4bb` — `feat(pipeline): /research/reply command + pause-UI rendering (#4.2h)`
+
+### Known Issues (updated)
+- **New #18**: LLM-gated pause is opt-in per run — no way to force a pause from the user side. Acceptable for now; bidirectional SSE for user-triggered pause is a separate design problem
+- **New #19**: Resume uses the same two seeded gap_queries for every session. A smarter approach would feed the reply through `_decompose_topic()` to produce 3-5 targeted queries. Deferred
+- **New #20**: `state_snapshot.entries_projection` stores `content_hash=""` because `ingest_entries()` computes the hash internally and doesn't propagate back. Cosmetic — URLs and titles are sufficient for resume. Pre-existing from Phase 1
