@@ -1,0 +1,259 @@
+{
+  "version": "1.0",
+  "created_at": "2026-04-18",
+  "kb_snapshot_entries": 501,
+  "kb_snapshot_note": "Post batch ingestion push (191 -> 501 across 31 runs)",
+  "pairs": [
+    {
+      "id": "g001",
+      "query": "parallel implementation of Kahn topological sort",
+      "expected_entry_ids": [
+        "scaffold-parallel-implementation-of-kahn's-algorithm-054cfbad",
+        "scaffold-kahn's-algorithm-implementation-2b2d3d06"
+      ],
+      "expected_titles_contain": ["Kahn", "algorithm"],
+      "domain": "eng",
+      "difficulty": "medium",
+      "tier": "direct_lookup",
+      "notes": "Target ranked #2; generic topological-sort entry ranked #1 (arguably also valid)"
+    },
+    {
+      "id": "g002",
+      "query": "how does topological sorting work step by step",
+      "expected_entry_ids": [
+        "scaffold-topological-sorting-process-079a7191"
+      ],
+      "expected_titles_contain": ["topological", "sorting"],
+      "domain": "rag",
+      "difficulty": "medium",
+      "tier": "direct_lookup",
+      "notes": "Target at rank 5; multiple Kahn variants ranked above"
+    },
+    {
+      "id": "g003",
+      "query": "how do I secure my web application against common attacks",
+      "expected_entry_ids": [
+        "scaffold-web-security-implementation-guides-dfe09110",
+        "scaffold-content-security-policy-(csp)-4bad0089"
+      ],
+      "expected_titles_contain": ["security"],
+      "domain": "rag",
+      "difficulty": "easy",
+      "tier": "troubleshooting",
+      "notes": "Target rank 1; CSP entry also legitimately relevant"
+    },
+    {
+      "id": "g004",
+      "query": "when should I truncate versus round numbers",
+      "expected_entry_ids": [
+        "scaffold-truncation-in-mathematics-and-computer-science-ef2f0d67",
+        "scaffold-truncation-definition-4e224245"
+      ],
+      "expected_titles_contain": ["truncation"],
+      "domain": "rag",
+      "difficulty": "easy",
+      "tier": "parameter_tuning",
+      "notes": "Target rank 1; only 2 results returned (too_strict threshold may have filtered)"
+    },
+    {
+      "id": "g005",
+      "query": "how to route telemetry data with Vector",
+      "expected_entry_ids": [
+        "scaffold-vector-telemetry-data-router-91e23a2a"
+      ],
+      "expected_titles_contain": ["Vector", "telemetry"],
+      "domain": "rag",
+      "difficulty": "easy",
+      "tier": "code_adjacent",
+      "notes": "Target rank 1; only 1 result returned"
+    },
+    {
+      "id": "g006",
+      "query": "Kahn algorithm vs DFS for topological sort",
+      "expected_entry_ids": [
+        "scaffold-kahn's-algorithm-implementation-37c0f092",
+        "scaffold-kahn's-algorithm-for-topological-sorting-aca1c3a8"
+      ],
+      "expected_titles_contain": ["Kahn", "algorithm"],
+      "domain": "rag",
+      "difficulty": "medium",
+      "tier": "comparative",
+      "notes": "DFS not covered in KB; Kahn variants returned as closest match"
+    },
+    {
+      "id": "g007",
+      "query": "how do I handle cache invalidation correctly",
+      "expected_entry_ids": [
+        "scaffold-cache-invalidation-d0152326",
+        "scaffold-redis-cache-invalidation-patterns-61f6cf5a"
+      ],
+      "expected_titles_contain": ["cache", "invalidation"],
+      "domain": "eng",
+      "difficulty": "easy",
+      "tier": "troubleshooting",
+      "notes": "Target rank 1; only 2 results returned (too_strict threshold)"
+    },
+    {
+      "id": "g008",
+      "query": "when to use write-through versus write-back caching",
+      "expected_entry_ids": [
+        "scaffold-write-through-pattern-43f8c68a",
+        "scaffold-write-behind-caching-3e943468"
+      ],
+      "expected_titles_contain": ["write", "caching"],
+      "domain": "eng",
+      "difficulty": "easy",
+      "tier": "parameter_tuning",
+      "notes": "Target rank 1; write-behind complementary match at rank 2"
+    },
+    {
+      "id": "g009",
+      "query": "cache data between pipeline runs",
+      "expected_entry_ids": [
+        "scaffold-caching-data-between-runs-fce6caca"
+      ],
+      "expected_titles_contain": ["caching", "runs"],
+      "domain": "eng",
+      "difficulty": "medium",
+      "tier": "direct_lookup",
+      "notes": "Target rank 2; Python subdirectory entry ranked above (less specific)"
+    },
+    {
+      "id": "g010",
+      "query": "gRPC versus REST API performance tradeoffs",
+      "expected_entry_ids": [
+        "scaffold-grpc-vs-rest-performance-eadb4807",
+        "scaffold-grpc-vs-rest-performance-benchmark-5b7b8ac4"
+      ],
+      "expected_titles_contain": ["gRPC", "REST"],
+      "domain": "eng",
+      "difficulty": "easy",
+      "tier": "comparative",
+      "notes": "Target rank 1; duplicate benchmark entries at ranks 2-4 suggest dedup gap"
+    },
+    {
+      "id": "g011",
+      "query": "configuring storage quotas and eviction policies",
+      "expected_entry_ids": [
+        "scaffold-storage-quotas-and-eviction-38e530dc"
+      ],
+      "expected_titles_contain": ["storage", "quotas"],
+      "domain": "eng",
+      "difficulty": "hard",
+      "tier": "parameter_tuning",
+      "notes": "Target missed entirely; only Redis Memory Management returned (semantically adjacent but not target). Genuine recall failure."
+    },
+    {
+      "id": "g012",
+      "query": "parallelizing Kahn algorithm for large graphs",
+      "expected_entry_ids": [
+        "scaffold-parallel-kahn's-algorithm-60db8c02"
+      ],
+      "expected_titles_contain": ["parallel", "Kahn"],
+      "domain": "rag",
+      "difficulty": "easy",
+      "tier": "comparative",
+      "notes": "Target rank 1; sequential variant and complexity entry as neighbors"
+    },
+    {
+      "id": "g013",
+      "query": "running Keycloak in a container for auth",
+      "expected_entry_ids": [
+        "scaffold-keycloak-docker-image-57117089",
+        "scaffold-keycloak-d2a361b2"
+      ],
+      "expected_titles_contain": ["Keycloak"],
+      "domain": "rag",
+      "difficulty": "easy",
+      "tier": "code_adjacent",
+      "notes": "Target rank 1; 3 Keycloak variants returned"
+    },
+    {
+      "id": "g014",
+      "query": "setting up OAuth2 proxy in front of a service",
+      "expected_entry_ids": [
+        "scaffold-oauth2-proxy-06302d54"
+      ],
+      "expected_titles_contain": ["OAuth2", "proxy"],
+      "domain": "rag",
+      "difficulty": "easy",
+      "tier": "troubleshooting",
+      "notes": "Target rank 1; only 1 result returned"
+    },
+    {
+      "id": "g015",
+      "query": "serving Qwen3 reranker via vLLM",
+      "expected_entry_ids": [
+        "scaffold-docker-image-qwen3-reranker-vllm-0b827d85"
+      ],
+      "expected_titles_contain": ["qwen3", "reranker"],
+      "domain": "rag",
+      "difficulty": "easy",
+      "tier": "code_adjacent",
+      "notes": "Target rank 1; cross-encoder entry as neighbor"
+    },
+    {
+      "id": "g016",
+      "query": "deploying Milvus with Bitnami Helm chart",
+      "expected_entry_ids": [
+        "scaffold-bitnamicharts/milvus-eae7290c",
+        "scaffold-bitnami-helm-chart-for-milvus-b8603f4c",
+        "scaffold-bitnami/milvus-0edbc48d"
+      ],
+      "expected_titles_contain": ["bitnami", "milvus"],
+      "domain": "rag",
+      "difficulty": "easy",
+      "tier": "code_adjacent",
+      "notes": "Target rank 1; 3 near-duplicate Bitnami Milvus entries suggest dedup gap"
+    },
+    {
+      "id": "g017",
+      "query": "HTTP compression dictionary transport feature",
+      "expected_entry_ids": [
+        "scaffold-compression-dictionary-transport-a3f299a4"
+      ],
+      "expected_titles_contain": ["compression", "dictionary"],
+      "domain": "eng",
+      "difficulty": "easy",
+      "tier": "direct_lookup",
+      "notes": "Target rank 1; only 1 result returned (niche topic)"
+    },
+    {
+      "id": "g018",
+      "query": "reduce FastAPI Docker image size",
+      "expected_entry_ids": [
+        "scaffold-fastapi-docker-image-size-906ddba5",
+        "scaffold-fastapi-docker-image-5fa90e31"
+      ],
+      "expected_titles_contain": ["FastAPI", "Docker"],
+      "domain": "eng",
+      "difficulty": "easy",
+      "tier": "code_adjacent",
+      "notes": "Target rank 1; 3 FastAPI Docker variants returned"
+    },
+    {
+      "id": "g019",
+      "query": "how does lossless compression work",
+      "expected_entry_ids": [
+        "scaffold-lossless-compression-28cb4801"
+      ],
+      "expected_titles_contain": ["lossless", "compression"],
+      "domain": "eng",
+      "difficulty": "easy",
+      "tier": "direct_lookup",
+      "notes": "Target rank 1; Brotli and Zstandard as related algorithm neighbors"
+    },
+    {
+      "id": "g020",
+      "query": "reducing eventual consistency delays in distributed systems",
+      "expected_entry_ids": [
+        "scaffold-minimizing-eventual-consistency-3bf7caae"
+      ],
+      "expected_titles_contain": ["eventual", "consistency"],
+      "domain": "eng",
+      "difficulty": "easy",
+      "tier": "parameter_tuning",
+      "notes": "Target rank 1; only 1 result returned"
+    }
+  ]
+}
