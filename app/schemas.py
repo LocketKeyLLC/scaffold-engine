@@ -379,6 +379,12 @@ class ResearchInput(BaseModel):
     depth: str = "medium"  # shallow | medium | deep
     domain: str | None = None
     model_overrides: dict | None = None
+
+
+class ResearchReplyInput(BaseModel):
+    session_id: str
+    reply: str
+    model_overrides: dict | None = None
 # ---------------- Scheduled research jobs ----------------
 
 class ScheduleCreate(BaseModel):

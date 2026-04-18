@@ -298,6 +298,83 @@ async def _persist_session_stats(
         await db.commit()
 
 
+async def _pause_session(
+    session_id: str,
+    state: "ResearchState",
+    question: str,
+    ttl_seconds: int = 3600,
+) -> None:
+    """Mark session paused_awaiting_reply with snapshot + question + expiry."""
+    snapshot = _build_snapshot(state)
+    async with async_session() as db:
+        await db.execute(
+            text("""
+                UPDATE research_sessions
+                SET status = 'paused_awaiting_reply',
+                    pause_question = :question,
+                    pause_expires_at = NOW() + make_interval(secs => :ttl),
+                    state_snapshot = CAST(:snapshot AS JSONB),
+                    updated_at = NOW()
+                WHERE id = :sid
+            """),
+            {
+                "sid": session_id,
+                "question": question,
+                "ttl": ttl_seconds,
+                "snapshot": json.dumps(snapshot),
+            },
+        )
+        await db.commit()
+
+
+async def _load_session_for_resume(session_id: str) -> dict | None:
+    """Fetch a paused session row. Returns None if missing or not resumable."""
+    async with async_session() as db:
+        row = await db.execute(
+            text("""
+                SELECT id, topic, depth, domain, status, state_snapshot,
+                       pause_question, pause_expires_at, pause_reply
+                FROM research_sessions
+                WHERE id = :sid
+            """),
+            {"sid": session_id},
+        )
+        r = row.mappings().first()
+        return dict(r) if r else None
+
+
+def _rehydrate_state(row: dict) -> "ResearchState":
+    """Reconstruct ResearchState from a persisted snapshot.
+
+    Note: all_entries are projected (title + content_hash only); full content
+    lives in Milvus. Gap-analysis and summary on resume work off the projection,
+    which is degraded but non-breaking.
+    """
+    snap = row.get("state_snapshot") or {}
+    if isinstance(snap, str):
+        snap = json.loads(snap) if snap else {}
+
+    state = ResearchState(
+        topic=row["topic"],
+        depth=row["depth"],
+        domain=row["domain"],
+    )
+    state.iteration = int(snap.get("iteration", 0))
+    state.search_history = set(snap.get("search_history", []))
+    state.url_history = set(snap.get("url_history", []))
+    state.outline_facets = list(snap.get("outline_facets", []))
+    state.covered_facets = set(snap.get("covered_facets", []))
+    state.gap_queries = list(snap.get("gap_queries", []))
+    state.all_entries = list(snap.get("entries_projection", []))
+    totals = snap.get("totals", {})
+    state.total_ingested = int(totals.get("ingested", 0))
+    state.total_rejected = int(totals.get("rejected", 0))
+    state.total_new = int(totals.get("new", 0))
+    state.total_versioned = int(totals.get("versioned", 0))
+    state.total_skipped_hash = int(totals.get("skipped_hash", 0))
+    return state
+
+
 async def _finalize_session(
     session_id: str,
     status: str,
@@ -757,6 +834,12 @@ async def _extract_entries(
 GAP_SYSTEM = """You are a research coverage analyst. Given a topic, its facets, and
 the knowledge entries collected so far, identify what's missing.
 
+You may OPTIONALLY request user clarification if — and only if — a specific
+ambiguity in the topic is actively blocking good coverage AND a one-sentence
+answer from the user would materially change which queries to run next.
+Do NOT pause for generic "would you like more detail" questions. Default to
+no pause; only set needs_clarification=true when you have a concrete question.
+
 OUTPUT FORMAT (strict JSON, no markdown fences):
 {
   "coverage_pct": 75,
@@ -765,7 +848,9 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
   "gap_queries": [
     {"query": "keyword search terms", "facet": "gap_facet", "priority": "high", "search_category": "general"}
   ],
-  "assessment": "One paragraph on what's well covered and what's missing"
+  "assessment": "One paragraph on what's well covered and what's missing",
+  "needs_clarification": false,
+  "clarifying_question": ""
 }"""
 
 
@@ -1079,6 +1164,25 @@ async def run_research(
                 "assessment": gaps.get("assessment", ""),
             })
 
+            # ---- Pause gate: LLM may request user clarification ----
+            # Only pause when iterations remain AND the analyzer produced a
+            # concrete question. Malformed/missing fields fall through silently.
+            if (
+                state.iteration < state.max_iterations
+                and gaps.get("needs_clarification") is True
+                and (gaps.get("clarifying_question") or "").strip()
+            ):
+                question = gaps["clarifying_question"].strip()
+                await _pause_session(session_id, state, question)
+                yield _sse("awaiting_reply", {
+                    "session_id": session_id,
+                    "question": question,
+                    "topic": topic,
+                    "iteration": state.iteration,
+                    "expires_in_seconds": 3600,
+                })
+                return
+
             # Check if well covered
             if coverage >= 85 and not gaps.get("gap_queries"):
                 yield _sse("convergence", {
@@ -1130,6 +1234,261 @@ async def run_research(
         await _finalize_session(session_id, "failed", elapsed_ms)
         yield _sse("error", {
             "message": f"Research failed: {exc}",
+            "session_id": session_id,
+            "topic": topic,
+        })
+
+
+# ---------------------------------------------------------------------------
+# Resume: continue a paused_awaiting_reply session with user reply injected
+# ---------------------------------------------------------------------------
+
+async def resume_research(
+    session_id: str,
+    user_reply: str,
+    model_overrides: dict | None = None,
+) -> AsyncGenerator[str, None]:
+    """Resume a paused research session using the user's clarification reply.
+
+    Contract:
+      - Session must be in status='paused_awaiting_reply' AND not expired.
+      - State rehydrated from state_snapshot (entries projected: title + hash only).
+      - Reply injected as top-priority gap_query; loop continues from next iteration.
+      - On completion, same terminal events as run_research().
+    """
+    t0 = time.monotonic()
+
+    row = await _load_session_for_resume(session_id)
+    if row is None:
+        yield _sse("error", {
+            "message": f"Session not found: {session_id}",
+            "http_status": 404,
+        })
+        return
+
+    if row["status"] != "paused_awaiting_reply":
+        yield _sse("error", {
+            "message": f"Session is not awaiting reply (status={row['status']})",
+            "session_id": session_id,
+            "http_status": 409,
+        })
+        return
+
+    # Expiry check: reaper eventually catches these, but resumption itself
+    # must also refuse to pick up a stale pause.
+    from datetime import datetime, timezone
+    expires = row.get("pause_expires_at")
+    if expires is not None:
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= expires:
+            await _finalize_session(
+                session_id, "cancelled",
+                int((time.monotonic() - t0) * 1000),
+                error_message="Pause expired before reply received",
+            )
+            yield _sse("error", {
+                "message": "Pause expired; session cancelled",
+                "session_id": session_id,
+                "http_status": 410,
+            })
+            return
+
+    reply = (user_reply or "").strip()
+    if not reply:
+        yield _sse("error", {
+            "message": "Reply cannot be empty",
+            "session_id": session_id,
+            "http_status": 400,
+        })
+        return
+
+    # Rehydrate state + mark session running again with reply persisted.
+    state = _rehydrate_state(row)
+    async with async_session() as db:
+        await db.execute(
+            text("""
+                UPDATE research_sessions
+                SET status = 'running',
+                    pause_reply = :reply,
+                    updated_at = NOW()
+                WHERE id = :sid
+            """),
+            {"sid": session_id, "reply": reply},
+        )
+        await db.commit()
+
+    topic = row["topic"]
+    depth = row["depth"]
+    decompose_model = get_model("model_verifier", model_overrides)
+    extract_model = get_model("model_verifier", model_overrides)
+    summary_model = get_model("model_verifier", model_overrides)
+
+    yield _sse("research_resumed", {
+        "session_id": session_id,
+        "topic": topic,
+        "iteration": state.iteration,
+        "reply": reply,
+    })
+
+    # Seed next-iteration queries from the reply. A small, targeted set keeps
+    # the resumed iteration fast and honors the user's steer.
+    queries = [
+        {"query": reply, "facet": "user_clarification",
+         "priority": "high", "search_category": "general"},
+        {"query": f"{topic} {reply}", "facet": "user_clarification",
+         "priority": "high", "search_category": "general"},
+    ]
+
+    try:
+        # Resume loop — mirrors run_research() tail but skips decomposition.
+        coverage = None
+        while state.iteration < state.max_iterations:
+            state.iteration += 1
+
+            yield _sse("iteration_started", {
+                "iteration": state.iteration,
+                "query_count": len(queries),
+                "resumed": True,
+            })
+
+            results = await _search_queries(queries, state)
+            yield _sse("search_complete", {
+                "iteration": state.iteration,
+                "results_found": len(results),
+                "total_urls": len(state.url_history),
+            })
+
+            if not results:
+                yield _sse("iteration_complete", {
+                    "iteration": state.iteration,
+                    "entries_extracted": 0,
+                    "entries_ingested": 0,
+                    "reason": "no_results",
+                })
+                break
+
+            extract_task = asyncio.create_task(
+                _extract_entries(results, topic, model=extract_model)
+            )
+            while not extract_task.done():
+                await asyncio.sleep(8)
+                if not extract_task.done():
+                    yield _sse("heartbeat",
+                               {"status": "extracting", "iteration": state.iteration})
+            entries = extract_task.result()
+
+            yield _sse("extraction_complete", {
+                "iteration": state.iteration,
+                "entries_extracted": len(entries),
+            })
+
+            ingested = 0
+            if entries:
+                state.all_entries.extend(entries)
+                stats = await ingest_entries(entries, domain=state.domain)
+                ingested = stats["new"] + stats["versioned"]
+                state.total_new += stats["new"]
+                state.total_versioned += stats["versioned"]
+                state.total_rejected += stats["rejected"]
+                state.total_skipped_hash += stats["skipped_hash"]
+                state.total_ingested += ingested
+
+            yield _sse("ingestion_complete", {
+                "iteration": state.iteration,
+                "entries_ingested": ingested,
+                "total_ingested": state.total_ingested,
+                "total_rejected": state.total_rejected,
+            })
+            yield _sse("iteration_complete", {
+                "iteration": state.iteration,
+                "entries_extracted": len(entries),
+                "entries_ingested": ingested,
+            })
+
+            await _update_session_iteration(session_id, state, coverage)
+
+            if state.iteration >= state.max_iterations:
+                break
+            if ingested == 0 and len(entries) > 0:
+                yield _sse("convergence", {
+                    "reason": "all_duplicates",
+                    "message": "All extracted entries were duplicates.",
+                })
+                break
+
+            # Gap analysis for next iteration. No second pause on resume —
+            # we don't want to loop into pause/reply forever.
+            gap_task = asyncio.create_task(_analyze_gaps(state, model=decompose_model))
+            while not gap_task.done():
+                await asyncio.sleep(8)
+                if not gap_task.done():
+                    yield _sse("heartbeat", {"status": "analyzing_gaps"})
+            gaps = gap_task.result()
+            coverage = gaps.get("coverage_pct", 100)
+            state.covered_facets.update(gaps.get("covered_facets", []))
+
+            yield _sse("gap_analysis", {
+                "iteration": state.iteration,
+                "coverage_pct": coverage,
+                "covered_facets": list(state.covered_facets),
+                "gap_facets": gaps.get("gap_facets", []),
+                "assessment": gaps.get("assessment", ""),
+            })
+
+            if coverage >= 85 and not gaps.get("gap_queries"):
+                yield _sse("convergence", {
+                    "reason": "coverage_threshold",
+                    "coverage_pct": coverage,
+                })
+                break
+
+            queries = gaps.get("gap_queries", [])
+            if not queries:
+                break
+
+        # Final summary + finalize
+        summary_task = asyncio.create_task(_generate_summary(state, model=summary_model))
+        while not summary_task.done():
+            await asyncio.sleep(8)
+            if not summary_task.done():
+                yield _sse("heartbeat", {"status": "summarizing"})
+        summary = summary_task.result()
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+        await _update_session_iteration(session_id, state, coverage)
+        await _finalize_session(session_id, "completed", elapsed_ms, summary)
+
+        yield _sse("research_complete", {
+            "topic": topic,
+            "session_id": session_id,
+            "total_entries": len(state.all_entries),
+            "total_ingested": state.total_ingested,
+            "total_rejected": state.total_rejected,
+            "new": state.total_new,
+            "versioned": state.total_versioned,
+            "rejected": state.total_rejected,
+            "skipped_hash": state.total_skipped_hash,
+            "iterations": state.iteration,
+            "total_urls_searched": len(state.url_history),
+            "total_queries": len(state.search_history),
+            "duration_ms": elapsed_ms,
+            "summary": summary,
+            "domain": state.domain,
+            "depth": depth,
+            "resumed_from_pause": True,
+        })
+
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        logger.error("resume_research_failed: session=%s error=%s",
+                     session_id, exc, exc_info=True)
+        await _finalize_session(
+            session_id, "failed", elapsed_ms,
+            error_message=f"Resume failed: {exc}",
+        )
+        yield _sse("error", {
+            "message": f"Resume failed: {exc}",
             "session_id": session_id,
             "topic": topic,
         })
