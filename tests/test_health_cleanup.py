@@ -144,7 +144,9 @@ def _make_reap_db(running_reaped=0, planning_reaped=0):
     db = AsyncMock()
     r3 = MagicMock()
     r3.rowcount = 0
-    db.execute = AsyncMock(side_effect=[r1, r2, r3])
+    r4 = MagicMock()
+    r4.rowcount = 0
+    db.execute = AsyncMock(side_effect=[r1, r2, r3, r4])
     db.commit = AsyncMock()
     return db
 
@@ -157,7 +159,7 @@ class TestReapStaleJobs:
         db = _make_reap_db(running_reaped=0, planning_reaped=0)
         from app.modules.cleanup import reap_stale_jobs
         result = _run(reap_stale_jobs(db))
-        assert result == {"running_to_failed": 0, "planning_to_cancelled": 0, "research_to_failed": 0}
+        assert result == {"running_to_failed": 0, "planning_to_cancelled": 0, "research_to_failed": 0, "paused_to_cancelled": 0}
 
     def test_running_jobs_reaped(self):
         db = _make_reap_db(running_reaped=3, planning_reaped=0)
@@ -193,3 +195,19 @@ class TestReapStaleJobs:
         assert isinstance(result, dict)
         assert "running_to_failed" in result
         assert "planning_to_cancelled" in result
+        assert "paused_to_cancelled" in result
+
+    def test_expired_paused_sessions_reaped(self):
+        """Separate fixture: returns a specific paused_to_cancelled count."""
+        from unittest.mock import AsyncMock, MagicMock
+        r1 = MagicMock(); r1.rowcount = 0
+        r2 = MagicMock(); r2.rowcount = 0
+        r3 = MagicMock(); r3.rowcount = 0
+        r4 = MagicMock(); r4.rowcount = 2
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[r1, r2, r3, r4])
+        db.commit = AsyncMock()
+        from app.modules.cleanup import reap_stale_jobs
+        result = _run(reap_stale_jobs(db))
+        assert result["paused_to_cancelled"] == 2
+        assert result["running_to_failed"] == 0
