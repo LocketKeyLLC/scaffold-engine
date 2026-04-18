@@ -1757,3 +1757,31 @@ only fires when analyzer produces a concrete question AND iterations remain.
 - **New #18**: LLM-gated pause is opt-in per run — no way to force a pause from the user side. Acceptable for now; bidirectional SSE for user-triggered pause is a separate design problem
 - **New #19**: Resume uses the same two seeded gap_queries for every session. A smarter approach would feed the reply through `_decompose_topic()` to produce 3-5 targeted queries. Deferred
 - **New #20**: `state_snapshot.entries_projection` stores `content_hash=""` because `ingest_entries()` computes the hash internally and doesn't propagate back. Cosmetic — URLs and titles are sufficient for resume. Pre-existing from Phase 1
+---
+
+## Changelog — April 17, 2026 (Pausable Research — Phases 4.1a/b/c verified + pipeline test coverage)
+
+### Audit finding — feature already complete
+Spec asked for pause/resume UX wiring in `scaffold_router.py`. Inspection confirmed all three phases were already implemented and live:
+
+- **4.1a — SSE handler** — `awaiting_reply` event rendered at lines 598–610 of `pipelines/scaffold_router.py` as the plain ⏸️ block (header, question, session ID, expiry in minutes, resume hint, abandon hint). `research_resumed` event handled at 611–616.
+- **4.1b — Chat command** — `/research/reply <session_id> <reply>` parsed and validated at lines 288–301; dispatches to `_research_reply_and_stream()` (line 449) which POSTs to `/research/reply` with `{session_id, reply, model_overrides}` via the shared `_research_and_stream_raw()` helper.
+- **4.1c — Help row** — `/research/reply` documented in the help table at line 1377.
+
+Two spec deviations accepted as correct:
+1. Command is `/research/reply`, not `/reply` — keeps research commands namespaced
+2. Uses `session_id`, not `job_id` — matches backend's `ResearchReplyInput` schema and the session lifecycle model from Phase 1
+
+### Test coverage gap filled
+Backend pause/resume covered by `tests/test_research_pause_resume.py` (8 `awaiting_reply` assertions on the orchestrator side). Pipeline renderer had no direct test. Added two behavioral tests to `TestResearchCommand` in `tests/test_scaffold_router.py`:
+
+1. **`test_awaiting_reply_renders_paused_block`** — mocks `requests.post` with an SSE stream carrying `awaiting_reply`, asserts chat output contains: "Research paused" header, question text, session ID, `/research/reply <sid>` resume hint, and expiry rendered as "60 min" (3600s conversion).
+2. **`test_research_reply_posts_to_reply_endpoint`** — captures the POST call from `_research_reply_and_stream()`, asserts URL ends with `/research/reply` (not `/research`), body uses `session_id` + `reply` keys (not `job_id` / `answer`), and `research_resumed` event renders to chat.
+
+### Test results
+- **Pipeline (local):** 51 passed (+2 new), 0 failed
+- **In-container:** unchanged (no orchestrator changes)
+- **Total:** 344 passed, 21 skipped, 0 failed
+
+### Commit
+- `test: pipeline-side awaiting_reply render + /research/reply dispatch (#4.1d)`
