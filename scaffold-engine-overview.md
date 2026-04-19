@@ -1,15 +1,9 @@
 # Scaffold Engine — Project Overview
-**Last Updated:** April 17, 2026 (v0.4.0 — pausable research: LLM-gated clarification + /research/reply resume)
+**Last Updated:** April 18, 2026 (v0.3.1 — retrieval quality scoring)
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Latest Commit:** `a8fc4bb` — `feat(pipeline): /research/reply command + pause-UI rendering (#4.2h)`
-**Test Suite:** 306 passed, 21 skipped, 0 failed in container (+ 49 pipeline local)
+**Latest Commit:** `db9d6cc` — `chore: gitignore retrieval_report.json`
+**Test Suite:** 237 passed, 21 skipped, 0 failed in container (+ 49 pipeline + 18 valve + 3 gt_browser locally = 307 total)
 **Codebase:** ~6,700 lines of application Python across 27 source files + ~1,050 lines in `scaffold_router.py` (pipeline)
-
-
-
-
-**Test Suite:** 210 passed, 20 skipped, 0 failed in container (+ 43 pipeline + 18 valve + 3 gt_browser locally = 274 total)
-**Codebase:** ~6,400 lines of application Python across 26 source files + ~974 lines in `scaffold_router.py` (pipeline)
 
 ---
 
@@ -1785,3 +1779,40 @@ Backend pause/resume covered by `tests/test_research_pause_resume.py` (8 `awaiti
 
 ### Commit
 - `test: pipeline-side awaiting_reply render + /research/reply dispatch (#4.1d)`
+
+---
+
+## Changelog — April 18, 2026 (Retrieval Quality Metrics — #4.6b)
+
+### New: `scripts/score_retrieval.py` (~110 lines)
+1. Loads `tests/fixtures/golden_set.json` (20 query/expected-id pairs), runs each through `query_rag()`, computes per-query `recall@5`, `recall@10`, `mrr`, and `hit` (any expected ID retrieved)
+2. Aggregate summary: `coverage` (% queries with at least one hit), mean `recall@5`, mean `recall@10`, mean `mrr`
+3. Writes full per-query breakdown to `retrieval_report.json`; prints summary + missed queries to stdout
+4. CLI: `--golden <path>` (default `tests/fixtures/golden_set.json`), `--output <path>` (default `retrieval_report.json`)
+
+### Baseline (KB = 501 entries, April 18)
+- Queries: 20, Coverage: **95%**, Mean Recall@5: **0.95**, Mean Recall@10: **0.95**, Mean MRR: **0.86**
+- One miss: `configuring storage quotas and eviction policies` returned `redis-memory-management` instead of the expected `storage-quotas-and-eviction` entry (semantically adjacent)
+- Two low-MRR queries (0.2, 0.5) show generic topological-sort entries outranking specific Kahn targets — reranker or confidence-weighting tweak candidate, deferred
+
+### Tests: `tests/test_score_retrieval.py` (10 tests)
+- `TestRecallAtK` (5) — full, partial, zero, empty-expected, k-truncation
+- `TestMRR` (3) — first/nth position, not found
+- `TestScoreQuery` (2) — hit and miss paths with mocked `query_rag()`
+
+### CI: `.github/workflows/retrieval-quality.yml`
+- Runs on PRs touching `rag_pipeline.py`, `rerankers.py`, scoring script, golden set, or scoring tests
+- `continue-on-error: true` — report-only, never blocks merge
+- Runs unit tests only; live scoring requires Milvus + Ollama (not available on GitHub-hosted runners). Self-hosted runner for live scoring deferred
+
+### Design decisions
+- **Non-blocking from day one** — quality signal, not a merge gate. Lets baseline drift surface in PRs without blocking iteration
+- **Entry-ID exact match** — deterministic and simple. Title-substring matching available in golden set (`expected_titles_contain`) but unused by v1 scorer; can be added as a fallback later
+- **Live scoring stays local/manual** — GitHub Actions runners lack the stack. Run via `docker exec scaffold-orchestrator python /code/scripts/score_retrieval.py` after significant retrieval changes
+
+### Test counts (updated)
+- **In-container:** 237 passed (was 227), 21 skipped, 0 failed
+- **Total:** 307 passed, 21 skipped, 0 failed
+
+### Commit
+- `db86cef` — `feat: retrieval quality scoring (recall@5/@10, MRR, coverage) (#4.6b)`

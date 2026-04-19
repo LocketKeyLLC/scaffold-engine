@@ -7,10 +7,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-SPEC = importlib.util.spec_from_file_location(
-    "scaffold_router",
-    Path(__file__).resolve().parents[1] / "pipelines" / "scaffold_router.py",
-)
+_ROUTER_PATH = Path(__file__).resolve().parents[1] / "pipelines" / "scaffold_router.py"
+if not _ROUTER_PATH.exists():
+    pytest.skip(
+        f"scaffold_router.py not found at {_ROUTER_PATH} — skipping (expected in pipelines/ directory)",
+        allow_module_level=True,
+    )
+
+SPEC = importlib.util.spec_from_file_location("scaffold_router", _ROUTER_PATH)
 sr = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sr)
 

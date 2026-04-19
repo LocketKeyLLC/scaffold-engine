@@ -1,85 +1,73 @@
-"""Scaffold Engine — Autonomous research agent.
+"""Scaffold Engine — autonomous research agent.
 
-/research <topic> decomposes a topic into sub-queries, searches via SearXNG,
-fetches and extracts content, distills facts via LLM, ingests into Milvus,
-then runs gap analysis and iterates until coverage converges.
+Dispatches a research topic to one of five modes based on prefix:
+- openapi:<url>      — OpenAPI/Swagger spec ingestion
+- github:owner/repo  — GitHub repo docs + docstring ingestion
+- http(s)://...      — single-URL direct ingestion
+- (any other string) — topic mode: SearXNG-driven decompose/search/distill loop
 
-Architecture: planner-executor loop with fan-out search / fan-in extraction.
-Two-tier model strategy: model_verifier (7b) for decomposition/extraction,
-model_general (heavy) reserved for final synthesis only.
+PDF uploads go through run_research_pdf() (called from /research/pdf endpoint).
+
+Topic-mode architecture: planner-executor loop with fan-out search / fan-in
+extraction. Two-tier model strategy: model_verifier (7b) for decomposition/
+extraction/summary; model_general (235b) is avoided in research loops
+because of CPU-only serving constraints.
+
+Pause/resume: topic-mode may pause on LLM-initiated clarifying question
+(status='paused_awaiting_reply'). resume_research() re-enters the loop with
+the user's reply injected as gap_focus into a fresh _decompose_topic() call.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import AsyncGenerator
+from urllib.parse import urlparse
+from urllib.robotparser import RobotFileParser
+
+import httpx
+import pdfplumber
+import trafilatura
+from pypdf import PdfReader
+from sqlalchemy import text
 
 from app import model_router
 from app.config import settings, get_model
-from app.modules.rag_pipeline import ingest_entries, _embed_query
-from urllib.parse import urlparse
-
-from app.utils.llm_parsing import parse_json_object, parse_json_array
 from app.database import async_session
-from sqlalchemy import text
-from app.modules.gt_extractor import _detect_topic_id
+from app.modules.rag_pipeline import ingest_entries
+from app.utils.llm_parsing import parse_json_array, parse_json_object
+from app.utils.topic_detection import detect_topic_id
 
 logger = logging.getLogger("scaffold.research")
 
 
-# ---------------------------------------------------------------------------
-# Domain auto-detection (reuses gt_extractor topic classifier)
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Module constants
+# =============================================================================
 
-TOPIC_TO_DOMAIN: dict[int, str] = {
-    1: "llm",
-    2: "rag",
-    3: "eng",
-    4: "eng",
-    5: "eng",
-    6: "eng",
+HEARTBEAT_INTERVAL_SECONDS = settings.research_heartbeat_interval
+SEARXNG_CACHE_TTL_SECONDS = 3600
+
+DOMAIN_SCORES: dict[str, float] = {
+    "arxiv.org": 0.95, "ieee.org": 0.95, "acm.org": 0.95,
+    "docs.python.org": 0.90, "docs.microsoft.com": 0.90,
+    "learn.microsoft.com": 0.90, "developer.mozilla.org": 0.90,
+    "kubernetes.io": 0.90, "docs.docker.com": 0.90,
+    "pytorch.org": 0.90, "huggingface.co": 0.90,
+    "github.com": 0.80, "stackoverflow.com": 0.80,
+    "wiki.archlinux.org": 0.80,
+    "medium.com": 0.60, "dev.to": 0.60, "towardsdatascience.com": 0.60,
+    "reddit.com": 0.50,
 }
-
-
-def _detect_domain(topic: str) -> str:
-    """Map a research topic to a Milvus partition domain via keyword scoring."""
-    topic_id = _detect_topic_id(topic)
-    return TOPIC_TO_DOMAIN.get(topic_id, "eng")
-
-
-# ---------------------------------------------------------------------------
-# SearXNG category -> engine routing
-# ---------------------------------------------------------------------------
-# SearXNG result cache (Redis, 1h TTL)
-_SEARXNG_CACHE_TTL = 3600
-
-def _searxng_cache_key(query: str) -> str:
-    h = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
-    return f"searxng:{h}"
-
-async def _searxng_cache_get(query: str):
-    try:
-        from app.utils.embedding_cache import get_cache
-        r = await get_cache()._get_redis()
-        raw = await r.get(_searxng_cache_key(query))
-        if raw:
-            return json.loads(raw)
-    except Exception as e:
-        logger.debug("searxng_cache_get_failed: query=%s error=%s", query, e)
-    return None
-
-async def _searxng_cache_set(query: str, results) -> None:
-    try:
-        from app.utils.embedding_cache import get_cache
-        r = await get_cache()._get_redis()
-        await r.setex(_searxng_cache_key(query), _SEARXNG_CACHE_TTL, json.dumps(results))
-    except Exception as e:
-        logger.debug("searxng_cache_set_failed: query=%s error=%s", query, e)
+DEFAULT_SOURCE_SCORE = 0.50
 
 CATEGORY_ENGINES: dict[str, str] = {
     "it": "github,stackoverflow,pypi,google",
@@ -88,42 +76,16 @@ CATEGORY_ENGINES: dict[str, str] = {
     "general": "google,bing,duckduckgo,brave",
 }
 
-
-def _engines_for_category(category: str) -> str:
-    """Return a comma-separated engine string for a SearXNG search category."""
-    return CATEGORY_ENGINES.get(category, "google,bing,duckduckgo")
+_EXTRACT_BATCH_FULL_PAGE = 5
+_EXTRACT_BATCH_SNIPPET = 10
 
 
-# ---------------------------------------------------------------------------
-# Source reliability scoring
-# ---------------------------------------------------------------------------
-
-DOMAIN_SCORES: dict[str, float] = {
-    "arxiv.org": 0.95,
-    "ieee.org": 0.95,
-    "acm.org": 0.95,
-    "docs.python.org": 0.90,
-    "docs.microsoft.com": 0.90,
-    "learn.microsoft.com": 0.90,
-    "developer.mozilla.org": 0.90,
-    "kubernetes.io": 0.90,
-    "docs.docker.com": 0.90,
-    "pytorch.org": 0.90,
-    "huggingface.co": 0.90,
-    "github.com": 0.80,
-    "stackoverflow.com": 0.80,
-    "wiki.archlinux.org": 0.80,
-    "medium.com": 0.60,
-    "dev.to": 0.60,
-    "towardsdatascience.com": 0.60,
-    "reddit.com": 0.50,
-}
-
-DEFAULT_SOURCE_SCORE: float = 0.50
-
+# =============================================================================
+# Helpers: source scoring, domain detection, confidence resolution
+# =============================================================================
 
 def _score_source(url: str) -> float:
-    """Return a reliability score for a URL based on its domain."""
+    """Reliability score (0.0–1.0) based on URL domain."""
     try:
         hostname = urlparse(url).hostname or ""
     except Exception:
@@ -135,9 +97,31 @@ def _score_source(url: str) -> float:
     return DEFAULT_SOURCE_SCORE
 
 
-# ---------------------------------------------------------------------------
-# State container
-# ---------------------------------------------------------------------------
+def _detect_domain(topic: str) -> str:
+    """Map research topic to Milvus partition domain via keyword scoring."""
+    topic_id = detect_topic_id(topic)
+    return settings.topic_to_domain.get(topic_id, settings.default_domain)
+
+
+def _resolve_confidence(entry_value, source_url: str) -> float:
+    """Prefer LLM-provided confidence if valid [0.0, 1.0]; fall back to URL heuristic.
+
+    Logs a warning when the LLM value is out of range.
+    """
+    if isinstance(entry_value, (int, float)):
+        v = float(entry_value)
+        if 0.0 <= v <= 1.0:
+            return v
+        logger.warning(
+            "confidence_out_of_range: got=%s url=%s falling_back_to_url_score",
+            entry_value, source_url,
+        )
+    return _score_source(source_url)
+
+
+# =============================================================================
+# ResearchState
+# =============================================================================
 
 @dataclass
 class ResearchState:
@@ -145,6 +129,7 @@ class ResearchState:
     depth: str = "medium"
     domain: str = "eng"
     iteration: int = 0
+    paused: bool = False
     search_history: set = field(default_factory=set)
     url_history: set = field(default_factory=set)
     all_entries: list = field(default_factory=list)
@@ -162,20 +147,33 @@ class ResearchState:
         return {"shallow": 1, "medium": 2, "deep": 4}.get(self.depth, 2)
 
 
-# ---------------------------------------------------------------------------
-# SSE helper
-# ---------------------------------------------------------------------------
+# =============================================================================
+# SSE + heartbeat
+# =============================================================================
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
-# ---------------------------------------------------------------------------
-# Session tracking helpers
-# ---------------------------------------------------------------------------
+async def _await_with_heartbeat(
+    task: asyncio.Task,
+    heartbeat_payload: dict,
+    interval: int | None = None,
+) -> AsyncGenerator[str, None]:
+    """Yield heartbeat SSE while `task` is running. Caller reads task.result() after."""
+    ivl = interval or HEARTBEAT_INTERVAL_SECONDS
+    while not task.done():
+        await asyncio.sleep(ivl)
+        if not task.done():
+            yield _sse("heartbeat", heartbeat_payload)
+
+
+# =============================================================================
+# Session tracking
+# =============================================================================
 
 async def _guard_concurrent() -> dict | None:
-    """Check for running research sessions. Returns existing row dict or None."""
+    """Return existing running-session dict or None."""
     async with async_session() as db:
         row = await db.execute(
             text("SELECT id, topic FROM research_sessions WHERE status = 'running' LIMIT 1")
@@ -185,7 +183,6 @@ async def _guard_concurrent() -> dict | None:
 
 
 async def _create_session(topic: str, depth: str, domain: str) -> str:
-    """Insert a new research_sessions row. Returns session UUID as string."""
     async with async_session() as db:
         result = await db.execute(
             text("""
@@ -200,18 +197,18 @@ async def _create_session(topic: str, depth: str, domain: str) -> str:
         return session_id
 
 
-def _build_snapshot(state: "ResearchState") -> dict:
-    """JSON-safe snapshot of ResearchState for persistence.
-
-    Sets -> sorted lists. Entries projected to title + content_hash only
-    (full content lives in Milvus).
-    """
+def _build_snapshot(state: ResearchState) -> dict:
+    """JSON-safe snapshot of ResearchState for persistence."""
     return {
         "iteration": state.iteration,
         "search_history": sorted(state.search_history),
         "url_history": sorted(state.url_history),
         "entries_projection": [
-            {"title": e.get("title", ""), "content_hash": e.get("content_hash", "")}
+            {
+                "title": e.get("title", ""),
+                "content_hash": e.get("content_hash")
+                    or hashlib.sha256((e.get("content") or "").encode("utf-8")).hexdigest()[:16],
+            }
             for e in state.all_entries
         ],
         "outline_facets": state.outline_facets,
@@ -229,10 +226,9 @@ def _build_snapshot(state: "ResearchState") -> dict:
 
 async def _update_session_iteration(
     session_id: str,
-    state: "ResearchState",
+    state: ResearchState,
     coverage: float | None = None,
 ) -> None:
-    """Update session counters + snapshot after an iteration."""
     snapshot = _build_snapshot(state)
     async with async_session() as db:
         await db.execute(
@@ -264,47 +260,12 @@ async def _update_session_iteration(
         await db.commit()
 
 
-async def _persist_session_stats(
-    session_id,
-    entries_extracted: int,
-    entries_ingested: int,
-    entries_rejected: int,
-    urls_searched: int,
-    iterations: int,
-) -> None:
-    """Write final counts to research_sessions for the short-circuit modes."""
-    from app.database import async_session
-    from sqlalchemy import text
-    async with async_session() as db:
-        await db.execute(
-            text("""
-                UPDATE research_sessions
-                SET total_entries_extracted = :ext,
-                    total_entries_ingested = :ing,
-                    total_entries_rejected = :rej,
-                    total_urls_searched = :urls,
-                    iterations_completed = :iters
-                WHERE id = :sid
-            """),
-            {
-                "ext": entries_extracted,
-                "ing": entries_ingested,
-                "rej": entries_rejected,
-                "urls": urls_searched,
-                "iters": iterations,
-                "sid": session_id,
-            },
-        )
-        await db.commit()
-
-
 async def _pause_session(
     session_id: str,
-    state: "ResearchState",
+    state: ResearchState,
     question: str,
     ttl_seconds: int = 3600,
 ) -> None:
-    """Mark session paused_awaiting_reply with snapshot + question + expiry."""
     snapshot = _build_snapshot(state)
     async with async_session() as db:
         await db.execute(
@@ -328,7 +289,6 @@ async def _pause_session(
 
 
 async def _load_session_for_resume(session_id: str) -> dict | None:
-    """Fetch a paused session row. Returns None if missing or not resumable."""
     async with async_session() as db:
         row = await db.execute(
             text("""
@@ -343,13 +303,25 @@ async def _load_session_for_resume(session_id: str) -> dict | None:
         return dict(r) if r else None
 
 
-def _rehydrate_state(row: dict) -> "ResearchState":
-    """Reconstruct ResearchState from a persisted snapshot.
+async def _atomic_claim_for_resume(session_id: str, reply: str) -> bool:
+    """Atomic paused_awaiting_reply → running. Returns True if this caller won the race."""
+    async with async_session() as db:
+        result = await db.execute(
+            text("""
+                UPDATE research_sessions
+                SET status = 'running',
+                    pause_reply = :reply,
+                    updated_at = NOW()
+                WHERE id = :sid
+                  AND status = 'paused_awaiting_reply'
+            """),
+            {"sid": session_id, "reply": reply},
+        )
+        await db.commit()
+        return result.rowcount == 1
 
-    Note: all_entries are projected (title + content_hash only); full content
-    lives in Milvus. Gap-analysis and summary on resume work off the projection,
-    which is degraded but non-breaking.
-    """
+
+def _rehydrate_state(row: dict) -> ResearchState:
     snap = row.get("state_snapshot") or {}
     if isinstance(snap, str):
         snap = json.loads(snap) if snap else {}
@@ -382,11 +354,6 @@ async def _finalize_session(
     summary: str | None = None,
     error_message: str | None = None,
 ) -> None:
-    """Mark session completed or failed.
-
-    error_message is optional; None preserves prior value via COALESCE,
-    so existing failure-path callers don't need to be touched.
-    """
     async with async_session() as db:
         await db.execute(
             text("""
@@ -410,11 +377,358 @@ async def _finalize_session(
         await db.commit()
 
 
-# ---------------------------------------------------------------------------
-# Step 1: Topic decomposition
-# ---------------------------------------------------------------------------
+# =============================================================================
+# URL / GitHub / OpenAPI parsing + fetching
+# =============================================================================
 
-DECOMPOSE_SYSTEM = """You are a research planner. Decompose the given topic into
+def _is_url(s: str) -> bool:
+    try:
+        p = urlparse(s.strip())
+        return p.scheme in ("http", "https") and bool(p.netloc)
+    except Exception:
+        return False
+
+
+def _is_github_ref(s: str) -> bool:
+    if not s.startswith("github:"):
+        return False
+    rest = s[len("github:"):].strip()
+    parts = rest.split("/")
+    return len(parts) == 2 and all(parts) and "." not in parts[0]
+
+
+def _parse_github_ref(s: str) -> tuple[str, str]:
+    """Parse `github:owner/repo`. Raises ValueError on malformed input."""
+    if not _is_github_ref(s):
+        raise ValueError(f"Malformed GitHub ref: {s!r} (expected 'github:owner/repo')")
+    owner, repo = s[len("github:"):].strip().split("/", 1)
+    owner, repo = owner.strip(), repo.strip()
+    if not owner or not repo:
+        raise ValueError(f"Malformed GitHub ref: {s!r} (empty owner or repo)")
+    return owner, repo
+
+
+def _is_openapi_ref(s: str) -> bool:
+    if not s.startswith("openapi:"):
+        return False
+    rest = s[len("openapi:"):].strip()
+    return rest.startswith("http://") or rest.startswith("https://")
+
+
+def _parse_openapi_ref(s: str) -> str:
+    if not _is_openapi_ref(s):
+        raise ValueError(f"Malformed OpenAPI ref: {s!r}")
+    return s[len("openapi:"):].strip()
+
+
+async def _robots_allowed(url: str, user_agent: str = "ScaffoldEngine/1.0") -> bool:
+    """Fail-open robots.txt check."""
+    try:
+        p = urlparse(url)
+        robots_url = f"{p.scheme}://{p.netloc}/robots.txt"
+        async with httpx.AsyncClient(
+            timeout=settings.research_fetch_timeout, follow_redirects=True,
+        ) as c:
+            r = await c.get(robots_url)
+            if r.status_code >= 400:
+                return True
+            rp = RobotFileParser()
+            rp.parse(r.text.splitlines())
+            return rp.can_fetch(user_agent, url)
+    except Exception as e:
+        logger.debug("robots_check_failed: url=%s error=%s", url, e)
+        return True
+
+
+async def _fetch_url_bounded(url: str, max_bytes: int | None = None) -> str | None:
+    """Stream-fetch with hard byte cap. Returns text or None on failure/cap."""
+    cap = max_bytes or settings.research_max_url_bytes
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.research_url_fetch_timeout, follow_redirects=True,
+        ) as c:
+            async with c.stream(
+                "GET", url, headers={"User-Agent": "ScaffoldEngine/1.0"},
+            ) as resp:
+                if resp.status_code != 200:
+                    logger.warning("url_fetch_status: url=%s status=%d", url, resp.status_code)
+                    return None
+                cl = resp.headers.get("content-length")
+                if cl and cl.isdigit() and int(cl) > cap:
+                    logger.warning("url_fetch_content_length_exceeded: url=%s bytes=%s", url, cl)
+                    return None
+                buf = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    buf.extend(chunk)
+                    if len(buf) > cap:
+                        logger.warning("url_fetch_cap_exceeded: url=%s bytes=%d", url, len(buf))
+                        return None
+                enc = resp.encoding or "utf-8"
+                try:
+                    return bytes(buf).decode(enc, errors="replace")
+                except LookupError:
+                    return bytes(buf).decode("utf-8", errors="replace")
+    except Exception as e:
+        logger.warning("url_fetch_failed: url=%s error=%s", url, e)
+        return None
+
+
+async def _extract_page_title(html: str, url: str) -> str:
+    """trafilatura metadata → <title> regex → URL. Always returns a string."""
+    try:
+        meta = await asyncio.to_thread(trafilatura.extract_metadata, html)
+        if meta:
+            title = getattr(meta, "title", None)
+            if title:
+                return str(title).strip()[:200]
+    except Exception as e:
+        logger.debug("trafilatura_metadata_failed: url=%s error=%s", url, e)
+
+    match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    if match:
+        title = re.sub(r"\s+", " ", match.group(1)).strip()
+        if title:
+            return title[:200]
+
+    return url[:200]
+
+
+# =============================================================================
+# Chunking
+# =============================================================================
+
+def _chunk_text(text_in: str, max_tokens: int = 1500, overlap_tokens: int = 200) -> list[str]:
+    """Paragraph-aware chunking (~4 chars/token). Oversized paragraphs hard-split.
+
+    Guarantees no chunk exceeds max_chars.
+    """
+    max_chars = max_tokens * 4
+    overlap_chars = overlap_tokens * 4
+
+    if len(text_in) <= max_chars:
+        return [text_in]
+
+    # Pre-split oversized paragraphs
+    paragraphs: list[str] = []
+    for p in text_in.split("\n\n"):
+        if len(p) <= max_chars:
+            paragraphs.append(p)
+            continue
+        pieces = re.split(r"(?<=[.!?])\s+", p)
+        buf = ""
+        for piece in pieces:
+            if len(piece) > max_chars:
+                for i in range(0, len(piece), max_chars):
+                    paragraphs.append(piece[i:i + max_chars])
+                continue
+            if len(buf) + len(piece) + 1 <= max_chars:
+                buf = f"{buf} {piece}" if buf else piece
+            else:
+                if buf:
+                    paragraphs.append(buf)
+                buf = piece
+        if buf:
+            paragraphs.append(buf)
+
+    chunks: list[str] = []
+    current = ""
+    for p in paragraphs:
+        if len(current) + len(p) + 2 <= max_chars:
+            current = f"{current}\n\n{p}" if current else p
+        else:
+            if current:
+                chunks.append(current)
+            if chunks and overlap_chars > 0:
+                tail = chunks[-1][-overlap_chars:]
+                current = f"{tail}\n\n{p}"
+            else:
+                current = p
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+# =============================================================================
+# SearXNG cache + engine routing
+# =============================================================================
+
+def _searxng_cache_key(query: str) -> str:
+    h = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
+    return f"searxng:{h}"
+
+
+async def _searxng_cache_get(query: str):
+    try:
+        from app.utils.embedding_cache import get_cache
+        r = await get_cache()._get_redis()
+        raw = await r.get(_searxng_cache_key(query))
+        if raw:
+            return json.loads(raw)
+    except Exception as e:
+        logger.debug("searxng_cache_get_failed: query=%s error=%s", query, e)
+    return None
+
+
+async def _searxng_cache_set(query: str, results) -> None:
+    try:
+        from app.utils.embedding_cache import get_cache
+        r = await get_cache()._get_redis()
+        await r.setex(_searxng_cache_key(query), SEARXNG_CACHE_TTL_SECONDS, json.dumps(results))
+    except Exception as e:
+        logger.debug("searxng_cache_set_failed: query=%s error=%s", query, e)
+
+
+def _engines_for_category(category: str) -> str:
+    return CATEGORY_ENGINES.get(category, "google,bing,duckduckgo")
+
+
+# =============================================================================
+# PDF extraction
+# =============================================================================
+
+def _extract_pypdf(pdf_bytes: bytes) -> tuple[str, int]:
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    pages = len(reader.pages)
+    parts = []
+    for page in reader.pages:
+        try:
+            t = page.extract_text() or ""
+            if t.strip():
+                parts.append(t)
+        except Exception as e:
+            logger.debug("pypdf_page_fail: error=%s", e)
+    return ("\n\n".join(parts), pages)
+
+
+def _extract_pdfplumber(pdf_bytes: bytes) -> tuple[str, int]:
+    parts = []
+    pages = 0
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        pages = len(pdf.pages)
+        for page in pdf.pages:
+            try:
+                t = page.extract_text() or ""
+                if t.strip():
+                    parts.append(t)
+            except Exception as e:
+                logger.debug("pdfplumber_page_fail: error=%s", e)
+    return ("\n\n".join(parts), pages)
+
+
+def _extract_threshold(page_count: int) -> int:
+    return max(200, page_count * 50)
+
+
+async def _extract_pdf_text(
+    pdf_bytes: bytes,
+    extractor: str = "auto",
+) -> tuple[str, int, str, bool]:
+    """Extract text. Returns (text, page_count, extractor_used, fell_back)."""
+    extractor = (extractor or "auto").lower()
+    if extractor not in ("auto", "pypdf", "plumber"):
+        extractor = "auto"
+
+    if extractor == "pypdf":
+        text_out, pages = await asyncio.to_thread(_extract_pypdf, pdf_bytes)
+        return (text_out, pages, "pypdf", False)
+
+    if extractor == "plumber":
+        text_out, pages = await asyncio.to_thread(_extract_pdfplumber, pdf_bytes)
+        return (text_out, pages, "plumber", False)
+
+    text_out, pages = await asyncio.to_thread(_extract_pypdf, pdf_bytes)
+    if len(text_out) >= _extract_threshold(pages):
+        return (text_out, pages, "pypdf", False)
+
+    logger.info(
+        "pdf_extract_fallback: pypdf_chars=%d pages=%d threshold=%d",
+        len(text_out), pages, _extract_threshold(pages),
+    )
+    plumber_text, _ = await asyncio.to_thread(_extract_pdfplumber, pdf_bytes)
+    if len(plumber_text) >= _extract_threshold(pages):
+        return (plumber_text, pages, "plumber", True)
+
+    raise RuntimeError(
+        f"PDF appears to be scanned or unreadable: "
+        f"pypdf={len(text_out)} chars, plumber={len(plumber_text)} chars, pages={pages}"
+    )
+
+
+# =============================================================================
+# Contradiction check (sync — no await needed)
+# =============================================================================
+
+def _check_contradictions(entries: list[dict]) -> list[dict]:
+    """Flag entry pairs whose titles share ≥2 words. Capped at 5."""
+    contradictions: list[dict] = []
+    for i, e1 in enumerate(entries):
+        for e2 in entries[i + 1:]:
+            t1 = e1.get("title", "")
+            t2 = e2.get("title", "")
+            if not t1 or not t2:
+                continue
+            shared = set(t1.lower().split()) & set(t2.lower().split())
+            if len(shared) < 2:
+                continue
+            contradictions.append({
+                "entry_a": t1,
+                "entry_b": t2,
+                "shared_concepts": sorted(shared),
+            })
+            if len(contradictions) >= 5:
+                return contradictions[:5]
+    return contradictions[:5]
+
+
+# =============================================================================
+# Web fetch + extract
+# =============================================================================
+
+async def _fetch_and_extract(results: list[dict]) -> list[dict]:
+    """Fetch URLs concurrently, extract clean text via trafilatura.
+
+    Returns [{"url", "content"}] for pages with ≥100 chars extracted.
+    """
+    if not results:
+        return []
+
+    sem = asyncio.Semaphore(settings.research_fetch_concurrency)
+    urls = [r["url"] for r in results if r.get("url")]
+
+    async with httpx.AsyncClient(
+        timeout=settings.research_fetch_timeout, follow_redirects=True,
+    ) as client:
+        async def _fetch_one(url: str) -> dict | None:
+            async with sem:
+                try:
+                    resp = await client.get(url)
+                    if resp.status_code != 200 or not resp.text:
+                        return None
+                    text_out = await asyncio.to_thread(
+                        trafilatura.extract,
+                        resp.text,
+                        output_format="txt",
+                        with_metadata=False,
+                    )
+                    if not text_out or len(text_out) < 100:
+                        return None
+                    return {"url": url, "content": text_out}
+                except Exception as e:
+                    logger.debug("trafilatura_fetch_failed: url=%s error=%s", url, e)
+                    return None
+
+        fetched = await asyncio.gather(*[_fetch_one(u) for u in urls])
+
+    return [f for f in fetched if f is not None]
+
+
+# =============================================================================
+# Prompts (V1 — bump suffix on prompt-level changes)
+# =============================================================================
+
+DECOMPOSE_SYSTEM_V1 = """You are a research planner. Decompose the given topic into
 keyword-based search engine queries (3-8 words each, NOT natural language questions).
 
 Rules:
@@ -438,18 +752,6 @@ EXAMPLE 1 — Topic: "Redis caching strategies"
   ]
 }
 
-EXAMPLE 2 — Topic: "WebAssembly serverless edge computing"
-{
-  "topic_complexity": "complex",
-  "facets": ["wasm runtimes", "cold start performance", "edge platforms", "language support"],
-  "queries": [
-    {"query": "WebAssembly runtime wasmtime wasmer comparison", "facet": "wasm runtimes", "search_category": "it"},
-    {"query": "WASM serverless cold start latency benchmarks", "facet": "cold start performance", "search_category": "it"},
-    {"query": "Cloudflare Workers Fastly edge WASM deployment", "facet": "edge platforms", "search_category": "it"},
-    {"query": "WebAssembly Rust Go language compile support", "facet": "language support", "search_category": "it"}
-  ]
-}
-
 OUTPUT FORMAT (strict JSON, no markdown fences):
 {
   "topic_complexity": "simple|medium|complex",
@@ -459,6 +761,71 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
   ]
 }"""
 
+EXTRACT_SYSTEM_V1 = """You are a knowledge extraction engine. Given search results about a topic,
+extract atomic, self-contained factual entries.
+
+Rules:
+- Each entry is ONE fact that can be understood without surrounding context
+- Be specific: include numbers, names, versions, dates where applicable
+- Assign confidence: 1.0 = verified fact, 0.7 = secondary source, 0.4 = opinion/speculation
+- Discard noise, opinions, marketing language
+- 5-15 entries per batch
+- Content must NOT contain escaped quotes or backslashes
+
+OUTPUT FORMAT (strict JSON array, no markdown fences):
+[
+  {
+    "title": "Short descriptive title",
+    "content": "Self-contained factual statement. Technically precise.",
+    "tags": "comma,separated,tags",
+    "source": "URL",
+    "confidence_score": 0.85,
+    "source_type": "tech_docs|news|community|official_docs|curated",
+    "facet": "which facet of the topic this covers"
+  }
+]"""
+
+EXTRACT_PROMPT_V1 = """Extract factual knowledge entries from these search results about: {topic}
+
+Search results:
+---
+{results}
+---
+
+Return ONLY the JSON array."""
+
+GAP_SYSTEM_V1 = """You are a research coverage analyst. Given a topic, its facets, and
+the knowledge entries collected so far, identify what's missing.
+
+You may OPTIONALLY request user clarification if — and only if — a specific
+ambiguity in the topic is actively blocking good coverage AND a one-sentence
+answer from the user would materially change which queries to run next.
+Do NOT pause for generic "would you like more detail" questions. Default to
+no pause; only set needs_clarification=true when you have a concrete question.
+
+OUTPUT FORMAT (strict JSON, no markdown fences):
+{
+  "coverage_pct": 75,
+  "covered_facets": ["facet1", "facet2"],
+  "gap_facets": ["facet3"],
+  "gap_queries": [
+    {"query": "keyword search terms", "facet": "gap_facet", "priority": "high", "search_category": "general"}
+  ],
+  "assessment": "One paragraph on what's well covered and what's missing",
+  "needs_clarification": false,
+  "clarifying_question": ""
+}"""
+
+SUMMARY_SYSTEM_V1 = """You are a research summarizer. Given collected knowledge entries,
+produce a concise summary organized by facet/theme.
+
+Write in clear prose paragraphs. Include key facts, numbers, and specifics.
+Keep it under 500 words. No markdown headers — just flowing text with topic transitions."""
+
+
+# =============================================================================
+# Decomposition, search, extraction, gap analysis, summary
+# =============================================================================
 
 async def _decompose_topic(
     topic: str,
@@ -466,7 +833,7 @@ async def _decompose_topic(
     existing_facets: list | None = None,
     gap_focus: str | None = None,
 ) -> dict:
-    """Decompose topic into search queries. Returns parsed dict or fallback."""
+    """Decompose topic into queries. Retries once on <2 facets; falls back."""
     prompt = f"Decompose this research topic into search queries:\n\nTOPIC: {topic}"
     if existing_facets:
         prompt += f"\n\nAlready covered facets (do NOT repeat): {', '.join(existing_facets)}"
@@ -474,11 +841,8 @@ async def _decompose_topic(
         prompt += f"\n\nFocus specifically on these gaps: {gap_focus}"
 
     resp = await model_router.generate(
-        prompt,
-        model=model,
-        system=DECOMPOSE_SYSTEM,
-        temperature=0.4,
-        max_tokens=2048,
+        prompt, model=model, system=DECOMPOSE_SYSTEM_V1,
+        temperature=0.4, max_tokens=2048,
     )
 
     if resp.success:
@@ -487,8 +851,7 @@ async def _decompose_topic(
             facets = parsed.get("facets", [])
             if len(facets) >= 2:
                 return parsed
-            # Retry once — model produced too few facets
-            logger.info("decomposition_retry: got %d facets, retrying with explicit instruction", len(facets))
+            logger.info("decomposition_retry: got %d facets, retrying", len(facets))
             retry_prompt = (
                 f"Decompose this research topic into search queries:\n\n"
                 f"TOPIC: {topic}\n\n"
@@ -497,19 +860,14 @@ async def _decompose_topic(
                 f"Each facet must cover a DIFFERENT aspect of the topic."
             )
             retry_resp = await model_router.generate(
-                retry_prompt,
-                model=model,
-                system=DECOMPOSE_SYSTEM,
-                temperature=0.5,
-                max_tokens=2048,
+                retry_prompt, model=model, system=DECOMPOSE_SYSTEM_V1,
+                temperature=0.5, max_tokens=2048,
             )
             if retry_resp.success:
                 retry_parsed = parse_json_object(retry_resp.text)
                 if retry_parsed and "queries" in retry_parsed:
                     return retry_parsed
-            # If retry also fails, fall through to fallback below
 
-    # Fallback: generate basic queries
     return {
         "topic_complexity": "medium",
         "facets": [topic],
@@ -522,25 +880,22 @@ async def _decompose_topic(
     }
 
 
-# ---------------------------------------------------------------------------
-# Step 2: SearXNG search + fetch
-# ---------------------------------------------------------------------------
-
 async def _search_queries(
     queries: list[dict],
     state: ResearchState,
 ) -> list[dict]:
-    """Run SearXNG searches for each query. Returns list of result dicts."""
+    """Run SearXNG searches with URL + case-insensitive query dedup."""
     from app.utils.http_clients import get_searxng_client
 
     all_results = []
     client = get_searxng_client()
 
     for q in queries[:settings.research_max_queries]:
-        query_text = q["query"]
-        if query_text in state.search_history:
+        query_text = (q["query"] or "").strip()
+        query_key = query_text.lower()
+        if not query_key or query_key in state.search_history:
             continue
-        # Check Redis cache first
+
         cached = await _searxng_cache_get(query_text)
         if cached is not None:
             logger.info("searxng_cache_hit: query=%s results=%d", query_text, len(cached))
@@ -554,8 +909,9 @@ async def _search_queries(
                         "content": r.get("content", ""),
                         "facet": q.get("facet", ""),
                     })
-            state.search_history.add(query_text)
+            state.search_history.add(query_key)
             continue
+
         try:
             resp = await client.get(
                 "/search",
@@ -580,7 +936,7 @@ async def _search_queries(
                             "content": r.get("content", ""),
                             "facet": q.get("facet", ""),
                         })
-            state.search_history.add(query_text)
+            state.search_history.add(query_key)
         except Exception as e:
             logger.warning("research_search_failed: query='%s' error=%s", query_text, e)
 
@@ -589,230 +945,91 @@ async def _search_queries(
     return all_results[:settings.research_max_urls_per_iteration]
 
 
-# ---------------------------------------------------------------------------
-# Step 3: LLM distillation
-# ---------------------------------------------------------------------------
-
-EXTRACT_SYSTEM = """You are a knowledge extraction engine. Given search results about a topic,
-extract atomic, self-contained factual entries.
-
-Rules:
-- Each entry is ONE fact that can be understood without surrounding context
-- Be specific: include numbers, names, versions, dates where applicable
-- Assign confidence: 1.0 = verified fact, 0.7 = secondary source, 0.4 = opinion/speculation
-- Discard noise, opinions, marketing language
-- 5-15 entries per batch
-- Content must NOT contain escaped quotes or backslashes
-
-OUTPUT FORMAT (strict JSON array, no markdown fences):
-[
-  {
-    "title": "Short descriptive title",
-    "content": "Self-contained factual statement. Technically precise.",
-    "tags": "comma,separated,tags",
-    "source": "URL",
-    "confidence_score": 0.85,
-    "source_type": "tech_docs|news|community|official_docs|curated",
-    "facet": "which facet of the topic this covers"
-  }
-]"""
-
-EXTRACT_PROMPT = """Extract factual knowledge entries from these search results about: {topic}
-
-Search results:
----
-{results}
----
-
-Return ONLY the JSON array."""
-
-
-# ---------------------------------------------------------------------------
-# Step 2.5: Full-page fetch + extraction via trafilatura
-# ---------------------------------------------------------------------------
-
-async def _fetch_and_extract(results: list[dict]) -> list[dict]:
-    """Fetch URLs concurrently, extract clean text via trafilatura.
-
-    Returns [{"url", "content"}] for pages where extracted text >= 100 chars.
-    trafilatura.extract is synchronous/CPU-bound, so runs in a thread executor.
-    One short-lived httpx.AsyncClient is reused across all URLs in the batch.
-    """
-    if not results:
-        return []
-
-    import httpx
-    import trafilatura
-
-    sem = asyncio.Semaphore(5)
-    urls = [r["url"] for r in results if r.get("url")]
-
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-        async def _fetch_one(url: str) -> dict | None:
-            async with sem:
-                try:
-                    resp = await client.get(url)
-                    if resp.status_code != 200 or not resp.text:
-                        return None
-                    text = await asyncio.to_thread(
-                        trafilatura.extract,
-                        resp.text,
-                        output_format="txt",
-                        with_metadata=False,
-                    )
-                    if not text or len(text) < 100:
-                        return None
-                    return {"url": url, "content": text}
-                except Exception as e:
-                    logger.debug("trafilatura_fetch_failed: url=%s error=%s", url, e)
-                    return None
-
-        fetched = await asyncio.gather(*[_fetch_one(u) for u in urls])
-
-    return [f for f in fetched if f is not None]
-
-
-def _chunk_text(text: str, max_tokens: int = 1500, overlap_tokens: int = 200) -> list[str]:
-    """Split text at paragraph boundaries, ~4 chars/token estimate, with overlap."""
-    max_chars = max_tokens * 4
-    overlap_chars = overlap_tokens * 4
-
-    if len(text) <= max_chars:
-        return [text]
-
-    paragraphs = text.split("\n\n")
-    chunks: list[str] = []
-    current = ""
-
-    for p in paragraphs:
-        if len(current) + len(p) + 2 <= max_chars:
-            current = f"{current}\n\n{p}" if current else p
-        else:
-            if current:
-                chunks.append(current)
-            if chunks and overlap_chars > 0:
-                tail = chunks[-1][-overlap_chars:]
-                current = f"{tail}\n\n{p}"
-            else:
-                current = p
-
-    if current:
-        chunks.append(current)
-
-    return chunks
-
-
-async def _check_contradictions(entries: list[dict]) -> list[dict]:
-    """Scan entry pairs for potential conflicts via title word overlap.
-
-    Heuristic: two entries whose titles share 2+ words (lowercased, whitespace-split)
-    are flagged as candidates. Informational only — caller decides what to do.
-    Capped at 5 pairs to avoid O(n^2) blowup on large batches.
-    """
-    contradictions: list[dict] = []
-    for i, e1 in enumerate(entries):
-        for e2 in entries[i + 1:]:
-            t1 = e1.get("title", "")
-            t2 = e2.get("title", "")
-            if not t1 or not t2:
-                continue
-            shared = set(t1.lower().split()) & set(t2.lower().split())
-            if len(shared) < 2:
-                continue
-            contradictions.append({
-                "entry_a": t1,
-                "entry_b": t2,
-                "shared_concepts": sorted(shared),
-            })
-            if len(contradictions) >= 5:
-                return contradictions[:5]
-    return contradictions[:5]
-
-
 async def _extract_entries(
     results: list[dict],
     topic: str,
     model: str,
 ) -> list[dict]:
-    """Distill search results into knowledge entries via LLM.
+    """Distill search results into knowledge entries.
 
-    Fetches full-page text via trafilatura where available; chunks long pages;
-    falls back to SearXNG snippet when fetch/extract fails for a given URL.
+    Fetches full pages via trafilatura; chunks long pages; snippet fallback.
     """
     if not results:
         return []
 
-    # Full-page fetch; map url -> extracted text. Empty dict = total failure,
-    # in which case we fall through to snippet-only behavior.
     fetched = await _fetch_and_extract(results)
     url_to_text: dict[str, str] = {f["url"]: f["content"] for f in fetched}
     if fetched:
-        logger.info("research_fetch: %d/%d URLs extracted via trafilatura",
-                    len(fetched), len(results))
+        logger.info(
+            "research_fetch: %d/%d URLs extracted via trafilatura",
+            len(fetched), len(results),
+        )
     else:
         logger.warning("research_fetch: trafilatura returned nothing; snippet fallback")
 
-    # Expand results: each becomes 1+ chunks. Missing full-page -> single snippet chunk.
-    expanded: list[dict] = []
+    expanded_results: list[dict] = []
     for r in results:
         url = r.get("url", "")
         full = url_to_text.get(url)
         if full:
             for chunk in _chunk_text(full):
-                expanded.append({
+                expanded_results.append({
                     "title": r.get("title", ""),
                     "url": url,
                     "content": chunk,
                     "facet": r.get("facet", ""),
                 })
         else:
-            expanded.append(r)  # snippet fallback
+            expanded_results.append(r)
 
-    # Batch to stay within context limits. Full-page chunks are larger than
-    # snippets, so reduce batch size when we have real content.
-    batch_size = 5 if fetched else 10
-    all_entries = []
-    results = expanded
+    batch_size = _EXTRACT_BATCH_FULL_PAGE if fetched else _EXTRACT_BATCH_SNIPPET
+    all_entries: list[dict] = []
 
-    for i in range(0, len(results), batch_size):
-        batch = results[i:i + batch_size]
-        entries = []
+    for i in range(0, len(expanded_results), batch_size):
+        batch = expanded_results[i:i + batch_size]
         results_text = "\n\n".join(
             f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['content'][:600]}"
             for r in batch
         )
-
         resp = await model_router.generate(
-            EXTRACT_PROMPT.format(topic=topic, results=results_text),
-            model=model,
-            system=EXTRACT_SYSTEM,
-            temperature=0.1,
-            max_tokens=1024,
+            EXTRACT_PROMPT_V1.format(topic=topic, results=results_text),
+            model=model, system=EXTRACT_SYSTEM_V1,
+            temperature=0.1, max_tokens=1024,
         )
 
+        entries: list[dict] = []
         if resp.success and resp.text and len(resp.text.strip()) > 5:
-            entries = parse_json_array(resp.text) or []
-            entries = [e for e in entries if isinstance(e, dict)]
+            parsed = parse_json_array(resp.text) or []
+            entries = [e for e in parsed if isinstance(e, dict)]
             if entries:
                 for entry in entries:
-                    source_url = entry.get("source", "")
-                    if source_url:
-                        entry["confidence_score"] = _score_source(source_url)
+                    src_url = entry.get("source", "")
+                    if src_url:
+                        entry["confidence_score"] = _resolve_confidence(
+                            entry.get("confidence_score"), src_url,
+                        )
                 all_entries.extend(entries)
-                logger.info("extraction_batch: %d entries from batch %d", len(entries), i // batch_size + 1)
+                logger.info(
+                    "extraction_batch: %d entries from batch %d",
+                    len(entries), i // batch_size + 1,
+                )
             else:
-                logger.warning("extraction_parse_failed: batch=%d raw_len=%d raw_preview=%s",
-                               i // batch_size + 1, len(resp.text), resp.text[:300])
+                logger.warning(
+                    "extraction_parse_failed: batch=%d raw_len=%d",
+                    i // batch_size + 1, len(resp.text),
+                )
         else:
-            logger.warning("extraction_llm_failed: batch=%d success=%s raw_len=%d error=%s",
-                           i // batch_size + 1, resp.success, len(resp.text or ""), resp.error)
+            logger.warning(
+                "extraction_llm_failed: batch=%d success=%s error=%s",
+                i // batch_size + 1, resp.success,
+                resp.error if resp else "no-resp",
+            )
 
-        # Fallback: if LLM returned nothing for this batch, create entries from snippets
         if not entries:
             for r in batch:
                 content = r.get("content", "")
                 if len(content) > 50:
-                    fallback_entry = {
+                    all_entries.append({
                         "title": r.get("title", "")[:100],
                         "content": content,
                         "tags": "",
@@ -820,48 +1037,20 @@ async def _extract_entries(
                         "confidence_score": _score_source(r.get("url", "")),
                         "source_type": "community",
                         "facet": r.get("facet", ""),
-                    }
-                    all_entries.append(fallback_entry)
-                    logger.info("extraction_fallback: title='%s' url='%s'", fallback_entry["title"], fallback_entry["source"])
+                    })
+                    logger.info("extraction_fallback: url='%s'", r.get("url", ""))
 
     return all_entries
-
-
-# ---------------------------------------------------------------------------
-# Step 4: Gap analysis
-# ---------------------------------------------------------------------------
-
-GAP_SYSTEM = """You are a research coverage analyst. Given a topic, its facets, and
-the knowledge entries collected so far, identify what's missing.
-
-You may OPTIONALLY request user clarification if — and only if — a specific
-ambiguity in the topic is actively blocking good coverage AND a one-sentence
-answer from the user would materially change which queries to run next.
-Do NOT pause for generic "would you like more detail" questions. Default to
-no pause; only set needs_clarification=true when you have a concrete question.
-
-OUTPUT FORMAT (strict JSON, no markdown fences):
-{
-  "coverage_pct": 75,
-  "covered_facets": ["facet1", "facet2"],
-  "gap_facets": ["facet3"],
-  "gap_queries": [
-    {"query": "keyword search terms", "facet": "gap_facet", "priority": "high", "search_category": "general"}
-  ],
-  "assessment": "One paragraph on what's well covered and what's missing",
-  "needs_clarification": false,
-  "clarifying_question": ""
-}"""
 
 
 async def _analyze_gaps(
     state: ResearchState,
     model: str,
 ) -> dict:
-    """Analyze coverage gaps in collected research."""
+    """Analyze coverage gaps. Retries once on parse failure."""
     entry_summaries = [
         f"[{e.get('facet', '?')}] {e.get('title', '')}: {e.get('content', '')[:100]}"
-        for e in state.all_entries[-50:]  # Last 50 entries for context
+        for e in state.all_entries[-50:]
     ]
 
     prompt = (
@@ -872,18 +1061,17 @@ async def _analyze_gaps(
         f"Sample entries:\n" + "\n".join(entry_summaries[:30])
     )
 
-    resp = await model_router.generate(
-        prompt,
-        model=model,
-        system=GAP_SYSTEM,
-        temperature=0.3,
-        max_tokens=2048,
-    )
-
-    if resp.success:
-        parsed = parse_json_object(resp.text)
-        if parsed:
-            return parsed
+    for attempt in range(2):
+        resp = await model_router.generate(
+            prompt, model=model, system=GAP_SYSTEM_V1,
+            temperature=0.3, max_tokens=2048,
+        )
+        if resp.success:
+            parsed = parse_json_object(resp.text)
+            if parsed:
+                return parsed
+        if attempt == 0:
+            logger.info("gap_analysis_retry: attempt 1 failed, retrying")
 
     return {
         "coverage_pct": 100,
@@ -894,22 +1082,11 @@ async def _analyze_gaps(
     }
 
 
-# ---------------------------------------------------------------------------
-# Step 5: Summary generation
-# ---------------------------------------------------------------------------
-
-SUMMARY_SYSTEM = """You are a research summarizer. Given collected knowledge entries,
-produce a concise summary organized by facet/theme.
-
-Write in clear prose paragraphs. Include key facts, numbers, and specifics.
-Keep it under 500 words. No markdown headers — just flowing text with topic transitions."""
-
-
 async def _generate_summary(
     state: ResearchState,
     model: str,
 ) -> str:
-    """Generate a human-readable summary of all collected research."""
+    """Generate human-readable summary of all collected research."""
     entry_texts = [
         f"[{e.get('facet', '?')}] {e.get('content', '')}"
         for e in state.all_entries
@@ -922,11 +1099,8 @@ async def _generate_summary(
     )
 
     resp = await model_router.generate(
-        prompt,
-        model=model,
-        system=SUMMARY_SYSTEM,
-        temperature=0.3,
-        max_tokens=2048,
+        prompt, model=model, system=SUMMARY_SYSTEM_V1,
+        temperature=0.3, max_tokens=2048,
     )
 
     if resp.success:
@@ -934,9 +1108,726 @@ async def _generate_summary(
     return f"Research collected {len(state.all_entries)} entries on '{state.topic}'."
 
 
-# ---------------------------------------------------------------------------
-# Main research loop (SSE streaming)
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Canonical research_complete payload (#141)
+# =============================================================================
+
+def _build_research_complete_payload(
+    state: ResearchState,
+    session_id: str,
+    *,
+    mode: str,
+    duration_ms: int,
+    topic: str | None = None,
+    summary: str | None = None,
+    **mode_extras,
+) -> dict:
+    """Common keys across all modes + mode-specific extras."""
+    payload = {
+        "session_id": session_id,
+        "topic": topic if topic is not None else state.topic,
+        "mode": mode,
+        "domain": state.domain,
+        "depth": state.depth,
+        "duration_ms": duration_ms,
+        "iterations": state.iteration,
+        "total_entries": len(state.all_entries),
+        "total_ingested": state.total_ingested,
+        "new": state.total_new,
+        "versioned": state.total_versioned,
+        "rejected": state.total_rejected,
+        "skipped_hash": state.total_skipped_hash,
+        "total_urls_searched": len(state.url_history),
+        "total_queries": len(state.search_history),
+    }
+    if summary is not None:
+        payload["summary"] = summary
+    payload.update(mode_extras)
+    return payload
+
+
+# =============================================================================
+# Iteration loop (shared by run_research + resume_research, #50)
+# =============================================================================
+
+async def _execute_iteration_loop(
+    state: ResearchState,
+    session_id: str,
+    initial_queries: list[dict],
+    decompose_model: str,
+    extract_model: str,
+    topic: str,
+    allow_pause: bool,
+) -> AsyncGenerator[str, None]:
+    """Search → extract → contradictions → ingest → gap-analysis loop.
+
+    Mutates state in place. Sets state.paused=True if the gap analyzer
+    requested clarification (only when allow_pause=True). Does NOT emit
+    research_started or research_complete — caller owns those.
+    """
+    queries = initial_queries
+    coverage: float | None = None
+
+    while state.iteration < state.max_iterations:
+        state.iteration += 1
+        yield _sse("iteration_started", {
+            "iteration": state.iteration,
+            "query_count": len(queries),
+        })
+
+        results = await _search_queries(queries, state)
+        yield _sse("search_complete", {
+            "iteration": state.iteration,
+            "results_found": len(results),
+            "total_urls": len(state.url_history),
+        })
+
+        if not results:
+            yield _sse("iteration_complete", {
+                "iteration": state.iteration,
+                "entries_extracted": 0,
+                "entries_ingested": 0,
+                "reason": "no_results",
+            })
+            break
+
+        extract_task = asyncio.create_task(
+            _extract_entries(results, topic, model=extract_model)
+        )
+        async for hb in _await_with_heartbeat(
+            extract_task, {"status": "extracting", "iteration": state.iteration}
+        ):
+            yield hb
+        entries = extract_task.result()
+
+        yield _sse("extraction_complete", {
+            "iteration": state.iteration,
+            "entries_extracted": len(entries),
+        })
+
+        if entries:
+            contradictions = _check_contradictions(entries)
+            if contradictions:
+                yield _sse("contradictions_detected", {
+                    "count": len(contradictions),
+                    "pairs": contradictions,
+                })
+
+        ingested = 0
+        if entries:
+            state.all_entries.extend(entries)
+            stats = await ingest_entries(entries, domain=state.domain)
+            ingested = stats["new"] + stats["versioned"]
+            state.total_new += stats["new"]
+            state.total_versioned += stats["versioned"]
+            state.total_rejected += stats["rejected"]
+            state.total_skipped_hash += stats["skipped_hash"]
+            state.total_ingested += ingested
+
+        yield _sse("ingestion_complete", {
+            "iteration": state.iteration,
+            "entries_ingested": ingested,
+            "total_ingested": state.total_ingested,
+            "total_rejected": state.total_rejected,
+        })
+        yield _sse("iteration_complete", {
+            "iteration": state.iteration,
+            "entries_extracted": len(entries),
+            "entries_ingested": ingested,
+        })
+
+        await _update_session_iteration(session_id, state, coverage)
+
+        if state.iteration >= state.max_iterations:
+            break
+
+        if ingested == 0 and len(entries) > 0:
+            yield _sse("convergence", {
+                "reason": "all_duplicates",
+                "message": "All extracted entries were duplicates.",
+            })
+            break
+
+        gap_task = asyncio.create_task(_analyze_gaps(state, model=decompose_model))
+        async for hb in _await_with_heartbeat(
+            gap_task, {"status": "analyzing_gaps"}
+        ):
+            yield hb
+        gaps = gap_task.result()
+        coverage = gaps.get("coverage_pct", 100)
+        state.covered_facets.update(gaps.get("covered_facets", []))
+
+        yield _sse("gap_analysis", {
+            "iteration": state.iteration,
+            "coverage_pct": coverage,
+            "covered_facets": list(state.covered_facets),
+            "gap_facets": gaps.get("gap_facets", []),
+            "assessment": gaps.get("assessment", ""),
+        })
+
+        if (
+            allow_pause
+            and state.iteration < state.max_iterations
+            and gaps.get("needs_clarification") is True
+            and (gaps.get("clarifying_question") or "").strip()
+        ):
+            question = gaps["clarifying_question"].strip()
+            await _pause_session(session_id, state, question)
+            state.paused = True
+            yield _sse("awaiting_reply", {
+                "session_id": session_id,
+                "question": question,
+                "topic": topic,
+                "iteration": state.iteration,
+                "expires_in_seconds": 3600,
+            })
+            return
+
+        if coverage >= 85 and not gaps.get("gap_queries"):
+            yield _sse("convergence", {
+                "reason": "coverage_threshold",
+                "coverage_pct": coverage,
+            })
+            break
+
+        queries = gaps.get("gap_queries", [])
+        if not queries:
+            break
+
+
+# =============================================================================
+# Shared direct-mode finalizer (#51, #55, #56, #57)
+# =============================================================================
+
+async def _ingest_and_finalize_direct(
+    *,
+    state: ResearchState,
+    session_id: str,
+    entries: list[dict],
+    mode: str,
+    topic: str,
+    t0: float,
+    summary_model: str | None = None,
+    extra_complete_fields: dict | None = None,
+) -> AsyncGenerator[str, None]:
+    """Truncate → ingest → (optional summary) → finalize. Caller already emitted
+    `extraction_complete`. Populates state.all_entries (#56). Emits
+    content_truncated (#57), ingestion_complete, iteration_complete,
+    research_complete with unified payload (#141)."""
+    max_chars = settings.research_max_entry_chars
+    truncated_count = 0
+    for e in entries:
+        content = e.get("content") or ""
+        if len(content) > max_chars:
+            e["content"] = content[:max_chars]
+            truncated_count += 1
+
+    if truncated_count > 0:
+        yield _sse("content_truncated", {
+            "count": truncated_count,
+            "max_chars": max_chars,
+            "mode": mode,
+        })
+
+    state.all_entries.extend(entries)
+
+    ingested = 0
+    if entries:
+        stats = await ingest_entries(entries, domain=state.domain)
+        state.total_new += stats.get("new", 0)
+        state.total_versioned += stats.get("versioned", 0)
+        state.total_rejected += stats.get("rejected", 0)
+        state.total_skipped_hash += stats.get("skipped_hash", 0)
+        ingested = stats.get("new", 0) + stats.get("versioned", 0)
+        state.total_ingested = state.total_new + state.total_versioned
+
+    yield _sse("ingestion_complete", {
+        "iteration": state.iteration,
+        "entries_ingested": ingested,
+        "total_ingested": state.total_ingested,
+        "total_rejected": state.total_rejected,
+        "new": state.total_new,
+        "versioned": state.total_versioned,
+        "rejected": state.total_rejected,
+        "skipped_hash": state.total_skipped_hash,
+    })
+
+    yield _sse("iteration_complete", {
+        "iteration": state.iteration,
+        "entries_extracted": len(entries),
+        "entries_ingested": ingested,
+    })
+
+    summary: str | None = None
+    if summary_model is not None and state.all_entries:
+        summary_task = asyncio.create_task(
+            _generate_summary(state, model=summary_model)
+        )
+        async for hb in _await_with_heartbeat(
+            summary_task, {"status": "summarizing"}
+        ):
+            yield hb
+        summary = summary_task.result()
+
+    duration_ms = int((time.monotonic() - t0) * 1000)
+    await _update_session_iteration(session_id, state)
+    await _finalize_session(session_id, "completed", duration_ms, summary)
+
+    yield _sse("research_complete", _build_research_complete_payload(
+        state, session_id,
+        mode=mode,
+        duration_ms=duration_ms,
+        topic=topic,
+        summary=summary,
+        **(extra_complete_fields or {}),
+    ))
+
+
+# =============================================================================
+# Direct modes: OpenAPI / GitHub / URL / PDF
+# =============================================================================
+
+async def _run_research_openapi_mode(
+    spec_url: str,
+    state: ResearchState,
+    session_id: str,
+    t0: float,
+) -> AsyncGenerator[str, None]:
+    """OpenAPI-mode: fetch + validate spec, ingest one entry per endpoint."""
+    from app.utils.openapi_ingest import fetch_and_parse_spec
+
+    state.outline_facets = ["openapi_spec"]
+    state.iteration = 1
+    yield _sse("decomposition_complete", {
+        "complexity": "direct",
+        "facets": state.outline_facets,
+        "query_count": 0,
+    })
+    yield _sse("iteration_started", {
+        "iteration": 1,
+        "query_count": 0,
+        "mode": "openapi",
+    })
+
+    task = asyncio.create_task(fetch_and_parse_spec(spec_url))
+    async for hb in _await_with_heartbeat(
+        task, {"status": "fetching_openapi", "iteration": 1}
+    ):
+        yield hb
+    endpoints, meta = task.result()
+
+    if not endpoints:
+        raise RuntimeError(f"No endpoints found in spec at {spec_url}")
+
+    yield _sse("search_complete", {
+        "iteration": 1,
+        "results_found": len(endpoints),
+        "total_urls": 1,
+        "mode": "openapi",
+        "spec_title": meta["title"],
+        "spec_version": meta["spec_version"],
+        "openapi_version": meta["version"],
+        "truncated": meta["truncated"],
+    })
+
+    state.url_history.add(spec_url)
+    state.search_history.add(f"openapi:{spec_url}".lower())
+
+    entries: list[dict] = []
+    for ep in endpoints:
+        source_url = f"{spec_url}#{ep['method']} {ep['path']}"
+        tags = ep.get("tags") or []
+        primary_facet = tags[0] if tags else "openapi_spec"
+        entries.append({
+            "title": ep["title"],
+            "content": ep["content"],
+            "source": source_url,
+            "source_type": "tech_docs",
+            "confidence_score": 0.95,
+            "facet": primary_facet,
+            "domain_tags": tags,
+        })
+
+    yield _sse("extraction_complete", {
+        "iteration": 1,
+        "entries_extracted": len(entries),
+        "mode": "openapi",
+    })
+
+    async for evt in _ingest_and_finalize_direct(
+        state=state,
+        session_id=session_id,
+        entries=entries,
+        mode="openapi",
+        topic=f"openapi:{spec_url}",
+        t0=t0,
+        extra_complete_fields={
+            "spec_title": meta["title"],
+            "spec_version": meta["spec_version"],
+            "openapi_version": meta["version"],
+            "endpoints_found": meta["total_endpoints"],
+            "endpoints_ingested": meta["ingested_endpoints"],
+            "truncated": meta["truncated"],
+        },
+    ):
+        yield evt
+
+
+async def _run_research_github_mode(
+    owner: str,
+    repo: str,
+    state: ResearchState,
+    session_id: str,
+    t0: float,
+) -> AsyncGenerator[str, None]:
+    """GitHub-mode: fetch README + docs + docstrings, ingest as tech_docs."""
+    from app.utils.github_ingest import fetch_repo_content
+
+    state.outline_facets = ["github_repo"]
+    state.iteration = 1
+    yield _sse("decomposition_complete", {
+        "complexity": "direct",
+        "facets": state.outline_facets,
+        "query_count": 0,
+    })
+    yield _sse("iteration_started", {
+        "iteration": 1,
+        "query_count": 0,
+        "mode": "github",
+    })
+
+    task = asyncio.create_task(fetch_repo_content(owner, repo))
+    async for hb in _await_with_heartbeat(
+        task, {"status": "fetching_github", "iteration": 1}
+    ):
+        yield hb
+    files = task.result()
+
+    if not files:
+        raise RuntimeError(f"No ingestible content found in {owner}/{repo}")
+
+    yield _sse("search_complete", {
+        "iteration": 1,
+        "results_found": len(files),
+        "total_urls": len(files),
+        "mode": "github",
+    })
+
+    entries: list[dict] = []
+    for f in files:
+        source_url = f"https://github.com/{owner}/{repo}/blob/HEAD/{f['path']}"
+        state.url_history.add(source_url)
+        entries.append({
+            "title": f"{owner}/{repo}: {f['path']}",
+            "content": f["content"],
+            "source": source_url,
+            "source_type": "tech_docs",
+            "confidence_score": 0.9,
+            "facet": "github_repo",
+        })
+
+    yield _sse("extraction_complete", {
+        "iteration": 1,
+        "entries_extracted": len(entries),
+        "mode": "github",
+    })
+
+    async for evt in _ingest_and_finalize_direct(
+        state=state,
+        session_id=session_id,
+        entries=entries,
+        mode="github",
+        topic=f"github:{owner}/{repo}",
+        t0=t0,
+        extra_complete_fields={"files_fetched": len(files)},
+    ):
+        yield evt
+
+
+async def _run_research_url_mode(
+    url: str,
+    state: ResearchState,
+    session_id: str,
+    extract_model: str,
+    summary_model: str,
+    t0: float,
+) -> AsyncGenerator[str, None]:
+    """URL-mode: fetch one URL, extract via trafilatura, chunk, distill, ingest."""
+    state.outline_facets = ["direct_url"]
+    state.iteration = 1
+    yield _sse("decomposition_complete", {
+        "complexity": "direct",
+        "facets": state.outline_facets,
+        "query_count": 0,
+    })
+    yield _sse("iteration_started", {
+        "iteration": 1,
+        "query_count": 0,
+        "mode": "direct_url",
+    })
+
+    if not await _robots_allowed(url):
+        raise RuntimeError(f"robots.txt disallows fetching {url}")
+
+    html = await _fetch_url_bounded(url)
+    if not html:
+        cap_mb = settings.research_max_url_bytes // (1024 * 1024)
+        raise RuntimeError(
+            f"Failed to fetch {url} (non-200 or exceeded {cap_mb}MB cap)"
+        )
+
+    text_content = await asyncio.to_thread(
+        trafilatura.extract, html,
+        output_format="txt", with_metadata=False,
+    )
+    if not text_content or len(text_content) < 100:
+        raise RuntimeError(
+            f"No extractable content at {url} "
+            f"(got {len(text_content or '')} chars)"
+        )
+
+    page_title = await _extract_page_title(html, url)
+
+    yield _sse("search_complete", {
+        "iteration": 1,
+        "results_found": 1,
+        "total_urls": 1,
+        "mode": "direct_url",
+    })
+
+    state.url_history.add(url)
+    state.search_history.add(f"direct:{url}".lower())
+
+    chunks = _chunk_text(text_content)
+    prompt_topic = page_title if page_title != url[:200] else f"content at {url}"
+    batch_size = _EXTRACT_BATCH_FULL_PAGE
+    entries: list[dict] = []
+
+    for i in range(0, len(chunks), batch_size):
+        batch_chunks = chunks[i:i + batch_size]
+        results_text = "\n\n".join(
+            f"Title: {page_title}\nURL: {url}\nSnippet: {c[:600]}"
+            for c in batch_chunks
+        )
+        task = asyncio.create_task(model_router.generate(
+            EXTRACT_PROMPT_V1.format(topic=prompt_topic, results=results_text),
+            model=extract_model,
+            system=EXTRACT_SYSTEM_V1,
+            temperature=0.1,
+            max_tokens=1024,
+        ))
+        async for hb in _await_with_heartbeat(
+            task, {"status": "extracting", "iteration": 1}
+        ):
+            yield hb
+        resp = task.result()
+
+        batch_entries: list[dict] = []
+        if resp.success and resp.text and len(resp.text.strip()) > 5:
+            parsed = parse_json_array(resp.text) or []
+            batch_entries = [e for e in parsed if isinstance(e, dict)]
+            for entry in batch_entries:
+                src_url = entry.get("source", "") or url
+                entry["source"] = src_url
+                entry["confidence_score"] = _resolve_confidence(
+                    entry.get("confidence_score"), src_url,
+                )
+                entry["facet"] = "direct_url"
+                entry.setdefault("source_type", "community")
+            entries.extend(batch_entries)
+        else:
+            logger.warning(
+                "url_mode_extract_failed: batch=%d success=%s error=%s",
+                i // batch_size,
+                resp.success if resp else None,
+                resp.error if resp else "no-resp",
+            )
+
+        if not batch_entries:
+            for c in batch_chunks:
+                if len(c) > 50:
+                    entries.append({
+                        "title": page_title,
+                        "content": c,
+                        "tags": "",
+                        "source": url,
+                        "confidence_score": _score_source(url),
+                        "source_type": "community",
+                        "facet": "direct_url",
+                    })
+
+    yield _sse("extraction_complete", {
+        "iteration": 1,
+        "entries_extracted": len(entries),
+    })
+
+    async for evt in _ingest_and_finalize_direct(
+        state=state,
+        session_id=session_id,
+        entries=entries,
+        mode="direct_url",
+        topic=url,
+        t0=t0,
+        summary_model=summary_model,
+    ):
+        yield evt
+
+
+async def _run_research_pdf_mode(
+    pdf_bytes: bytes,
+    filename: str,
+    extractor: str,
+    state: ResearchState,
+    session_id: str,
+    extract_model: str,
+    summary_model: str,
+    t0: float,
+) -> AsyncGenerator[str, None]:
+    """PDF-mode: extract bytes via pypdf (or plumber fallback), distill, ingest."""
+    if len(pdf_bytes) > settings.research_max_pdf_bytes:
+        cap_mb = settings.research_max_pdf_bytes // (1024 * 1024)
+        raise RuntimeError(
+            f"PDF exceeds {cap_mb}MB cap ({len(pdf_bytes)} bytes)"
+        )
+
+    state.outline_facets = ["direct_pdf"]
+    state.iteration = 1
+    yield _sse("decomposition_complete", {
+        "complexity": "direct",
+        "facets": state.outline_facets,
+        "query_count": 0,
+    })
+    yield _sse("iteration_started", {
+        "iteration": 1,
+        "query_count": 0,
+        "mode": "direct_pdf",
+    })
+
+    try:
+        text_content, page_count, used, fell_back = await _extract_pdf_text(
+            pdf_bytes, extractor=extractor,
+        )
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"{e}. Scanned PDFs require OCR (not yet supported)."
+        ) from e
+
+    if fell_back:  # #60
+        yield _sse("extractor_fallback", {
+            "iteration": 1,
+            "from": "pypdf",
+            "to": "plumber",
+            "reason": "insufficient_text",
+        })
+
+    yield _sse("search_complete", {
+        "iteration": 1,
+        "results_found": 1,
+        "total_urls": 1,
+        "mode": "direct_pdf",
+        "page_count": page_count,
+        "extractor_used": used,
+        "char_count": len(text_content),
+    })
+
+    virtual_url = f"pdf://{filename}"
+    state.url_history.add(virtual_url)
+    state.search_history.add(f"direct_pdf:{filename}".lower())
+
+    chunks = _chunk_text(text_content)
+    batch_size = _EXTRACT_BATCH_FULL_PAGE
+    entries: list[dict] = []
+    pdf_default_confidence = 0.8  # local upload, reasonably trusted
+
+    for i in range(0, len(chunks), batch_size):
+        batch_chunks = chunks[i:i + batch_size]
+        # #59: label clarifies meaning (total pages, not page marker)
+        results_text = "\n\n".join(
+            f"Title: {filename} (total pages: {page_count})\n"
+            f"URL: {virtual_url}\nSnippet: {c[:600]}"
+            for c in batch_chunks
+        )
+        task = asyncio.create_task(model_router.generate(
+            EXTRACT_PROMPT_V1.format(topic=filename, results=results_text),
+            model=extract_model,
+            system=EXTRACT_SYSTEM_V1,
+            temperature=0.1,
+            max_tokens=1024,
+        ))
+        async for hb in _await_with_heartbeat(
+            task, {"status": "extracting", "iteration": 1}
+        ):
+            yield hb
+        resp = task.result()
+
+        batch_entries: list[dict] = []
+        if resp.success and resp.text and len(resp.text.strip()) > 5:
+            parsed = parse_json_array(resp.text) or []
+            batch_entries = [e for e in parsed if isinstance(e, dict)]
+            for entry in batch_entries:
+                entry["source"] = virtual_url
+                llm_conf = entry.get("confidence_score")
+                if (
+                    isinstance(llm_conf, (int, float))
+                    and 0.0 <= float(llm_conf) <= 1.0
+                ):
+                    entry["confidence_score"] = float(llm_conf)
+                else:
+                    if llm_conf is not None:
+                        logger.warning(
+                            "confidence_out_of_range: got=%s pdf=%s "
+                            "falling_back_to=%.2f",
+                            llm_conf, virtual_url, pdf_default_confidence,
+                        )
+                    entry["confidence_score"] = pdf_default_confidence
+                entry["facet"] = "direct_pdf"
+                entry["source_type"] = entry.get("source_type") or "tech_docs"
+            entries.extend(batch_entries)
+        else:
+            logger.warning(
+                "pdf_mode_extract_failed: batch=%d success=%s error=%s",
+                i // batch_size,
+                resp.success if resp else None,
+                resp.error if resp else "no-resp",
+            )
+
+        if not batch_entries:
+            for c in batch_chunks:
+                if len(c) > 50:
+                    entries.append({
+                        "title": filename,
+                        "content": c,
+                        "tags": "",
+                        "source": virtual_url,
+                        "confidence_score": pdf_default_confidence,
+                        "source_type": "tech_docs",
+                        "facet": "direct_pdf",
+                    })
+
+    yield _sse("extraction_complete", {
+        "iteration": 1,
+        "entries_extracted": len(entries),
+    })
+
+    async for evt in _ingest_and_finalize_direct(
+        state=state,
+        session_id=session_id,
+        entries=entries,
+        mode="direct_pdf",
+        topic=filename,
+        t0=t0,
+        summary_model=summary_model,
+        extra_complete_fields={
+            "page_count": page_count,
+            "extractor_used": used,
+        },
+    ):
+        yield evt
+
+
+# =============================================================================
+# Public entry points
+# =============================================================================
 
 async def run_research(
     topic: str,
@@ -944,11 +1835,10 @@ async def run_research(
     domain: str | None = None,
     model_overrides: dict | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Execute the full research loop, yielding SSE events."""
+    """Execute research, yielding SSE events. Dispatches to direct modes by prefix."""
     t0 = time.monotonic()
     research_domain = domain or _detect_domain(topic)
 
-    # ---- Concurrent research guard ----
     existing = await _guard_concurrent()
     if existing:
         yield _sse("error", {
@@ -958,79 +1848,66 @@ async def run_research(
         })
         return
 
-    # ---- Create session row ----
-    session_id = await _create_session(topic, depth, research_domain)
-
-    state = ResearchState(
-        topic=topic,
-        depth=depth,
-        domain=research_domain,
-    )
-
-    # OpenAPI-mode short-circuit: openapi:<url>
+    # Determine mode + persisted depth label
     if _is_openapi_ref(topic):
-        spec_url = _parse_openapi_ref(topic)
+        mode, state_depth = "openapi", "direct_openapi"
+    elif _is_github_ref(topic):
+        mode, state_depth = "github", "direct_github"
+    elif _is_url(topic):
+        mode, state_depth = "direct_url", "direct_url"
+    else:
+        mode, state_depth = "topic", depth
+
+    session_id = await _create_session(topic, state_depth, research_domain)
+    state = ResearchState(topic=topic, depth=state_depth, domain=research_domain)
+
+    # --- Direct modes: single-iteration, protected by try/except for #4/#5 ---
+    if mode != "topic":
         yield _sse("research_started", {
             "topic": topic,
-            "depth": "direct_openapi",
+            "depth": state_depth,
             "domain": state.domain,
             "max_iterations": 1,
             "session_id": session_id,
-            "mode": "openapi",
+            "mode": mode,
         })
-        async for _evt in _run_research_openapi_mode(
-            spec_url=spec_url,
-            state=state,
-            session_id=session_id,
-            t0=t0,
-        ):
-            yield _evt
+        try:
+            if mode == "openapi":
+                async for evt in _run_research_openapi_mode(
+                    _parse_openapi_ref(topic), state, session_id, t0,
+                ):
+                    yield evt
+            elif mode == "github":
+                owner, repo = _parse_github_ref(topic)
+                async for evt in _run_research_github_mode(
+                    owner, repo, state, session_id, t0,
+                ):
+                    yield evt
+            elif mode == "direct_url":
+                extract_m = get_model("model_verifier", model_overrides)
+                summary_m = get_model("model_verifier", model_overrides)
+                async for evt in _run_research_url_mode(
+                    topic, state, session_id, extract_m, summary_m, t0,
+                ):
+                    yield evt
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            logger.error(
+                "direct_mode_failed: mode=%s session=%s error=%s",
+                mode, session_id, exc, exc_info=True,
+            )
+            await _finalize_session(
+                session_id, "failed", elapsed_ms,
+                error_message=f"{type(exc).__name__}: {exc}",
+            )
+            yield _sse("error", {
+                "message": f"Research failed: {exc}",
+                "session_id": session_id,
+                "topic": topic,
+            })
         return
 
-        # GitHub-mode short-circuit: github:owner/repo
-    if _is_github_ref(topic):
-        owner, repo = _parse_github_ref(topic)
-        yield _sse("research_started", {
-            "topic": topic,
-            "depth": "direct_github",
-            "domain": state.domain,
-            "max_iterations": 1,
-            "session_id": session_id,
-            "mode": "github",
-        })
-        async for _evt in _run_research_github_mode(
-            owner=owner,
-            repo=repo,
-            state=state,
-            session_id=session_id,
-            t0=t0,
-        ):
-            yield _evt
-        return
-
-        # URL-mode short-circuit: if topic is a URL, skip decompose/search
-    if _is_url(topic):
-        _extract_m = get_model("model_verifier", model_overrides)
-        _summary_m = get_model("model_verifier", model_overrides)
-        yield _sse("research_started", {
-            "topic": topic,
-            "depth": "direct_url",
-            "domain": state.domain,
-            "max_iterations": 1,
-            "session_id": session_id,
-            "mode": "direct_url",
-        })
-        async for _evt in _run_research_url_mode(
-            url=topic,
-            state=state,
-            session_id=session_id,
-            extract_model=_extract_m,
-            summary_model=_summary_m,
-            t0=t0,
-        ):
-            yield _evt
-        return
-
+    # --- Topic mode ---
     decompose_model = get_model("model_verifier", model_overrides)
     extract_model = get_model("model_verifier", model_overrides)
     summary_model = get_model("model_verifier", model_overrides)
@@ -1044,7 +1921,6 @@ async def run_research(
     })
 
     try:
-        # Initial decomposition
         decomposition = await _decompose_topic(topic, model=decompose_model)
         state.outline_facets = decomposition.get("facets", [topic])
         queries = decomposition.get("queries", [])
@@ -1055,183 +1931,50 @@ async def run_research(
             "query_count": len(queries),
         })
 
-        # ---- Research loop ----
-        coverage = None
-        while state.iteration < state.max_iterations:
-            state.iteration += 1
+        async for evt in _execute_iteration_loop(
+            state=state,
+            session_id=session_id,
+            initial_queries=queries,
+            decompose_model=decompose_model,
+            extract_model=extract_model,
+            topic=topic,
+            allow_pause=True,
+        ):
+            yield evt
 
-            yield _sse("iteration_started", {
-                "iteration": state.iteration,
-                "query_count": len(queries),
-            })
+        if state.paused:
+            return
 
-            # Search
-            results = await _search_queries(queries, state)
-
-            yield _sse("search_complete", {
-                "iteration": state.iteration,
-                "results_found": len(results),
-                "total_urls": len(state.url_history),
-            })
-
-            if not results:
-                yield _sse("iteration_complete", {
-                    "iteration": state.iteration,
-                    "entries_extracted": 0,
-                    "entries_ingested": 0,
-                    "reason": "no_results",
-                })
-                break
-
-            # Extract (with heartbeat to keep SSE alive during long LLM calls)
-            extract_task = asyncio.create_task(
-                _extract_entries(results, topic, model=extract_model)
-            )
-            while not extract_task.done():
-                await asyncio.sleep(8)
-                if not extract_task.done():
-                    yield _sse("heartbeat", {"status": "extracting", "iteration": state.iteration})
-            entries = extract_task.result()
-
-            yield _sse("extraction_complete", {
-                "iteration": state.iteration,
-                "entries_extracted": len(entries),
-            })
-
-            # Contradiction check (informational — ingestion proceeds regardless)
-            if entries:
-                contradictions = await _check_contradictions(entries)
-                if contradictions:
-                    yield _sse("contradictions_detected", {
-                        "count": len(contradictions),
-                        "pairs": contradictions,
-                    })
-            # Ingest
-            ingested = 0
-            if entries:
-                state.all_entries.extend(entries)
-                stats = await ingest_entries(entries, domain=state.domain)
-                ingested = stats["new"] + stats["versioned"]
-                state.total_new += stats["new"]
-                state.total_versioned += stats["versioned"]
-                state.total_rejected += stats["rejected"]
-                state.total_skipped_hash += stats["skipped_hash"]
-                state.total_ingested += ingested
-
-            yield _sse("ingestion_complete", {
-                "iteration": state.iteration,
-                "entries_ingested": ingested,
-                "total_ingested": state.total_ingested,
-                "total_rejected": state.total_rejected,
-            })
-
-            yield _sse("iteration_complete", {
-                "iteration": state.iteration,
-                "entries_extracted": len(entries),
-                "entries_ingested": ingested,
-            })
-
-            # Update session after each iteration
-            await _update_session_iteration(session_id, state, coverage)
-
-            # Convergence check: last iteration or no new entries
-            if state.iteration >= state.max_iterations:
-                break
-
-            # Diminishing returns check
-            if ingested == 0 and len(entries) > 0:
-                yield _sse("convergence", {
-                    "reason": "all_duplicates",
-                    "message": "All extracted entries were duplicates — topic appears well covered.",
-                })
-                break
-
-            # Gap analysis for next iteration (with heartbeat)
-            gap_task = asyncio.create_task(_analyze_gaps(state, model=decompose_model))
-            while not gap_task.done():
-                await asyncio.sleep(8)
-                if not gap_task.done():
-                    yield _sse("heartbeat", {"status": "analyzing_gaps"})
-            gaps = gap_task.result()
-            coverage = gaps.get("coverage_pct", 100)
-            state.covered_facets.update(gaps.get("covered_facets", []))
-
-            yield _sse("gap_analysis", {
-                "iteration": state.iteration,
-                "coverage_pct": coverage,
-                "covered_facets": list(state.covered_facets),
-                "gap_facets": gaps.get("gap_facets", []),
-                "assessment": gaps.get("assessment", ""),
-            })
-
-            # ---- Pause gate: LLM may request user clarification ----
-            # Only pause when iterations remain AND the analyzer produced a
-            # concrete question. Malformed/missing fields fall through silently.
-            if (
-                state.iteration < state.max_iterations
-                and gaps.get("needs_clarification") is True
-                and (gaps.get("clarifying_question") or "").strip()
-            ):
-                question = gaps["clarifying_question"].strip()
-                await _pause_session(session_id, state, question)
-                yield _sse("awaiting_reply", {
-                    "session_id": session_id,
-                    "question": question,
-                    "topic": topic,
-                    "iteration": state.iteration,
-                    "expires_in_seconds": 3600,
-                })
-                return
-
-            # Check if well covered
-            if coverage >= 85 and not gaps.get("gap_queries"):
-                yield _sse("convergence", {
-                    "reason": "coverage_threshold",
-                    "coverage_pct": coverage,
-                })
-                break
-
-            # Prepare next iteration queries from gaps
-            queries = gaps.get("gap_queries", [])
-            if not queries:
-                break
-
-        # ---- Final summary (with heartbeat) ----
-        summary_task = asyncio.create_task(_generate_summary(state, model=summary_model))
-        while not summary_task.done():
-            await asyncio.sleep(8)
-            if not summary_task.done():
-                yield _sse("heartbeat", {"status": "summarizing"})
+        summary_task = asyncio.create_task(
+            _generate_summary(state, model=summary_model)
+        )
+        async for hb in _await_with_heartbeat(
+            summary_task, {"status": "summarizing"}
+        ):
+            yield hb
         summary = summary_task.result()
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-        # Finalize session — completed
-        await _update_session_iteration(session_id, state, coverage)
+        await _update_session_iteration(session_id, state)
         await _finalize_session(session_id, "completed", elapsed_ms, summary)
 
-        yield _sse("research_complete", {
-            "topic": topic,
-            "session_id": session_id,
-            "total_entries": len(state.all_entries),
-            "total_ingested": state.total_ingested,
-            "total_rejected": state.total_rejected,
-            "new": state.total_new,
-            "versioned": state.total_versioned,
-            "rejected": state.total_rejected,
-            "skipped_hash": state.total_skipped_hash,
-            "iterations": state.iteration,
-            "total_urls_searched": len(state.url_history),
-            "total_queries": len(state.search_history),
-            "duration_ms": elapsed_ms,
-            "summary": summary,
-            "domain": state.domain,
-            "depth": depth,
-        })
-
+        yield _sse("research_complete", _build_research_complete_payload(
+            state, session_id,
+            mode="topic",
+            duration_ms=elapsed_ms,
+            topic=topic,
+            summary=summary,
+        ))
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - t0) * 1000)
-        logger.error("research_failed: session=%s error=%s", session_id, exc, exc_info=True)
-        await _finalize_session(session_id, "failed", elapsed_ms)
+        logger.error(
+            "research_failed: session=%s error=%s",
+            session_id, exc, exc_info=True,
+        )
+        await _finalize_session(
+            session_id, "failed", elapsed_ms,
+            error_message=f"{type(exc).__name__}: {exc}",
+        )
         yield _sse("error", {
             "message": f"Research failed: {exc}",
             "session_id": session_id,
@@ -1239,23 +1982,12 @@ async def run_research(
         })
 
 
-# ---------------------------------------------------------------------------
-# Resume: continue a paused_awaiting_reply session with user reply injected
-# ---------------------------------------------------------------------------
-
 async def resume_research(
     session_id: str,
     user_reply: str,
     model_overrides: dict | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Resume a paused research session using the user's clarification reply.
-
-    Contract:
-      - Session must be in status='paused_awaiting_reply' AND not expired.
-      - State rehydrated from state_snapshot (entries projected: title + hash only).
-      - Reply injected as top-priority gap_query; loop continues from next iteration.
-      - On completion, same terminal events as run_research().
-    """
+    """Resume paused session. Atomic claim prevents two concurrent resumers (#3)."""
     t0 = time.monotonic()
 
     row = await _load_session_for_resume(session_id)
@@ -1274,9 +2006,6 @@ async def resume_research(
         })
         return
 
-    # Expiry check: reaper eventually catches these, but resumption itself
-    # must also refuse to pick up a stale pause.
-    from datetime import datetime, timezone
     expires = row.get("pause_expires_at")
     if expires is not None:
         if expires.tzinfo is None:
@@ -1303,23 +2032,18 @@ async def resume_research(
         })
         return
 
-    # Rehydrate state + mark session running again with reply persisted.
-    state = _rehydrate_state(row)
-    async with async_session() as db:
-        await db.execute(
-            text("""
-                UPDATE research_sessions
-                SET status = 'running',
-                    pause_reply = :reply,
-                    updated_at = NOW()
-                WHERE id = :sid
-            """),
-            {"sid": session_id, "reply": reply},
-        )
-        await db.commit()
+    # Atomic claim — loses to any concurrent resumer on the same session
+    claimed = await _atomic_claim_for_resume(session_id, reply)
+    if not claimed:
+        yield _sse("error", {
+            "message": "Session was claimed by another resumer or changed status",
+            "session_id": session_id,
+            "http_status": 409,
+        })
+        return
 
+    state = _rehydrate_state(row)
     topic = row["topic"]
-    depth = row["depth"]
     decompose_model = get_model("model_verifier", model_overrides)
     extract_model = get_model("model_verifier", model_overrides)
     summary_model = get_model("model_verifier", model_overrides)
@@ -1331,161 +2055,64 @@ async def resume_research(
         "reply": reply,
     })
 
-    # Seed next-iteration queries from the reply. A small, targeted set keeps
-    # the resumed iteration fast and honors the user's steer.
-    queries = [
-        {"query": reply, "facet": "user_clarification",
-         "priority": "high", "search_category": "general"},
-        {"query": f"{topic} {reply}", "facet": "user_clarification",
-         "priority": "high", "search_category": "general"},
-    ]
-
     try:
-        # Resume loop — mirrors run_research() tail but skips decomposition.
-        coverage = None
-        while state.iteration < state.max_iterations:
-            state.iteration += 1
+        # #142: targeted decompose with reply as gap_focus (replaces 2-query seed)
+        decomposition = await _decompose_topic(
+            topic,
+            model=decompose_model,
+            existing_facets=state.outline_facets,
+            gap_focus=reply,
+        )
+        new_queries = decomposition.get("queries", [])
 
-            yield _sse("iteration_started", {
-                "iteration": state.iteration,
-                "query_count": len(queries),
-                "resumed": True,
-            })
+        yield _sse("decomposition_complete", {
+            "complexity": decomposition.get("topic_complexity", "medium"),
+            "facets": decomposition.get("facets", []),
+            "query_count": len(new_queries),
+            "resumed": True,
+        })
 
-            results = await _search_queries(queries, state)
-            yield _sse("search_complete", {
-                "iteration": state.iteration,
-                "results_found": len(results),
-                "total_urls": len(state.url_history),
-            })
+        async for evt in _execute_iteration_loop(
+            state=state,
+            session_id=session_id,
+            initial_queries=new_queries,
+            decompose_model=decompose_model,
+            extract_model=extract_model,
+            topic=topic,
+            allow_pause=False,
+        ):
+            yield evt
 
-            if not results:
-                yield _sse("iteration_complete", {
-                    "iteration": state.iteration,
-                    "entries_extracted": 0,
-                    "entries_ingested": 0,
-                    "reason": "no_results",
-                })
-                break
-
-            extract_task = asyncio.create_task(
-                _extract_entries(results, topic, model=extract_model)
-            )
-            while not extract_task.done():
-                await asyncio.sleep(8)
-                if not extract_task.done():
-                    yield _sse("heartbeat",
-                               {"status": "extracting", "iteration": state.iteration})
-            entries = extract_task.result()
-
-            yield _sse("extraction_complete", {
-                "iteration": state.iteration,
-                "entries_extracted": len(entries),
-            })
-
-            ingested = 0
-            if entries:
-                state.all_entries.extend(entries)
-                stats = await ingest_entries(entries, domain=state.domain)
-                ingested = stats["new"] + stats["versioned"]
-                state.total_new += stats["new"]
-                state.total_versioned += stats["versioned"]
-                state.total_rejected += stats["rejected"]
-                state.total_skipped_hash += stats["skipped_hash"]
-                state.total_ingested += ingested
-
-            yield _sse("ingestion_complete", {
-                "iteration": state.iteration,
-                "entries_ingested": ingested,
-                "total_ingested": state.total_ingested,
-                "total_rejected": state.total_rejected,
-            })
-            yield _sse("iteration_complete", {
-                "iteration": state.iteration,
-                "entries_extracted": len(entries),
-                "entries_ingested": ingested,
-            })
-
-            await _update_session_iteration(session_id, state, coverage)
-
-            if state.iteration >= state.max_iterations:
-                break
-            if ingested == 0 and len(entries) > 0:
-                yield _sse("convergence", {
-                    "reason": "all_duplicates",
-                    "message": "All extracted entries were duplicates.",
-                })
-                break
-
-            # Gap analysis for next iteration. No second pause on resume —
-            # we don't want to loop into pause/reply forever.
-            gap_task = asyncio.create_task(_analyze_gaps(state, model=decompose_model))
-            while not gap_task.done():
-                await asyncio.sleep(8)
-                if not gap_task.done():
-                    yield _sse("heartbeat", {"status": "analyzing_gaps"})
-            gaps = gap_task.result()
-            coverage = gaps.get("coverage_pct", 100)
-            state.covered_facets.update(gaps.get("covered_facets", []))
-
-            yield _sse("gap_analysis", {
-                "iteration": state.iteration,
-                "coverage_pct": coverage,
-                "covered_facets": list(state.covered_facets),
-                "gap_facets": gaps.get("gap_facets", []),
-                "assessment": gaps.get("assessment", ""),
-            })
-
-            if coverage >= 85 and not gaps.get("gap_queries"):
-                yield _sse("convergence", {
-                    "reason": "coverage_threshold",
-                    "coverage_pct": coverage,
-                })
-                break
-
-            queries = gaps.get("gap_queries", [])
-            if not queries:
-                break
-
-        # Final summary + finalize
-        summary_task = asyncio.create_task(_generate_summary(state, model=summary_model))
-        while not summary_task.done():
-            await asyncio.sleep(8)
-            if not summary_task.done():
-                yield _sse("heartbeat", {"status": "summarizing"})
+        summary_task = asyncio.create_task(
+            _generate_summary(state, model=summary_model)
+        )
+        async for hb in _await_with_heartbeat(
+            summary_task, {"status": "summarizing"}
+        ):
+            yield hb
         summary = summary_task.result()
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-        await _update_session_iteration(session_id, state, coverage)
+        await _update_session_iteration(session_id, state)
         await _finalize_session(session_id, "completed", elapsed_ms, summary)
 
-        yield _sse("research_complete", {
-            "topic": topic,
-            "session_id": session_id,
-            "total_entries": len(state.all_entries),
-            "total_ingested": state.total_ingested,
-            "total_rejected": state.total_rejected,
-            "new": state.total_new,
-            "versioned": state.total_versioned,
-            "rejected": state.total_rejected,
-            "skipped_hash": state.total_skipped_hash,
-            "iterations": state.iteration,
-            "total_urls_searched": len(state.url_history),
-            "total_queries": len(state.search_history),
-            "duration_ms": elapsed_ms,
-            "summary": summary,
-            "domain": state.domain,
-            "depth": depth,
-            "resumed_from_pause": True,
-        })
-
+        yield _sse("research_complete", _build_research_complete_payload(
+            state, session_id,
+            mode="topic",
+            duration_ms=elapsed_ms,
+            topic=topic,
+            summary=summary,
+            resumed_from_pause=True,
+        ))
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - t0) * 1000)
-        logger.error("resume_research_failed: session=%s error=%s",
-                     session_id, exc, exc_info=True)
+        logger.error(
+            "resume_research_failed: session=%s error=%s",
+            session_id, exc, exc_info=True,
+        )
         await _finalize_session(
             session_id, "failed", elapsed_ms,
-            error_message=f"Resume failed: {exc}",
+            error_message=f"Resume failed: {type(exc).__name__}: {exc}",
         )
         yield _sse("error", {
             "message": f"Resume failed: {exc}",
@@ -1494,869 +2121,14 @@ async def resume_research(
         })
 
 
-# ---------------------------------------------------------------------------
-# URL-mode: direct ingestion of a single URL (bypasses SearXNG discovery)
-# ---------------------------------------------------------------------------
-
-_MAX_URL_BYTES = 5 * 1024 * 1024  # 5 MB cap per page
-
-
-def _is_url(s: str) -> bool:
-    """True iff s is a valid absolute http(s) URL."""
-    from urllib.parse import urlparse
-    try:
-        p = urlparse(s.strip())
-        return p.scheme in ("http", "https") and bool(p.netloc)
-    except Exception:
-        return False
-
-
-async def _robots_allowed(url: str, user_agent: str = "ScaffoldEngine/1.0") -> bool:
-    """Check robots.txt. Fail-open on any error (missing robots.txt = allowed)."""
-    import httpx
-    from urllib.parse import urlparse
-    from urllib.robotparser import RobotFileParser
-    try:
-        p = urlparse(url)
-        robots_url = f"{p.scheme}://{p.netloc}/robots.txt"
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
-            r = await c.get(robots_url)
-            if r.status_code >= 400:
-                return True
-            rp = RobotFileParser()
-            rp.parse(r.text.splitlines())
-            return rp.can_fetch(user_agent, url)
-    except Exception as e:
-        logger.debug("robots_check_failed: url=%s error=%s", url, e)
-        return True
-
-
-async def _fetch_url_bounded(url: str, max_bytes: int = _MAX_URL_BYTES) -> str | None:
-    """Stream-fetch with hard byte cap. Returns text or None on failure/cap."""
-    import httpx
-    try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
-            async with c.stream("GET", url, headers={"User-Agent": "ScaffoldEngine/1.0"}) as resp:
-                if resp.status_code != 200:
-                    logger.warning("url_fetch_status: url=%s status=%d", url, resp.status_code)
-                    return None
-                cl = resp.headers.get("content-length")
-                if cl and cl.isdigit() and int(cl) > max_bytes:
-                    logger.warning("url_fetch_content_length_exceeded: url=%s bytes=%s", url, cl)
-                    return None
-                buf = bytearray()
-                async for chunk in resp.aiter_bytes():
-                    buf.extend(chunk)
-                    if len(buf) > max_bytes:
-                        logger.warning("url_fetch_cap_exceeded: url=%s bytes=%d", url, len(buf))
-                        return None
-                enc = resp.encoding or "utf-8"
-                try:
-                    return bytes(buf).decode(enc, errors="replace")
-                except LookupError:
-                    return bytes(buf).decode("utf-8", errors="replace")
-    except Exception as e:
-        logger.warning("url_fetch_failed: url=%s error=%s", url, e)
-        return None
-
-
-def _is_github_ref(s: str) -> bool:
-    """Match `github:owner/repo` prefix."""
-    if not s.startswith("github:"):
-        return False
-    rest = s[len("github:"):].strip()
-    parts = rest.split("/")
-    return len(parts) == 2 and all(parts) and "." not in parts[0]
-
-
-def _parse_github_ref(s: str) -> tuple[str, str]:
-    owner, repo = s[len("github:"):].strip().split("/", 1)
-    return owner.strip(), repo.strip()
-
-
-async def _run_research_github_mode(
-    owner: str,
-    repo: str,
-    state: "ResearchState",
-    session_id,
-    t0: float,
-):
-    """GitHub-mode: fetch README + docs/**/*.md + top-level Py docstrings, ingest as tech_docs."""
-    from app.utils.github_ingest import (
-        fetch_repo_content,
-        GitHubRepoNotFoundError,
-        GitHubRateLimitError,
-    )
-
-    state.outline_facets = ["github_repo"]
-    yield _sse("decomposition_complete", {
-        "complexity": "direct",
-        "facets": state.outline_facets,
-        "query_count": 0,
-    })
-
-    state.iteration = 1
-    yield _sse("iteration_started", {
-        "iteration": 1,
-        "query_count": 0,
-        "mode": "github",
-    })
-
-    # Fetch with heartbeat wrapper
-    task = asyncio.create_task(fetch_repo_content(owner, repo))
-    while not task.done():
-        await asyncio.sleep(8)
-        if not task.done():
-            yield _sse("heartbeat", {"status": "fetching_github", "iteration": 1})
-
-    try:
-        files = task.result()
-    except GitHubRepoNotFoundError as e:
-        yield _sse("error", {
-            "message": f"GitHub repo not found: {e}. Check owner/repo and GITHUB_TOKEN for private repos.",
-            "session_id": session_id,
-            "topic": f"{owner}/{repo}",
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-    except GitHubRateLimitError as e:
-        yield _sse("error", {
-            "message": f"GitHub rate limit: {e}",
-            "session_id": session_id,
-            "topic": f"{owner}/{repo}",
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-
-    if not files:
-        yield _sse("error", {
-            "message": f"No ingestible content found in {owner}/{repo}",
-            "session_id": session_id,
-            "topic": f"{owner}/{repo}",
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-
-    yield _sse("search_complete", {
-        "iteration": 1,
-        "results_found": len(files),
-        "total_urls": len(files),
-        "mode": "github",
-    })
-
-    # Build entries (mirror url_mode shape + source_type tech_docs)
-    all_entries: list[dict] = []
-    for f in files:
-        source_url = f"https://github.com/{owner}/{repo}/blob/HEAD/{f['path']}"
-        state.url_history.add(source_url)
-        all_entries.append({
-            "title": f"{owner}/{repo}: {f['path']}",
-            "content": f["content"][:8000],
-            "source": source_url,
-            "source_type": "tech_docs",
-            "confidence_score": 0.9,
-            "facet": "github_repo",
-        })
-
-    yield _sse("extraction_complete", {
-        "iteration": 1,
-        "entries_extracted": len(all_entries),
-        "mode": "github",
-    })
-
-    # Ingest via shared pipeline (inherits dedup, TTL, partition key)
-    stats = await ingest_entries(all_entries, domain=state.domain)
-    state.total_new += stats.get("new", 0)
-    state.total_versioned += stats.get("versioned", 0)
-    state.total_rejected += stats.get("rejected", 0)
-    state.total_skipped_hash += stats.get("skipped_hash", 0)
-    state.total_ingested = state.total_new + state.total_versioned
-
-    yield _sse("ingestion_complete", {
-        "iteration": 1,
-        "entries_ingested": stats.get("new", 0) + stats.get("versioned", 0),
-        "total_rejected": stats.get("rejected", 0) + stats.get("skipped_hash", 0),
-        "new": stats.get("new", 0),
-        "versioned": stats.get("versioned", 0),
-        "rejected": stats.get("rejected", 0),
-        "skipped_hash": stats.get("skipped_hash", 0),
-    })
-
-    # PATCH_GITHUB_OPENAPI_DISPLAY
-    duration_ms = int((time.monotonic() - t0) * 1000)
-    total_ingested = state.total_new + state.total_versioned
-    await _persist_session_stats(
-        session_id,
-        entries_extracted=len(all_entries),
-        entries_ingested=total_ingested,
-        entries_rejected=state.total_rejected,
-        urls_searched=len(state.url_history),
-        iterations=1,
-    )
-    yield _sse("research_complete", {
-        "topic": f"github:{owner}/{repo}",
-        "mode": "github",
-        "files_fetched": len(files),
-        "total_entries": len(all_entries),
-        "total_ingested": total_ingested,
-        "iterations": 1,
-        "new": state.total_new,
-        "versioned": state.total_versioned,
-        "rejected": state.total_rejected,
-        "skipped_hash": state.total_skipped_hash,
-        "duration_ms": duration_ms,
-        "session_id": session_id,
-    })
-
-    await _finalize_session(session_id, "completed", duration_ms)
-
-
-def _is_openapi_ref(s: str) -> bool:
-    """Match `openapi:<url>` prefix with http(s) URL."""
-    if not s.startswith("openapi:"):
-        return False
-    rest = s[len("openapi:"):].strip()
-    return rest.startswith("http://") or rest.startswith("https://")
-
-
-def _parse_openapi_ref(s: str) -> str:
-    return s[len("openapi:"):].strip()
-
-
-async def _run_research_openapi_mode(
-    spec_url: str,
-    state: "ResearchState",
-    session_id,
-    t0: float,
-):
-    """OpenAPI-mode: fetch + validate spec, ingest one entry per endpoint."""
-    from app.utils.openapi_ingest import (
-        fetch_and_parse_spec,
-        OpenAPIFetchError,
-        OpenAPIParseError,
-        OpenAPIValidationError,
-    )
-
-    state.outline_facets = ["openapi_spec"]
-    yield _sse("decomposition_complete", {
-        "complexity": "direct",
-        "facets": state.outline_facets,
-        "query_count": 0,
-    })
-
-    state.iteration = 1
-    yield _sse("iteration_started", {
-        "iteration": 1,
-        "query_count": 0,
-        "mode": "openapi",
-    })
-
-    # Fetch + validate with heartbeat
-    task = asyncio.create_task(fetch_and_parse_spec(spec_url))
-    while not task.done():
-        await asyncio.sleep(8)
-        if not task.done():
-            yield _sse("heartbeat", {"status": "fetching_openapi", "iteration": 1})
-
-    try:
-        endpoints, meta = task.result()
-    except OpenAPIFetchError as e:
-        yield _sse("error", {
-            "message": f"OpenAPI fetch failed: {e}",
-            "session_id": session_id,
-            "topic": spec_url,
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-    except OpenAPIParseError as e:
-        yield _sse("error", {
-            "message": f"OpenAPI parse failed: {e}",
-            "session_id": session_id,
-            "topic": spec_url,
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-    except OpenAPIValidationError as e:
-        yield _sse("error", {
-            "message": f"OpenAPI validation failed: {e}",
-            "session_id": session_id,
-            "topic": spec_url,
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-
-    if not endpoints:
-        yield _sse("error", {
-            "message": f"No endpoints found in spec at {spec_url}",
-            "session_id": session_id,
-            "topic": spec_url,
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-
-    yield _sse("search_complete", {
-        "iteration": 1,
-        "results_found": len(endpoints),
-        "total_urls": 1,
-        "mode": "openapi",
-        "spec_title": meta["title"],
-        "spec_version": meta["spec_version"],
-        "openapi_version": meta["version"],
-        "truncated": meta["truncated"],
-    })
-
-    state.url_history.add(spec_url)
-
-    # Build entries (one per endpoint)
-    all_entries: list[dict] = []
-    for ep in endpoints:
-        source_url = f"{spec_url}#{ep['method']} {ep['path']}"
-        tags = ep.get("tags") or []
-        # Primary tag goes into facet; all tags preserved as domain_tags
-        primary_facet = tags[0] if tags else "openapi_spec"
-        all_entries.append({
-            "title": ep["title"],
-            "content": ep["content"][:8000],
-            "source": source_url,
-            "source_type": "tech_docs",
-            "confidence_score": 0.95,
-            "facet": primary_facet,
-            "domain_tags": tags,
-        })
-
-    yield _sse("extraction_complete", {
-        "iteration": 1,
-        "entries_extracted": len(all_entries),
-        "mode": "openapi",
-    })
-
-    # Ingest via shared pipeline
-    stats = await ingest_entries(all_entries, domain=state.domain)
-    state.total_new += stats.get("new", 0)
-    state.total_versioned += stats.get("versioned", 0)
-    state.total_rejected += stats.get("rejected", 0)
-    state.total_skipped_hash += stats.get("skipped_hash", 0)
-    state.total_ingested = state.total_new + state.total_versioned
-
-    yield _sse("ingestion_complete", {
-        "iteration": 1,
-        "entries_ingested": stats.get("new", 0) + stats.get("versioned", 0),
-        "total_rejected": stats.get("rejected", 0) + stats.get("skipped_hash", 0),
-        "new": stats.get("new", 0),
-        "versioned": stats.get("versioned", 0),
-        "rejected": stats.get("rejected", 0),
-        "skipped_hash": stats.get("skipped_hash", 0),
-    })
-
-    duration_ms = int((time.monotonic() - t0) * 1000)
-    total_ingested = state.total_new + state.total_versioned
-    await _persist_session_stats(
-        session_id,
-        entries_extracted=len(all_entries),
-        entries_ingested=total_ingested,
-        entries_rejected=state.total_rejected,
-        urls_searched=1,
-        iterations=1,
-    )
-    yield _sse("research_complete", {
-        "topic": f"openapi:{spec_url}",
-        "mode": "openapi",
-        "spec_title": meta["title"],
-        "spec_version": meta["spec_version"],
-        "openapi_version": meta["version"],
-        "endpoints_found": meta["total_endpoints"],
-        "endpoints_ingested": meta["ingested_endpoints"],
-        "truncated": meta["truncated"],
-        "total_entries": len(all_entries),
-        "total_ingested": total_ingested,
-        "iterations": 1,
-        "new": state.total_new,
-        "versioned": state.total_versioned,
-        "rejected": state.total_rejected,
-        "skipped_hash": state.total_skipped_hash,
-        "duration_ms": duration_ms,
-        "session_id": session_id,
-    })
-
-    await _finalize_session(session_id, "completed", duration_ms)
-
-
-async def _run_research_url_mode(
-    url: str,
-    state: "ResearchState",
-    session_id,
-    extract_model: str,
-    summary_model: str,
-    t0: float,
-):
-    """URL-mode: fetch one URL, extract via trafilatura, ingest, summarize."""
-    import trafilatura
-
-    state.outline_facets = ["direct_url"]
-    yield _sse("decomposition_complete", {
-        "complexity": "direct",
-        "facets": state.outline_facets,
-        "query_count": 0,
-    })
-
-    state.iteration = 1
-    yield _sse("iteration_started", {
-        "iteration": 1,
-        "query_count": 0,
-        "mode": "direct_url",
-    })
-
-    # 1. Robots check
-    if not await _robots_allowed(url):
-        yield _sse("error", {
-            "message": f"robots.txt disallows fetching {url}",
-            "session_id": session_id,
-            "topic": url,
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-
-    # 2. Bounded fetch
-    html = await _fetch_url_bounded(url)
-    if not html:
-        yield _sse("error", {
-            "message": f"Failed to fetch {url} (or exceeded 5MB cap)",
-            "session_id": session_id,
-            "topic": url,
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-
-    # 3. Trafilatura extract
-    text = await asyncio.to_thread(
-        trafilatura.extract, html, output_format="txt", with_metadata=False,
-    )
-    if not text or len(text) < 100:
-        yield _sse("error", {
-            "message": f"No extractable content at {url} (got {len(text or '')} chars)",
-            "session_id": session_id,
-            "topic": url,
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-
-    # Page title (best-effort)
-    try:
-        meta = await asyncio.to_thread(trafilatura.extract_metadata, html)
-        page_title = (getattr(meta, "title", None) or url)[:200]
-    except Exception:
-        page_title = url[:200]
-
-    yield _sse("search_complete", {
-        "iteration": 1,
-        "results_found": 1,
-        "total_urls": 1,
-        "mode": "direct_url",
-    })
-
-    state.url_history.add(url)
-    state.search_history.add(f"direct:{url}")
-
-    # 4. Chunk + LLM extract
-    chunks = _chunk_text(text)
-    prompt_topic = page_title if page_title and page_title != url[:200] else f"content at {url}"
-    batch_size = 5
-    all_entries: list[dict] = []
-
-    for i in range(0, len(chunks), batch_size):
-        batch_chunks = chunks[i:i + batch_size]
-        results_text = "\n\n".join(
-            f"Title: {page_title}\nURL: {url}\nSnippet: {c[:600]}"
-            for c in batch_chunks
-        )
-        task = asyncio.create_task(model_router.generate(
-            EXTRACT_PROMPT.format(topic=prompt_topic, results=results_text),
-            model=extract_model,
-            system=EXTRACT_SYSTEM,
-            temperature=0.1,
-            max_tokens=1024,
-        ))
-        while not task.done():
-            await asyncio.sleep(8)
-            if not task.done():
-                yield _sse("heartbeat", {"status": "extracting", "iteration": 1})
-        resp = task.result()
-
-        entries = []
-        if resp.success and resp.text and len(resp.text.strip()) > 5:
-            entries = parse_json_array(resp.text) or []
-            entries = [e for e in entries if isinstance(e, dict)]
-            for entry in entries:
-                src_url = entry.get("source", "") or url
-                entry["source"] = src_url
-                entry["confidence_score"] = _score_source(src_url)
-                entry["facet"] = "direct_url"
-            all_entries.extend(entries)
-        else:
-            logger.warning("url_mode_extract_failed: batch=%d success=%s error=%s",
-                           i // batch_size, resp.success if resp else None,
-                           resp.error if resp else "no-resp")
-
-        # Fallback: one entry per chunk if LLM produced nothing
-        if not entries:
-            for c in batch_chunks:
-                if len(c) > 50:
-                    all_entries.append({
-                        "title": page_title,
-                        "content": c,
-                        "tags": "",
-                        "source": url,
-                        "confidence_score": _score_source(url),
-                        "source_type": "community",
-                        "facet": "direct_url",
-                    })
-
-    yield _sse("extraction_complete", {
-        "iteration": 1,
-        "entries_extracted": len(all_entries),
-    })
-
-    # 5. Ingest
-    ingested = 0
-    if all_entries:
-        state.all_entries.extend(all_entries)
-        stats = await ingest_entries(all_entries, domain=state.domain)
-        ingested = stats["new"] + stats["versioned"]
-        state.total_new += stats["new"]
-        state.total_versioned += stats["versioned"]
-        state.total_rejected += stats["rejected"]
-        state.total_skipped_hash += stats["skipped_hash"]
-        state.total_ingested += ingested
-
-    yield _sse("ingestion_complete", {
-        "iteration": 1,
-        "entries_ingested": ingested,
-        "total_ingested": state.total_ingested,
-        "total_rejected": state.total_rejected,
-    })
-
-    yield _sse("iteration_complete", {
-        "iteration": 1,
-        "entries_extracted": len(all_entries),
-        "entries_ingested": ingested,
-    })
-
-    # 6. Summary + finalize
-    summary_task = asyncio.create_task(_generate_summary(state, model=summary_model))
-    while not summary_task.done():
-        await asyncio.sleep(8)
-        if not summary_task.done():
-            yield _sse("heartbeat", {"status": "summarizing"})
-    summary = summary_task.result()
-    elapsed_ms = int((time.monotonic() - t0) * 1000)
-
-    await _update_session_iteration(session_id, state, 100)
-    await _finalize_session(session_id, "completed", elapsed_ms, summary)
-
-    yield _sse("research_complete", {
-        "topic": url,
-        "session_id": session_id,
-        "total_entries": len(state.all_entries),
-        "total_ingested": state.total_ingested,
-        "total_rejected": state.total_rejected,
-        "new": state.total_new,
-        "versioned": state.total_versioned,
-        "rejected": state.total_rejected,
-        "skipped_hash": state.total_skipped_hash,
-        "iterations": 1,
-        "total_urls_searched": 1,
-        "total_queries": 1,
-        "duration_ms": elapsed_ms,
-        "summary": summary,
-        "domain": state.domain,
-        "depth": "direct_url",
-    })
-
-
-# ---------------------------------------------------------------------------
-# PDF-mode: direct ingestion of a single uploaded PDF (#4.5b)
-# ---------------------------------------------------------------------------
-
-_MAX_PDF_BYTES = 20 * 1024 * 1024  # 20 MB cap
-
-
-def _extract_pypdf(pdf_bytes: bytes) -> tuple[str, int]:
-    """Extract text via pypdf. Returns (text, page_count)."""
-    import io
-    from pypdf import PdfReader
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    pages = len(reader.pages)
-    parts = []
-    for page in reader.pages:
-        try:
-            t = page.extract_text() or ""
-            if t.strip():
-                parts.append(t)
-        except Exception as e:
-            logger.debug("pypdf_page_fail: error=%s", e)
-    return ("\n\n".join(parts), pages)
-
-
-def _extract_pdfplumber(pdf_bytes: bytes) -> tuple[str, int]:
-    """Extract text via pdfplumber (better for structured/multi-column). Returns (text, page_count)."""
-    import io
-    import pdfplumber
-    parts = []
-    pages = 0
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        pages = len(pdf.pages)
-        for page in pdf.pages:
-            try:
-                t = page.extract_text() or ""
-                if t.strip():
-                    parts.append(t)
-            except Exception as e:
-                logger.debug("pdfplumber_page_fail: error=%s", e)
-    return ("\n\n".join(parts), pages)
-
-
-def _extract_threshold(page_count: int) -> int:
-    """Minimum char count to consider extraction successful."""
-    return max(200, page_count * 50)
-
-
-async def _extract_pdf_text(
-    pdf_bytes: bytes,
-    extractor: str = "auto",
-) -> tuple[str, int, str]:
-    """Extract text from PDF bytes.
-
-    extractor: 'auto' (pypdf → plumber fallback), 'pypdf' (force), 'plumber' (force).
-    Returns (text, page_count, extractor_used).
-    Raises RuntimeError on scanned/unreadable PDFs (both extractors return too little).
-    """
-    extractor = (extractor or "auto").lower()
-    if extractor not in ("auto", "pypdf", "plumber"):
-        extractor = "auto"
-
-    # Force pypdf
-    if extractor == "pypdf":
-        text, pages = await asyncio.to_thread(_extract_pypdf, pdf_bytes)
-        return (text, pages, "pypdf")
-
-    # Force plumber
-    if extractor == "plumber":
-        text, pages = await asyncio.to_thread(_extract_pdfplumber, pdf_bytes)
-        return (text, pages, "plumber")
-
-    # Auto: try pypdf first
-    text, pages = await asyncio.to_thread(_extract_pypdf, pdf_bytes)
-    if len(text) >= _extract_threshold(pages):
-        return (text, pages, "pypdf")
-
-    # Fallback to plumber
-    logger.info("pdf_extract_fallback: pypdf_chars=%d pages=%d threshold=%d",
-                len(text), pages, _extract_threshold(pages))
-    plumber_text, _ = await asyncio.to_thread(_extract_pdfplumber, pdf_bytes)
-    if len(plumber_text) >= _extract_threshold(pages):
-        return (plumber_text, pages, "plumber")
-
-    # Both failed — likely scanned
-    raise RuntimeError(
-        f"PDF appears to be scanned or unreadable: "
-        f"pypdf={len(text)} chars, plumber={len(plumber_text)} chars, pages={pages}"
-    )
-
-
-async def _run_research_pdf_mode(
-    pdf_bytes: bytes,
-    filename: str,
-    extractor: str,
-    state: "ResearchState",
-    session_id,
-    extract_model: str,
-    summary_model: str,
-    t0: float,
-):
-    """PDF-mode: extract text from uploaded bytes, ingest like URL-mode."""
-    if len(pdf_bytes) > _MAX_PDF_BYTES:
-        yield _sse("error", {
-            "message": f"PDF exceeds {_MAX_PDF_BYTES // (1024*1024)}MB cap ({len(pdf_bytes)} bytes)",
-            "session_id": session_id,
-            "topic": filename,
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-
-    state.outline_facets = ["direct_pdf"]
-    yield _sse("decomposition_complete", {
-        "complexity": "direct",
-        "facets": state.outline_facets,
-        "query_count": 0,
-    })
-
-    state.iteration = 1
-    yield _sse("iteration_started", {
-        "iteration": 1,
-        "query_count": 0,
-        "mode": "direct_pdf",
-    })
-
-    # 1. Extract text (pypdf → plumber fallback by default)
-    try:
-        text, page_count, used = await _extract_pdf_text(pdf_bytes, extractor=extractor)
-    except RuntimeError as e:
-        yield _sse("error", {
-            "message": str(e),
-            "session_id": session_id,
-            "topic": filename,
-            "hint": "Scanned PDFs require OCR (not yet supported)",
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-    except Exception as e:
-        yield _sse("error", {
-            "message": f"PDF extraction failed: {e}",
-            "session_id": session_id,
-            "topic": filename,
-        })
-        await _finalize_session(session_id, "failed", int((time.monotonic() - t0) * 1000))
-        return
-
-    yield _sse("search_complete", {
-        "iteration": 1,
-        "results_found": 1,
-        "total_urls": 1,
-        "mode": "direct_pdf",
-        "page_count": page_count,
-        "extractor_used": used,
-        "char_count": len(text),
-    })
-
-    virtual_url = f"pdf://{filename}"
-    state.url_history.add(virtual_url)
-    state.search_history.add(f"direct_pdf:{filename}")
-
-    # 2. Chunk + LLM extract
-    chunks = _chunk_text(text)
-    batch_size = 5
-    all_entries: list[dict] = []
-
-    for i in range(0, len(chunks), batch_size):
-        batch_chunks = chunks[i:i + batch_size]
-        results_text = "\n\n".join(
-            f"Title: {filename} (p. {page_count})\nURL: {virtual_url}\nSnippet: {c[:600]}"
-            for c in batch_chunks
-        )
-        task = asyncio.create_task(model_router.generate(
-            EXTRACT_PROMPT.format(topic=filename, results=results_text),
-            model=extract_model,
-            system=EXTRACT_SYSTEM,
-            temperature=0.1,
-            max_tokens=1024,
-        ))
-        while not task.done():
-            await asyncio.sleep(8)
-            if not task.done():
-                yield _sse("heartbeat", {"status": "extracting", "iteration": 1})
-        resp = task.result()
-
-        entries = []
-        if resp.success and resp.text and len(resp.text.strip()) > 5:
-            entries = parse_json_array(resp.text) or []
-            entries = [e for e in entries if isinstance(e, dict)]
-            for entry in entries:
-                entry["source"] = virtual_url
-                entry["confidence_score"] = 0.8  # local upload, reasonably trusted
-                entry["facet"] = "direct_pdf"
-                entry["source_type"] = entry.get("source_type") or "tech_docs"
-            all_entries.extend(entries)
-        else:
-            logger.warning("pdf_mode_extract_failed: batch=%d success=%s error=%s",
-                           i // batch_size, resp.success if resp else None,
-                           resp.error if resp else "no-resp")
-
-        # Fallback: one entry per chunk if LLM produced nothing
-        if not entries:
-            for c in batch_chunks:
-                if len(c) > 50:
-                    all_entries.append({
-                        "title": filename,
-                        "content": c,
-                        "tags": "",
-                        "source": virtual_url,
-                        "confidence_score": 0.8,
-                        "source_type": "tech_docs",
-                        "facet": "direct_pdf",
-                    })
-
-    yield _sse("extraction_complete", {
-        "iteration": 1,
-        "entries_extracted": len(all_entries),
-    })
-
-    # 3. Ingest
-    ingested = 0
-    if all_entries:
-        state.all_entries.extend(all_entries)
-        stats = await ingest_entries(all_entries, domain=state.domain)
-        ingested = stats["new"] + stats["versioned"]
-        state.total_new += stats["new"]
-        state.total_versioned += stats["versioned"]
-        state.total_rejected += stats["rejected"]
-        state.total_skipped_hash += stats["skipped_hash"]
-        state.total_ingested += ingested
-
-    yield _sse("ingestion_complete", {
-        "iteration": 1,
-        "entries_ingested": ingested,
-        "total_ingested": state.total_ingested,
-        "total_rejected": state.total_rejected,
-    })
-
-    yield _sse("iteration_complete", {
-        "iteration": 1,
-        "entries_extracted": len(all_entries),
-        "entries_ingested": ingested,
-    })
-
-    # 4. Summary + finalize
-    summary_task = asyncio.create_task(_generate_summary(state, model=summary_model))
-    while not summary_task.done():
-        await asyncio.sleep(8)
-        if not summary_task.done():
-            yield _sse("heartbeat", {"status": "summarizing"})
-    summary = summary_task.result()
-    elapsed_ms = int((time.monotonic() - t0) * 1000)
-
-    await _update_session_iteration(session_id, state, 100)
-    await _finalize_session(session_id, "completed", elapsed_ms, summary)
-
-    yield _sse("research_complete", {
-        "topic": filename,
-        "session_id": session_id,
-        "total_entries": len(state.all_entries),
-        "total_ingested": state.total_ingested,
-        "total_rejected": state.total_rejected,
-        "new": state.total_new,
-        "versioned": state.total_versioned,
-        "rejected": state.total_rejected,
-        "skipped_hash": state.total_skipped_hash,
-        "iterations": 1,
-        "total_urls_searched": 1,
-        "total_queries": 1,
-        "duration_ms": elapsed_ms,
-        "summary": summary,
-        "domain": state.domain,
-        "depth": "direct_pdf",
-        "page_count": page_count,
-        "extractor_used": used,
-    })
-
-
 async def run_research_pdf(
     pdf_bytes: bytes,
     filename: str,
     extractor: str = "auto",
     domain: str | None = None,
     model_overrides: dict | None = None,
-):
-    """Entry point for PDF-mode research. Yields SSE events like run_research()."""
+) -> AsyncGenerator[str, None]:
+    """Entry point for PDF research (called from /research/pdf endpoint)."""
     t0 = time.monotonic()
     research_domain = domain or _detect_domain(filename)
 
@@ -2370,11 +2142,8 @@ async def run_research_pdf(
         return
 
     session_id = await _create_session(filename, "direct_pdf", research_domain)
-
     state = ResearchState(
-        topic=filename,
-        depth="direct_pdf",
-        domain=research_domain,
+        topic=filename, depth="direct_pdf", domain=research_domain,
     )
 
     extract_model = get_model("model_verifier", model_overrides)
@@ -2404,8 +2173,14 @@ async def run_research_pdf(
             yield evt
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - t0) * 1000)
-        logger.error("pdf_research_failed: session=%s error=%s", session_id, exc, exc_info=True)
-        await _finalize_session(session_id, "failed", elapsed_ms)
+        logger.error(
+            "pdf_research_failed: session=%s error=%s",
+            session_id, exc, exc_info=True,
+        )
+        await _finalize_session(
+            session_id, "failed", elapsed_ms,
+            error_message=f"{type(exc).__name__}: {exc}",
+        )
         yield _sse("error", {
             "message": f"PDF research failed: {exc}",
             "session_id": session_id,

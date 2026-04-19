@@ -95,7 +95,7 @@ class TestExtractPdfTextCascade:
     @pytest.mark.asyncio
     async def test_pypdf_succeeds_no_fallback(self):
         pdf = _make_test_pdf("Enough text here to pass the threshold easily. " * 20)
-        text, pages, used = await ra._extract_pdf_text(pdf, extractor="auto")
+        text, pages, used, _ = await ra._extract_pdf_text(pdf, extractor="auto")
         assert used == "pypdf"
         assert len(text) >= 200
 
@@ -107,7 +107,7 @@ class TestExtractPdfTextCascade:
         fake_plumber_long = ("enough text to pass threshold " * 20, 1)
         with patch.object(ra, "_extract_pypdf", return_value=fake_pypdf_short), \
              patch.object(ra, "_extract_pdfplumber", return_value=fake_plumber_long):
-            text, pages, used = await ra._extract_pdf_text(pdf, extractor="auto")
+            text, pages, used, _ = await ra._extract_pdf_text(pdf, extractor="auto")
             assert used == "plumber"
             assert len(text) >= 200
 
@@ -116,7 +116,7 @@ class TestExtractPdfTextCascade:
         """extractor=pypdf forces pypdf even when output is short."""
         with patch.object(ra, "_extract_pypdf", return_value=("tiny", 1)), \
              patch.object(ra, "_extract_pdfplumber") as plumber_mock:
-            text, pages, used = await ra._extract_pdf_text(b"fake", extractor="pypdf")
+            text, pages, used, _ = await ra._extract_pdf_text(b"fake", extractor="pypdf")
             assert used == "pypdf"
             plumber_mock.assert_not_called()
 
@@ -124,7 +124,7 @@ class TestExtractPdfTextCascade:
     async def test_force_plumber_skips_pypdf(self):
         with patch.object(ra, "_extract_pypdf") as pypdf_mock, \
              patch.object(ra, "_extract_pdfplumber", return_value=("long " * 50, 1)):
-            text, pages, used = await ra._extract_pdf_text(b"fake", extractor="plumber")
+            text, pages, used, _ = await ra._extract_pdf_text(b"fake", extractor="plumber")
             assert used == "plumber"
             pypdf_mock.assert_not_called()
 
@@ -140,7 +140,7 @@ class TestExtractPdfTextCascade:
     async def test_invalid_extractor_defaults_to_auto(self):
         """Invalid extractor name falls back to auto behavior."""
         pdf = _make_test_pdf("content " * 50)
-        text, pages, used = await ra._extract_pdf_text(pdf, extractor="garbage")
+        text, pages, used, _ = await ra._extract_pdf_text(pdf, extractor="garbage")
         assert used in ("pypdf", "plumber")
 
 
