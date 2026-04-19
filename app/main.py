@@ -13,11 +13,11 @@ import httpx
 import structlog
 from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, Query
 from pymilvus import connections as milvus_connections, utility, Collection
-from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.model_router import close_client, validate_models
-from starlette.responses import StreamingResponse, HTMLResponse
+from starlette.responses import StreamingResponse
+from fastapi.templating import Jinja2Templates
 
 from app.auth import require_api_key
 from app.config import settings
@@ -39,18 +39,27 @@ from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag as _query_rag
 from app.routers.status import router as status_router
 from app.schemas import (
+    ConfirmInput,
+    DagInput,
+    ExecRetryInput,
     ExecuteNextInput,
     ExecutionResult,
+    GtInput,
+    GtSearchInput,
+    IdeaInput,
     PromptOptimizeInput,
     PromptOptimizeResult,
+    PromptUpdateInput,
+    RagInput,
     ResearchInput,
     ResearchReplyInput,
-    SkipNodeInput,
     ScheduleCreate,
     ScheduleResponse,
+    SkipNodeInput,
 )
 
 logger = logging.getLogger("scaffold")
+templates = Jinja2Templates(directory="app/templates")
 
 setup_logging(
     json_logs=os.getenv("LOG_JSON_FORMAT", "true").lower() == "true",
@@ -86,13 +95,12 @@ async def lifespan(app: FastAPI):
     if os.getenv("CLEANUP_ON_STARTUP", "").lower() == "true":
         logger.info('event="startup_cleanup_begin"')
         try:
-            async for db in get_db():
+            async with async_session() as db:
                 result = await reap_stale_jobs(db)
                 logger.info(
                     'event="startup_cleanup_complete" running_to_failed=%s planning_to_cancelled=%s',
                     result["running_to_failed"], result["planning_to_cancelled"],
                 )
-                break
         except Exception as exc:
             logger.error('event="startup_cleanup_failed" error=%s', exc)
 
@@ -221,6 +229,7 @@ async def health():
         milvus = {"status": "down", "latency_ms": 0, "collection_count": 0, "entry_count": 0}
 
     # Redis + cache stats (reuse async connection from embedding cache)
+    cache_stats: dict = {}
     try:
         from app.utils.embedding_cache import get_cache
         _cache = get_cache()
@@ -231,7 +240,6 @@ async def health():
         redis_info = {"status": "up", "keys": _key_count}
     except Exception:
         redis_info = {"status": "down", "keys": 0}
-        cache_stats = cache_stats if 'cache_stats' in dir() else {}
     checks = {"postgresql": pg, "ollama": ollama, "milvus": milvus, "redis": redis_info, "embedding_cache": cache_stats}
     pg_up = pg["status"] == "up"
     ollama_up = ollama["status"] == "up"
@@ -263,20 +271,8 @@ async def cleanup_stale_jobs(db: AsyncSession = Depends(get_db)):
     }
 
 
-# === Endpoint stubs — each will be implemented as a separate module ===
 
 
-class IdeaInput(BaseModel):
-    idea: str
-    domain: str | None = None
-    model: str | None = None
-    model_overrides: dict | None = None
-
-class ConfirmInput(BaseModel):
-    job_id: str
-    feedback: str | None = None
-    push_to_github: bool = False
-    model_overrides: dict | None = None
 
 
 
@@ -296,6 +292,7 @@ async def _require_valid_models(overrides: dict | None = None):
 @app.post("/ideas")
 async def submit_idea(body: IdeaInput, db=Depends(get_db)):
     """Step 10: Submit new idea → trigger refinement."""
+    await _require_valid_models(body.model_overrides)
     result = await refine_idea(body.idea, db, model=body.model, domain=body.domain, model_overrides=body.model_overrides)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
@@ -354,11 +351,6 @@ async def get_dag(job_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
-class DagInput(BaseModel):
-    job_id: str
-    model: str | None = None
-    model_overrides: dict | None = None
-
 @app.post("/dag")
 async def generate_dag_endpoint(body: DagInput, db=Depends(get_db)):
     """Step 11: Generate DAG from refined idea brief."""
@@ -371,14 +363,6 @@ async def generate_dag_endpoint(body: DagInput, db=Depends(get_db)):
         )
     return result
 
-
-class RagInput(BaseModel):
-    query: str
-    top_k: int = 10
-    confidence_threshold: float = 0.8
-    skip_rerank: bool = False
-    include_history: bool = False
-    domain: str | None = None
 
 @app.post("/rag")
 async def query_rag(body: RagInput):
@@ -415,16 +399,10 @@ async def list_dedup_log(limit: int = 50, offset: int = 0):
         "entries": [dict(r) for r in rows],
     }
 
-class GtInput(BaseModel):
-    topic: str
-    queries: list[str] | None = None
-    push_to_github: bool = False
-    target_file: str | None = None
-    model: str | None = None
-
 @app.post("/gt")
 async def extract_gt(body: GtInput):
     """Step 12: Extract ground truths via SearXNG + LLM distillation."""
+    await _require_valid_models({"model_general": body.model} if body.model else None)
     return await extract_ground_truths(
         body.topic,
         queries=body.queries,
@@ -433,11 +411,6 @@ async def extract_gt(body: GtInput):
         model=body.model,
     )
 
-
-class GtSearchInput(BaseModel):
-    domain: str | None = None
-    query: str
-    top_k: int = 10
 
 @app.get("/gt/list")
 async def gt_list_endpoint(page: int = 1, per_page: int = 20):
@@ -501,19 +474,23 @@ async def prompts_detail(job_id: str, node_key: str, db: AsyncSession = Depends(
 
 
 @app.post("/prompts/{job_id}/{node_key}")
-async def prompts_update(job_id: str, node_key: str, request: Request, db: AsyncSession = Depends(get_db)):
+async def prompts_update(
+    job_id: str,
+    node_key: str,
+    body: PromptUpdateInput,
+    db: AsyncSession = Depends(get_db),
+):
     """Update the optimized prompt for a pending/failed node."""
+    new_prompt = body.prompt.strip()
+    if not new_prompt:
+        raise HTTPException(status_code=400, detail="Missing 'prompt' in request body")
     try:
-        body = await request.json()
-        new_prompt = body.get("prompt", "").strip()
-        if not new_prompt:
-            raise HTTPException(status_code=400, detail="Missing 'prompt' in request body")
         result = await update_prompt(UUID(job_id), node_key, new_prompt, db)
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=result["error"])
-        return result
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid job_id format")
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 @app.get("/exec/status/{job_id}")
@@ -529,20 +506,17 @@ async def exec_status(job_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/exec/retry")
-async def exec_retry(request: Request, db: AsyncSession = Depends(get_db)):
+async def exec_retry(body: ExecRetryInput, db: AsyncSession = Depends(get_db)):
     """Reset a failed node to pending for retry."""
+    if not body.job_id or not body.node_key:
+        raise HTTPException(status_code=400, detail="Missing job_id or node_key")
     try:
-        body = await request.json()
-        job_id = body.get("job_id", "")
-        node_key = body.get("node_key", "")
-        if not job_id or not node_key:
-            raise HTTPException(status_code=400, detail="Missing job_id or node_key")
-        result = await retry_failed_node(UUID(job_id), node_key, db)
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=result["error"])
-        return result
+        result = await retry_failed_node(UUID(body.job_id), body.node_key, db)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid job_id format")
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 
@@ -645,10 +619,10 @@ async def research_pdf_endpoint(
     )
 
 
-@app.get("/research/pdf", tags=["Research"], response_class=HTMLResponse)
-async def research_pdf_upload_page():
+@app.get("/research/pdf", tags=["Research"])
+async def research_pdf_upload_page(request: Request):
     """Drag-and-drop HTML upload page for PDF ingestion."""
-    return _PDF_UPLOAD_HTML
+    return templates.TemplateResponse(request, "research_pdf_upload.html")
 
 
 
@@ -677,9 +651,8 @@ async def research_history():
 @app.get("/research/history/{session_id}", tags=["Research"])
 async def research_history_detail(session_id: str):
     """Get a single research session by ID. Returns 404 if not found."""
-    from uuid import UUID as _UUID
     try:
-        parsed = _UUID(session_id)
+        parsed = UUID(session_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid session ID format")
     async with async_session() as db:
@@ -715,7 +688,7 @@ async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_d
     if body.depth not in ("shallow", "medium", "deep"):
         raise HTTPException(status_code=422, detail="depth must be shallow|medium|deep")
 
-    _require_valid_models(body.model_overrides)
+    await _require_valid_models(body.model_overrides)
 
     result = await db.execute(text("""
         INSERT INTO scheduled_jobs (topic, depth, cron_expression, timezone, enabled)
@@ -754,90 +727,3 @@ async def delete_schedule(schedule_id: int, db: AsyncSession = Depends(get_db)):
     return {"deleted": schedule_id}
 
 
-_PDF_UPLOAD_HTML = """<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<title>Scaffold Engine — PDF Research Upload</title>
-<style>
-  body { font-family: -apple-system, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; background: #111; color: #eee; }
-  h1 { font-size: 1.4rem; }
-  .drop { border: 2px dashed #555; border-radius: 8px; padding: 3rem 1rem; text-align: center; cursor: pointer; transition: all 0.2s; }
-  .drop.hover { border-color: #4a9eff; background: #1a2030; }
-  input[type=file] { display: none; }
-  select, button { background: #222; color: #eee; border: 1px solid #555; padding: 0.4rem 0.8rem; border-radius: 4px; margin: 0.3rem; }
-  button { background: #2a5; cursor: pointer; }
-  button:disabled { background: #555; cursor: not-allowed; }
-  #log { background: #000; color: #0f0; padding: 1rem; margin-top: 1rem; height: 400px; overflow-y: scroll; white-space: pre-wrap; font-family: monospace; font-size: 12px; border-radius: 4px; }
-  label { font-size: 0.9rem; }
-</style></head>
-<body>
-<h1>📄 Scaffold Engine — PDF Research</h1>
-<p>Drop a PDF to extract, chunk, and ingest into the knowledge base.</p>
-<div id="drop" class="drop">Drop PDF here, or click to choose file</div>
-<input type="file" id="fileinput" accept="application/pdf">
-<div style="margin-top: 1rem;">
-  <label>Extractor:
-    <select id="extractor">
-      <option value="auto">auto (pypdf → plumber fallback)</option>
-      <option value="pypdf">pypdf (force)</option>
-      <option value="plumber">plumber (force)</option>
-    </select>
-  </label>
-  <label>Domain:
-    <select id="domain">
-      <option value="">(auto-detect)</option>
-      <option value="eng">eng</option>
-      <option value="rag">rag</option>
-      <option value="llm">llm</option>
-      <option value="prompt">prompt</option>
-      <option value="spec">spec</option>
-    </select>
-  </label>
-  <button id="upload" disabled>Upload & Ingest</button>
-</div>
-<pre id="log"></pre>
-<script>
-const drop = document.getElementById('drop');
-const inp = document.getElementById('fileinput');
-const btn = document.getElementById('upload');
-const log = document.getElementById('log');
-let file = null;
-function setFile(f) {
-  file = f;
-  drop.textContent = f ? `Selected: ${f.name} (${(f.size/1024).toFixed(1)} KB)` : 'Drop PDF here, or click to choose file';
-  btn.disabled = !f;
-}
-drop.onclick = () => inp.click();
-inp.onchange = e => setFile(e.target.files[0]);
-drop.ondragover = e => { e.preventDefault(); drop.classList.add('hover'); };
-drop.ondragleave = () => drop.classList.remove('hover');
-drop.ondrop = e => {
-  e.preventDefault();
-  drop.classList.remove('hover');
-  if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
-};
-btn.onclick = async () => {
-  if (!file) return;
-  log.textContent = '';
-  btn.disabled = true;
-  const fd = new FormData();
-  fd.append('file', file);
-  const params = new URLSearchParams({extractor: document.getElementById('extractor').value});
-  const domVal = document.getElementById('domain').value;
-  if (domVal) params.set('domain', domVal);
-  try {
-    const res = await fetch('/research/pdf?' + params, { method: 'POST', body: fd });
-    if (!res.ok) { log.textContent += `HTTP ${res.status}: ${await res.text()}\\n`; btn.disabled = false; return; }
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, {stream: true});
-      log.textContent += dec.decode(value);
-      log.scrollTop = log.scrollHeight;
-    }
-  } catch (e) { log.textContent += `Error: ${e}\\n`; }
-  btn.disabled = false;
-};
-</script></body></html>"""

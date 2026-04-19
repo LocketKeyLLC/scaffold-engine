@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Scaffold Engine — PDF Research Upload</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; background: #111; color: #eee; }
+  h1 { font-size: 1.4rem; }
+  .drop { border: 2px dashed #555; border-radius: 8px; padding: 3rem 1rem; text-align: center; cursor: pointer; transition: all 0.2s; }
+  .drop.hover { border-color: #4a9eff; background: #1a2030; }
+  input[type=file] { display: none; }
+  select, button { background: #222; color: #eee; border: 1px solid #555; padding: 0.4rem 0.8rem; border-radius: 4px; margin: 0.3rem; }
+  button { background: #2a5; cursor: pointer; }
+  button:disabled { background: #555; cursor: not-allowed; }
+  #log { background: #000; color: #0f0; padding: 1rem; margin-top: 1rem; height: 400px; overflow-y: scroll; white-space: pre-wrap; font-family: monospace; font-size: 12px; border-radius: 4px; }
+  label { font-size: 0.9rem; }
+</style></head>
+<body>
+<h1>📄 Scaffold Engine — PDF Research</h1>
+<p>Drop a PDF to extract, chunk, and ingest into the knowledge base.</p>
+<div id="drop" class="drop">Drop PDF here, or click to choose file</div>
+<input type="file" id="fileinput" accept="application/pdf">
+<div style="margin-top: 1rem;">
+  <label>Extractor:
+    <select id="extractor">
+      <option value="auto">auto (pypdf → plumber fallback)</option>
+      <option value="pypdf">pypdf (force)</option>
+      <option value="plumber">plumber (force)</option>
+    </select>
+  </label>
+  <label>Domain:
+    <select id="domain">
+      <option value="">(auto-detect)</option>
+      <option value="eng">eng</option>
+      <option value="rag">rag</option>
+      <option value="llm">llm</option>
+      <option value="prompt">prompt</option>
+      <option value="spec">spec</option>
+    </select>
+  </label>
+  <button id="upload" disabled>Upload & Ingest</button>
+</div>
+<pre id="log"></pre>
+<script>
+const drop = document.getElementById('drop');
+const inp = document.getElementById('fileinput');
+const btn = document.getElementById('upload');
+const log = document.getElementById('log');
+let file = null;
+function setFile(f) {
+  file = f;
+  drop.textContent = f ? `Selected: ${f.name} (${(f.size/1024).toFixed(1)} KB)` : 'Drop PDF here, or click to choose file';
+  btn.disabled = !f;
+}
+drop.onclick = () => inp.click();
+inp.onchange = e => setFile(e.target.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('hover'); };
+drop.ondragleave = () => drop.classList.remove('hover');
+drop.ondrop = e => {
+  e.preventDefault();
+  drop.classList.remove('hover');
+  if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+};
+btn.onclick = async () => {
+  if (!file) return;
+  log.textContent = '';
+  btn.disabled = true;
+  const fd = new FormData();
+  fd.append('file', file);
+  const params = new URLSearchParams({extractor: document.getElementById('extractor').value});
+  const domVal = document.getElementById('domain').value;
+  if (domVal) params.set('domain', domVal);
+  try {
+    const res = await fetch('/research/pdf?' + params, { method: 'POST', body: fd });
+    if (!res.ok) { log.textContent += `HTTP ${res.status}: ${await res.text()}\n`; btn.disabled = false; return; }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      log.textContent += dec.decode(value);
+      log.scrollTop = log.scrollHeight;
+    }
+  } catch (e) { log.textContent += `Error: ${e}\n`; }
+  btn.disabled = false;
+};
+</script></body></html>
