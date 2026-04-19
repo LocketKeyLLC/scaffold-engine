@@ -409,3 +409,72 @@ class ScheduleResponse(BaseModel):
     run_count: int
     failure_count: int
     created_at: datetime
+
+# ---------------------------------------------------------------------------
+# Phase 2 (fix-list #13, #14): endpoint body schemas moved from main.py
+#   + two new schemas for raw-request → Pydantic conversion.
+# ---------------------------------------------------------------------------
+
+
+class IdeaInput(BaseModel):
+    idea: str
+    domain: str | None = None
+    model: str | None = None
+    model_overrides: dict | None = None
+
+
+class ConfirmInput(BaseModel):
+    job_id: str
+    feedback: str | None = None
+    push_to_github: bool = False
+    model_overrides: dict | None = None
+
+
+class DagInput(BaseModel):
+    job_id: str
+    model: str | None = None
+    model_overrides: dict | None = None
+
+
+class RagInput(BaseModel):
+    query: str
+    top_k: int = 10
+    confidence_threshold: float = 0.8
+    skip_rerank: bool = False
+    include_history: bool = False
+    domain: str | None = None
+
+
+class GtInput(BaseModel):
+    topic: str
+    queries: list[str] | None = None
+    push_to_github: bool = False
+    target_file: str | None = None
+    model: str | None = None
+
+
+class GtSearchInput(BaseModel):
+    domain: str | None = None
+    query: str
+    top_k: int = 10
+
+
+class PromptUpdateInput(BaseModel):
+    """Body for POST /prompts/{job_id}/{node_key} — fix-list #14."""
+    prompt: str
+    reason: str | None = None
+
+
+class ExecRetryInput(BaseModel):
+    """Body for POST /exec/retry — fix-list #14.
+
+    `job_id` kept as str (not UUID) to preserve current 400 'Invalid job_id
+    format' error on malformed UUIDs. Pydantic UUID type would return 422
+    instead → would break any client parsing the 400 shape.
+    `max_retries` reserved for future; retry_failed_node() does not yet
+    accept it.
+    """
+    job_id: str
+    node_key: str
+    max_retries: int | None = None
+
