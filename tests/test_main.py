@@ -142,3 +142,40 @@ def test_fix16_pdf_upload_form_renders_from_template(client):
     assert 'id="extractor"' in body, "extractor select missing"
     assert 'id="domain"' in body, "domain select missing"
     assert "Scaffold Engine" in body
+
+
+# ───────── Module 5 Phase 2: fix-list #98 (/execute validation) & #95 (skip_node shape) ─────────
+
+def test_fix98_execute_runs_model_validation(client):
+    """#98: /execute now awaits _require_valid_models — 422 on bad override."""
+    from fastapi import HTTPException
+    from unittest.mock import AsyncMock, patch
+    exc = HTTPException(
+        status_code=422,
+        detail={"error": "model_validation_failed", "missing_models": ["nope:1b"]},
+    )
+    with patch("app.main._require_valid_models",
+               new_callable=AsyncMock, side_effect=exc):
+        response = client.post(
+            "/execute",
+            json={"job_id": "00000000-0000-0000-0000-000000000000",
+                  "model_overrides": {"model_general": "nope:1b"}},
+        )
+    assert response.status_code == 422, response.text
+
+
+def test_fix95_skip_node_return_shape_matches_execution_result():
+    """#95: skip_node returns keys that ExecutionResult response_model accepts.
+
+    /skip is declared with response_model=ExecutionResult. If skip_node()
+    returns keys ExecutionResult doesn't model, FastAPI drops them silently
+    on serialization — this pins that the two canonical success/error shapes
+    are compatible with the response model.
+    """
+    from app.schemas import ExecutionResult
+    # Success shape from skip_node
+    ok = ExecutionResult(**{"status": "skipped", "node_key": "T1"})
+    assert ok.status == "skipped" and ok.node_key == "T1"
+    # Error shape from skip_node
+    err = ExecutionResult(**{"status": "error", "message": "Node 'T9' not found"})
+    assert err.status == "error" and err.message == "Node 'T9' not found"

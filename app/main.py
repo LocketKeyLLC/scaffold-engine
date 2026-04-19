@@ -536,6 +536,7 @@ async def optimize_endpoint(body: PromptOptimizeInput):
 @app.post("/execute", response_model=ExecutionResult, tags=["Step 15"])
 async def execute_next(body: ExecuteNextInput, db: AsyncSession = Depends(get_db)):
     """Step 15: Execute the next pending DAG node for a job."""
+    await _require_valid_models(body.model_overrides)
     return await execute_next_node(
         job_id=body.job_id,
         db=db,
