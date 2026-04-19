@@ -2,7 +2,7 @@
 
 **Last Updated:** April 19, 2026
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Test Suite:** 360 passed + 22 skipped in-container + 49 pipeline + 18 valve + 3 gt_browser, 0 failed
+**Test Suite:** 362 passed + 22 skipped in-container + 49 pipeline + 18 valve + 3 gt_browser, 0 failed
 **Codebase:** ~6,700 lines of application Python across 27 source files + ~2,100 lines across 5 pipelines
 
 ---
@@ -168,7 +168,7 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 ### Modules
 | File | Lines | Purpose |
 |---|---:|---|
-| `modules/execution_agent.py` | ~1,153 | DAG node execution, SSE streaming, tool dispatch, verification, auto-retry |
+| `modules/execution_agent.py` | 1,261 | DAG node execution, SSE streaming, tool dispatch, verification, auto-retry |
 | `modules/dag_generator.py` | 575 | DAG creation, Kahn's cycle check, numeric-sort truncation |
 | `modules/rag_pipeline.py` | 596 | Embed → parallel vector+keyword → RRF → rerank; ingest with dedup + version chains |
 | `modules/research_agent.py` | ~2,400 | Autonomous research + URL/GitHub/OpenAPI/PDF direct modes + pause/resume |
