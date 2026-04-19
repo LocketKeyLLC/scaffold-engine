@@ -478,3 +478,363 @@ class TestMilvusSearchErrorHandling:
         assert "[1] RAG Architecture" in result
         assert "[2] Embeddings" in result
         assert "Retrieval-augmented" in result
+
+
+# ---------------------------------------------------------------------------
+# Phase B: abnormal-exit cleanup (#2), completed-status guard (#17),
+# blocked-job compile cache (#22)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.smoke
+class TestExecuteAllNodesAbnormalExit:
+    """#2: try/finally transitions stuck 'running' jobs to terminal state."""
+
+    def test_exception_mid_loop_transitions_to_failed(self):
+        """RuntimeError from execute_next_node → finally marks job 'failed' + emits execution_failed SSE."""
+        guard_result = MagicMock(); guard_result.rowcount = 1
+        dag_check = MagicMock(); dag_check.scalar.return_value = 1
+        cleanup_status = MagicMock(); cleanup_status.scalar.return_value = "running"
+        cleanup_update = MagicMock()
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[
+            guard_result,     # Session 1 guard UPDATE
+            dag_check,        # Session 3 DAG COUNT
+            cleanup_status,   # finally: SELECT status
+            cleanup_update,   # finally: UPDATE status='failed'
+        ])
+        db.commit = AsyncMock()
+
+        mock_session_ctx = AsyncMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=db)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock(return_value=mock_session_ctx)
+
+        mock_get_job = AsyncMock(return_value={"status": "executing", "id": "job-1"})
+        mock_get_next = AsyncMock(return_value={"node_key": "T1", "title": "T", "tool": "LLM"})
+        mock_exec_next = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job", mock_get_job), \
+             patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+             patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
+            from app.modules.execution_agent import execute_all_nodes
+            events = _collect_sse(execute_all_nodes("job-1"))
+
+        event_names = [e[0] for e in events]
+        assert "execution_failed" in event_names, f"execution_failed missing from {event_names}"
+
+        # Verify the cleanup UPDATE was called with 'failed'
+        update_calls = [
+            c for c in db.execute.call_args_list
+            if len(c.args) > 1 and isinstance(c.args[1], dict)
+               and c.args[1].get("s") == "failed"
+        ]
+        assert len(update_calls) >= 1, "Cleanup UPDATE with status='failed' not found"
+
+    def test_cancelled_error_transitions_to_cancelled_and_reraises(self):
+        """CancelledError from execute_next_node → finally marks 'cancelled' + re-raises."""
+        guard_result = MagicMock(); guard_result.rowcount = 1
+        dag_check = MagicMock(); dag_check.scalar.return_value = 1
+        cleanup_status = MagicMock(); cleanup_status.scalar.return_value = "running"
+        cleanup_update = MagicMock()
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[
+            guard_result, dag_check, cleanup_status, cleanup_update,
+        ])
+        db.commit = AsyncMock()
+
+        mock_session_ctx = AsyncMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=db)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock(return_value=mock_session_ctx)
+
+        mock_get_job = AsyncMock(return_value={"status": "executing", "id": "job-1"})
+        mock_get_next = AsyncMock(return_value={"node_key": "T1", "title": "T", "tool": "LLM"})
+        mock_exec_next = AsyncMock(side_effect=asyncio.CancelledError())
+
+        async def _run_collecting():
+            events = []
+            reraised = False
+            with patch("app.modules.execution_agent.async_session", mock_session), \
+                 patch("app.modules.execution_agent._get_job", mock_get_job), \
+                 patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+                 patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
+                from app.modules.execution_agent import execute_all_nodes
+                try:
+                    async for chunk in execute_all_nodes("job-1"):
+                        events.append(chunk)
+                except asyncio.CancelledError:
+                    reraised = True
+            return events, reraised
+
+        _, reraised = asyncio.new_event_loop().run_until_complete(_run_collecting())
+        assert reraised, "CancelledError was not re-raised after cleanup"
+
+        update_calls = [
+            c for c in db.execute.call_args_list
+            if len(c.args) > 1 and isinstance(c.args[1], dict)
+               and c.args[1].get("s") == "cancelled"
+        ]
+        assert len(update_calls) >= 1, "Cleanup UPDATE with status='cancelled' not found"
+
+    def test_clean_exit_does_not_double_write_status(self):
+        """Normal completion: finally sees status != 'running', does NOT UPDATE again."""
+        guard_result = MagicMock(); guard_result.rowcount = 1
+        dag_check = MagicMock(); dag_check.scalar.return_value = 1
+        # execute_next_node (mocked) returns status=complete → _build_pipeline_summary
+        # runs a SELECT compiled_output, returns empty. Then finally's SELECT status
+        # returns 'completed' (clean exit already transitioned via execute_next_node).
+        co_select = MagicMock(); co_select.scalar.return_value = ""
+        cleanup_status_completed = MagicMock()
+        cleanup_status_completed.scalar.return_value = "completed"
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[
+            guard_result,            # guard
+            dag_check,               # DAG count
+            co_select,               # _build_pipeline_summary compiled_output SELECT
+            cleanup_status_completed # finally SELECT status='completed' -> no-op
+        ])
+        db.commit = AsyncMock()
+
+        mock_session_ctx = AsyncMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=db)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock(return_value=mock_session_ctx)
+
+        mock_get_job = AsyncMock(return_value={"status": "executing", "id": "job-1"})
+        mock_get_next = AsyncMock(return_value=None)
+        mock_exec_next = AsyncMock(return_value={"status": "complete"})
+
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job", mock_get_job), \
+             patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+             patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
+            from app.modules.execution_agent import execute_all_nodes
+            events = _collect_sse(execute_all_nodes("job-1"))
+
+        # pipeline_complete should fire; no 'failed'/'cancelled' status UPDATE in finally
+        terminal_updates = [
+            c for c in db.execute.call_args_list
+            if len(c.args) > 1 and isinstance(c.args[1], dict)
+               and c.args[1].get("s") in ("failed", "cancelled")
+        ]
+        assert len(terminal_updates) == 0, "Finally double-wrote status on clean exit"
+
+
+@pytest.mark.smoke
+class TestExecuteAllNodesCompletedGuard:
+    """#17: guard rejects already-completed jobs with 409."""
+
+    def test_completed_job_returns_409(self):
+        guard_result = MagicMock(); guard_result.rowcount = 0  # guard blocks
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=guard_result)
+        db.commit = AsyncMock()
+
+        mock_session_ctx = AsyncMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=db)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock(return_value=mock_session_ctx)
+
+        mock_get_job = AsyncMock(return_value={"status": "completed", "id": "job-1"})
+
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job", mock_get_job):
+            from app.modules.execution_agent import execute_all_nodes
+            events = _collect_sse(execute_all_nodes("job-1"))
+
+        assert len(events) == 1
+        assert events[0][0] == "error"
+        assert events[0][1].get("http_status") == 409
+        assert "completed" in events[0][1]["message"].lower()
+
+
+@pytest.mark.smoke
+class TestCompileOutputCache:
+    """#22: blocked job with cached compiled_output skips recompute."""
+
+    def test_cached_compiled_output_skips_recompute(self):
+        """When jobs.compiled_output is populated, _compile_output is NOT called."""
+        from app.modules.execution_agent import execute_next_node
+
+        cached_result = MagicMock()
+        cached_result.scalar.return_value = "CACHED COMPILED OUTPUT"
+        status_update_result = MagicMock()
+        blocked_query_result = MagicMock()
+        blocked_query_result.fetchall.return_value = []
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[
+            cached_result,         # SELECT compiled_output -> cache hit
+            status_update_result,  # UPDATE status = 'blocked' (idempotent guard)
+            blocked_query_result,  # SELECT for blocked_nodes detail
+        ])
+        db.commit = AsyncMock()
+
+        mock_get_job = AsyncMock(return_value={
+            "id": "job-1", "status": "running", "refined_brief": {}
+        })
+        mock_get_next = AsyncMock(return_value=None)
+        mock_all_done = AsyncMock(return_value=False)
+        mock_compile = AsyncMock()  # MUST NOT be called
+
+        with patch("app.modules.execution_agent._get_job", mock_get_job), \
+             patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+             patch("app.modules.execution_agent._all_nodes_done", mock_all_done), \
+             patch("app.modules.execution_agent._compile_output", mock_compile):
+            result = _run(execute_next_node("job-1", db))
+
+        assert result["status"] == "blocked"
+        mock_compile.assert_not_called()
+
+    def test_uncached_blocked_job_recomputes(self):
+        """When compiled_output is NULL, _compile_output IS called and result stored."""
+        from app.modules.execution_agent import execute_next_node
+
+        cached_result = MagicMock()
+        cached_result.scalar.return_value = None  # cache miss
+        status_update_result = MagicMock()
+        blocked_query_result = MagicMock()
+        blocked_query_result.fetchall.return_value = []
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[
+            cached_result,         # SELECT compiled_output -> None
+            status_update_result,  # UPDATE compiled_output + status
+            blocked_query_result,  # SELECT for blocked_nodes detail
+        ])
+        db.commit = AsyncMock()
+
+        mock_get_job = AsyncMock(return_value={
+            "id": "job-1", "status": "running", "refined_brief": {}
+        })
+        mock_get_next = AsyncMock(return_value=None)
+        mock_all_done = AsyncMock(return_value=False)
+        mock_compile = AsyncMock(return_value="FRESHLY COMPILED")
+
+        with patch("app.modules.execution_agent._get_job", mock_get_job), \
+             patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+             patch("app.modules.execution_agent._all_nodes_done", mock_all_done), \
+             patch("app.modules.execution_agent._compile_output", mock_compile):
+            result = _run(execute_next_node("job-1", db))
+
+        assert result["status"] == "blocked"
+        mock_compile.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Phase C: is_output_node precedence (#97) + skip_node shape (#95)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.smoke
+class TestCompileOutputExplicitMarker:
+    """#97: is_output_node=TRUE takes precedence over title heuristics."""
+
+    def test_is_output_node_overrides_title_heuristic(self):
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Research topic", "tool": "SearXNG",
+             "status": "done", "output_text": "should NOT be used",
+             "is_output_node": False},
+            {"node_key": "T2", "title": "Summarize output", "tool": "LLM",
+             "status": "done", "output_text": "legacy heuristic winner",
+             "is_output_node": False},
+            {"node_key": "T3", "title": "Final deliverable", "tool": "LLM",
+             "status": "done", "output_text": "EXPLICIT WINNER",
+             "is_output_node": True},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result = _run(_compile_output("job-1", db))
+        assert result == "EXPLICIT WINNER"
+
+    def test_falls_back_to_heuristics_when_no_explicit_marker(self):
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Research", "tool": "LLM",
+             "status": "done", "output_text": "research data",
+             "is_output_node": False},
+            {"node_key": "T2", "title": "Generate output", "tool": "LLM",
+             "status": "done", "output_text": "heuristic-selected",
+             "is_output_node": False},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result = _run(_compile_output("job-1", db))
+        assert result == "heuristic-selected"
+
+    def test_explicit_marker_but_not_done_falls_through(self):
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Research", "tool": "LLM",
+             "status": "done", "output_text": "fallback content",
+             "is_output_node": False},
+            {"node_key": "T2", "title": "Compose output", "tool": "LLM",
+             "status": "failed", "output_text": None,
+             "is_output_node": True},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result = _run(_compile_output("job-1", db))
+        assert "fallback content" in result
+        assert "T2" not in result
+
+    def test_multiple_output_nodes_joined(self):
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Part A", "tool": "LLM",
+             "status": "done", "output_text": "alpha",
+             "is_output_node": True},
+            {"node_key": "T2", "title": "Part B", "tool": "LLM",
+             "status": "done", "output_text": "beta",
+             "is_output_node": True},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result = _run(_compile_output("job-1", db))
+        assert "alpha" in result
+        assert "beta" in result
+        assert "---" in result
+
+    def test_backward_compat_no_marker_key(self):
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Research", "tool": "LLM",
+             "status": "done", "output_text": "legacy row"},
+            {"node_key": "T2", "title": "Final output", "tool": "LLM",
+             "status": "done", "output_text": "legacy heuristic pick"},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result = _run(_compile_output("job-1", db))
+        assert result == "legacy heuristic pick"
+
+
+@pytest.mark.smoke
+class TestSkipNodeReturnShape:
+    """#95: skip_node return dict conforms to ExecutionResult schema."""
+
+    def test_skipped_return_conforms_to_schema(self):
+        from app.modules.execution_agent import skip_node
+        from app.schemas import ExecutionResult
+
+        row_result = MagicMock()
+        row_result.mappings.return_value.first.return_value = {"id": "node-uuid-1"}
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=row_result)
+        db.commit = AsyncMock()
+
+        result = _run(skip_node("job-1", "T1", db))
+
+        validated = ExecutionResult(**result)
+        assert validated.status == "skipped"
+        assert validated.node_key == "T1"
+
+    def test_not_found_return_conforms_to_schema(self):
+        from app.modules.execution_agent import skip_node
+        from app.schemas import ExecutionResult
+
+        row_result = MagicMock()
+        row_result.mappings.return_value.first.return_value = None
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=row_result)
+
+        result = _run(skip_node("job-1", "T99", db))
+
+        validated = ExecutionResult(**result)
+        assert validated.status == "error"
+        assert validated.message is not None
+        assert "not found" in validated.message.lower()

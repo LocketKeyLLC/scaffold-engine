@@ -186,18 +186,18 @@ async def _all_nodes_done(db: AsyncSession, job_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _truncate_output(text: str, max_chars: int) -> str:
-    """Truncate text preserving first/last 20%, with a marker in the middle."""
-    if len(text) <= max_chars:
-        return text
+def _truncate_output(content: str, max_chars: int) -> str:
+    """Truncate content preserving first/last 20%, with a marker in the middle."""
+    if len(content) <= max_chars:
+        return content
     keep = max_chars
     head_len = int(keep * 0.2)
     tail_len = int(keep * 0.2)
-    removed = len(text) - head_len - tail_len
+    removed = len(content) - head_len - tail_len
     return (
-        text[:head_len]
+        content[:head_len]
         + f"\n[...truncated {removed} chars...]\n"
-        + text[-tail_len:]
+        + content[-tail_len:]
     )
 
 
@@ -270,6 +270,7 @@ async def _verify_output(task_title: str, output: str, model: str) -> tuple[bool
             "content": f"TASK: {task_title}\n\nOUTPUT:\n{output}",
         },
     ]
+    resp = None
     try:
         resp = await model_router.chat(messages=messages, model=model)
         raw = resp.text.strip()
@@ -326,7 +327,7 @@ async def _verify_output(task_title: str, output: str, model: str) -> tuple[bool
         logger.warning("All verifier parse strategies failed | cleaned: %s", cleaned[:300])
         return True, "Verification skipped (parse error)", 0.0
     except Exception as e:
-        logger.warning("Verifier failed: %s | Raw: %s", e, resp.text[:200] if 'resp' in locals() else 'N/A')
+        logger.warning("Verifier failed: %s | Raw: %s", e, resp.text[:200] if resp is not None else 'N/A')
         return True, "Verification skipped (error)", 0.0
 
 
@@ -469,21 +470,39 @@ async def execute_next_node(
             )
             await db.commit()
             return {"status": "complete", "message": "All nodes done. Job complete."}
-        # ── Partial compile for blocked jobs ──
+        # ── Partial compile for blocked jobs (cached, #22) ──
         try:
-            partial_result = await _compile_output(job_id, db)
-            if partial_result:
+            # #22: if compiled_output already populated (prior blocked run),
+            # serve from cache instead of recomputing. _compile_output is
+            # pure (no LLM, just SQL aggregation) but the SELECT avoids
+            # re-scanning all dag_nodes on every status poll.
+            cached_row = await db.execute(
+                text("SELECT compiled_output FROM jobs WHERE id = :jid"),
+                {"jid": job_id},
+            )
+            cached_output = cached_row.scalar()
+            if cached_output:
+                partial_result = cached_output
                 await db.execute(
-                    text("UPDATE jobs SET compiled_output = :co, status = 'blocked' WHERE id = :jid"),
-                    {"co": partial_result, "jid": job_id}
-                )
-            else:
-                await db.execute(
-                    text("UPDATE jobs SET status = 'blocked' WHERE id = :jid"),
+                    text("UPDATE jobs SET status = 'blocked' WHERE id = :jid AND status != 'blocked'"),
                     {"jid": job_id}
                 )
-            await db.commit()
-            logger.info("partial_compiled: job=%s chars=%s", job_id, len(partial_result) if partial_result else 0)
+                await db.commit()
+                logger.info("partial_compiled_cache_hit: job=%s chars=%s", job_id, len(partial_result))
+            else:
+                partial_result = await _compile_output(job_id, db)
+                if partial_result:
+                    await db.execute(
+                        text("UPDATE jobs SET compiled_output = :co, status = 'blocked' WHERE id = :jid"),
+                        {"co": partial_result, "jid": job_id}
+                    )
+                else:
+                    await db.execute(
+                        text("UPDATE jobs SET status = 'blocked' WHERE id = :jid"),
+                        {"jid": job_id}
+                    )
+                await db.commit()
+                logger.info("partial_compiled: job=%s chars=%s", job_id, len(partial_result) if partial_result else 0)
         except Exception as exc:
             logger.warning("partial_compile_failed: job=%s error=%s", job_id, str(exc))
         # ── Identify blocked nodes and their failed dependencies ──
@@ -615,7 +634,7 @@ async def execute_next_node(
                         upstream_nodes=truncated_keys,
                     ),
                 )
-            parts = [f"### {nk}\n{text}" for nk, text in upstream_outputs.items()]
+            parts = [f"### {nk}\n{upstream_text}" for nk, upstream_text in upstream_outputs.items()]
             exec_prompt = (
                 "## Upstream Node Outputs (MANDATORY CONTEXT — your output MUST build on and be consistent with this work)\n"
                 + "\n\n".join(parts)
@@ -755,12 +774,23 @@ async def _compile_output(job_id: str, db) -> str:
     """Compile node outputs into a single deliverable. No LLM calls."""
     rows = await db.execute(
         text(
-            "SELECT node_key, title, tool, status, output_text "
+            "SELECT node_key, title, tool, status, output_text, "
+            "       COALESCE(is_output_node, FALSE) AS is_output_node "
             "FROM dag_nodes WHERE job_id = :jid ORDER BY execution_order"
         ),
         {"jid": job_id},
     )
     nodes = rows.mappings().all()
+
+    # Strategy 0 (#97): explicit is_output_node marker wins over heuristics.
+    explicit = [n for n in nodes if n.get("is_output_node") and n["status"] == "done" and n["output_text"]]
+    if explicit:
+        if len(explicit) == 1:
+            return explicit[0]["output_text"]
+        return "\n\n---\n\n".join(
+            f"## {n['node_key']}: {n['title']}\n\n{n['output_text']}"
+            for n in explicit
+        )
 
     # Strategy 1: output-titled node gets priority
     for n in nodes:
@@ -968,20 +998,30 @@ async def execute_all_nodes(
     """
     Execute every pending DAG node in sequence, yielding Server-Sent Events.
 
-    Auto-generates the DAG if none exists.  On verification failure the node
+    Auto-generates the DAG if none exists. On verification failure the node
     is recorded as failed and the loop continues to the next actionable node.
     Nodes whose dependencies include a failed node are naturally blocked.
 
     Each database operation uses a short-lived session to avoid holding a
     connection for the full pipeline duration (15-30+ min on CPU hardware).
 
+    Abnormal exit (exception, client disconnect) is caught by an outer
+    try/except/finally. The finally block transitions the job from 'running'
+    to a terminal status ('failed' or 'cancelled') so the 30-minute stale-job
+    reaper doesn't have to. CancelledError is re-raised after cleanup so the
+    async framework knows the stream was cancelled (#2).
+
     SSE event types:
-        dag_generated    — DAG was auto-created (includes task_count, strategy)
-        node_start       — node execution beginning (includes node_key, title)
-        node_done        — node passed verification
-        node_failed      — node failed execution or verification (skipped)
-        pipeline_complete — all actionable nodes processed (summary)
-        error            — fatal error, pipeline halted
+        dag_generated       — DAG was auto-created (includes task_count, strategy)
+        node_start          — node execution beginning (includes node_key, title)
+        node_done           — node passed verification
+        node_failed         — node failed execution or verification (skipped)
+        node_retry          — failed node being auto-retried
+        pipeline_complete   — all actionable nodes processed (summary)
+        execution_failed    — abnormal exit via exception (#2)
+        execution_cancelled — abnormal exit via client disconnect (best-effort, #2)
+        error               — fatal error, pipeline halted
+        blocked             — no actionable nodes, dependencies not satisfied
     """
     import json as _json
     import time as _time
@@ -993,20 +1033,26 @@ async def execute_all_nodes(
     node_results: list[dict] = []
 
     # ---- Session 1: concurrent execution guard (atomic check-and-set) ----
+    # #17: guard excludes 'completed' so finished jobs can't be re-executed.
     async with async_session() as db:
         guard_result = await db.execute(
             text("""
                 UPDATE jobs SET status = 'running', updated_at = now()
-                WHERE id = :jid AND status != 'running'
+                WHERE id = :jid AND status NOT IN ('running', 'completed')
                 RETURNING id
             """),
             {"jid": job_id},
         )
         if guard_result.rowcount == 0:
-            # Job is already running or doesn't exist — check which
             job_check = await _get_job(db, job_id)
             if not job_check:
                 yield _sse("error", {"message": f"Job {job_id} not found"})
+            elif job_check["status"] == "completed":
+                yield _sse("error", {
+                    "message": "Job already completed; cannot re-execute",
+                    "job_id": job_id,
+                    "http_status": 409,
+                })
             else:
                 yield _sse("error", {
                     "message": "Job is already executing",
@@ -1049,105 +1095,172 @@ async def execute_all_nodes(
                 yield _sse("error", {"message": f"DAG generation failed: {exc}"})
                 return
 
-    # ---- execute loop ----
-    while True:
-        # ---- Session 4 (per iteration): peek + execute ----
-        async with async_session() as db:
-            # Peek at next node so we can emit a start event before the
-            # multi-minute execution begins.
-            node = await _get_next_node(db, job_id)
-            if node:
-                yield _sse("node_start", {
+    # ---- Main execute loop, wrapped for abnormal-exit cleanup (#2) ----
+    exit_reason: str | None = None  # None = clean exit
+    exit_exception: BaseException | None = None
+
+    try:
+        while True:
+            # ---- Session 4 (per iteration): peek + execute ----
+            async with async_session() as db:
+                node = await _get_next_node(db, job_id)
+                if node:
+                    yield _sse("node_start", {
+                        "job_id": job_id,
+                        "node_key": node["node_key"],
+                        "title": node["title"],
+                        "tool": node.get("tool", "LLM"),
+                    })
+                result = await execute_next_node(
+                    job_id, db, model_overrides=model_overrides
+                )
+            status = result.get("status", "unknown")
+
+            # -- terminal: all nodes done --
+            if status == "complete":
+                elapsed_ms = int((_time.monotonic() - t0) * 1000)
+                summary = await _build_pipeline_summary(
+                    job_id, node_results, elapsed_ms, async_session,
+                    extra_fields={"status": "completed"},
+                )
+                logger.info(
+                    "pipeline_completed: job=%s total=%s passed=%s failed=%s duration_ms=%s",
+                    job_id, summary["total_nodes"], summary["passed"],
+                    summary["failed"], elapsed_ms,
+                )
+                yield _sse("pipeline_complete", summary)
+                return
+
+            # -- terminal: fatal error or blocked --
+            if status in ("error", "blocked"):
+                elapsed_ms = int((_time.monotonic() - t0) * 1000)
+                result["nodes_completed"] = len(node_results)
+                result["duration_ms"] = elapsed_ms
+                yield _sse(status, result)
+                return
+
+            # -- node executed --
+            node_results.append(result)
+
+            if status == "done":
+                yield _sse("node_done", {
                     "job_id": job_id,
-                    "node_key": node["node_key"],
-                    "title": node["title"],
-                    "tool": node.get("tool", "LLM"),
+                    "node_key": result.get("node_key"),
+                    "title": result.get("title"),
+                    "output": result.get("output"),
+                    "verified": result.get("verified"),
+                    "confidence": result.get("confidence"),
+                    "model_used": result.get("model_used"),
                 })
+            elif status == "failed":
+                _failed_key = result.get("node_key", "")
+                _retried = False
+                try:
+                    async with async_session() as _retry_db:
+                        retry_result = await retry_failed_node(
+                            job_id, _failed_key, _retry_db
+                        )
+                        if retry_result.get("status") == "reset":
+                            _retried = True
+                            yield _sse("node_retry", {
+                                "job_id": job_id,
+                                "node_key": _failed_key,
+                                "title": result.get("title"),
+                                "retry_count": retry_result.get("retry_count", 0),
+                                "message": "Auto-retrying failed node",
+                            })
+                            node_results.pop()
+                            continue
+                except Exception as _retry_exc:
+                    logger.warning(
+                        "auto_retry_failed: node=%s error=%s",
+                        _failed_key, _retry_exc,
+                    )
+                yield _sse("node_failed", {
+                    "job_id": job_id,
+                    "node_key": _failed_key,
+                    "title": result.get("title"),
+                    "error": result.get("error"),
+                    "verification_reason": result.get("verification_reason"),
+                    "model_used": result.get("model_used"),
+                    "retries_exhausted": not _retried,
+                })
+            else:
+                logger.warning(
+                    "Unexpected node status '%s' in execute_all", status
+                )
+                yield _sse("error", {
+                    "message": f"Unexpected status '{status}'",
+                    "result": result,
+                })
+                return
 
-            # execute_next_node re-fetches the node internally — safe.
-            result = await execute_next_node(job_id, db, model_overrides=model_overrides)
-        status = result.get("status", "unknown")
+            # -- early exit: auto-completion fired on last node --
+            if result.get("job_complete"):
+                elapsed_ms = int((_time.monotonic() - t0) * 1000)
+                early_summary = await _build_pipeline_summary(
+                    job_id, node_results, elapsed_ms, async_session,
+                )
+                yield _sse("pipeline_complete", early_summary)
+                return
 
-        # -- terminal: all nodes done --
-        if status == "complete":
+    except asyncio.CancelledError as _cancelled:
+        # Client disconnect / stream aclose(). Cleanup in finally, then re-raise.
+        exit_reason = "cancelled"
+        exit_exception = _cancelled
+        logger.info("execute_all_nodes_cancelled: job=%s", job_id)
+    except Exception as _exc:
+        # Unexpected runtime error. Emit SSE (best-effort), cleanup in finally.
+        exit_reason = "exception"
+        exit_exception = _exc
+        logger.exception("execute_all_nodes_failed: job=%s", job_id)
+        try:
             elapsed_ms = int((_time.monotonic() - t0) * 1000)
-            passed = sum(1 for r in node_results if r.get("verified"))
-            failed_count = len(node_results) - passed
-            summary = await _build_pipeline_summary(
-                job_id, node_results, elapsed_ms, async_session,
-                extra_fields={"status": "completed"},
-            )
-            logger.info("pipeline_completed: job=%s total=%s passed=%s failed=%s duration_ms=%s", job_id, summary["total_nodes"], summary["passed"], summary["failed"], elapsed_ms)
-            yield _sse("pipeline_complete", summary)
-            return
-
-        # -- terminal: fatal error or blocked --
-        if status in ("error", "blocked"):
-            elapsed_ms = int((_time.monotonic() - t0) * 1000)
-            result["nodes_completed"] = len(node_results)
-            result["duration_ms"] = elapsed_ms
-            yield _sse(status, result)
-            return
-
-        # -- node executed --
-        node_results.append(result)
-
-        if status == "done":
-            yield _sse("node_done", {
+            yield _sse("execution_failed", {
                 "job_id": job_id,
-                "node_key": result.get("node_key"),
-                "title": result.get("title"),
-                "output": result.get("output"),
-                "verified": result.get("verified"),
-                "confidence": result.get("confidence"),
-                "model_used": result.get("model_used"),
+                "status": "failed",
+                "message": f"Execution failed: {_exc}",
+                "nodes_completed": len(node_results),
+                "duration_ms": elapsed_ms,
             })
-        elif status == "failed":
-            _failed_key = result.get("node_key", "")
-            # ── Auto-retry if retries remain ──
-            _retried = False
-            try:
-                async with async_session() as _retry_db:
-                    retry_result = await retry_failed_node(job_id, _failed_key, _retry_db)
-                    if retry_result.get("status") == "reset":
-                        _retried = True
-                        yield _sse("node_retry", {
-                            "job_id": job_id,
-                            "node_key": _failed_key,
-                            "title": result.get("title"),
-                            "retry_count": retry_result.get("retry_count", 0),
-                            "message": "Auto-retrying failed node",
-                        })
-                        node_results.pop()  # remove failed result, will re-run
-                        continue  # retry immediately
-            except Exception as _retry_exc:
-                logger.warning("auto_retry_failed: node=%s error=%s", _failed_key, _retry_exc)
-            # No retries left or retry failed — report and move on
-            yield _sse("node_failed", {
-                "job_id": job_id,
-                "node_key": _failed_key,
-                "title": result.get("title"),
-                "error": result.get("error"),
-                "verification_reason": result.get("verification_reason"),
-                "model_used": result.get("model_used"),
-                "retries_exhausted": not _retried,
-            })
-            # skip failed node — continue to next actionable node
-        else:
-            # unexpected status — log and bail
-            logger.warning("Unexpected node status '%s' in execute_all", status)
-            yield _sse("error", {
-                "message": f"Unexpected status '{status}'",
-                "result": result,
-            })
-            return
-
-        # -- early exit: auto-completion fired on last node --
-        if result.get("job_complete"):
-            elapsed_ms = int((_time.monotonic() - t0) * 1000)
-            passed = sum(1 for r in node_results if r.get("verified"))
-            early_summary = await _build_pipeline_summary(
-                job_id, node_results, elapsed_ms, async_session,
+        except Exception:
+            pass  # stream may already be closed
+    finally:
+        # Always-on cleanup: if job stuck at 'running', transition to terminal.
+        # Clean exits (return inside loop) already set 'completed'/'blocked'
+        # via execute_next_node or terminal branches — this is a no-op for them.
+        try:
+            async with async_session() as _cleanup_db:
+                status_row = await _cleanup_db.execute(
+                    text("SELECT status FROM jobs WHERE id = :jid"),
+                    {"jid": job_id},
+                )
+                current_status = status_row.scalar()
+                if current_status == "running":
+                    if exit_reason == "cancelled":
+                        terminal = "cancelled"
+                    elif exit_reason == "exception":
+                        terminal = "failed"
+                    else:
+                        terminal = "failed"  # safety default
+                    await _cleanup_db.execute(
+                        text("""
+                            UPDATE jobs SET status = :s, updated_at = now()
+                            WHERE id = :jid
+                        """),
+                        {"s": terminal, "jid": job_id},
+                    )
+                    await _cleanup_db.commit()
+                    logger.warning(
+                        "execute_all_nodes_cleanup: job=%s running->%s (reason=%s)",
+                        job_id, terminal, exit_reason,
+                    )
+        except Exception as _cleanup_exc:
+            logger.error(
+                "execute_all_nodes_cleanup_failed: job=%s error=%s",
+                job_id, _cleanup_exc,
             )
-            yield _sse("pipeline_complete", early_summary)
-            return
+
+        # Re-raise CancelledError so the framework knows we were cancelled.
+        if exit_reason == "cancelled" and exit_exception is not None:
+            raise exit_exception

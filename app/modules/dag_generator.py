@@ -217,17 +217,24 @@ async def generate_dag(
         strategy = _infer_strategy(normalized)
 
     # 7. Persist DAG nodes to database
+    # 6b. Compute leaf set (#97): node is a leaf if nothing depends on it.
+    referenced = set()
+    for t in normalized:
+        for dep in t.get("depends_on", []) or []:
+            referenced.add(dep)
+    leaf_keys = {t["id"] for t in normalized if t["id"] not in referenced}
+
     for i, task in enumerate(normalized):
         await db.execute(
             text("""
                 INSERT INTO dag_nodes
                     (job_id, node_key, title, node_type, status,
                      depends_on, assigned_model, prompt_template,
-                     execution_order, tool, domain)
+                     execution_order, tool, domain, is_output_node)
                 VALUES
                     (:job_id, :node_key, :title, :node_type, 'pending',
                      :depends_on, :assigned_model, :prompt_template,
-                     :execution_order, :tool, :domain)
+                     :execution_order, :tool, :domain, :is_output_node)
             """),
             {
                 "job_id": uid,
@@ -240,6 +247,7 @@ async def generate_dag(
                 "execution_order": i,
                 "tool": task.get("tool", "LLM"),
                 "domain": task.get("domain"),
+                "is_output_node": task["id"] in leaf_keys,
             },
         )
 
