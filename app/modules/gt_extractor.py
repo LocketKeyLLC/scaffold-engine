@@ -5,33 +5,31 @@ Extracts ground truths for a topic via:
   2. LLM distillation into discrete knowledge entries
   3. TOON formatting with sanitization
   4. Optional push to GitHub KB via API
-
-Reuses patterns from build_knowledge.py and toon_knowledge_builder.py.
-
-Step 12 of 23-step build plan.
 """
 
 from __future__ import annotations
 
-import json
-import logging
-import os
-import re
 import base64
-from app.utils.llm_parsing import parse_json_array
+import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
-
 from app import model_router
 from app.config import settings
+from app.utils.github_ingest import (
+    GitHubRateLimitError,
+    GitHubRepoNotFoundError,
+    check_github_rate_limit,
+)
+from app.utils.http_clients import get_github_client, get_searxng_client
+from app.utils.llm_parsing import parse_json_array
 from app.utils.topic_detection import detect_topic_id as _topic_detect_impl
 
 logger = logging.getLogger("scaffold.gt")
 
 # ---------------------------------------------------------------------------
-# TOON topic map (from build_knowledge.py)
+# TOON topic map
 # ---------------------------------------------------------------------------
 
 TOPIC_MAP = {
@@ -61,7 +59,7 @@ DISTILL_SYSTEM = """You are a knowledge distillation engine. Given raw search re
 OUTPUT FORMAT (strict JSON array, no markdown fences):
 [
   {
-    "topic": "short-hyphenated-topic",
+    "title": "short-hyphenated-title",
     "content": "Single self-contained fact. Technically precise. No filler.",
     "tags": "comma,separated,tags",
     "source": "URL or citation"
@@ -74,6 +72,7 @@ Rules:
 - Discard noise, opinions, marketing language
 - 5-10 entries per extraction
 - Content must NOT contain escaped quotes or backslashes
+- The "title" field is REQUIRED on every entry
 - If no useful facts found, return an empty array []"""
 
 DISTILL_PROMPT = """Extract factual knowledge entries from these search results about: {topic}
@@ -93,15 +92,10 @@ Return ONLY the JSON array."""
 async def _search_searxng(query: str, max_results: int = 10) -> list[dict]:
     """Query SearXNG and return result list."""
     try:
-        from app.utils.http_clients import get_searxng_client
         client = get_searxng_client()
         resp = await client.get(
             "/search",
-            params={
-                "q": query,
-                "format": "json",
-                "categories": "general",
-            },
+            params={"q": query, "format": "json", "categories": "general"},
         )
         if resp.status_code != 200:
             logger.warning("SearXNG returned %d for query: %s", resp.status_code, query)
@@ -123,14 +117,21 @@ async def _search_searxng(query: str, max_results: int = 10) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# TOON formatting (from toon_knowledge_builder.py)
+# TOON formatting
 # ---------------------------------------------------------------------------
 
 def sanitize_toon_content(text: str) -> str:
-    """Sanitize text for TOON quoted fields."""
-    sanitized = text.replace('\\"', "")
-    sanitized = sanitized.replace('"', '""')
-    return sanitized
+    """Escape a string for TOON quoted fields.
+
+    Order matters: escape backslashes FIRST so subsequent \\n, \\t, \\"
+    insertions aren't double-escaped on re-read.
+    """
+    return (
+        text.replace("\\", "\\\\")
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+            .replace('"', '\\"')
+    )
 
 
 def _format_toon_rows(entries: list[dict]) -> list[str]:
@@ -138,139 +139,155 @@ def _format_toon_rows(entries: list[dict]) -> list[str]:
     rows = []
     for i, entry in enumerate(entries):
         eid = i + 1
-        topic = entry.get("topic", "unknown").strip().lower().replace(" ", "-")
+        title = entry.get("title", "unknown").strip().lower().replace(" ", "-")
         content = sanitize_toon_content(entry.get("content", ""))
         tags = ",".join(t.strip().lower() for t in entry.get("tags", "").split(","))
         source = entry.get("source", "pending-verification").strip() or "pending-verification"
-        rows.append(f'  {eid},{topic},"{content}","{tags}",{source},false,pending')
+        rows.append(f'  {eid},{title},"{content}","{tags}",{source},false,pending')
     return rows
 
 
 def _detect_topic_id(topic_text: str) -> int:
-    """Auto-detect topic category from text.
-
-    Thin wrapper binding the shared algorithm to this module's
-    ``TOPIC_KEYWORDS``. External callers should use
-    :func:`app.utils.topic_detection.detect_topic_id` directly.
-    """
+    """Auto-detect topic category from text (delegates to shared util)."""
     return _topic_detect_impl(topic_text, TOPIC_KEYWORDS, default=1)
 
 
+def _normalize_legacy_keys(entries: list[dict]) -> list[dict]:
+    """Tolerate LLM drift: map legacy 'topic' → 'title' in-place."""
+    for e in entries:
+        if "title" not in e and "topic" in e:
+            e["title"] = e.pop("topic")
+    return entries
+
+
 # ---------------------------------------------------------------------------
-# GitHub push (from toon_knowledge_builder.py patterns)
+# GitHub push
 # ---------------------------------------------------------------------------
 
 async def _push_to_github(
     rows: list[str],
     file_path: str,
     topic: str,
+    *,
+    owner: str | None = None,
+    repo: str | None = None,
+    branch: str | None = None,
 ) -> dict:
-    """Push TOON rows to GitHub via Contents API. Returns result dict."""
-    token = os.environ.get("GITHUB_TOKEN", "")
-    if not token:
-        return {"pushed": False, "reason": "GITHUB_TOKEN not set"}
+    """Push TOON rows to GitHub via Contents API. Returns result dict.
 
-    owner = "LocketKeyLLC"
-    repo = "smokieRAGs"
-    branch = "main"
-    api_base = f"https://api.github.com/repos/{owner}/{repo}"
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-    }
+    Kwargs default to settings.gt_github_{owner,repo,branch}, keeping the
+    positional signature backward-compatible with existing callers.
+    """
+    if not settings.github_token:
+        return {"pushed": False, "reason": "github_token not set in settings"}
+
+    owner = owner or settings.gt_github_owner
+    repo = repo or settings.gt_github_repo
+    branch = branch or settings.gt_github_branch
+
+    client = get_github_client()
+    repo_base = f"/repos/{owner}/{repo}"
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            # Get current file
-            resp = await client.get(
-                f"{api_base}/contents/{file_path}",
-                headers=headers,
-                params={"ref": branch},
-            )
+        # 0. Rate-limit preflight (cheap, surfaces 403 early)
+        rate_resp = await client.get("/rate_limit")
+        check_github_rate_limit(rate_resp)
 
-            if resp.status_code == 200:
-                data = resp.json()
-                existing = base64.b64decode(data["content"]).decode("utf-8")
-                file_sha = data["sha"]
-            elif resp.status_code == 404:
-                existing = _new_toon_header(file_path)
-                file_sha = None
-            else:
-                return {"pushed": False, "reason": f"GitHub GET failed: {resp.status_code}"}
+        # 1. Get current file (or 404 → fresh header)
+        resp = await client.get(
+            f"{repo_base}/contents/{file_path}",
+            params={"ref": branch},
+        )
+        check_github_rate_limit(resp)
 
-            # Append rows and update count
-            updated = existing
-            for row in rows:
-                updated = _append_toon_row(updated, row)
+        if resp.status_code == 200:
+            existing = base64.b64decode(resp.json()["content"]).decode("utf-8")
+        elif resp.status_code == 404:
+            existing = _new_toon_header(file_path)
+        else:
+            return {"pushed": False, "reason": f"GitHub GET failed: {resp.status_code}"}
 
-            # Get main SHA for branch creation
-            ref_resp = await client.get(
-                f"{api_base}/git/ref/heads/{branch}",
-                headers=headers,
-            )
-            ref_resp.raise_for_status()
-            main_sha = ref_resp.json()["object"]["sha"]
+        # 2. Append new rows
+        updated = existing
+        for row in rows:
+            updated = _append_toon_row(updated, row)
 
-            # Create feature branch
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            safe_topic = re.sub(r"[^a-z0-9-]", "", topic.lower().replace(" ", "-"))[:30]
-            new_branch = f"knowledge/{safe_topic}-{ts}"
+        # 3. Get base-branch SHA
+        ref_resp = await client.get(f"{repo_base}/git/ref/heads/{branch}")
+        check_github_rate_limit(ref_resp)
+        ref_resp.raise_for_status()
+        main_sha = ref_resp.json()["object"]["sha"]
 
-            await client.post(
-                f"{api_base}/git/refs",
-                headers=headers,
-                json={"ref": f"refs/heads/{new_branch}", "sha": main_sha},
-            )
+        # 4. Create feature branch
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        safe_topic = re.sub(r"[^a-z0-9-]", "", topic.lower().replace(" ", "-"))[:30]
+        new_branch = f"knowledge/{safe_topic}-{ts}"
 
-            # Get file SHA on new branch
-            branch_resp = await client.get(
-                f"{api_base}/contents/{file_path}",
-                headers=headers,
-                params={"ref": new_branch},
-            )
-            branch_file_sha = None
-            if branch_resp.status_code == 200:
-                branch_file_sha = branch_resp.json()["sha"]
+        create_resp = await client.post(
+            f"{repo_base}/git/refs",
+            json={"ref": f"refs/heads/{new_branch}", "sha": main_sha},
+        )
+        check_github_rate_limit(create_resp)
+        if create_resp.status_code not in (200, 201):
+            return {"pushed": False, "reason": f"Branch creation failed: {create_resp.status_code}"}
 
-            # Push file
-            payload: dict[str, Any] = {
-                "message": f"knowledge: add {len(rows)} entries for '{topic}' via Scaffold Engine",
-                "content": base64.b64encode(updated.encode("utf-8")).decode("utf-8"),
-                "branch": new_branch,
-            }
-            if branch_file_sha:
-                payload["sha"] = branch_file_sha
+        # 5. Get file SHA on new branch (if present)
+        branch_resp = await client.get(
+            f"{repo_base}/contents/{file_path}",
+            params={"ref": new_branch},
+        )
+        check_github_rate_limit(branch_resp)
+        branch_file_sha = None
+        if branch_resp.status_code == 200:
+            branch_file_sha = branch_resp.json()["sha"]
 
-            put_resp = await client.put(
-                f"{api_base}/contents/{file_path}",
-                headers=headers,
-                json=payload,
-            )
-            if put_resp.status_code not in (200, 201):
-                return {"pushed": False, "reason": f"Push failed: {put_resp.status_code}"}
+        # 6. Push updated file
+        payload: dict[str, Any] = {
+            "message": f"knowledge: add {len(rows)} entries for '{topic}' via Scaffold Engine",
+            "content": base64.b64encode(updated.encode("utf-8")).decode("utf-8"),
+            "branch": new_branch,
+        }
+        if branch_file_sha:
+            payload["sha"] = branch_file_sha
 
-            # Open PR
-            pr_resp = await client.post(
-                f"{api_base}/pulls",
-                headers=headers,
-                json={
-                    "title": f"knowledge: add {topic} entries via Scaffold Engine",
-                    "head": new_branch,
-                    "base": branch,
-                    "body": f"Add {len(rows)} TOON entries for `{topic}`.\n\nPushed via Scaffold Engine GT extractor.",
-                },
-            )
-            pr_data = pr_resp.json()
+        put_resp = await client.put(
+            f"{repo_base}/contents/{file_path}",
+            json=payload,
+        )
+        check_github_rate_limit(put_resp)
+        if put_resp.status_code not in (200, 201):
+            return {"pushed": False, "reason": f"Push failed: {put_resp.status_code}"}
 
-            return {
-                "pushed": True,
-                "branch": new_branch,
-                "pr_number": pr_data.get("number"),
-                "pr_url": pr_data.get("html_url", ""),
-            }
+        # 7. Open PR
+        pr_resp = await client.post(
+            f"{repo_base}/pulls",
+            json={
+                "title": f"knowledge: add {topic} entries via Scaffold Engine",
+                "head": new_branch,
+                "base": branch,
+                "body": f"Add {len(rows)} TOON entries for `{topic}`.\n\nPushed via Scaffold Engine GT extractor.",
+            },
+        )
+        check_github_rate_limit(pr_resp)
+        pr_data = pr_resp.json()
 
+        return {
+            "pushed": True,
+            "owner": owner,
+            "repo": repo,
+            "branch": new_branch,
+            "pr_number": pr_data.get("number"),
+            "pr_url": pr_data.get("html_url", ""),
+        }
+
+    except GitHubRateLimitError as e:
+        logger.warning("GitHub rate limit exhausted: %s", e)
+        return {"pushed": False, "reason": f"rate_limit: {e}"}
+    except GitHubRepoNotFoundError as e:
+        logger.warning("GitHub repo not found: %s", e)
+        return {"pushed": False, "reason": f"not_found: {e}"}
     except Exception as e:
-        logger.error("GitHub push failed: %s", e)
+        logger.error("GitHub push failed: %s", e, exc_info=True)
         return {"pushed": False, "reason": str(e)}
 
 
@@ -284,11 +301,11 @@ def _new_toon_header(file_path: str) -> str:
     return (
         f"meta:\n"
         f"  schema_v: 1\n"
-        f"  source: https://github.com/LocketKeyLLC/smokieRAGs\n"
+        f"  source: https://github.com/{settings.gt_github_owner}/{settings.gt_github_repo}\n"
         f"  timestamp: {ts}\n"
         f"  content_type: technical-knowledge\n"
         f"  category: {category}\n\n"
-        f"knowledge[0]{{id,topic,content,tags,source,verified,last_verified}}:\n"
+        f"knowledge[0]{{id,title,content,tags,source,verified,last_verified}}:\n"
     )
 
 
@@ -330,24 +347,13 @@ async def extract_ground_truths(
     push_to_github: bool = False,
     target_file: str | None = None,
     model: str | None = None,
+    github_owner: str | None = None,
+    github_repo: str | None = None,
 ) -> dict:
-    """Extract ground truths for a topic via SearXNG + LLM distillation.
-
-    Args:
-        topic: The subject to research
-        queries: Optional custom search queries (auto-generated if omitted)
-        push_to_github: If True, push TOON entries to GitHub KB via PR
-        target_file: Target .toon file path (auto-detected if omitted)
-        model: Override model for distillation
-
-    Returns:
-        Dict with entries, toon_rows, and optional github result
-    """
-    # 1. Generate search queries if not provided
+    """Extract ground truths for a topic via SearXNG + LLM distillation."""
     if not queries:
         queries = [topic, f"{topic} best practices", f"{topic} technical details"]
 
-    # 2. Search via SearXNG
     all_results: list[dict] = []
     for query in queries[:5]:
         results = await _search_searxng(query)
@@ -361,7 +367,7 @@ async def extract_ground_truths(
             "error": "SearXNG returned no results for any query",
         }
 
-    # 3. Deduplicate by URL
+    # Dedupe by URL
     seen_urls: set[str] = set()
     unique_results: list[dict] = []
     for r in all_results:
@@ -370,7 +376,7 @@ async def extract_ground_truths(
             seen_urls.add(url)
             unique_results.append(r)
 
-    # 4. Distill via LLM
+    # Distill via LLM (model_router / 4b — snippet-level distillation)
     results_text = "\n\n".join(
         f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['content']}"
         for r in unique_results[:15]
@@ -386,13 +392,8 @@ async def extract_ground_truths(
     )
 
     if not resp.success:
-        return {
-            "status": "llm_failed",
-            "topic": topic,
-            "error": resp.error,
-        }
+        return {"status": "llm_failed", "topic": topic, "error": resp.error}
 
-    # 5. Parse entries
     entries = _parse_entries(resp.text)
     if not entries:
         return {
@@ -402,10 +403,9 @@ async def extract_ground_truths(
             "raw_output": resp.text[:500],
         }
 
-    # 6. Format as TOON rows
+    entries = _normalize_legacy_keys(entries)
     toon_rows = _format_toon_rows(entries)
 
-    # 7. Detect target file
     if not target_file:
         topic_id = _detect_topic_id(topic)
         target_file = f"knowledge/{TOPIC_MAP.get(topic_id, 'llm-research')}.toon"
@@ -422,9 +422,14 @@ async def extract_ground_truths(
         "duration_ms": resp.total_duration_ms,
     }
 
-    # 8. Optional GitHub push
     if push_to_github:
-        gh_result = await _push_to_github(toon_rows, target_file, topic)
+        gh_result = await _push_to_github(
+            toon_rows,
+            target_file,
+            topic,
+            owner=github_owner,
+            repo=github_repo,
+        )
         result["github"] = gh_result
 
     return result

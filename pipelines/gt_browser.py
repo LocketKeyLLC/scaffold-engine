@@ -140,11 +140,17 @@ class Pipeline:
     def _handle_detail(self, entry_id: str) -> str:
         """Show full TOON entry."""
         data = self._call("GET", f"/gt/detail/{entry_id.strip()}")
-        if "error" in data:
-            return f"❌ {data['error']}"
 
-        if not data.get("found"):
-            return f"Entry `{entry_id}` not found."
+        # _call wraps HTTPStatusError as {"error": "HTTP 404: ..."}.
+        # Also tolerate legacy {"found": false} in case backend is old.
+        if isinstance(data, dict):
+            err = str(data.get("error", ""))
+            if err.startswith("HTTP 404") or "not found" in err.lower():
+                return f"Entry `{entry_id}` not found."
+            if "error" in data:
+                return f"❌ {data['error']}"
+            if not data.get("found", True):
+                return f"Entry `{entry_id}` not found."
 
         lines = [
             f"📄 **Entry:** `{data.get('entry_id', '—')}`\n",

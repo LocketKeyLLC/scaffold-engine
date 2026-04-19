@@ -2,7 +2,7 @@
 
 **Last Updated:** April 19, 2026
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Test Suite:** 366 passed + 22 skipped in-container + 49 pipeline + 18 valve + 3 gt_browser, 0 failed
+**Test Suite:** 390 passed + 22 skipped in-container + 49 pipeline + 18 valve + 3 gt_browser, 0 failed
 **Codebase:** ~6,700 lines of application Python across 27 source files + ~2,100 lines across 5 pipelines
 
 ---
@@ -175,8 +175,8 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 | `modules/ideation_workflow.py` | 383 | Phase 1 (refine + feasibility) + Phase 2 (research → compile) |
 | `modules/idea_refinement.py` | 172 | Raw idea → structured brief |
 | `modules/prompt_optimizer.py` | 201 | Strip → optimize → verify |
-| `modules/gt_extractor.py` | 435 | SearXNG → distill → TOON formatting → optional GitHub push |
-| `modules/gt_browser.py` | 184 | GT browsing/search/detail/stats (async-safe) |
+| `modules/gt_extractor.py` | 440 | SearXNG → distill → TOON formatting → optional GitHub push |
+| `modules/gt_browser.py` | 266 | GT browsing/search/detail/stats (async-safe, supersede filter) |
 | `modules/prompt_inspector.py` | 116 | Prompt analysis + revision |
 | `modules/execution_handler.py` | 73 | Execution status queries |
 | `modules/cleanup.py` | 143 | Stale-job reaper (15-min loop, unified `reap_stale_jobs`) |
@@ -198,6 +198,7 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 | `utils/staleness.py` | 77 | TTL-per-source-type sweep |
 | `utils/github_ingest.py` | 154 | GitHub repo fetch + rate-limit guard |
 | `utils/openapi_ingest.py` | 241 | OpenAPI/Swagger fetch, validate, flatten per-endpoint |
+| `utils/embedding.py` | 42 | Public `embed_query` — decouples rag_pipeline from gt callers |
 
 ---
 
@@ -435,7 +436,7 @@ CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval co
 ## Test Suite
 
 **382 tests** across 33 files, ~9,300 lines.
-- **360 in-container (+22 skipped):** core orchestrator modules
+- **384 in-container (+22 skipped):** core orchestrator modules
 - **49 pipeline (local):** `test_scaffold_router.py`, `test_schedule_command.py`
 - **18 valve (local):** `test_model_valves.py`
 - **3 gt_browser (local):** `test_gt_browser.py`
