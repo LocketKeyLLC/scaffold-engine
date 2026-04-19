@@ -2,7 +2,7 @@
 
 **Last Updated:** April 19, 2026
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Test Suite:** 353 passed + 22 skipped in-container + 49 pipeline + 18 valve + 3 gt_browser, 0 failed
+**Test Suite:** 360 passed + 22 skipped in-container + 49 pipeline + 18 valve + 3 gt_browser, 0 failed
 **Codebase:** ~6,700 lines of application Python across 27 source files + ~2,100 lines across 5 pipelines
 
 ---
@@ -155,7 +155,7 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 ### Core
 | File | Lines | Purpose |
 |---|---:|---|
-| `main.py` | ~843 | FastAPI app, all endpoints, health checks, lifespan, middleware |
+| `main.py` | 729 | FastAPI app, all endpoints, health checks, lifespan, middleware |
 | `model_router.py` | 344 | Ollama API routing with retry cascade, persistent `httpx.AsyncClient` |
 | `config.py` | ~50 | Pydantic Settings (env vars with defaults) |
 | `auth.py` | 33 | API key auth via `X-API-Key` |
@@ -436,8 +436,8 @@ CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval co
 
 ## Test Suite
 
-**307 tests** across 29 files, ~8,200 lines.
-- **237 in-container:** core orchestrator modules
+**382 tests** across 33 files, ~9,300 lines.
+- **360 in-container (+22 skipped):** core orchestrator modules
 - **49 pipeline (local):** `test_scaffold_router.py`, `test_schedule_command.py`
 - **18 valve (local):** `test_model_valves.py`
 - **3 gt_browser (local):** `test_gt_browser.py`
@@ -489,7 +489,7 @@ scaffold-engine/
 │   ├── toon/             # TOON spec + validator reference
 │   └── CI.md, logging-events.md
 ├── scripts/              # score_retrieval.py, create_toon_v2.py
-├── tests/                # 29 files, 307 tests + fixtures/
+├── tests/                # 33 files, 382 tests + fixtures/
 ├── docker-compose.yml, Dockerfile
 ├── requirements.txt, requirements-dev.txt, requirements-ci.txt
 ├── Makefile
