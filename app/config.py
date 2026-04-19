@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     scheduler_timezone: str = "UTC"
     scheduler_jobstore_url: str = ""
+    scheduler_job_timeout: int = 3600
+    """Max seconds a single scheduled research job may run before being cancelled."""
+    scheduler_misfire_grace_time: int = 300
+    """Seconds APScheduler will still fire a missed job after its scheduled time."""
+    scheduler_shutdown_timeout: int = 30
+    """Seconds to wait for in-flight jobs during graceful shutdown before forcing exit."""
 
     # External services
     ollama_base_url: str = "http://172.18.0.1:11434"
