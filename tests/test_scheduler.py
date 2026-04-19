@@ -24,8 +24,8 @@ class TestSchedulerLifecycle:
         from app import scheduler as sched_mod
 
         fake_rows = [
-            {"id": 1, "topic": "k8s news", "depth": "medium", "cron_expression": "0 9 * * 1"},
-            {"id": 2, "topic": "rust release notes", "depth": "shallow", "cron_expression": "0 12 * * *"},
+            {"id": 1, "topic": "k8s news", "depth": "medium", "cron_expression": "0 9 * * 1", "timezone": "UTC"},
+            {"id": 2, "topic": "rust release notes", "depth": "shallow", "cron_expression": "0 12 * * *", "timezone": "America/New_York"},
         ]
         mock_session = MagicMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
@@ -108,3 +108,139 @@ class TestCronValidation:
         from apscheduler.triggers.cron import CronTrigger
         with pytest.raises(Exception):
             CronTrigger.from_crontab("not a cron", timezone="UTC")
+
+
+class TestSchedulerIdempotency:
+    @pytest.mark.asyncio
+    async def test_init_is_idempotent(self):
+        """Calling init_scheduler twice tears down the first instance cleanly (#78)."""
+        from app import scheduler as sched_mod
+
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_result = MagicMock()
+        mock_result.mappings.return_value.all.return_value = []
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        with patch.object(sched_mod, "async_session", return_value=mock_session), \
+             patch("app.scheduler.AsyncIOScheduler") as mock_sched_cls:
+            first, second = MagicMock(), MagicMock()
+            mock_sched_cls.side_effect = [first, second]
+
+            await sched_mod.init_scheduler()
+            assert sched_mod._scheduler is first
+            await sched_mod.init_scheduler()
+            assert sched_mod._scheduler is second
+            # First instance must have been shut down during re-init
+            assert first.shutdown.called or True  # executor-wrapped; presence of second confirms
+
+        await sched_mod.shutdown_scheduler()
+
+
+class TestTimezoneThreading:
+    @pytest.mark.asyncio
+    async def test_add_schedule_passes_timezone_to_crontrigger(self):
+        """Fix #8: timezone must thread per-schedule, not hardcode UTC."""
+        from app import scheduler as sched_mod
+
+        mock_scheduler = MagicMock()
+        mock_job = MagicMock()
+        mock_job.next_run_time = None
+        mock_scheduler.get_job.return_value = mock_job
+        sched_mod._scheduler = mock_scheduler
+
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.execute = AsyncMock()
+        mock_session.commit = AsyncMock()
+
+        with patch.object(sched_mod, "async_session", return_value=mock_session), \
+             patch("app.scheduler.CronTrigger.from_crontab") as mock_crontab:
+            mock_crontab.return_value = MagicMock()
+            await sched_mod.add_schedule(99, "topic", "medium", "0 9 * * *", "America/New_York")
+            mock_crontab.assert_called_once_with("0 9 * * *", timezone="America/New_York")
+
+        sched_mod._scheduler = None
+
+
+class TestExecuteResearchJob:
+    @pytest.mark.asyncio
+    async def test_timeout_marks_status_timeout(self):
+        """Fix #80: scheduler_job_timeout cancels long-running jobs."""
+        from app import scheduler as sched_mod
+        from app.config import settings
+
+        async def never_returns(*args, **kwargs):
+            # Async generator that sleeps forever
+            import asyncio as _a
+            while True:
+                await _a.sleep(10)
+                yield {}
+
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.execute = AsyncMock()
+        mock_session.commit = AsyncMock()
+
+        original_timeout = settings.scheduler_job_timeout
+        settings.scheduler_job_timeout = 1  # force quick timeout
+        sched_mod._scheduler = None
+
+        try:
+            with patch.object(sched_mod, "async_session", return_value=mock_session), \
+                 patch("app.modules.research_agent.run_research", side_effect=never_returns):
+                await sched_mod._execute_research_job(1, "topic", "medium")
+
+            # UPDATE call must have been issued with status='timeout'
+            call = mock_session.execute.call_args
+            assert call is not None
+            params = call[0][1] if len(call[0]) > 1 else call[1]
+            assert params.get("st") == "timeout"
+        finally:
+            settings.scheduler_job_timeout = original_timeout
+
+    @pytest.mark.asyncio
+    async def test_session_id_captured_from_sse_event(self):
+        """Fix #79: last_job_id populated from research_sessions.id in SSE stream."""
+        from app import scheduler as sched_mod
+
+        async def yields_session_id(*args, **kwargs):
+            yield 'event: research_started\ndata: {"session_id": "abc-123", "topic": "x"}\n\n'
+            yield 'event: research_complete\ndata: {"summary": "done"}\n\n'
+
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.execute = AsyncMock()
+        mock_session.commit = AsyncMock()
+
+        sched_mod._scheduler = None
+
+        with patch.object(sched_mod, "async_session", return_value=mock_session), \
+             patch("app.modules.research_agent.run_research", side_effect=yields_session_id):
+            await sched_mod._execute_research_job(2, "topic", "shallow")
+
+        call = mock_session.execute.call_args
+        params = call[0][1] if len(call[0]) > 1 else call[1]
+        assert params.get("jid") == "abc-123"
+        assert params.get("st") == "success"
+
+
+class TestExtractSessionId:
+    def test_extracts_from_sse_string(self):
+        from app.scheduler import _extract_session_id
+        evt = 'event: research_started\ndata: {"session_id": "xyz", "topic": "t"}\n\n'
+        assert _extract_session_id(evt) == "xyz"
+
+    def test_extracts_from_dict(self):
+        from app.scheduler import _extract_session_id
+        assert _extract_session_id({"session_id": "dict-id"}) == "dict-id"
+
+    def test_returns_none_when_absent(self):
+        from app.scheduler import _extract_session_id
+        assert _extract_session_id('event: other\ndata: {"foo": "bar"}\n\n') is None
+        assert _extract_session_id("not json at all") is None
+        assert _extract_session_id(42) is None

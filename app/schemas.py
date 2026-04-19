@@ -389,8 +389,9 @@ class ResearchReplyInput(BaseModel):
 
 class ScheduleCreate(BaseModel):
     topic: str
-    cron_expression: str  # e.g. "0 9 * * 1" = Mondays at 09:00 UTC
+    cron_expression: str  # e.g. "0 9 * * 1" = Mondays at 09:00 in `timezone`
     depth: str = "medium"  # shallow | medium | deep
+    timezone: str = "UTC"  # IANA tz name, e.g. "America/New_York"
     model_overrides: dict | None = None
 
 
@@ -399,6 +400,7 @@ class ScheduleResponse(BaseModel):
     topic: str
     depth: str
     cron_expression: str
+    timezone: str = "UTC"
     enabled: bool
     last_run_at: datetime | None = None
     last_status: str | None = None

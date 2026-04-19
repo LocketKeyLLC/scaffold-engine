@@ -1,10 +1,12 @@
 """APScheduler integration for /research recurrence.
 
 Rehydrates scheduled_jobs from Postgres on startup. Jobs execute
-run_research() directly in-process via asyncio.
+run_research() directly in-process via asyncio, with a timeout wrapper
+and capture of the real research_sessions.id into scheduled_jobs.last_job_id.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -22,21 +24,37 @@ logger = logging.getLogger(__name__)
 _scheduler: Optional[AsyncIOScheduler] = None
 
 
-def get_scheduler() -> AsyncIOScheduler:
-    if _scheduler is None:
-        raise RuntimeError("Scheduler not initialized; call init_scheduler() first")
+def get_scheduler() -> Optional[AsyncIOScheduler]:
+    """Return the running scheduler, or None if disabled/not started.
+
+    Callers must handle the None case — scheduler_enabled=False is legal.
+    """
     return _scheduler
 
 
-async def init_scheduler() -> AsyncIOScheduler:
-    """Create the scheduler, rehydrate from DB, start it."""
+async def init_scheduler() -> Optional[AsyncIOScheduler]:
+    """Create the scheduler, rehydrate from DB, start it.
+
+    Idempotent: a prior scheduler (if any) is shut down before re-init.
+    Returns None when settings.scheduler_enabled is False.
+    """
     global _scheduler
+
+    # Idempotency: tear down any prior instance cleanly.
+    if _scheduler is not None:
+        logger.info('event="scheduler_reinit" shutting_down_prior=true')
+        await shutdown_scheduler()
+
     if not settings.scheduler_enabled:
         logger.info('event="scheduler_disabled"')
         return None
+
     jobstore_url = settings.scheduler_jobstore_url or settings.sync_database_url
     jobstore = SQLAlchemyJobStore(url=jobstore_url, tablename="apscheduler_jobs")
-    _scheduler = AsyncIOScheduler(jobstores={"default": jobstore}, timezone=settings.scheduler_timezone)
+    _scheduler = AsyncIOScheduler(
+        jobstores={"default": jobstore},
+        timezone=settings.scheduler_timezone,
+    )
     await _rehydrate()
     _scheduler.start()
     logger.info('event="scheduler_started" jobs=%d', len(_scheduler.get_jobs()))
@@ -44,77 +62,184 @@ async def init_scheduler() -> AsyncIOScheduler:
 
 
 async def shutdown_scheduler() -> None:
+    """Graceful shutdown with bounded wait (#155)."""
     global _scheduler
-    if _scheduler is not None:
-        _scheduler.shutdown(wait=False)
-        _scheduler = None
-        logger.info('event="scheduler_stopped"')
+    if _scheduler is None:
+        return
+
+    sched = _scheduler
+    _scheduler = None  # flip the guard first so re-entrant callers see None
+
+    # APScheduler's shutdown(wait=True) is blocking; run in executor
+    # and bound it with asyncio.wait_for.
+    loop = asyncio.get_running_loop()
+    try:
+        await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: sched.shutdown(wait=True)),
+            timeout=settings.scheduler_shutdown_timeout,
+        )
+        logger.info('event="scheduler_stopped" graceful=true')
+    except asyncio.TimeoutError:
+        logger.warning(
+            'event="scheduler_stopped" graceful=false timeout=%ds — forcing',
+            settings.scheduler_shutdown_timeout,
+        )
+        # Force non-waiting shutdown; in-flight jobs are abandoned.
+        try:
+            sched.shutdown(wait=False)
+        except Exception:
+            pass
 
 
 async def _rehydrate() -> None:
     """Re-add enabled schedules from DB on startup (source of truth = scheduled_jobs)."""
     async with async_session() as db:
         rows = (await db.execute(text(
-            "SELECT id, topic, depth, cron_expression FROM scheduled_jobs WHERE enabled = TRUE"
+            "SELECT id, topic, depth, cron_expression, timezone "
+            "FROM scheduled_jobs WHERE enabled = TRUE"
         ))).mappings().all()
     for r in rows:
-        _add_job(r["id"], r["topic"], r["depth"], r["cron_expression"])
+        _add_job(r["id"], r["topic"], r["depth"], r["cron_expression"], r["timezone"])
 
 
-def _add_job(schedule_id: int, topic: str, depth: str, cron_expr: str) -> None:
-    get_scheduler().add_job(
+def _add_job(
+    schedule_id: int,
+    topic: str,
+    depth: str,
+    cron_expr: str,
+    tz: str,
+) -> None:
+    """Register an APScheduler job. Timezone threads through per-schedule (#8)."""
+    if _scheduler is None:
+        raise RuntimeError("Scheduler not initialized; cannot add job")
+    _scheduler.add_job(
         _execute_research_job,
-        trigger=CronTrigger.from_crontab(cron_expr, timezone="UTC"),
+        trigger=CronTrigger.from_crontab(cron_expr, timezone=tz),
         id=f"schedule_{schedule_id}",
         args=[schedule_id, topic, depth],
         replace_existing=True,
-        misfire_grace_time=300,
+        misfire_grace_time=settings.scheduler_misfire_grace_time,
     )
 
 
-async def add_schedule(schedule_id: int, topic: str, depth: str, cron_expr: str) -> None:
-    _add_job(schedule_id, topic, depth, cron_expr)
+async def add_schedule(
+    schedule_id: int,
+    topic: str,
+    depth: str,
+    cron_expr: str,
+    tz: str = "UTC",
+) -> None:
+    """Register a new schedule and write the computed next_run_at back to the DB."""
+    if _scheduler is None:
+        logger.warning('event="add_schedule_skipped" reason="scheduler_disabled"')
+        return
+
+    _add_job(schedule_id, topic, depth, cron_expr, tz)
+    job = _scheduler.get_job(f"schedule_{schedule_id}")
+    next_run = job.next_run_time if job else None  # datetime with tzinfo — safe for TIMESTAMPTZ
+
     async with async_session() as db:
-        job = get_scheduler().get_job(f"schedule_{schedule_id}")
-        next_run = job.next_run_time if job else None
         await db.execute(text(
-            "UPDATE scheduled_jobs SET next_run_at = :nr, updated_at = NOW() WHERE id = :id"
+            "UPDATE scheduled_jobs "
+            "SET next_run_at = :nr, updated_at = NOW() "
+            "WHERE id = :id"
         ), {"nr": next_run, "id": schedule_id})
         await db.commit()
 
 
 async def remove_schedule(schedule_id: int) -> None:
+    if _scheduler is None:
+        return
     job_id = f"schedule_{schedule_id}"
-    if get_scheduler().get_job(job_id):
-        get_scheduler().remove_job(job_id)
+    if _scheduler.get_job(job_id):
+        _scheduler.remove_job(job_id)
 
 
 async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> None:
-    """APScheduler entrypoint. Calls run_research() and updates scheduled_jobs."""
+    """APScheduler entrypoint. Runs research with timeout, captures real session_id (#79),
+    converts epoch next_run_time → TIMESTAMPTZ correctly (#7), enforces timeout (#80)."""
     from app.modules.research_agent import run_research
-    from uuid import uuid4
 
-    research_job_id = str(uuid4())
     started = datetime.now(timezone.utc)
+    session_id: Optional[str] = None
     status = "success"
+
+    async def _consume() -> None:
+        nonlocal session_id
+        async for event in run_research(topic=topic, depth=depth, domain=None):
+            # run_research yields SSE-formatted strings or dicts; capture session_id
+            # from the first event that carries it. Keep logic defensive — format may vary.
+            if session_id is None:
+                sid = _extract_session_id(event)
+                if sid:
+                    session_id = sid
+
     try:
-        async for _ in run_research(topic=topic, depth=depth, domain=None):
-            pass
+        await asyncio.wait_for(_consume(), timeout=settings.scheduler_job_timeout)
+    except asyncio.TimeoutError:
+        status = "timeout"
+        logger.error(
+            'event="scheduled_research_timeout" schedule_id=%s timeout=%ds',
+            schedule_id, settings.scheduler_job_timeout,
+        )
     except Exception as exc:
         status = "failed"
-        logger.error('event="scheduled_research_failed" schedule_id=%s error=%s', schedule_id, exc)
-    finally:
-        async with async_session() as db:
-            await db.execute(text("""
-                UPDATE scheduled_jobs
-                SET last_run_at = :ts, last_status = :st, last_job_id = :jid,
-                    run_count = run_count + 1,
-                    failure_count = failure_count + CASE WHEN :st = 'failed' THEN 1 ELSE 0 END,
-                    next_run_at = (SELECT next_run_time FROM apscheduler_jobs WHERE id = :asid),
-                    updated_at = NOW()
-                WHERE id = :id
-            """), {
-                "ts": started, "st": status, "jid": research_job_id,
-                "asid": f"schedule_{schedule_id}", "id": schedule_id,
-            })
-            await db.commit()
+        logger.error(
+            'event="scheduled_research_failed" schedule_id=%s error=%s',
+            schedule_id, exc,
+        )
+
+    # Compute next_run_at from the live scheduler job (avoids the DOUBLE-PRECISION
+    # → TIMESTAMPTZ type mismatch that the old subquery had).
+    next_run: Optional[datetime] = None
+    if _scheduler is not None:
+        job = _scheduler.get_job(f"schedule_{schedule_id}")
+        if job is not None:
+            next_run = job.next_run_time  # already a tz-aware datetime
+
+    async with async_session() as db:
+        await db.execute(text("""
+            UPDATE scheduled_jobs
+            SET last_run_at = :ts,
+                last_status = :st,
+                last_job_id = :jid,
+                run_count = run_count + 1,
+                failure_count = failure_count + CASE WHEN :st IN ('failed', 'timeout') THEN 1 ELSE 0 END,
+                next_run_at = :nr,
+                updated_at = NOW()
+            WHERE id = :id
+        """), {
+            "ts": started,
+            "st": status,
+            "jid": session_id,
+            "nr": next_run,
+            "id": schedule_id,
+        })
+        await db.commit()
+
+
+def _extract_session_id(event) -> Optional[str]:
+    """Best-effort pull of session_id from a research_agent SSE event.
+
+    research_agent yields via _sse(event_type, payload) which produces strings
+    like 'event: X\\ndata: {...}\\n\\n'. We parse the data line if present.
+    Also tolerates raw dicts in case the generator shape changes.
+    """
+    if isinstance(event, dict):
+        return event.get("session_id")
+    if not isinstance(event, str):
+        return None
+    # Cheap parse — find data:{...} with session_id
+    if '"session_id"' not in event:
+        return None
+    try:
+        import json
+        for line in event.splitlines():
+            if line.startswith("data:"):
+                payload = json.loads(line[5:].strip())
+                sid = payload.get("session_id")
+                if sid:
+                    return str(sid)
+    except Exception:
+        return None
+    return None

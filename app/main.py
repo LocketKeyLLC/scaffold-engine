@@ -708,9 +708,9 @@ async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_d
     from app.scheduler import add_schedule
 
     try:
-        CronTrigger.from_crontab(body.cron_expression, timezone="UTC")
+        CronTrigger.from_crontab(body.cron_expression, timezone=body.timezone)
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"invalid cron expression: {exc}")
+        raise HTTPException(status_code=422, detail=f"invalid cron expression or timezone: {exc}")
 
     if body.depth not in ("shallow", "medium", "deep"):
         raise HTTPException(status_code=422, detail="depth must be shallow|medium|deep")
@@ -718,23 +718,23 @@ async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_d
     _require_valid_models(body.model_overrides)
 
     result = await db.execute(text("""
-        INSERT INTO scheduled_jobs (topic, depth, cron_expression, enabled)
-        VALUES (:topic, :depth, :cron, TRUE)
-        RETURNING id, topic, depth, cron_expression, enabled,
+        INSERT INTO scheduled_jobs (topic, depth, cron_expression, timezone, enabled)
+        VALUES (:topic, :depth, :cron, :tz, TRUE)
+        RETURNING id, topic, depth, cron_expression, timezone, enabled,
                   last_run_at, last_status, last_job_id, next_run_at,
                   run_count, failure_count, created_at
-    """), {"topic": body.topic, "depth": body.depth, "cron": body.cron_expression})
+    """), {"topic": body.topic, "depth": body.depth, "cron": body.cron_expression, "tz": body.timezone})
     row = result.mappings().first()
     await db.commit()
 
-    await add_schedule(row["id"], row["topic"], row["depth"], row["cron_expression"])
+    await add_schedule(row["id"], row["topic"], row["depth"], row["cron_expression"], row["timezone"])
     return dict(row)
 
 
 @app.get("/schedule")
 async def list_schedules(db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(text("""
-        SELECT id, topic, depth, cron_expression, enabled,
+        SELECT id, topic, depth, cron_expression, timezone, enabled,
                last_run_at, last_status, last_job_id, next_run_at,
                run_count, failure_count, created_at
         FROM scheduled_jobs ORDER BY created_at DESC
