@@ -44,6 +44,7 @@ from app.config import settings, get_model
 from app.database import async_session
 from app.modules.rag_pipeline import ingest_entries
 from app.utils.llm_parsing import parse_json_array, parse_json_object
+from app.modules.gt_extractor import TOPIC_KEYWORDS
 from app.utils.topic_detection import detect_topic_id
 
 logger = logging.getLogger("scaffold.research")
@@ -99,7 +100,7 @@ def _score_source(url: str) -> float:
 
 def _detect_domain(topic: str) -> str:
     """Map research topic to Milvus partition domain via keyword scoring."""
-    topic_id = detect_topic_id(topic)
+    topic_id = detect_topic_id(topic, TOPIC_KEYWORDS, default=1)
     return settings.topic_to_domain.get(topic_id, settings.default_domain)
 
 

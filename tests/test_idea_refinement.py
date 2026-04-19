@@ -190,7 +190,8 @@ class TestRefineIdeaDomainOverride:
 class TestRefineIdeaTargetStatus:
     """refine_idea() uses target_status for the final job state."""
 
-    def test_custom_target_status(self):
+    def test_custom_target_status_returned(self):
+        """Passing target_status='awaiting_confirmation' must be reflected in the return dict."""
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
@@ -199,13 +200,18 @@ class TestRefineIdeaTargetStatus:
             result = _run(refine_idea(
                 "Build a tool", db, target_status="awaiting_confirmation"
             ))
-        # The UPDATE SQL should have been called with the custom status.
-        # We verify by checking the execute call args for target_status.
-        update_calls = [
-            c for c in db.execute.call_args_list
-            if c.args and "target_status" in str(c.args)
-        ]
-        # At minimum, the result should still return successfully
+        assert result["status"] == "awaiting_confirmation", (
+            "target_status parameter must drive the returned status, not be ignored."
+        )
+
+    def test_default_target_status_is_planning(self):
+        """When target_status is not supplied, default 'planning' must be returned."""
+        db = _make_db()
+        resp = _make_llm_response()
+        with patch("app.modules.idea_refinement.model_router") as mock_mr:
+            mock_mr.generate = AsyncMock(return_value=resp)
+            from app.modules.idea_refinement import refine_idea
+            result = _run(refine_idea("Build a tool", db))
         assert result["status"] == "planning"
 
 

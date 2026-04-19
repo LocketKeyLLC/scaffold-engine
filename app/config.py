@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # Research agent
     research_max_iterations: int = 3
     research_max_queries: int = 8
+    # Ideation pipeline caps (Phase 2 research_and_compile)
+    ideation_max_queries: int = 5
+    ideation_max_distill_results: int = 15
     research_max_urls_per_iteration: int = 20
     research_searxng_delay: float = 1.5
     research_chunk_size: int = 1500

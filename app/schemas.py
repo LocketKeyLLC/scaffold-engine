@@ -324,6 +324,7 @@ class PromptOptimizeInput(BaseModel):
     model_optimizer: str | None = None
     model_verifier: str | None = None
     skip_verify: bool = False
+    model_overrides: dict | None = None
 
 class PromptOptimizeResult(BaseModel):
     original_prompt: str

@@ -1,23 +1,46 @@
-"""Scaffold Engine - Ideation-to-Workflow pipeline (Phase 1).
+"""Scaffold Engine — Ideation-to-Workflow pipeline.
 
-Multi-phase flow between idea_refinement and dag_generator:
-  refining -> awaiting_confirmation -> (Phase 2 added later)
+Multi-phase flow bridging idea refinement and DAG generation:
+
+    pending -> refining -> awaiting_confirmation    (Phase 1)
+    awaiting_confirmation -> researching -> planning (Phase 2)
+
+Phase 1 (``analyze_and_confirm``) refines a raw idea and produces a feasibility
+assessment, then halts at ``awaiting_confirmation`` pending user review.
+
+Phase 2 (``research_and_compile``) is claimed atomically to prevent double
+execution, then runs SearXNG research, LLM distillation, Milvus ingestion, and
+prompt compilation before transitioning to ``planning``.
 """
-
 from __future__ import annotations
 
+# stdlib
 import json
-import logging
 
+# third-party
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# local
 from app import model_router
-from app.config import settings, get_model
+from app.config import get_model, settings
+from app.modules.gt_extractor import (
+    DISTILL_PROMPT,
+    DISTILL_SYSTEM,
+    TOPIC_KEYWORDS,
+    TOPIC_MAP,
+    _format_toon_rows,
+    _push_to_github,
+    _search_searxng,
+)
 from app.modules.idea_refinement import refine_idea
-from app.utils.llm_parsing import parse_json_object, parse_json_array
+from app.modules.rag_pipeline import ingest_entries
+from app.utils.llm_parsing import parse_json_array, parse_json_object
+from app.utils.topic_detection import detect_topic_id
 
-logger = logging.getLogger("scaffold.ideation")
+logger = structlog.stdlib.get_logger("scaffold.ideation")
+
 
 FEASIBILITY_SYSTEM = (
     "You are a technical feasibility analyst. Given a structured brief, assess:\n"
@@ -34,79 +57,6 @@ FEASIBILITY_SYSTEM = (
     '  "summary": "one paragraph assessment"\n'
     '}'
 )
-
-
-async def analyze_and_confirm(
-    idea_text: str,
-    db: AsyncSession,
-    model: str | None = None,
-    domain: str | None = None,
-    model_overrides: dict | None = None,
-) -> dict:
-    """Phase 1: Refine idea, assess feasibility, halt at awaiting_confirmation."""
-
-    refine_result = await refine_idea(idea_text, db, model=model, domain=domain, model_overrides=model_overrides, target_status="awaiting_confirmation")
-
-    if refine_result["status"] == "failed":
-        return refine_result
-
-    job_id = refine_result["job_id"]
-    brief = refine_result["refined_brief"]
-
-    resp = await model_router.generate(
-        "Assess this brief:\n" + json.dumps(brief, indent=2),
-        model=model or get_model("model_router", model_overrides),  # 4b suffices for snippet distillation
-        system=FEASIBILITY_SYSTEM,
-        temperature=0.2,
-        max_tokens=2048,
-    )
-
-    feasibility = parse_json_object(resp.text) if resp.success else None
-    if feasibility is None:
-        feasibility = {
-            "feasible": True,
-            "confidence": 0.5,
-            "risks": ["Could not assess - proceeding with best effort"],
-            "clarifications_needed": [],
-            "recommended_research_queries": [idea_text],
-            "summary": "Feasibility check failed; defaulting to proceed.",
-        }
-
-    await db.execute(
-        text(
-            "UPDATE jobs SET "
-            "research_data = :data WHERE id = :id"
-        ),
-        {
-            "data": json.dumps({"feasibility": feasibility, "brief": brief}),
-            "id": job_id,
-        },
-    )
-    await db.commit()
-
-    return {
-        "job_id": job_id,
-        "status": "awaiting_confirmation",
-        "refined_brief": brief,
-        "feasibility": feasibility,
-        "message": "Review the analysis. Reply /confirm <job_id> to proceed, or /confirm <job_id> <feedback> to adjust.",
-    }
-
-
-# ---------------------------------------------------------------------------
-# Phase 2: Research -> Ingest -> Compile -> Present
-# ---------------------------------------------------------------------------
-
-from app.modules.gt_extractor import (
-    _search_searxng,
-    _format_toon_rows,
-    _detect_topic_id,
-    _push_to_github,
-    TOPIC_MAP,
-    DISTILL_SYSTEM,
-    DISTILL_PROMPT,
-)
-from app.modules.rag_pipeline import ingest_entries
 
 COMPILE_SYSTEM = (
     "You are a prompt architect. Given a refined brief and researched facts, produce:\n"
@@ -128,6 +78,92 @@ COMPILE_SYSTEM = (
 )
 
 
+async def analyze_and_confirm(
+    idea_text: str,
+    db: AsyncSession,
+    model: str | None = None,
+    domain: str | None = None,
+    model_overrides: dict | None = None,
+) -> dict:
+    """Phase 1: refine an idea, assess feasibility, halt at ``awaiting_confirmation``.
+
+    Delegates initial structuring to :func:`app.modules.idea_refinement.refine_idea`
+    with ``target_status="awaiting_confirmation"``, then runs a feasibility LLM
+    pass (using the router/4b model) and stashes both brief and feasibility on the
+    job row.
+
+    Args:
+        idea_text: Raw user-submitted idea.
+        db: Async SQLAlchemy session.
+        model: Optional explicit model tag.
+        domain: Optional domain override propagated to refinement.
+        model_overrides: Per-request role→model mapping.
+
+    Returns:
+        Dict with ``job_id``, ``status``, ``refined_brief``, ``feasibility``, and
+        ``message``. On refinement failure, returns the refine_idea failure dict.
+    """
+    log = logger.bind(phase="ideation.phase1")
+    log.info("phase1_start", idea_preview=idea_text[:80])
+
+    refine_result = await refine_idea(
+        idea_text,
+        db,
+        model=model,
+        domain=domain,
+        model_overrides=model_overrides,
+        target_status="awaiting_confirmation",
+    )
+    if refine_result["status"] == "failed":
+        log.warning("phase1_refinement_failed", error=refine_result.get("error"))
+        return refine_result
+
+    job_id = refine_result["job_id"]
+    brief = refine_result["refined_brief"]
+    log = log.bind(job_id=job_id)
+
+    resp = await model_router.generate(
+        "Assess this brief:\n" + json.dumps(brief, indent=2),
+        model=model or get_model("model_router", model_overrides),
+        system=FEASIBILITY_SYSTEM,
+        temperature=0.2,
+        max_tokens=2048,
+    )
+
+    feasibility = parse_json_object(resp.text) if resp.success else None
+    if feasibility is None:
+        log.warning("phase1_feasibility_fallback", llm_success=resp.success)
+        feasibility = {
+            "feasible": True,
+            "confidence": 0.5,
+            "risks": ["Could not assess - proceeding with best effort"],
+            "clarifications_needed": [],
+            "recommended_research_queries": [idea_text],
+            "summary": "Feasibility check failed; defaulting to proceed.",
+        }
+
+    await db.execute(
+        text("UPDATE jobs SET research_data = :data WHERE id = :id"),
+        {
+            "data": json.dumps({"feasibility": feasibility, "brief": brief}),
+            "id": job_id,
+        },
+    )
+    await db.commit()
+
+    log.info("phase1_complete", feasible=feasibility.get("feasible"))
+    return {
+        "job_id": job_id,
+        "status": "awaiting_confirmation",
+        "refined_brief": brief,
+        "feasibility": feasibility,
+        "message": (
+            "Review the analysis. Reply /confirm <job_id> to proceed, "
+            "or /confirm <job_id> <feedback> to adjust."
+        ),
+    }
+
+
 async def research_and_compile(
     job_id: str,
     db: AsyncSession,
@@ -136,34 +172,73 @@ async def research_and_compile(
     push_to_github: bool = False,
     model_overrides: dict | None = None,
 ) -> dict:
-    """Phase 2: Research via SearXNG, ingest to Milvus, compile prompt, present workflow."""
+    """Phase 2: claim atomically, research, ingest, compile, transition to planning.
 
-    # Load job + stashed data
-    row = await db.execute(
-        text("SELECT status, research_data, refined_brief FROM jobs WHERE id = :id"),
+    Uses ``UPDATE ... WHERE status='awaiting_confirmation' RETURNING ...`` to
+    prevent concurrent ``/confirm`` calls from double-executing. If the claim
+    fails (job missing or wrong status), returns a conflict result suitable for
+    HTTP 409.
+
+    Args:
+        job_id: UUID of a job in ``awaiting_confirmation``.
+        db: Async SQLAlchemy session.
+        user_feedback: Optional adjustments from ``/confirm <id> <feedback>``.
+        model: Optional explicit model tag.
+        push_to_github: When True, pushes TOON rows to the configured repo.
+        model_overrides: Per-request role→model mapping.
+
+    Returns:
+        Success dict with ``status="planning"``, ``research_summary``, and
+        ``workflow``. On failure/conflict, returns dict with ``status="failed"``
+        or ``status="conflict"`` and an ``http_status`` hint (409 / 404).
+    """
+    log = logger.bind(phase="ideation.phase2", job_id=job_id)
+
+    # Atomic claim
+    claim = await db.execute(
+        text(
+            """
+            UPDATE jobs
+               SET status = 'researching'
+             WHERE id = :id
+               AND status = 'awaiting_confirmation'
+         RETURNING research_data, refined_brief
+            """
+        ),
         {"id": job_id},
     )
-    job = row.mappings().first()
-    if not job:
-        return {"status": "failed", "error": f"Job {job_id} not found"}
-    if job["status"] != "awaiting_confirmation":
-        return {"status": "failed", "error": f"Job is '{job['status']}', expected 'awaiting_confirmation'"}
+    claimed = claim.mappings().first()
+    await db.commit()
 
-    stashed = job["research_data"] if job["research_data"] else {}
-    brief = stashed.get("brief", {})
-    if not brief and job["refined_brief"]:
-        brief = job["refined_brief"] if job["refined_brief"] else {}
+    if not claimed:
+        check = await db.execute(
+            text("SELECT status FROM jobs WHERE id = :id"),
+            {"id": job_id},
+        )
+        existing = check.mappings().first()
+        if not existing:
+            log.warning("phase2_job_not_found")
+            return {
+                "status": "failed",
+                "error": f"Job {job_id} not found",
+                "http_status": 404,
+            }
+        log.warning("phase2_claim_conflict", actual_status=existing["status"])
+        return {
+            "status": "conflict",
+            "error": (
+                f"Job is '{existing['status']}', not 'awaiting_confirmation' "
+                "(may be in progress or already processed)"
+            ),
+            "http_status": 409,
+        }
+
+    stashed = claimed["research_data"] or {}
+    brief = stashed.get("brief") or (claimed["refined_brief"] or {})
     feasibility = stashed.get("feasibility", {})
 
     if user_feedback:
         brief["user_feedback"] = user_feedback
-
-    # Transition -> researching
-    await db.execute(
-        text("UPDATE jobs SET status = 'researching' WHERE id = :id"),
-        {"id": job_id},
-    )
-    await db.commit()
 
     # Step 1: SearXNG research
     queries = feasibility.get("recommended_research_queries", [])
@@ -171,59 +246,65 @@ async def research_and_compile(
         topic = brief.get("title", "")
         queries = [topic, f"{topic} best practices", f"{topic} implementation"]
 
+    query_cap = settings.ideation_max_queries
     all_results: list[dict] = []
     seen_urls: set[str] = set()
-    for q in queries[:5]:
+    for q in queries[:query_cap]:
         results = await _search_searxng(q)
         for r in results:
             url = r.get("url", "")
             if url and url not in seen_urls:
                 seen_urls.add(url)
                 all_results.append(r)
-        logger.info("ideation_search: %d results for '%s'", len(results), q)
+        log.info("phase2_search", query=q, result_count=len(results))
 
-    # Step 2: LLM distillation
+    # Step 2: LLM distillation (router/4b)
     entries: list[dict] = []
+    distill_cap = settings.ideation_max_distill_results
     if all_results:
         results_text = "\n\n".join(
             f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['content']}"
-            for r in all_results[:15]
+            for r in all_results[:distill_cap]
         )
         topic_str = brief.get("title", "unknown")
         resp = await model_router.generate(
             DISTILL_PROMPT.format(topic=topic_str, results=results_text),
-            model=model or get_model("model_general", model_overrides),
+            model=model or get_model("model_router", model_overrides),
             system=DISTILL_SYSTEM,
             temperature=0.2,
             max_tokens=4096,
         )
         if resp.success:
             entries = parse_json_array(resp.text) or []
+        log.info("phase2_distill", entry_count=len(entries))
 
-    # Step 3: TOON format + Milvus ingest
+    # Step 3: TOON + Milvus ingest
     toon_rows = _format_toon_rows(entries) if entries else []
     ingest_count = 0
     if entries:
-        _ingest_stats = await ingest_entries(entries, domain=brief.get("domain", "eng"))
-        ingest_count = _ingest_stats["new"] + _ingest_stats["versioned"]
+        stats = await ingest_entries(entries, domain=brief.get("domain", "eng"))
+        ingest_count = stats["new"] + stats["versioned"]
+        log.info("phase2_ingest", **stats)
 
     # Optional GitHub push
     gh_result = None
     if push_to_github and toon_rows:
-        topic_id = _detect_topic_id(brief.get("title", ""))
+        topic_id = detect_topic_id(brief.get("title", ""), TOPIC_KEYWORDS, default=1)
         target_file = f"knowledge/{TOPIC_MAP.get(topic_id, 'llm-research')}.toon"
         gh_result = await _push_to_github(toon_rows, target_file, brief.get("title", ""))
 
-    # Step 4: Compile prompt + workflow
-    compile_context = json.dumps({
-        "brief": brief,
-        "researched_facts": [e.get("content", "") for e in entries[:10]],
-        "fact_count": len(entries),
-    }, indent=2)
-
+    # Step 4: Compile (router/4b)
+    compile_context = json.dumps(
+        {
+            "brief": brief,
+            "researched_facts": [e.get("content", "") for e in entries[:10]],
+            "fact_count": len(entries),
+        },
+        indent=2,
+    )
     resp = await model_router.generate(
         "Compile an execution plan from this context:\n" + compile_context,
-        model=model or get_model("model_general", model_overrides),
+        model=model or get_model("model_router", model_overrides),
         system=COMPILE_SYSTEM,
         temperature=0.3,
         max_tokens=4096,
@@ -231,13 +312,17 @@ async def research_and_compile(
 
     workflow = parse_json_object(resp.text) if resp.success else None
     if workflow is None:
+        log.warning("phase2_compile_fallback", llm_success=resp.success)
         workflow = {
             "compiled_prompt": brief.get("description", ""),
             "workflow_steps": [],
-            "configuration": {"domain": brief.get("domain", "eng"), "estimated_nodes": 3},
+            "configuration": {
+                "domain": brief.get("domain", "eng"),
+                "estimated_nodes": 3,
+            },
         }
 
-    # Step 5: Persist and transition -> planning
+    # Step 5: Persist + transition
     await db.execute(
         text(
             "UPDATE jobs SET status = 'planning', "
@@ -245,23 +330,32 @@ async def research_and_compile(
             "WHERE id = :id"
         ),
         {
-            "data": json.dumps({
-                "feasibility": feasibility,
-                "brief": brief,
-                "research_entries": len(entries),
-                "milvus_ingested": ingest_count,
-            }),
+            "data": json.dumps(
+                {
+                    "feasibility": feasibility,
+                    "brief": brief,
+                    "research_entries": len(entries),
+                    "milvus_ingested": ingest_count,
+                }
+            ),
             "workflow": json.dumps(workflow),
             "id": job_id,
         },
     )
     await db.commit()
 
+    log.info(
+        "phase2_complete",
+        queries_run=len(queries[:query_cap]),
+        results_found=len(all_results),
+        facts_extracted=len(entries),
+        milvus_ingested=ingest_count,
+    )
     return {
         "job_id": job_id,
         "status": "planning",
         "research_summary": {
-            "queries_run": len(queries),
+            "queries_run": len(queries[:query_cap]),
             "results_found": len(all_results),
             "facts_extracted": len(entries),
             "milvus_ingested": ingest_count,
@@ -269,7 +363,8 @@ async def research_and_compile(
             "github": gh_result,
         },
         "workflow": workflow,
-        "message": "Research complete. Job is now in 'planning' status. DAG generation can proceed via /dag or auto-chain.",
+        "message": (
+            "Research complete. Job is now in 'planning' status. "
+            "DAG generation can proceed via /dag or auto-chain."
+        ),
     }
-
-

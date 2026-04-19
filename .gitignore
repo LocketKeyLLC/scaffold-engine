@@ -14,3 +14,4 @@ docker-compose.yml.bak*
 pipelines/failed/
 tests/fixtures/kb_entries.txt
 retrieval_report.json
+.backups/
