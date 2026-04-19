@@ -26,7 +26,11 @@ class GitHubRateLimitError(Exception):
     """Rate limit exhausted."""
 
 
-def _check_rate_limit(response: httpx.Response) -> None:
+def check_github_rate_limit(response: httpx.Response) -> None:
+    """Inspect GitHub response headers and raise if rate limit exhausted.
+
+    Shared by github_ingest and gt_extractor (push path).
+    """
     remaining = response.headers.get("X-RateLimit-Remaining")
     if remaining is None:
         return
@@ -36,6 +40,10 @@ def _check_rate_limit(response: httpx.Response) -> None:
         raise GitHubRateLimitError(f"GitHub rate limit exhausted. Resets at {reset}")
     if remaining_int < 10:
         logger.warning("GitHub rate limit low: %d remaining", remaining_int)
+
+
+# Backward-compat alias for internal callers
+_check_rate_limit = check_github_rate_limit
 
 
 async def _get_default_branch(client: httpx.AsyncClient, owner: str, repo: str) -> str:

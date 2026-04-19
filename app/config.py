@@ -67,6 +67,14 @@ class Settings(BaseSettings):
     openapi_max_endpoints: int = 200
     openapi_timeout: int = 30
 
+    # GT pipeline — GitHub push target
+    gt_github_owner: str = "LocketKeyLLC"
+    gt_github_repo: str = "smokieRAGs"
+    gt_github_branch: str = "main"
+
+    # GT browser — stats scan cap (Milvus max per query is 16384)
+    gt_stats_scan_limit: int = 16384
+
     # Research agent — fetch caps & concurrency (new: phase B)
     research_max_url_bytes: int = 5 * 1024 * 1024
     """Per-URL byte cap for bounded fetch in URL-mode and trafilatura batch."""

@@ -413,10 +413,10 @@ async def extract_gt(body: GtInput):
 
 
 @app.get("/gt/list")
-async def gt_list_endpoint(page: int = 1, per_page: int = 20):
+async def gt_list_endpoint(page: int = 1, per_page: int = 20, include_history: bool = False):
     """Step 19: Paginated list of all TOON entries."""
     try:
-        return await gt_list(page=page, per_page=per_page)
+        return await gt_list(page=page, per_page=per_page, include_history=include_history)
     except Exception as e:
         logger.error("/gt/list failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -425,7 +425,7 @@ async def gt_list_endpoint(page: int = 1, per_page: int = 20):
 async def gt_search_endpoint(body: GtSearchInput):
     """Step 19: Semantic search TOON entries."""
     try:
-        return await gt_search(query=body.query, top_k=body.top_k, domain=body.domain)
+        return await gt_search(query=body.query, top_k=body.top_k, domain=body.domain, include_history=body.include_history)
     except Exception as e:
         logger.error("/gt/search failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -435,6 +435,9 @@ async def gt_detail_endpoint(entry_id: str):
     """Step 19: Full content of a specific TOON entry."""
     try:
         return await gt_detail(entry_id=entry_id)
+    except HTTPException:
+        # Propagate 4xx untouched (e.g. 404 from missing entry)
+        raise
     except Exception as e:
         logger.error("/gt/detail failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))

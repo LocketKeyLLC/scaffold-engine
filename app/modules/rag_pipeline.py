@@ -72,21 +72,13 @@ _get_collection = get_collection
 # ---------------------------------------------------------------------------
 
 async def _embed_query(query: str) -> list[float] | None:
-    """Embed query with instruction prefix, MRL truncation, and cache."""
-    query_text = f"Instruct: Given a query, retrieve relevant knowledge entries\nQuery: {query}"
+    """Embed query (thin wrapper — delegates to app.utils.embedding.embed_query).
 
-    cache = get_cache()
-    cached = await cache.get(query_text)
-    if cached:
-        return cached
-
-    embeddings = await model_router.embed(query_text, model=settings.model_embedder_pipeline)
-    if not embeddings or not embeddings[0]:
-        return None
-
-    truncated = truncate_and_normalize(embeddings[0])
-    await cache.put(query_text, truncated)
-    return truncated
+    Kept for backward compatibility with internal rag_pipeline callers.
+    External modules should import ``embed_query`` from app.utils.embedding.
+    """
+    from app.utils.embedding import embed_query as _public_embed_query
+    return await _public_embed_query(query)
 
 
 async def _embed_content(text: str) -> list[float] | None:
