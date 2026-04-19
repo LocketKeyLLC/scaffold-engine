@@ -347,7 +347,6 @@ class ExecuteNextInput(BaseModel):
     job_id: str
     skip_optimize: bool = False
     skip_verify: bool = False
-    model_override: str | None = None
     model_overrides: dict | None = None
 
 class SkipNodeInput(BaseModel):

@@ -440,7 +440,6 @@ async def execute_next_node(
     db: AsyncSession,
     skip_optimize: bool = False,
     skip_verify: bool = False,
-    model_override: str | None = None,
     model_overrides: dict | None = None,
 ) -> dict:
     """
@@ -532,7 +531,7 @@ async def execute_next_node(
     title = node["title"]
     _raw_model = node.get("assigned_model", "")
     _assigned = _raw_model if _raw_model and str(_raw_model).lower() not in ("none", "null") else ""
-    exec_model = model_override or _assigned or get_model("model_general", model_overrides)
+    exec_model = _assigned or get_model("model_general", model_overrides)
     tool = (node.get("tool") or "LLM").strip()
     # ── Human: short-circuit ──
     if tool.lower() in ("human", "human_review"):
