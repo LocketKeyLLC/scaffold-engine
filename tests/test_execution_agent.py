@@ -386,61 +386,57 @@ class TestExecuteAllNodesBlocked:
 
 @pytest.mark.smoke
 class TestSearXNGSearchErrorHandling:
-    """_searxng_search graceful degradation on failures."""
+    """_searxng_search graceful degradation on failures.
+
+    _searxng_search lazy-imports get_searxng_client inside the function,
+    so the correct patch target is its source module, not execution_agent.
+    """
+    @staticmethod
+    def _mock_client(*, response=None, side_effect=None):
+        client = AsyncMock()
+        if side_effect is not None:
+            client.get = AsyncMock(side_effect=side_effect)
+        else:
+            client.get = AsyncMock(return_value=response)
+        return client
 
     def test_http_error_returns_failure_string(self):
         from app.modules.execution_agent import _searxng_search
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = httpx.HTTPStatusError(
             "503", request=MagicMock(), response=MagicMock(status_code=503)
         )
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock(return_value=mock_resp)
-
-        with patch("app.modules.execution_agent.httpx.AsyncClient", return_value=mock_client):
+        client = self._mock_client(response=resp)
+        with patch("app.utils.http_clients.get_searxng_client", return_value=client):
             result = _run(_searxng_search("test query"))
         assert "failed" in result.lower()
 
     def test_timeout_returns_failure_string(self):
         from app.modules.execution_agent import _searxng_search
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
-
-        with patch("app.modules.execution_agent.httpx.AsyncClient", return_value=mock_client):
+        client = self._mock_client(side_effect=httpx.TimeoutException("timed out"))
+        with patch("app.utils.http_clients.get_searxng_client", return_value=client):
             result = _run(_searxng_search("test query"))
         assert "failed" in result.lower()
 
     def test_empty_results_returns_no_results(self):
         from app.modules.execution_agent import _searxng_search
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"results": []}
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock(return_value=mock_resp)
-
-        with patch("app.modules.execution_agent.httpx.AsyncClient", return_value=mock_client):
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"results": []}
+        client = self._mock_client(response=resp)
+        with patch("app.utils.http_clients.get_searxng_client", return_value=client):
             result = _run(_searxng_search("test query"))
         assert "no search results" in result.lower()
 
     def test_success_formats_results(self):
         from app.modules.execution_agent import _searxng_search
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"results": [
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"results": [
             {"title": "Result 1", "content": "Snippet 1", "url": "https://example.com"},
         ]}
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock(return_value=mock_resp)
-
-        with patch("app.modules.execution_agent.httpx.AsyncClient", return_value=mock_client):
+        client = self._mock_client(response=resp)
+        with patch("app.utils.http_clients.get_searxng_client", return_value=client):
             result = _run(_searxng_search("test query"))
         assert "[1] Result 1" in result
         assert "Snippet 1" in result
