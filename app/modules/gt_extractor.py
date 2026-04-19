@@ -26,6 +26,7 @@ import httpx
 
 from app import model_router
 from app.config import settings
+from app.utils.topic_detection import detect_topic_id as _topic_detect_impl
 
 logger = logging.getLogger("scaffold.gt")
 
@@ -146,14 +147,13 @@ def _format_toon_rows(entries: list[dict]) -> list[str]:
 
 
 def _detect_topic_id(topic_text: str) -> int:
-    """Auto-detect topic category from text."""
-    topic_lower = topic_text.lower()
-    scores = {}
-    for tid, keywords in TOPIC_KEYWORDS.items():
-        score = sum(1 for kw in keywords if kw in topic_lower)
-        scores[tid] = score
-    best = max(scores, key=scores.get)
-    return best if scores[best] > 0 else 1
+    """Auto-detect topic category from text.
+
+    Thin wrapper binding the shared algorithm to this module's
+    ``TOPIC_KEYWORDS``. External callers should use
+    :func:`app.utils.topic_detection.detect_topic_id` directly.
+    """
+    return _topic_detect_impl(topic_text, TOPIC_KEYWORDS, default=1)
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +379,7 @@ async def extract_ground_truths(
     prompt = DISTILL_PROMPT.format(topic=topic, results=results_text)
     resp = await model_router.generate(
         prompt,
-        model=model or settings.model_general,
+        model=model or settings.model_router,
         system=DISTILL_SYSTEM,
         temperature=0.2,
         max_tokens=4096,

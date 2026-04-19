@@ -11,7 +11,7 @@ from typing import Optional
 
 
 from app import model_router
-from app.config import settings
+from app.config import get_model, settings
 
 logger = logging.getLogger(__name__)
 
@@ -137,29 +137,70 @@ async def _llm_optimize(pre_cleaned: str, model: str) -> str:
     return resp.text.strip()
 
 async def _llm_verify(original: str, optimized: str, model: str) -> tuple[bool, str]:
-    import json
-    messages = [{"role": "user", "content": f"ORIGINAL:\n{original}\n\nOPTIMIZED:\n{optimized}"}]
-    messages = [{"role": "system", "content": VERIFY_SYSTEM}] + messages
+    """Verify the optimized prompt preserves the semantic intent of the original.
+
+    Parsing strategy (fail-closed):
+      1. Primary: parse_json_object — handles markdown fences, partial JSON, etc.
+      2. Fallback: strict regex match on \\bpreserved\\s*[:=]\\s*(true|false)\\b
+      3. Both fail: return (False, <raw[:120]>) — default deny, not allow
+
+    Args:
+        original: The original prompt text.
+        optimized: The rewritten prompt to verify against the original.
+        model: Verifier model tag.
+
+    Returns:
+        Tuple of (preserved, reason). ``preserved`` defaults to False on any
+        parse/LLM failure to prevent accepting a corrupted optimization.
+    """
+    import re
+    from app.utils.llm_parsing import parse_json_object, strip_think_tags
+
+    messages = [
+        {"role": "system", "content": VERIFY_SYSTEM},
+        {"role": "user", "content": f"ORIGINAL:\n{original}\n\nOPTIMIZED:\n{optimized}"},
+    ]
     resp = await model_router.chat(messages=messages, model=model)
-    raw = resp.text
-    from app.utils.llm_parsing import strip_think_tags
-    raw = strip_think_tags(raw)
-    try:
-        data = json.loads(raw.strip())
-        return bool(data.get("preserved", False)), str(data.get("reason", ""))
-    except (json.JSONDecodeError, KeyError):
-        logger.warning("Verifier returned non-JSON: %s", raw[:200])
-        preserved = "true" in raw.lower()
-        return preserved, raw[:120]
+    raw = strip_think_tags(resp.text or "")
+
+    # 1. Primary: structured JSON parse
+    data = parse_json_object(raw)
+    if isinstance(data, dict) and "preserved" in data:
+        return bool(data["preserved"]), str(data.get("reason", ""))[:200]
+
+    # 2. Fallback: strict regex for preserved: true|false
+    match = re.search(r"\bpreserved\s*[:=]\s*(true|false)\b", raw, re.IGNORECASE)
+    if match:
+        logger.warning("Verifier JSON parse failed; used regex fallback: %s", raw[:120])
+        return match.group(1).lower() == "true", raw[:120]
+
+    # 3. Fail closed — neither parser succeeded
+    logger.warning("Verifier unparseable, defaulting to not-preserved: %s", raw[:200])
+    return False, raw[:120]
 
 async def optimize_prompt(
     prompt: str,
     model_optimizer: Optional[str] = None,
     model_verifier: Optional[str] = None,
     skip_verify: bool = False,
+    model_overrides: Optional[dict] = None,
 ) -> OptimizationResult:
-    opt_model = model_optimizer or settings.model_verifier
-    ver_model = model_verifier or settings.model_verifier
+    """Strip filler, LLM-rewrite, verify intent, score clarity.
+
+    Args:
+        prompt: Raw prompt text to optimize.
+        model_optimizer: Explicit optimizer model tag (overrides role resolution).
+        model_verifier: Explicit verifier model tag (overrides role resolution).
+        skip_verify: When True, skip the intent-preservation verification pass.
+        model_overrides: Per-request role→model mapping. Used only when the
+            explicit ``model_optimizer``/``model_verifier`` args are not set.
+
+    Returns:
+        OptimizationResult with original, optimized, and pre_cleaned text plus
+        token counts, reduction %, clarity score, and preservation verdict.
+    """
+    opt_model = model_optimizer or get_model("model_verifier", model_overrides)
+    ver_model = model_verifier or get_model("model_verifier", model_overrides)
 
     analysis = _analyze(prompt)
     issues_before = len(analysis.issues)

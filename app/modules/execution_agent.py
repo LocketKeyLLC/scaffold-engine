@@ -572,6 +572,7 @@ async def execute_next_node(
             opt_result = await optimize_prompt(
                 prompt=raw_prompt,
                 skip_verify=True,  # fast path inside execution
+                model_overrides=model_overrides,
             )
             exec_prompt = opt_result.optimized_prompt
             logger.info("Prompt optimized: %d -> %d tokens", opt_result.token_count_before, opt_result.token_count_after)

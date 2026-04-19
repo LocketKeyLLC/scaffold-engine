@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
 from app.config import get_model
-from app.schemas import JobCreate, JobRead
 from app.utils.llm_parsing import parse_json_object
 
 logger = logging.getLogger("scaffold.refine")
@@ -147,7 +146,7 @@ async def refine_idea(
 
     return {
         "job_id": str(job_id),
-        "status": "planning",
+        "status": target_status,
         "refined_brief": brief,
         "model_used": resp.model,
         "duration_ms": resp.total_duration_ms,

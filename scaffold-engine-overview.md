@@ -2,7 +2,7 @@
 
 **Last Updated:** April 19, 2026
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Test Suite:** 362 passed + 22 skipped in-container + 49 pipeline + 18 valve + 3 gt_browser, 0 failed
+**Test Suite:** 366 passed + 22 skipped in-container + 49 pipeline + 18 valve + 3 gt_browser, 0 failed
 **Codebase:** ~6,700 lines of application Python across 27 source files + ~2,100 lines across 5 pipelines
 
 ---
@@ -172,7 +172,7 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 | `modules/dag_generator.py` | 575 | DAG creation, Kahn's cycle check, numeric-sort truncation |
 | `modules/rag_pipeline.py` | 596 | Embed → parallel vector+keyword → RRF → rerank; ingest with dedup + version chains |
 | `modules/research_agent.py` | 2,188 | Autonomous research + URL/GitHub/OpenAPI/PDF direct modes + pause/resume |
-| `modules/ideation_workflow.py` | 275 | Phase 1 (refine + feasibility) + Phase 2 (research → compile) |
+| `modules/ideation_workflow.py` | 383 | Phase 1 (refine + feasibility) + Phase 2 (research → compile) |
 | `modules/idea_refinement.py` | 172 | Raw idea → structured brief |
 | `modules/prompt_optimizer.py` | 201 | Strip → optimize → verify |
 | `modules/gt_extractor.py` | 435 | SearXNG → distill → TOON formatting → optional GitHub push |
@@ -371,11 +371,11 @@ CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval co
 9. **Auto-chain on `/confirm`** — Phase 2 → DAG → execute all
 10. **Concurrent execution guard** — atomic `UPDATE` prevents duplicate job/session runs
 11. **Active-node-aware cleanup** — stale reaper skips jobs with running nodes
-12. **Numeric DAG truncation** — sorts T1, T2, T3... numerically, not alphabetically
-13. **Upstream-last prompt assembly** — mandatory upstream context prepended, task instruction last
-14. **Env-first model configuration** — docker-compose env vars override config.py defaults
-15. **Short-lived database sessions** — independent session per operation, not request-scoped
-16. **Auto-retry on verify fail** — up to `max_retries`, then blocked with manual `/exec/retry`
+10. **Numeric DAG truncation** — sorts T1, T2, T3... numerically, not alphabetically
+11. **Upstream-last prompt assembly** — mandatory upstream context prepended, task instruction last
+12. **Env-first model configuration** — docker-compose env vars override config.py defaults
+13. **Short-lived database sessions** — independent session per operation, not request-scoped
+14. **Auto-retry on verify fail** — up to `max_retries`, then blocked with manual `/exec/retry`
 17. **Tool-constrained DAG** — only LLM, CodeGen, SearXNG, Milvus; no Human/FileSystem
 18. **Model valve system** — 8 roles switchable via admin panel; overrides threaded per-request
 19. **3-tier ingestion** — dedup > 0.95, version chain 0.90–0.95, new < 0.90
@@ -406,13 +406,11 @@ CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval co
 9. **Context stripping depends on `</context>` tag** — regex in `pipe()` needs updating if Open WebUI format changes.
 
 ### Known bugs (see fix list)
-10. **Distillation uses `model_general` (235b) instead of `model_router` (4b)** — regression from changelog April 14 #26. Confirmed in `ideation_workflow.py` and `gt_extractor.py`.
-11. **`idea_refinement.refine_idea` hardcodes `status="planning"`** — ignores `target_status` parameter.
-12. **`execution_handler` pipeline field mismatches** — reads `model`/`output_preview` but orchestrator returns `model_used`/`output`.
-13. **`test_pipeline_complete.py` tautologies** — ~6 of 10 tests validate their own literals.
-14. **`conftest_ci.py` is dead code** — filename not auto-loaded by pytest.
-15. **Client-disconnect leaves orphan research sessions** — `run_research()` generator cancelled without finalize. Reaper catches at 30 min.
-16. **Scheduler timestamp type mismatch** — `apscheduler_jobs.next_run_time` (DOUBLE PRECISION) → `scheduled_jobs.next_run_at` (TIMESTAMPTZ) without `to_timestamp()` cast.
+10. **`execution_handler` pipeline field mismatches** — reads `model`/`output_preview` but orchestrator returns `model_used`/`output`.
+11. **`test_pipeline_complete.py` tautologies** — ~6 of 10 tests validate their own literals.
+12. **`conftest_ci.py` is dead code** — filename not auto-loaded by pytest.
+13. **Client-disconnect leaves orphan research sessions** — `run_research()` generator cancelled without finalize. Reaper catches at 30 min.
+14. **Scheduler timestamp type mismatch** — `apscheduler_jobs.next_run_time` (DOUBLE PRECISION) → `scheduled_jobs.next_run_at` (TIMESTAMPTZ) without `to_timestamp()` cast.
 
 ---
 
@@ -479,7 +477,7 @@ scaffold-engine/
 │   ├── modules/          # 12 files, orchestration logic
 │   ├── routers/          # status.py
 │   ├── middleware/       # performance.py, error_logging.py
-│   └── utils/            # 7 shared utilities
+│   └── utils/            # 8 shared utilities
 ├── pipelines/            # 5 Open WebUI pipelines
 ├── db/
 │   ├── init.sql

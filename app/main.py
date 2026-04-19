@@ -529,6 +529,7 @@ async def optimize_endpoint(body: PromptOptimizeInput):
         model_optimizer=body.model_optimizer,
         model_verifier=body.model_verifier,
         skip_verify=body.skip_verify,
+        model_overrides=body.model_overrides,
     )
     return PromptOptimizeResult(**result.__dict__)
 
