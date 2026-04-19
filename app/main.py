@@ -542,7 +542,6 @@ async def execute_next(body: ExecuteNextInput, db: AsyncSession = Depends(get_db
         db=db,
         skip_optimize=body.skip_optimize,
         skip_verify=body.skip_verify,
-        model_override=body.model_override,
     )
 
 
