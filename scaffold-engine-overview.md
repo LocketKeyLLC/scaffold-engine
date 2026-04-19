@@ -171,7 +171,7 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 | `modules/execution_agent.py` | 1,261 | DAG node execution, SSE streaming, tool dispatch, verification, auto-retry |
 | `modules/dag_generator.py` | 575 | DAG creation, Kahn's cycle check, numeric-sort truncation |
 | `modules/rag_pipeline.py` | 596 | Embed → parallel vector+keyword → RRF → rerank; ingest with dedup + version chains |
-| `modules/research_agent.py` | ~2,400 | Autonomous research + URL/GitHub/OpenAPI/PDF direct modes + pause/resume |
+| `modules/research_agent.py` | 2,188 | Autonomous research + URL/GitHub/OpenAPI/PDF direct modes + pause/resume |
 | `modules/ideation_workflow.py` | 275 | Phase 1 (refine + feasibility) + Phase 2 (research → compile) |
 | `modules/idea_refinement.py` | 172 | Raw idea → structured brief |
 | `modules/prompt_optimizer.py` | 201 | Strip → optimize → verify |
