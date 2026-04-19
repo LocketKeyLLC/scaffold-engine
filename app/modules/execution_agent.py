@@ -7,7 +7,7 @@ Flow per node:
   fetch next pending node (deps satisfied)
     -> optimize prompt (Step 14)
       -> execute via model_router
-        -> verify output (phi4-mini-reasoning)
+        -> verify output (qwen2.5:7b)
           -> persist result + update status
             -> return to user for approval
 
@@ -21,9 +21,8 @@ Error recovery cascade (per spec):
 import asyncio
 import logging
 import time as _time_mod
-from typing import AsyncGenerator,  Optional
+from typing import AsyncGenerator
 from uuid import UUID
-import httpx
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -239,7 +238,7 @@ async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = No
         return ""
 
 
-async def _build_prompt(node: dict, brief: dict) -> str:
+def _build_prompt(node: dict, brief: dict) -> str:
     """Build execution prompt from node template + brief context."""
     template = node.get("prompt_template") or ""
     title = node["title"]
@@ -348,9 +347,6 @@ def _extract_verify_result(data: dict) -> tuple[bool, str, float]:
 # Public API
 
 # ── Tool Dispatch ────────────────────────────────────────────
-import os as _os
-_SEARXNG_URL = _os.environ.get("SEARXNG_URL", "http://searxng:8080")
-
 
 async def _searxng_search(query: str, max_results: int = 5) -> str:
     """Call SearXNG JSON API, return formatted results."""
@@ -444,7 +440,7 @@ async def execute_next_node(
     db: AsyncSession,
     skip_optimize: bool = False,
     skip_verify: bool = False,
-    model_override: Optional[str] = None,
+    model_override: str | None = None,
     model_overrides: dict | None = None,
 ) -> dict:
     """
@@ -569,7 +565,7 @@ async def execute_next_node(
 
     # 3. Build prompt with RAG grounding
     brief = job.get("refined_brief") or {}
-    raw_prompt = await _build_prompt(node, brief)
+    raw_prompt = _build_prompt(node, brief)
 
     # 4. Optimize prompt (Step 14) — before RAG injection
     if not skip_optimize:
