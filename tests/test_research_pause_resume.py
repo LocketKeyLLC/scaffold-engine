@@ -198,6 +198,17 @@ class TestResumeHappyPath:
         with patch.object(ra, "_load_session_for_resume",
                           AsyncMock(return_value=row)), \
              patch.object(ra, "async_session", lambda: _AsyncCM()), \
+             patch.object(ra, "_atomic_claim_for_resume",
+                          AsyncMock(return_value=True)), \
+             patch.object(ra, "_decompose_topic", AsyncMock(return_value={
+                 "topic_complexity": "medium",
+                 "facets": ["tracing"],
+                 "queries": [{"query": "gRPC tracing",
+                              "facet": "tracing",
+                              "search_category": "general"}],
+             })), \
+             patch.object(ra, "_search_queries",
+                          AsyncMock(return_value=[])), \
              patch.object(ra, "_update_session_iteration", AsyncMock()), \
              patch.object(ra, "_finalize_session", AsyncMock()), \
              patch.object(ra, "_generate_summary", _fake_summary):
