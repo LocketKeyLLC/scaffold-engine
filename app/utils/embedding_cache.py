@@ -1,13 +1,16 @@
 """Two-tier embedding cache: in-memory LRU + Redis persistent store.
 
-Cache key format: embed:{model_id}:{sha256(normalized_text)}
+Cache key format: embedv2:{model_id}:{sha256(normalized_text)}
+- Key prefix bumped to ``embedv2:`` when switching to binary encoding (#45).
+  Old ``embed:`` keys expire naturally via Redis TTL.
 - Model/dimension changes auto-invalidate stale entries
 - Stores truncated 512d embeddings, not full 4096d
+- Binary float32 encoding: ~4x smaller than JSON, no parse overhead
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import json
 import logging
 from collections import OrderedDict
 from typing import Any
@@ -21,6 +24,28 @@ logger = logging.getLogger("scaffold.embedding_cache")
 
 # Consecutive Redis failures before escalating log level debug -> warning
 _REDIS_FAILURE_THRESHOLD = 3
+
+# Cache key version prefix (bump on wire-format change)
+_KEY_PREFIX = "embedv2"
+
+
+def normalize_cache_text(text: str) -> str:
+    """Lowercase + whitespace-collapse text for cache-key hashing (#130).
+
+    Shared between embedding_cache and rag_pipeline so both produce the same
+    cache key for the same logical query.
+    """
+    return " ".join(text.lower().split())
+
+
+def _encode_embedding(embedding: list[float]) -> bytes:
+    """Pack embedding as float32 bytes (#45 — ~4x smaller than JSON)."""
+    return np.asarray(embedding, dtype=np.float32).tobytes()
+
+
+def _decode_embedding(blob: bytes) -> list[float]:
+    """Unpack float32 bytes back to list[float]."""
+    return np.frombuffer(blob, dtype=np.float32).tolist()
 
 
 class EmbeddingCache:
@@ -37,22 +62,27 @@ class EmbeddingCache:
         self.dim = dim or settings.embedding_dim
         self._memory: OrderedDict[str, list[float]] = OrderedDict()
         self._redis: aioredis.Redis | None = None
+        self._redis_lock = asyncio.Lock()
         self._hits = 0
         self._misses = 0
         self._evictions = 0
         self._redis_failures = 0
 
     async def _get_redis(self) -> aioredis.Redis:
-        if self._redis is None:
-            self._redis = aioredis.from_url(
-                self.redis_url, decode_responses=True
-            )
+        # Fast path — already initialized
+        if self._redis is not None:
+            return self._redis
+        # Slow path — serialize concurrent first-callers
+        async with self._redis_lock:
+            if self._redis is None:
+                self._redis = aioredis.from_url(
+                    self.redis_url, decode_responses=False
+                )
         return self._redis
 
     def _cache_key(self, text: str) -> str:
-        normalized = " ".join(text.lower().split())
-        h = hashlib.sha256(normalized.encode()).hexdigest()
-        return f"embed:{self.model_id}:{h}"
+        h = hashlib.sha256(normalize_cache_text(text).encode()).hexdigest()
+        return f"{_KEY_PREFIX}:{self.model_id}:{h}"
 
     async def get(self, text: str) -> list[float] | None:
         """Look up cached embedding. Returns None on miss."""
@@ -70,7 +100,7 @@ class EmbeddingCache:
             cached = await r.get(key)
             self._redis_failures = 0
             if cached:
-                emb = json.loads(cached)
+                emb = _decode_embedding(cached)
                 self._memory[key] = emb
                 self._evict_memory()
                 self._hits += 1
@@ -94,7 +124,7 @@ class EmbeddingCache:
         # Tier 2: Redis
         try:
             r = await self._get_redis()
-            await r.set(key, json.dumps(embedding))
+            await r.setex(key, settings.embedding_cache_ttl_s, _encode_embedding(embedding))
             self._redis_failures = 0
         except Exception as e:
             self._redis_failures += 1

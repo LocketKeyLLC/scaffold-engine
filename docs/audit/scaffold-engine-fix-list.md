@@ -76,17 +76,17 @@ Total items: **155**
 - [x] **#35** `/rag` should raise HTTPException on error (not return 200 with `{"status": "error"}` body) — ✅ `b1c862c`
 
 ### Phase 4b — rerankers + utils
-- [ ] **#36** Add thread/async lock around reranker singleton init (rerankers.py)
-- [ ] **#37** Add auto-retry with backoff to reranker load failure path
+- [x] **#36** Add thread/async lock around reranker singleton init (rerankers.py)
+- [x] **#37** Add auto-retry with backoff to reranker load failure path
 - [x] **#38** Extract reranker `max_pairs=20` to module constant
 - [x] **#39** Make reranker prompt template config-driven (decouple from Qwen3)
-- [ ] **#40** Cache Milvus connection liveness — don't `utility.list_collections()` RPC on every `get_collection` call
-- [ ] **#41** Cache Milvus `load()` status — don't RPC on every call
+- [x] **#40** Cache Milvus connection liveness — don't `utility.list_collections()` RPC on every `get_collection` call
+- [x] **#41** Cache Milvus `load()` status — don't RPC on every call
 - [x] **#42** Consolidate toon_v2 schema (remove duplication between `milvus_utils.py` and `scripts/create_toon_v2.py`)
 - [x] **#43** Move `num_partitions=64` to config
-- [ ] **#44** Add async lock to `EmbeddingCache._get_redis()` lazy init
-- [ ] **#45** Consider binary encoding for cached embeddings (replace JSON; 2× smaller/faster)
-- [ ] **#46** Add explicit Redis TTL on cache entries
+- [x] **#44** Add async lock to `EmbeddingCache._get_redis()` lazy init
+- [x] **#45** Consider binary encoding for cached embeddings (replace JSON; 2× smaller/faster)
+- [x] **#46** Add explicit Redis TTL on cache entries
 - [x] **#47** Use `aclose()` instead of `close()` on redis client (deprecation-proof)
 - [x] **#48** Fix `staleness.sweep_expired()` `entry_id in {list}` quoting (build expression explicitly with double quotes)
 - [x] **#49** Paginate staleness sweep instead of hard 1000 cap
@@ -190,7 +190,7 @@ Total items: **155**
 - [x] **#127** Raise Redis cache error log level above debug on repeated failures
 - [x] **#128** Add eviction counter to `EmbeddingCache.stats`
 - [x] **#129** Move `MEMORY_MAX_SIZE=10_000` to config
-- [ ] **#130** Share text-normalization helper between `embedding_cache` and `rag_pipeline`
+- [x] **#130** Share text-normalization helper between `embedding_cache` and `rag_pipeline`
 - [x] **#131** Move `TTL_POLICY` to config
 - [x] **#132** Replace `created_at=0` sentinel with `None` in `compute_expires_at`
 - [x] **#133** Log warning on unknown `source_type` in staleness (currently silent 180d default)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -15,35 +16,72 @@ _MAX_PAIRS = 20
 # ---------------------------------------------------------------------------
 _cross_encoder = None
 _load_failed = False
+_load_lock = threading.Lock()
 
 
 def reset_reranker():
     """Reset reranker state so next call retries loading."""
     global _cross_encoder, _load_failed
-    _cross_encoder = None
-    _load_failed = False
+    with _load_lock:
+        _cross_encoder = None
+        _load_failed = False
 
 
 def _get_cross_encoder():
-    """Load model once, on first call. Returns None if unavailable."""
+    """Load model once, on first call. Returns None if unavailable.
+
+    Uses double-checked locking so concurrent first calls don\'t trigger
+    multiple ~13s CrossEncoder loads.
+    """
     global _cross_encoder, _load_failed
-    if _load_failed:
-        return None
+    # Fast path (no lock) — hot path after initial load
     if _cross_encoder is not None:
         return _cross_encoder
-    try:
+    if _load_failed:
+        return None
+
+    with _load_lock:
+        # Recheck under lock
+        if _cross_encoder is not None:
+            return _cross_encoder
+        if _load_failed:
+            return None
         from sentence_transformers import CrossEncoder
         from app.config import settings
         model_name = settings.model_reranker
-        logger.info("crossencoder_loading: model=%s", model_name)
-        t0 = time.monotonic()
-        _cross_encoder = CrossEncoder(model_name, trust_remote_code=True)
-        elapsed = time.monotonic() - t0
-        logger.info("crossencoder_loaded: elapsed_s=%.1f", elapsed)
-        return _cross_encoder
-    except Exception as e:
+
+        # Retry with exponential backoff (transient network/disk stalls during
+        # cold HF cache load shouldn't permanently disable the reranker)
+        _MAX_ATTEMPTS = 3
+        _BASE_DELAY_S = 2.0
+
+        last_err: Exception | None = None
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                logger.info(
+                    "crossencoder_loading: model=%s attempt=%d/%d",
+                    model_name, attempt, _MAX_ATTEMPTS,
+                )
+                t0 = time.monotonic()
+                _cross_encoder = CrossEncoder(model_name, trust_remote_code=True)
+                elapsed = time.monotonic() - t0
+                logger.info("crossencoder_loaded: elapsed_s=%.1f", elapsed)
+                return _cross_encoder
+            except Exception as e:
+                last_err = e
+                if attempt < _MAX_ATTEMPTS:
+                    delay = _BASE_DELAY_S * (2 ** (attempt - 1))
+                    logger.warning(
+                        "crossencoder_load_retry: attempt=%d/%d error=%s retry_in=%.1fs",
+                        attempt, _MAX_ATTEMPTS, e, delay,
+                    )
+                    time.sleep(delay)
+
         _load_failed = True
-        logger.error("crossencoder_load_failed: error=%s", e)
+        logger.error(
+            "crossencoder_load_failed: attempts=%d last_error=%s",
+            _MAX_ATTEMPTS, last_err,
+        )
         return None
 
 

@@ -40,7 +40,7 @@ from app.rerankers import rerank as cross_encoder_rerank
 from app import model_router
 from app.config import settings
 from app.utils.staleness import compute_expires_at
-from app.utils.embedding_cache import get_cache, truncate_and_normalize
+from app.utils.embedding_cache import get_cache, truncate_and_normalize, normalize_cache_text
 
 from sqlalchemy import text
 from app.database import async_session
@@ -475,9 +475,8 @@ def _build_embedding_text(entry: dict) -> str:
 
 
 def _content_hash(text: str) -> str:
-    """SHA-256 hash of normalized text for dedup."""
-    normalized = " ".join(text.lower().split())
-    return hashlib.sha256(normalized.encode()).hexdigest()
+    """SHA-256 hash of normalized text for dedup (#130 — shared helper)."""
+    return hashlib.sha256(normalize_cache_text(text).encode()).hexdigest()
 
 
 async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:

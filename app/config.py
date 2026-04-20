@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     milvus_uri: str = "http://milvus-standalone:19530"
     milvus_num_partitions: int = 64
     embedding_cache_memory_size: int = 10_000
+    embedding_cache_ttl_s: int = 30 * 86400  # 30 days
     # Reranker prompt template (default: Qwen3-Reranker format)
     reranker_prompt_system: str = (
         "<|im_start|>system\n"

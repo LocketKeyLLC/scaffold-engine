@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 
 from pymilvus import Collection, MilvusClient, DataType, connections, utility
 
@@ -11,6 +13,25 @@ logger = logging.getLogger("scaffold.milvus_utils")
 
 COLLECTION_NAME = "toon_v2"
 DIM = 512
+
+
+# ---------------------------------------------------------------------------
+# get_collection() cache (#40, #41)
+# Liveness/has_collection/load RPCs are redundant after first success.
+# Cache handle for CACHE_TTL seconds, invalidate on any error.
+# ---------------------------------------------------------------------------
+_CACHE_TTL_S = 30.0
+_cached_collection: "Collection | None" = None
+_cached_at: float = 0.0
+_cache_lock = threading.Lock()
+
+
+def _invalidate_cache() -> None:
+    """Drop cached Collection so next get_collection() re-verifies."""
+    global _cached_collection, _cached_at
+    with _cache_lock:
+        _cached_collection = None
+        _cached_at = 0.0
 
 
 def build_toon_v2_schema():
@@ -93,6 +114,13 @@ def get_collection(*, raise_on_missing: bool = False) -> Collection | None:
     sites that assume a Collection. Pass ``raise_on_missing=True`` in code
     paths where a missing collection is unrecoverable.
     """
+    global _cached_collection, _cached_at
+
+    # Fast path — serve from cache if fresh (#40, #41)
+    with _cache_lock:
+        if _cached_collection is not None and (time.monotonic() - _cached_at) < _CACHE_TTL_S:
+            return _cached_collection
+
     try:
         # Ensure connection
         try:
@@ -116,10 +144,17 @@ def get_collection(*, raise_on_missing: bool = False) -> Collection | None:
 
         col = Collection(COLLECTION_NAME)
         col.load()
+
+        # Populate cache
+        with _cache_lock:
+            _cached_collection = col
+            _cached_at = time.monotonic()
         return col
     except RuntimeError:
+        _invalidate_cache()
         raise
     except Exception as e:
+        _invalidate_cache()
         msg = f"Failed to get Milvus collection: {e}"
         if raise_on_missing:
             raise RuntimeError(msg) from e
