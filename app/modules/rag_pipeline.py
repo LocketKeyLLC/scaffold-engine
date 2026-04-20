@@ -357,7 +357,10 @@ async def query_rag(
     top_k = max(1, min(top_k, MAX_TOP_K))
     t0 = time.monotonic()
 
-    collection = _get_collection()
+    # #120-inverse: get_collection() makes 3 Milvus RPCs; run off the event loop
+    # to match the ingest_entries pattern and avoid blocking other requests.
+    loop = asyncio.get_running_loop()
+    collection = await loop.run_in_executor(None, _get_collection)
     if collection is None:
         return {
             "status": "error",
