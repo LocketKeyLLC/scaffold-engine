@@ -73,6 +73,23 @@ blocking. Wrap is required.
 
 ---
 
+### #24 — "Reconcile DAG prompt 3-10 steps with code enforcement ≤10 only"
+**Original audit framing:** Prompt says 3-10 but code only enforces ≤10; undersize DAGs slip through.
+**Why it was wrong:** `_enforce_node_count` has `min_count=3` and was only logging at undercount — but that's a separate bug (#23). The prompt and the `_enforce_node_count` bounds already agreed on 3-10. With #23 fixed (undercount now raises), the prompt and code are fully aligned.
+**Resolution:** Subsumed by #23. Marked resolved as part of Phase B.
+
+### #100 — "Share adjacency structure between validate_dag and _build_edges"
+**Original audit framing:** Duplicate graph traversal.
+**Why it was wrong:** The two functions produce genuinely different output shapes. `validate_dag` builds a successors map (`dict[str, list[str]]` keyed by source node id) as input to Kahn's cycle-detection algorithm. `_build_edges` builds an edge-record list (`list[{"from": x, "to": y}]`) consumed by Mermaid rendering and root/disconnected checks. They share underlying edge information but serve different consumers — merging them would require a transformation layer that adds complexity without reducing traversal cost.
+**Resolution:** Won't-fix as specified. Logged in fix-list as reframed.
+
+### #107 — "isinstance(raw, dict): continue silently skips non-dict tasks"
+**Original audit framing:** Add to errors list.
+**Why it was stale:** Already implemented before the Module 12 audit pass. Line check on `_normalize_tasks` shows `errors.append(f"Task {i}: must be an object")` followed by `continue`.
+**Resolution:** No code change needed; marked resolved as stale.
+
+---
+
 ## Open
 
 ### Stale `.pyc` / AST cache in container
