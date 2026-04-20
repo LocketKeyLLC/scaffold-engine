@@ -1,8 +1,8 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 19, 2026
+**Last Updated:** April 20, 2026
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Test Suite:** 390 passed + 22 skipped in-container + 49 pipeline + 18 valve + 3 gt_browser, 0 failed
+**Test Suite:** 390 passed + 22 skipped in-container + 58 pipeline + 18 valve + 3 gt_browser, 0 failed
 **Codebase:** ~6,700 lines of application Python across 27 source files + ~2,100 lines across 5 pipelines
 
 ---
@@ -100,8 +100,9 @@ Compiled output displayed in chat
 | `/research github:<owner>/<repo>` | Ingest README + docs + module docstrings |
 | `/research openapi:<url>` | Ingest OpenAPI/Swagger spec as per-endpoint entries |
 | `/research/reply <session_id> <msg>` | Resume paused research session |
-| `/schedule <sub>` | Manage scheduled research: `list`, `add`, `delete`, `help` |
+| `/schedule <sub>` | Manage scheduled research: `list`, `add [--depth=<level>]`, `delete`, `help` |
 | `/status` | List active jobs |
+| `/results <job_id>` | View a completed job's output, progress, or failure reason |
 | `/help` | Show command list |
 
 Additional endpoint (not a chat command): `POST /research/pdf` — direct PDF upload (use the self-hosted upload form at `GET /research/pdf` or `curl -F file=@spec.pdf`).
@@ -206,14 +207,14 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 
 | Pipeline | Lines | Purpose |
 |---|---:|---|
-| `scaffold_router.py` | ~1,380 | Main pipeline: triage, synthesis, `/go`/`/confirm` auto-chain, `/research`, `/research/reply`, `/schedule`, `/model` |
+| `scaffold_router.py` | ~1,355 | Main pipeline: triage, synthesis, `/go`/`/confirm` auto-chain, `/research`, `/research/reply`, `/schedule`, `/model`, `/results` |
 | `gt_browser.py` | 205 | GT browsing |
 | `execution_handler.py` | 201 | Direct execution control |
 | `prompt_inspector.py` | 178 | Prompt analysis |
 | `dag_viewer.py` | 111 | DAG visualization (Mermaid) |
 
 ### scaffold_router Valves (admin-configurable)
-- **Connection:** `api_key`, `orchestrator_url`, `dag_timeout=3600`, `keepalive_interval=10`, `triage_timeout=3600`, `ollama_url`
+- **Connection:** `api_key`, `orchestrator_url`, `request_timeout=30`, `stream_timeout=3600`, `triage_timeout=3600`, `keepalive_interval=10`, `ollama_url`, `dag_timeout` *(legacy alias, migrated to stream_timeout on init)*
 - **Triage:** `triage_model=qwen3:4b`
 - **Model overrides (8 roles):** `model_general`, `model_verifier`, `model_coder`, `model_embedder`, `model_reranker`, `model_router`, `model_fallback`, `model_cloud_alt`
 
@@ -435,9 +436,9 @@ CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval co
 
 ## Test Suite
 
-**382 tests** across 33 files, ~9,300 lines.
+**391 tests** across 33 files, ~9,500 lines.
 - **384 in-container (+22 skipped):** core orchestrator modules
-- **49 pipeline (local):** `test_scaffold_router.py`, `test_schedule_command.py`
+- **58 pipeline (local):** `test_scaffold_router.py`, `test_schedule_command.py`
 - **18 valve (local):** `test_model_valves.py`
 - **3 gt_browser (local):** `test_gt_browser.py`
 
