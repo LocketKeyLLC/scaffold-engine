@@ -19,7 +19,8 @@ from app.config import settings
 
 logger = logging.getLogger("scaffold.embedding_cache")
 
-MEMORY_MAX_SIZE = 10_000
+# Consecutive Redis failures before escalating log level debug -> warning
+_REDIS_FAILURE_THRESHOLD = 3
 
 
 class EmbeddingCache:
@@ -38,6 +39,8 @@ class EmbeddingCache:
         self._redis: aioredis.Redis | None = None
         self._hits = 0
         self._misses = 0
+        self._evictions = 0
+        self._redis_failures = 0
 
     async def _get_redis(self) -> aioredis.Redis:
         if self._redis is None:
@@ -65,6 +68,7 @@ class EmbeddingCache:
         try:
             r = await self._get_redis()
             cached = await r.get(key)
+            self._redis_failures = 0
             if cached:
                 emb = json.loads(cached)
                 self._memory[key] = emb
@@ -72,7 +76,9 @@ class EmbeddingCache:
                 self._hits += 1
                 return emb
         except Exception as e:
-            logger.debug("Redis cache get failed: %s", e)
+            self._redis_failures += 1
+            _log = logger.warning if self._redis_failures >= _REDIS_FAILURE_THRESHOLD else logger.debug
+            _log("Redis cache get failed (consecutive=%d): %s", self._redis_failures, e)
 
         self._misses += 1
         return None
@@ -89,12 +95,16 @@ class EmbeddingCache:
         try:
             r = await self._get_redis()
             await r.set(key, json.dumps(embedding))
+            self._redis_failures = 0
         except Exception as e:
-            logger.debug("Redis cache put failed: %s", e)
+            self._redis_failures += 1
+            _log = logger.warning if self._redis_failures >= _REDIS_FAILURE_THRESHOLD else logger.debug
+            _log("Redis cache put failed (consecutive=%d): %s", self._redis_failures, e)
 
     def _evict_memory(self) -> None:
-        while len(self._memory) > MEMORY_MAX_SIZE:
+        while len(self._memory) > settings.embedding_cache_memory_size:
             self._memory.popitem(last=False)
+            self._evictions += 1
 
     @property
     def hit_rate(self) -> float:
@@ -108,11 +118,12 @@ class EmbeddingCache:
             "misses": self._misses,
             "hit_rate": round(self.hit_rate, 3),
             "memory_size": len(self._memory),
+            "evictions": self._evictions,
         }
 
     async def close(self) -> None:
         if self._redis:
-            await self._redis.close()
+            await self._redis.aclose()
             self._redis = None
 
 

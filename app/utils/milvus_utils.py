@@ -63,7 +63,7 @@ def _auto_create_collection() -> None:
         collection_name=COLLECTION_NAME,
         schema=schema,
         index_params=index_params,
-        num_partitions=64,
+        num_partitions=settings.milvus_num_partitions,
         properties={"partitionkey.isolation": "true"},
     )
     logger.info("Auto-created collection '%s' with HNSW_SQ8 + partition key isolation",
@@ -79,6 +79,12 @@ def get_collection(*, raise_on_missing: bool = False) -> Collection | None:
 
     Returns:
         Loaded Collection, or None if unavailable and raise_on_missing is False.
+
+    ⚠️  Pitfall: with ``raise_on_missing=False`` (the default), callers MUST
+    check for ``None`` before use. Forgetting this leads to
+    ``AttributeError: 'NoneType' object has no attribute 'search'`` at call
+    sites that assume a Collection. Pass ``raise_on_missing=True`` in code
+    paths where a missing collection is unrecoverable.
     """
     try:
         # Ensure connection

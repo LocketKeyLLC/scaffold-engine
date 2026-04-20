@@ -12,22 +12,11 @@ import time
 from pymilvus import Collection
 from app.utils.milvus_utils import get_collection
 
-from app.config import settings
+from app.config import settings, TTL_POLICY, DEFAULT_TTL_SECONDS
 
 logger = logging.getLogger("scaffold.staleness")
 
 COLLECTION_NAME = "toon_v2"
-
-# TTL defaults by source_type (seconds)
-TTL_POLICY = {
-    "real_time": 7 * 86400,        # 7 days
-    "news": 30 * 86400,            # 30 days
-    "community": 90 * 86400,       # 90 days
-    "tech_docs": 180 * 86400,      # 6 months
-    "curated": 365 * 86400,        # 1 year
-    "official_docs": 365 * 86400,  # 1 year
-    "ai_generated": 180 * 86400,   # 6 months
-}
 
 _get_collection = get_collection
 
@@ -56,22 +45,42 @@ async def sweep_expired() -> dict:
 
         titles = [e.get("title", "unknown") for e in expired]
         logger.info("staleness_sweep: deleted %d expired entries", len(ids))
+        _TITLES_CAP = 50
         return {
             "status": "ok",
             "expired_count": len(ids),
-            "deleted": titles,
+            "deleted": titles[:_TITLES_CAP],
+            "deleted_truncated": len(titles) > _TITLES_CAP,
         }
 
     return await loop.run_in_executor(None, _sync)
 
 
 def get_ttl_for_source(source_type: str) -> int:
-    """Return TTL in seconds for a given source type."""
-    return TTL_POLICY.get(source_type, 180 * 86400)
+    """Return TTL in seconds for a given source type.
+
+    Logs a warning for unknown source_types and falls back to
+    ``DEFAULT_TTL_SECONDS`` (180 days).
+    """
+    if source_type not in TTL_POLICY:
+        logger.warning(
+            "staleness_unknown_source_type: source_type=%r falling_back_to=%ds",
+            source_type, DEFAULT_TTL_SECONDS,
+        )
+        return DEFAULT_TTL_SECONDS
+    return TTL_POLICY[source_type]
 
 
-def compute_expires_at(source_type: str, created_at: int = 0) -> int:
-    """Compute expires_at timestamp. Returns 0 for no-expiry."""
+def compute_expires_at(source_type: str, created_at: int | None = None) -> int:
+    """Compute expires_at timestamp.
+
+    Args:
+        source_type: TOON source category; drives TTL selection.
+        created_at: Entry creation epoch (seconds). ``None`` (default) uses now.
+
+    Returns:
+        Absolute expiry epoch (seconds).
+    """
     ttl = get_ttl_for_source(source_type)
-    base = created_at or int(time.time())
+    base = created_at if created_at is not None else int(time.time())
     return base + ttl

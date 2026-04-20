@@ -4,9 +4,11 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Max query-document pairs to score per rerank call (CrossEncoder input cap)
+_MAX_PAIRS = 20
 
 # ---------------------------------------------------------------------------
 # Lazy-loaded CrossEncoder singleton
@@ -93,9 +95,14 @@ def rerank_cross_encoder(
     query: str,
     documents: list[str],
     top_k: int = 5,
-    max_pairs: int = 20,
+    max_pairs: int = _MAX_PAIRS,
 ) -> RerankResult | None:
-    """Score query-document pairs via CrossEncoder. Returns None on failure."""
+    """Score query-document pairs via CrossEncoder. Returns None on failure.
+
+    Score range is model-dependent. Qwen3-Reranker emits ~0..1 (post-sigmoid);
+    other CrossEncoders may output raw logits. Do not compare scores across
+    different reranker models.
+    """
     model = _get_cross_encoder()
     if model is None:
         return None
@@ -135,7 +142,12 @@ def rerank_rrf(
     top_k: int = 5,
     k: int = 60,
 ) -> RerankResult:
-    """Reciprocal Rank Fusion — preserves input order as rank."""
+    """Reciprocal Rank Fusion — preserves input order as rank.
+
+    Note: Omits ``query`` parameter intentionally. RRF is order-based and
+    does not use query-document similarity, so passing a query would be
+    misleading.
+    """
     items = [
         RerankedItem(
             index=i,

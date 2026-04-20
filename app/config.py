@@ -13,6 +13,21 @@ VALID_TOOLS = frozenset({"LLM", "CodeGen", "SearXNG", "Milvus"})
 VALID_DOMAINS = frozenset({"prompt", "rag", "eng", "llm", "spec"})
 
 
+
+# ---------------------------------------------------------------------------
+# TTL policy by source_type (seconds) — code-level invariant, not env-overridable
+# ---------------------------------------------------------------------------
+TTL_POLICY = {
+    "real_time": 7 * 86400,        # 7 days
+    "news": 30 * 86400,            # 30 days
+    "community": 90 * 86400,       # 90 days
+    "tech_docs": 180 * 86400,      # 6 months
+    "curated": 365 * 86400,        # 1 year
+    "official_docs": 365 * 86400,  # 1 year
+    "ai_generated": 180 * 86400,   # 6 months
+}
+DEFAULT_TTL_SECONDS = 180 * 86400  # fallback for unknown source_types
+
 class Settings(BaseSettings):
     """All config sourced from env vars set in docker-compose.yml."""
 
@@ -37,6 +52,8 @@ class Settings(BaseSettings):
     # External services
     ollama_base_url: str = "http://172.18.0.1:11434"
     milvus_uri: str = "http://milvus-standalone:19530"
+    milvus_num_partitions: int = 64
+    embedding_cache_memory_size: int = 10_000
     searxng_url: str = "http://searxng:8080"
     redis_url: str = "redis://scaffold-redis:6379/0"
 

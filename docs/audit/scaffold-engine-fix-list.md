@@ -78,16 +78,16 @@ Total items: **155**
 ### Phase 4b — rerankers + utils
 - [ ] **#36** Add thread/async lock around reranker singleton init (rerankers.py)
 - [ ] **#37** Add auto-retry with backoff to reranker load failure path
-- [ ] **#38** Extract reranker `max_pairs=20` to module constant
+- [x] **#38** Extract reranker `max_pairs=20` to module constant
 - [ ] **#39** Make reranker prompt template config-driven (decouple from Qwen3)
 - [ ] **#40** Cache Milvus connection liveness — don't `utility.list_collections()` RPC on every `get_collection` call
 - [ ] **#41** Cache Milvus `load()` status — don't RPC on every call
 - [ ] **#42** Consolidate toon_v2 schema (remove duplication between `milvus_utils.py` and `scripts/create_toon_v2.py`)
-- [ ] **#43** Move `num_partitions=64` to config
+- [x] **#43** Move `num_partitions=64` to config
 - [ ] **#44** Add async lock to `EmbeddingCache._get_redis()` lazy init
 - [ ] **#45** Consider binary encoding for cached embeddings (replace JSON; 2× smaller/faster)
 - [ ] **#46** Add explicit Redis TTL on cache entries
-- [ ] **#47** Use `aclose()` instead of `close()` on redis client (deprecation-proof)
+- [x] **#47** Use `aclose()` instead of `close()` on redis client (deprecation-proof)
 - [ ] **#48** Fix `staleness.sweep_expired()` `entry_id in {list}` quoting (build expression explicitly with double quotes)
 - [ ] **#49** Paginate staleness sweep instead of hard 1000 cap
 
@@ -183,18 +183,18 @@ Total items: **155**
 - [ ] **#122** Update overview line counts (rag_pipeline 583→596)
 
 ### Phase 4b — rerankers + utils
-- [ ] **#123** Remove unused `Optional` import from rerankers.py
-- [ ] **#124** Document why `rerank_rrf` omits `query` param (order-based, intentional)
-- [ ] **#125** Document reranker score range (model-dependent)
-- [ ] **#126** Document `raise_on_missing=False` pitfall in `get_collection` (callers forget to check)
-- [ ] **#127** Raise Redis cache error log level above debug on repeated failures
-- [ ] **#128** Add eviction counter to `EmbeddingCache.stats`
-- [ ] **#129** Move `MEMORY_MAX_SIZE=10_000` to config
+- [x] **#123** Remove unused `Optional` import from rerankers.py
+- [x] **#124** Document why `rerank_rrf` omits `query` param (order-based, intentional)
+- [x] **#125** Document reranker score range (model-dependent)
+- [x] **#126** Document `raise_on_missing=False` pitfall in `get_collection` (callers forget to check)
+- [x] **#127** Raise Redis cache error log level above debug on repeated failures
+- [x] **#128** Add eviction counter to `EmbeddingCache.stats`
+- [x] **#129** Move `MEMORY_MAX_SIZE=10_000` to config
 - [ ] **#130** Share text-normalization helper between `embedding_cache` and `rag_pipeline`
-- [ ] **#131** Move `TTL_POLICY` to config
-- [ ] **#132** Replace `created_at=0` sentinel with `None` in `compute_expires_at`
-- [ ] **#133** Log warning on unknown `source_type` in staleness (currently silent 180d default)
-- [ ] **#134** Cap `deleted: titles` length in `sweep_expired` return
+- [x] **#131** Move `TTL_POLICY` to config
+- [x] **#132** Replace `created_at=0` sentinel with `None` in `compute_expires_at`
+- [x] **#133** Log warning on unknown `source_type` in staleness (currently silent 180d default)
+- [x] **#134** Cap `deleted: titles` length in `sweep_expired` return
 
 ### Phase 5a — research_agent.py
 - [x] **#135** Extract heartbeat `sleep(8)` to module constant — ✅ `5fc820e`
