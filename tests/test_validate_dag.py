@@ -69,6 +69,7 @@ def _node(nid: str, depends_on: list[str] | None = None, tool: str = "LLM") -> d
 # validate_dag tests
 # ═══════════════════════════════════════════════════════════════════════════
 
+@pytest.mark.smoke
 class TestValidateDAG:
 
     # 1. Valid DAG — no warnings, no errors
@@ -162,6 +163,7 @@ class TestValidateDAG:
 # _enforce_node_count tests
 # ═══════════════════════════════════════════════════════════════════════════
 
+@pytest.mark.smoke
 class TestEnforceNodeCount:
 
     # 11. >5 nodes truncated to 5 by key sort
