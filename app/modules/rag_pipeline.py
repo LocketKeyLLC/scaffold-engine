@@ -48,9 +48,7 @@ class RagResult:
     """Single retrieval result."""
     content: str = ""
     title: str = ""
-    topic: str = ""
     tags: str = ""
-    source_file: str = ""
     source_url: str = ""
     entry_id: str = ""
     domain: str = ""
@@ -64,11 +62,13 @@ class RagResult:
 
 
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 # Milvus collection (delegates to shared utility)
 # ---------------------------------------------------------------------------
 _get_collection = get_collection
-# Embedding helper
+
+
+# ---------------------------------------------------------------------------
+# Embedding helpers
 # ---------------------------------------------------------------------------
 
 async def _embed_query(query: str) -> list[float] | None:
@@ -120,11 +120,10 @@ async def _vector_search(
             search_domain = domain or "eng"
             search_kwargs["expr"] = f'domain == "{search_domain}"'
 
-            col = _get_collection() if collection is None else collection
-            if col is None:
+            if collection is None:
                 return []
 
-            results = col.search(**search_kwargs)
+            results = collection.search(**search_kwargs)
 
             hits = []
             for hit in results[0]:
@@ -181,11 +180,10 @@ async def _keyword_search(
 
     def _sync() -> list[RagResult]:
         try:
-            col = _get_collection() if collection is None else collection
-            if col is None:
+            if collection is None:
                 return []
 
-            results = col.query(
+            results = collection.query(
                 expr=expr,
                 output_fields=["canonical_text", "title", "domain_tags", "source_url", "entry_id", "domain", "version", "supersedes_id"],
                 limit=top_k,
@@ -378,7 +376,6 @@ async def query_rag(
         result_dicts.append({
             "content": r.content,
             "title": r.title,
-            "topic": r.topic,
             "tags": r.tags,
             "source_url": r.source_url,
             "entry_id": r.entry_id,
