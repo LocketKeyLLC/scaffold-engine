@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     milvus_uri: str = "http://milvus-standalone:19530"
     milvus_num_partitions: int = 64
     embedding_cache_memory_size: int = 10_000
+    # Reranker prompt template (default: Qwen3-Reranker format)
+    reranker_prompt_system: str = (
+        "<|im_start|>system\n"
+        "Judge whether the Document meets the requirements based on the Query "
+        "and the Instruct provided. Note that the answer can only be \"yes\" "
+        "or \"no\".<|im_end|>\n<|im_start|>user\n"
+    )
+    reranker_prompt_suffix: str = (
+        "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    )
+    reranker_default_instruction: str = (
+        "Given a web search query, retrieve relevant passages that answer the query"
+    )
     searxng_url: str = "http://searxng:8080"
     redis_url: str = "redis://scaffold-redis:6379/0"
 

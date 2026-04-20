@@ -13,13 +13,12 @@ COLLECTION_NAME = "toon_v2"
 DIM = 512
 
 
-def _auto_create_collection() -> None:
-    """Create toon_v2 with the canonical TOON schema.
+def build_toon_v2_schema():
+    """Build the canonical toon_v2 TOON schema (16 fields, 512d vector).
 
-    Replicates scripts/create_toon_v2.py exactly.
+    Single source of truth for the schema — used by both auto-create here
+    and scripts/create_toon_v2.py.
     """
-    client = MilvusClient(settings.milvus_uri)
-
     schema = MilvusClient.create_schema(auto_id=False, enable_dynamic_field=False)
     schema.add_field("entry_id", DataType.VARCHAR, max_length=128, is_primary=True)
     schema.add_field("title", DataType.VARCHAR, max_length=512)
@@ -38,7 +37,11 @@ def _auto_create_collection() -> None:
     schema.add_field("updated_at", DataType.INT64)
     schema.add_field("expires_at", DataType.INT64)
     schema.add_field("dense_vector", DataType.FLOAT_VECTOR, dim=DIM)
+    return schema
 
+
+def build_toon_v2_index_params(client: MilvusClient):
+    """Build the canonical toon_v2 index params (HNSW_SQ8 + scalar indexes)."""
     index_params = client.prepare_index_params()
     index_params.add_index(
         field_name="dense_vector",
@@ -58,17 +61,21 @@ def _auto_create_collection() -> None:
     index_params.add_index(field_name="confidence_score", index_type="INVERTED")
     index_params.add_index(field_name="created_at", index_type="STL_SORT")
     index_params.add_index(field_name="version", index_type="BITMAP")
+    return index_params
 
+
+def _auto_create_collection() -> None:
+    """Create toon_v2 with the canonical TOON schema."""
+    client = MilvusClient(settings.milvus_uri)
     client.create_collection(
         collection_name=COLLECTION_NAME,
-        schema=schema,
-        index_params=index_params,
+        schema=build_toon_v2_schema(),
+        index_params=build_toon_v2_index_params(client),
         num_partitions=settings.milvus_num_partitions,
         properties={"partitionkey.isolation": "true"},
     )
     logger.info("Auto-created collection '%s' with HNSW_SQ8 + partition key isolation",
                 COLLECTION_NAME)
-
 
 def get_collection(*, raise_on_missing: bool = False) -> Collection | None:
     """Get the toon_v2 Milvus collection, auto-creating if missing.

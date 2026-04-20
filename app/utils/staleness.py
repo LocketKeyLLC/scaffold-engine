@@ -31,26 +31,53 @@ async def sweep_expired() -> dict:
     now = int(time.time())
 
     def _sync() -> dict:
-        expired = col.query(
-            expr=f"expires_at > 0 and expires_at < {now}",
-            output_fields=["entry_id", "title", "source_type", "expires_at"],
-            limit=1000,
-        )
-        if not expired:
-            return {"status": "ok", "expired_count": 0, "deleted": []}
-
-        ids = [e["entry_id"] for e in expired]
-        col.delete(expr=f'entry_id in {ids}')
-        col.flush()
-
-        titles = [e.get("title", "unknown") for e in expired]
-        logger.info("staleness_sweep: deleted %d expired entries", len(ids))
+        # #49 — paginate; #48 — explicit double-quoted IDs in `entry_id in [...]`
+        _PAGE_SIZE = 1000
+        _MAX_PAGES = 100  # safety cap: 100k entries per sweep
         _TITLES_CAP = 50
+
+        total_ids: list[str] = []
+        total_titles: list[str] = []
+        hit_cap = True
+
+        for _ in range(_MAX_PAGES):
+            expired = col.query(
+                expr=f"expires_at > 0 and expires_at < {now}",
+                output_fields=["entry_id", "title", "source_type", "expires_at"],
+                limit=_PAGE_SIZE,
+            )
+            if not expired:
+                hit_cap = False
+                break
+
+            ids = [e["entry_id"] for e in expired]
+            # Build IN expression with explicit double-quoted, escaped IDs
+            quoted = ",".join(
+                '"' + eid.replace('\\', '\\\\').replace('"', '\\"') + '"'
+                for eid in ids
+            )
+            col.delete(expr=f"entry_id in [{quoted}]")
+            col.flush()
+
+            total_ids.extend(ids)
+            total_titles.extend(e.get("title", "unknown") for e in expired)
+
+            if len(expired) < _PAGE_SIZE:
+                hit_cap = False
+                break
+
+        if hit_cap:
+            logger.warning(
+                "staleness_sweep: hit MAX_PAGES=%d cap, more expired entries may remain",
+                _MAX_PAGES,
+            )
+
+        logger.info("staleness_sweep: deleted %d expired entries", len(total_ids))
         return {
             "status": "ok",
-            "expired_count": len(ids),
-            "deleted": titles[:_TITLES_CAP],
-            "deleted_truncated": len(titles) > _TITLES_CAP,
+            "expired_count": len(total_ids),
+            "deleted": total_titles[:_TITLES_CAP],
+            "deleted_truncated": len(total_titles) > _TITLES_CAP,
         }
 
     return await loop.run_in_executor(None, _sync)

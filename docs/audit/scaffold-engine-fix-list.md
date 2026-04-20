@@ -79,17 +79,17 @@ Total items: **155**
 - [ ] **#36** Add thread/async lock around reranker singleton init (rerankers.py)
 - [ ] **#37** Add auto-retry with backoff to reranker load failure path
 - [x] **#38** Extract reranker `max_pairs=20` to module constant
-- [ ] **#39** Make reranker prompt template config-driven (decouple from Qwen3)
+- [x] **#39** Make reranker prompt template config-driven (decouple from Qwen3)
 - [ ] **#40** Cache Milvus connection liveness — don't `utility.list_collections()` RPC on every `get_collection` call
 - [ ] **#41** Cache Milvus `load()` status — don't RPC on every call
-- [ ] **#42** Consolidate toon_v2 schema (remove duplication between `milvus_utils.py` and `scripts/create_toon_v2.py`)
+- [x] **#42** Consolidate toon_v2 schema (remove duplication between `milvus_utils.py` and `scripts/create_toon_v2.py`)
 - [x] **#43** Move `num_partitions=64` to config
 - [ ] **#44** Add async lock to `EmbeddingCache._get_redis()` lazy init
 - [ ] **#45** Consider binary encoding for cached embeddings (replace JSON; 2× smaller/faster)
 - [ ] **#46** Add explicit Redis TTL on cache entries
 - [x] **#47** Use `aclose()` instead of `close()` on redis client (deprecation-proof)
-- [ ] **#48** Fix `staleness.sweep_expired()` `entry_id in {list}` quoting (build expression explicitly with double quotes)
-- [ ] **#49** Paginate staleness sweep instead of hard 1000 cap
+- [x] **#48** Fix `staleness.sweep_expired()` `entry_id in {list}` quoting (build expression explicitly with double quotes)
+- [x] **#49** Paginate staleness sweep instead of hard 1000 cap
 
 ### Phase 5a — research_agent.py
 - [x] **#50** Extract `_execute_iteration_loop` helper (deduplicates run_research/resume_research, ~90% duplication) — ✅ `5fc820e`

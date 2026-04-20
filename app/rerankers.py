@@ -50,25 +50,17 @@ def _get_cross_encoder():
 
 
 # ---------------------------------------------------------------------------
-# Qwen3-Reranker prompt template (required for score calibration)
+# Reranker prompt template (config-driven; defaults match Qwen3-Reranker)
 # ---------------------------------------------------------------------------
-_RERANKER_SYSTEM = (
-    "<|im_start|>system\n"
-    "Judge whether the Document meets the requirements based on the Query "
-    "and the Instruct provided. Note that the answer can only be \"yes\" "
-    "or \"no\".<|im_end|>\n<|im_start|>user\n"
-)
-_RERANKER_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-_DEFAULT_INSTRUCTION = "Given a web search query, retrieve relevant passages that answer the query"
-
-
 def _format_query(query: str, instruction: str | None = None) -> str:
-    inst = instruction or _DEFAULT_INSTRUCTION
-    return f"{_RERANKER_SYSTEM}<Instruct>: {inst}\n<Query>: {query}\n"
+    from app.config import settings
+    inst = instruction or settings.reranker_default_instruction
+    return f"{settings.reranker_prompt_system}<Instruct>: {inst}\n<Query>: {query}\n"
 
 
 def _format_document(document: str) -> str:
-    return f"<Document>: {document}{_RERANKER_SUFFIX}"
+    from app.config import settings
+    return f"<Document>: {document}{settings.reranker_prompt_suffix}"
 
 # ---------------------------------------------------------------------------
 # Data objects
