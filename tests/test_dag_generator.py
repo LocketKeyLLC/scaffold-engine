@@ -81,6 +81,7 @@ VALID_DOMAINS = {"prompt", "rag", "eng", "llm", "spec"}
 # validate_dag tests
 # ===========================================================================
 
+@pytest.mark.smoke
 class TestValidateDag:
     """Tests for validate_dag() — graph structure validation."""
 
@@ -174,6 +175,7 @@ class TestValidateDag:
 # _enforce_node_count tests
 # ===========================================================================
 
+@pytest.mark.smoke
 class TestEnforceNodeCount:
     """Tests for _enforce_node_count() — 3-5 node constraint."""
 
@@ -223,6 +225,7 @@ class TestEnforceNodeCount:
 # Domain validation tests
 # ===========================================================================
 
+@pytest.mark.smoke
 class TestDomainValidation:
     """Tests for domain field validation in DAG nodes."""
 

@@ -337,6 +337,7 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str]]:
             continue
         if not name:
             errors.append(f"Task {i}: missing 'name'")
+            continue  # #99
         if task_type not in VALID_TASK_TYPES:
             logger.warning("Task %s: unknown type '%s', coercing to 'action'", task_id, task_type)
             task_type = "action"
@@ -488,7 +489,7 @@ def _validate_graph(tasks: list[dict], edges: list[dict]) -> tuple[list[str], li
     sources = {e["from"] for e in edges}
     targets = {e["to"] for e in edges}
     roots = id_set - targets
-    leaves = id_set - sources
+    # #27: removed dead `leaves = id_set - sources`
 
     if not roots and len(ids) > 1:
         errors.append("No root node found (every task has a dependency)")
