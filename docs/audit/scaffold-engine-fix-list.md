@@ -59,12 +59,12 @@ Total items: **155**
 - [x] **#22** Cache `_compile_output` result for blocked jobs (currently recomputed per call) — ✅ `d653af1`
 
 ### Phase 3b — dag_generator.py
-- [ ] **#23** Fix `_enforce_node_count` to actually enforce `min_count` or remove the parameter
-- [ ] **#24** Reconcile DAG prompt "3-10 steps" with code enforcement "≤10 only"
-- [ ] **#25** Warn/reject when Milvus node is missing required `domain`
-- [ ] **#26** Surface `_normalize_tasks` coercion warnings to caller's `warnings` list
-- [ ] **#27** Remove dead `leaves` variable in `_validate_graph`
-- [ ] **#28** Expand `_safe_label` Mermaid escaping to cover `( ) { } | " #`
+- [x] **#23** Fix `_enforce_node_count` to actually enforce `min_count` or remove the parameter — ✅ `9b49e0d`
+- [x] **#24** Reconcile DAG prompt "3-10 steps" with code enforcement "≤10 only" — 🔄 reframed: audit-wrong (prompt matches code) (see drift-findings.md)
+- [x] **#25** Warn/reject when Milvus node is missing required `domain` — ✅ `9b49e0d`
+- [x] **#26** Surface `_normalize_tasks` coercion warnings to caller's `warnings` list — ✅ `9b49e0d`
+- [x] **#27** Remove dead `leaves` variable in `_validate_graph` — ✅ `e5dd575`
+- [x] **#28** Expand `_safe_label` Mermaid escaping to cover `( ) { } | " #` — ✅ `9b49e0d`
 
 ### Phase 4a — rag_pipeline.py
 - [x] **#29** Fix `confidence_threshold` mismatch when `skip_rerank=True` (RRF scores top at ~0.03, threshold 0.8 always triggers `too_strict`) — ✅ `b1c862c`
@@ -155,16 +155,16 @@ Total items: **155**
 - [x] **#98** `execute_next_node` doesn't call `_require_valid_models` — only `/execute/all` endpoint does — consider moving validation into the function — ✅ `f5cb9ad`
 
 ### Phase 3b — dag_generator.py
-- [ ] **#99** Use `continue` after missing-name/non-dict errors for consistency
-- [ ] **#100** Share adjacency structure between `validate_dag` and `_build_edges` (duplicate graph traversal)
-- [ ] **#101** Move `VALID_DOMAINS` / `VALID_TOOLS` to `config.py`
-- [ ] **#102** Remove arbitrary ≤2 task skip in `_render_mermaid`
+- [x] **#99** Use `continue` after missing-name/non-dict errors for consistency — ✅ `e5dd575`
+- [x] **#100** Share adjacency structure between `validate_dag` and `_build_edges` (duplicate graph traversal) — 🔄 reframed: audit-wrong (different output shapes) (see drift-findings.md)
+- [x] **#101** Move `VALID_DOMAINS` / `VALID_TOOLS` to `config.py` — ✅ `f777d05`
+- [x] **#102** Remove arbitrary ≤2 task skip in `_render_mermaid` — ✅ `6afc039`
 - [ ] **#103** Update overview line counts (dag_generator 615→575)
-- [ ] **#104** Enforce task-name length limit (≤5 words or ≤80 chars; prompt says "max 5 words" but no enforcement)
+- [x] **#104** Enforce task-name length limit (≤5 words or ≤80 chars; prompt says "max 5 words" but no enforcement) — ✅ `f777d05`
 - [ ] **#105** Consider bulk INSERT for DAG nodes (deferred, perf only)
-- [ ] **#106** Remove unnecessary `from __future__ import annotations` (Python 3.12)
-- [ ] **#107** `isinstance(raw, dict): continue` silently skips non-dict tasks — add to errors list
-- [ ] **#108** Deduplicate `str(raw_domain).strip().lower()` calls in `_normalize_tasks`
+- [x] **#106** Remove unnecessary `from __future__ import annotations` (Python 3.12) — ✅ `f777d05`
+- [x] **#107** `isinstance(raw, dict): continue` silently skips non-dict tasks — add to errors list — 🔄 reframed: stale (already implemented) (see drift-findings.md)
+- [x] **#108** Deduplicate `str(raw_domain).strip().lower()` calls in `_normalize_tasks` — ✅ `6afc039`
 
 ### Phase 4a — rag_pipeline.py
 - [x] **#109** Hardcoded stopwords list → move to module constant or config — ✅ `ee46bf3`
