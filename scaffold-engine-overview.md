@@ -209,7 +209,7 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 |---|---:|---|
 | `scaffold_router.py` | ~1,355 | Main pipeline: triage, synthesis, `/go`/`/confirm` auto-chain, `/research`, `/research/reply`, `/schedule`, `/model`, `/results` |
 | `gt_browser.py` | 205 | GT browsing |
-| `execution_handler.py` | 201 | Direct execution control |
+| `execution_handler.py` | 326 | Direct execution control |
 | `prompt_inspector.py` | 178 | Prompt analysis |
 | `dag_viewer.py` | 111 | DAG visualization (Mermaid) |
 

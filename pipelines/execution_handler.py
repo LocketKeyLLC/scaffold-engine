@@ -1,19 +1,63 @@
 """
 title: Execution Handler
 author: scaffold-engine
-version: 0.1.0
+version: 0.2.0
 description: Interactive DAG execution control — status, approve, skip, retry.
 """
 
+import json
 import requests
 from typing import Optional
 from pydantic import BaseModel
+
+
+# TODO: share with other pipelines (see fix #8.17)
+STATUS_ICONS = {
+    "done": "✅", "failed": "❌", "running": "🔄", "pending": "⬜",
+    "skipped": "⏭️", "executing": "🔄", "planning": "📋",
+    "blocked": "🚫", "completed": "✅", "cancelled": "🚫",
+}
+
+
+def _safe_json(resp):
+    """Parse resp.json() safely. Returns (data, error_message). Exactly one is None."""
+    try:
+        return resp.json(), None
+    except (json.JSONDecodeError, requests.exceptions.JSONDecodeError, ValueError):
+        body_preview = (resp.text or "")[:200] if hasattr(resp, "text") else ""
+        msg = f"❌ Orchestrator returned non-JSON response (HTTP {resp.status_code})"
+        if body_preview:
+            msg += f"\n\n```\n{body_preview}\n```"
+        return None, msg
+
+
+def _format_output(output: str, max_chars: int = 600) -> str:
+    """Render node output, truncating long strings and fencing code-like content."""
+    if not output:
+        return ""
+    total = len(output)
+    if total > max_chars:
+        truncated = output[:max_chars]
+        suffix = f"\n... [{total - max_chars} chars truncated]"
+    else:
+        truncated = output
+        suffix = ""
+
+    # Heuristic: code if multiline and no markdown header lines
+    is_code = "\n" in truncated and not any(
+        line.lstrip().startswith("#") for line in truncated.split("\n")
+    )
+    if is_code:
+        return f"```\n{truncated}{suffix}\n```"
+    return f"{truncated}{suffix}"
 
 
 class Pipeline:
     class Valves(BaseModel):
         api_key: str = ""
         orchestrator_url: str = "http://scaffold-orchestrator:8000"
+        # 310s = orchestrator per-node execute timeout (300s) + 10s slack for
+        # network and JSON serialization. See execution_agent.execute_next_node.
         request_timeout: int = 310
 
     def __init__(self):
@@ -48,58 +92,77 @@ class Pipeline:
             resp = requests.get(
                 f"{self.valves.orchestrator_url}/exec/status/{job_id}",
                 headers={"X-API-Key": self.valves.api_key},
-                timeout=30
+                timeout=30,
             )
-            if resp.status_code != 200:
-                return f"❌ Error: {resp.json().get('detail', resp.text)}"
-
-            d = resp.json()
-            status_icons = {"done": "✅", "failed": "❌", "running": "🔄", "pending": "⬜", "skipped": "⏭️", "executing": "🔄", "planning": "📋", "blocked": "🚫", "completed": "✅", "cancelled": "🚫"}
-            j_icon = status_icons.get(d["job_status"], d["job_status"])
-
-            lines = [
-                f"## ⚡ Job `{job_id[:8]}...` — {d['job_title']}",
-                f"**Status:** {j_icon} {d['job_status']}\n",
-            ]
-
-            # Counts summary
-            count_parts = []
-            for s in ["done", "pending", "running", "failed", "skipped"]:
-                if d["counts"].get(s, 0) > 0:
-                    count_parts.append(f"{status_icons.get(s, s)} {d['counts'][s]} {s}")
-            lines.append(" · ".join(count_parts) + "\n")
-
-            # Node table
-            lines.append("| # | Node | Status | Deps Met | Action |")
-            lines.append("|---|---|---|---|---|")
-            for n in d["nodes"]:
-                s_icon = status_icons.get(n["status"], n["status"])
-                deps = "✅" if n["deps_met"] else "⏳"
-                action = ""
-                if n["actionable"]:
-                    if n["status"] == "pending":
-                        action = "→ `approve`"
-                    elif n["status"] == "failed":
-                        action = "→ `retry`"
-                lines.append(f"| {n['execution_order']} | `{n['node_key']}` | {s_icon} {n['status']} | {deps} | {action} |")
-
-            # Next node callout
-            if d["next_node"]:
-                n = d["next_node"]
-                lines.append(f"\n🎯 **Next:** `{n['node_key']}` — {n['title']}")
-                if n["status"] == "pending":
-                    lines.append(f"Run `/exec approve {job_id}` to execute it.")
-                elif n["status"] == "failed":
-                    lines.append(f"Run `/exec retry {job_id} {n['node_key']}` then `/exec approve {job_id}`.")
-            else:
-                if d["counts"].get("pending", 0) == 0 and d["counts"].get("failed", 0) == 0:
-                    lines.append("\n🎉 **All nodes complete!**")
-                else:
-                    lines.append("\n⏳ No actionable nodes — dependencies not yet met.")
-
-            return "\n".join(lines)
         except requests.exceptions.RequestException as e:
             return f"❌ Connection error: {e}"
+
+        d, err = _safe_json(resp)
+        if err:
+            return err
+        if resp.status_code != 200:
+            detail = d.get("detail", resp.text) if isinstance(d, dict) else resp.text
+            return f"❌ Error: {detail}"
+
+        # execution_status() returns HTTP 200 with {"error": "..."} on job-not-found
+        if isinstance(d, dict) and "error" in d and "job_status" not in d:
+            return f"❌ {d['error']}"
+
+        job_status = d.get("job_status", "unknown")
+        job_title = d.get("job_title", "?")
+        counts = d.get("counts", {}) or {}
+        nodes = d.get("nodes", []) or []
+        next_node = d.get("next_node")
+        j_icon = STATUS_ICONS.get(job_status, job_status)
+
+        lines = [
+            f"## ⚡ Job `{job_id[:8]}...` — {job_title}",
+            f"**Status:** {j_icon} {job_status}\n",
+        ]
+
+        count_parts = []
+        for s in ["done", "pending", "running", "failed", "skipped"]:
+            n = counts.get(s, 0)
+            if n > 0:
+                count_parts.append(f"{STATUS_ICONS.get(s, s)} {n} {s}")
+        if count_parts:
+            lines.append(" · ".join(count_parts) + "\n")
+
+        if nodes:
+            lines.append("| # | Node | Status | Deps Met | Action |")
+            lines.append("|---|---|---|---|---|")
+            for n in nodes:
+                n_status = n.get("status", "unknown")
+                s_icon = STATUS_ICONS.get(n_status, n_status)
+                deps = "✅" if n.get("deps_met") else "⏳"
+                action = ""
+                if n.get("actionable"):
+                    if n_status == "pending":
+                        action = "→ `approve`"
+                    elif n_status == "failed":
+                        action = "→ `retry`"
+                lines.append(
+                    f"| {n.get('execution_order', '?')} "
+                    f"| `{n.get('node_key', '?')}` "
+                    f"| {s_icon} {n_status} | {deps} | {action} |"
+                )
+
+        if next_node:
+            nn_key = next_node.get("node_key", "?")
+            nn_title = next_node.get("title", "")
+            nn_status = next_node.get("status", "")
+            lines.append(f"\n🎯 **Next:** `{nn_key}` — {nn_title}")
+            if nn_status == "pending":
+                lines.append(f"Run `/exec approve {job_id}` to execute it.")
+            elif nn_status == "failed":
+                lines.append(f"Run `/exec retry {job_id} {nn_key}` then `/exec approve {job_id}`.")
+        else:
+            if counts.get("pending", 0) == 0 and counts.get("failed", 0) == 0:
+                lines.append("\n🎉 **All nodes complete!**")
+            else:
+                lines.append("\n⏳ No actionable nodes — dependencies not yet met.")
+
+        return "\n".join(lines)
 
     def _approve(self, parts: list) -> str:
         if len(parts) < 3:
@@ -111,27 +174,63 @@ class Pipeline:
                 f"{self.valves.orchestrator_url}/execute",
                 json={"job_id": job_id},
                 headers={"X-API-Key": self.valves.api_key},
-                timeout=self.valves.request_timeout
+                timeout=self.valves.request_timeout,
             )
-            if resp.status_code != 200:
-                return f"❌ Error: {resp.json().get('detail', resp.text)}"
-
-            d = resp.json()
-
-            if d.get("awaiting_approval"):
-                lines = [
-                    f"✅ **Node `{d.get('node_key', '?')}` executed**\n",
-                    f"**Model:** `{d.get('model', 'default')}`",
-                ]
-                if d.get("output_preview"):
-                    lines.append(f"\n### Output Preview\n```\n{d['output_preview'][:300]}\n```")
-                lines.append(f"\nRun `/exec status {job_id}` to see what's next.")
-                return "\n".join(lines)
-            else:
-                return f"✅ Execution result:\n```\n{str(d)[:500]}\n```"
-
         except requests.exceptions.RequestException as e:
             return f"❌ Connection error: {e}"
+
+        d, err = _safe_json(resp)
+        if err:
+            return err
+        if resp.status_code != 200:
+            detail = d.get("detail", resp.text) if isinstance(d, dict) else resp.text
+            return f"❌ Error: {detail}"
+
+        node_key = d.get("node_key", "?")
+        title = d.get("title", "")
+        model_used = d.get("model_used", "unknown")
+        output = d.get("output", "") or ""
+        verified = d.get("verified")
+        verification_reason = d.get("verification_reason", "")
+        confidence = d.get("confidence")
+        error = d.get("error")
+        status = d.get("status", "")
+
+        # Node-level failure branch (tool error, LLM timeout, verifier hard-fail)
+        if error or status == "failed":
+            msg = [f"❌ **Node `{node_key}` failed**"]
+            if title:
+                msg.append(f"**Task:** {title}")
+            msg.append(f"**Model:** `{model_used}`")
+            if error:
+                msg.append(f"**Error:** {error}")
+            msg.append(
+                f"\nRun `/exec status {job_id}` or "
+                f"`/exec retry {job_id} {node_key}` to retry."
+            )
+            return "\n".join(msg)
+
+        lines = [f"✅ **Node `{node_key}` executed**"]
+        if title:
+            lines.append(f"**Task:** {title}")
+        lines.append(f"**Model:** `{model_used}`")
+
+        # Verification verdict (new — surfaces fields orchestrator already returns)
+        if verified is True:
+            conf_str = (
+                f" (confidence {confidence:.2f})"
+                if isinstance(confidence, (int, float)) else ""
+            )
+            lines.append(f"**Verification:** ✅ Verified{conf_str}")
+        elif verified is False:
+            reason_str = f" — {verification_reason}" if verification_reason else ""
+            lines.append(f"**Verification:** ⚠️ Failed{reason_str}")
+
+        if output:
+            lines.append(f"\n### Output\n{_format_output(output)}")
+
+        lines.append(f"\nRun `/exec status {job_id}` to see what's next.")
+        return "\n".join(lines)
 
     def _skip(self, parts: list) -> str:
         if len(parts) < 4:
@@ -143,14 +242,28 @@ class Pipeline:
                 f"{self.valves.orchestrator_url}/skip",
                 json={"job_id": job_id, "node_key": node_key},
                 headers={"X-API-Key": self.valves.api_key},
-                timeout=30
+                timeout=30,
             )
-            if resp.status_code != 200:
-                return f"❌ Error: {resp.json().get('detail', resp.text)}"
-
-            return f"⏭️ **Node `{node_key}` skipped.**\n\nRun `/exec status {job_id}` to see what's next."
         except requests.exceptions.RequestException as e:
             return f"❌ Connection error: {e}"
+
+        d, err = _safe_json(resp)
+        if err:
+            return err
+        if resp.status_code != 200:
+            detail = d.get("detail", resp.text) if isinstance(d, dict) else resp.text
+            return f"❌ Error: {detail}"
+
+        # skip_node returns {"status":"skipped",...} on success or
+        # {"status":"error","message":...} on not-found. Don't claim success blindly.
+        if d.get("status") == "skipped":
+            return (
+                f"⏭️ **Node `{node_key}` skipped.**\n\n"
+                f"Run `/exec status {job_id}` to see what's next."
+            )
+        else:
+            reason = d.get("message") or d.get("error") or "unknown error"
+            return f"❌ Could not skip `{node_key}`: {reason}"
 
     def _retry(self, parts: list) -> str:
         if len(parts) < 4:
@@ -162,23 +275,35 @@ class Pipeline:
                 f"{self.valves.orchestrator_url}/exec/retry",
                 json={"job_id": job_id, "node_key": node_key},
                 headers={"X-API-Key": self.valves.api_key},
-                timeout=30
+                timeout=30,
             )
-            if resp.status_code != 200:
-                return f"❌ Error: {resp.json().get('detail', resp.text)}"
-
-            d = resp.json()
-            if d.get("status") == "reset":
-                return (
-                    f"🔄 **Node `{node_key}` reset to pending.**\n\n"
-                    f"Run `/exec approve {job_id}` to re-execute it."
-                )
-            else:
-                return f"❌ {d.get('error', 'Unknown error')}"
         except requests.exceptions.RequestException as e:
             return f"❌ Connection error: {e}"
 
-    def pipe(self, user_message: str, model_id: str = "", messages: list = None, body: dict = None) -> Optional[str]:
+        d, err = _safe_json(resp)
+        if err:
+            return err
+        if resp.status_code != 200:
+            detail = d.get("detail", resp.text) if isinstance(d, dict) else resp.text
+            return f"❌ Error: {detail}"
+
+        if d.get("status") == "reset":
+            return (
+                f"🔄 **Node `{node_key}` reset to pending.**\n\n"
+                f"Run `/exec approve {job_id}` to re-execute it."
+            )
+        else:
+            # Orchestrator uses 'message' per skip_node convention; 'error' legacy fallback.
+            reason = d.get("message") or d.get("error") or "Unknown error"
+            return f"❌ {reason}"
+
+    def pipe(
+        self,
+        user_message: str,
+        model_id: str = "",
+        messages: list = None,
+        body: dict = None,
+    ) -> Optional[str]:
         msg = user_message.strip()
 
         if not msg.startswith("/exec"):
