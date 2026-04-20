@@ -366,8 +366,14 @@ async def generate_dag_endpoint(body: DagInput, db=Depends(get_db)):
 
 @app.post("/rag")
 async def query_rag(body: RagInput):
-    """Step 13: Query RAG pipeline (embed → search → rerank → return)."""
-    return await _query_rag(
+    """Step 13: Query RAG pipeline (embed → search → rerank → return).
+
+    #35: raises HTTPException on pipeline errors so clients get a proper 5xx
+    instead of HTTP 200 with an error body. The underlying query_rag() still
+    returns status="error" dicts so non-HTTP callers (execution_agent) can
+    degrade gracefully.
+    """
+    result = await _query_rag(
         body.query,
         top_k=body.top_k,
         confidence_threshold=body.confidence_threshold,
@@ -375,6 +381,12 @@ async def query_rag(body: RagInput):
         include_history=body.include_history,
         domain=body.domain,
     )
+    if result.get("status") == "error":
+        raise HTTPException(
+            status_code=503,
+            detail=result.get("error", "RAG pipeline error"),
+        )
+    return result
 @app.get("/rag/dedup")
 async def list_dedup_log(limit: int = 50, offset: int = 0):
     """List logged near-duplicate rejections for manual review."""

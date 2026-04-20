@@ -81,19 +81,19 @@ async def _embed_query(query: str) -> list[float] | None:
     return await _public_embed_query(query)
 
 
-async def _embed_content(text: str) -> list[float] | None:
+async def _embed_content(content: str) -> list[float] | None:
     """Embed content text (no instruction prefix), MRL truncation, and cache."""
     cache = get_cache()
-    cached = await cache.get(text)
+    cached = await cache.get(content)
     if cached:
         return cached
 
-    embeddings = await model_router.embed(text, model=settings.model_embedder_pipeline)
+    embeddings = await model_router.embed(content, model=settings.model_embedder_pipeline)
     if not embeddings or not embeddings[0]:
         return None
 
     truncated = truncate_and_normalize(embeddings[0])
-    await cache.put(text, truncated)
+    await cache.put(content, truncated)
     return truncated
 
 
@@ -347,11 +347,19 @@ async def query_rag(
     else:
         ranked = await _rerank(query, fused, top_k)
 
-    filtered = [r for r in ranked if r.final_score >= confidence_threshold]
-
-    too_strict = len(filtered) == 0 and len(ranked) > 0
-    if too_strict:
-        filtered = ranked[:3]
+    # #29: confidence_threshold is only meaningful for reranker scores.
+    # RRF scores top at ~0.016 and would always fail a reasonable threshold.
+    # When skip_rerank=True, bypass the filter and return ranked results as-is.
+    # When confidence_threshold<=0.0, also bypass (documented disable via #121).
+    if skip_rerank or confidence_threshold <= 0.0:
+        filtered = ranked
+        too_strict = False
+    else:
+        filtered = [r for r in ranked if r.final_score >= confidence_threshold]
+        too_strict = len(filtered) == 0 and len(ranked) > 0
+        if too_strict:
+            # #113: scale fallback with top_k instead of hardcoded 3.
+            filtered = ranked[:min(3, top_k)]
 
     latency_ms = round((time.monotonic() - t0) * 1000, 1)
     top_score = round(filtered[0].final_score, 4) if filtered else 0.0
