@@ -2,7 +2,7 @@
 
 **Last Updated:** April 20, 2026
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Test Suite:** 390 passed + 22 skipped in-container + 58 pipeline + 18 valve + 3 gt_browser, 0 failed
+**Test Suite:** 390 passed + 22 skipped in-container + 58 pipeline + 18 valve + 18 gt_browser, 0 failed
 **Codebase:** ~6,700 lines of application Python across 27 source files + ~2,100 lines across 5 pipelines
 
 ---
@@ -208,7 +208,7 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 | Pipeline | Lines | Purpose |
 |---|---:|---|
 | `scaffold_router.py` | ~1,355 | Main pipeline: triage, synthesis, `/go`/`/confirm` auto-chain, `/research`, `/research/reply`, `/schedule`, `/model`, `/results` |
-| `gt_browser.py` | 205 | GT browsing |
+| `gt_browser.py` | 234 | GT browsing (requests-based, paginated hints, per_page valve) |
 | `execution_handler.py` | 326 | Direct execution control |
 | `prompt_inspector.py` | 178 | Prompt analysis |
 | `dag_viewer.py` | 111 | DAG visualization (Mermaid) |
@@ -436,11 +436,11 @@ CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval co
 
 ## Test Suite
 
-**391 tests** across 33 files, ~9,500 lines.
+**406 tests** across 33 files, ~9,500 lines.
 - **384 in-container (+22 skipped):** core orchestrator modules
 - **58 pipeline (local):** `test_scaffold_router.py`, `test_schedule_command.py`
 - **18 valve (local):** `test_model_valves.py`
-- **3 gt_browser (local):** `test_gt_browser.py`
+- **18 gt_browser (local):** `test_gt_browser.py`
 
 **Markers:** `smoke` (fast unit), `validate` (integration, requires stack)
 **Run:** `make test` / `make test-ci`
@@ -489,7 +489,7 @@ scaffold-engine/
 │   ├── toon/             # TOON spec + validator reference
 │   └── CI.md, logging-events.md
 ├── scripts/              # score_retrieval.py, create_toon_v2.py
-├── tests/                # 33 files, 382 tests + fixtures/
+├── tests/                # 33 files, 397 tests + fixtures/
 ├── docker-compose.yml, Dockerfile
 ├── requirements.txt, requirements-dev.txt, requirements-ci.txt
 ├── Makefile
