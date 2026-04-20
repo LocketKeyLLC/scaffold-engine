@@ -89,7 +89,8 @@ class TestValidDomains:
         assert VALID_DOMAINS == {"prompt", "rag", "eng", "llm", "spec"}
 
     def test_is_set(self):
-        assert isinstance(VALID_DOMAINS, set)
+        # #101: VALID_DOMAINS promoted to frozenset (immutable)
+        assert isinstance(VALID_DOMAINS, (set, frozenset))
 
 
 # ---------------------------------------------------------------------------
