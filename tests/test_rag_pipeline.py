@@ -201,6 +201,35 @@ class TestRRFFusion:
         # doc B appears in both sources, should rank higher
         assert fused[0].content == "doc B"
 
+    def test_fuse_dedup_uses_entry_id_not_content_prefix(self):
+        """#112: entry_id is the dedup key, not content prefix.
+
+        Same entry_id from both paths must merge (RRF accumulates).
+        Different entry_ids with shared content prefix must NOT merge.
+        """
+        from app.modules.rag_pipeline import RagResult, _rrf_fuse
+        # Case A: same entry_id, different content formatting — must merge
+        vec = [RagResult(content="Foo.  ", vector_score=0.9, entry_id="e1")]
+        kw = [RagResult(content="foo", keyword_score=0.8, entry_id="e1")]
+        fused = _rrf_fuse(vec, kw)
+        assert len(fused) == 1, "same entry_id from both paths must merge"
+
+        # Case B: different entry_ids with shared prefix — must NOT merge
+        shared_prefix = "SHARED BOILERPLATE " * 20  # >200 chars identical
+        vec2 = [RagResult(content=shared_prefix + "alpha", vector_score=0.9, entry_id="e1")]
+        kw2 = [RagResult(content=shared_prefix + "beta", keyword_score=0.8, entry_id="e2")]
+        fused2 = _rrf_fuse(vec2, kw2)
+        assert len(fused2) == 2, "distinct entry_ids must remain separate"
+
+    def test_fuse_falls_back_to_content_when_entry_id_missing(self):
+        """#112 fallback: entries without entry_id dedup on content[:200]."""
+        from app.modules.rag_pipeline import RagResult, _rrf_fuse
+        vec = [RagResult(content="malformed doc", vector_score=0.9, entry_id="")]
+        kw = [RagResult(content="malformed doc", keyword_score=0.8, entry_id="")]
+        fused = _rrf_fuse(vec, kw)
+        assert len(fused) == 1, "fallback path should merge identical content"
+
+
 
 # ===========================================================================
 # Confidence Threshold Relaxation (too_strict fallback)
