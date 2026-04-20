@@ -1,5 +1,19 @@
 """Scaffold Engine -- RAG pipeline module.
 
+#118 Canonical field names (schema migration in progress):
+  - canonical_text  (legacy alias: content)
+  - title           (legacy alias: topic)
+  - source_url      (legacy alias: source)
+  - domain_tags     (legacy alias: tags)
+Legacy aliases are still accepted on ingest for backward compatibility;
+all reads and writes to Milvus use the canonical names.
+
+#116 Milvus expression safety:
+  pymilvus .query(expr=...) and .search(expr=...) do not accept bind
+  parameters the way SQLAlchemy does. Interpolated values are escaped
+  inline (see _keyword_search safe_word pattern). Do not add quotes
+  around int/bool values.
+
 Query flow:
   1. Embed query (qwen3-embedding:8b, MRL truncated to 512d)
   2. Milvus ANN search (HNSW_SQ8 COSINE on toon_v2)
@@ -14,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -35,6 +50,7 @@ logger = logging.getLogger("scaffold.rag")
 COLLECTION_NAME = "toon_v2"
 EMBED_DIM = 512
 DEFAULT_TOP_K = 10
+MAX_TOP_K = 100  # #119: hard cap on top_k
 CONFIDENCE_THRESHOLD = 0.8
 RRF_K = 60  # RRF smoothing constant
 
@@ -181,6 +197,9 @@ async def _keyword_search(
     if not words:
         return []
 
+    # #110: Milvus `like` is case-sensitive. Input is already lowercased
+    # above, and canonical_text is stored lowercased at ingest, so matching
+    # works. If ingest casing policy changes, revisit this.
     conditions = []
     for word in words[:KEYWORD_MAX_TERMS]:  # #111
         safe_word = word.replace("'", "\\'").replace('"', '\\"')
@@ -334,6 +353,8 @@ async def query_rag(
     include_history: bool = False,
 ) -> dict[str, Any]:
     """Full RAG pipeline: embed -> search -> fuse -> rerank -> filter."""
+    # #119: cap top_k to protect Milvus and reranker from runaway requests.
+    top_k = max(1, min(top_k, MAX_TOP_K))
     t0 = time.monotonic()
 
     collection = _get_collection()
@@ -462,7 +483,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
     Returns breakdown: {"new": N, "versioned": M, "rejected": K, "skipped_hash": S}.
     new + versioned = successfully inserted rows.
     """
-    stats = {"new": 0, "versioned": 0, "rejected": 0, "skipped_hash": 0}
+    stats = {"new": 0, "versioned": 0, "rejected": 0, "skipped_hash": 0, "skipped_empty": 0}  # #117
     if not entries:
         return stats
 
@@ -477,6 +498,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
     for entry in entries:
         content = entry.get("content", "") or entry.get("canonical_text", "")
         if not content:
+            stats["skipped_empty"] += 1  # #117
             continue
 
         title = entry.get("title", entry.get("topic", "unknown")).strip()
@@ -575,7 +597,11 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
         except Exception as e:
             logger.debug("semantic_dedup_failed: %s", e)
 
-        topic_slug = title.lower().replace(" ", "-")[:60]
+        # #114: build URL-safe slug. Strip non-alphanumeric, collapse
+        # separators, trim edges. Falls back to "untitled" if title is
+        # empty/all-punctuation so entry_id always has a middle segment.
+        _slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
+        topic_slug = _slug or "untitled"
         entry_id = f"scaffold-{topic_slug}-{ch[:8]}"
 
         row = [{
@@ -613,7 +639,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
         await loop.run_in_executor(None, collection.flush)
         logger.info(
             "ingested %d (new=%d versioned=%d rejected=%d hash_skipped=%d) into toon_v2",
-            inserted, stats["new"], stats["versioned"], stats["rejected"], stats["skipped_hash"],
+            inserted, stats["new"], stats["versioned"], stats["rejected"], stats["skipped_hash"],  # #117 skipped_empty in stats dict
         )
 
     return stats
