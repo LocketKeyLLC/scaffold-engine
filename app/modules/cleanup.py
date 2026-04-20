@@ -21,13 +21,13 @@ _background_tasks: Set[asyncio.Task] = set()
 CLEANUP_INTERVAL_SECONDS: Final[int] = 900
 STALE_THRESHOLD_MINUTES: Final[int] = 30
 
-_REAP_RUNNING_SQL: Final[str] = """
+_REAP_RUNNING_SQL: Final[str] = f"""
     UPDATE jobs
     SET status = 'failed',
-        compiled_output = :msg,
+        error_summary = :msg,
         updated_at = NOW()
     WHERE status IN ('running', 'executing')
-      AND updated_at < NOW() - INTERVAL '30 minutes'
+      AND updated_at < NOW() - INTERVAL '{STALE_THRESHOLD_MINUTES} minutes'
       AND NOT EXISTS (
           SELECT 1 FROM dag_nodes
           WHERE dag_nodes.job_id = jobs.id
@@ -45,14 +45,14 @@ _REAP_PLANNING_SQL: Final[str] = """
     RETURNING id
 """
 
-_REAP_RESEARCH_SESSIONS_SQL: Final[str] = """
+_REAP_RESEARCH_SESSIONS_SQL: Final[str] = f"""
     UPDATE research_sessions
     SET status = 'failed',
         error_message = COALESCE(error_message, :msg),
         updated_at = NOW(),
         completed_at = NOW()
     WHERE status IN ('pending', 'running')
-      AND updated_at < NOW() - INTERVAL '30 minutes'
+      AND updated_at < NOW() - INTERVAL '{STALE_THRESHOLD_MINUTES} minutes'
     RETURNING id
 """
 
@@ -72,9 +72,11 @@ _REAP_PAUSED_RESEARCH_SQL: Final[str] = """
 async def reap_stale_jobs(db: AsyncSession) -> dict:
     """Unified stale-job reaper. Returns counts of reaped jobs.
 
-    Covers:
-      - running/executing > 30 min (with active-node guard) -> failed
+    Covers 4 categories:
+      - running/executing > STALE_THRESHOLD_MINUTES (with active-node guard) -> failed
       - planning > 60 min -> cancelled
+      - research_sessions pending/running > STALE_THRESHOLD_MINUTES -> failed
+      - research_sessions paused past pause_expires_at -> cancelled
     """
     r1 = await db.execute(
         text(_REAP_RUNNING_SQL),
