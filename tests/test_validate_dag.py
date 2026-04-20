@@ -181,10 +181,11 @@ class TestEnforceNodeCount:
         assert "T11" not in t4["depends_on"]
 
     # 12. <3 nodes — accepted, no truncation
-    def test_undercount_accepted(self):
+    def test_undercount_raises(self):
+        """#23: undercount now raises ValueError (was: silent warning+pass)."""
         nodes = [_node("T1"), _node("T2", ["T1"])]
-        result = _enforce_node_count(copy.deepcopy(nodes))
-        assert len(result) == 2
+        with pytest.raises(ValueError, match="dag_undercount"):
+            _enforce_node_count(copy.deepcopy(nodes))
 
     # 13. Exactly 5 nodes — no change
     def test_exactly_5(self):

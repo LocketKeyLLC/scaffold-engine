@@ -100,55 +100,55 @@ class TestNormalizeDomain:
     def test_valid_domain_preserved(self):
         """Valid domain string is kept on the normalized task."""
         for domain in ("prompt", "rag", "eng", "llm", "spec"):
-            tasks, errors = _normalize_tasks([_make_task(domain=domain)])
+            tasks, errors, _ = _normalize_tasks([_make_task(domain=domain)])
             assert not errors
             assert tasks[0].get("domain") == domain
 
     def test_invalid_domain_dropped(self):
         """Invalid domain value is silently dropped (logged as warning)."""
-        tasks, errors = _normalize_tasks([_make_task(domain="bogus")])
+        tasks, errors, _ = _normalize_tasks([_make_task(domain="bogus")])
         assert not errors
         assert "domain" not in tasks[0]
 
     def test_null_string_domain_treated_as_absent(self):
         """Domain set to string 'null' is treated as absent."""
-        tasks, errors = _normalize_tasks([_make_task(domain="null")])
+        tasks, errors, _ = _normalize_tasks([_make_task(domain="null")])
         assert not errors
         assert "domain" not in tasks[0]
 
     def test_none_domain_treated_as_absent(self):
         """Domain set to None is treated as absent."""
-        tasks, errors = _normalize_tasks([_make_task(domain=None)])
+        tasks, errors, _ = _normalize_tasks([_make_task(domain=None)])
         assert not errors
         assert "domain" not in tasks[0]
 
     def test_empty_string_domain_treated_as_absent(self):
         """Domain set to empty string is treated as absent."""
-        tasks, errors = _normalize_tasks([_make_task(domain="")])
+        tasks, errors, _ = _normalize_tasks([_make_task(domain="")])
         assert not errors
         assert "domain" not in tasks[0]
 
     def test_domain_case_insensitive(self):
         """Domain matching is case-insensitive."""
-        tasks, errors = _normalize_tasks([_make_task(domain="RAG")])
+        tasks, errors, _ = _normalize_tasks([_make_task(domain="RAG")])
         assert not errors
         assert tasks[0].get("domain") == "rag"
 
     def test_domain_whitespace_stripped(self):
         """Domain value has whitespace stripped."""
-        tasks, errors = _normalize_tasks([_make_task(domain="  eng  ")])
+        tasks, errors, _ = _normalize_tasks([_make_task(domain="  eng  ")])
         assert not errors
         assert tasks[0].get("domain") == "eng"
 
     def test_non_milvus_tool_domain_still_preserved(self):
         """Domain is preserved even on non-Milvus tools (LLM might set it)."""
-        tasks, errors = _normalize_tasks([_make_task(tool="LLM", domain="llm")])
+        tasks, errors, _ = _normalize_tasks([_make_task(tool="LLM", domain="llm")])
         assert not errors
         assert tasks[0].get("domain") == "llm"
 
     def test_no_domain_key_in_input(self):
         """When domain key is absent from input, output has no domain."""
-        tasks, errors = _normalize_tasks([_make_task(include_domain=False)])
+        tasks, errors, _ = _normalize_tasks([_make_task(include_domain=False)])
         assert not errors
         assert "domain" not in tasks[0]
 
@@ -159,7 +159,7 @@ class TestNormalizeDomain:
             _make_task("T2", tool="Milvus", domain="rag", depends_on=["T1"]),
             _make_task("T3", tool="LLM", domain="bogus", depends_on=["T2"]),
         ]
-        tasks, errors = _normalize_tasks(raw)
+        tasks, errors, _ = _normalize_tasks(raw)
         assert not errors
         assert "domain" not in tasks[0]       # None → absent
         assert tasks[1].get("domain") == "rag"  # valid → kept
@@ -177,14 +177,14 @@ class TestValidateDagDomain:
             _make_task("T1", tool="SearXNG", domain=None),
             _make_task("T2", tool="Milvus", domain="prompt", depends_on=["T1"]),
         ]
-        normalized, _ = _normalize_tasks(raw)
+        normalized, _, _ = _normalize_tasks(raw)
         validated, warnings = validate_dag(normalized)
         assert validated[1].get("domain") == "prompt"
 
     def test_domain_absent_survives_validation(self):
         """Nodes without domain pass through validate_dag unchanged."""
         raw = [_make_task("T1", tool="LLM", domain=None)]
-        normalized, _ = _normalize_tasks(raw)
+        normalized, _, _ = _normalize_tasks(raw)
         validated, _ = validate_dag(normalized)
         assert "domain" not in validated[0]
 
@@ -200,16 +200,28 @@ class TestEnforceNodeCountDomain:
             _make_task(f"T{i}", domain="eng" if i == 1 else None)
             for i in range(1, 13)
         ]
-        normalized, _ = _normalize_tasks(raw)
+        normalized, _, _ = _normalize_tasks(raw)
         result = _enforce_node_count(normalized)
         assert len(result) == 10
         t1 = next(t for t in result if t["id"] == "T1")
         assert t1.get("domain") == "eng"
 
-    def test_domain_preserved_under_count(self):
-        """Under-count nodes still have their domain."""
+    def test_undercount_raises_even_with_valid_domains(self):
+        """#23: undercount raises ValueError regardless of domain validity."""
         raw = [_make_task("T1", domain="spec"), _make_task("T2", domain="rag", depends_on=["T1"])]
-        normalized, _ = _normalize_tasks(raw)
+        normalized, _, _ = _normalize_tasks(raw)
+        with pytest.raises(ValueError, match="dag_undercount"):
+            _enforce_node_count(normalized)
+
+    def test_domain_preserved_at_minimum_count(self):
+        """At min_count, domain is preserved through _enforce_node_count."""
+        raw = [
+            _make_task("T1", domain="spec"),
+            _make_task("T2", domain="rag", depends_on=["T1"]),
+            _make_task("T3", domain="eng", depends_on=["T2"]),
+        ]
+        normalized, _, _ = _normalize_tasks(raw)
         result = _enforce_node_count(normalized)
         assert result[0].get("domain") == "spec"
         assert result[1].get("domain") == "rag"
+        assert result[2].get("domain") == "eng"

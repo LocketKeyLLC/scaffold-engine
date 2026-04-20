@@ -191,7 +191,7 @@ async def generate_dag(
     tasks = _enforce_node_count(tasks)
 
     # 4. Normalize and validate tasks
-    normalized, errors = _normalize_tasks(tasks)
+    normalized, errors, normalize_warnings = _normalize_tasks(tasks)
     if errors:
         await _fail_job(db, uid, f"Task validation errors: {'; '.join(errors)}")
         return {"job_id": job_id, "status": "failed", "errors": errors}
@@ -207,6 +207,7 @@ async def generate_dag(
     edges = _build_edges(normalized)
     graph_errors, warnings = _validate_graph(normalized, edges)
     warnings.extend(dag_warnings)
+    warnings.extend(normalize_warnings)  # #26 #25
     if graph_errors:
         await _fail_job(db, uid, f"Graph validation errors: {'; '.join(graph_errors)}")
         return {"job_id": job_id, "status": "failed", "errors": graph_errors}
@@ -285,10 +286,11 @@ def _enforce_node_count(
 ) -> list[dict]:
     """Enforce node count bounds. Truncates excess nodes and cleans dangling refs."""
     if len(tasks) < min_count:
-        logger.warning(
-            "dag_undercount: node_count=%d", len(tasks)
+        # #23: undercount is a hard failure now. generate_dag catches ValueError
+        # at the validate_dag boundary and rolls the job to failed via _fail_job.
+        raise ValueError(
+            f"dag_undercount: got {len(tasks)} tasks, required minimum {min_count}"
         )
-        return tasks
 
     if len(tasks) > max_count:
         # Sort by node_key, keep first max_count
@@ -317,9 +319,14 @@ def _enforce_node_count(
 # Task normalization (from WA tool logic)
 # ---------------------------------------------------------------------------
 
-def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str]]:
-    """Normalize and validate task list. Returns (tasks, errors)."""
+def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str], list[str]]:
+    """Normalize and validate task list. Returns (tasks, errors, warnings).
+
+    #26: warnings list surfaces silent coercions (unknown type/tool defaulting)
+    and #25 Milvus-without-domain to the caller instead of log-only.
+    """
     errors: list[str] = []
+    warnings: list[str] = []
     normalized: list[dict] = []
     seen_ids: set[str] = set()
 
@@ -339,7 +346,9 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str]]:
             errors.append(f"Task {i}: missing 'name'")
             continue  # #99
         if task_type not in VALID_TASK_TYPES:
-            logger.warning("Task %s: unknown type '%s', coercing to 'action'", task_id, task_type)
+            msg = f"Task {task_id}: unknown type '{task_type}', coercing to 'action'"  # #26
+            logger.warning(msg)
+            warnings.append(msg)
             task_type = "action"
         if task_id in seen_ids:
             errors.append(f"Task {i}: duplicate id '{task_id}'")
@@ -372,7 +381,9 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str]]:
                     task_id, raw_domain,
                 )
         if task["tool"] not in VALID_TOOLS:
-            logger.warning("Task %s: unknown tool '%s', coercing to 'LLM'", task_id, task["tool"])
+            msg = f"Task {task_id}: unknown tool '{task['tool']}', coercing to 'LLM'"  # #26
+            logger.warning(msg)
+            warnings.append(msg)
             task["tool"] = "LLM"
         raw_model = str(raw.get("assigned_model", "")).strip()
         if raw_model and raw_model.lower() not in ("none", "null", ""):
@@ -382,9 +393,15 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str]]:
         if raw.get("notes"):
             task["notes"] = str(raw["notes"]).strip()
 
+        # #25: Milvus nodes require a domain; warn if missing or dropped as invalid
+        if task.get("tool") == "Milvus" and not task.get("domain"):
+            msg = f"Task {task_id}: Milvus tool requires 'domain' field; none set"
+            logger.warning(msg)
+            warnings.append(msg)
+
         normalized.append(task)
 
-    return normalized, errors
+    return normalized, errors, warnings
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +569,16 @@ def _render_mermaid(tasks: list[dict], edges: list[dict]) -> str:
 
 
 def _safe_label(value: str) -> str:
-    return value.replace("[", "(").replace("]", ")")
+    # #28: escape all Mermaid-breaking chars, not just square brackets
+    replacements = [
+        ("[", "("), ("]", ")"),
+        ("{", "("), ("}", ")"),
+        ("|", "/"), ('"', "'"),
+        ("#", "No."),
+    ]
+    for old, new in replacements:
+        value = value.replace(old, new)
+    return value
 
 
 # ---------------------------------------------------------------------------
