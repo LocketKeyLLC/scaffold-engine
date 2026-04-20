@@ -4,8 +4,7 @@ Commands: /gt list, /gt search <query>, /gt detail <entry_id>, /gt stats
 Routes to scaffold-orchestrator GT endpoints.
 """
 
-import json
-import httpx
+import requests
 from typing import Optional, List
 from pydantic import BaseModel, Field
 
@@ -18,6 +17,7 @@ class Pipeline:
             description="Scaffold orchestrator base URL",
         )
         timeout: int = Field(default=60, description="Request timeout seconds")
+        per_page: int = Field(default=20, description="Number of entries per /gt list page.")
 
     def __init__(self):
         self.id = "gt_browser"
@@ -63,32 +63,57 @@ class Pipeline:
             return self._help()
 
     def _call(self, method: str, path: str, params: dict = None, json_body: dict = None) -> dict:
-        """Synchronous HTTP call to orchestrator."""
+        """Synchronous HTTP call to orchestrator.
+
+        Success: returns the parsed JSON dict from the orchestrator.
+        Failure: returns ``{"_error": str, "_status_code": int | None}`` — the
+        underscore prefix prevents collision with payload fields.
+        """
         url = f"{self.valves.orchestrator_url}{path}"
+        headers = {"X-API-Key": self.valves.api_key}
         try:
-            with httpx.Client(timeout=self.valves.timeout) as client:
-                if method == "GET":
-                    resp = client.get(url, params=params, headers={"X-API-Key": self.valves.api_key})
-                else:
-                    resp = client.post(url, json=json_body, headers={"X-API-Key": self.valves.api_key})
-                resp.raise_for_status()
-                return resp.json()
-        except httpx.TimeoutException:
-            return {"error": f"Timeout after {self.valves.timeout}s"}
-        except httpx.HTTPStatusError as e:
-            return {"error": f"HTTP {e.response.status_code}: {e.response.text[:200]}"}
-        except Exception as e:
-            return {"error": str(e)}
+            if method == "GET":
+                resp = requests.get(url, params=params, headers=headers, timeout=self.valves.timeout)
+            else:
+                resp = requests.post(url, json=json_body, headers=headers, timeout=self.valves.timeout)
+        except requests.Timeout:
+            return {"_error": f"Timeout after {self.valves.timeout}s", "_status_code": None}
+        except requests.RequestException as e:
+            return {"_error": f"Network error: {e}", "_status_code": None}
+
+        status = resp.status_code
+
+        try:
+            data = resp.json()
+        except ValueError:
+            snippet = (resp.text or "")[:200]
+            return {
+                "_error": f"Orchestrator returned non-JSON response (HTTP {status}). Body: {snippet}",
+                "_status_code": status,
+            }
+
+        if status >= 400:
+            detail = ""
+            if isinstance(data, dict):
+                detail = data.get("detail", "") or data.get("error", "")
+            msg = f"HTTP {status}: {detail}" if detail else f"HTTP {status}"
+            return {"_error": msg, "_status_code": status}
+
+        if isinstance(data, dict):
+            return data
+        return {"_raw": data}
 
     def _handle_list(self, arg: str) -> str:
         """List TOON entries, paginated."""
         page = 1
         if arg.strip().isdigit():
-            page = int(arg.strip())
+            page = max(1, int(arg.strip()))
 
-        data = self._call("GET", "/gt/list", params={"page": page, "per_page": 20})
-        if "error" in data:
-            return f"❌ {data['error']}"
+        per_page = self.valves.per_page
+
+        data = self._call("GET", "/gt/list", params={"page": page, "per_page": per_page})
+        if "_error" in data:
+            return f"❌ {data['_error']}"
 
         total = data.get("total", 0)
         total_pages = data.get("total_pages", 1)
@@ -97,27 +122,36 @@ class Pipeline:
         if not entries:
             return "No entries found."
 
-        lines = [f"📚 **TOON Entries** — Page {page}/{total_pages} ({total} total)\n"]
+        lines: List[str] = []
+
+        if page > 1:
+            lines.append(f"◀ *Previous:* `/gt list {page - 1}`\n")
+
+        lines.append(f"📚 **TOON Entries** — Page {page}/{total_pages} ({total} total)\n")
         lines.append("| # | Entry ID | Topic | Tags | Snippet |")
         lines.append("|---|---|---|---|---|")
 
-        for i, e in enumerate(entries, start=(page - 1) * 20 + 1):
+        offset = (page - 1) * per_page
+        for i, e in enumerate(entries, start=offset + 1):
             eid = e.get("entry_id", "—")
             topic = e.get("title", "—")
             tags = e.get("tags", "—")
-            snippet = e.get("snippet", "—")[:60]
+            snippet = (e.get("snippet") or "—")[:60]
             lines.append(f"| {i} | `{eid}` | {topic} | {tags} | {snippet} |")
 
-        if total_pages > 1:
-            lines.append(f"\n*Navigate:* `/gt list {page + 1}` for next page")
+        has_more = page < total_pages
+        if has_more:
+            lines.append(f"\n▶ *Next:* `/gt list {page + 1}`")
+        elif page > 1:
+            lines.append("\n*End of results.*")
 
         return "\n".join(lines)
 
     def _handle_search(self, query: str) -> str:
         """Semantic search TOON entries."""
         data = self._call("POST", "/gt/search", json_body={"query": query, "top_k": 10})
-        if "error" in data:
-            return f"❌ {data['error']}"
+        if "_error" in data:
+            return f"❌ {data['_error']}"
 
         results = data.get("results", [])
         if not results:
@@ -130,9 +164,13 @@ class Pipeline:
         for i, r in enumerate(results, 1):
             eid = r.get("entry_id", "—")
             topic = r.get("title", "—")
-            score = r.get("score", 0)
-            snippet = r.get("snippet", "—")[:60]
-            lines.append(f"| {i} | `{eid}` | {topic} | {score:.4f} | {snippet} |")
+            score = r.get("score", 0) or 0
+            snippet = (r.get("snippet") or "—")[:60]
+            try:
+                score_str = f"{float(score):.4f}"
+            except (TypeError, ValueError):
+                score_str = str(score)
+            lines.append(f"| {i} | `{eid}` | {topic} | {score_str} | {snippet} |")
 
         lines.append("\n*View full entry:* `/gt detail <entry_id>`")
         return "\n".join(lines)
@@ -141,57 +179,42 @@ class Pipeline:
         """Show full TOON entry."""
         data = self._call("GET", f"/gt/detail/{entry_id.strip()}")
 
-        # _call wraps HTTPStatusError as {"error": "HTTP 404: ..."}.
-        # Also tolerate legacy {"found": false} in case backend is old.
-        if isinstance(data, dict):
-            err = str(data.get("error", ""))
-            if err.startswith("HTTP 404") or "not found" in err.lower():
-                return f"Entry `{entry_id}` not found."
-            if "error" in data:
-                return f"❌ {data['error']}"
-            if not data.get("found", True):
-                return f"Entry `{entry_id}` not found."
+        if data.get("_status_code") == 404:
+            return f"❌ Entry not found: `{entry_id}`"
+        if "_error" in data:
+            return f"❌ {data['_error']}"
 
         lines = [
             f"📄 **Entry:** `{data.get('entry_id', '—')}`\n",
             f"**Topic:** {data.get('title', '—')}",
             f"**Tags:** {data.get('tags', '—')}",
             f"**Source:** {data.get('source_url', '—')}",
+            f"\n---\n\n{data.get('content', 'No content')}",
         ]
-
-        url = data.get("source_url", "")
-        if url:
-            lines.append(f"**URL:** {url}")
-
-        lines.append(f"\n---\n\n{data.get('content', 'No content')}")
-
         return "\n".join(lines)
 
     def _handle_stats(self) -> str:
         """Collection summary."""
         data = self._call("GET", "/gt/stats")
-        if "error" in data:
-            return f"❌ {data['error']}"
+        if "_error" in data:
+            return f"❌ {data['_error']}"
 
         total = data.get("total_entries", 0)
-        topics = data.get("domains", {})
-        tags = data.get("tags", {})
-        sources = data.get("source_types", {})
+        topics = data.get("domains", {}) or {}
+        tags = data.get("tags", {}) or {}
+        sources = data.get("source_types", {}) or {}
 
         lines = [f"📊 **Knowledge Base Stats** — {total} entries\n"]
 
-        # Topics
         lines.append("**Topics:**")
         for t, count in list(topics.items())[:15]:
             lines.append(f"- {t}: {count}")
 
-        # Tags (top 15)
         if tags:
             lines.append("\n**Top Tags:**")
             for t, count in list(tags.items())[:15]:
                 lines.append(f"- {t}: {count}")
 
-        # Sources
         if sources:
             lines.append("\n**Source Files:**")
             for s, count in sources.items():
