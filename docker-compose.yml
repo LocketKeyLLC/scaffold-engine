@@ -104,6 +104,7 @@ services:
       SCHEDULER_JOBSTORE_URL: "postgresql+psycopg2://scaffold:scaffold_dev_pw@scaffold-postgres:5432/scaffold_engine"
     volumes:
       - ./app:/code/app:ro
+      - ./tests:/code/tests:ro
       - ./ground_truths:/code/ground_truths:ro
       - hf-cache:/code/.cache/huggingface
       - scaffold-logs:/var/log/scaffold
