@@ -238,18 +238,31 @@ def _rrf_fuse(
     keyword_results: list[RagResult],
     k: int = RRF_K,
 ) -> list[RagResult]:
-    """Reciprocal Rank Fusion of vector and keyword result sets."""
+    """Reciprocal Rank Fusion of vector and keyword result sets.
+
+    #112: dedup key is entry_id (stable primary key) rather than content[:200].
+    Content-prefix dedup was buggy in two directions:
+      - False merge: two distinct entries with shared prefix (legal boilerplate,
+        common intros) collapsed into one.
+      - False split: same entry_id from both paths with differently formatted
+        canonical_text failed to merge and double-counted the RRF score.
+    Results missing entry_id fall back to content[:200] so malformed rows still
+    participate in fusion rather than being silently dropped.
+    """
     merged: dict[str, RagResult] = {}
 
+    def _key(result: RagResult) -> str:
+        return result.entry_id or result.content[:200]
+
     for rank, result in enumerate(vector_results):
-        key = result.content[:200]
+        key = _key(result)
         if key not in merged:
             merged[key] = result
         merged[key].rrf_score += 1.0 / (k + rank + 1)
         merged[key].vector_score = max(merged[key].vector_score, result.vector_score)
 
     for rank, result in enumerate(sorted(keyword_results, key=lambda r: r.keyword_score, reverse=True)):
-        key = result.content[:200]
+        key = _key(result)
         if key not in merged:
             merged[key] = result
         merged[key].rrf_score += 1.0 / (k + rank + 1)
