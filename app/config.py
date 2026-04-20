@@ -2,6 +2,17 @@
 from pydantic_settings import BaseSettings
 
 
+# ---------------------------------------------------------------------------
+# DAG validation enums (#101 — moved from dag_generator.py module top)
+# These are plain module constants, not Settings fields, because they are
+# code-level invariants and not env-overridable.
+# ---------------------------------------------------------------------------
+VALID_TASK_TYPES = frozenset({"research", "decision", "action", "validation", "output"})
+VALID_STRATEGIES = frozenset({"sequential", "parallel", "hybrid", "conditional"})
+VALID_TOOLS = frozenset({"LLM", "CodeGen", "SearXNG", "Milvus"})
+VALID_DOMAINS = frozenset({"prompt", "rag", "eng", "llm", "spec"})
+
+
 class Settings(BaseSettings):
     """All config sourced from env vars set in docker-compose.yml."""
 

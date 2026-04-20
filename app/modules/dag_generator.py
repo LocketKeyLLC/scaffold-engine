@@ -11,8 +11,6 @@ Persists nodes to dag_nodes table. Job transitions: planning → executing.
 Step 11 of 23-step build plan.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import re
@@ -30,13 +28,15 @@ from app.utils.llm_parsing import parse_json_object
 logger = logging.getLogger("scaffold.dag")
 
 # ---------------------------------------------------------------------------
-# Valid enums (mirrored from WA tool)
+# Valid enums — imported from config (#101)
 # ---------------------------------------------------------------------------
 
-VALID_TASK_TYPES = {"research", "decision", "action", "validation", "output"}
-VALID_STRATEGIES = {"sequential", "parallel", "hybrid", "conditional"}
-VALID_TOOLS = {"LLM", "CodeGen", "SearXNG", "Milvus"}
-VALID_DOMAINS = {"prompt", "rag", "eng", "llm", "spec"}
+from app.config import (
+    VALID_TASK_TYPES,
+    VALID_STRATEGIES,
+    VALID_TOOLS,
+    VALID_DOMAINS,
+)
 
 # ---------------------------------------------------------------------------
 # DAG generation prompt
@@ -345,6 +345,9 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str], list[str
         if not name:
             errors.append(f"Task {i}: missing 'name'")
             continue  # #99
+        if len(name.split()) > 5:  # #104
+            errors.append(f"Task {i}: name exceeds 5 words: '{name}'")
+            continue
         if task_type not in VALID_TASK_TYPES:
             msg = f"Task {task_id}: unknown type '{task_type}', coercing to 'action'"  # #26
             logger.warning(msg)
