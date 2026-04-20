@@ -183,14 +183,14 @@ class TestEnforceNodeCount:
         not hasattr(_dag_gen, "_enforce_node_count"),
         reason="_enforce_node_count not exposed",
     )
-    def test_under_minimum_accepted_with_warning(self):
-        """DAGs with <3 nodes are accepted (with dag_undercount warning)."""
+    def test_under_minimum_raises_valueerror(self):
+        """#23: DAGs with <3 nodes now raise ValueError (was: silent warning+pass)."""
         dag = [
             {"id": "T1", "title": "Step 1", "tool": "LLM", "depends_on": []},
             {"id": "T2", "title": "Step 2", "tool": "LLM", "depends_on": ["T1"]},
         ]
-        result = _dag_gen._enforce_node_count(dag)
-        assert len(result) == 2
+        with pytest.raises(ValueError, match="dag_undercount"):
+            _dag_gen._enforce_node_count(dag)
 
     @pytest.mark.skipif(
         not hasattr(_dag_gen, "_enforce_node_count"),
