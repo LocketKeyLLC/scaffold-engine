@@ -38,6 +38,20 @@ DEFAULT_TOP_K = 10
 CONFIDENCE_THRESHOLD = 0.8
 RRF_K = 60  # RRF smoothing constant
 
+# #33: reranker limits
+RERANK_MAX_CANDIDATES = 20  # max pairs sent to cross-encoder
+RERANK_DOC_TRUNCATE = 500   # chars per doc passed to reranker
+RERANK_WARN_MS = 5000       # log at WARNING above this latency
+RERANK_ERROR_MS = 15000     # log at ERROR above this latency
+
+# #109/#111: keyword-search tuning
+KEYWORD_MAX_TERMS = 5       # max words per keyword expression
+_STOPWORDS = frozenset({
+    "the", "and", "for", "are", "but", "not", "you", "all", "can",
+    "has", "was", "one", "our", "out", "how", "what", "when",
+    "where", "which", "who", "why", "with", "this", "that", "from", "into",
+})
+
 
 # ---------------------------------------------------------------------------
 # Result container
@@ -161,15 +175,14 @@ async def _keyword_search(
     domain: str | None = None,
 ) -> list[RagResult]:
     """Keyword-based search using Milvus query expressions (off event loop)."""
-    stopwords = {"the", "and", "for", "are", "but", "not", "you", "all", "can", "has", "was", "one", "our", "out",
-                 "how", "what", "when", "where", "which", "who", "why", "with", "this", "that", "from", "into"}
-    words = [w.strip().lower() for w in query.split() if len(w.strip()) >= 3 and w.strip().lower() not in stopwords]
+    # #109: stopwords promoted to module-level _STOPWORDS
+    words = [w.strip().lower() for w in query.split() if len(w.strip()) >= 3 and w.strip().lower() not in _STOPWORDS]
 
     if not words:
         return []
 
     conditions = []
-    for word in words[:5]:
+    for word in words[:KEYWORD_MAX_TERMS]:  # #111
         safe_word = word.replace("'", "\\'").replace('"', '\\"')
         conditions.append(f'canonical_text like "%{safe_word}%"')
         conditions.append(f'title like "%{safe_word}%"')
@@ -258,13 +271,13 @@ async def _rerank(
     if not results:
         return []
 
-    docs = [r.content[:500] for r in results[:20]]
+    docs = [r.content[:RERANK_DOC_TRUNCATE] for r in results[:RERANK_MAX_CANDIDATES]]
 
     loop = asyncio.get_running_loop()
     rr = await loop.run_in_executor(None, cross_encoder_rerank, query, docs, len(docs))
 
     score_map = {item.index: item.score for item in rr.items}
-    for i, r in enumerate(results[:20]):
+    for i, r in enumerate(results[:RERANK_MAX_CANDIDATES]):
         if i in score_map:
             r.rerank_score = score_map[i]
             r.final_score = score_map[i]
@@ -272,12 +285,12 @@ async def _rerank(
             r.rerank_score = r.rrf_score
             r.final_score = r.rrf_score
 
-    for r in results[20:]:
+    for r in results[RERANK_MAX_CANDIDATES:]:
         r.rerank_score = r.rrf_score
         r.final_score = r.rrf_score
 
     scores = [item.score for item in rr.items]
-    _log_reranker = logger.error if rr.latency_ms > 15000 else logger.warning if rr.latency_ms > 5000 else logger.info
+    _log_reranker = logger.error if rr.latency_ms > RERANK_ERROR_MS else logger.warning if rr.latency_ms > RERANK_WARN_MS else logger.info
     _log_reranker(
         "reranker_decision",
         extra=dict(
