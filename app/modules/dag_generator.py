@@ -373,9 +373,10 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str], list[str
             "tool": str(raw.get("tool", "LLM")).strip(),
         }
         # Preserve domain for Milvus nodes (validated against VALID_DOMAINS)
+        # #108: compute once, reuse for gate + validity check
         raw_domain = raw.get("domain")
-        if raw_domain and str(raw_domain).strip().lower() not in ("none", "null", ""):
-            domain_val = str(raw_domain).strip().lower()
+        domain_val = str(raw_domain).strip().lower() if raw_domain else ""
+        if domain_val and domain_val not in ("none", "null"):
             if domain_val in VALID_DOMAINS:
                 task["domain"] = domain_val
             else:
@@ -557,8 +558,12 @@ def _infer_strategy(tasks: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 def _render_mermaid(tasks: list[dict], edges: list[dict]) -> str:
-    """Generate Mermaid flowchart from tasks and edges."""
-    if len(tasks) <= 2:
+    """Generate Mermaid flowchart from tasks and edges.
+
+    #102: render even 1-2 task DAGs; Mermaid handles single nodes fine.
+    Empty task list still returns empty string to avoid malformed output.
+    """
+    if not tasks:
         return ""
 
     lines = ["flowchart TD"]
