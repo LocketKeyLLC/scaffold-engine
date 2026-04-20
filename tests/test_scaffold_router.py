@@ -45,6 +45,12 @@ spec = importlib.util.spec_from_file_location("scaffold_router", _router_path)
 _mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(_mod)
 Pipeline = _mod.Pipeline
+sys.modules["scaffold_router"] = _mod
+import types as _types
+_pkg = _types.ModuleType("pipelines")
+_pkg.scaffold_router = _mod
+sys.modules["pipelines"] = _pkg
+sys.modules["pipelines.scaffold_router"] = _mod
 
 
 # ---------------------------------------------------------------------------
@@ -875,3 +881,234 @@ class TestResearchCommand:
         # Resume event rendered to chat
         assert "Resuming session" in output
         assert "sess_xyz" in output
+
+
+# =======================================================================
+# Phase 7 additions — #8.1, #8.2, #8.6, #8.8, #8.9, #8.10, #8.11, #8.12
+# =======================================================================
+
+import queue as _queue
+
+
+@pytest.mark.smoke
+class TestWordBoundaryCommands:
+    """#8.6: /executor must NOT match /exec; /confirmation must NOT match /confirm."""
+
+    def test_executor_does_not_match_exec(self, pipe):
+        assert pipe._is_cmd("/executor foo", "/exec") is False
+        assert pipe._is_cmd("/executor", "/exec") is False
+
+    def test_exec_matches_exec(self, pipe):
+        assert pipe._is_cmd("/exec job_123", "/exec") is True
+        assert pipe._is_cmd("/exec", "/exec") is True
+
+    def test_confirmation_does_not_match_confirm(self, pipe):
+        assert pipe._is_cmd("/confirmation yes", "/confirm") is False
+
+    def test_confirm_matches_confirm(self, pipe):
+        assert pipe._is_cmd("/confirm job_123", "/confirm") is True
+
+    def test_executor_falls_through_all_commands(self, pipe):
+        known = ("/exec", "/execute", "/confirm", "/go", "/run",
+                 "/research", "/research/reply", "/dag", "/idea",
+                 "/skip", "/optimize", "/rag", "/status", "/model",
+                 "/schedule", "/results", "/help", "/prompt")
+        assert not any(pipe._is_cmd("/executor please", c) for c in known)
+
+
+@pytest.mark.smoke
+class TestResultsCommand:
+    """#8.1: /results <job_id> renders output/progress/error from /exec/status."""
+
+    def test_completed_renders_compiled_output(self, pipe):
+        with patch("scaffold_router.requests.get") as mg:
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = {
+                "status": "completed",
+                "compiled_output": "## Final Report\n\nHere is the output.",
+            }
+            mg.return_value = resp
+            out = pipe._handle_results(["/results", "job_abc"])
+        assert "Final Report" in out
+        assert "Here is the output." in out
+
+    def test_404_returns_not_found(self, pipe):
+        with patch("scaffold_router.requests.get") as mg:
+            mg.return_value = MagicMock(status_code=404, text="")
+            out = pipe._handle_results(["/results", "bogus"])
+        assert "Job not found" in out
+        assert "bogus" in out
+
+    def test_running_shows_progress(self, pipe):
+        with patch("scaffold_router.requests.get") as mg:
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = {
+                "status": "running",
+                "total_nodes": 7,
+                "completed_nodes": 3,
+                "current_node": {"node_key": "T4", "title": "write_report"},
+            }
+            mg.return_value = resp
+            out = pipe._handle_results(["/results", "j"])
+        assert "running" in out
+        assert "3/7" in out
+        assert "T4" in out
+        assert "write_report" in out
+
+    def test_failed_shows_error(self, pipe):
+        with patch("scaffold_router.requests.get") as mg:
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = {
+                "status": "failed",
+                "error_summary": "verifier rejected T3 after max retries",
+            }
+            mg.return_value = resp
+            out = pipe._handle_results(["/results", "j"])
+        assert "failed" in out
+        assert "verifier rejected" in out
+
+    def test_dispatch_via_handle_command(self, pipe):
+        with patch("scaffold_router.requests.get") as mg:
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = {"status": "completed", "compiled_output": "DONE"}
+            mg.return_value = resp
+            out = pipe._handle_command("/results job_xyz")
+        assert "DONE" in out
+
+
+@pytest.mark.smoke
+class TestSSEErrorEventRendering:
+    """#8.2: error SSE events render with error prefix and optional traceback fence."""
+
+    def test_error_with_traceback(self, pipe):
+        failed = []
+        data = json.dumps({"message": "boom", "traceback": "Traceback: line 42"})
+        out = "".join(pipe._handle_sse_event("error", data, failed))
+        assert "Execution error" in out
+        assert "boom" in out
+        assert "Traceback: line 42" in out
+        assert "```traceback" in out
+        assert len(failed) == 1
+
+    def test_error_without_traceback(self, pipe):
+        failed = []
+        data = json.dumps({"error": "something went wrong"})
+        out = "".join(pipe._handle_sse_event("error", data, failed))
+        assert "something went wrong" in out
+        assert "```traceback" not in out
+
+
+@pytest.mark.smoke
+class TestScheduleDepthFlag:
+    """#8.9: /schedule add parses --depth and sends it in payload."""
+
+    def test_depth_equals_syntax(self, pipe):
+        captured = {}
+        def _mp(url, **kw):
+            captured["json"] = kw.get("json")
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = {"id": 1, "topic": "research foo",
+                                      "cron_expression": "0 9 * * 1", "depth": "deep"}
+            return resp
+        with patch("scaffold_router.requests.post", side_effect=_mp):
+            out = pipe._handle_schedule('/schedule add "0 9 * * 1" --depth=deep research foo')
+        assert captured["json"]["depth"] == "deep"
+        assert captured["json"]["topic"] == "research foo"
+        assert captured["json"]["cron_expression"] == "0 9 * * 1"
+
+    def test_depth_space_syntax(self, pipe):
+        captured = {}
+        def _mp(url, **kw):
+            captured["json"] = kw.get("json")
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = {"id": 2, "topic": "my topic",
+                                      "cron_expression": "* * * * *", "depth": "medium"}
+            return resp
+        with patch("scaffold_router.requests.post", side_effect=_mp):
+            pipe._handle_schedule('/schedule add "* * * * *" --depth medium my topic')
+        assert captured["json"]["depth"] == "medium"
+
+    def test_default_depth_shallow(self, pipe):
+        captured = {}
+        def _mp(url, **kw):
+            captured["json"] = kw.get("json")
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = {"id": 3, "topic": "foo",
+                                      "cron_expression": "0 0 * * *", "depth": "shallow"}
+            return resp
+        with patch("scaffold_router.requests.post", side_effect=_mp):
+            pipe._handle_schedule('/schedule add "0 0 * * *" foo')
+        assert captured["json"]["depth"] == "shallow"
+
+    def test_invalid_depth_value(self, pipe):
+        out = pipe._handle_schedule('/schedule add "* * * * *" --depth=insane topic')
+        assert "Invalid" in out or "insane" in out
+
+
+@pytest.mark.smoke
+class TestSSEStreamStalled:
+    """#8.12: Stream stall detected; reader emits stream_stalled event."""
+
+    def test_stream_stalled_event_renders_warning(self, pipe):
+        def fake_streamer(url, body, q):
+            q.put(("connected", None, None))
+            q.put(("event", "stream_stalled",
+                   json.dumps({"idle_seconds": 50, "max_idle": 50})))
+            q.put(("done", None, None))
+
+        with patch.object(pipe, "_stream_sse_to_queue", side_effect=fake_streamer):
+            out = "".join(pipe._execute_and_stream("job_test", 0))
+        assert "stalled" in out.lower()
+        assert "50" in out
+
+    def test_per_read_timeout_tuple_passed_to_requests(self, pipe):
+        pipe.valves.keepalive_interval = 7
+        with patch("scaffold_router.requests.post") as mp:
+            resp = MagicMock(status_code=200)
+            resp.iter_lines.return_value = iter([])
+            mp.return_value = resp
+            q = _queue.Queue()
+            pipe._stream_sse_to_queue("http://x/y", {}, q)
+            kw = mp.call_args.kwargs
+            assert kw["timeout"] == (10, 7)
+            assert kw["stream"] is True
+
+
+@pytest.mark.smoke
+class TestModelOverridesSingleSource:
+    """#8.10: _MODEL_DEFAULTS removed; defaults read from self.Valves()."""
+
+    def test_no_model_defaults_attribute(self, pipe):
+        assert not hasattr(pipe, "_MODEL_DEFAULTS")
+
+    def test_overrides_filter_empty_strings(self, pipe):
+        pipe.valves.model_general = ""
+        pipe.valves.model_coder = "qwen2.5-coder:7b"
+        ov = pipe._model_overrides()
+        assert "model_general" not in ov
+        assert ov.get("model_coder") == "qwen2.5-coder:7b"
+
+
+class TestNoPrintStatements:
+    """#8.11: scaffold_router.py uses logger, not print()."""
+
+    def test_source_has_no_print(self):
+        src = _router_path.read_text()
+        offenders = [
+            ln for ln in src.splitlines()
+            if "print(" in ln and not ln.lstrip().startswith("#")
+        ]
+        assert offenders == [], "Unexpected print() calls:\n" + "\n".join(offenders)
+
+
+@pytest.mark.smoke
+class TestTimeoutValveConsolidation:
+    """#8.8: three timeout valves; legacy dag_timeout alias preserved."""
+
+    def test_three_timeout_valves_exist(self, pipe):
+        assert hasattr(pipe.valves, "request_timeout")
+        assert hasattr(pipe.valves, "stream_timeout")
+        assert hasattr(pipe.valves, "triage_timeout")
+
+    def test_dag_timeout_alias_still_present(self, pipe):
+        assert hasattr(pipe.valves, "dag_timeout")

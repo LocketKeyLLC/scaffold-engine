@@ -1,76 +1,39 @@
 """
-scaffold_router.py  --  Step 17 (v3 — triage + streaming auto-chain)
-Open WebUI Pipeline: conversational triage before auto-chaining
-/ideate → /dag → /execute/all for plain messages.
+scaffold_router.py — Open WebUI pipeline for Scaffold Engine.
 
-Slash commands still work:
-  /idea <text>        -> POST /ideate  (manual, returns JSON)
-  /dag <job_id>       -> POST /dag    (manual, returns JSON)
-  /execute <job_id>   -> POST /execute
-  /skip <job_id> <node_key> -> POST /skip
-  /optimize <text>    -> POST /optimize
-  /rag <query>        -> POST /rag
-  /confirm <job_id>   -> POST /ideate/confirm (Phase 2)
-  /go or /run         -> Synthesize conversation → auto-chain
-  /status             -> GET  /status
-  /help               -> show command list
+Commands: see _help() for the full list.
 
-Non-command messages trigger a conversational triage phase via a lightweight
-model (qwen2.5:7b). The user discusses scope and goals, then types /go or
-/run to launch the full Scaffold Engine pipeline.
+Three timeout valves (consolidated from six hardcoded values):
+  - request_timeout  (default 30s)    — quick JSON endpoints
+  - stream_timeout   (default 3600s)  — SSE + long-poll LLM endpoints
+  - triage_timeout   (default 3600s)  — direct Ollama calls for triage/synthesis
+
+Legacy `dag_timeout` valve is preserved; if an admin customized it, the value
+is migrated into stream_timeout on pipeline init.
 """
 
-from typing import List, Optional, Generator, Iterator
-import requests
+from typing import Generator, List
 import json
-import time
-import re
-import threading
+import logging
 import queue
-from pydantic import BaseModel, Field
+import re
+import shlex
+import threading
+import time
+
+import requests
+from pydantic import BaseModel
+
+logger = logging.getLogger("scaffold_router")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 
-class Pipeline:
-    class Valves(BaseModel):
-        api_key: str = ""
-        orchestrator_url: str = "http://scaffold-orchestrator:8000"
-        dag_timeout: int = 3600          # seconds to wait for DAG generation
-        keepalive_interval: int = 10    # seconds between keepalive dots
-        triage_model: str = "qwen3:4b"
-        triage_timeout: int = 3600       # seconds to wait for triage model response
-        ollama_url: str = "http://172.18.0.1:11434"
-        # --- Model Valves (sent to orchestrator as overrides) ---
-        model_general: str = "qwen3-vl:235b-instruct-cloud"
-        model_verifier: str = "qwen2.5:7b"
-        model_coder: str = "qwen2.5-coder:7b"
-        model_embedder: str = "qwen3-embedding:8b"
-        model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-        model_router: str = "qwen3:4b"
-        model_fallback: str = "qwen3.5:latest"
-        model_cloud_alt: str = "qwen3.5:397b-cloud"
+# --------------------------------------------------------------------
+# Module-level prompts (#8.13)
+# --------------------------------------------------------------------
 
-    def __init__(self):
-        self.id = "scaffold_router"
-        self.name = "Scaffold Router"
-        self.valves = self.Valves()
-
-    def _model_overrides(self) -> dict:
-        """Build model overrides dict from current valve values."""
-        return {
-            "model_general": self.valves.model_general,
-            "model_verifier": self.valves.model_verifier,
-            "model_coder": self.valves.model_coder,
-            "model_embedder": self.valves.model_embedder,
-            "model_reranker": self.valves.model_reranker,
-            "model_router": self.valves.model_router,
-            "model_fallback": self.valves.model_fallback,
-            "model_cloud_alt": self.valves.model_cloud_alt,
-        }
-
-    # ------------------------------------------------------------------
-    # Triage: lightweight conversational phase before workflow launch
-    # ------------------------------------------------------------------
-    TRIAGE_SYSTEM_PROMPT = """You are a hands-on project planning assistant for Scaffold Engine. Respond ONLY in English.
+TRIAGE_SYSTEM_PROMPT = """You are a hands-on project planning assistant for Scaffold Engine. Respond ONLY in English.
 The user has an idea they want to build. Your job is to actively help them
 shape it into a clear, actionable scope — not just ask questions.
 
@@ -109,9 +72,86 @@ and tell the user: "Type `/go` when you're ready to launch."
 
 Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to."""
 
+
+SYNTHESIS_SYSTEM_PROMPT = (
+    "You extract a project description from a planning conversation. "
+    "Respond ONLY in English. "
+    "Write 3-6 plain sentences describing what will be built, using only "
+    "details the user confirmed. Be specific: include technologies, "
+    "components, architecture, and goals. Write as a direct project "
+    "description — not 'the user wants' but 'Build a...' or 'Set up a...'. "
+    "No preamble, no markdown, no labels, no meta-text like 'type /go'."
+)
+
+
+class Pipeline:
+    class Valves(BaseModel):
+        api_key: str = ""
+        orchestrator_url: str = "http://scaffold-orchestrator:8000"
+
+        # --- Consolidated timeouts (#8.8) ---
+        request_timeout: int = 30     # quick JSON endpoints
+        stream_timeout: int = 3600    # SSE + long-poll LLM endpoints
+        triage_timeout: int = 3600    # direct Ollama calls
+        # Legacy alias (migrated to stream_timeout on init if non-default)
+        dag_timeout: int = 3600
+
+        # SSE cadence & per-read timeout & stall threshold multiplier source
+        keepalive_interval: int = 10
+
+        # Triage
+        triage_model: str = "qwen3:4b"
+        ollama_url: str = "http://172.18.0.1:11434"
+
+        # Model overrides
+        model_general: str = "qwen3-vl:235b-instruct-cloud"
+        model_verifier: str = "qwen2.5:7b"
+        model_coder: str = "qwen2.5-coder:7b"
+        model_embedder: str = "qwen3-embedding:8b"
+        model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
+        model_router: str = "qwen3:4b"
+        model_fallback: str = "qwen3.5:latest"
+        model_cloud_alt: str = "qwen3.5:397b-cloud"
+
+    _MODEL_ROLES = (
+        "model_general", "model_verifier", "model_coder",
+        "model_embedder", "model_reranker", "model_router",
+        "model_fallback", "model_cloud_alt",
+    )
+    _SINGLETON_ROLES = {"model_embedder", "model_reranker"}
+
+    def __init__(self):
+        self.id = "scaffold_router"
+        self.name = "Scaffold Router"
+        self.valves = self.Valves()
+        self.logger = logger
+
+        # Migrate legacy dag_timeout (#8.8 compat)
+        if self.valves.dag_timeout != 3600 and self.valves.stream_timeout == 3600:
+            self.logger.info(
+                "Migrating legacy dag_timeout (%s) → stream_timeout",
+                self.valves.dag_timeout,
+            )
+            self.valves.stream_timeout = self.valves.dag_timeout
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _auth_headers(self) -> dict:
+        return {"X-API-Key": self.valves.api_key}
+
+    def _model_overrides(self) -> dict:
+        """Build overrides dict, filtering out empty strings (#8.10)."""
+        out = {}
+        for role in self._MODEL_ROLES:
+            val = getattr(self.valves, role, "")
+            if val and val.strip():
+                out[role] = val
+        return out
+
     @staticmethod
     def _extract_text(content) -> str:
-        """Extract plain text from message content (string or multimodal list)."""
         if isinstance(content, str):
             return content
         if isinstance(content, list):
@@ -131,7 +171,6 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
         return str(content) if content else ""
 
     def _clean_messages(self, messages: List[dict]) -> List[dict]:
-        """Strip zero-width spaces and normalize content to plain text strings."""
         cleaned = []
         for m in messages:
             text = self._extract_text(m.get("content", ""))
@@ -140,14 +179,27 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                 cleaned.append({"role": m["role"], "content": text})
         return cleaned
 
+    @staticmethod
+    def _first_token(msg: str) -> str:
+        if not msg:
+            return ""
+        parts = msg.split(None, 1)
+        return parts[0].lower() if parts else ""
+
+    def _is_cmd(self, msg: str, *commands: str) -> bool:
+        """Word-boundary command match (#8.6): first token equals one of commands."""
+        first = self._first_token(msg)
+        return first in {c.lower() for c in commands}
+
+    # ------------------------------------------------------------------
+    # Triage / synthesis
+    # ------------------------------------------------------------------
+
     def _call_triage(self, messages: List[dict]) -> str:
-        """Call the lightweight triage model for conversational clarification."""
         clean = self._clean_messages(messages)
         payload = {
             "model": self.valves.triage_model,
-            "messages": [
-                {"role": "system", "content": self.TRIAGE_SYSTEM_PROMPT}
-            ] + clean,
+            "messages": [{"role": "system", "content": TRIAGE_SYSTEM_PROMPT}] + clean,
             "stream": False,
         }
         try:
@@ -158,78 +210,61 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
             )
             if r.status_code == 200:
                 return r.json()["choices"][0]["message"]["content"]
-            else:
-                return f"⚠️ Triage model error (HTTP {r.status_code}). You can skip triage by typing `/go` to launch directly."
+            return f"⚠️ Triage model error (HTTP {r.status_code}). Type `/go` to launch directly."
         except requests.exceptions.ConnectionError:
-            return "⚠️ Cannot reach Ollama for triage. You can skip triage by typing `/go` to launch directly."
+            return "⚠️ Cannot reach Ollama for triage. Type `/go` to launch directly."
         except Exception as e:
-            return f"⚠️ Triage error: {e}. You can skip triage by typing `/go` to launch directly."
+            self.logger.error("Triage call error: %s", e)
+            return f"⚠️ Triage error: {e}. Type `/go` to launch directly."
 
     def _synthesize_idea(self, messages: List[dict]) -> str:
-        """Use the triage model to extract the final agreed-upon idea from the conversation."""
-        clean_messages = self._clean_messages(messages)
-
-        if not any(m["role"] == "user" for m in clean_messages):
+        clean = self._clean_messages(messages)
+        if not any(m["role"] == "user" for m in clean):
             return ""
 
-        # Build a plain-text transcript instead of replaying chat turns.
-        # This avoids confusing the model with its own prior assistant outputs.
-        transcript_lines = []
-        for m in clean_messages:
-            label = "User" if m["role"] == "user" else "Assistant"
-            transcript_lines.append(f"{label}: {m['content']}")
-        transcript = "\n\n".join(transcript_lines)
-
-        synthesis_prompt = {
+        transcript = "\n\n".join(
+            f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}"
+            for m in clean
+        )
+        payload = {
             "model": self.valves.triage_model,
             "messages": [
-                {"role": "system", "content": (
-                    "You extract a project description from a planning conversation. "
-                    "Respond ONLY in English. "
-                    "Write 3-6 plain sentences describing what will be built, using only "
-                    "details the user confirmed. Be specific: include technologies, "
-                    "components, architecture, and goals. Write as a direct project "
-                    "description — not 'the user wants' but 'Build a...' or 'Set up a...'. "
-                    "No preamble, no markdown, no labels, no meta-text like 'type /go'."
-                )},
-                {"role": "user", "content": (
-                    "Here is the planning conversation. Extract the final agreed-upon plan:\n\n"
-                    f"{transcript}"
-                )}
+                {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+                {"role": "user", "content":
+                    f"Here is the planning conversation. Extract the final agreed-upon plan:\n\n{transcript}"},
             ],
             "stream": False,
         }
         try:
             r = requests.post(
                 f"{self.valves.ollama_url}/v1/chat/completions",
-                json=synthesis_prompt,
+                json=payload,
                 timeout=self.valves.triage_timeout,
             )
             if r.status_code == 200:
                 raw = r.json()["choices"][0]["message"]["content"].strip()
-                print(f"[scaffold_router] Synthesis raw ({len(raw)} chars): {raw[:200]}")
-                # Strip think/thinking tags the model may emit
+                self.logger.info("Synthesis raw (%d chars): %s", len(raw), raw[:200])
                 cleaned = re.sub(
                     r"<think(?:ing)?>.*?</think(?:ing)?>",
-                    "", raw, flags=re.DOTALL
+                    "", raw, flags=re.DOTALL,
                 ).strip()
                 if cleaned:
                     return cleaned
-                print(f"[scaffold_router] Synthesis cleaned to empty, using fallback")
+                self.logger.info("Synthesis cleaned to empty, using fallback")
             else:
-                print(f"[scaffold_router] Synthesis HTTP {r.status_code}: {r.text[:300]}")
+                self.logger.error("Synthesis HTTP %s: %s", r.status_code, r.text[:300])
         except Exception as e:
-            print(f"[scaffold_router] Synthesis error: {e}")
+            self.logger.error("Synthesis error: %s", e)
 
-        # Fallback: concatenate user messages only
-        user_texts = [m["content"] for m in clean_messages if m["role"] == "user"]
+        user_texts = [m["content"] for m in clean if m["role"] == "user"]
         fallback = " ".join(user_texts)
-        print(f"[scaffold_router] Synthesis fallback ({len(fallback)} chars): {fallback[:200]}")
+        self.logger.info("Synthesis fallback (%d chars): %s", len(fallback), fallback[:200])
         return fallback
 
     # ------------------------------------------------------------------
-    # Main entry point — sync GENERATOR (yields chunks)
+    # Main entry
     # ------------------------------------------------------------------
+
     def pipe(
         self,
         user_message: str,
@@ -238,561 +273,298 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
         body: dict,
     ) -> Generator[str, None, None]:
         msg = user_message.strip()
-        # Strip Open WebUI context injection to find the real user command
-        import re as _re
-        _ctx_match = _re.search(r'.*</context>\s*\n*(.*)', msg, _re.DOTALL)
-        if _ctx_match:
-            msg = _ctx_match.group(1).strip()
+        ctx_match = re.search(r".*</context>\s*\n*(.*)", msg, re.DOTALL)
+        if ctx_match:
+            msg = ctx_match.group(1).strip()
 
-        # Force streaming — pipe() always yields chunks
         body["stream"] = True
 
-        # --- /go or /run: synthesize conversation and launch pipeline ---
-        if msg.lower() == "/go" or msg.lower() == "/run" or msg.lower().startswith("/go ") or msg.lower().startswith("/run "):
-            # Build chat history (exclude the /go itself)
-            chat_history = [m for m in messages
-                            if not (m["role"] == "user"
-                                    and isinstance(m.get("content"), str)
-                                    and (m["content"].strip().lower().startswith("/go") or m["content"].strip().lower().startswith("/run")))]
+        # Word-boundary command dispatch (#8.6)
+        if self._is_cmd(msg, "/go", "/run"):
+            yield from self._handle_go(msg, messages); return
+        if self._is_cmd(msg, "/research/reply"):
+            yield from self._handle_research_reply(msg); return
+        if self._is_cmd(msg, "/research"):
+            yield from self._handle_research(msg); return
+        if self._is_cmd(msg, "/execute"):
+            yield from self._handle_execute(msg); return
+        if self._is_cmd(msg, "/confirm"):
+            yield from self._handle_confirm(msg); return
 
-            user_msgs_in_history = [m for m in chat_history if m["role"] == "user"]
-            if not user_msgs_in_history:
-                yield "Nothing to launch yet — describe your idea first, then type `/go`."
-                return
-
-            # Debug: show what we're working with
-            yield f"📋 Synthesizing from {len(user_msgs_in_history)} user message(s)...\n\n"
-
-            synthesized = self._synthesize_idea(chat_history)
-
-            # Guard: don't launch with empty idea
-            if not synthesized or len(synthesized.strip()) < 10:
-                yield (
-                    "⚠️ Synthesis produced an empty or too-short result. "
-                    "Here's what I captured from your messages:\n\n"
-                )
-                for i, m in enumerate(user_msgs_in_history, 1):
-                    content = m.get("content", "")
-                    if isinstance(content, list):
-                        content = " ".join(
-                            c.get("text", "") for c in content if c.get("type") == "text"
-                        )
-                    yield f"{i}. {content[:200]}\n"
-                yield "\nPlease try rephrasing your idea in a single message, then type `/go`."
-                return
-
-            yield f"> **Launching with:** {synthesized}\n\n---\n\n"
-            yield from self._auto_chain(synthesized)
-            return
-
-# --- /research/reply <session_id> <msg>: resume paused research ---
-        if msg.lower().startswith("/research/reply"):
-            parts = msg.split(None, 2)
-            if len(parts) < 3:
-                yield "Usage: `/research/reply <session_id> <your reply>`"
-                return
-            session_id = parts[1].strip()
-            user_reply = parts[2].strip()
-            if not user_reply:
-                yield "Reply cannot be empty."
-                return
-            yield f"▶️ Resuming session `{session_id}` ...\n\n"
-            yield from self._research_reply_and_stream(session_id, user_reply)
-            return
-
-# --- /research <topic>: autonomous research loop ---
-        if msg.lower().startswith("/research"):
-            parts = msg.split(None, 1)
-            if len(parts) < 2:
-                yield "Usage: `/research <topic>` — research a topic and ingest into the knowledge base.\n\nSources:\n- `/research <topic>` — web search via SearXNG\n- `/research <url>` — fetch and extract one URL\n- `/research github:owner/repo` — ingest README + docs + module docstrings\n- `/research openapi:<url>` — fetch OpenAPI/Swagger spec, one entry per endpoint\n\nOptions: append `--depth shallow|medium|deep` to control iteration count."
-                return
-            raw_args = parts[1]
-            # Parse --depth flag
-            depth = "medium"
-            import re as _depth_re
-            depth_match = _depth_re.search(r'--depth\s+(shallow|medium|deep)', raw_args)
-            if depth_match:
-                depth = depth_match.group(1)
-                raw_args = raw_args[:depth_match.start()].strip() + raw_args[depth_match.end():].strip()
-            topic = raw_args.strip()
-            if not topic:
-                yield "Usage: `/research <topic>`"
-                return
-            yield f"🔬 Researching: **{topic}** (depth: {depth})\n\n"
-            yield from self._research_and_stream(topic, depth)
-            return
-
-        # --- /execute <job_id>: stream full execution ---
-        if msg.lower().startswith("/execute"):
-            parts = msg.split()
-            if len(parts) < 2:
-                yield "Usage: `/execute <job_id>`"
-                return
-            job_id = parts[1]
-            headers = {"X-API-Key": self.valves.api_key}
-            yield f"Executing all nodes for job `{job_id}`...\n\n"
-            yield from self._execute_and_stream(job_id, 0, headers)
-            return
-
-        # --- /confirm <job_id> [feedback]: Phase 2 → auto-chain to /dag → /execute/all ---
-        if msg.lower().startswith("/confirm"):
-            parts = msg.split(None, 2)
-            if len(parts) < 2:
-                yield "Usage: `/confirm <job_id> [feedback]`"
-                return
-            job_id = parts[1]
-            headers = {"X-API-Key": self.valves.api_key}
-            payload = {"job_id": job_id, "model_overrides": self._model_overrides()}
-            if len(parts) > 2:
-                payload["feedback"] = parts[2]
-
-            yield "🔬 Starting research and knowledge ingestion — this may take several minutes on CPU...\n\n"
-
-            # Phase 2: /ideate/confirm (long-running — ~10 min on CPU)
-            confirm_result = [None]
-            confirm_error = [None]
-
-            def _call_confirm():
-                try:
-                    confirm_result[0] = requests.post(
-                        f"{self.valves.orchestrator_url}/ideate/confirm",
-                        json=payload,
-                        headers=headers,
-                        timeout=3600,
-                    )
-                except Exception as e:
-                    confirm_error[0] = e
-
-            t = threading.Thread(target=_call_confirm, daemon=True)
-            t.start()
-            while t.is_alive():
-                time.sleep(self.valves.keepalive_interval)
-                if t.is_alive():
-                    yield "\u200b"
-            t.join()
-
-            if confirm_error[0]:
-                yield f"\n⚠️ Research phase error: {confirm_error[0]}"
-                return
-
-            r = confirm_result[0]
-            if r is None:
-                yield "\n⚠️ No response from research phase."
-                return
-            if r.status_code >= 400:
-                try:
-                    err = r.json().get("message") or r.json().get("detail") or r.text[:200]
-                except Exception:
-                    err = r.text[:200]
-                yield f"\n⚠️ Research phase failed: {err}"
-                return
-
-            yield "\n✅ Research complete — generating execution plan...\n\n"
-
-            # DAG generation
-            dag_result = [None]
-            dag_error = [None]
-
-            def _call_dag():
-                try:
-                    dag_result[0] = requests.post(
-                        f"{self.valves.orchestrator_url}/dag",
-                        json={"job_id": job_id, "model_overrides": self._model_overrides()},
-                        headers=headers,
-                        timeout=self.valves.dag_timeout,
-                    )
-                except Exception as e:
-                    dag_error[0] = e
-
-            t = threading.Thread(target=_call_dag, daemon=True)
-            t.start()
-            while t.is_alive():
-                time.sleep(self.valves.keepalive_interval)
-                if t.is_alive():
-                    yield "\u200b"
-            t.join()
-
-            if dag_error[0]:
-                yield f"\n⚠️ DAG generation error: {dag_error[0]}"
-                return
-
-            r = dag_result[0]
-            if r is None:
-                yield "\n⚠️ No response from DAG generation."
-                return
-            if r.status_code >= 400:
-                yield f"\n⚠️ DAG generation failed (HTTP {r.status_code})."
-                return
-
-            try:
-                dag_data = r.json()
-                num_nodes = dag_data.get("task_count", len(dag_data.get("tasks", [])))
-            except (ValueError, KeyError):
-                yield "\n⚠️ Unexpected response from DAG generation."
-                return
-
-            yield f"📋 Execution plan ready — running {num_nodes} steps...\n\n"
-            yield from self._execute_and_stream(job_id, num_nodes, headers)
-            return
-
-        # --- All other slash commands dispatch to _handle_command ---
         if msg.startswith("/"):
             result = self._handle_command(msg)
             if result:
                 yield result
             return
 
-# ------------------------------------------------------------------
-    # /research: SSE consumer for research agent
+        yield self._call_triage(messages)
+
     # ------------------------------------------------------------------
-    def _research_reply_and_stream(
-        self, session_id: str, user_reply: str
-    ) -> Generator[str, None, None]:
-        """Delegate to _research_and_stream but POST to /research/reply."""
-        yield from self._research_and_stream_raw(
-            url_path="/research/reply",
-            body={
-                "session_id": session_id,
-                "reply": user_reply,
-                "model_overrides": self._model_overrides(),
-            },
-        )
+    # Generator command handlers
+    # ------------------------------------------------------------------
 
-    def _research_and_stream(
-        self, topic: str, depth: str = "medium"
-    ) -> Generator[str, None, None]:
-        yield from self._research_and_stream_raw(
-            url_path="/research",
-            body={
-                "topic": topic,
-                "depth": depth,
-                "model_overrides": self._model_overrides(),
-            },
-        )
-
-    def _research_and_stream_raw(
-        self, url_path: str, body: dict
-    ) -> Generator[str, None, None]:
-        headers = {"X-API-Key": self.valves.api_key}
-
-        try:
-            r = requests.post(
-                f"{self.valves.orchestrator_url}{url_path}",
-                json=body,
-                headers=headers,
-                stream=True,
-                timeout=(10, None),
+    def _handle_go(self, msg: str, messages: List[dict]) -> Generator[str, None, None]:
+        chat_history = [
+            m for m in messages
+            if not (
+                m["role"] == "user"
+                and isinstance(m.get("content"), str)
+                and self._is_cmd(m["content"], "/go", "/run")
             )
-        except requests.exceptions.ConnectionError:
-            yield "⚠️ Cannot reach orchestrator. Is it running?"
-            return
-        except Exception as e:
-            yield f"⚠️ Error starting research: {e}"
+        ]
+        user_msgs = [m for m in chat_history if m["role"] == "user"]
+        if not user_msgs:
+            yield "Nothing to launch yet — describe your idea first, then type `/go`."
             return
 
+        yield f"📋 Synthesizing from {len(user_msgs)} user message(s)...\n\n"
+        synthesized = self._synthesize_idea(chat_history)
+
+        if not synthesized or len(synthesized.strip()) < 10:
+            yield ("⚠️ Synthesis produced an empty or too-short result. "
+                   "Here's what I captured from your messages:\n\n")
+            for i, m in enumerate(user_msgs, 1):
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(c.get("text", "") for c in content if c.get("type") == "text")
+                yield f"{i}. {content[:200]}\n"
+            yield "\nPlease try rephrasing your idea in a single message, then type `/go`."
+            return
+
+        yield f"> **Launching with:** {synthesized}\n\n---\n\n"
+        yield from self._auto_chain(synthesized)
+
+    def _handle_research_reply(self, msg: str) -> Generator[str, None, None]:
+        parts = msg.split(None, 2)
+        if len(parts) < 3:
+            yield "Usage: `/research/reply <session_id> <your reply>`"
+            return
+        session_id = parts[1].strip()
+        user_reply = parts[2].strip()
+        if not user_reply:
+            yield "Reply cannot be empty."
+            return
+        yield f"▶️ Resuming session `{session_id}` ...\n\n"
+        yield from self._research_reply_and_stream(session_id, user_reply)
+
+    def _handle_research(self, msg: str) -> Generator[str, None, None]:
+        parts = msg.split(None, 1)
+        if len(parts) < 2:
+            yield ("Usage: `/research <topic>` — research a topic and ingest.\n\n"
+                   "Sources:\n"
+                   "- `/research <topic>` — web search via SearXNG\n"
+                   "- `/research <url>` — fetch and extract one URL\n"
+                   "- `/research github:owner/repo` — ingest README + docs\n"
+                   "- `/research openapi:<url>` — ingest OpenAPI/Swagger spec\n\n"
+                   "Options: `--depth shallow|medium|deep` to control iteration count.")
+            return
+        raw_args = parts[1]
+        depth = "medium"
+        m = re.search(r"--depth\s+(shallow|medium|deep)", raw_args)
+        if m:
+            depth = m.group(1)
+            raw_args = (raw_args[:m.start()] + raw_args[m.end():]).strip()
+        topic = raw_args.strip()
+        if not topic:
+            yield "Usage: `/research <topic>`"
+            return
+        yield f"🔬 Researching: **{topic}** (depth: {depth})\n\n"
+        yield from self._research_and_stream(topic, depth)
+
+    def _handle_execute(self, msg: str) -> Generator[str, None, None]:
+        parts = msg.split()
+        if len(parts) < 2:
+            yield "Usage: `/execute <job_id>`"
+            return
+        job_id = parts[1]
+        yield f"Executing all nodes for job `{job_id}`...\n\n"
+        yield from self._execute_and_stream(job_id, 0)
+
+    def _handle_confirm(self, msg: str) -> Generator[str, None, None]:
+        parts = msg.split(None, 2)
+        if len(parts) < 2:
+            yield "Usage: `/confirm <job_id> [feedback]`"
+            return
+        job_id = parts[1]
+        payload = {"job_id": job_id, "model_overrides": self._model_overrides()}
+        if len(parts) > 2:
+            payload["feedback"] = parts[2]
+
+        yield "🔬 Starting research and knowledge ingestion — this may take several minutes on CPU...\n\n"
+
+        ok, res = yield from self._post_with_keepalive(
+            f"{self.valves.orchestrator_url}/ideate/confirm",
+            payload, self.valves.stream_timeout,
+        )
+        if not ok:
+            yield f"\n⚠️ Research phase error: {res}"
+            return
+        r = res
         if r.status_code >= 400:
             try:
-                err = r.json().get("detail", r.text[:200])
+                err = r.json().get("message") or r.json().get("detail") or r.text[:200]
             except Exception:
                 err = r.text[:200]
-            yield f"⚠️ Research failed: {err}"
+            yield f"\n⚠️ Research phase failed: {err}"
             return
 
-        # SSE reader thread (same pattern as _execute_and_stream)
-        q = queue.Queue()
+        yield "\n✅ Research complete — generating execution plan...\n\n"
 
-        def _sse_reader():
+        ok, res = yield from self._post_with_keepalive(
+            f"{self.valves.orchestrator_url}/dag",
+            {"job_id": job_id, "model_overrides": self._model_overrides()},
+            self.valves.stream_timeout,
+        )
+        if not ok:
+            yield f"\n⚠️ DAG generation error: {res}"
+            return
+        r = res
+        if r.status_code >= 400:
+            yield f"\n⚠️ DAG generation failed (HTTP {r.status_code})."
+            return
+        try:
+            dag_data = r.json()
+            num_nodes = dag_data.get("task_count", len(dag_data.get("tasks", [])))
+        except (ValueError, KeyError):
+            yield "\n⚠️ Unexpected response from DAG generation."
+            return
+
+        yield f"📋 Execution plan ready — running {num_nodes} steps...\n\n"
+        yield from self._execute_and_stream(job_id, num_nodes)
+
+    # ------------------------------------------------------------------
+    # Backward-compat aliases (older tests reference these method names)
+    # ------------------------------------------------------------------
+
+    def _research_and_stream(self, topic: str, depth: str = "medium"):
+        yield from self._research_and_stream_raw(
+            "/research",
+            {"topic": topic, "depth": depth,
+             "model_overrides": self._model_overrides()},
+        )
+
+    def _research_reply_and_stream(self, session_id: str, user_reply: str):
+        yield from self._research_and_stream_raw(
+            "/research/reply",
+            {"session_id": session_id, "reply": user_reply,
+             "model_overrides": self._model_overrides()},
+        )
+
+    # ------------------------------------------------------------------
+    # Long-poll with keepalive (DRY helper, #8.7)
+    # ------------------------------------------------------------------
+
+    def _post_with_keepalive(
+        self, url: str, payload: dict, timeout: int,
+    ):
+        """Generator: yields '\\u200b' every keepalive_interval until POST returns.
+        Terminates with `return (ok, response_or_exception)`."""
+        result = [None]
+        error = [None]
+
+        def _call():
             try:
-                event_type = None
-                data_buffer = ""
-                for raw_line in r.iter_lines(decode_unicode=True):
-                    if raw_line is None:
-                        continue
-                    line = raw_line.strip() if raw_line else ""
-                    if line == "":
-                        if event_type and data_buffer:
-                            q.put(("event", event_type, data_buffer))
-                        event_type = None
-                        data_buffer = ""
-                        continue
-                    if line.startswith("event:"):
-                        event_type = line[6:].strip()
-                    elif line.startswith("data:"):
-                        data_buffer += line[5:].strip()
-                if event_type and data_buffer:
-                    q.put(("event", event_type, data_buffer))
-                q.put(("done", None, None))
-            except Exception as e:
-                q.put(("error", str(e), None))
-            finally:
-                r.close()
-
-        reader_thread = threading.Thread(target=_sse_reader, daemon=True)
-        reader_thread.start()
-
-        while True:
-            try:
-                msg_type, field1, field2 = q.get(timeout=self.valves.keepalive_interval)
-            except queue.Empty:
-                yield "\u200b"
-                continue
-
-            if msg_type == "error":
-                yield f"\n⚠️ Connection lost during research: {field1}"
-                return
-            if msg_type == "done":
-                break
-
-            event_type = field1
-            data = field2
-
-            try:
-                payload = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-
-            # Render research SSE events
-            if event_type == "heartbeat":
-                yield "\u200b"
-                continue
-            if event_type == "research_started":
-                yield f"📊 Depth: {payload.get('depth', '?')} | Max iterations: {payload.get('max_iterations', '?')}\n\n"
-
-            elif event_type == "decomposition_complete":
-                facets = payload.get("facets", [])
-                yield f"🧩 Topic decomposed into {len(facets)} facets: {', '.join(facets)}\n"
-                yield f"   Complexity: {payload.get('complexity', '?')} | Queries: {payload.get('query_count', '?')}\n\n"
-
-            elif event_type == "iteration_started":
-                iteration = payload.get("iteration", "?")
-                yield f"--- **Iteration {iteration}** ---\n"
-
-            elif event_type == "search_complete":
-                yield f"🔍 Found {payload.get('results_found', 0)} new results ({payload.get('total_urls', 0)} total URLs searched)\n"
-
-            elif event_type == "extraction_complete":
-                yield f"📝 Extracted {payload.get('entries_extracted', 0)} knowledge entries\n"
-
-            elif event_type == "ingestion_complete":
-                ingested = payload.get("entries_ingested", 0)
-                rejected = payload.get("total_rejected", 0)
-                yield f"💾 Ingested {ingested} entries into Milvus ({rejected} duplicates rejected total)\n"
-
-            elif event_type == "iteration_complete":
-                yield "\n"
-
-            elif event_type == "gap_analysis":
-                coverage = payload.get("coverage_pct", "?")
-                gaps = payload.get("gap_facets", [])
-                yield f"📈 Coverage: {coverage}%"
-                if gaps:
-                    yield f" | Gaps: {', '.join(gaps)}"
-                yield "\n"
-                assessment = payload.get("assessment", "")
-                if assessment:
-                    yield f"   {assessment}\n"
-                yield "\n"
-
-            elif event_type == "convergence":
-                reason = payload.get("reason", "")
-                yield f"✅ Research converged: {reason}\n\n"
-
-            elif event_type == "awaiting_reply":
-                sid = payload.get("session_id", "?")
-                question = payload.get("question", "")
-                expires = payload.get("expires_in_seconds", 3600)
-                mins = expires // 60
-                yield "---\n\n"
-                yield "⏸️ **Research paused — need your input**\n\n"
-                yield f"**Question:** {question}\n\n"
-                yield f"**Session:** `{sid}` (expires in {mins} min)\n\n"
-                yield "**To continue:** type `/research/reply " + sid + " <your answer>`\n"
-                yield "**To abandon:** do nothing — the session auto-cancels on expiry.\n\n"
-                return
-
-            elif event_type == "research_resumed":
-                sid = payload.get("session_id", "?")
-                reply = payload.get("reply", "")
-                it = payload.get("iteration", "?")
-                yield f"▶️ **Resuming session** `{sid}` from iteration {it}\n"
-                yield f"   Reply injected: _{reply}_\n\n"
-
-            elif event_type == "research_complete":
-                total = payload.get("total_ingested", 0)
-                entries = payload.get("total_entries", 0)
-                iterations = payload.get("iterations", 0)
-                duration = payload.get("duration_ms", 0)
-                mins = duration / 60000
-
-                yield "---\n\n"
-                yield f"**Research Complete**\n\n"
-                yield f"- **Topic:** {payload.get('topic', '?')}\n"
-                yield f"- **Entries extracted:** {entries}\n"
-                yield f"- **Ingested to Milvus:** {total}\n"
-                yield f"- **Iterations:** {iterations}\n"
-                yield f"- **Duration:** {mins:.1f} min\n\n"
-
-                summary = payload.get("summary", "")
-                if summary:
-                    yield f"**Summary:**\n\n{summary}\n\n"
-                yield "---\n\n"
-                yield "**Next steps:**\n\n"
-                yield "- Type `/go` to build a project plan from this research\n"
-                yield "- Type `/research <subtopic> --depth deep` to explore further\n"
-                yield "- Type `/rag <query>` to query what was ingested\n"
-
-        reader_thread.join(timeout=5)
-
-    def _auto_chain(self, message: str) -> Generator[str, None, None]:
-        headers = {"X-API-Key": self.valves.api_key}
-
-        # ---- Phase 1: /ideate (can take ~500s, yield keepalive dots) ----
-        yield "Let me think about this"
-
-        ideas_result = [None]
-        ideas_error = [None]
-
-        def _call_ideas():
-            try:
-                ideas_result[0] = requests.post(
-                    f"{self.valves.orchestrator_url}/ideate",
-                    json={"idea": message, "model_overrides": self._model_overrides()},
-                    headers=headers,
-                    timeout=3600,
+                result[0] = requests.post(
+                    url, json=payload, headers=self._auth_headers(), timeout=timeout,
                 )
             except Exception as e:
-                ideas_error[0] = e
+                error[0] = e
 
-        t = threading.Thread(target=_call_ideas, daemon=True)
+        t = threading.Thread(target=_call, daemon=True)
         t.start()
-
         while t.is_alive():
             time.sleep(self.valves.keepalive_interval)
             if t.is_alive():
                 yield "\u200b"
-
         t.join()
 
-        if ideas_error[0]:
-            if isinstance(ideas_error[0], requests.exceptions.ConnectionError):
-                yield "\nI couldn't reach the analysis engine. It may be restarting — please try again in a moment."
-            elif isinstance(ideas_error[0], requests.exceptions.Timeout):
-                yield "\n⚠️ The analysis engine is taking too long to respond. Please try again in a moment."
+        if error[0] is not None:
+            return (False, error[0])
+        if result[0] is None:
+            return (False, "no response")
+        return (True, result[0])
+
+    # ------------------------------------------------------------------
+    # /go auto-chain
+    # ------------------------------------------------------------------
+
+    def _auto_chain(self, message: str) -> Generator[str, None, None]:
+        yield "Let me think about this"
+        ok, res = yield from self._post_with_keepalive(
+            f"{self.valves.orchestrator_url}/ideate",
+            {"idea": message, "model_overrides": self._model_overrides()},
+            self.valves.stream_timeout,
+        )
+        if not ok:
+            err = res
+            if isinstance(err, requests.exceptions.ConnectionError):
+                yield "\nI couldn't reach the analysis engine. It may be restarting — please try again."
+            elif isinstance(err, requests.exceptions.Timeout):
+                yield "\n⚠️ The analysis engine timed out. Please try again."
             else:
-                yield f"\n⚠️ Error: {ideas_error[0]}"
+                yield f"\n⚠️ Error: {err}"
             return
 
-        r = ideas_result[0]
-        if r is None:
-            yield "\n⚠️ No response from the analysis engine."
-            return
-
+        r = res
         if r.status_code >= 400:
-            yield "\nI had trouble understanding that request. Could you rephrase it?"
+            yield "\nI had trouble with that request. Could you rephrase it?"
             return
-
         try:
-            ideas_data = r.json()
-            job_id = ideas_data["job_id"]
+            data = r.json()
+            job_id = data["job_id"]
         except (ValueError, KeyError) as e:
-            yield f"\n⚠️ Unexpected response from the analysis engine: {e}"
+            yield f"\n⚠️ Unexpected response: {e}"
             return
 
-        brief = ideas_data.get("refined_brief", {})
+        brief = data.get("refined_brief", {})
         title = brief.get("title", "") if isinstance(brief, dict) else ""
-        if title:
-            yield f"\n**{title}**\n\n"
-        else:
-            yield "\n\n"
+        yield (f"\n**{title}**\n\n" if title else "\n\n")
 
-        # ---- Check for ideation workflow confirmation ----
-        if ideas_data.get("status") == "awaiting_confirmation":
-            feasibility = ideas_data.get("feasibility", {})
-            is_feasible = feasibility.get("feasible", True)
-            confidence = feasibility.get("confidence", 0)
-
-            # Brief summary
-            description = brief.get("description", "") if isinstance(brief, dict) else ""
-            if description:
-                yield f"{description}\n\n"
-
-            yield f"**Feasibility:** {chr(9989) if is_feasible else chr(9888)} ({confidence:.0%} confidence)\n\n"
-
-            risks = feasibility.get("risks", [])
+        if data.get("status") == "awaiting_confirmation":
+            feas = data.get("feasibility", {})
+            is_feasible = feas.get("feasible", True)
+            confidence = feas.get("confidence", 0)
+            desc = brief.get("description", "") if isinstance(brief, dict) else ""
+            if desc:
+                yield f"{desc}\n\n"
+            yield f"**Feasibility:** {'✅' if is_feasible else '⚠️'} ({confidence:.0%} confidence)\n\n"
+            risks = feas.get("risks", []) or []
             if risks:
                 yield "**Risks to consider:**\n"
                 for risk in risks:
                     yield f"- {risk}\n"
                 yield "\n"
-
-            clarifications = feasibility.get("clarifications_needed", [])
-            if clarifications:
+            clar = feas.get("clarifications_needed", []) or []
+            if clar:
                 yield "**A few things that could be more specific:**\n"
-                for c in clarifications:
+                for c in clar:
                     yield f"- **{c}**\n"
                 yield "\n"
-
-            yield "---\n\n"
-            yield "**What would you like to do?**\n\n"
+            yield "---\n\n**What would you like to do?**\n\n"
             yield f"- **Proceed as-is:** Type `/confirm {job_id}`\n"
-            yield f"- **Proceed with changes:** Type `/confirm {job_id}` followed by your adjustments — for example:\n"
-            yield f"  `/confirm {job_id} focus on Docker networking only, skip the storage setup`\n"
+            yield f"- **Proceed with changes:** `/confirm {job_id} <your adjustments>`\n"
             yield f"- **Start over:** Describe a new idea and type `/go` again\n"
             return
 
-        # ---- Phase 2: /dag (long wait ~200s, yield keepalive dots) ----
         yield "Planning my approach"
-
-        dag_result = [None]   # mutable container for thread result
-        dag_error = [None]
-
-        def _call_dag():
-            try:
-                dag_result[0] = requests.post(
-                    f"{self.valves.orchestrator_url}/dag",
-                    json={"job_id": job_id, "model_overrides": self._model_overrides()},
-                    headers=headers,
-                    timeout=self.valves.dag_timeout,
-                )
-            except Exception as e:
-                dag_error[0] = e
-
-        t = threading.Thread(target=_call_dag, daemon=True)
-        t.start()
-
-        # Yield keepalive dots while waiting
-        elapsed = 0
-        while t.is_alive():
-            time.sleep(self.valves.keepalive_interval)
-            elapsed += self.valves.keepalive_interval
-            if t.is_alive():
-                yield "\u200b"
-            # Safety: don't wait longer than dag_timeout + buffer
-            if elapsed > self.valves.dag_timeout + 30:
-                yield "\n\nPlanning is taking longer than expected. Please try again with a simpler question."
-                return
-
-        t.join()
-
-        # Check for errors
-        if dag_error[0]:
-            if isinstance(dag_error[0], requests.exceptions.Timeout):
-                yield "\n\nPlanning is taking longer than expected. Please try again with a simpler question."
-            elif isinstance(dag_error[0], requests.exceptions.ConnectionError):
-                yield "\n\nI couldn't reach the analysis engine. It may be restarting — please try again in a moment."
+        ok, res = yield from self._post_with_keepalive(
+            f"{self.valves.orchestrator_url}/dag",
+            {"job_id": job_id, "model_overrides": self._model_overrides()},
+            self.valves.stream_timeout,
+        )
+        if not ok:
+            err = res
+            if isinstance(err, requests.exceptions.Timeout):
+                yield "\n\nPlanning is taking longer than expected. Please simplify."
+            elif isinstance(err, requests.exceptions.ConnectionError):
+                yield "\n\nCouldn't reach the engine. Try again in a moment."
             else:
-                yield f"\n\n⚠️ Error during planning: {dag_error[0]}"
+                yield f"\n\n⚠️ Error during planning: {err}"
             return
-
-        r = dag_result[0]
-        if r is None:
-            yield "\n\n⚠️ No response from DAG generation."
-            return
-
+        r = res
         if r.status_code >= 400:
-            yield "\n\nI wasn't able to plan an approach for that question. Please try rephrasing or simplifying."
+            yield "\n\nI wasn't able to plan that. Please rephrase or simplify."
             return
-
         try:
             dag_data = r.json()
             num_nodes = dag_data.get("task_count", len(dag_data.get("tasks", [])))
@@ -801,130 +573,280 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
             return
 
         yield f"\nReady — executing {num_nodes} steps...\n\n"
-
-        # ---- Phase 3: /execute/all (SSE stream) ----
-        yield from self._execute_and_stream(job_id, num_nodes, headers)
+        yield from self._execute_and_stream(job_id, num_nodes)
 
     # ------------------------------------------------------------------
-    # SSE consumer for /execute/all
+    # SSE reader helper (#8.7, #8.12)
     # ------------------------------------------------------------------
-    def _execute_and_stream(
-        self, job_id: str, total_nodes: int, headers: dict
-    ) -> Generator[str, None, None]:
 
-        # --- Connect and validate ---
+    def _stream_sse_to_queue(
+        self, url: str, payload: dict, event_queue: queue.Queue,
+    ) -> None:
+        """POST `url` and stream SSE events into event_queue.
+
+        Queue messages (tuples of length 3):
+          ("connected",    None, None)
+          ("http_error",   status_code, body_text)
+          ("event",        event_type, data_string)
+          ("heartbeat",    None, None)                  # on per-read timeout
+          ("event", "stream_stalled", json_payload)     # after 5x keepalive silent
+          ("error",        exception_str, None)
+          ("done",         None, None)
+        """
+        keep = self.valves.keepalive_interval
+        max_idle = 5 * keep
+
         try:
             r = requests.post(
-                f"{self.valves.orchestrator_url}/execute/all",
-                json={"job_id": job_id, "model_overrides": self._model_overrides()},
-                headers=headers,
-                stream=True,
-                timeout=(10, None),
+                url, json=payload, headers=self._auth_headers(),
+                stream=True, timeout=(10, keep),
             )
-        except requests.exceptions.ConnectionError:
-            yield "I couldn't reach the analysis engine. It may be restarting — please try again in a moment."
-            return
+        except requests.exceptions.ConnectionError as e:
+            event_queue.put(("error", f"cannot reach orchestrator: {e}", None)); return
         except Exception as e:
-            yield f"⚠️ Error starting execution: {e}"
-            return
+            event_queue.put(("error", str(e), None)); return
 
-        if r.status_code == 409:
-            yield "That question is already being processed. Please wait for it to complete."
-            return
         if r.status_code >= 400:
-            yield f"⚠️ Execution failed (HTTP {r.status_code}). Please try again."
-            return
-
-        # --- Read SSE in a background thread, yield from main thread ---
-        q = queue.Queue()
-
-        def _sse_reader():
-            """Reads SSE lines and puts parsed events on the queue."""
             try:
-                event_type = None
-                data_buffer = ""
-                for raw_line in r.iter_lines(decode_unicode=True):
-                    if raw_line is None:
-                        continue
-                    line = raw_line.strip() if raw_line else ""
+                body_text = r.text[:400]
+            except Exception:
+                body_text = ""
+            event_queue.put(("http_error", r.status_code, body_text))
+            r.close(); return
 
-                    if line == "":
-                        if event_type and data_buffer:
-                            q.put(("event", event_type, data_buffer))
-                        event_type = None
-                        data_buffer = ""
-                        continue
+        event_queue.put(("connected", None, None))
 
-                    if line.startswith("event:"):
-                        event_type = line[6:].strip()
-                    elif line.startswith("data:"):
-                        data_buffer += line[5:].strip()
+        event_type = None
+        data_buffer = ""
+        idle_seconds = 0
 
-                # Flush remaining buffer
-                if event_type and data_buffer:
-                    q.put(("event", event_type, data_buffer))
-
-                q.put(("done", None, None))
-            except Exception as e:
-                q.put(("error", str(e), None))
-            finally:
+        try:
+            while True:
+                try:
+                    for raw_line in r.iter_lines(decode_unicode=True):
+                        idle_seconds = 0
+                        if raw_line is None:
+                            continue
+                        line = raw_line.strip() if raw_line else ""
+                        if line == "":
+                            if event_type and data_buffer:
+                                event_queue.put(("event", event_type, data_buffer))
+                            event_type = None
+                            data_buffer = ""
+                            continue
+                        if line.startswith("event:"):
+                            event_type = line[6:].strip()
+                        elif line.startswith("data:"):
+                            data_buffer += line[5:].strip()
+                    # Iterator exhausted — server closed cleanly
+                    if event_type and data_buffer:
+                        event_queue.put(("event", event_type, data_buffer))
+                    event_queue.put(("done", None, None))
+                    return
+                except requests.exceptions.ReadTimeout:
+                    idle_seconds += keep
+                    if idle_seconds >= max_idle:
+                        event_queue.put((
+                            "event", "stream_stalled",
+                            json.dumps({"idle_seconds": idle_seconds,
+                                        "max_idle": max_idle}),
+                        ))
+                        event_queue.put(("done", None, None))
+                        return
+                    event_queue.put(("heartbeat", None, None))
+                    continue
+        except Exception as e:
+            event_queue.put(("error", str(e), None))
+        finally:
+            try:
                 r.close()
+            except Exception:
+                pass
 
-        reader_thread = threading.Thread(target=_sse_reader, daemon=True)
-        reader_thread.start()
+    # ------------------------------------------------------------------
+    # SSE consumers
+    # ------------------------------------------------------------------
 
-        # --- Main thread: consume queue, yield to Open WebUI ---
-        failed_nodes = []
-        compiled_output = None
-        compile_status = None
+    def _research_and_stream_raw(
+        self, url_path: str, body: dict,
+    ) -> Generator[str, None, None]:
+        q = queue.Queue()
+        url = f"{self.valves.orchestrator_url}{url_path}"
+        reader = threading.Thread(
+            target=self._stream_sse_to_queue,
+            args=(url, body, q), daemon=True,
+        )
+        reader.start()
 
         while True:
             try:
-                msg_type, field1, field2 = q.get(timeout=10)
+                msg_type, f1, f2 = q.get(timeout=self.valves.keepalive_interval)
             except queue.Empty:
-                # No SSE event in 10s — yield invisible keepalive
-                yield "\u200b"
+                yield "\u200b"; continue
+
+            if msg_type == "connected":
                 continue
-
-            if msg_type == "error":
-                yield from self._recover_from_disconnect(job_id, headers)
+            if msg_type == "heartbeat":
+                yield "\u200b"; continue
+            if msg_type == "http_error":
+                try:
+                    err = json.loads(f2).get("detail", f2[:200])
+                except Exception:
+                    err = (f2 or "")[:200]
+                yield f"⚠️ Research failed (HTTP {f1}): {err}"
                 return
-
+            if msg_type == "error":
+                yield f"\n⚠️ Connection error during research: {f1}"
+                return
             if msg_type == "done":
                 break
 
-            # msg_type == "event"
-            event_type = field1
-            data = field2
+            event_type, data = f1, f2
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError:
+                continue
 
-            # Yield progress messages
+            if event_type == "heartbeat":
+                yield "\u200b"
+            elif event_type == "stream_stalled":
+                yield f"\n⚠️ **Stream stalled** — no data in {payload.get('idle_seconds','?')}s. Closing.\n"
+                return
+            elif event_type == "error":
+                yield from self._render_error_event(payload); return
+            elif event_type == "research_started":
+                yield f"📊 Depth: {payload.get('depth','?')} | Max iterations: {payload.get('max_iterations','?')}\n\n"
+            elif event_type == "decomposition_complete":
+                facets = payload.get("facets", [])
+                yield f"🧩 Decomposed into {len(facets)} facets: {', '.join(facets)}\n"
+                yield f"   Complexity: {payload.get('complexity','?')} | Queries: {payload.get('query_count','?')}\n\n"
+            elif event_type == "iteration_started":
+                yield f"--- **Iteration {payload.get('iteration','?')}** ---\n"
+            elif event_type == "search_complete":
+                yield f"🔍 Found {payload.get('results_found',0)} new results ({payload.get('total_urls',0)} URLs searched)\n"
+            elif event_type == "extraction_complete":
+                yield f"📝 Extracted {payload.get('entries_extracted',0)} entries\n"
+            elif event_type == "ingestion_complete":
+                yield f"💾 Ingested {payload.get('entries_ingested',0)} entries ({payload.get('total_rejected',0)} duplicates rejected)\n"
+            elif event_type == "iteration_complete":
+                yield "\n"
+            elif event_type == "gap_analysis":
+                yield f"📈 Coverage: {payload.get('coverage_pct','?')}%"
+                gaps = payload.get("gap_facets", [])
+                if gaps:
+                    yield f" | Gaps: {', '.join(gaps)}"
+                yield "\n"
+                if payload.get("assessment"):
+                    yield f"   {payload['assessment']}\n"
+                yield "\n"
+            elif event_type == "convergence":
+                yield f"✅ Converged: {payload.get('reason','')}\n\n"
+            elif event_type == "awaiting_reply":
+                sid = payload.get("session_id", "?")
+                mins = payload.get("expires_in_seconds", 3600) // 60
+                yield "---\n\n⏸️ **Research paused — need your input**\n\n"
+                yield f"**Question:** {payload.get('question','')}\n\n"
+                yield f"**Session:** `{sid}` (expires in {mins} min)\n\n"
+                yield f"**To continue:** type `/research/reply {sid} <your answer>`\n"
+                yield "**To abandon:** do nothing — the session auto-cancels on expiry.\n\n"
+                return
+            elif event_type == "research_resumed":
+                yield f"▶️ Resuming session `{payload.get('session_id','?')}` from iteration {payload.get('iteration','?')}\n"
+                yield f"   Reply injected: _{payload.get('reply','')}_\n\n"
+            elif event_type == "research_complete":
+                total = payload.get("total_ingested", 0)
+                entries = payload.get("total_entries", 0)
+                iterations = payload.get("iterations", 0)
+                mins = payload.get("duration_ms", 0) / 60000
+                yield "---\n\n**Research Complete**\n\n"
+                yield f"- **Topic:** {payload.get('topic','?')}\n"
+                yield f"- **Entries extracted:** {entries}\n"
+                yield f"- **Ingested:** {total}\n"
+                yield f"- **Iterations:** {iterations}\n"
+                yield f"- **Duration:** {mins:.1f} min\n\n"
+                if payload.get("summary"):
+                    yield f"**Summary:**\n\n{payload['summary']}\n\n"
+                yield "---\n\n**Next steps:**\n\n"
+                yield "- `/go` to build a project plan from this research\n"
+                yield "- `/research <subtopic> --depth deep` to explore further\n"
+                yield "- `/rag <query>` to query what was ingested\n"
+
+        reader.join(timeout=5)
+
+    def _execute_and_stream(
+        self, job_id: str, total_nodes: int,
+    ) -> Generator[str, None, None]:
+        q = queue.Queue()
+        url = f"{self.valves.orchestrator_url}/execute/all"
+        body = {"job_id": job_id, "model_overrides": self._model_overrides()}
+        reader = threading.Thread(
+            target=self._stream_sse_to_queue,
+            args=(url, body, q), daemon=True,
+        )
+        reader.start()
+
+        failed_nodes = []
+        compiled_output = None
+        compile_status = None
+        stalled = False
+
+        while True:
+            try:
+                msg_type, f1, f2 = q.get(timeout=self.valves.keepalive_interval)
+            except queue.Empty:
+                yield "\u200b"; continue
+
+            if msg_type == "connected":
+                continue
+            if msg_type == "heartbeat":
+                yield "\u200b"; continue
+            if msg_type == "http_error":
+                if f1 == 409:
+                    yield "That question is already being processed. Please wait."
+                    return
+                yield f"⚠️ Execution failed (HTTP {f1}). Please try again."
+                return
+            if msg_type == "error":
+                yield from self._recover_from_disconnect(job_id)
+                return
+            if msg_type == "done":
+                break
+
+            event_type, data = f1, f2
+            if event_type == "stream_stalled":
+                try:
+                    p = json.loads(data) if data else {}
+                except json.JSONDecodeError:
+                    p = {}
+                yield (f"\n⚠️ **Stream stalled** — no data for {p.get('idle_seconds','?')}s. "
+                       f"Execution may still be running; use `/results {job_id}` to check.\n")
+                stalled = True
+                continue
+
             yield from self._handle_sse_event(event_type, data, failed_nodes)
 
-            # Capture pipeline_complete data
             if event_type == "pipeline_complete":
                 try:
                     payload = json.loads(data)
                     compiled_output = payload.get("compiled_output", "")
                     if not compiled_output and payload.get("compiled_output_available"):
-                        compiled_output = self._poll_compiled_output(job_id, headers)
+                        compiled_output = self._poll_compiled_output(job_id)
                     compile_status = payload.get("compile_status", "complete")
-                    failed_nodes_list = payload.get("failed_nodes", [])
-                    if failed_nodes_list:
-                        failed_nodes.extend(failed_nodes_list)
+                    for fn in payload.get("failed_nodes", []) or []:
+                        failed_nodes.append(fn)
                 except json.JSONDecodeError:
                     pass
 
-        reader_thread.join(timeout=5)
+        reader.join(timeout=5)
+        if stalled:
+            return
 
-        # ---- Render final output ----
-        if compiled_output is not None and compiled_output:
+        if compiled_output:
             if compile_status == "partial" and failed_nodes:
                 yield f"\n⚠️ **Partial results** — {len(failed_nodes)} of {total_nodes} steps could not be completed:\n"
                 for fn in failed_nodes:
                     if isinstance(fn, dict):
-                        title = fn.get("title", fn.get("node_key", "?"))
-                        reason = fn.get("reason", "unknown")
-                        yield f"- **{title}**: {reason}\n"
+                        yield f"- **{fn.get('title', fn.get('node_key','?'))}**: {fn.get('reason','unknown')}\n"
                     else:
                         yield f"- {fn}\n"
                 yield "\n---\n\n"
@@ -932,32 +854,41 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
             else:
                 yield compiled_output
         else:
-            # Fallback: no pipeline_complete event — poll for result
             yield "\n⏳ Fetching final output...\n"
             time.sleep(3)
             try:
                 sr = requests.get(
                     f"{self.valves.orchestrator_url}/exec/status/{job_id}",
-                    headers=headers,
-                    timeout=15,
+                    headers=self._auth_headers(),
+                    timeout=self.valves.request_timeout,
                 )
                 if sr.status_code == 200:
-                    status_data = sr.json()
-                    fallback_output = status_data.get("compiled_output", "")
-                    if fallback_output:
-                        yield fallback_output
+                    fallback = sr.json().get("compiled_output", "")
+                    if fallback:
+                        yield fallback
                     else:
-                        yield "✅ All steps completed. No compiled output was returned — check `/exec status " + job_id + "` for details."
+                        yield f"✅ All steps completed. Use `/results {job_id}` for details."
                 else:
-                    yield "✅ All steps completed. Use `/exec status " + job_id + "` to view results."
+                    yield f"✅ All steps completed. Use `/results {job_id}` for details."
             except Exception:
-                yield "✅ All steps completed. Use `/exec status " + job_id + "` to view results."
+                yield f"✅ All steps completed. Use `/results {job_id}` for details."
 
     # ------------------------------------------------------------------
-    # Handle individual SSE events → yield progress messages
+    # SSE event renderers
     # ------------------------------------------------------------------
+
+    def _render_error_event(self, payload: dict) -> Generator[str, None, None]:
+        """Render an SSE `error` event (#8.2)."""
+        message = (payload.get("error") or payload.get("message")
+                   or payload.get("detail") or "unknown error")
+        tb = payload.get("traceback") or payload.get("stack_trace")
+        yield "\n❌ **Execution error:** "
+        yield f"{message}\n\n"
+        if tb:
+            yield f"```traceback\n{tb}\n```\n"
+
     def _handle_sse_event(
-        self, event_type: str, data: str, failed_nodes: list
+        self, event_type: str, data: str, failed_nodes: list,
     ) -> Generator[str, None, None]:
         try:
             payload = json.loads(data)
@@ -965,51 +896,38 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
             return
 
         if event_type == "node_start":
-            node_key = payload.get("node_key", "?")
-            title = payload.get("title", "")
-            tool = payload.get("tool", "")
-            yield f"🔄 Step {node_key}: {title} ({tool})...\n"
-
+            yield f"🔄 Step {payload.get('node_key','?')}: {payload.get('title','')} ({payload.get('tool','')})...\n"
         elif event_type == "node_done":
-            node_key = payload.get("node_key", "?")
-            yield f"✅ Step {node_key} complete.\n"
-
+            yield f"✅ Step {payload.get('node_key','?')} complete.\n"
         elif event_type == "node_failed":
-            node_key = payload.get("node_key", "?")
             reason = payload.get("error") or payload.get("verification_reason") or "unknown"
-            yield f"❌ Step {node_key} failed: {reason}\n"
+            yield f"❌ Step {payload.get('node_key','?')} failed: {reason}\n"
             failed_nodes.append(payload)
-
         elif event_type == "node_retry":
-            node_key = payload.get("node_key", "?")
-            retry_count = payload.get("retry_count", 0)
             title = payload.get("title", "")
-            yield f"🔄 Step {node_key}: Retrying{' — ' + title if title else ''} (attempt {retry_count})...\n"
-
+            yield f"🔄 Step {payload.get('node_key','?')}: Retrying{' — ' + title if title else ''} (attempt {payload.get('retry_count',0)})...\n"
         elif event_type == "blocked":
-            node_key = payload.get("node_key", "?")
-            blocked_by = payload.get("blocked_by", [])
-            yield f"⏸️ Step {node_key} blocked (waiting on: {', '.join(blocked_by)})\n"
-
+            yield f"⏸️ Step {payload.get('node_key','?')} blocked (waiting on: {', '.join(payload.get('blocked_by', []))})\n"
+        elif event_type == "error":
+            # #8.2 — bubble orchestrator error events to chat
+            yield from self._render_error_event(payload)
+            failed_nodes.append(payload)
         elif event_type == "pipeline_complete":
-            # Final output handled in _execute_and_stream after the loop
-            pass
+            pass  # final output handled after loop
 
     # ------------------------------------------------------------------
-    # Task 3: Recovery after SSE disconnect
+    # Recovery / polling
     # ------------------------------------------------------------------
-    def _recover_from_disconnect(
-        self, job_id: str, headers: dict
-    ) -> Generator[str, None, None]:
+
+    def _recover_from_disconnect(self, job_id: str) -> Generator[str, None, None]:
         yield "\n⏳ Connection interrupted — checking job status...\n"
-
         for attempt in range(3):
             time.sleep(5 if attempt == 0 else 10)
             try:
                 r = requests.get(
                     f"{self.valves.orchestrator_url}/exec/status/{job_id}",
-                    headers=headers,
-                    timeout=15,
+                    headers=self._auth_headers(),
+                    timeout=self.valves.request_timeout,
                 )
                 if r.status_code == 200:
                     data = r.json()
@@ -1017,37 +935,32 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
                     if status in ("completed", "done"):
                         compiled = data.get("compiled_output", "")
                         if compiled:
-                            yield f"✅ Job completed successfully.\n\n"
+                            yield "✅ Job completed successfully.\n\n"
                             yield compiled
                             return
-                        else:
-                            yield "✅ Job completed but no output was generated."
-                            return
+                        yield "✅ Job completed but no output was generated."
+                        return
             except Exception:
                 continue
+        yield (f"⚠️ Connection lost. Job `{job_id}` may still be running. "
+               f"Use `/results {job_id}` to check.")
 
-        yield (
-            f"⚠️ Connection to Scaffold Engine was lost during execution. "
-            f"Job {job_id} may still be running. "
-            f"You can check status later or try again."
-        )
-
-    # ------------------------------------------------------------------
-    # Slash command dispatcher (returns a single string)
-    # ------------------------------------------------------------------
-    def _poll_compiled_output(self, job_id: str, headers: dict) -> str:
-        """Fetch compiled_output via status endpoint when too large for SSE."""
+    def _poll_compiled_output(self, job_id: str) -> str:
         try:
             r = requests.get(
                 f"{self.valves.orchestrator_url}/exec/status/{job_id}",
-                headers=headers,
-                timeout=15,
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
             )
             if r.status_code == 200:
                 return r.json().get("compiled_output", "")
         except Exception:
             pass
         return ""
+
+    # ------------------------------------------------------------------
+    # Single-string command dispatcher
+    # ------------------------------------------------------------------
 
     def _handle_command(self, msg: str) -> str:
         parts = msg.split(None, 2)
@@ -1056,232 +969,191 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
         try:
             if cmd == "/help":
                 return self._help()
-            elif cmd == "/model":
+            if cmd == "/model":
                 return self._handle_model(msg)
-            elif cmd == "/schedule":
+            if cmd == "/schedule":
                 return self._handle_schedule(msg)
-            elif cmd == "/idea":
+            if cmd == "/results":          # #8.1
+                return self._handle_results(parts)
+            if cmd == "/idea":
                 if len(parts) < 2:
                     return "Usage: /idea <description>"
                 text = " ".join(parts[1:])
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/ideate",
                     json={"idea": text, "model_overrides": self._model_overrides()},
-                    headers={"X-API-Key": self.valves.api_key},
-                    timeout=3600,
+                    headers=self._auth_headers(),
+                    timeout=self.valves.stream_timeout,
                 )
                 return self._fmt(r)
-
-            elif cmd == "/dag":
+            if cmd == "/dag":
                 if len(parts) < 2:
                     return "Usage: /dag <job_id>"
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/dag",
                     json={"job_id": parts[1], "model_overrides": self._model_overrides()},
-                    headers={"X-API-Key": self.valves.api_key},
-                    timeout=3600,
+                    headers=self._auth_headers(),
+                    timeout=self.valves.stream_timeout,
                 )
                 return self._fmt(r)
-
-            elif cmd == "/skip":
+            if cmd == "/skip":
                 if len(parts) < 3:
                     return "Usage: /skip <job_id> <node_key>"
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/skip",
                     json={"job_id": parts[1], "node_key": parts[2]},
-                    headers={"X-API-Key": self.valves.api_key},
-                    timeout=30,
+                    headers=self._auth_headers(),
+                    timeout=self.valves.request_timeout,
                 )
                 return self._fmt(r)
-
-            elif cmd == "/optimize":
+            if cmd == "/optimize":
                 if len(parts) < 2:
                     return "Usage: /optimize <prompt text>"
                 text = " ".join(parts[1:])
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/optimize",
-                    json={"prompt": text, "skip_verify": False, "model_overrides": self._model_overrides()},
-                    headers={"X-API-Key": self.valves.api_key},
-                    timeout=3600,
+                    json={"prompt": text, "skip_verify": False,
+                          "model_overrides": self._model_overrides()},
+                    headers=self._auth_headers(),
+                    timeout=self.valves.stream_timeout,
                 )
                 return self._fmt(r)
-
-            elif cmd == "/rag":
+            if cmd == "/rag":
                 if len(parts) < 2:
                     return "Usage: /rag <query>"
                 text = " ".join(parts[1:])
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/rag",
                     json={"query": text, "top_k": 5},
-                    headers={"X-API-Key": self.valves.api_key},
-                    timeout=60,
+                    headers=self._auth_headers(),
+                    timeout=self.valves.request_timeout,
                 )
                 return self._fmt(r)
-
-            elif cmd == "/status":
+            if cmd == "/status":
                 r = requests.get(
                     f"{self.valves.orchestrator_url}/status",
-                    headers={"X-API-Key": self.valves.api_key},
-                    timeout=10,
+                    headers=self._auth_headers(),
+                    timeout=self.valves.request_timeout,
                 )
                 return self._fmt(r)
 
-            else:
-                return f"Unknown command: `{cmd}`\nType `/help` for available commands."
+            return f"Unknown command: `{cmd}`\nType `/help` for available commands."
 
         except requests.exceptions.Timeout:
             return "⚠️ Request timed out. The orchestrator is still processing — check back shortly."
         except requests.exceptions.ConnectionError:
             return f"⚠️ Cannot reach orchestrator at {self.valves.orchestrator_url}. Is it running?"
         except Exception as e:
+            self.logger.error("Command error: %s", e)
             return f"⚠️ Error: {e}"
 
     # ------------------------------------------------------------------
-    # Helpers
+    # /results handler (#8.1)
     # ------------------------------------------------------------------
+
+    def _handle_results(self, parts: list) -> str:
+        if len(parts) < 2:
+            return "Usage: `/results <job_id>`"
+        job_id = parts[1].strip()
+
+        try:
+            r = requests.get(
+                f"{self.valves.orchestrator_url}/exec/status/{job_id}",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.Timeout:
+            return "⚠️ Request timed out."
+        except requests.exceptions.ConnectionError:
+            return f"⚠️ Cannot reach orchestrator at {self.valves.orchestrator_url}."
+
+        if r.status_code == 404:
+            return f"Job not found: `{job_id}`"
+        if r.status_code >= 400:
+            return f"⚠️ Error {r.status_code}: {r.text[:200]}"
+        try:
+            data = r.json()
+        except ValueError:
+            return "⚠️ Unexpected response from orchestrator."
+
+        status = data.get("status") or data.get("job_status") or "unknown"
+
+        if status in ("completed", "done"):
+            compiled = data.get("compiled_output", "")
+            if compiled:
+                return compiled
+            return f"✅ Job `{job_id}` completed, but no compiled output is available."
+
+        if status in ("running", "executing", "planning", "researching", "refining"):
+            total = data.get("total_nodes") or data.get("task_count") or 0
+            done = data.get("completed_nodes") or data.get("nodes_completed") or 0
+            current = data.get("current_node") or {}
+            if isinstance(current, dict) and current:
+                cur_str = f", currently running: {current.get('node_key','?')} ({current.get('title','?')})"
+            else:
+                cur_str = ""
+            return f"⏳ Status: **{status}** — {done}/{total} nodes complete{cur_str}"
+
+        if status in ("failed", "blocked", "cancelled"):
+            err = (data.get("error_summary") or data.get("error")
+                   or data.get("message") or "no details")
+            return f"⚠️ Status: **{status}** — {err}"
+
+        if status == "awaiting_confirmation":
+            return (f"⏸️ Status: **{status}** — job is waiting for your review.\n"
+                    f"Use `/confirm {job_id}` to proceed.")
+
+        return f"Status: **{status}** (no further details available)"
+
+    # ------------------------------------------------------------------
+    # Formatter
+    # ------------------------------------------------------------------
+
     def _fmt(self, r: requests.Response) -> str:
         try:
             data = r.json()
         except Exception:
             return f"HTTP {r.status_code}: {r.text[:500]}"
-
         if r.status_code >= 400:
             return f"⚠️ Error {r.status_code}: {data.get('message') or data.get('detail') or r.text[:200]}"
-
         return f"```json\n{json.dumps(data, indent=2)}\n```"
 
     # ------------------------------------------------------------------
     # /model command system
     # ------------------------------------------------------------------
-    _MODEL_DEFAULTS = {
-        "model_general": "qwen3-vl:235b-instruct-cloud",
-        "model_verifier": "qwen2.5:7b",
-        "model_coder": "qwen2.5-coder:7b",
-        "model_embedder": "qwen3-embedding:8b",
-        "model_reranker": "tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
-        "model_router": "qwen3:4b",
-        "model_fallback": "qwen3.5:latest",
-        "model_cloud_alt": "qwen3.5:397b-cloud",
-    }
-
-    _SINGLETON_ROLES = {"model_embedder", "model_reranker"}
 
     def _handle_model(self, msg: str) -> str:
         parts = msg.split()
         if len(parts) < 2:
             return self._model_help()
-
         sub = parts[1].lower()
+        if sub == "list":      return self._model_list()
+        if sub == "available": return self._model_available()
+        if sub == "set":       return self._model_set(parts)
+        if sub == "reset":     return self._model_reset()
+        if sub == "help":      return self._model_help()
+        return f"Unknown subcommand: `{sub}`\n\n{self._model_help()}"
 
-        if sub == "list":
-            return self._model_list()
-        elif sub == "available":
-            return self._model_available()
-        elif sub == "set":
-            return self._model_set(parts)
-        elif sub == "reset":
-            return self._model_reset()
-        elif sub == "help":
-            return self._model_help()
-        else:
-            return f"Unknown subcommand: `{sub}`\n\n{self._model_help()}"
-    def _handle_schedule(self, msg: str) -> str:
-        """
-        /schedule list                            — show all schedules
-        /schedule add <cron> <topic>              — create (cron in quotes if spaces)
-        /schedule delete <id>                     — remove by id
-        /schedule help                            — this message
-        """
-        parts = msg.split(None, 2)
-        sub = parts[1].lower() if len(parts) > 1 else "help"
-        base = self.valves.orchestrator_url
-        hdr = {"X-API-Key": self.valves.api_key}
-
-        if sub == "help" or sub not in ("list", "add", "delete"):
-            return (
-                "**Schedule commands:**\n"
-                "- `/schedule list` — show all schedules\n"
-                "- `/schedule add <cron> <topic>` — e.g. `/schedule add \"0 9 * * 1\" kubernetes news`\n"
-                "- `/schedule delete <id>`\n\n"
-                "Cron format: `minute hour day month weekday` (UTC)"
-            )
-
-        if sub == "list":
-            try:
-                r = requests.get(f"{base}/schedule", headers=hdr, timeout=30)
-                r.raise_for_status()
-                rows = r.json().get("schedules", [])
-            except Exception as exc:
-                return f"❌ Failed to list schedules: {exc}"
-            if not rows:
-                return "No schedules yet. Try `/schedule add \"0 9 * * 1\" kubernetes news`"
-            lines = ["| ID | Topic | Cron | Depth | Next Run | Runs | Failures |",
-                     "|----|-------|------|-------|----------|------|----------|"]
-            for s in rows:
-                lines.append(f"| {s['id']} | {s['topic']} | `{s['cron_expression']}` | "
-                             f"{s['depth']} | {s.get('next_run_at') or '—'} | "
-                             f"{s['run_count']} | {s['failure_count']} |")
-            return "\n".join(lines)
-
-        if sub == "add":
-            if len(parts) < 3:
-                return "Usage: `/schedule add <cron> <topic>` (quote the cron expression)"
-            rest = parts[2]
-            # Expect quoted cron: "0 9 * * 1" topic words here
-            import shlex
-            try:
-                tokens = shlex.split(rest)
-            except ValueError as exc:
-                return f"❌ Parse error: {exc}"
-            if len(tokens) < 2:
-                return "Usage: `/schedule add \"<cron>\" <topic>`"
-            cron_expr = tokens[0]
-            topic = " ".join(tokens[1:])
-            try:
-                r = requests.post(f"{base}/schedule", headers=hdr, timeout=60,
-                                  json={"topic": topic, "cron_expression": cron_expr,
-                                        "depth": "medium",
-                                        "model_overrides": self._model_overrides()})
-                if r.status_code == 422:
-                    return f"❌ {r.json().get('detail', 'validation failed')}"
-                r.raise_for_status()
-                s = r.json()
-                return (f"✅ Scheduled **#{s['id']}**: {s['topic']}\n"
-                        f"Cron: `{s['cron_expression']}` — depth: {s['depth']}")
-            except Exception as exc:
-                return f"❌ Failed to create schedule: {exc}"
-
-        # delete
-        if len(parts) < 3 or not parts[2].strip().isdigit():
-            return "Usage: `/schedule delete <id>`"
-        sid = int(parts[2].strip())
-        try:
-            r = requests.delete(f"{base}/schedule/{sid}", headers=hdr, timeout=30)
-            if r.status_code == 404:
-                return f"❌ Schedule #{sid} not found"
-            r.raise_for_status()
-            return f"🗑️ Deleted schedule #{sid}"
-        except Exception as exc:
-            return f"❌ Failed to delete: {exc}"
     def _model_list(self) -> str:
         lines = ["| Role | Current Model | Default? |", "|---|---|---|"]
-        for role, default in self._MODEL_DEFAULTS.items():
-            current = getattr(self.valves, role, default)
+        default_valves = self.Valves()
+        for role in self._MODEL_ROLES:
+            current = getattr(self.valves, role, "")
+            default = getattr(default_valves, role, "")
             is_default = "yes" if current == default else "no"
-            display_role = role.replace("model_", "")
-            lines.append(f"| `{display_role}` | `{current}` | {is_default} |")
+            lines.append(f"| `{role.replace('model_','')}` | `{current}` | {is_default} |")
         return "**Current Model Assignments**\n\n" + "\n".join(lines)
 
     def _model_available(self) -> str:
         try:
-            r = requests.get(f"{self.valves.ollama_url}/api/tags", timeout=10)
+            r = requests.get(f"{self.valves.ollama_url}/api/tags",
+                             timeout=self.valves.request_timeout)
             r.raise_for_status()
             models = r.json().get("models", [])
             if not models:
                 return "No models found on Ollama."
             names = sorted(m["name"] for m in models)
-            lines = [f"- `{n}`" for n in names]
-            return f"**Available Ollama Models** ({len(names)}):\n\n" + "\n".join(lines)
+            return f"**Available Ollama Models** ({len(names)}):\n\n" + "\n".join(f"- `{n}`" for n in names)
         except requests.exceptions.ConnectionError:
             return f"Cannot reach Ollama at `{self.valves.ollama_url}`."
         except Exception as e:
@@ -1293,50 +1165,43 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
 
         role_input = parts[2].lower()
         model_tag = parts[3]
+        role_key = role_input if role_input.startswith("model_") else f"model_{role_input}"
 
-        if not role_input.startswith("model_"):
-            role_key = f"model_{role_input}"
-        else:
-            role_key = role_input
-
-        if role_key not in self._MODEL_DEFAULTS:
-            valid = ", ".join(r.replace("model_", "") for r in self._MODEL_DEFAULTS)
+        if role_key not in self._MODEL_ROLES:
+            valid = ", ".join(r.replace("model_", "") for r in self._MODEL_ROLES)
             return f"Unknown role: `{role_input}`\nValid roles: {valid}"
 
-        # Validate model exists on Ollama (skip for reranker — HuggingFace model)
         if role_key != "model_reranker":
             try:
-                r = requests.get(f"{self.valves.ollama_url}/api/tags", timeout=10)
+                r = requests.get(f"{self.valves.ollama_url}/api/tags",
+                                 timeout=self.valves.request_timeout)
                 r.raise_for_status()
                 available = {m["name"] for m in r.json().get("models", [])}
                 available_bare = {n.replace(":latest", "") for n in available}
                 if model_tag not in available and model_tag not in available_bare:
-                    return f"Model `{model_tag}` not found on Ollama.\nRun `/model available` to see available models."
+                    return (f"Model `{model_tag}` not found on Ollama.\n"
+                            f"Run `/model available` to see available models.")
             except requests.exceptions.ConnectionError:
-                return f"Cannot reach Ollama to validate. Model not set."
+                return "Cannot reach Ollama to validate. Model not set."
             except Exception as e:
                 return f"Validation error: {e}"
 
-        old_value = getattr(self.valves, role_key)
+        old = getattr(self.valves, role_key)
         setattr(self.valves, role_key, model_tag)
-        display_role = role_key.replace("model_", "")
-
-        result = f"**Updated `{display_role}`**\n`{old_value}` -> `{model_tag}`"
-
+        result = f"**Updated `{role_key.replace('model_','')}`**\n`{old}` -> `{model_tag}`"
         if role_key in self._SINGLETON_ROLES:
             result += "\n\nThis role is singleton/dimension-locked. Change takes effect after container restart."
-
         return result
 
     def _model_reset(self) -> str:
+        default_valves = self.Valves()
         changes = []
-        for role, default in self._MODEL_DEFAULTS.items():
+        for role in self._MODEL_ROLES:
             current = getattr(self.valves, role)
+            default = getattr(default_valves, role)
             if current != default:
                 setattr(self.valves, role, default)
-                display_role = role.replace("model_", "")
-                changes.append(f"- `{display_role}`: `{current}` -> `{default}`")
-
+                changes.append(f"- `{role.replace('model_','')}`: `{current}` -> `{default}`")
         if not changes:
             return "All roles are already at default values."
         return "**Reset to defaults:**\n\n" + "\n".join(changes)
@@ -1354,6 +1219,116 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
 **Roles:** general, verifier, coder, embedder, reranker, router, fallback, cloud_alt
 **Example:** `/model set general qwen3:8b`"""
 
+    # ------------------------------------------------------------------
+    # /schedule command system (#8.9)
+    # ------------------------------------------------------------------
+
+    def _handle_schedule(self, msg: str) -> str:
+        parts = msg.split(None, 2)
+        sub = parts[1].lower() if len(parts) > 1 else "help"
+        base = self.valves.orchestrator_url
+        hdr = self._auth_headers()
+
+        if sub == "help" or sub not in ("list", "add", "delete"):
+            return (
+                "**Schedule commands:**\n"
+                "- `/schedule list` — show all schedules\n"
+                "- `/schedule add <cron> [--depth=<shallow|medium|deep>] <topic>`\n"
+                "  Example: `/schedule add \"0 9 * * 1\" --depth=medium kubernetes news`\n"
+                "- `/schedule delete <id>`\n\n"
+                "Cron format: `minute hour day month weekday` (UTC)\n"
+                "Depth defaults to `shallow`."
+            )
+
+        if sub == "list":
+            try:
+                r = requests.get(f"{base}/schedule", headers=hdr,
+                                 timeout=self.valves.request_timeout)
+                r.raise_for_status()
+                rows = r.json().get("schedules", [])
+            except Exception as exc:
+                return f"❌ Failed to list schedules: {exc}"
+            if not rows:
+                return "No schedules yet. Try `/schedule add \"0 9 * * 1\" kubernetes news`"
+            lines = ["| ID | Topic | Cron | Depth | Next Run | Runs | Failures |",
+                     "|----|-------|------|-------|----------|------|----------|"]
+            for s in rows:
+                lines.append(
+                    f"| {s['id']} | {s['topic']} | `{s['cron_expression']}` | "
+                    f"{s['depth']} | {s.get('next_run_at') or '—'} | "
+                    f"{s['run_count']} | {s['failure_count']} |"
+                )
+            return "\n".join(lines)
+
+        if sub == "add":
+            if len(parts) < 3:
+                return "Usage: `/schedule add <cron> [--depth=<level>] <topic>`"
+            try:
+                tokens = shlex.split(parts[2])
+            except ValueError as exc:
+                return f"❌ Parse error: {exc}"
+
+            depth = "shallow"
+            filtered = []
+            i = 0
+            while i < len(tokens):
+                tok = tokens[i]
+                if tok.startswith("--depth="):
+                    val = tok.split("=", 1)[1].lower()
+                    if val not in ("shallow", "medium", "deep"):
+                        return f"❌ Invalid --depth value: `{val}`. Use shallow, medium, or deep."
+                    depth = val
+                    i += 1
+                elif tok == "--depth":
+                    if i + 1 >= len(tokens):
+                        return "❌ `--depth` requires a value"
+                    val = tokens[i + 1].lower()
+                    if val not in ("shallow", "medium", "deep"):
+                        return f"❌ Invalid --depth value: `{val}`. Use shallow, medium, or deep."
+                    depth = val
+                    i += 2
+                else:
+                    filtered.append(tok)
+                    i += 1
+
+            if len(filtered) < 2:
+                return "Usage: `/schedule add \"<cron>\" [--depth=<level>] <topic>`"
+            cron_expr = filtered[0]
+            topic = " ".join(filtered[1:])
+            try:
+                r = requests.post(
+                    f"{base}/schedule", headers=hdr,
+                    timeout=self.valves.request_timeout,
+                    json={"topic": topic, "cron_expression": cron_expr,
+                          "depth": depth,
+                          "model_overrides": self._model_overrides()},
+                )
+                if r.status_code == 422:
+                    return f"❌ {r.json().get('detail', 'validation failed')}"
+                r.raise_for_status()
+                s = r.json()
+                return (f"✅ Scheduled **#{s['id']}**: {s['topic']}\n"
+                        f"Cron: `{s['cron_expression']}` — depth: {s['depth']}")
+            except Exception as exc:
+                return f"❌ Failed to create schedule: {exc}"
+
+        # delete
+        if len(parts) < 3 or not parts[2].strip().isdigit():
+            return "Usage: `/schedule delete <id>`"
+        sid = int(parts[2].strip())
+        try:
+            r = requests.delete(f"{base}/schedule/{sid}", headers=hdr,
+                                timeout=self.valves.request_timeout)
+            if r.status_code == 404:
+                return f"❌ Schedule #{sid} not found"
+            r.raise_for_status()
+            return f"🗑️ Deleted schedule #{sid}"
+        except Exception as exc:
+            return f"❌ Failed to delete: {exc}"
+
+    # ------------------------------------------------------------------
+    # Help
+    # ------------------------------------------------------------------
 
     def _help(self) -> str:
         return """**Scaffold Router Commands**
@@ -1364,17 +1339,17 @@ Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to.""
 | `/go` or `/run` | Launch the pipeline with your discussed idea |
 | `/idea <text>` | Submit idea directly (skip triage) |
 | `/dag <job_id>` | Generate DAG from refined idea |
-| `/execute <job_id>` | Execute next pending DAG node |
-| `/confirm <job_id>` | Confirm ideation Phase 2 (research) |
-| `/results <job_id>` | View a completed job's output |
+| `/execute <job_id>` | Execute all pending DAG nodes |
+| `/confirm <job_id> [feedback]` | Confirm ideation Phase 2 (research) |
+| `/results <job_id>` | View a completed job's output or current status |
 | `/skip <job_id> <node_key>` | Skip a specific node |
 | `/optimize <prompt>` | Optimize a prompt |
 | `/rag <query>` | Query the knowledge base |
 | `/status` | List active jobs |
 | `/model <sub>` | Manage model assignments (list/set/reset/available) |
-| `/schedule <sub>` | Manage scheduled research jobs (list/add/delete) |
-| `/research <topic>` | Research a topic (web), URL, `github:owner/repo`, or `openapi:<url>` and ingest into knowledge base |
-| `/research/reply <session_id> <msg>` | Resume a paused research session with clarification |
+| `/schedule <sub>` | Manage scheduled research (list/add/delete) |
+| `/research <topic>` | Research a topic (web), URL, `github:owner/repo`, or `openapi:<url>` |
+| `/research/reply <session_id> <msg>` | Resume a paused research session |
 | `/help` | Show this message |
 
-**Workflow:** Describe your idea → discuss scope with the assistant → `/go` → review feasibility → `/confirm` → execution."""
+**Workflow:** Describe your idea → discuss scope → `/go` → review feasibility → `/confirm` → execution."""
