@@ -3,6 +3,7 @@
 Fetches README, docs/**/*.md, and top-level Python module docstrings,
 returning them as {path, content} dicts ready for TOON ingestion.
 """
+import asyncio
 import ast
 import base64
 import logging
@@ -29,8 +30,16 @@ class GitHubRateLimitError(Exception):
 def check_github_rate_limit(response: httpx.Response) -> None:
     """Inspect GitHub response headers and raise if rate limit exhausted.
 
-    Shared by github_ingest and gt_extractor (push path).
+    Shared by github_ingest and gt_extractor (push path). Also upgrades an
+    HTTP 429 response into a GitHubRateLimitError so callers get one consistent
+    exception type for all rate-limit situations (#70).
     """
+    if response.status_code == 429:
+        reset = response.headers.get("X-RateLimit-Reset", "unknown")
+        retry_after = response.headers.get("Retry-After", "unknown")
+        raise GitHubRateLimitError(
+            f"GitHub returned 429. Reset={reset} Retry-After={retry_after}"
+        )
     remaining = response.headers.get("X-RateLimit-Remaining")
     if remaining is None:
         return
@@ -71,7 +80,10 @@ async def _fetch_readme(client: httpx.AsyncClient, owner: str, repo: str) -> tup
     return data.get("path", "README"), content
 
 
-async def _get_tree(client: httpx.AsyncClient, owner: str, repo: str, branch: str) -> list[dict]:
+async def _get_tree(client: httpx.AsyncClient, owner: str, repo: str, branch: str) -> tuple[list[dict], bool]:
+    # TODO(#151): Cache tree response in Redis keyed by (owner, repo, branch, sha)
+    # to avoid repeated GitHub API calls on re-ingests of the same repo.
+    # Deferred — current call volume is low and rate limit headroom is adequate.
     r = await client.get(
         f"/repos/{owner}/{repo}/git/trees/{branch}",
         params={"recursive": "1"},
@@ -79,13 +91,29 @@ async def _get_tree(client: httpx.AsyncClient, owner: str, repo: str, branch: st
     _check_rate_limit(r)
     r.raise_for_status()
     data = r.json()
-    if data.get("truncated"):
-        logger.warning("Tree truncated for %s/%s — some files may be missed", owner, repo)
-    return [e for e in data.get("tree", []) if e.get("type") == "blob"]
+    truncated = bool(data.get("truncated"))
+    if truncated:
+        # #68 — escalate to ERROR so log alerts notice; the SSE layer can
+        # surface the _truncated marker to the user via fetch_repo_content.
+        logger.error(
+            "GitHub tree truncated for %s/%s — results are INCOMPLETE (repo exceeds API tree cap)",
+            owner, repo,
+        )
+    blobs = [e for e in data.get("tree", []) if e.get("type") == "blob"]
+    # Return (blobs, truncated) — caller decides whether to surface/raise
+    return blobs, truncated
 
 
 def _select_tree_files(tree: list[dict], remaining_cap: int) -> list[dict]:
-    """Pick docs/**/*.md and top-level *.py, capped."""
+    """Pick docs/**/*.md and top-level *.py, capped.
+
+    Design note: only *top-level* .py files are included (no `/` in path). This
+    is intentional — a repo's top-level modules are almost always the public
+    entry points whose docstrings summarize the package. Recursing into all
+    .py files tends to pull in tests, build scripts, and vendored code with
+    low signal-to-noise. If you need deeper coverage, prefer adding content
+    to docs/ so it is captured by the .md filter.
+    """
     docs = [e for e in tree if e["path"].startswith(_DOCS_PREFIX) and e["path"].endswith(".md")]
     pyfiles = [e for e in tree if e["path"].endswith(".py") and "/" not in e["path"]]
     selected = docs + pyfiles
@@ -110,9 +138,12 @@ async def _fetch_blob(client: httpx.AsyncClient, owner: str, repo: str, sha: str
 
 
 def _extract_docstring(source: str) -> str:
+    # #71 — widen catch: malformed sources can raise ValueError (null bytes)
+    # or TypeError (bad ast input) in addition to SyntaxError
     try:
         return ast.get_docstring(ast.parse(source)) or ""
-    except SyntaxError:
+    except (SyntaxError, ValueError, TypeError) as e:
+        logger.debug("docstring extract failed: %s", e)
         return ""
 
 
@@ -133,30 +164,49 @@ async def fetch_repo_content(owner: str, repo: str) -> list[dict[str, Any]]:
     readme_path, readme_content = await _fetch_readme(client, owner, repo)
     if readme_content.strip():
         results.append({"path": readme_path, "content": readme_content})
+    elif readme_path:  # README endpoint returned something but body is empty/whitespace
+        logger.warning(
+            "GitHub README is empty/whitespace-only, dropping: %s/%s path=%s",
+            owner, repo, readme_path,
+        )
 
     # 2. docs/**/*.md + top-level *.py via tree
     remaining = settings.github_max_files - len(results)
     if remaining > 0:
-        tree = await _get_tree(client, owner, repo, branch)
+        tree, tree_truncated = await _get_tree(client, owner, repo, branch)
         selected = _select_tree_files(tree, remaining)
 
-        for entry in selected:
-            path = entry["path"]
-            content = await _fetch_blob(client, owner, repo, entry["sha"])
-            if not content.strip():
-                continue
+        # #69 — parallelize blob fetches. Semaphore bounds concurrent GitHub
+        # calls so we don't blow through the rate limit in bursts.
+        _BLOB_CONCURRENCY = 8
+        sem = asyncio.Semaphore(_BLOB_CONCURRENCY)
 
-            # Python files: extract module docstring only
+        async def _fetch_one(entry: dict) -> dict | None:
+            path = entry["path"]
+            async with sem:
+                content = await _fetch_blob(client, owner, repo, entry["sha"])
+            if not content.strip():
+                return None
             if path.endswith(".py"):
                 docstring = _extract_docstring(content)
                 if not docstring:
-                    continue
+                    return None
                 content = docstring
+            return {"path": path, "content": content}
 
-            results.append({"path": path, "content": content})
+        fetched = await asyncio.gather(
+            *(_fetch_one(e) for e in selected), return_exceptions=True,
+        )
+        for item in fetched:
+            if isinstance(item, Exception):
+                logger.warning("Blob fetch failed: %s", item)
+                continue
+            if item is not None:
+                results.append(item)
 
     logger.info(
-        "GitHub fetch: %s/%s branch=%s files=%d",
+        "GitHub fetch: %s/%s branch=%s files=%d tree_truncated=%s",
         owner, repo, branch, len(results),
+        tree_truncated if 'tree_truncated' in locals() else False,
     )
     return results

@@ -65,9 +65,36 @@ def get_github_client() -> httpx.AsyncClient:
     return _github_client
 
 
+
+
+_generic_client: httpx.AsyncClient | None = None
+
+
+def get_generic_http_client() -> httpx.AsyncClient:
+    """Return a generic-purpose async HTTP client (lazy init).
+
+    Used for ad-hoc fetches (e.g. OpenAPI spec URLs) that don't belong to a
+    specific upstream service. Has follow_redirects=True and a moderate
+    timeout. Base URL is intentionally not set — callers pass full URLs.
+    """
+    global _generic_client
+    if _generic_client is None or _generic_client.is_closed:
+        _generic_client = httpx.AsyncClient(
+            timeout=30.0,
+            follow_redirects=True,
+            headers={"User-Agent": "scaffold-engine"},
+            limits=httpx.Limits(
+                max_connections=10,
+                max_keepalive_connections=5,
+                keepalive_expiry=30,
+            ),
+        )
+        logger.info("Generic HTTP client initialized")
+    return _generic_client
+
 async def close_clients() -> None:
     """Shutdown hook — close all shared clients."""
-    global _searxng_client, _github_client
+    global _searxng_client, _github_client, _generic_client
     if _searxng_client and not _searxng_client.is_closed:
         await _searxng_client.aclose()
         _searxng_client = None
@@ -76,3 +103,7 @@ async def close_clients() -> None:
         await _github_client.aclose()
         _github_client = None
         logger.info("GitHub client closed")
+    if _generic_client and not _generic_client.is_closed:
+        await _generic_client.aclose()
+        _generic_client = None
+        logger.info("Generic HTTP client closed")

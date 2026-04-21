@@ -112,15 +112,15 @@ Total items: **155**
 - [x] **#67** Move `TOPIC_TO_DOMAIN` mapping to config — ✅ `5fc820e`
 
 ### Phase 5b — github_ingest, openapi_ingest, scheduler
-- [ ] **#68** Make tree-truncated fail or emit SSE warning (github_ingest.py)
-- [ ] **#69** Parallelize blob fetches with semaphore (github_ingest.py)
-- [ ] **#70** Unify 429 handling in github_ingest (raise `GitHubRateLimitError` consistently, not `HTTPStatusError`)
-- [ ] **#71** Widen `_extract_docstring` exception catch (add `ValueError`, `TypeError`)
-- [ ] **#72** Narrow `_validate_spec` exception catch (currently `except Exception` masks unrelated bugs)
-- [ ] **#73** Simplify `_build_entry` title logic (self-comparison and string rebuilding)
-- [ ] **#74** Extract content-cap constants or emit truncation signals (openapi_ingest 5 places)
-- [ ] **#75** Add `$ref` resolution to openapi_ingest (via `prance` or explicit resolver)
-- [ ] **#76** Use shared HTTP client in `_fetch_spec` (ephemeral client per call currently)
+- [x] **#68** Make tree-truncated fail or emit SSE warning (github_ingest.py)
+- [x] **#69** Parallelize blob fetches with semaphore (github_ingest.py)
+- [x] **#70** Unify 429 handling in github_ingest (raise `GitHubRateLimitError` consistently, not `HTTPStatusError`)
+- [x] **#71** Widen `_extract_docstring` exception catch (add `ValueError`, `TypeError`)
+- [x] **#72** Narrow `_validate_spec` exception catch (currently `except Exception` masks unrelated bugs)
+- [x] **#73** Simplify `_build_entry` title logic (self-comparison and string rebuilding)
+- [x] **#74** Extract content-cap constants or emit truncation signals (openapi_ingest 5 places)
+- [x] **#75** Add `$ref` resolution to openapi_ingest (via `prance` or explicit resolver)
+- [x] **#76** Use shared HTTP client in `_fetch_spec` (ephemeral client per call currently)
 - [x] **#77** Fix `init_scheduler` return type hint (`AsyncIOScheduler | None`, returns None when disabled) — ✅ `ad06f3d`
 - [x] **#78** Make `init_scheduler` idempotent (shutdown existing before re-init) — ✅ `ad06f3d`
 - [x] **#79** Either correlate `last_job_id` to real `research_sessions.id` or remove the field — ✅ `ad06f3d`
@@ -213,11 +213,11 @@ Total items: **155**
 - [x] **#148** Add prompt versioning (e.g., `DECOMPOSE_SYSTEM_V1`) for 4 system prompts — ✅ `5fc820e`
 
 ### Phase 5b — github_ingest, openapi_ingest, scheduler
-- [ ] **#149** Log warning when empty README is dropped (github_ingest)
-- [ ] **#150** Document "top-level *.py only" design in github_ingest
-- [ ] **#151** Consider Redis cache for GitHub trees (deferred)
-- [ ] **#152** Document `_fetch_spec` text-decoding assumption (openapi_ingest)
-- [ ] **#153** Use `Literal["openapi-3", "swagger-2"]` type for `_validate_spec` return
+- [x] **#149** Log warning when empty README is dropped (github_ingest)
+- [x] **#150** Document "top-level *.py only" design in github_ingest
+- [x] **#151** Consider Redis cache for GitHub trees (deferred)
+- [x] **#152** Document `_fetch_spec` text-decoding assumption (openapi_ingest)
+- [x] **#153** Use `Literal["openapi-3", "swagger-2"]` type for `_validate_spec` return
 - [x] **#154** Add explicit `scheduler_enabled` check in `get_scheduler()` call sites — ✅ `ad06f3d`
 - [x] **#155** Consider graceful shutdown with timeout (`wait=True, timeout=N`) in scheduler — ✅ `ad06f3d`
 

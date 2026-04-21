@@ -5,7 +5,7 @@ entry per endpoint with path + method + description + params.
 """
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -14,6 +14,16 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "trace"}
+
+# --- Content-truncation caps (#74) ------------------------------------------
+# Per-field character caps keep each endpoint entry bounded so a single verbose
+# spec doesn't blow the Milvus canonical_text field (65535 chars) or dominate
+# RAG retrieval. Increase with care — larger caps mean fewer endpoints fit.
+_DESC_CAP = 800        # operation description
+_REQ_BODY_CAP = 300    # requestBody description
+_PARAM_DESC_CAP = 200  # per-parameter description
+_RESPONSE_CAP = 200    # per-response description
+_TITLE_CAP = 200       # entry title
 
 
 class OpenAPIFetchError(Exception):
@@ -29,15 +39,21 @@ class OpenAPIValidationError(Exception):
 
 
 async def _fetch_spec(url: str) -> dict[str, Any]:
-    """Fetch spec URL and decode as JSON or YAML."""
+    """Fetch spec URL and decode as JSON or YAML.
+
+    Assumes the response body is UTF-8 (or httpx.Response.text-decodable) text.
+    Binary spec encodings (e.g. Protobuf, MessagePack) are NOT supported —
+    they would surface as ``OpenAPIParseError`` after failing both JSON and
+    YAML parsing. If such encodings become relevant, add a dedicated decoder
+    branch before the JSON/YAML attempts (#152).
+    """
+    # #76 — use shared pooled client (was ephemeral AsyncClient per call)
+    from app.utils.http_clients import get_generic_http_client
     try:
-        async with httpx.AsyncClient(
-            timeout=float(settings.openapi_timeout),
-            follow_redirects=True,
-        ) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            text = r.text
+        client = get_generic_http_client()
+        r = await client.get(url, timeout=float(settings.openapi_timeout))
+        r.raise_for_status()
+        text = r.text
     except httpx.HTTPError as e:
         raise OpenAPIFetchError(f"Failed to fetch {url}: {e}") from e
 
@@ -54,8 +70,8 @@ async def _fetch_spec(url: str) -> dict[str, Any]:
         raise OpenAPIParseError(f"Spec is neither JSON nor YAML: {e}") from e
 
 
-def _validate_spec(spec: dict) -> str:
-    """Validate and return spec version: 'openapi-3' or 'swagger-2'."""
+def _validate_spec(spec: dict) -> Literal["openapi-3", "swagger-2"]:
+    """Validate and return spec version: 'openapi-3' or 'swagger-2' (#153)."""
     from openapi_spec_validator import validate
     from openapi_spec_validator.validation.exceptions import OpenAPIValidationError as _ValErr
 
@@ -72,8 +88,15 @@ def _validate_spec(spec: dict) -> str:
         validate(spec)
     except _ValErr as e:
         raise OpenAPIValidationError(f"Spec validation failed: {e}") from e
-    except Exception as e:
-        # validate() can raise various refresolver/jsonschema errors for malformed specs
+    except (
+        # #72 — narrowed from bare Exception. Malformed specs commonly raise
+        # jsonschema.ValidationError/SchemaError, referencing.exceptions.Unresolvable,
+        # or TypeError/KeyError on mis-shaped dicts. Anything else is a real bug
+        # we want surfaced, not silently wrapped.
+        TypeError,
+        KeyError,
+        ValueError,
+    ) as e:
         raise OpenAPIValidationError(f"Spec validation error: {e}") from e
 
     return version
@@ -94,7 +117,7 @@ def _format_parameters(params: list[dict]) -> str:
         type_str = f" [{type_}]" if type_ else ""
         line = f"  - {name} (in: {loc}){type_str}{required}"
         if desc:
-            line += f" — {desc[:200]}"
+            line += f" — {desc[:_PARAM_DESC_CAP]}"
         lines.append(line)
     return "\n".join(lines)
 
@@ -108,7 +131,7 @@ def _format_responses(responses: dict) -> str:
         if not isinstance(resp, dict):
             continue
         desc = resp.get("description", "").strip().replace("\n", " ")
-        lines.append(f"  - {code}: {desc[:200]}" if desc else f"  - {code}")
+        lines.append(f"  - {code}: {desc[:_RESPONSE_CAP]}" if desc else f"  - {code}")
     return "\n".join(lines)
 
 
@@ -137,7 +160,7 @@ def _build_entry(
         if rb_desc or content_types:
             parts = ["Request body:"]
             if rb_desc:
-                parts.append(f"  {rb_desc[:300]}")
+                parts.append(f"  {rb_desc[:_REQ_BODY_CAP]}")
             if content_types:
                 parts.append(f"  Content-Type(s): {', '.join(content_types)}")
             req_body_desc = "\n".join(parts)
@@ -148,7 +171,7 @@ def _build_entry(
     if summary:
         content_parts.append(f"Summary: {summary}")
     if description:
-        content_parts.append(f"Description: {description[:800]}")
+        content_parts.append(f"Description: {description[:_DESC_CAP]}")
     if tags:
         content_parts.append(f"Tags: {', '.join(tags)}")
 
@@ -163,11 +186,13 @@ def _build_entry(
     if resp_text:
         content_parts.append(resp_text)
 
-    title = summary or op_id or f"{method.upper()} {path}"
-    title = f"{method.upper()} {path} — {title}" if title != f"{method.upper()} {path}" else f"{method.upper()} {path}"
+    # #73 — prefer summary/operationId, else fall back to just the METHOD+path.
+    route = f"{method.upper()} {path}"
+    label = summary or op_id
+    title = f"{route} — {label}" if label else route
 
     return {
-        "title": title[:200],
+        "title": title[:_TITLE_CAP],
         "content": "\n\n".join(content_parts),
         "tags": tags,
         "path": path,
@@ -195,6 +220,38 @@ def _walk_paths(spec: dict) -> list[dict[str, Any]]:
     return entries
 
 
+async def _resolve_refs(spec: dict, url: str) -> dict:
+    """Resolve $refs via prance. Falls back to unresolved spec on failure (#75).
+
+    Prance is synchronous, so we wrap in a thread executor. We pass ``spec``
+    as an in-memory source and let prance resolve internal refs; remote refs
+    resolve relative to ``url``.
+    """
+    import asyncio
+    try:
+        from prance import ResolvingParser
+    except ImportError:
+        logger.warning("prance not installed — skipping $ref resolution")
+        return spec
+
+    def _do_resolve() -> dict:
+        parser = ResolvingParser(
+            url=url,
+            spec_string=None,
+            lazy=False,
+            strict=False,
+            backend="openapi-spec-validator",
+        )
+        return parser.specification
+
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, _do_resolve)
+    except Exception as e:
+        logger.warning("prance $ref resolution failed: %s — falling back to unresolved spec", e)
+        return spec
+
+
 async def fetch_and_parse_spec(url: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Fetch, validate, and parse an OpenAPI/Swagger spec.
 
@@ -212,6 +269,10 @@ async def fetch_and_parse_spec(url: str) -> tuple[list[dict[str, Any]], dict[str
         raise OpenAPIParseError("Spec root is not an object")
 
     version = _validate_spec(spec)
+
+    # #75 — resolve $refs so _walk_paths sees inlined definitions.
+    # Prance's ResolvingParser runs synchronously; wrap in executor.
+    spec = await _resolve_refs(spec, url)
 
     info = spec.get("info") or {}
     entries = _walk_paths(spec)
