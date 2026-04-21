@@ -11,12 +11,25 @@ from typing import Optional
 from pydantic import BaseModel
 
 
-# TODO: share with other pipelines (see fix #8.17)
+# ─── SHARED: status icons — keep in sync across pipelines (#8.17) ───
+# Pipelines load as isolated single-file modules; no shared imports possible.
+# execution_handler has additional job-lifecycle states (executing, planning,
+# blocked, completed, cancelled) that the other pipelines don't need.
+# If you add/rename a status, update every pipeline file that has this block.
 STATUS_ICONS = {
-    "done": "✅", "failed": "❌", "running": "🔄", "pending": "⬜",
-    "skipped": "⏭️", "executing": "🔄", "planning": "📋",
-    "blocked": "🚫", "completed": "✅", "cancelled": "🚫",
+    "done":      "✅",
+    "failed":    "❌",
+    "running":   "🔄",
+    "pending":   "⬜",
+    "skipped":   "⏭️",
+    # Extended job states — execution_handler only
+    "executing": "🔄",
+    "planning":  "📋",
+    "blocked":   "🚫",
+    "completed": "✅",
+    "cancelled": "🚫",
 }
+# ─── END SHARED ───
 
 
 def _safe_json(resp):

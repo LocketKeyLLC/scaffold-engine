@@ -3,13 +3,61 @@ dag_viewer.py  --  Step 18
 Open WebUI Pipeline: fetch DAG for a job and render as Mermaid diagram.
 
 Usage in Open WebUI:
-  /dag <job_id>   -> fetches nodes from orchestrator, renders Mermaid
+  /dagviz <job_id>  -> fetches nodes from orchestrator, renders Mermaid
+  (Renamed from /dag in #8.20 to avoid overlap with scaffold_router.)
 """
 
 from typing import List, Optional
 import requests
 from pydantic import BaseModel
 
+
+
+
+# ─── SHARED: status icons — keep in sync across pipelines (#8.17) ───
+# Pipelines load as isolated single-file modules; no shared imports possible.
+# If you add/rename a status, update every pipeline file that has this block.
+STATUS_ICONS = {
+    "done":     "✅",
+    "failed":   "❌",
+    "running":  "🔄",
+    "pending":  "⬜",
+    "skipped":  "⏭️",
+}
+# ─── END SHARED ───
+
+# #8.21 — Mermaid has several reserved characters that break node labels:
+# `"` ends the label, `[` `]` `(` `)` `{` `}` are grouping/shape syntax,
+# `|` is used for edge labels, `#` starts comments. Plus backtick / newline
+# confuse the renderer. Replace them with safe alternatives.
+_MERMAID_LABEL_UNSAFE = {
+    '"': "'",
+    "[": "(",
+    "]": ")",
+    "{": "(",
+    "}": ")",
+    "|": "/",
+    "#": "♯",   # musical sharp, visually similar
+    "`": "'",
+    "\n": " ",
+    "\r": " ",
+    "<": "⟨",   # mathematical angle bracket
+    ">": "⟩",
+}
+
+
+def _escape_mermaid_label(label: str) -> str:
+    """Sanitize a string for safe inclusion inside a Mermaid node label."""
+    if not label:
+        return ""
+    # Mermaid itself has no escape syntax — best we can do is substitute.
+    for bad, good in _MERMAID_LABEL_UNSAFE.items():
+        label = label.replace(bad, good)
+    return label
+
+
+# #8.29 — cap Mermaid output so oversized DAGs don't flood chat.
+_MAX_NODES_RENDERED = 200
 
 
 class Pipeline:
@@ -22,15 +70,21 @@ class Pipeline:
         self.name = "DAG Viewer"
         self.valves = self.Valves()
 
+    async def on_startup(self):  # #8.27 — parity with other pipelines
+        pass
+
+    async def on_shutdown(self):  # #8.27
+        pass
+
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Optional[str]:
         msg = user_message.strip()
 
-        if not msg.startswith("/dag"):
+        if not msg.startswith("/dagviz"):
             return None
 
         parts = msg.split(None, 1)
         if len(parts) < 2:
-            return "Usage: `/dag <job_id>`"
+            return "Usage: `/dagviz <job_id>`"
 
         job_id = parts[1].strip()
 
@@ -58,13 +112,7 @@ class Pipeline:
             return f"⚠️ Error: {e}"
 
     def _render(self, job_id: str, data: dict, nodes: list) -> str:
-        status_icon = {
-            "pending":  "⬜",
-            "running":  "🔄",
-            "done":     "✅",
-            "failed":   "❌",
-            "skipped":  "⏭️",
-        }
+        status_icon = STATUS_ICONS  # #8.17 alias so existing references below keep working
         style_map = {
             "pending":  "fill:#444,stroke:#888,color:#fff",
             "running":  "fill:#1a6b9a,stroke:#4fc3f7,color:#fff",
@@ -73,39 +121,56 @@ class Pipeline:
             "skipped":  "fill:#4a148c,stroke:#ce93d8,color:#fff",
         }
 
-        lines = ["```mermaid", "graph TD"]
+        # #8.29 — truncate oversized DAGs. Keep the first N nodes and their edges;
+        # drop the rest and signal truncation in the summary.
+        total_nodes = len(nodes)
+        truncated = total_nodes > _MAX_NODES_RENDERED
+        rendered_nodes = nodes[:_MAX_NODES_RENDERED] if truncated else nodes
+        rendered_keys = {n["node_key"] for n in rendered_nodes}
 
-        for node in nodes:
+        # #8.28 — single pass collects node decls, edges, styles, summary rows
+        mermaid_lines = ["```mermaid", "graph TD"]
+        edge_lines: list[str] = []
+        style_lines: list[str] = []
+        summary_rows: list[str] = []
+
+        for node in rendered_nodes:
             key = node["node_key"]
-            title = node["title"].replace('"', "'")
+            title_raw = node.get("title", "")
+            title = _escape_mermaid_label(title_raw)
             status = node.get("status", "pending")
             icon = status_icon.get(status, "⬜")
-            lines.append(f'    {key}["{icon} {key}: {title}"]')
 
-        for node in nodes:
+            mermaid_lines.append(f'    {key}["{icon} {key}: {title}"]')
+
             for dep in (node.get("depends_on") or []):
-                lines.append(f"    {dep} --> {node['node_key']}")
+                # Only draw edges to nodes that survived truncation
+                if dep in rendered_keys:
+                    edge_lines.append(f"    {dep} --> {key}")
 
-        for node in nodes:
-            key = node["node_key"]
-            status = node.get("status", "pending")
             style = style_map.get(status, "")
             if style:
-                lines.append(f"    style {key} {style}")
+                style_lines.append(f"    style {key} {style}")
 
-        lines.append("```")
+            summary_rows.append(
+                f"| `{key}` | {title_raw} | {icon} {status} |"
+            )
 
-        # Summary table
+        mermaid_lines.extend(edge_lines)
+        mermaid_lines.extend(style_lines)
+        mermaid_lines.append("```")
+
         job_status = data.get("job_status", "unknown")
-        summary = [
+        header = [
             f"\n**Job:** `{job_id}`  |  **Status:** `{job_status}`\n",
             "| Node | Title | Status |",
             "|---|---|---|",
         ]
-        for node in nodes:
-            icon = status_icon.get(node.get("status", "pending"), "⬜")
-            summary.append(
-                f"| `{node['node_key']}` | {node['title']} | {icon} {node.get('status','pending')} |"
+        if truncated:
+            header.insert(
+                0,
+                f"⚠️  DAG has {total_nodes} nodes; rendering first "
+                f"{_MAX_NODES_RENDERED} only.\n",
             )
 
-        return "\n".join(lines) + "\n" + "\n".join(summary)
+        return "\n".join(mermaid_lines) + "\n" + "\n".join(header + summary_rows)

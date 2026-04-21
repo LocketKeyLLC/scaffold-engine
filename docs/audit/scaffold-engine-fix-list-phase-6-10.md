@@ -80,11 +80,11 @@
 - [x] **#8.14** `gt_browser` uses `httpx.Client` while other pipelines use `requests` — mixed HTTP libraries. — ✅ `94f74bb`
 - [x] **#8.15** `execution_handler.request_timeout=310` magic number — undocumented. — ✅ `cd039ce`
 - [x] **#8.16** `execution_handler._status` direct dict access (`d["counts"]`, `d["nodes"]`, `d["job_status"]`, `d["job_title"]`) — no `.get()` guards. — ✅ `cd039ce`
-- [ ] **#8.17** Status icon map duplicated across 5 pipelines (scaffold_router, execution_handler, prompt_inspector, gt_browser, dag_viewer). Extract shared constant.
-- [ ] **#8.18** `/prompt edit` → `/prompt save` two-step flow is fragile (comment in code acknowledges this). Single-step preferred.
-- [ ] **#8.19** `_save` joins new prompt with single space via `" ".join(parts[4:])` — newlines in prompt lost.
-- [ ] **#8.20** `/dag` command collision between `scaffold_router` and `dag_viewer` pipelines.
-- [ ] **#8.21** `dag_viewer` Mermaid escaping only handles `"` (line: `title.replace('"', "'")`) — breaks on `[`, `]`, `(`, `)`, `|`, `{`, `}`, `#`.
+- [x] **#8.17** Status icon map duplicated across 5 pipelines (scaffold_router, execution_handler, prompt_inspector, gt_browser, dag_viewer). Extract shared constant.
+- [x] **#8.18** `/prompt edit` → `/prompt save` two-step flow is fragile (comment in code acknowledges this). Single-step preferred.
+- [x] **#8.19** `_save` joins new prompt with single space via `" ".join(parts[4:])` — newlines in prompt lost.
+- [x] **#8.20** `/dag` command collision between `scaffold_router` and `dag_viewer` pipelines.
+- [x] **#8.21** `dag_viewer` Mermaid escaping only handles `"` (line: `title.replace('"', "'")`) — breaks on `[`, `]`, `(`, `)`, `|`, `{`, `}`, `#`.
 
 ### Phase 9 — Tests (structural)
 - [ ] **#9.3** `conftest_ci.py` — filename not auto-loaded by pytest. Fixtures unreachable. Dead code.
@@ -133,11 +133,11 @@
 - [x] **#8.22** `gt_browser` pagination lacks "previous page" hint. — ✅ `94f74bb`
 - [x] **#8.23** `per_page=20` hardcoded in offset calc in `gt_browser`. — ✅ `94f74bb`
 - [x] **#8.24** `execution_handler` — `resp.json()` can raise unhandled. — ✅ `cd039ce`
-- [ ] **#8.25** `prompt_inspector` direct dict access — `.get()` guards missing.
-- [ ] **#8.26** No client-side prompt-length validation in prompt_inspector.
-- [ ] **#8.27** `dag_viewer` missing `on_startup`/`on_shutdown` stubs.
-- [ ] **#8.28** `dag_viewer._render` has 3 separate loops — could combine.
-- [ ] **#8.29** `dag_viewer` no truncation on large DAG rendered output.
+- [x] **#8.25** `prompt_inspector` direct dict access — `.get()` guards missing.
+- [x] **#8.26** No client-side prompt-length validation in prompt_inspector.
+- [x] **#8.27** `dag_viewer` missing `on_startup`/`on_shutdown` stubs.
+- [x] **#8.28** `dag_viewer._render` has 3 separate loops — could combine.
+- [x] **#8.29** `dag_viewer` no truncation on large DAG rendered output.
 
 ### Phase 9
 - [ ] **#9.31** Remove duplicate `import pytest` in `test_verify_extraction.py`.

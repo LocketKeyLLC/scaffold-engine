@@ -10,6 +10,18 @@ from typing import Optional
 from pydantic import BaseModel
 
 
+# ─── SHARED: status icons — keep in sync across pipelines (#8.17) ───
+# Pipelines load as isolated single-file modules; no shared imports possible.
+# If you add/rename a status, update every pipeline file that has this block.
+STATUS_ICONS = {
+    "done":     "✅",
+    "failed":   "❌",
+    "running":  "🔄",
+    "pending":  "⬜",
+    "skipped":  "⏭️",
+}
+# ─── END SHARED ───
+
 class Pipeline:
     class Valves(BaseModel):
         api_key: str = ""
@@ -34,7 +46,7 @@ class Pipeline:
             "|---|---|\n"
             "| `/prompt list <job_id>` | List all node prompts for a job |\n"
             "| `/prompt view <job_id> <node_key>` | View full prompt for a node |\n"
-            "| `/prompt edit <job_id> <node_key>` | Edit prompt (paste new prompt as next message) |\n"
+            "| `/prompt edit <job_id> <node_key> <new prompt>` | Edit prompt in a single message (newlines preserved) |\n"
             "| `/prompt help` | Show this help |\n"
         )
 
@@ -53,18 +65,22 @@ class Pipeline:
                 return f"❌ Error: {resp.json().get('detail', resp.text)}"
 
             data = resp.json()
+            nodes = data.get("nodes", [])
             lines = [
                 f"## 📋 Prompts for Job `{job_id[:8]}...`\n",
-                f"**{data['node_count']} nodes**\n",
+                f"**{data.get('node_count', len(nodes))} nodes**\n",
                 "| # | Node | Status | Template | Optimized |",
                 "|---|---|---|---|---|",
             ]
-            for n in data["nodes"]:
-                t_icon = "✅" if n["has_template"] else "❌"
-                o_icon = "✅" if n["has_optimized"] else "⬜"
-                status_icons = {"done": "✅", "failed": "❌", "running": "🔄", "pending": "⬜", "skipped": "⏭️"}
-                s_icon = status_icons.get(n["status"], n["status"])
-                lines.append(f"| {n['execution_order']} | `{n['node_key']}` | {s_icon} {n['status']} | {t_icon} | {o_icon} |")
+            for n in nodes:
+                t_icon = "✅" if n.get("has_template") else "❌"
+                o_icon = "✅" if n.get("has_optimized") else "⬜"
+                status = n.get("status", "?")
+                s_icon = STATUS_ICONS.get(status, status)
+                lines.append(
+                    f"| {n.get('execution_order', '?')} | `{n.get('node_key', '?')}` | "
+                    f"{s_icon} {status} | {t_icon} | {o_icon} |"
+                )
 
             lines.append(f"\nUse `/prompt view {job_id} <node_key>` for full details.")
             return "\n".join(lines)
@@ -86,93 +102,135 @@ class Pipeline:
                 return f"❌ Error: {resp.json().get('detail', resp.text)}"
 
             d = resp.json()
-            status_icons = {"done": "✅", "failed": "❌", "running": "🔄", "pending": "⬜", "skipped": "⏭️"}
-            s_icon = status_icons.get(d["status"], d["status"])
+            status = d.get("status", "?")
+            s_icon = STATUS_ICONS.get(status, status)
+            model = d.get("assigned_model") or "default"
 
             lines = [
-                f"## 🔍 Node `{d['node_key']}` — {d['title']}",
-                f"**Status:** {s_icon} {d['status']} · **Order:** {d['execution_order']} · **Model:** `{d['assigned_model'] or 'default'}`\n",
+                f"## 🔍 Node `{d.get('node_key', '?')}` — {d.get('title', '')}",
+                f"**Status:** {s_icon} {status} · "
+                f"**Order:** {d.get('execution_order', '?')} · **Model:** `{model}`\n",
             ]
 
-            if d["prompt_template"]:
+            if d.get("prompt_template"):
                 lines.append("### Original Template")
                 lines.append(f"```\n{d['prompt_template']}\n```\n")
 
-            if d["optimized_prompt"]:
+            if d.get("optimized_prompt"):
                 lines.append("### Optimized Prompt")
                 lines.append(f"```\n{d['optimized_prompt']}\n```\n")
 
-            if d["has_output"]:
+            if d.get("has_output"):
                 lines.append("### Output Preview")
-                lines.append(f"```\n{d['output_preview']}\n```\n")
+                lines.append(f"```\n{d.get('output_preview', '')}\n```\n")
 
-            if d["status"] in ("pending", "failed"):
-                lines.append(f"💡 Editable — use `/prompt edit {job_id} {node_key}` then paste new prompt.")
+            if status in ("pending", "failed"):
+                lines.append(
+                    f"💡 Editable — use `/prompt edit {job_id} {node_key} <new prompt>`."
+                )
 
             return "\n".join(lines)
         except requests.exceptions.RequestException as e:
             return f"❌ Connection error: {e}"
 
-    def _edit(self, parts: list) -> str:
-        if len(parts) < 4:
-            return "❌ Usage: `/prompt edit <job_id> <node_key>`\n\nThen paste the new prompt as your next message."
+    # Client-side prompt length cap (#8.26). Orchestrator will re-validate.
+    _MAX_PROMPT_CHARS = 32_000
 
-        job_id, node_key = parts[2], parts[3]
+    def _edit(self, raw_message: str) -> str:
+        """Single-step edit: /prompt edit <job_id> <node_key> <new prompt>
 
-        # Check if there's a prompt in the conversation history (last user message before this one)
-        # For now, instruct the user to use a two-step flow
-        # In a future iteration, we can detect the follow-up message
+        Everything after the node_key is treated verbatim as the new prompt,
+        including newlines (#8.19 — no " ".join tokenization).
+        """
+        # Split only off the first 4 whitespace-delimited tokens to preserve
+        # internal whitespace/newlines in the prompt body.
+        header_parts = raw_message.split(None, 3)
+        if len(header_parts) < 4:
+            return (
+                "❌ Usage: `/prompt edit <job_id> <node_key> <new prompt text>`\n\n"
+                "Everything after `<node_key>` is used verbatim as the new prompt "
+                "(newlines preserved)."
+            )
+        _, _, job_id, rest = header_parts
+        # rest now contains node_key followed by the prompt body
+        node_parts = rest.split(None, 1)
+        if len(node_parts) < 2 or not node_parts[1].strip():
+            return "❌ Missing prompt body. Usage: `/prompt edit <job_id> <node_key> <new prompt text>`"
+        node_key, new_prompt = node_parts
 
-        return (
-            f"✏️ **Edit mode for `{node_key}`**\n\n"
-            f"Send your new prompt as the next message, prefixed with:\n"
-            f"```\n/prompt save {job_id} {node_key} <your prompt here>\n```"
-        )
+        # #8.26 — client-side length validation
+        if len(new_prompt) > self._MAX_PROMPT_CHARS:
+            return (
+                f"❌ Prompt too long: {len(new_prompt):,} chars (limit "
+                f"{self._MAX_PROMPT_CHARS:,}). Shorten and retry."
+            )
 
-    def _save(self, parts: list) -> str:
-        if len(parts) < 5:
-            return "❌ Usage: `/prompt save <job_id> <node_key> <new prompt text>`"
+        return self._post_prompt(job_id, node_key, new_prompt)
 
-        job_id, node_key = parts[2], parts[3]
-        new_prompt = " ".join(parts[4:])
-
+    def _post_prompt(self, job_id: str, node_key: str, new_prompt: str) -> str:
         try:
             resp = requests.post(
                 f"{self.valves.orchestrator_url}/prompts/{job_id}/{node_key}",
                 json={"prompt": new_prompt},
                 headers={"X-API-Key": self.valves.api_key},
-                timeout=self.valves.request_timeout
+                timeout=self.valves.request_timeout,
             )
             if resp.status_code != 200:
-                return f"❌ Error: {resp.json().get('detail', resp.text)}"
+                try:
+                    detail = resp.json().get("detail", resp.text)
+                except ValueError:
+                    detail = resp.text
+                return f"❌ Error: {detail}"
 
             d = resp.json()
+            # #8.25 — defensive .get() with fallbacks
+            old_len = d.get("old_length", "?")
+            new_len = d.get("new_length", len(new_prompt))
             return (
                 f"✅ **Prompt updated for `{node_key}`**\n\n"
-                f"Old length: {d['old_length']} chars → New length: {d['new_length']} chars"
+                f"Old length: {old_len} chars → New length: {new_len} chars"
             )
         except requests.exceptions.RequestException as e:
             return f"❌ Connection error: {e}"
 
-    # Override pipe to also handle /prompt save
+    # Back-compat: /prompt save <job> <node> <prompt> still works the same.
+    def _save(self, raw_message: str) -> str:
+        """Deprecated — use /prompt edit. Still accepted for compatibility."""
+        header_parts = raw_message.split(None, 3)
+        if len(header_parts) < 4:
+            return "❌ Usage: `/prompt save <job_id> <node_key> <new prompt text>` (deprecated — prefer `/prompt edit`)"
+        _, _, job_id, rest = header_parts
+        node_parts = rest.split(None, 1)
+        if len(node_parts) < 2 or not node_parts[1].strip():
+            return "❌ Missing prompt body."
+        node_key, new_prompt = node_parts
+        if len(new_prompt) > self._MAX_PROMPT_CHARS:
+            return (
+                f"❌ Prompt too long: {len(new_prompt):,} chars (limit "
+                f"{self._MAX_PROMPT_CHARS:,})."
+            )
+        return self._post_prompt(job_id, node_key, new_prompt)
+
     def pipe(self, user_message: str, model_id: str = "", messages: list = None, body: dict = None) -> Optional[str]:
         msg = user_message.strip()
 
         if not msg.startswith("/prompt"):
             return None
 
-        parts = msg.split(None, 4)
+        # Only split off the leading /prompt <cmd> for routing; edit/save
+        # need the full raw body below so newlines in the prompt body survive.
+        parts = msg.split(None, 2)
         cmd = parts[1] if len(parts) > 1 else "help"
 
         if cmd == "help":
             return self._help()
         elif cmd == "list":
-            return self._list(parts)
+            return self._list(msg.split())
         elif cmd == "view":
-            return self._view(parts)
+            return self._view(msg.split())
         elif cmd == "edit":
-            return self._edit(parts)
+            return self._edit(msg)
         elif cmd == "save":
-            return self._save(parts)
+            return self._save(msg)
         else:
             return f"❌ Unknown subcommand: `{cmd}`\n\n" + self._help()

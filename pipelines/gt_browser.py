@@ -9,6 +9,18 @@ from typing import Optional, List
 from pydantic import BaseModel, Field
 
 
+# ─── SHARED: status icons — keep in sync across pipelines (#8.17) ───
+# Pipelines load as isolated single-file modules; no shared imports possible.
+# If you add/rename a status, update every pipeline file that has this block.
+STATUS_ICONS = {
+    "done":     "✅",
+    "failed":   "❌",
+    "running":  "🔄",
+    "pending":  "⬜",
+    "skipped":  "⏭️",
+}
+# ─── END SHARED ───
+
 class Pipeline:
     class Valves(BaseModel):
         api_key: str = Field(default="", description="Scaffold Engine API key (X-API-Key header)")
