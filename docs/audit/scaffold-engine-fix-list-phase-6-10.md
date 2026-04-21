@@ -91,14 +91,14 @@
 - [x] **#9.4** No `asyncio_mode = "auto"` in `pyproject.toml` — every async test needs `@pytest.mark.asyncio` individually.
 - [x] **#9.5** No default `--timeout` in pytest addopts.
 - [ ] **#9.6** Oversized test files: `test_scaffold_router.py` (35 KB), `test_research_agent.py` (30 KB), `test_execution_agent.py` (21 KB), `test_ideation_workflow.py` (20 KB). Split.
-- [ ] **#9.7** Rename legacy `test_tasks_13_14_15_16.py` to module-based name.
+- [x] **#9.7** Rename legacy `test_tasks_13_14_15_16.py` to module-based name.
 - [x] **#9.8** `conftest.py` eager-imports `app` and `app.model_router` — blocks `test_scaffold_router.py` (must run with `--noconftest`).
 - [x] **#9.9** Pipeline tests require `--noconftest`, splitting CI and local runs.
 - [x] **#9.10** `make_mock_db` helper covers only `.mappings().all()` — tests using `.scalar()`, `.first()`, `.rowcount` must build mocks manually.
-- [ ] **#9.11** Replace custom `_run(coro)` helper in `test_verify_extraction.py` with pytest-asyncio.
+- [x] **#9.11** Replace custom `_run(coro)` helper in `test_verify_extraction.py` with pytest-asyncio.
 - [x] **#9.12** Remove dead `app.settings` stub from `test_pipeline_complete.py` (code uses `app.config`).
 - [x] **#9.13** Isolate `sys.modules` stubbing in `test_pipeline_complete.py` to fixtures, not module-level.
-- [ ] **#9.14** Convert source-grep tests in `test_tasks_13_14_15_16.py` to behavioral tests (per Phase Y guidance, missed).
+- [x] **#9.14** Convert source-grep tests in `test_tasks_13_14_15_16.py` to behavioral tests (per Phase Y guidance, missed).
 - [x] **#9.15** Loosen `test_download_before_copy` (assumes exact `COPY app/` syntax).
 - [x] **#9.16** Dead helper `_load_module()` in `test_tasks_13_14_15_16.py` — defined, never called.
 - [x] **#9.17** Dead `_status_spec`/`_status_mod` objects — created then discarded.
@@ -141,7 +141,7 @@
 
 ### Phase 9
 - [x] **#9.31** Remove duplicate `import pytest` in `test_verify_extraction.py`.
-- [ ] **#9.32** Add test for `_verify_output` exception-from-chat path.
+- [x] **#9.32** Add test for `_verify_output` exception-from-chat path.
 - [x] **#9.33** Remove `test_todo_removed` (fragile comment-absence check).
 
 ---
