@@ -110,10 +110,10 @@
 - [ ] **#9.21** `model_router.py` — retry cascade, timeout handling.
 - [ ] **#9.22** `prompt_optimizer.py` — filler strip, verify loop.
 - [ ] **#9.23** `gt_extractor.py` — SearXNG → distill → TOON flow.
-- [ ] **#9.24** `rerankers.py` — CrossEncoder path, RRF fallback, reset.
-- [ ] **#9.25** `embedding_cache.py` — hit/miss, eviction, Redis roundtrip.
-- [ ] **#9.26** `milvus_utils.py` — auto-create, `raise_on_missing`.
-- [ ] **#9.27** `staleness.py` — TTL policy, `sweep_expired`.
+- [x] **#9.24** `rerankers.py` — CrossEncoder path, RRF fallback, reset.
+- [x] **#9.25** `embedding_cache.py` — hit/miss, eviction, Redis roundtrip.
+- [x] **#9.26** `milvus_utils.py` — auto-create, `raise_on_missing`.
+- [x] **#9.27** `staleness.py` — TTL policy, `sweep_expired`.
 - [ ] **#9.28** `http_clients.py` — lazy init, `close_clients`.
 - [ ] **#9.29** `prompt_inspector.py` + `execution_handler.py` (orchestrator modules).
 - [ ] **#9.30** `cleanup.py` — separate from health, or clarify combined scope.
