@@ -133,3 +133,29 @@ field mismatches, resolved in `cd039ce`) are all listed as open.
   #120-inverse added
 - **Resolved-by-drift-session items:** 3
 
+
+---
+
+### Attempted fix for #9.8 / #9.9 — reverted (2026-04-21)
+
+**Audit item:** `conftest.py` eager-imports `app` and `app.model_router`, forcing
+pipeline tests to use `--noconftest`.
+
+**Attempted fix:** Removed the two eager imports on the theory that no test
+module actually depended on them.
+
+**Result:** 16 collection errors, all of the shape
+`ModuleNotFoundError: No module named 'app.config'; 'app' is not a package`.
+
+**Root cause:** Because `tests/` is not configured as a proper package (no
+`tests/__init__.py`, no explicit rootdir), pytest's path-based module finder
+discovers `app/` via `sys.path` manipulation. The eager `import app` in
+`conftest.py` is what causes `app` to be materialized as a proper package
+object before test modules reference `app.utils.x`, `app.modules.x`, etc.
+
+**Decision:** Keep the imports. Annotate them as load-bearing with a pointer
+to this finding. Future fix would require converting `tests/` to a proper
+package — scoped larger than an audit item.
+
+**Items marked [x] with caveat:** #9.8, #9.9 — addressed via documentation
+rather than code change.

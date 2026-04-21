@@ -1,8 +1,16 @@
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-addopts = ["--strict-markers", "--strict-config", "-ra"]
+# default 30s timeout (individual tests can override via @pytest.mark.timeout) - fix #9.5
+# asyncio_mode=auto removes the need for @pytest.mark.asyncio on every async test - fix #9.4
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+    "--timeout=30",
+]
+asyncio_mode = "auto"
 markers = [
-    "smoke: Fast sanity checks — unit tests, extraction pipeline (<2 min)",
-    "validate: Integration tests — API, reranker, verifier (<15 min)",
+    "smoke: Fast sanity checks - unit tests, extraction pipeline (<2 min)",
+    "validate: Integration tests - API, reranker, verifier (<15 min)",
 ]

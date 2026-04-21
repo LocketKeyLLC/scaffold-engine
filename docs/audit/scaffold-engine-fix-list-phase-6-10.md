@@ -28,7 +28,7 @@
 - [x] **#8.5** `execution_handler._approve` reads `d.get("output_preview")` but orchestrator returns `output` → preview section never renders. — ✅ `cd039ce`
 
 ### Phase 9 — Tests
-- [ ] **#9.1** `test_pipeline_complete.py` — ~6 of 10 tests are tautologies (e.g., `assert "pipeline_complete" == "pipeline_complete"`). Effectively zero real coverage.
+- [x] **#9.1** `test_pipeline_complete.py` — ~6 of 10 tests are tautologies (e.g., `assert "pipeline_complete" == "pipeline_complete"`). Effectively zero real coverage.
 - [x] **#9.2** `test_tasks_13_14_15_16.py::test_cache_dir_matches_compose` asserts `/app/.cache/huggingface`; actual Dockerfile path is `/code/.cache/huggingface`. Test is broken.
 
 ---
@@ -87,22 +87,22 @@
 - [x] **#8.21** `dag_viewer` Mermaid escaping only handles `"` (line: `title.replace('"', "'")`) — breaks on `[`, `]`, `(`, `)`, `|`, `{`, `}`, `#`.
 
 ### Phase 9 — Tests (structural)
-- [ ] **#9.3** `conftest_ci.py` — filename not auto-loaded by pytest. Fixtures unreachable. Dead code.
-- [ ] **#9.4** No `asyncio_mode = "auto"` in `pyproject.toml` — every async test needs `@pytest.mark.asyncio` individually.
-- [ ] **#9.5** No default `--timeout` in pytest addopts.
+- [x] **#9.3** `conftest_ci.py` — filename not auto-loaded by pytest. Fixtures unreachable. Dead code.
+- [x] **#9.4** No `asyncio_mode = "auto"` in `pyproject.toml` — every async test needs `@pytest.mark.asyncio` individually.
+- [x] **#9.5** No default `--timeout` in pytest addopts.
 - [ ] **#9.6** Oversized test files: `test_scaffold_router.py` (35 KB), `test_research_agent.py` (30 KB), `test_execution_agent.py` (21 KB), `test_ideation_workflow.py` (20 KB). Split.
 - [ ] **#9.7** Rename legacy `test_tasks_13_14_15_16.py` to module-based name.
-- [ ] **#9.8** `conftest.py` eager-imports `app` and `app.model_router` — blocks `test_scaffold_router.py` (must run with `--noconftest`).
-- [ ] **#9.9** Pipeline tests require `--noconftest`, splitting CI and local runs.
-- [ ] **#9.10** `make_mock_db` helper covers only `.mappings().all()` — tests using `.scalar()`, `.first()`, `.rowcount` must build mocks manually.
+- [x] **#9.8** `conftest.py` eager-imports `app` and `app.model_router` — blocks `test_scaffold_router.py` (must run with `--noconftest`).
+- [x] **#9.9** Pipeline tests require `--noconftest`, splitting CI and local runs.
+- [x] **#9.10** `make_mock_db` helper covers only `.mappings().all()` — tests using `.scalar()`, `.first()`, `.rowcount` must build mocks manually.
 - [ ] **#9.11** Replace custom `_run(coro)` helper in `test_verify_extraction.py` with pytest-asyncio.
-- [ ] **#9.12** Remove dead `app.settings` stub from `test_pipeline_complete.py` (code uses `app.config`).
-- [ ] **#9.13** Isolate `sys.modules` stubbing in `test_pipeline_complete.py` to fixtures, not module-level.
+- [x] **#9.12** Remove dead `app.settings` stub from `test_pipeline_complete.py` (code uses `app.config`).
+- [x] **#9.13** Isolate `sys.modules` stubbing in `test_pipeline_complete.py` to fixtures, not module-level.
 - [ ] **#9.14** Convert source-grep tests in `test_tasks_13_14_15_16.py` to behavioral tests (per Phase Y guidance, missed).
 - [x] **#9.15** Loosen `test_download_before_copy` (assumes exact `COPY app/` syntax).
 - [x] **#9.16** Dead helper `_load_module()` in `test_tasks_13_14_15_16.py` — defined, never called.
 - [x] **#9.17** Dead `_status_spec`/`_status_mod` objects — created then discarded.
-- [ ] **#9.18** `conftest_ci.py` uses `localhost` hostnames — from inside container, Milvus is at `scaffold-milvus:19530`, not localhost. Dead-on-arrival even if activated.
+- [x] **#9.18** `conftest_ci.py` uses `localhost` hostnames — from inside container, Milvus is at `scaffold-milvus:19530`, not localhost. Dead-on-arrival even if activated.
 
 ### Phase 9 — Tests (coverage gaps — add tests for these modules)
 - [ ] **#9.19** `auth.py` — API key validation, health exemption.
