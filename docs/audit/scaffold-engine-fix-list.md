@@ -159,9 +159,9 @@ Total items: **155**
 - [x] **#100** Share adjacency structure between `validate_dag` and `_build_edges` (duplicate graph traversal) — 🔄 reframed: audit-wrong (different output shapes) (see drift-findings.md)
 - [x] **#101** Move `VALID_DOMAINS` / `VALID_TOOLS` to `config.py` — ✅ `f777d05`
 - [x] **#102** Remove arbitrary ≤2 task skip in `_render_mermaid` — ✅ `6afc039`
-- [ ] **#103** Update overview line counts (dag_generator 615→575)
+- [x] **#103** Update overview line counts (dag_generator 615→575)
 - [x] **#104** Enforce task-name length limit (≤5 words or ≤80 chars; prompt says "max 5 words" but no enforcement) — ✅ `f777d05`
-- [ ] **#105** Consider bulk INSERT for DAG nodes (deferred, perf only)
+- [~] **#105** Consider bulk INSERT for DAG nodes — deferred, perf only (session 43c315f~)
 - [x] **#106** Remove unnecessary `from __future__ import annotations` (Python 3.12) — ✅ `f777d05`
 - [x] **#107** `isinstance(raw, dict): continue` silently skips non-dict tasks — add to errors list — 🔄 reframed: stale (already implemented) (see drift-findings.md)
 - [x] **#108** Deduplicate `str(raw_domain).strip().lower()` calls in `_normalize_tasks` — ✅ `6afc039`
@@ -173,14 +173,14 @@ Total items: **155**
 - [x] **#112** `_rrf_fuse` should dedup on `entry_id`, not `content[:200]` — ✅ `2a3d466`
 - [x] **#113** `too_strict` fallback should scale with `top_k` (e.g., `min(3, top_k)`) — ✅ `b1c862c`
 - [x] **#114** Sanitize `topic_slug` for URL-safe chars (current: `title.lower().replace(" ", "-")[:60]` leaves punctuation/unicode) — ✅ `0a0006b`
-- [ ] **#115** Consider batched ingestion (deferred, perf only)
+- [~] **#115** Consider batched ingestion — deferred, perf only (session 43c315f~)
 - [x] **#116** Use parameter binding for Milvus expressions (consistency; low-risk injection) — ✅ `0a0006b`
 - [x] **#117** Add `skipped_empty` counter to ingestion stats — ✅ `0a0006b`
 - [x] **#118** Document canonical field names; plan migration off legacy aliases (content/canonical_text, title/topic, etc.) — ✅ `0a0006b`
 - [x] **#119** Add upper bound cap on `top_k` (unbounded input currently) — ✅ `0a0006b`
-- [ ] **#120** Remove unnecessary `run_in_executor` around `_get_collection`
+- [x] **#120** Remove unnecessary `run_in_executor` around `_get_collection`
 - [x] **#121** Document `confidence_threshold=0.0` as disable-filter option — ✅ `b1c862c`
-- [ ] **#122** Update overview line counts (rag_pipeline 583→596)
+- [x] **#122** Update overview line counts (rag_pipeline 583→596)
 
 ### Phase 4b — rerankers + utils
 - [x] **#123** Remove unused `Optional` import from rerankers.py

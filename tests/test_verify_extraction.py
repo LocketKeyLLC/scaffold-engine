@@ -35,8 +35,6 @@ def _run(coro):
 # Layer 1: Think-tag stripping
 # ---------------------------------------------------------------------------
 
-import pytest
-
 @pytest.mark.smoke
 class TestLayer1ThinkStrip:
     """<think> and <thinking> blocks must be removed before JSON parsing."""

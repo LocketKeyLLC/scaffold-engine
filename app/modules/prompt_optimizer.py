@@ -214,9 +214,11 @@ async def optimize_prompt(
         logger.info("Running verifier with %s", ver_model)
         intent_preserved, reason = await _llm_verify(prompt, optimized, ver_model)
         if not intent_preserved:
+            # #6.12 — keep intent_preserved=False so callers/clarity score
+            # reflect the real verify outcome. Rollback to pre_cleaned is a
+            # safety fallback, not evidence the optimized prompt was valid.
             logger.warning("Intent not preserved: %s — falling back to pre_cleaned", reason)
             optimized = pre_cleaned
-            intent_preserved = True
 
     post_analysis = _analyze(optimized)
     issues_after = len(post_analysis.issues)

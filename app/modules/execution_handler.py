@@ -34,14 +34,20 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
     )
     rows = nodes_result.fetchall()
 
-    done_keys = {r.node_key for r in rows if r.status == "done"}
+    # #7.6 — "skipped" nodes satisfy downstream deps_met; otherwise skipping
+    # a single node would lock the whole downstream chain forever.
+    satisfied_keys = {r.node_key for r in rows if r.status in ("done", "skipped")}
     nodes = []
     next_node = None
 
     for r in rows:
         deps = r.depends_on or []
-        deps_met = all(d in done_keys for d in deps)
-        is_actionable = r.status in ("pending", "failed") and deps_met
+        deps_met = all(d in satisfied_keys for d in deps)
+        # #7.7 — only "pending" is actionable via /execute. Failed nodes
+        # require an explicit /exec/retry — "actionable" must mean "something
+        # /execute will pick up," and /execute never re-picks failed without
+        # explicit retry.
+        is_actionable = r.status == "pending" and deps_met
 
         node = {
             "node_key": r.node_key,

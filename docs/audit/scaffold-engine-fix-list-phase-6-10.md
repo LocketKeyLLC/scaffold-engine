@@ -16,7 +16,7 @@
 - [x] **#6.4** `gt_detail` returns HTTP 200 with `{"found": false}` on miss instead of HTTP 404. — ✅ `02f7ecb`
 
 ### Phase 7 — Utilities
-- [ ] **#7.1** `http_clients.get_searxng_client` declares `global _searxng_client, _github_client` but `_github_client` is not defined at module scope in that function — stray global referencing wrong name.
+- [x] **#7.1** `http_clients.get_searxng_client` declares `global _searxng_client, _github_client` but `_github_client` is not defined at module scope in that function — stray global referencing wrong name.
 
 ### Phase 8a — scaffold_router
 - [x] **#8.1** `/help` advertises `/results` command but `_handle_command` doesn't implement it. User-visible broken link. — ✅ `2989f0b`
@@ -29,7 +29,7 @@
 
 ### Phase 9 — Tests
 - [ ] **#9.1** `test_pipeline_complete.py` — ~6 of 10 tests are tautologies (e.g., `assert "pipeline_complete" == "pipeline_complete"`). Effectively zero real coverage.
-- [ ] **#9.2** `test_tasks_13_14_15_16.py::test_cache_dir_matches_compose` asserts `/app/.cache/huggingface`; actual Dockerfile path is `/code/.cache/huggingface`. Test is broken.
+- [x] **#9.2** `test_tasks_13_14_15_16.py::test_cache_dir_matches_compose` asserts `/app/.cache/huggingface`; actual Dockerfile path is `/code/.cache/huggingface`. Test is broken.
 
 ---
 
@@ -38,12 +38,12 @@
 ### Phase 6 — Ideation
 - [x] **#6.5** `ideation_workflow.py` — mid-module imports (inside functions) violate PEP 8. Move to top. — ✅ `02bdc22`
 - [x] **#6.6** Private function imports from `gt_extractor` (e.g., `_detect_topic_id`). Breaks encapsulation. — ✅ `02bdc22`
-- [ ] **#6.7** Misleading comment `"4b distillation"` next to code that calls 235b model.
+- [x] **#6.7** Misleading comment `"4b distillation"` next to code that calls 235b model.
 - [x] **#6.8** Hardcoded caps (research query count, URL cap) with no config reference. — ✅ `02bdc22`
 - [x] **#6.9** No concurrent-execution guard for Phase 2 (`research_and_compile`) — two simultaneous `/confirm` calls for same job would race. — ✅ `02bdc22`
 - [x] **#6.10** Dead imports: `JobCreate`, `JobRead`. — ✅ `02bdc22`
 - [x] **#6.11** `optimize_prompt` endpoint missing `model_overrides` param. — ✅ `02bdc22`
-- [ ] **#6.12** `_llm_verify` verify-fail path returns `intent_preserved=True` regardless of actual outcome.
+- [x] **#6.12** `_llm_verify` verify-fail path returns `intent_preserved=True` regardless of actual outcome.
 - [x] **#6.13** `_llm_verify` substring `"true"` fallback in text — fragile heuristic. — ✅ `02bdc22`
 
 ### Phase 6 — GT
@@ -61,9 +61,9 @@
 - [x] **#7.2** `cleanup.py` writes reaper messages to `jobs.compiled_output` field. Should use `error_summary` or a dedicated reap reason column. — ✅ `306fabf`
 - [x] **#7.3** `cleanup.py::STALE_THRESHOLD_MINUTES=30` constant declared but never referenced — SQL uses hardcoded literal. — ✅ `306fabf`
 - [x] **#7.4** `reap_stale_jobs` docstring says "2 categories" but code handles 4. Drift. — ✅ `306fabf`
-- [ ] **#7.5** SearXNG client in `http_clients` missing `follow_redirects=True` — 301/302 responses fail silently.
-- [ ] **#7.6** `execution_handler.deps_met` logic inconsistent with `execute_next_node` — excludes `'skipped'` status.
-- [ ] **#7.7** `actionable` filter in `execution_handler` includes `'failed'` status, but `/execute` won't re-pick failed nodes without explicit `/exec/retry`.
+- [x] **#7.5** SearXNG client in `http_clients` missing `follow_redirects=True` — 301/302 responses fail silently.
+- [x] **#7.6** `execution_handler.deps_met` logic inconsistent with `execute_next_node` — excludes `'skipped'` status.
+- [x] **#7.7** `actionable` filter in `execution_handler` includes `'failed'` status, but `/execute` won't re-pick failed nodes without explicit `/exec/retry`.
 - [ ] **#7.8** No prompt revision history (Phase 8 #119 workflow) — edits overwrite without audit trail.
 
 ### Phase 8a — scaffold_router
@@ -99,9 +99,9 @@
 - [ ] **#9.12** Remove dead `app.settings` stub from `test_pipeline_complete.py` (code uses `app.config`).
 - [ ] **#9.13** Isolate `sys.modules` stubbing in `test_pipeline_complete.py` to fixtures, not module-level.
 - [ ] **#9.14** Convert source-grep tests in `test_tasks_13_14_15_16.py` to behavioral tests (per Phase Y guidance, missed).
-- [ ] **#9.15** Loosen `test_download_before_copy` (assumes exact `COPY app/` syntax).
-- [ ] **#9.16** Dead helper `_load_module()` in `test_tasks_13_14_15_16.py` — defined, never called.
-- [ ] **#9.17** Dead `_status_spec`/`_status_mod` objects — created then discarded.
+- [x] **#9.15** Loosen `test_download_before_copy` (assumes exact `COPY app/` syntax).
+- [x] **#9.16** Dead helper `_load_module()` in `test_tasks_13_14_15_16.py` — defined, never called.
+- [x] **#9.17** Dead `_status_spec`/`_status_mod` objects — created then discarded.
 - [ ] **#9.18** `conftest_ci.py` uses `localhost` hostnames — from inside container, Milvus is at `scaffold-milvus:19530`, not localhost. Dead-on-arrival even if activated.
 
 ### Phase 9 — Tests (coverage gaps — add tests for these modules)
@@ -140,9 +140,9 @@
 - [x] **#8.29** `dag_viewer` no truncation on large DAG rendered output.
 
 ### Phase 9
-- [ ] **#9.31** Remove duplicate `import pytest` in `test_verify_extraction.py`.
+- [x] **#9.31** Remove duplicate `import pytest` in `test_verify_extraction.py`.
 - [ ] **#9.32** Add test for `_verify_output` exception-from-chat path.
-- [ ] **#9.33** Remove `test_todo_removed` (fragile comment-absence check).
+- [x] **#9.33** Remove `test_todo_removed` (fragile comment-absence check).
 
 ---
 

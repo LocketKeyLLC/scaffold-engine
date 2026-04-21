@@ -20,11 +20,14 @@ _searxng_client: httpx.AsyncClient | None = None
 
 def get_searxng_client() -> httpx.AsyncClient:
     """Return the module-level SearXNG async client (lazy init)."""
-    global _searxng_client, _github_client
+    global _searxng_client
     if _searxng_client is None or _searxng_client.is_closed:
+        # #7.5 — follow_redirects=True so 301/302 responses from SearXNG
+        # upstream don't silently return empty results.
         _searxng_client = httpx.AsyncClient(
             base_url=settings.searxng_url,
             timeout=30.0,
+            follow_redirects=True,
             limits=httpx.Limits(
                 max_connections=10,
                 max_keepalive_connections=5,

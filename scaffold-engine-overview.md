@@ -156,31 +156,32 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 ### Core
 | File | Lines | Purpose |
 |---|---:|---|
-| `main.py` | 729 | FastAPI app, all endpoints, health checks, lifespan, middleware |
+| `main.py` | 759 | FastAPI app, all endpoints, health checks, lifespan, middleware |
 | `model_router.py` | 344 | Ollama API routing with retry cascade, persistent `httpx.AsyncClient` |
 | `config.py` | ~50 | Pydantic Settings (env vars with defaults) |
-| `auth.py` | 33 | API key auth via `X-API-Key` |
+| `auth.py` | 39 | API key auth via `X-API-Key` |
 | `database.py` | 26 | Async SQLAlchemy engine + session |
 | `schemas.py` | ~400 | Pydantic request/response models |
-| `rerankers.py` | 164 | CrossEncoder reranker + RRF fallback |
+| `rerankers.py` | 206 | CrossEncoder reranker + RRF fallback |
 | `scheduler.py` | 245 | APScheduler: per-schedule tz, job timeout, idempotent init, graceful shutdown, real session_id capture |
+| `migrations.py` | 158 | Schema migration runner — scans db/migrations/*.sql, applies unseen files, tracks in schema_migrations table |
 | `logging_config.py` | 86 | structlog setup |
 
 ### Modules
 | File | Lines | Purpose |
 |---|---:|---|
-| `modules/execution_agent.py` | 1,261 | DAG node execution, SSE streaming, tool dispatch, verification, auto-retry |
-| `modules/dag_generator.py` | 575 | DAG creation, Kahn's cycle check, numeric-sort truncation |
-| `modules/rag_pipeline.py` | 596 | Embed → parallel vector+keyword → RRF → rerank; ingest with dedup + version chains |
-| `modules/research_agent.py` | 2,188 | Autonomous research + URL/GitHub/OpenAPI/PDF direct modes + pause/resume |
-| `modules/ideation_workflow.py` | 383 | Phase 1 (refine + feasibility) + Phase 2 (research → compile) |
-| `modules/idea_refinement.py` | 172 | Raw idea → structured brief |
-| `modules/prompt_optimizer.py` | 201 | Strip → optimize → verify |
+| `modules/execution_agent.py` | 1,262 | DAG node execution, SSE streaming, tool dispatch, verification, auto-retry |
+| `modules/dag_generator.py` | 618 | DAG creation, Kahn's cycle check, numeric-sort truncation |
+| `modules/rag_pipeline.py` | 647 | Embed → parallel vector+keyword → RRF → rerank; ingest with dedup + version chains |
+| `modules/research_agent.py` | 2,189 | Autonomous research + URL/GitHub/OpenAPI/PDF direct modes + pause/resume |
+| `modules/ideation_workflow.py` | 370 | Phase 1 (refine + feasibility) + Phase 2 (research → compile) |
+| `modules/idea_refinement.py` | 171 | Raw idea → structured brief |
+| `modules/prompt_optimizer.py` | 242 | Strip → optimize → verify |
 | `modules/gt_extractor.py` | 440 | SearXNG → distill → TOON formatting → optional GitHub push |
-| `modules/gt_browser.py` | 266 | GT browsing/search/detail/stats (async-safe, supersede filter) |
+| `modules/gt_browser.py` | 271 | GT browsing/search/detail/stats (async-safe, supersede filter) |
 | `modules/prompt_inspector.py` | 116 | Prompt analysis + revision |
 | `modules/execution_handler.py` | 73 | Execution status queries |
-| `modules/cleanup.py` | 143 | Stale-job reaper (15-min loop, unified `reap_stale_jobs`) |
+| `modules/cleanup.py` | 145 | Stale-job reaper (15-min loop, unified `reap_stale_jobs`) |
 
 ### Routers & Middleware
 | File | Lines | Purpose |
@@ -193,12 +194,13 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 | File | Lines | Purpose |
 |---|---:|---|
 | `utils/llm_parsing.py` | 115 | Shared `strip_think_tags()`, `parse_json_object()`, `parse_json_array()` |
-| `utils/http_clients.py` | 78 | Shared SearXNG + GitHub async clients with pooling |
-| `utils/milvus_utils.py` | 139 | `get_collection()` with auto-create of `toon_v2` schema |
-| `utils/embedding_cache.py` | ~80 | Two-tier: in-memory LRU + Redis |
-| `utils/staleness.py` | 77 | TTL-per-source-type sweep |
-| `utils/github_ingest.py` | 154 | GitHub repo fetch + rate-limit guard |
-| `utils/openapi_ingest.py` | 241 | OpenAPI/Swagger fetch, validate, flatten per-endpoint |
+| `utils/http_clients.py` | 109 | Shared SearXNG + GitHub async clients with pooling |
+| `utils/milvus_utils.py` | 162 | `get_collection()` with auto-create of `toon_v2` schema |
+| `utils/embedding_cache.py` | 180 | Two-tier: in-memory LRU + Redis |
+| `utils/staleness.py` | 113 | TTL-per-source-type sweep |
+| `utils/github_ingest.py` | 212 | GitHub repo fetch + rate-limit guard |
+| `utils/openapi_ingest.py` | 302 | OpenAPI/Swagger fetch, validate, flatten per-endpoint |
+| `utils/topic_detection.py` | 40 | Shared topic-id detection (domain routing for research/ingest) |
 | `utils/embedding.py` | 42 | Public `embed_query` — decouples rag_pipeline from gt callers |
 
 ---
@@ -207,11 +209,11 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 
 | Pipeline | Lines | Purpose |
 |---|---:|---|
-| `scaffold_router.py` | ~1,355 | Main pipeline: triage, synthesis, `/go`/`/confirm` auto-chain, `/research`, `/research/reply`, `/schedule`, `/model`, `/results` |
-| `gt_browser.py` | 234 | GT browsing (requests-based, paginated hints, per_page valve) |
-| `execution_handler.py` | 326 | Direct execution control |
-| `prompt_inspector.py` | 178 | Prompt analysis |
-| `dag_viewer.py` | 111 | DAG visualization (Mermaid) |
+| `scaffold_router.py` | 1,367 | Main pipeline: triage, synthesis, `/go`/`/confirm` auto-chain, `/research`, `/research/reply`, `/schedule`, `/model`, `/results` |
+| `gt_browser.py` | 246 | GT browsing (requests-based, paginated hints, per_page valve) |
+| `execution_handler.py` | 339 | Direct execution control |
+| `prompt_inspector.py` | 236 | Prompt analysis |
+| `dag_viewer.py` | 176 | DAG visualization (Mermaid) |
 
 ### scaffold_router Valves (admin-configurable)
 - **Connection:** `api_key`, `orchestrator_url`, `request_timeout=30`, `stream_timeout=3600`, `triage_timeout=3600`, `keepalive_interval=10`, `ollama_url`, `dag_timeout` *(legacy alias, migrated to stream_timeout on init)*
