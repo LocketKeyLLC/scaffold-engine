@@ -34,15 +34,15 @@ Total items: **155**
 ## HIGH (1)
 
 ### Phase 1 — Foundation
-- [ ] **#10** **No migration runner on orchestrator startup** — `init.sql` runs on fresh DB but migrations 002–013 don't auto-apply; `docker compose down -v && up` produces incomplete schema
+- [x] **#10** **No migration runner on orchestrator startup** — `init.sql` runs on fresh DB but migrations 002–013 don't auto-apply; `docker compose down -v && up` produces incomplete schema
 
 ---
 
 ## MEDIUM (71)
 
 ### Phase 1 — Foundation
-- [ ] **#11** Remove dead `MODEL_CLOUD_HEAVY` env var from `docker-compose.yml`
-- [ ] **#12** Set `SCHEDULER_JOBSTORE_URL: ""` in compose, let `config.py` derive it
+- [x] **#11** Remove dead `MODEL_CLOUD_HEAVY` env var from `docker-compose.yml`
+- [x] **#12** Set `SCHEDULER_JOBSTORE_URL: ""` in compose, let `config.py` derive it
 
 ### Phase 2 — main.py
 - [x] **#13** Move 6 inline Pydantic models to `schemas.py` (`IdeaInput`, `ConfirmInput`, `DagInput`, `RagInput`, `GtInput`, `GtSearchInput`) — ✅ `4a3c1d7`
@@ -132,13 +132,13 @@ Total items: **155**
 ## LOW (74)
 
 ### Phase 1 — Foundation
-- [ ] **#82** Pin `requirements-ci.txt` to exact versions matching production
-- [ ] **#83** Fix migration 011 internal header comment ("Migration 010" → "Migration 011")
-- [ ] **#84** Remove unused `LOCAL_TIMEOUT` from `.env` (compose hardcodes value)
-- [ ] **#85** Split dev deps out of production Docker image (future optimization)
-- [ ] **#86** Verify `sentence-transformers==5.3.0` major version bump is intentional
-- [ ] **#87** Reconcile `init.sql` "8 tables" comment vs overview "9 tables" claim
-- [ ] **#88** Note: `Dockerfile` doesn't copy `requirements-ci.txt` (informational; CI uses venv)
+- [x] **#82** Pin `requirements-ci.txt` to exact versions matching production
+- [x] **#83** Fix migration 011 internal header comment ("Migration 010" → "Migration 011")
+- [x] **#84** Remove unused `LOCAL_TIMEOUT` from `.env` (compose hardcodes value)
+- [x] **#85** Split dev deps out of production Docker image (future optimization)
+- [x] **#86** Verify `sentence-transformers==5.3.0` major version bump is intentional
+- [x] **#87** Reconcile `init.sql` "8 tables" comment vs overview "9 tables" claim
+- [x] **#88** Note: `Dockerfile` doesn't copy `requirements-ci.txt` (informational; CI uses venv)
 
 ### Phase 2 — main.py
 - [x] **#89** Fix `cache_stats` fallback in `/health` (uses sketchy `dir()` check; initialize `cache_stats = {}` before try) — ✅ `4a3c1d7`

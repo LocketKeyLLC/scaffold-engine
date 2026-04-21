@@ -1,5 +1,8 @@
 -- Scaffold Engine — PostgreSQL Schema
--- All 8 tables, idempotent (safe to re-run)
+-- Creates the 8 core tables that existed at project inception (#87).
+-- Additional tables (dedup_log, research_sessions, scheduled_jobs,
+-- apscheduler_jobs, + legacy) come from migrations 002–013.
+-- Idempotent (safe to re-run).
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 

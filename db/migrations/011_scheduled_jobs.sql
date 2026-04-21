@@ -1,4 +1,4 @@
--- Migration 010: Scheduled research jobs
+-- Migration 011: Scheduled research jobs
 -- Adds user-facing schedule metadata + APScheduler's internal jobstore table
 -- Date: April 16, 2026
 

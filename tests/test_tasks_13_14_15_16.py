@@ -92,8 +92,10 @@ class TestConfidenceInSchema:
         if not init_path.exists():
             pytest.skip("db/init.sql not available inside container")
         init_sql = init_path.read_text()
-        assert "confidence" in init_sql, "confidence column missing from init.sql"
-        assert "FLOAT" in init_sql.upper().split("confidence")[1][:30].upper()
+        upper = init_sql.upper()
+        assert "CONFIDENCE" in upper, "confidence column missing from init.sql"
+        # Find the column declaration and verify it's typed FLOAT
+        assert "FLOAT" in upper.split("CONFIDENCE", 1)[1][:30]
 
     def test_migration_file_exists(self):
         """Migration 002 must exist for running databases."""

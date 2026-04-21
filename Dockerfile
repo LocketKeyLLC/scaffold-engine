@@ -2,6 +2,10 @@ FROM python:3.12.13-slim
 WORKDIR /code
 RUN apt-get update && apt-get install -y --no-install-recommends curl jq make && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir "setuptools==71.1.0"
+# TODO(#85): Split dev deps into a separate build stage to shrink the
+# production image. Currently requirements-dev is installed in the same
+# layer; future work: multi-stage build with a dev target for tests and
+# a lean runtime target that only has requirements.txt.
 COPY requirements.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements-dev.txt

@@ -89,6 +89,20 @@ async def lifespan(app: FastAPI):
         logger.warning("milvus_connection_failed: uri=%s error=%s", settings.milvus_uri, e)
 
     # Database connectivity is verified by first request via get_db()
+    # Run schema migrations before anything else touches the DB (#10)
+    try:
+        from app.migrations import run_migrations
+        mig_result = await run_migrations()
+        if mig_result.get("status") == "error":
+            logger.error("migrations_failed_at_startup: %s", mig_result)
+        elif mig_result.get("applied"):
+            logger.info(
+                "migrations_applied_at_startup: count=%d files=%s",
+                len(mig_result["applied"]), mig_result["applied"],
+            )
+    except Exception as exc:
+        logger.error("migrations_hook_crashed: error=%s", exc)
+
     logger.info("engine_started: log_level=%s", settings.log_level)
 
     # Optional startup cleanup

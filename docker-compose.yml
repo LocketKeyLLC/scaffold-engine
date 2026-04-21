@@ -84,7 +84,6 @@ services:
       MODEL_CODER: qwen2.5-coder:7b
       MODEL_GENERAL: qwen3-vl:235b-instruct-cloud
       MODEL_VERIFIER: qwen2.5:7b
-      MODEL_CLOUD_HEAVY: qwen3-vl:235b-instruct-cloud
       MODEL_CLOUD_ALT: qwen3.5:397b-cloud
       MODEL_FALLBACK: qwen3.5:latest
       CLOUD_TIMEOUT: "600"
@@ -101,11 +100,11 @@ services:
       SCAFFOLD_API_KEY: "${SCAFFOLD_API_KEY}"
       SCHEDULER_ENABLED: "true"
       SCHEDULER_TIMEZONE: "UTC"
-      SCHEDULER_JOBSTORE_URL: "postgresql+psycopg2://scaffold:scaffold_dev_pw@scaffold-postgres:5432/scaffold_engine"
     volumes:
       - ./app:/code/app:ro
       - ./tests:/code/tests:ro
       - ./ground_truths:/code/ground_truths:ro
+      - ./db:/code/db:ro
       - hf-cache:/code/.cache/huggingface
       - scaffold-logs:/var/log/scaffold
     restart: unless-stopped
