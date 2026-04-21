@@ -105,18 +105,18 @@
 - [x] **#9.18** `conftest_ci.py` uses `localhost` hostnames — from inside container, Milvus is at `scaffold-milvus:19530`, not localhost. Dead-on-arrival even if activated.
 
 ### Phase 9 — Tests (coverage gaps — add tests for these modules)
-- [ ] **#9.19** `auth.py` — API key validation, health exemption.
-- [ ] **#9.20** `llm_parsing.py` — 4-step fallback chain, edge cases.
-- [ ] **#9.21** `model_router.py` — retry cascade, timeout handling.
-- [ ] **#9.22** `prompt_optimizer.py` — filler strip, verify loop.
-- [ ] **#9.23** `gt_extractor.py` — SearXNG → distill → TOON flow.
+- [x] **#9.19** `auth.py` — API key validation, health exemption.
+- [x] **#9.20** `llm_parsing.py` — 4-step fallback chain, edge cases.
+- [x] **#9.21** `model_router.py` — retry cascade, timeout handling.
+- [x] **#9.22** `prompt_optimizer.py` — filler strip, verify loop.
+- [x] **#9.23** `gt_extractor.py` — SearXNG → distill → TOON flow.
 - [x] **#9.24** `rerankers.py` — CrossEncoder path, RRF fallback, reset.
 - [x] **#9.25** `embedding_cache.py` — hit/miss, eviction, Redis roundtrip.
 - [x] **#9.26** `milvus_utils.py` — auto-create, `raise_on_missing`.
 - [x] **#9.27** `staleness.py` — TTL policy, `sweep_expired`.
-- [ ] **#9.28** `http_clients.py` — lazy init, `close_clients`.
-- [ ] **#9.29** `prompt_inspector.py` + `execution_handler.py` (orchestrator modules).
-- [ ] **#9.30** `cleanup.py` — separate from health, or clarify combined scope.
+- [x] **#9.28** `http_clients.py` — lazy init, `close_clients`.
+- [x] **#9.29** `prompt_inspector.py` + `execution_handler.py` (orchestrator modules).
+- [x] **#9.30** `cleanup.py` — separate from health, or clarify combined scope.
 
 ---
 
