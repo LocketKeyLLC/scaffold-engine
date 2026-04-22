@@ -90,7 +90,7 @@
 - [x] **#9.3** `conftest_ci.py` — filename not auto-loaded by pytest. Fixtures unreachable. Dead code.
 - [x] **#9.4** No `asyncio_mode = "auto"` in `pyproject.toml` — every async test needs `@pytest.mark.asyncio` individually.
 - [x] **#9.5** No default `--timeout` in pytest addopts.
-- [ ] **#9.6** Oversized test files: `test_scaffold_router.py` (35 KB), `test_research_agent.py` (30 KB), `test_execution_agent.py` (21 KB), `test_ideation_workflow.py` (20 KB). Split.
+- [x] **#9.6** Oversized test files: `test_scaffold_router.py` (35 KB), `test_research_agent.py` (30 KB), `test_execution_agent.py` (21 KB), `test_ideation_workflow.py` (20 KB). Split.
 - [x] **#9.7** Rename legacy `test_tasks_13_14_15_16.py` to module-based name.
 - [x] **#9.8** `conftest.py` eager-imports `app` and `app.model_router` — blocks `test_scaffold_router.py` (must run with `--noconftest`).
 - [x] **#9.9** Pipeline tests require `--noconftest`, splitting CI and local runs.

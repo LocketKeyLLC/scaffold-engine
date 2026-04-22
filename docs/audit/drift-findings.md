@@ -159,3 +159,21 @@ package — scoped larger than an audit item.
 
 **Items marked [x] with caveat:** #9.8, #9.9 — addressed via documentation
 rather than code change.
+
+---
+
+### Update to #9.8 / #9.9 (2026-04-21, after #9.6 split)
+
+When the file splits for #9.6 added `tests/__init__.py` to make
+`from tests._scaffold_router_setup import ...` work, this reduced the
+collection errors from 16 down to 2 on removing the eager imports. The
+2 remaining errors are specifically in `test_main.py` and
+`test_integration.py`, both of which do `from app.model_router import
+close_client` — and pytest's path finder still fails to resolve
+`app.model_router` as a package path in those two files without the eager
+import priming it.
+
+**Decision:** Still keep the eager imports. The workaround isn't 100%
+complete, and chasing the last 2 files would require refactoring
+test_main / test_integration.
+
