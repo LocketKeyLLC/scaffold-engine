@@ -146,6 +146,16 @@ class Settings(BaseSettings):
     default_domain: str = "eng"
     """Fallback partition when topic_to_domain lookup misses."""
 
+    # Stale-job reaper (cleanup.py)
+    stale_threshold_minutes: int = 30
+    """Base stale threshold for running/executing jobs and research sessions."""
+    planning_stale_minutes: int = 60
+    """Stale threshold for jobs stuck in the planning state."""
+    long_phase_stale_minutes: int = 45
+    """Elevated threshold for long-running phases: researching / refining / planning."""
+    cleanup_interval_seconds: int = 900
+    """Sleep between reaper sweeps."""
+
     # Logging
     log_level: str = "info"
 

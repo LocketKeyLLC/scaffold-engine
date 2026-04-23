@@ -153,6 +153,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Middleware executes in reverse registration order:
+# incoming request: Performance (outer) -> ErrorLogging (inner) -> endpoint.
+# ErrorLogging re-raises HTTPException so Performance still times 4xx paths.
 app.add_middleware(ErrorLoggingMiddleware)
 app.add_middleware(PerformanceMiddleware)
 app.include_router(status_router)
@@ -714,9 +717,6 @@ async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_d
         CronTrigger.from_crontab(body.cron_expression, timezone=body.timezone)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"invalid cron expression or timezone: {exc}")
-
-    if body.depth not in ("shallow", "medium", "deep"):
-        raise HTTPException(status_code=422, detail="depth must be shallow|medium|deep")
 
     await _require_valid_models(body.model_overrides)
 

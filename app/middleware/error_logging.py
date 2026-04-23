@@ -72,8 +72,6 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
 
 def _classify_error(exc: Exception) -> str:
     """Map exception type to error_type enum value."""
-    import httpx
-
     if isinstance(exc, httpx.TimeoutException):
         return "timeout"
     if isinstance(exc, httpx.HTTPError):

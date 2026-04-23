@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +54,7 @@ BlockerCategory = Literal[
 ]
 
 BlockerStatus = Literal["open", "in_progress", "resolved", "wont_fix"]
+ResearchDepth = Literal["shallow", "medium", "deep"]
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +65,7 @@ class JobBase(BaseModel):
     title: str
     description: str | None = None
     input_text: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class JobCreate(JobBase):
@@ -77,7 +78,7 @@ class JobUpdate(BaseModel):
     status: JobStatus | None = None
     refined_brief: dict[str, Any] | None = None
     error_summary: str | None = None
-    metadata: dict[str, Any] | None = None
+    meta: dict[str, Any] | None = None
 
 
 class JobRead(JobBase):
@@ -107,6 +108,10 @@ class DagNodeBase(BaseModel):
     max_retries: int = 3
     parallel_group: int | None = None
     execution_order: int | None = None
+    tool: str | None = None
+    domain: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    is_output_node: bool = False
 
 
 class DagNodeCreate(DagNodeBase):
@@ -166,6 +171,7 @@ class ExecutionLogRead(ExecutionLogBase):
 # ---------------------------------------------------------------------------
 
 class ErrorLogBase(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     job_id: UUID | None = None
     node_id: UUID | None = None
     error_type: ErrorType
@@ -196,7 +202,7 @@ class ErrorLogRead(ErrorLogBase):
     created_at: datetime
     resolved_at: datetime | None = None
 
-    model_config = {"from_attributes": True}
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +218,7 @@ class ArtifactBase(BaseModel):
     file_path: str | None = None
     mime_type: str = "text/plain"
     size_bytes: int | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class ArtifactCreate(ArtifactBase):
@@ -231,6 +237,7 @@ class ArtifactRead(ArtifactBase):
 # ---------------------------------------------------------------------------
 
 class PerfLogBase(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     job_id: UUID | None = None
     node_id: UUID | None = None
     model: str
@@ -253,7 +260,7 @@ class PerfLogRead(PerfLogBase):
     id: UUID
     created_at: datetime
 
-    model_config = {"from_attributes": True}
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +268,7 @@ class PerfLogRead(PerfLogBase):
 # ---------------------------------------------------------------------------
 
 class BenchmarkBase(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     model: str
     domain: str
     benchmark_name: str
@@ -278,7 +286,7 @@ class BenchmarkRead(BenchmarkBase):
     id: UUID
     run_at: datetime
 
-    model_config = {"from_attributes": True}
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +328,7 @@ class BlockerRead(BlockerBase):
 # ---------------------------------------------------------------------------
 
 class PromptOptimizeInput(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     prompt: str
     model_optimizer: str | None = None
     model_verifier: str | None = None
@@ -327,6 +336,7 @@ class PromptOptimizeInput(BaseModel):
     model_overrides: dict | None = None
 
 class PromptOptimizeResult(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     original_prompt: str
     optimized_prompt: str
     pre_cleaned: str
@@ -345,6 +355,7 @@ class PromptOptimizeResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ExecuteNextInput(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     job_id: str
     skip_optimize: bool = False
     skip_verify: bool = False
@@ -355,6 +366,7 @@ class SkipNodeInput(BaseModel):
     node_key: str
 
 class ExecutionResult(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     status: str
     job_id: str | None = None
     node_key: str | None = None
@@ -375,22 +387,25 @@ class ExecutionResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ResearchInput(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     topic: str
-    depth: str = "medium"  # shallow | medium | deep
+    depth: ResearchDepth = "medium"
     domain: str | None = None
     model_overrides: dict | None = None
 
 
 class ResearchReplyInput(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     session_id: str
     reply: str
     model_overrides: dict | None = None
 # ---------------- Scheduled research jobs ----------------
 
 class ScheduleCreate(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     topic: str
     cron_expression: str  # e.g. "0 9 * * 1" = Mondays at 09:00 in `timezone`
-    depth: str = "medium"  # shallow | medium | deep
+    depth: ResearchDepth = "medium"
     timezone: str = "UTC"  # IANA tz name, e.g. "America/New_York"
     model_overrides: dict | None = None
 
@@ -417,6 +432,7 @@ class ScheduleResponse(BaseModel):
 
 
 class IdeaInput(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     idea: str
     domain: str | None = None
     model: str | None = None
@@ -424,6 +440,7 @@ class IdeaInput(BaseModel):
 
 
 class ConfirmInput(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     job_id: str
     feedback: str | None = None
     push_to_github: bool = False
@@ -431,6 +448,7 @@ class ConfirmInput(BaseModel):
 
 
 class DagInput(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     job_id: str
     model: str | None = None
     model_overrides: dict | None = None
@@ -438,14 +456,15 @@ class DagInput(BaseModel):
 
 class RagInput(BaseModel):
     query: str
-    top_k: int = 10
-    confidence_threshold: float = 0.8
+    top_k: int = Field(default=10, ge=1, le=100)
+    confidence_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
     skip_rerank: bool = False
     include_history: bool = False
     domain: str | None = None
 
 
 class GtInput(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     topic: str
     queries: list[str] | None = None
     push_to_github: bool = False
@@ -474,10 +493,7 @@ class ExecRetryInput(BaseModel):
     `job_id` kept as str (not UUID) to preserve current 400 'Invalid job_id
     format' error on malformed UUIDs. Pydantic UUID type would return 422
     instead → would break any client parsing the 400 shape.
-    `max_retries` reserved for future; retry_failed_node() does not yet
-    accept it.
     """
     job_id: str
     node_key: str
-    max_retries: int | None = None
 
