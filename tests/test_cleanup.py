@@ -1,55 +1,83 @@
-"""Tests for app/modules/cleanup.py (#9.30)."""
+"""Tests for app/modules/cleanup.py — state-aware reaper + settings-backed.
+
+Shape: reap_stale_jobs() issues 5 UPDATE ... RETURNING statements and returns
+a 5-key dict keyed by category. Row counts come from len(fetchall()) rather
+than the driver-dependent `rowcount` attribute.
+"""
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.config import settings
 from app.modules import cleanup
 
 
-def _db_with_rowcounts(*rowcounts):
-    """Build a db whose sequential execute() calls return mocks with given rowcount."""
+def _db_with_counts(*counts):
+    """Build an AsyncMock db whose sequential execute() calls return results
+    with the given len(fetchall()) values."""
     db = AsyncMock()
     results = []
-    for rc in rowcounts:
+    for c in counts:
         r = MagicMock()
-        r.rowcount = rc
+        # fetchall() is sync on SQLAlchemy 2.x async Result
+        r.fetchall.return_value = [object()] * c
         results.append(r)
     db.execute.side_effect = results
     return db
 
 
-async def test_reap_stale_jobs_returns_all_four_counts():
-    """The function always returns a dict with 4 category keys."""
-    db = _db_with_rowcounts(2, 1, 3, 0)
+async def test_reap_stale_jobs_returns_all_five_counts():
+    """The function always returns a dict with 5 category keys."""
+    db = _db_with_counts(2, 4, 1, 3, 0)
     result = await cleanup.reap_stale_jobs(db)
     assert set(result.keys()) == {
-        "running_to_failed", "planning_to_cancelled",
-        "research_to_failed", "paused_to_cancelled",
+        "running_to_failed",
+        "long_phase_to_failed",
+        "planning_to_cancelled",
+        "research_to_failed",
+        "paused_to_cancelled",
     }
     assert result["running_to_failed"] == 2
+    assert result["long_phase_to_failed"] == 4
     assert result["planning_to_cancelled"] == 1
     assert result["research_to_failed"] == 3
     assert result["paused_to_cancelled"] == 0
     db.commit.assert_awaited()
 
 
-async def test_reap_stale_jobs_runs_four_sql_statements():
-    """Exactly 4 UPDATE ... RETURNING statements, one per category."""
-    db = _db_with_rowcounts(0, 0, 0, 0)
+async def test_reap_stale_jobs_runs_five_sql_statements():
+    """Exactly 5 UPDATE ... RETURNING statements, one per category."""
+    db = _db_with_counts(0, 0, 0, 0, 0)
     await cleanup.reap_stale_jobs(db)
-    assert db.execute.await_count == 4
+    assert db.execute.await_count == 5
 
 
 async def test_reap_stale_jobs_no_reaping_returns_zero_counts():
-    db = _db_with_rowcounts(0, 0, 0, 0)
+    db = _db_with_counts(0, 0, 0, 0, 0)
     result = await cleanup.reap_stale_jobs(db)
     assert all(v == 0 for v in result.values())
 
 
+async def test_reap_stale_jobs_passes_threshold_params_from_settings():
+    """Thresholds in bind params must come from settings, not module constants."""
+    db = _db_with_counts(0, 0, 0, 0, 0)
+    await cleanup.reap_stale_jobs(db)
+    calls = db.execute.await_args_list
+    # Running guard (call 1) — base threshold
+    assert calls[0].args[1]["threshold_min"] == settings.stale_threshold_minutes
+    # Long-phase guard (call 2) — elevated threshold
+    assert calls[1].args[1]["threshold_min"] == settings.long_phase_stale_minutes
+    # Planning sweep (call 3) — planning threshold
+    assert calls[2].args[1]["threshold_min"] == settings.planning_stale_minutes
+    # Research sessions (call 4) — base threshold
+    assert calls[3].args[1]["threshold_min"] == settings.stale_threshold_minutes
+    # Paused research (call 5) — no threshold_min param (expires_at driven)
+    assert "threshold_min" not in calls[4].args[1]
+
+
 async def test_start_cleanup_task_registers_strong_reference():
-    """#7.4 / #9.30: task must live in _background_tasks to avoid GC."""
+    """Task must live in _background_tasks to avoid GC."""
     with patch.object(cleanup, "_cleanup_loop") as loop:
-        # Make _cleanup_loop an awaitable that never starts
         async def _noop():
             import asyncio
             await asyncio.sleep(3600)
@@ -66,9 +94,32 @@ async def test_start_cleanup_task_registers_strong_reference():
                 pass
 
 
-def test_cleanup_interval_is_15_minutes():
-    assert cleanup.CLEANUP_INTERVAL_SECONDS == 900  # 15 * 60
+async def test_cleanup_loop_runs_eager_sweep_before_sleep():
+    """_cleanup_loop must call _run_once() once before entering asyncio.sleep."""
+    import asyncio
+
+    call_order = []
+
+    async def fake_run_once():
+        call_order.append("run_once")
+
+    async def fake_sleep(_seconds):
+        call_order.append("sleep")
+        raise asyncio.CancelledError()
+
+    with patch.object(cleanup, "_run_once", side_effect=fake_run_once), \
+         patch.object(cleanup.asyncio, "sleep", side_effect=fake_sleep):
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup._cleanup_loop()
+
+    # First event must be an eager run_once, before any sleep.
+    assert call_order[0] == "run_once"
+    assert "sleep" in call_order
 
 
-def test_stale_threshold_is_30_minutes():
-    assert cleanup.STALE_THRESHOLD_MINUTES == 30
+def test_cleanup_settings_are_sourced_from_config():
+    """Sanity: settings carry the documented defaults."""
+    assert settings.cleanup_interval_seconds == 900
+    assert settings.stale_threshold_minutes == 30
+    assert settings.long_phase_stale_minutes == 45
+    assert settings.planning_stale_minutes == 60
