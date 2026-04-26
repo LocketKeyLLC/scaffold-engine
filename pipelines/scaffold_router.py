@@ -145,6 +145,11 @@ class Pipeline:
                 self.valves.dag_timeout,
             )
             self.valves.stream_timeout = self.valves.dag_timeout
+        # Embedder dimension probe (strict)
+        ok, msg = self._probe_embedder_dim()
+        if not ok:
+            raise RuntimeError(f"Embedder probe failed: {msg}")
+        self.logger.info("Embedder probe OK: %s", msg)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -153,12 +158,34 @@ class Pipeline:
     def _auth_headers(self) -> dict:
         return {"X-API-Key": self.valves.api_key}
 
+    _EMBEDDER_EXPECTED_DIM = 512
+
+    def _probe_embedder_dim(self, model: str = None) -> tuple:
+        """POST /api/embeddings; verify dim == 512. Returns (ok, msg)."""
+        target = model or self.valves.model_embedder
+        try:
+            r = requests.post(
+                f"{self.valves.ollama_url}/api/embeddings",
+                json={"model": target, "prompt": "dimension probe"},
+                timeout=self.valves.request_timeout,
+            )
+            r.raise_for_status()
+            emb = r.json().get("embedding") or []
+            n = len(emb)
+            if n < self._EMBEDDER_EXPECTED_DIM:
+                return (False, f"{target} returned dim={n}, < expected {self._EMBEDDER_EXPECTED_DIM} (post-truncation target)")
+            return (True, f"{target} native dim={n}, will truncate to {self._EMBEDDER_EXPECTED_DIM}")
+        except requests.exceptions.ConnectionError:
+            return (False, f"cannot reach Ollama at {self.valves.ollama_url}")
+        except Exception as e:
+            return (False, f"{target}: {type(e).__name__}: {e}")
+
     def _model_overrides(self) -> dict:
         """Build overrides dict, filtering out empty strings (#8.10)."""
         out = {}
         for role in self._MODEL_ROLES:
             val = getattr(self.valves, role, "")
-            if val and val.strip():
+            if role not in self._SINGLETON_ROLES and val and val.strip():
                 out[role] = val
         return out
 
@@ -285,9 +312,8 @@ class Pipeline:
         body: dict,
     ) -> Generator[str, None, None]:
         msg = user_message.strip()
-        ctx_match = re.search(r".*</context>\s*\n*(.*)", msg, re.DOTALL)
-        if ctx_match:
-            msg = ctx_match.group(1).strip()
+        # Strip Open WebUI context wrapper (use last segment after </context>).
+        msg = re.split(r"</context>\s*", msg, maxsplit=1, flags=re.DOTALL)[-1].strip()
 
         body["stream"] = True
 
@@ -606,12 +632,12 @@ class Pipeline:
           ("done",         None, None)
         """
         keep = self.valves.keepalive_interval
-        max_idle = 5 * keep
+        max_idle = max(300, 5 * keep)
 
         try:
             r = requests.post(
                 url, json=payload, headers=self._auth_headers(),
-                stream=True, timeout=(10, keep),
+                stream=True, timeout=(30, 120),
             )
         except requests.exceptions.ConnectionError as e:
             event_queue.put(("error", f"cannot reach orchestrator: {e}", None)); return
@@ -636,9 +662,10 @@ class Pipeline:
             while True:
                 try:
                     for raw_line in r.iter_lines(decode_unicode=True):
-                        idle_seconds = 0
                         if raw_line is None:
                             continue
+                        # Reset idle timer only after consuming a real line.
+                        idle_seconds = 0
                         line = raw_line.strip() if raw_line else ""
                         if line == "":
                             if event_type and data_buffer:
@@ -649,7 +676,8 @@ class Pipeline:
                         if line.startswith("event:"):
                             event_type = line[6:].strip()
                         elif line.startswith("data:"):
-                            data_buffer += line[5:].strip()
+                            # SSE spec: multi-line data fields join with newline.
+                            data_buffer += ("\n" if data_buffer else "") + line[5:].lstrip()
                     # Iterator exhausted — server closed cleanly
                     if event_type and data_buffer:
                         event_queue.put(("event", event_type, data_buffer))
@@ -904,7 +932,11 @@ class Pipeline:
     ) -> Generator[str, None, None]:
         try:
             payload = json.loads(data)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            self.logger.debug(
+                "SSE JSON decode failed (event=%s): %s | data=%r",
+                event_type, e, data[:200],
+            )
             return
 
         if event_type == "node_start":
@@ -931,8 +963,11 @@ class Pipeline:
     # Recovery / polling
     # ------------------------------------------------------------------
 
+    _TERMINAL_STATES = {"completed", "done", "failed", "cancelled", "canceled", "blocked"}
+
     def _recover_from_disconnect(self, job_id: str) -> Generator[str, None, None]:
         yield "\n⏳ Connection interrupted — checking job status...\n"
+        last_status = None
         for attempt in range(3):
             time.sleep(5 if attempt == 0 else 10)
             try:
@@ -941,21 +976,42 @@ class Pipeline:
                     headers=self._auth_headers(),
                     timeout=self.valves.request_timeout,
                 )
-                if r.status_code == 200:
-                    data = r.json()
-                    status = data.get("status", data.get("job_status", ""))
-                    if status in ("completed", "done"):
-                        compiled = data.get("compiled_output", "")
-                        if compiled:
-                            yield "✅ Job completed successfully.\n\n"
-                            yield compiled
-                            return
-                        yield "✅ Job completed but no output was generated."
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                status = (data.get("status") or data.get("job_status") or "").lower()
+                last_status = status or last_status
+                if status in ("completed", "done"):
+                    compiled = data.get("compiled_output", "")
+                    if compiled:
+                        yield "✅ Job completed successfully.\n\n"
+                        yield compiled
                         return
-            except Exception:
+                    yield "✅ Job completed but no output was generated."
+                    return
+                if status == "failed":
+                    reason = data.get("error") or data.get("reason") or "see server logs"
+                    yield f"❌ Job `{job_id}` failed: {reason}\n"
+                    yield f"Run `/results {job_id}` for full diagnostic output."
+                    return
+                if status in ("cancelled", "canceled"):
+                    yield f"🛑 Job `{job_id}` was cancelled.\n"
+                    return
+                if status == "blocked":
+                    blocked_by = data.get("blocked_by") or []
+                    detail = f" (waiting on: {', '.join(blocked_by)})" if blocked_by else ""
+                    yield f"⏸️ Job `{job_id}` is blocked{detail}.\n"
+                    yield f"Use `/results {job_id}` once unblocked."
+                    return
+            except Exception as e:
+                self.logger.debug("recover poll attempt %d: %s", attempt, e)
                 continue
-        yield (f"⚠️ Connection lost. Job `{job_id}` may still be running. "
-               f"Use `/results {job_id}` to check.")
+        # All polls exhausted without a terminal state.
+        last = last_status or "unknown"
+        yield (f"⚠️ Connection lost; orchestrator unreachable or job `{job_id}` still running "
+               f"(last status: `{last}`).\n"
+               f"Run `/results {job_id}` to retrieve output once available, "
+               f"or `/cancel {job_id}` to abort.")
 
     def _poll_compiled_output(self, job_id: str) -> str:
         try:
@@ -1056,8 +1112,9 @@ class Pipeline:
         except requests.exceptions.ConnectionError:
             return f"⚠️ Cannot reach orchestrator at {self.valves.orchestrator_url}. Is it running?"
         except Exception as e:
-            self.logger.error("Command error: %s", e)
-            return f"⚠️ Error: {e}"
+            self.logger.exception("Command `%s` failed", cmd)
+            return ("⚠️ Internal error processing command. "
+                    "See server logs for details.")
 
     # ------------------------------------------------------------------
     # /results handler (#8.1)
@@ -1143,6 +1200,7 @@ class Pipeline:
         if sub == "available": return self._model_available()
         if sub == "set":       return self._model_set(parts)
         if sub == "reset":     return self._model_reset()
+        if sub == "probe":     return self._model_probe()
         if sub == "help":      return self._model_help()
         return f"Unknown subcommand: `{sub}`\n\n{self._model_help()}"
 
@@ -1183,6 +1241,11 @@ class Pipeline:
             valid = ", ".join(r.replace("model_", "") for r in self._MODEL_ROLES)
             return f"Unknown role: `{role_input}`\nValid roles: {valid}"
 
+        if role_key in self._SINGLETON_ROLES:
+            env_var = role_key.upper()
+            return (f"Role `{role_input}` is config-locked; set `{env_var}` env var "
+                    f"and restart the container.")
+
         if role_key != "model_reranker":
             try:
                 r = requests.get(f"{self.valves.ollama_url}/api/tags",
@@ -1201,8 +1264,7 @@ class Pipeline:
         old = getattr(self.valves, role_key)
         setattr(self.valves, role_key, model_tag)
         result = f"**Updated `{role_key.replace('model_','')}`**\n`{old}` -> `{model_tag}`"
-        if role_key in self._SINGLETON_ROLES:
-            result += "\n\nThis role is singleton/dimension-locked. Change takes effect after container restart."
+        result += "\n\n_(session-only; container restart reverts to env/defaults)_"
         return result
 
     def _model_reset(self) -> str:
@@ -1218,6 +1280,11 @@ class Pipeline:
             return "All roles are already at default values."
         return "**Reset to defaults:**\n\n" + "\n".join(changes)
 
+    def _model_probe(self) -> str:
+        ok, msg = self._probe_embedder_dim()
+        status = "OK" if ok else "FAIL"
+        return f"**Embedder probe: {status}**\n`{msg}`"
+
     def _model_help(self) -> str:
         return """**Model Commands**
 | Command | Description |
@@ -1226,6 +1293,7 @@ class Pipeline:
 | `/model available` | List models available on Ollama |
 | `/model set <role> <model>` | Assign a model to a role |
 | `/model reset` | Reset all roles to defaults |
+| `/model probe` | Probe embedder dimension (must equal 512) |
 | `/model help` | Show this message |
 
 **Roles:** general, verifier, coder, embedder, reranker, router, fallback, cloud_alt
@@ -1362,6 +1430,7 @@ class Pipeline:
 | `/schedule <sub>` | Manage scheduled research (list/add/delete) |
 | `/research <topic>` | Research a topic (web), URL, `github:owner/repo`, or `openapi:<url>` |
 | `/research/reply <session_id> <msg>` | Resume a paused research session |
+| `/research/pdf <url>` | Research a PDF document |
 | `/help` | Show this message |
 
 **Workflow:** Describe your idea → discuss scope → `/go` → review feasibility → `/confirm` → execution."""

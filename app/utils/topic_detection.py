@@ -11,6 +11,15 @@ Example:
 """
 from __future__ import annotations
 
+import re
+from functools import lru_cache
+
+
+@lru_cache(maxsize=512)
+def _kw_pattern(kw_lower: str) -> re.Pattern[str]:
+    """Compile a word-boundary pattern for ``kw_lower`` (already lowercased)."""
+    return re.compile(rf"\b{re.escape(kw_lower)}\b")
+
 
 def detect_topic_id(
     text: str,
@@ -19,8 +28,12 @@ def detect_topic_id(
 ) -> int:
     """Score ``text`` against each topic's keyword list; return highest scorer.
 
+    Matching is case-insensitive and uses word boundaries, so ``"rag"`` no
+    longer matches ``"storage"``. Caller-supplied keywords are lowercased
+    defensively, so callers don't have to pre-normalize.
+
     Args:
-        text: Free-form input to classify. Matched case-insensitively.
+        text: Free-form input to classify.
         keywords_by_topic: Mapping of topic_id -> list of keyword strings.
         default: Topic id returned when no keyword matches in any topic,
             or when ``keywords_by_topic`` is empty.
@@ -32,9 +45,15 @@ def detect_topic_id(
     if not keywords_by_topic:
         return default
     lowered = text.lower()
-    scores = {
-        tid: sum(1 for kw in kws if kw in lowered)
-        for tid, kws in keywords_by_topic.items()
-    }
+    scores: dict[int, int] = {}
+    for tid, kws in keywords_by_topic.items():
+        score = 0
+        for kw in kws:
+            kw_lower = kw.lower().strip()
+            if not kw_lower:
+                continue
+            if _kw_pattern(kw_lower).search(lowered):
+                score += 1
+        scores[tid] = score
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else default

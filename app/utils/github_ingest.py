@@ -74,9 +74,11 @@ async def _fetch_readme(client: httpx.AsyncClient, owner: str, repo: str) -> tup
     data = r.json()
     try:
         content = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
-    except Exception as e:
-        logger.warning("README decode failed: %s", e)
-        return "", ""
+    except (ValueError, TypeError, KeyError) as e:
+        # Distinguish decode failure from "no README" — caller logs and continues,
+        # but does not silently treat a corrupt README as missing.
+        logger.error("README decode failed for %s/%s: %s", owner, repo, e)
+        raise
     return data.get("path", "README"), content
 
 
@@ -171,15 +173,17 @@ async def fetch_repo_content(owner: str, repo: str) -> list[dict[str, Any]]:
         )
 
     # 2. docs/**/*.md + top-level *.py via tree
+    tree_truncated = False
+    attempted = 0
     remaining = settings.github_max_files - len(results)
     if remaining > 0:
         tree, tree_truncated = await _get_tree(client, owner, repo, branch)
         selected = _select_tree_files(tree, remaining)
+        attempted = len(selected)
 
         # #69 — parallelize blob fetches. Semaphore bounds concurrent GitHub
         # calls so we don't blow through the rate limit in bursts.
-        _BLOB_CONCURRENCY = 8
-        sem = asyncio.Semaphore(_BLOB_CONCURRENCY)
+        sem = asyncio.Semaphore(settings.github_blob_concurrency)
 
         async def _fetch_one(entry: dict) -> dict | None:
             path = entry["path"]
@@ -198,15 +202,18 @@ async def fetch_repo_content(owner: str, repo: str) -> list[dict[str, Any]]:
             *(_fetch_one(e) for e in selected), return_exceptions=True,
         )
         for item in fetched:
+            if isinstance(item, (GitHubRateLimitError, GitHubRepoNotFoundError)):
+                # Critical errors must NOT be swallowed — propagate so caller
+                # sees the real failure mode instead of a silent partial result.
+                raise item
             if isinstance(item, Exception):
-                logger.warning("Blob fetch failed: %s", item)
+                logger.warning("Blob fetch failed (transient): %s", item)
                 continue
             if item is not None:
                 results.append(item)
 
     logger.info(
-        "GitHub fetch: %s/%s branch=%s files=%d tree_truncated=%s",
-        owner, repo, branch, len(results),
-        tree_truncated if 'tree_truncated' in locals() else False,
+        "GitHub fetch: %s/%s branch=%s attempted=%d files=%d tree_truncated=%s",
+        owner, repo, branch, attempted, len(results), tree_truncated,
     )
     return results

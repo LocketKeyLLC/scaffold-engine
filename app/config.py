@@ -1,35 +1,50 @@
 """Scaffold Engine configuration — loaded from environment variables."""
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
 
 
 # ---------------------------------------------------------------------------
-# DAG validation enums (#101 — moved from dag_generator.py module top)
-# These are plain module constants, not Settings fields, because they are
-# code-level invariants and not env-overridable.
+# DAG validation enums (#101)
 # ---------------------------------------------------------------------------
 VALID_TASK_TYPES = frozenset({"research", "decision", "action", "validation", "output"})
 VALID_STRATEGIES = frozenset({"sequential", "parallel", "hybrid", "conditional"})
 VALID_TOOLS = frozenset({"LLM", "CodeGen", "SearXNG", "Milvus"})
 VALID_DOMAINS = frozenset({"prompt", "rag", "eng", "llm", "spec"})
 
-
+# get_model() allowlist — prevents arbitrary attribute access via role string
+ROLE_FIELDS = frozenset({
+    "model_router",
+    "model_embedder_pipeline",
+    "model_reranker",
+    "model_coder",
+    "model_general",
+    "model_verifier",
+    "model_cloud_heavy",
+    "model_cloud_alt",
+    "model_fallback",
+})
 
 # ---------------------------------------------------------------------------
-# TTL policy by source_type (seconds) — code-level invariant, not env-overridable
+# TTL policy by source_type (seconds)
 # ---------------------------------------------------------------------------
 TTL_POLICY = {
-    "real_time": 7 * 86400,        # 7 days
-    "news": 30 * 86400,            # 30 days
-    "community": 90 * 86400,       # 90 days
-    "tech_docs": 180 * 86400,      # 6 months
-    "curated": 365 * 86400,        # 1 year
-    "official_docs": 365 * 86400,  # 1 year
-    "ai_generated": 180 * 86400,   # 6 months
+    "real_time": 7 * 86400,
+    "news": 30 * 86400,
+    "community": 90 * 86400,
+    "tech_docs": 180 * 86400,
+    "curated": 365 * 86400,
+    "official_docs": 365 * 86400,
+    "ai_generated": 180 * 86400,
 }
-DEFAULT_TTL_SECONDS = 180 * 86400  # fallback for unknown source_types
+DEFAULT_TTL_SECONDS = 180 * 86400
+
 
 class Settings(BaseSettings):
     """All config sourced from env vars set in docker-compose.yml."""
+
+    # Auth
+    scaffold_api_key: SecretStr = SecretStr("")
+    scaffold_auth_disabled: bool = False
 
     # Database
     database_url: str = "postgresql+asyncpg://scaffold:scaffold_dev_pw@scaffold-postgres:5432/scaffold_engine"
@@ -37,25 +52,28 @@ class Settings(BaseSettings):
     @property
     def sync_database_url(self) -> str:
         """Sync DSN for APScheduler's SQLAlchemyJobStore (no asyncpg)."""
-        return self.database_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+        prefix = "postgresql+asyncpg://"
+        assert self.database_url.startswith(prefix), (
+            f"database_url must start with {prefix!r}, got: {self.database_url!r}"
+        )
+        return self.database_url.replace(prefix, "postgresql+psycopg2://", 1)
 
+    # Scheduler
     scheduler_enabled: bool = True
     scheduler_timezone: str = "UTC"
     scheduler_jobstore_url: str = ""
-    scheduler_job_timeout: int = 3600
-    """Max seconds a single scheduled research job may run before being cancelled."""
-    scheduler_misfire_grace_time: int = 300
-    """Seconds APScheduler will still fire a missed job after its scheduled time."""
-    scheduler_shutdown_timeout: int = 30
-    """Seconds to wait for in-flight jobs during graceful shutdown before forcing exit."""
+    scheduler_job_timeout: int = Field(default=3600, ge=1, le=86400)
+    scheduler_misfire_grace_time: int = Field(default=300, ge=0, le=86400)
+    scheduler_shutdown_timeout: int = Field(default=30, ge=0, le=600)
 
     # External services
     ollama_base_url: str = "http://172.18.0.1:11434"
     milvus_uri: str = "http://milvus-standalone:19530"
-    milvus_num_partitions: int = 64
-    embedding_cache_memory_size: int = 10_000
-    embedding_cache_ttl_s: int = 30 * 86400  # 30 days
-    # Reranker prompt template (default: Qwen3-Reranker format)
+    milvus_num_partitions: int = Field(default=64, ge=1, le=4096)
+    embedding_cache_memory_size: int = Field(default=10_000, ge=0, le=1_000_000)
+    embedding_cache_ttl_s: int = Field(default=30 * 86400, ge=0, le=365 * 86400)
+
+    # Reranker prompt template
     reranker_prompt_system: str = (
         "<|im_start|>system\n"
         "Judge whether the Document meets the requirements based on the Query "
@@ -68,13 +86,22 @@ class Settings(BaseSettings):
     reranker_default_instruction: str = (
         "Given a web search query, retrieve relevant passages that answer the query"
     )
+
+    # Reranker tuning (moved from rag_pipeline.py module constants)
+    rerank_max_candidates: int = Field(default=32, ge=1, le=512)
+    rerank_doc_truncate: int = Field(default=2000, ge=100, le=20000)
+    rerank_warn_ms: int = Field(default=1500, ge=0, le=60000)
+    rerank_error_ms: int = Field(default=5000, ge=0, le=300000)
+
     searxng_url: str = "http://searxng:8080"
     redis_url: str = "redis://scaffold-redis:6379/0"
 
     # Embedding config
-    embedding_dim: int = 512
+    embedding_dim: int = Field(default=512, ge=512, le=512)
     model_embedder_id: str = "qwen3-embedding-8b-mrl512"
-    semantic_dedup_threshold: float = 0.95
+    semantic_dedup_threshold: float = Field(default=0.95, ge=0.0, le=1.0)
+    version_chain_threshold: float = Field(default=0.90, ge=0.0, le=1.0)
+    embedding_batch_size: int = Field(default=32, ge=1, le=512)
 
     # Model assignments
     model_router: str = "qwen3:4b"
@@ -88,52 +115,45 @@ class Settings(BaseSettings):
     model_fallback: str = "qwen3.5:latest"
 
     # Timeouts (seconds)
-    cloud_timeout: int = 3600
-    local_timeout: int = 1800
-    max_retries: int = 3
+    cloud_timeout: int = Field(default=3600, ge=1, le=86400)
+    local_timeout: int = Field(default=1800, ge=1, le=86400)
+    verify_timeout_seconds: int = Field(default=120, ge=1, le=3600)
+    max_retries: int = Field(default=3, ge=0, le=20)
 
     # Research agent
-    research_max_iterations: int = 3
-    research_max_queries: int = 8
-    # Ideation pipeline caps (Phase 2 research_and_compile)
-    ideation_max_queries: int = 5
-    ideation_max_distill_results: int = 15
-    research_max_urls_per_iteration: int = 20
-    research_searxng_delay: float = 1.5
-    research_chunk_size: int = 1500
-    research_timeout: int = 3600
+    research_max_iterations: int = Field(default=3, ge=1, le=20)
+    research_max_queries: int = Field(default=8, ge=1, le=50)
+    ideation_max_queries: int = Field(default=5, ge=1, le=50)
+    ideation_max_distill_results: int = Field(default=15, ge=1, le=200)
+    research_max_urls_per_iteration: int = Field(default=20, ge=1, le=200)
+    research_searxng_delay: float = Field(default=1.5, ge=0.0, le=60.0)
+    research_chunk_size: int = Field(default=1500, ge=100, le=50000)
+    research_timeout: int = Field(default=3600, ge=1, le=86400)
     github_token: str = ""
-    github_max_files: int = 50
-    github_timeout: int = 30
+    github_max_files: int = Field(default=50, ge=1, le=1000)
+    github_blob_concurrency: int = Field(default=8, ge=1, le=64)
+    github_timeout: int = Field(default=30, ge=1, le=300)
     github_api_base: str = "https://api.github.com"
-    openapi_max_endpoints: int = 200
-    openapi_timeout: int = 30
+    openapi_max_endpoints: int = Field(default=200, ge=1, le=5000)
+    openapi_max_params_per_endpoint: int = Field(default=50, ge=1, le=500)
+    openapi_timeout: int = Field(default=30, ge=1, le=300)
 
-    # GT pipeline — GitHub push target
+    # GT pipeline
     gt_github_owner: str = "LocketKeyLLC"
     gt_github_repo: str = "smokieRAGs"
     gt_github_branch: str = "main"
+    gt_stats_scan_limit: int = Field(default=16384, ge=1, le=16384)
 
-    # GT browser — stats scan cap (Milvus max per query is 16384)
-    gt_stats_scan_limit: int = 16384
+    # Research agent — fetch caps & concurrency
+    research_max_url_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
+    research_max_pdf_bytes: int = Field(default=20 * 1024 * 1024, ge=1024, le=500 * 1024 * 1024)
+    research_fetch_concurrency: int = Field(default=5, ge=1, le=100)
+    research_fetch_timeout: int = Field(default=15, ge=1, le=300)
+    research_url_fetch_timeout: int = Field(default=30, ge=1, le=300)
+    research_heartbeat_interval: int = Field(default=8, ge=1, le=120)
+    research_max_entry_chars: int = Field(default=8000, ge=100, le=100000)
 
-    # Research agent — fetch caps & concurrency (new: phase B)
-    research_max_url_bytes: int = 5 * 1024 * 1024
-    """Per-URL byte cap for bounded fetch in URL-mode and trafilatura batch."""
-    research_max_pdf_bytes: int = 20 * 1024 * 1024
-    """Per-PDF byte cap for uploads to /research/pdf."""
-    research_fetch_concurrency: int = 5
-    """Semaphore size for concurrent trafilatura page fetches."""
-    research_fetch_timeout: int = 15
-    """httpx timeout (s) for trafilatura batch fetches."""
-    research_url_fetch_timeout: int = 30
-    """httpx timeout (s) for URL-mode bounded fetch + robots check."""
-    research_heartbeat_interval: int = 8
-    """Seconds between SSE heartbeat emissions during long LLM calls."""
-    research_max_entry_chars: int = 8000
-    """Max chars per ingested entry content (GitHub/OpenAPI truncation)."""
-
-    # Research agent — topic → Milvus partition domain (new: phase B)
+    # Research agent — topic → Milvus partition domain
     topic_to_domain: dict[int, str] = {
         1: "llm",
         2: "rag",
@@ -142,19 +162,23 @@ class Settings(BaseSettings):
         5: "eng",
         6: "eng",
     }
-    """Maps _detect_topic_id() output → Milvus partition key."""
     default_domain: str = "eng"
-    """Fallback partition when topic_to_domain lookup misses."""
 
-    # Stale-job reaper (cleanup.py)
-    stale_threshold_minutes: int = 30
-    """Base stale threshold for running/executing jobs and research sessions."""
-    planning_stale_minutes: int = 60
-    """Stale threshold for jobs stuck in the planning state."""
-    long_phase_stale_minutes: int = 45
-    """Elevated threshold for long-running phases: researching / refining / planning."""
-    cleanup_interval_seconds: int = 900
-    """Sleep between reaper sweeps."""
+    # Stale-job reaper
+    stale_threshold_minutes: int = Field(default=30, ge=1, le=1440)
+    planning_stale_minutes: int = Field(default=60, ge=1, le=1440)
+    long_phase_stale_minutes: int = Field(default=45, ge=1, le=1440)
+    cleanup_interval_seconds: int = Field(default=900, ge=10, le=86400)
+
+    # Execution agent tuning
+    node_timeout_seconds: int = Field(default=600, ge=1, le=86400)
+    max_upstream_chars: int = Field(default=8000, ge=100, le=200000)
+    rag_cosine_floor: float = Field(default=0.3, ge=0.0, le=1.0)
+    verifier_top_k: int = Field(default=5, ge=1, le=50)
+    compile_output_gate_chars: int = Field(default=50_000, ge=1_000, le=1_000_000)
+    compile_output_min_chunk: int = Field(default=200, ge=1, le=10_000)
+    execution_global_retry_cap: int = Field(default=20, ge=0, le=1000)
+    sse_keepalive_seconds: float = Field(default=15.0, ge=1.0, le=300.0)
 
     # Logging
     log_level: str = "info"
@@ -166,7 +190,14 @@ settings = Settings()
 
 
 def get_model(role: str, overrides: dict | None = None) -> str:
-    """Return model tag: override > env var > default."""
+    """Return model tag: override > env var > default.
+
+    Restricted to ROLE_FIELDS allowlist to prevent arbitrary attribute access.
+    """
+    if role not in ROLE_FIELDS:
+        raise ValueError(
+            f"unknown role {role!r}; must be one of {sorted(ROLE_FIELDS)}"
+        )
     if overrides and overrides.get(role):
         return overrides[role]
     return getattr(settings, role)

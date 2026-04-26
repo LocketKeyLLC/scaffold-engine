@@ -26,10 +26,13 @@ def _mock_db_with_rows_and_fetchone(rows=None, fetchone=None):
 # ---------------------------------------------------------------------------
 # list_prompts
 # ---------------------------------------------------------------------------
-async def test_list_prompts_returns_error_when_no_rows():
+async def test_list_prompts_returns_empty_shape_when_no_rows():
     db = _mock_db_with_rows_and_fetchone(rows=[])
     result = await prompt_inspector.list_prompts(uuid4(), db)
-    assert "error" in result
+    assert "error" not in result
+    assert result["nodes"] == []
+    assert result["node_count"] == 0
+    assert "job_id" in result
 
 
 async def test_list_prompts_builds_node_summary():

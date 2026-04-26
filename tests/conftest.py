@@ -60,3 +60,24 @@ def make_mock_db(rows: list[dict] | None = None, *, scalar=None, rowcount=None):
     db = AsyncMock()
     db.execute.return_value = result_obj
     return db
+
+
+# ---------------------------------------------------------------------------
+# http_clients eager-init for the test suite.
+# The module no longer lazy-creates clients; modules that call get_*()
+# require init_clients() to have run. We re-seed the registry before every
+# test so fixtures in other modules that close/reset clients don't leave
+# a hole for the next test.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _init_shared_http_clients():
+    """Re-seed the http_clients registry per test so each httpx client is
+    bound to the current event loop (pytest-asyncio gives each test its own
+    loop; reusing a client across loops raises 'Event loop is closed')."""
+    from app.utils import http_clients
+    # Drop any registry entries from the previous test without awaiting
+    # aclose() (previous loop is gone). These are leftover Python objects
+    # — GC will finalize them.
+    http_clients._clients.clear()
+    http_clients.init_clients()
+    yield

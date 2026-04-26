@@ -128,9 +128,11 @@ async def generate_dag(
         return {"error": f"Job {job_id} not found"}
 
     status, brief = row
-    if status != "planning":
+    # H6: accept 'planning' OR 'running' — execute_all_nodes flips to 'running'
+    # before calling generate_dag on auto-gen path.
+    if status not in ("planning", "running"):
         return {
-            "error": "Job is not in planning status",
+            "error": "Job is not in an executable planning/running status",
             "job_id": job_id,
             "current_status": status,
             "http_status": 409,
@@ -187,17 +189,14 @@ async def generate_dag(
         await _fail_job(db, uid, "DAG must have at least 2 tasks")
         return {"job_id": job_id, "status": "failed", "error": "Less than 2 tasks generated"}
 
-    # 3b. Enforce node count bounds (3-10)
-    tasks = _enforce_node_count(tasks)
-
-    # 4. Normalize and validate tasks
-    normalized, errors, normalize_warnings = _normalize_tasks(tasks)
-    if errors:
-        await _fail_job(db, uid, f"Task validation errors: {'; '.join(errors)}")
-        return {"job_id": job_id, "status": "failed", "errors": errors}
-
-    # 4b. Semantic DAG validation (deps, cycles, tools)
+    # 3b-4b. Node-count enforcement + normalize + semantic validation
+    # (single try/except so any ValueError from these steps fails the job cleanly)
     try:
+        tasks = _enforce_node_count(tasks)
+        normalized, errors, normalize_warnings = _normalize_tasks(tasks)
+        if errors:
+            await _fail_job(db, uid, f"Task validation errors: {'; '.join(errors)}")
+            return {"job_id": job_id, "status": "failed", "errors": errors}
         normalized, dag_warnings = validate_dag(normalized)
     except ValueError as exc:
         await _fail_job(db, uid, str(exc))
@@ -225,39 +224,45 @@ async def generate_dag(
             referenced.add(dep)
     leaf_keys = {t["id"] for t in normalized if t["id"] not in referenced}
 
-    for i, task in enumerate(normalized):
-        await db.execute(
-            text("""
-                INSERT INTO dag_nodes
-                    (job_id, node_key, title, node_type, status,
-                     depends_on, assigned_model, prompt_template,
-                     execution_order, tool, domain, is_output_node)
-                VALUES
-                    (:job_id, :node_key, :title, :node_type, 'pending',
-                     :depends_on, :assigned_model, :prompt_template,
-                     :execution_order, :tool, :domain, :is_output_node)
-            """),
-            {
-                "job_id": uid,
-                "node_key": task["id"],
-                "title": task["name"],
-                "node_type": _map_node_type(task["type"]),
-                "depends_on": task.get("depends_on", []),
-                "assigned_model": task.get("assigned_model"),
-                "prompt_template": task.get("notes"),
-                "execution_order": i,
-                "tool": task.get("tool", "LLM"),
-                "domain": task.get("domain"),
-                "is_output_node": task["id"] in leaf_keys,
-            },
-        )
+    try:
+        for i, task in enumerate(normalized):
+            await db.execute(
+                text("""
+                    INSERT INTO dag_nodes
+                        (job_id, node_key, title, node_type, status,
+                         depends_on, assigned_model, prompt_template,
+                         execution_order, tool, domain, is_output_node)
+                    VALUES
+                        (:job_id, :node_key, :title, :node_type, 'pending',
+                         :depends_on, :assigned_model, :prompt_template,
+                         :execution_order, :tool, :domain, :is_output_node)
+                """),
+                {
+                    "job_id": uid,
+                    "node_key": task["id"],
+                    "title": task["name"],
+                    "node_type": _map_node_type(task["type"]),
+                    "depends_on": task.get("depends_on", []),
+                    "assigned_model": task.get("assigned_model"),
+                    "prompt_template": task.get("notes"),
+                    "execution_order": i,
+                    "tool": task.get("tool", "LLM"),
+                    "domain": task.get("domain"),
+                    "is_output_node": task["id"] in leaf_keys,
+                },
+            )
 
-    # 8. Transition job to executing
-    await db.execute(
-        text("UPDATE jobs SET status = 'executing' WHERE id = :id"),
-        {"id": uid},
-    )
-    await db.commit()
+        # 8. Transition job to executing
+        await db.execute(
+            text("UPDATE jobs SET status = 'executing' WHERE id = :id"),
+            {"id": uid},
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("dag_insert_failed: job=%s", job_id)
+        await _fail_job(db, uid, f"DAG persistence failed: {exc}")
+        return {"job_id": job_id, "status": "failed", "error": f"DAG persistence failed: {exc}"}
     logger.info("dag_generated: job=%s node_count=%d", job_id, len(normalized))
 
     # 9. Generate Mermaid diagram

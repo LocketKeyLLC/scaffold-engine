@@ -257,6 +257,6 @@ class TestRefineIdeaDBInteractions:
             mock_mr.generate = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             _run(refine_idea("Build a CLI tool", db))
-        # Should have called execute (INSERT + UPDATEs) and commit
-        assert db.execute.call_count >= 3  # INSERT + status update + final update
-        assert db.commit.call_count >= 2   # after refining status + after final update
+        # Should have called execute (single INSERT refining + final UPDATE) and commit
+        assert db.execute.call_count >= 2  # INSERT refining + final UPDATE
+        assert db.commit.call_count >= 2   # after INSERT + after final UPDATE

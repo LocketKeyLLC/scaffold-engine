@@ -15,3 +15,10 @@ pipelines/failed/
 tests/fixtures/kb_entries.txt
 retrieval_report.json
 .backups/
+
+# Local backups containing secrets
+.env.*
+.env.backup*
+pipelines/*/valves.json
+*.bak-*
+*.bak[0-9]*

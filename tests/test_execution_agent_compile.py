@@ -6,8 +6,9 @@ and helpers live in _execution_agent_shared.
 from tests._execution_agent_shared import *  # noqa: F401, F403
 
 @pytest.mark.smoke
+@pytest.mark.skip(reason="Strategy 1 (title-heuristic) removed; superseded by is_output_node marker (Strategy 0).")
 class TestCompileOutputStrategy1:
-    """Strategy 1: output-titled node gets priority."""
+    """Strategy 1: output-titled node gets priority. [REMOVED]"""
 
     async def test_output_node_preferred(self):
         db = make_mock_db([
@@ -193,11 +194,15 @@ class TestCompileOutputCache:
         mock_all_done = AsyncMock(return_value=False)
         mock_compile = AsyncMock()  # MUST NOT be called
 
-        with patch("app.modules.execution_agent._get_job", mock_get_job), \
+        mock_session_factory = MagicMock()
+        mock_session_factory.return_value.__aenter__ = AsyncMock(return_value=db)
+        mock_session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.modules.execution_agent.async_session", mock_session_factory), \
+             patch("app.modules.execution_agent._get_job", mock_get_job), \
              patch("app.modules.execution_agent._get_next_node", mock_get_next), \
              patch("app.modules.execution_agent._all_nodes_done", mock_all_done), \
              patch("app.modules.execution_agent._compile_output", mock_compile):
-            result = await execute_next_node("job-1", db)
+            result = await execute_next_node("job-1")
 
         assert result["status"] == "blocked"
         mock_compile.assert_not_called()
@@ -227,11 +232,15 @@ class TestCompileOutputCache:
         mock_all_done = AsyncMock(return_value=False)
         mock_compile = AsyncMock(return_value="FRESHLY COMPILED")
 
-        with patch("app.modules.execution_agent._get_job", mock_get_job), \
+        mock_session_factory = MagicMock()
+        mock_session_factory.return_value.__aenter__ = AsyncMock(return_value=db)
+        mock_session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.modules.execution_agent.async_session", mock_session_factory), \
+             patch("app.modules.execution_agent._get_job", mock_get_job), \
              patch("app.modules.execution_agent._get_next_node", mock_get_next), \
              patch("app.modules.execution_agent._all_nodes_done", mock_all_done), \
              patch("app.modules.execution_agent._compile_output", mock_compile):
-            result = await execute_next_node("job-1", db)
+            result = await execute_next_node("job-1")
 
         assert result["status"] == "blocked"
         mock_compile.assert_called_once()
@@ -257,6 +266,7 @@ class TestCompileOutputExplicitMarker:
         result = await _compile_output("job-1", db)
         assert result == "EXPLICIT WINNER"
 
+    @pytest.mark.skip(reason="Strategy 1 title-heuristic removed; superseded by is_output_node.")
     async def test_falls_back_to_heuristics_when_no_explicit_marker(self):
         db = make_mock_db([
             {"node_key": "T1", "title": "Research", "tool": "LLM",
@@ -299,6 +309,7 @@ class TestCompileOutputExplicitMarker:
         assert "beta" in result
         assert "---" in result
 
+    @pytest.mark.skip(reason="Strategy 1 title-heuristic removed; superseded by is_output_node.")
     async def test_backward_compat_no_marker_key(self):
         db = make_mock_db([
             {"node_key": "T1", "title": "Research", "tool": "LLM",

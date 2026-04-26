@@ -19,27 +19,28 @@ Error recovery cascade (per spec):
 """
 
 import asyncio
+import json
 import logging
-import time as _time_mod
-from typing import AsyncGenerator
+import re
+import time
+from typing import AsyncGenerator, Literal
 from uuid import UUID
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.database import async_session
+try:
+    from json_repair import repair_json
+except ImportError:  # pragma: no cover
+    repair_json = None
 
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.database import async_session
 from app import model_router
 from app.config import settings, get_model
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Configurable constants
-# ---------------------------------------------------------------------------
-NODE_TIMEOUT_SECONDS = 600
-MAX_UPSTREAM_CHARS = 6000
 
 # ---------------------------------------------------------------------------
 # Verify system prompt
@@ -93,33 +94,50 @@ async def _get_job(db: AsyncSession, job_id: str) -> dict | None:
 
 
 async def _get_next_node(db: AsyncSession, job_id: str) -> dict | None:
-    """Return the next pending node whose dependencies are all done."""
+    """Atomically claim the next dep-satisfied pending node.
+
+    Uses compound UPDATE ... WHERE id = (...) AND status='pending' RETURNING *
+    so only one concurrent executor can claim a given node.
+    """
     rows = await db.execute(
         text("""
-            SELECT id, node_key, title, node_type, depends_on,
-                   assigned_model, prompt_template, execution_order, tool, domain
+            SELECT id, node_key, depends_on, execution_order
             FROM dag_nodes
             WHERE job_id = :job_id AND status = 'pending'
             ORDER BY execution_order ASC
         """),
         {"job_id": job_id},
     )
-    nodes = [dict(r) for r in rows.mappings()]
-    if not nodes:
+    candidates = [dict(r) for r in rows.mappings()]
+    if not candidates:
         return None
 
-    # Fetch done node_keys
     done_rows = await db.execute(
         text("SELECT node_key FROM dag_nodes WHERE job_id = :job_id AND status IN ('done', 'skipped')"),
         {"job_id": job_id},
     )
     done_keys = {r[0] for r in done_rows}
 
-    for node in nodes:
-        deps = node.get("depends_on") or []
-        if all(d in done_keys for d in deps):
-            return node
-    return None
+    target = next(
+        (c for c in candidates if all(d in done_keys for d in (c.get("depends_on") or []))),
+        None,
+    )
+    if target is None:
+        return None
+
+    claim = await db.execute(
+        text("""
+            UPDATE dag_nodes
+            SET status = 'running', started_at = NOW()
+            WHERE id = :id AND status = 'pending'
+            RETURNING id, node_key, title, node_type, depends_on,
+                      assigned_model, prompt_template, execution_order, tool, domain
+        """),
+        {"id": str(target["id"])},
+    )
+    claimed = claim.mappings().first()
+    await db.commit()
+    return dict(claimed) if claimed else None
 
 
 async def _set_node_status(
@@ -129,12 +147,13 @@ async def _set_node_status(
     output: str | None = None,
     optimized_prompt: str | None = None,
 ) -> None:
+    """Update node status. COALESCE preserves prior values when caller passes None."""
     await db.execute(
         text("""
             UPDATE dag_nodes
             SET status = :status,
-                output_text = :output,
-                optimized_prompt = :optimized_prompt,
+                output_text = COALESCE(:output, output_text),
+                optimized_prompt = COALESCE(:optimized_prompt, optimized_prompt),
                 completed_at = CASE WHEN :status IN ('done','failed','skipped')
                                THEN NOW() ELSE completed_at END
             WHERE id = :id
@@ -152,7 +171,6 @@ async def _log_execution(
     message: str,
     details: dict | None = None,
 ) -> None:
-    import json
     await db.execute(
         text("""
             INSERT INTO execution_logs (job_id, node_id, log_level, message, details)
@@ -226,12 +244,12 @@ async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = No
         for r in rag["results"]:
             vec_score = r.get("scores", {}).get("vector", 0.0)
             rrf_score = r.get("scores", {}).get("rrf", 0.0)
-            if vec_score < 0.3:
-                logger.info("RAG skip low-relevance doc: %s (cosine=%.3f, rrf=%.4f)", r.get("title", "?"), vec_score, rrf_score)
+            if vec_score < settings.rag_cosine_floor:
+                logger.info("RAG skip low-relevance doc: %s (cosine=%.3f, rrf=%.4f, floor=%.3f)", r.get("title", "?"), vec_score, rrf_score, settings.rag_cosine_floor)
                 continue
             entries.append(f"[{r['title']}] {r['content']}")
         if not entries:
-            logger.info("RAG: all results below cosine relevance threshold (0.3)")
+            logger.info("RAG: all results below cosine relevance threshold (%.3f)", settings.rag_cosine_floor)
         return "\n\n".join(entries)
     except Exception as e:
         logger.warning("RAG grounding failed: %s", e)
@@ -257,90 +275,48 @@ def _build_prompt(node: dict, brief: dict) -> str:
     )
 
 
-async def _verify_output(task_title: str, output: str, model: str) -> tuple[bool, str, float]:
-    """Verify output quality. Returns (pass, reason, confidence)."""
-    import json
-    import re as _re
-    from json_repair import repair_json
+async def _verify_output(
+    task_title: str,
+    output: str,
+    model: str,
+) -> tuple[Literal["pass", "fail"], str, float]:
+    """Verify output quality. Fail-closed: any error/parse/timeout => ('fail', ...)."""
+    from app.utils.llm_parsing import parse_json_object
     messages = [
         {"role": "system", "content": VERIFY_SYSTEM},
-        {
-            "role": "user",
-            "content": f"TASK: {task_title}\n\nOUTPUT:\n{output}",
-        },
+        {"role": "user", "content": f"TASK: {task_title}\n\nOUTPUT:\n{output}"},
     ]
-    resp = None
-    try:
-        resp = await model_router.chat(messages=messages, model=model)
-        raw = resp.text.strip()
-        logger.info("Verifier raw response (first 500 chars): %s", raw[:500])
+
+    async def _body() -> tuple[Literal["pass", "fail"], str, float]:
+        try:
+            resp = await model_router.chat(messages=messages, model=model)
+        except Exception as e:
+            logger.warning("verify_chat_failed: %s", e)
+            return "fail", f"verifier chat failed: {e}", 0.0
+        raw = (resp.text or "").strip()
         if not raw:
-            logger.warning("Verifier returned empty response")
-            return True, "Verification skipped (empty response)", 0.0
+            return "fail", "verifier returned empty response", 0.0
+        data = parse_json_object(raw)
+        if not isinstance(data, dict):
+            logger.warning("verify_parse_failed | raw: %s", raw[:300])
+            return "fail", "verifier output unparseable", 0.0
+        if "pass" not in data:
+            logger.warning("verify_schema_missing_pass: %s", str(data)[:200])
+            return "fail", "verifier response missing 'pass' key", 0.0
+        return (
+            "pass" if bool(data.get("pass", False)) else "fail",
+            str(data.get("reason", "")),
+            float(data.get("confidence", 0.0)),
+        )
 
-        # --- Layer 1: Strip <think> reasoning blocks ---
-        cleaned = _re.sub(r'<think>.*?</think>', '', raw, flags=_re.DOTALL)
-        cleaned = _re.sub(r'<thinking>.*?</thinking>', '', cleaned, flags=_re.DOTALL)
-        # Handle unclosed <think> from truncation
-        cleaned = _re.sub(r'<think>.*', '', cleaned, flags=_re.DOTALL)
-        cleaned = cleaned.strip()
-        logger.info("Verifier after think-strip (first 300 chars): %s", cleaned[:300])
-
-        if not cleaned:
-            logger.warning("No content after stripping think tags")
-            return True, "Verification skipped (only reasoning, no answer)", 0.0
-
-        # --- Layer 2: Strip markdown code fences ---
-        fence_match = _re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', cleaned, _re.DOTALL)
-        if fence_match:
-            cleaned = fence_match.group(1).strip()
-
-        # --- Layer 3: Direct parse (fast path) ---
-        try:
-            data = json.loads(cleaned)
-            logger.info("Verifier parsed (direct): %s", data)
-            return _extract_verify_result(data)
-        except json.JSONDecodeError:
-            pass
-
-        # --- Layer 4: json_repair for malformed JSON ---
-        try:
-            repaired = repair_json(cleaned, ensure_ascii=False)
-            data = json.loads(repaired)
-            logger.info("Verifier parsed (repaired): %s", data)
-            return _extract_verify_result(data)
-        except Exception:
-            pass
-
-        # --- Layer 5: Find first { and repair from there ---
-        brace = cleaned.find("{")
-        if brace != -1:
-            try:
-                repaired = repair_json(cleaned[brace:], ensure_ascii=False)
-                data = json.loads(repaired)
-                logger.info("Verifier parsed (brace-find): %s", data)
-                return _extract_verify_result(data)
-            except Exception:
-                pass
-
-        logger.warning("All verifier parse strategies failed | cleaned: %s", cleaned[:300])
-        return True, "Verification skipped (parse error)", 0.0
+    try:
+        return await asyncio.wait_for(_body(), timeout=settings.verify_timeout_seconds)
+    except asyncio.TimeoutError:
+        logger.warning("verify_timeout after %ss", settings.verify_timeout_seconds)
+        return "fail", f"verifier timeout ({settings.verify_timeout_seconds}s)", 0.0
     except Exception as e:
-        logger.warning("Verifier failed: %s | Raw: %s", e, resp.text[:200] if resp is not None else 'N/A')
-        return True, "Verification skipped (error)", 0.0
-
-
-def _extract_verify_result(data: dict) -> tuple[bool, str, float]:
-    """Pull pass/reason/confidence from parsed verifier JSON."""
-    if "pass" not in data:
-        logger.warning("Verifier JSON missing 'pass' key — treating as skip: %s", 
-                       str(data)[:200])
-        return True, "Verification skipped (model returned wrong schema)", 0.0
-    return (
-        bool(data.get("pass", False)),
-        str(data.get("reason", "")),
-        float(data.get("confidence", 0.0)),
-    )
+        logger.exception("verify_unexpected_error")
+        return "fail", f"verifier unexpected error: {e}", 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -437,141 +413,221 @@ async def _milvus_search(query: str, node_key: str = "?", domain: str | None = N
 
 async def execute_next_node(
     job_id: str,
-    db: AsyncSession,
     skip_optimize: bool = False,
     skip_verify: bool = False,
     model_overrides: dict | None = None,
 ) -> dict:
-    """
-    Execute the next pending node in the DAG.
+    """Execute the next pending node in the DAG.
 
-    Returns a result dict for the caller (pipeline / endpoint) to present
-    to the user for approval before the next node runs.
+    Session-lifetime policy: this function manages its own short-lived
+    async sessions around each DB phase. Long LLM work (optimize/execute/
+    verify) runs with NO session open — connections are not held across
+    10+ minute model calls.
     """
-    # 1. Validate job
-    job = await _get_job(db, job_id)
-    if not job:
-        return {"status": "error", "message": f"Job {job_id} not found"}
-    if job["status"] not in ("running", "executing", "planning"):
-        return {"status": "error", "message": f"Job status is '{job['status']}' — not executable"}
+    # ---- Phase 1 (fast session): validate + claim next node ----
+    async with async_session() as db:
+        job = await _get_job(db, job_id)
+        if not job:
+            return {"status": "error", "message": f"Job {job_id} not found"}
+        if job["status"] not in ("running", "executing", "planning"):
+            return {"status": "error", "message": f"Job status is '{job['status']}' — not executable"}
 
-    # 2. Get next node
-    node = await _get_next_node(db, job_id)
-    if not node:
-        if await _all_nodes_done(db, job_id):
+        node = await _get_next_node(db, job_id)
+        if node is None:
+            if await _all_nodes_done(db, job_id):
+                result = await db.execute(
+                    text(
+                        "UPDATE jobs SET status = 'completed' "
+                        "WHERE id = :jid AND status != 'completed' "
+                        "RETURNING id"
+                    ),
+                    {"jid": job_id},
+                )
+                flipped = result.fetchone()
+                await db.commit()
+                if flipped is not None:
+                    compiled = await _compile_output(job_id, db)
+                    if compiled:
+                        await db.execute(
+                            text("UPDATE jobs SET compiled_output = :co WHERE id = :jid"),
+                            {"co": compiled, "jid": job_id},
+                        )
+                        await db.commit()
+                return {"status": "complete", "message": "All nodes done. Job complete."}
+
+            # Partial compile for blocked jobs (#22, cached)
+            partial_result = None
+            try:
+                cached_row = await db.execute(
+                    text("SELECT compiled_output FROM jobs WHERE id = :jid"),
+                    {"jid": job_id},
+                )
+                cached_output = cached_row.scalar()
+                if cached_output:
+                    partial_result = cached_output
+                    await db.execute(
+                        text("UPDATE jobs SET status = 'blocked' WHERE id = :jid AND status != 'blocked'"),
+                        {"jid": job_id},
+                    )
+                    await db.commit()
+                    logger.info("partial_compiled_cache_hit: job=%s chars=%s", job_id, len(partial_result))
+                else:
+                    partial_result = await _compile_output(job_id, db)
+                    if partial_result:
+                        await db.execute(
+                            text("UPDATE jobs SET compiled_output = :co, status = 'blocked' WHERE id = :jid"),
+                            {"co": partial_result, "jid": job_id},
+                        )
+                    else:
+                        await db.execute(
+                            text("UPDATE jobs SET status = 'blocked' WHERE id = :jid"),
+                            {"jid": job_id},
+                        )
+                    await db.commit()
+                    logger.info("partial_compiled: job=%s chars=%s", job_id, len(partial_result) if partial_result else 0)
+            except Exception as exc:
+                logger.warning("partial_compile_failed: job=%s error=%s", job_id, str(exc))
+
+            blocked_nodes = []
+            try:
+                _all = await db.execute(
+                    text("SELECT node_key, title, status, depends_on FROM dag_nodes WHERE job_id = :jid"),
+                    {"jid": job_id},
+                )
+                _rows = _all.fetchall()
+                failed_keys = {r.node_key for r in _rows if r.status == "failed"}
+                for r in _rows:
+                    if r.status == "pending":
+                        deps = r.depends_on if isinstance(r.depends_on, list) else []
+                        blocked_by = [k for k in deps if k in failed_keys]
+                        if blocked_by:
+                            blocked_nodes.append({
+                                "node_key": r.node_key,
+                                "title": r.title,
+                                "blocked_by": blocked_by,
+                            })
+            except Exception as exc:
+                logger.warning("blocked_node_query_failed: job=%s error=%s", job_id, str(exc))
+
+            return {
+                "status": "blocked",
+                "message": "No executable nodes — dependencies not satisfied",
+                "blocked_nodes": blocked_nodes,
+            }
+
+        # Node claimed. Snapshot fields we need after session closes.
+        node_id = node["id"]
+        title = node["title"]
+        node_key = node["node_key"]
+        _raw_model = node.get("assigned_model", "")
+        _assigned = _raw_model if _raw_model and str(_raw_model).lower() not in ("none", "null") else ""
+        tool = (node.get("tool") or "LLM").strip()
+
+        # CodeGen override — only when assigned_model is blank.
+        if tool == "CodeGen" and not _assigned:
+            exec_model = get_model("model_coder", model_overrides)
+        else:
+            exec_model = _assigned or get_model("model_general", model_overrides)
+        verifier_model = get_model("model_verifier", model_overrides)
+
+        # ── Human: single atomic UPDATE short-circuit (H3) ──
+        if tool.lower() in ("human", "human_review"):
+            skip_msg = "Skipped: human review not required in auto mode"
             await db.execute(
-                text("UPDATE jobs SET status = 'completed' WHERE id = :id"),
-                {"id": job_id},
+                text(
+                    "UPDATE dag_nodes "
+                    "SET status = 'done', output_text = :o, completed_at = NOW() "
+                    "WHERE id = :nid"
+                ),
+                {"o": skip_msg, "nid": str(node_id)},
             )
             await db.commit()
-            return {"status": "complete", "message": "All nodes done. Job complete."}
-        # ── Partial compile for blocked jobs (cached, #22) ──
-        try:
-            # #22: if compiled_output already populated (prior blocked run),
-            # serve from cache instead of recomputing. _compile_output is
-            # pure (no LLM, just SQL aggregation) but the SELECT avoids
-            # re-scanning all dag_nodes on every status poll.
-            cached_row = await db.execute(
-                text("SELECT compiled_output FROM jobs WHERE id = :jid"),
-                {"jid": job_id},
-            )
-            cached_output = cached_row.scalar()
-            if cached_output:
-                partial_result = cached_output
-                await db.execute(
-                    text("UPDATE jobs SET status = 'blocked' WHERE id = :jid AND status != 'blocked'"),
-                    {"jid": job_id}
-                )
-                await db.commit()
-                logger.info("partial_compiled_cache_hit: job=%s chars=%s", job_id, len(partial_result))
-            else:
-                partial_result = await _compile_output(job_id, db)
-                if partial_result:
-                    await db.execute(
-                        text("UPDATE jobs SET compiled_output = :co, status = 'blocked' WHERE id = :jid"),
-                        {"co": partial_result, "jid": job_id}
-                    )
-                else:
-                    await db.execute(
-                        text("UPDATE jobs SET status = 'blocked' WHERE id = :jid"),
-                        {"jid": job_id}
-                    )
-                await db.commit()
-                logger.info("partial_compiled: job=%s chars=%s", job_id, len(partial_result) if partial_result else 0)
-        except Exception as exc:
-            logger.warning("partial_compile_failed: job=%s error=%s", job_id, str(exc))
-        # ── Identify blocked nodes and their failed dependencies ──
-        blocked_nodes = []
-        try:
-            _all = await db.execute(
-                text("SELECT node_key, title, status, depends_on FROM dag_nodes WHERE job_id = :jid"),
-                {"jid": job_id}
-            )
-            _rows = _all.fetchall()
-            failed_keys = {r.node_key for r in _rows if r.status == "failed"}
-            for r in _rows:
-                if r.status == "pending":
-                    deps = r.depends_on if isinstance(r.depends_on, list) else []
-                    blocked_by = [k for k in deps if k in failed_keys]
-                    if blocked_by:
-                        blocked_nodes.append({
-                            "node_key": r.node_key,
-                            "title": r.title,
-                            "blocked_by": blocked_by
-                        })
-        except Exception as exc:
-            logger.warning("blocked_node_query_failed: job=%s error=%s", job_id, str(exc))
-        return {
-            "status": "blocked",
-            "message": "No executable nodes — dependencies not satisfied",
-            "blocked_nodes": blocked_nodes
-        }
+            await _log_execution(db, job_id, str(node_id), "info", f"Tool dispatch: {tool} skipped")
+            logger.info("tool_dispatch: %s skip node=%s", tool, node_key)
+            return {
+                "status": "done",
+                "node_key": node_key,
+                "title": title,
+                "output": skip_msg,
+                "passed": True,
+                "reason": "Tool dispatch: node skipped",
+                "confidence": 1.0,
+                "model_used": "none (skipped)",
+                "tool": tool,
+            }
 
-    node_id = node["id"]
-    title = node["title"]
-    _raw_model = node.get("assigned_model", "")
-    _assigned = _raw_model if _raw_model and str(_raw_model).lower() not in ("none", "null") else ""
-    exec_model = _assigned or get_model("model_general", model_overrides)
-    tool = (node.get("tool") or "LLM").strip()
-    # ── Human: short-circuit ──
-    if tool.lower() in ("human", "human_review"):
-        skip_msg = "Skipped: human review not required in auto mode"
-        logger.info("tool_dispatch: %s skip node=%s", tool, node["node_key"])
-        await _set_node_status(db, node_id, "done")
-        await db.execute(text(
-            "UPDATE dag_nodes SET output_text = :o WHERE id = :nid"
-        ), {"o": skip_msg, "nid": str(node_id)})
-        await db.commit()
-        await _log_execution(db, job_id, str(node_id), "info", f"Tool dispatch: {tool} skipped")
-        return {
-            "status": "done",
-            "node_key": node["node_key"],
+        logger.info("node_execution_started: node='%s' job=%s model=%s", title, job_id, exec_model)
+
+        brief = job.get("refined_brief") or {}
+        depends_on = node.get("depends_on") or []
+        upstream_outputs = await _fetch_upstream_outputs(db, job_id, depends_on) if depends_on else {}
+
+        node_snapshot = {
+            "node_key": node_key,
             "title": title,
-            "output": skip_msg,
-            "passed": True,
-            "reason": "Tool dispatch: node skipped",
-            "confidence": 1.0,
-            "model_used": "none (skipped)",
-            "tool": tool,
+            "prompt_template": node.get("prompt_template"),
+            "domain": node.get("domain"),
         }
-    # ── Model routing by tool ──
-    if tool == "CodeGen":
-        exec_model = get_model("model_coder", model_overrides)
-    verifier_model = get_model("model_verifier", model_overrides)
+    # ---- Session closed. LLM phase begins. ----
 
-    logger.info("node_execution_started: node='%s' job=%s model=%s", title, job_id, exec_model)
-    await _set_node_status(db, node_id, "running")
+    # Build raw prompt.
+    raw_prompt = _build_prompt(node_snapshot, brief)
 
-    # 3. Build prompt with RAG grounding
-    brief = job.get("refined_brief") or {}
-    raw_prompt = _build_prompt(node, brief)
+    # Inject RAG grounding BEFORE optimize (optimizer should see grounded content).
+    project_goal = " ".join(brief.get("goals", [])) if brief else ""
+    rag_query = f"{project_goal}: {title}" if project_goal else title
+    job_domain = brief.get("domain") if brief else None
 
-    # 4. Optimize prompt (Step 14) — before RAG injection
+    if tool == "Milvus":
+        rag_block = await _milvus_search(title, node_key=node_key, domain=node_snapshot.get("domain"))
+        if rag_block:
+            raw_prompt = f"{raw_prompt}\n\n## Knowledge Base Results\n{rag_block}"
+            logger.info("milvus_context_injected: chars=%d node='%s'", len(rag_block), title)
+    elif tool == "SearXNG":
+        search_results = await _searxng_search(title)
+        raw_prompt = f"{raw_prompt}\n\n## Web Search Results\n{search_results}"
+        logger.info("searxng_context_injected: chars=%d node='%s'", len(search_results), title)
+    else:
+        rag_context = await _fetch_rag_context(rag_query, top_k=settings.verifier_top_k, domain=job_domain)
+        if rag_context:
+            raw_prompt = f"{raw_prompt}\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}"
+            logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
+
+    # Inject upstream outputs (size-managed).
+    if upstream_outputs:
+        total_chars = sum(len(v) for v in upstream_outputs.values())
+        truncated_keys = []
+        if total_chars > settings.max_upstream_chars:
+            for nk in upstream_outputs:
+                orig_len = len(upstream_outputs[nk])
+                share = max(settings.compile_output_min_chunk, int(settings.max_upstream_chars * orig_len / total_chars))
+                if orig_len > share:
+                    upstream_outputs[nk] = _truncate_output(upstream_outputs[nk], share)
+                    truncated_keys.append(nk)
+            logger.info(
+                "upstream_truncated",
+                extra=dict(
+                    event="upstream_truncated",
+                    node_key=node_key,
+                    original_chars=total_chars,
+                    truncated_chars=sum(len(v) for v in upstream_outputs.values()),
+                    upstream_nodes=truncated_keys,
+                ),
+            )
+        parts = [f"### {nk}\n{upstream_text}" for nk, upstream_text in upstream_outputs.items()]
+        raw_prompt = (
+            "## Upstream Node Outputs (MANDATORY CONTEXT — your output MUST build on and be consistent with this work)\n"
+            + "\n\n".join(parts)
+            + "\n\n---\n\n## YOUR TASK (build on the upstream outputs above — do NOT rewrite or contradict them):\n"
+            + raw_prompt
+        )
+
+    # Optimize prompt (now sees grounded content).
     if not skip_optimize:
         try:
             opt_result = await optimize_prompt(
                 prompt=raw_prompt,
-                skip_verify=True,  # fast path inside execution
+                skip_verify=True,
                 model_overrides=model_overrides,
             )
             exec_prompt = opt_result.optimized_prompt
@@ -582,64 +638,8 @@ async def execute_next_node(
     else:
         exec_prompt = raw_prompt
 
-    # 5. Inject RAG grounding AFTER optimization — single call per node
-    project_goal = " ".join(brief.get("goals", [])) if brief else ""
-    rag_query = f"{title}"
-    if project_goal:
-        rag_query = f"{project_goal}: {title}"
-    job_domain = brief.get("domain") if brief else None
-
-    if tool == "Milvus":
-        node_domain = node.get("domain")
-        rag_block = await _milvus_search(title, node_key=node["node_key"], domain=node_domain)
-        if rag_block:
-            exec_prompt = f"{exec_prompt}\n\n## Knowledge Base Results\n{rag_block}"
-            logger.info("milvus_context_injected: chars=%d node='%s'", len(rag_block), title)
-    elif tool == "SearXNG":
-        search_results = await _searxng_search(title)
-        exec_prompt = f"{exec_prompt}\n\n## Web Search Results\n{search_results}"
-        logger.info("searxng_context_injected: chars=%d node='%s'", len(search_results), title)
-    else:
-        rag_context = await _fetch_rag_context(rag_query, top_k=2, domain=job_domain)
-        if rag_context:
-            exec_prompt = f"{exec_prompt}\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}"
-            logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
-
-    # 5b. Inject upstream node outputs (with size management)
-    depends_on = node.get("depends_on") or []
-    if depends_on:
-        upstream_outputs = await _fetch_upstream_outputs(db, job_id, depends_on)
-        if upstream_outputs:
-            total_chars = sum(len(v) for v in upstream_outputs.values())
-            truncated_keys = []
-            if total_chars > MAX_UPSTREAM_CHARS:
-                # Truncate each proportionally
-                for nk in upstream_outputs:
-                    orig_len = len(upstream_outputs[nk])
-                    share = max(200, int(MAX_UPSTREAM_CHARS * orig_len / total_chars))
-                    if orig_len > share:
-                        upstream_outputs[nk] = _truncate_output(upstream_outputs[nk], share)
-                        truncated_keys.append(nk)
-                logger.info(
-                    "upstream_truncated",
-                    extra=dict(
-                        event="upstream_truncated",
-                        node_key=node["node_key"],
-                        original_chars=total_chars,
-                        truncated_chars=sum(len(v) for v in upstream_outputs.values()),
-                        upstream_nodes=truncated_keys,
-                    ),
-                )
-            parts = [f"### {nk}\n{upstream_text}" for nk, upstream_text in upstream_outputs.items()]
-            exec_prompt = (
-                "## Upstream Node Outputs (MANDATORY CONTEXT — your output MUST build on and be consistent with this work)\n"
-                + "\n\n".join(parts)
-                + "\n\n---\n\n## YOUR TASK (build on the upstream outputs above — do NOT rewrite or contradict them):\n"
-                + exec_prompt
-            )
-
-    # 6. Execute (with timeout guard)
-    _node_t0 = _time_mod.monotonic()
+    # Execute with timeout guard.
+    _node_t0 = time.monotonic()
     try:
         async def _run_inference():
             messages = [{"role": "user", "content": exec_prompt}]
@@ -648,30 +648,29 @@ async def execute_next_node(
                 raise RuntimeError(resp.error or "Model returned failure")
             return resp.text.strip()
 
-        output = await asyncio.wait_for(
-            _run_inference(), timeout=NODE_TIMEOUT_SECONDS,
-        )
+        output = await asyncio.wait_for(_run_inference(), timeout=settings.node_timeout_seconds)
     except asyncio.TimeoutError:
-        elapsed = round(_time_mod.monotonic() - _node_t0, 1)
+        elapsed = round(time.monotonic() - _node_t0, 1)
         timeout_msg = (
-            f"Node '{node['node_key']}' timed out after {elapsed}s "
-            f"(limit: {NODE_TIMEOUT_SECONDS}s)"
+            f"Node '{node_key}' timed out after {elapsed}s "
+            f"(limit: {settings.node_timeout_seconds}s)"
         )
         logger.warning(
             "node_timeout",
             extra=dict(
                 event="node_timeout",
-                node_key=node["node_key"],
+                node_key=node_key,
                 tool=tool,
                 elapsed_s=elapsed,
-                timeout_s=NODE_TIMEOUT_SECONDS,
+                timeout_s=settings.node_timeout_seconds,
             ),
         )
-        await _set_node_status(db, node_id, "failed", output=timeout_msg)
-        await _log_execution(db, job_id, node_id, "error", timeout_msg)
+        async with async_session() as db:
+            await _set_node_status(db, node_id, "failed", output=timeout_msg, optimized_prompt=exec_prompt)
+            await _log_execution(db, job_id, node_id, "error", timeout_msg)
         return {
             "status": "failed",
-            "node_key": node["node_key"],
+            "node_key": node_key,
             "title": title,
             "error": timeout_msg,
             "reason": "timeout",
@@ -679,79 +678,84 @@ async def execute_next_node(
         }
     except Exception as e:
         logger.error("node_execution_failed: node='%s' error=%s", title, e)
-        await _set_node_status(db, node_id, "failed")
-        await _log_execution(db, job_id, node_id, "error", str(e))
+        async with async_session() as db:
+            await _set_node_status(db, node_id, "failed", optimized_prompt=exec_prompt)
+            await _log_execution(db, job_id, node_id, "error", str(e))
         return {
             "status": "failed",
-            "node_key": node["node_key"],
+            "node_key": node_key,
             "title": title,
             "error": str(e),
             "message": "Node failed. Review error and retry or skip.",
         }
 
-    # 7. Verify output
-    verified, reason, confidence = True, "skipped", 1.0
-    if not skip_verify:
-        verified, reason, confidence = await _verify_output(title, output, verifier_model)
-        if not verified:
+    # Verify (LLM call — still outside DB session).
+    if skip_verify:
+        verify_status: Literal["pass", "fail", "skipped"] = "skipped"
+        reason, confidence = "verification skipped", 0.0
+    else:
+        vstatus, reason, confidence = await _verify_output(title, output, verifier_model)
+        verify_status = vstatus
+        if verify_status == "fail":
             logger.warning("node_verification_failed: node='%s' reason=%s", title, reason)
+    verified = (verify_status == "pass")
+    db_confidence = confidence if (verify_status != "skipped" and confidence > 0.0) else None
 
-    # Store confidence from verifier (logprob-based confidence requires
-    # migrating to Ollama's OpenAI-compatible /v1/chat/completions endpoint
-    # which supports the logprobs parameter — future work).
-    # Verifier confidence is set to NULL when verification is skipped.
-    db_confidence = confidence if (not skip_verify and confidence > 0.0) else None
-    await db.execute(
-        text("UPDATE dag_nodes SET confidence = :conf WHERE id = :nid"),
-        {"conf": db_confidence, "nid": str(node_id)},
-    )
-    await db.commit()
-    logger.info(
-        "verification_complete",
-        extra=dict(
-            event="verification_complete",
-            node_key=node["node_key"],
-            verified=verified,
-            confidence=db_confidence,
-        ),
-    )
-
-    # 8. Persist
-    final_status = "done" if verified else "failed"
-    await _set_node_status(db, node_id, final_status, output=output, optimized_prompt=exec_prompt)
-    await _log_execution(
-        db, job_id, node_id, "info" if verified else "warning",
-        f"Node '{title}' -> {final_status}",
-        {"model": exec_model, "confidence": confidence, "reason": reason},
-    )
-
-    # 9. Auto-complete job if no pending nodes remain
+    # ---- Phase 3 (fast session): persist + atomic autocomplete ----
     job_complete = False
-    remaining = await db.execute(
-        text("SELECT COUNT(*) FROM dag_nodes WHERE job_id = :jid AND status = 'pending'"),
-        {"jid": job_id},
-    )
-    if remaining.scalar() == 0:
+    async with async_session() as db:
+        final_status = "done" if verify_status in ("pass", "skipped") else "failed"
+        await _set_node_status(db, node_id, final_status, output=output, optimized_prompt=exec_prompt)
         await db.execute(
-            text("UPDATE jobs SET status = 'completed' WHERE id = :jid"),
+            text("UPDATE dag_nodes SET confidence = :conf WHERE id = :nid"),
+            {"conf": db_confidence, "nid": str(node_id)},
+        )
+        await db.commit()
+        await _log_execution(
+            db, job_id, node_id, "info" if verified else "warning",
+            f"Node '{title}' -> {final_status}",
+            {"model": exec_model, "confidence": confidence, "reason": reason},
+        )
+        logger.info(
+            "verification_complete",
+            extra=dict(
+                event="verification_complete",
+                node_key=node_key,
+                verified=verified,
+                confidence=db_confidence,
+            ),
+        )
+
+        remaining = await db.execute(
+            text("SELECT COUNT(*) FROM dag_nodes WHERE job_id = :jid AND status = 'pending'"),
             {"jid": job_id},
         )
-        await db.commit()
-        job_complete = True
-        logger.info("job_autocompleted: job=%s", job_id)
-        # ── Step 9b: Compile final output ──
-        compiled = await _compile_output(job_id, db)
-        await db.execute(
-            text("UPDATE jobs SET compiled_output = :out WHERE id = :jid"),
-            {"out": compiled, "jid": job_id},
-        )
-        await db.commit()
-        logger.info("compiled_output_stored: chars=%s job=%s", len(compiled), job_id)
+        if remaining.scalar() == 0:
+            auto = await db.execute(
+                text(
+                    "UPDATE jobs SET status = 'completed' "
+                    "WHERE id = :jid AND status != 'completed' "
+                    "RETURNING id"
+                ),
+                {"jid": job_id},
+            )
+            flipped = auto.fetchone()
+            await db.commit()
+            if flipped is not None:
+                job_complete = True
+                logger.info("job_autocompleted: job=%s", job_id)
+                compiled = await _compile_output(job_id, db)
+                await db.execute(
+                    text("UPDATE jobs SET compiled_output = :out WHERE id = :jid"),
+                    {"out": compiled, "jid": job_id},
+                )
+                await db.commit()
+                logger.info("compiled_output_stored: chars=%s job=%s", len(compiled), job_id)
 
     return {
         "status": final_status,
         "job_id": job_id,
-        "node_key": node["node_key"],
+        "node_key": node_key,
         "title": title,
         "output": output,
         "verified": verified,
@@ -759,10 +763,10 @@ async def execute_next_node(
         "confidence": confidence,
         "model_used": exec_model,
         "prompt_used": exec_prompt,
-        "awaiting_approval": verified,  # caller should confirm before next node
+        "verify_status": verify_status,
+        "awaiting_approval": True,
         "job_complete": job_complete,
     }
-
 
 
 
@@ -787,11 +791,6 @@ async def _compile_output(job_id: str, db) -> str:
             f"## {n['node_key']}: {n['title']}\n\n{n['output_text']}"
             for n in explicit
         )
-
-    # Strategy 1: output-titled node gets priority
-    for n in nodes:
-        if n["title"] and "output" in n["title"].lower() and n["status"] == "done":
-            return n["output_text"] or ""
 
     # Strategy 2: last CodeGen node is the deliverable
     done = [n for n in nodes if n["status"] == "done" and n["output_text"]]
@@ -927,14 +926,14 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
     # ---- Stage 6: Structured log ----
     logger.info(
         "node_retry job_id=%s node_key=%s retry_count=%s downstream_reset=%s",
-        job_id, node_key, row.retry_count + 1, len(downstream_to_reset),
+        job_id, node_key, new_retry_count, len(downstream_to_reset),
     )
 
     # ---- Stage 7: Return result ----
     return {
         "status": "reset",
         "node_key": node_key,
-        "retry_count": row.retry_count + 1,
+        "retry_count": new_retry_count,
         "downstream_reset": downstream_to_reset,
     }
 
@@ -978,13 +977,44 @@ async def _build_pipeline_summary(
             {"jid": job_id},
         )
         _co_val = str(_co_row.scalar() or "")
-    if len(_co_val) <= 50_000:
+    if len(_co_val) <= settings.compile_output_gate_chars:
         summary["compiled_output"] = _co_val
     else:
         summary["compiled_output_available"] = True
     if is_partial:
         summary["failed_nodes"] = failed_node_details
     return summary
+
+
+async def _peek_next_node(job_id: str) -> dict | None:
+    """Read-only snapshot of the next dep-satisfied pending node.
+
+    Used by execute_all_nodes for SSE node_start preview. The actual atomic
+    claim still happens inside execute_next_node via _get_next_node.
+    """
+    async with async_session() as db:
+        rows = await db.execute(
+            text("""
+                SELECT node_key, title, tool, depends_on, execution_order
+                FROM dag_nodes
+                WHERE job_id = :jid AND status = 'pending'
+                ORDER BY execution_order ASC
+            """),
+            {"jid": job_id},
+        )
+        cands = [dict(r) for r in rows.mappings()]
+        if not cands:
+            return None
+        done = await db.execute(
+            text("SELECT node_key FROM dag_nodes WHERE job_id = :jid AND status IN ('done','skipped')"),
+            {"jid": job_id},
+        )
+        done_keys = {r[0] for r in done}
+    for c in cands:
+        deps = c.get("depends_on") or []
+        if all(d in done_keys for d in deps):
+            return c
+    return None
 
 
 async def execute_all_nodes(
@@ -1019,13 +1049,11 @@ async def execute_all_nodes(
         error               — fatal error, pipeline halted
         blocked             — no actionable nodes, dependencies not satisfied
     """
-    import json as _json
-    import time as _time
 
     def _sse(event: str, data: dict) -> str:
-        return f"event: {event}\ndata: {_json.dumps(data, default=str)}\n\n"
+        return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
-    t0 = _time.monotonic()
+    t0 = time.monotonic()
     node_results: list[dict] = []
 
     # ---- Session 1: concurrent execution guard (atomic check-and-set) ----
@@ -1064,7 +1092,10 @@ async def execute_all_nodes(
     if not job:
         yield _sse("error", {"message": f"Job {job_id} not found"})
         return
-    if job["status"] not in ("running", "executing", "planning", "refining"):
+    # Allowlist: only 'running' (set by Session 1 guard above) or 'executing'.
+    # 'refining' and 'planning' are not executable here — callers should finish
+    # those phases and flip status before streaming /execute/all.
+    if job["status"] not in ("running", "executing"):
         yield _sse("error", {
             "message": f"Job status is '{job['status']}' — not executable",
         })
@@ -1094,27 +1125,72 @@ async def execute_all_nodes(
     # ---- Main execute loop, wrapped for abnormal-exit cleanup (#2) ----
     exit_reason: str | None = None  # None = clean exit
     exit_exception: BaseException | None = None
+    retry_budget = settings.execution_global_retry_cap
 
     try:
         while True:
-            # ---- Session 4 (per iteration): peek + execute ----
-            async with async_session() as db:
-                node = await _get_next_node(db, job_id)
-                if node:
-                    yield _sse("node_start", {
-                        "job_id": job_id,
-                        "node_key": node["node_key"],
-                        "title": node["title"],
-                        "tool": node.get("tool", "LLM"),
-                    })
-                result = await execute_next_node(
-                    job_id, db, model_overrides=model_overrides
-                )
+            # ---- Session 4 (short peek only; execute_next_node owns its own sessions) ----
+            node = await _peek_next_node(job_id)
+            if node is not None:
+                yield _sse("node_start", {
+                    "job_id": job_id,
+                    "node_key": node["node_key"],
+                    "title": node["title"],
+                    "tool": node.get("tool", "LLM"),
+                })
+
+            # Spawn keepalive so the SSE stream doesn't look dead during long LLM calls.
+            keepalive_stop = asyncio.Event()
+
+            async def _keepalive_loop():
+                while not keepalive_stop.is_set():
+                    try:
+                        await asyncio.wait_for(
+                            keepalive_stop.wait(),
+                            timeout=settings.sse_keepalive_seconds,
+                        )
+                    except asyncio.TimeoutError:
+                        pass  # heartbeat tick — handled below
+
+            keepalive_queue: asyncio.Queue[str] = asyncio.Queue()
+
+            async def _heartbeat_producer():
+                while not keepalive_stop.is_set():
+                    try:
+                        await asyncio.wait_for(
+                            keepalive_stop.wait(),
+                            timeout=settings.sse_keepalive_seconds,
+                        )
+                    except asyncio.TimeoutError:
+                        await keepalive_queue.put(": keepalive\n\n")
+
+            hb_task = asyncio.create_task(_heartbeat_producer())
+            exec_task = asyncio.create_task(
+                execute_next_node(job_id, model_overrides=model_overrides)
+            )
+            try:
+                while not exec_task.done():
+                    try:
+                        beat = await asyncio.wait_for(keepalive_queue.get(), timeout=0.5)
+                        yield beat
+                    except asyncio.TimeoutError:
+                        continue
+                # Drain any queued beats produced between last get() and task done.
+                while not keepalive_queue.empty():
+                    yield keepalive_queue.get_nowait()
+                result = await exec_task
+            finally:
+                keepalive_stop.set()
+                hb_task.cancel()
+                try:
+                    await hb_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             status = result.get("status", "unknown")
 
             # -- terminal: all nodes done --
             if status == "complete":
-                elapsed_ms = int((_time.monotonic() - t0) * 1000)
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
                 summary = await _build_pipeline_summary(
                     job_id, node_results, elapsed_ms, async_session,
                     extra_fields={"status": "completed"},
@@ -1129,7 +1205,7 @@ async def execute_all_nodes(
 
             # -- terminal: fatal error or blocked --
             if status in ("error", "blocked"):
-                elapsed_ms = int((_time.monotonic() - t0) * 1000)
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
                 result["nodes_completed"] = len(node_results)
                 result["duration_ms"] = elapsed_ms
                 yield _sse(status, result)
@@ -1151,27 +1227,35 @@ async def execute_all_nodes(
             elif status == "failed":
                 _failed_key = result.get("node_key", "")
                 _retried = False
-                try:
-                    async with async_session() as _retry_db:
-                        retry_result = await retry_failed_node(
-                            job_id, _failed_key, _retry_db
-                        )
-                        if retry_result.get("status") == "reset":
-                            _retried = True
-                            yield _sse("node_retry", {
-                                "job_id": job_id,
-                                "node_key": _failed_key,
-                                "title": result.get("title"),
-                                "retry_count": retry_result.get("retry_count", 0),
-                                "message": "Auto-retrying failed node",
-                            })
-                            node_results.pop()
-                            continue
-                except Exception as _retry_exc:
+                if retry_budget <= 0:
                     logger.warning(
-                        "auto_retry_failed: node=%s error=%s",
-                        _failed_key, _retry_exc,
+                        "auto_retry_budget_exhausted: job=%s node=%s cap=%s",
+                        job_id, _failed_key, settings.execution_global_retry_cap,
                     )
+                else:
+                    try:
+                        async with async_session() as _retry_db:
+                            retry_result = await retry_failed_node(
+                                job_id, _failed_key, _retry_db
+                            )
+                            if retry_result.get("status") == "reset":
+                                _retried = True
+                                retry_budget -= 1
+                                yield _sse("node_retry", {
+                                    "job_id": job_id,
+                                    "node_key": _failed_key,
+                                    "title": result.get("title"),
+                                    "retry_count": retry_result.get("retry_count", 0),
+                                    "budget_remaining": retry_budget,
+                                    "message": "Auto-retrying failed node",
+                                })
+                                node_results.pop()
+                                continue
+                    except Exception as _retry_exc:
+                        logger.warning(
+                            "auto_retry_failed: node=%s error=%s",
+                            _failed_key, _retry_exc,
+                        )
                 yield _sse("node_failed", {
                     "job_id": job_id,
                     "node_key": _failed_key,
@@ -1193,7 +1277,7 @@ async def execute_all_nodes(
 
             # -- early exit: auto-completion fired on last node --
             if result.get("job_complete"):
-                elapsed_ms = int((_time.monotonic() - t0) * 1000)
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
                 early_summary = await _build_pipeline_summary(
                     job_id, node_results, elapsed_ms, async_session,
                 )
@@ -1205,13 +1289,24 @@ async def execute_all_nodes(
         exit_reason = "cancelled"
         exit_exception = _cancelled
         logger.info("execute_all_nodes_cancelled: job=%s", job_id)
+        try:
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            yield _sse("execution_cancelled", {
+                "job_id": job_id,
+                "status": "cancelled",
+                "message": "Execution cancelled by client",
+                "nodes_completed": len(node_results),
+                "duration_ms": elapsed_ms,
+            })
+        except Exception:
+            pass  # stream already closed — best-effort
     except Exception as _exc:
         # Unexpected runtime error. Emit SSE (best-effort), cleanup in finally.
         exit_reason = "exception"
         exit_exception = _exc
         logger.exception("execute_all_nodes_failed: job=%s", job_id)
         try:
-            elapsed_ms = int((_time.monotonic() - t0) * 1000)
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
             yield _sse("execution_failed", {
                 "job_id": job_id,
                 "status": "failed",
@@ -1245,6 +1340,15 @@ async def execute_all_nodes(
                             WHERE id = :jid
                         """),
                         {"s": terminal, "jid": job_id},
+                    )
+                    # Orphaned node cleanup — any claimed-but-never-completed node.
+                    await _cleanup_db.execute(
+                        text("""
+                            UPDATE dag_nodes
+                            SET status = 'failed', completed_at = NOW()
+                            WHERE job_id = :jid AND status = 'running'
+                        """),
+                        {"jid": job_id},
                     )
                     await _cleanup_db.commit()
                     logger.warning(

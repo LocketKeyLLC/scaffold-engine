@@ -238,9 +238,8 @@ class TestPauseGateInLoop:
 
     def _setup_patches(self, stack, gaps_response: dict):
         stack.enter_context(patch.object(
-            ra, "_guard_concurrent", AsyncMock(return_value=None)))
-        stack.enter_context(patch.object(
-            ra, "_create_session", AsyncMock(return_value="sid-1")))
+            ra, "_guard_and_create_session",
+            AsyncMock(return_value=("sid-1", None))))
         stack.enter_context(patch.object(
             ra, "_decompose_topic",
             AsyncMock(return_value={

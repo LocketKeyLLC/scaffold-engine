@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import secrets
 from datetime import datetime, timezone
 from typing import Any
 
@@ -46,7 +47,7 @@ TOPIC_KEYWORDS = {
     2: ["rag", "retriev", "chunk", "embed", "vector", "rerank", "milvus", "semantic search"],
     3: ["architecture", "pattern", "microservice", "api", "design pattern", "distributed", "scalab"],
     4: ["ci/cd", "pipeline", "github action", "deploy", "devops", "agile", "tdd", "docker", "test"],
-    5: ["python", "javascript", "code", "snippet", "algorithm", "data structure", "bash", "sql", "decorator"],
+    5: ["python", "javascript", "snippet", "algorithm", "data structure", "bash", "sql", "decorator"],
     6: ["toon", "token", "serializ", "format", "compression", "schema", "bpe"],
 }
 
@@ -89,7 +90,7 @@ Return ONLY the JSON array."""
 # SearXNG search
 # ---------------------------------------------------------------------------
 
-async def _search_searxng(query: str, max_results: int = 10) -> list[dict]:
+async def search_searxng(query: str, max_results: int = 10) -> list[dict]:
     """Query SearXNG and return result list."""
     try:
         client = get_searxng_client()
@@ -134,16 +135,19 @@ def sanitize_toon_content(text: str) -> str:
     )
 
 
-def _format_toon_rows(entries: list[dict]) -> list[str]:
+def format_toon_rows(entries: list[dict]) -> list[str]:
     """Convert knowledge entries to TOON data rows."""
     rows = []
     for i, entry in enumerate(entries):
         eid = i + 1
         title = entry.get("title", "unknown").strip().lower().replace(" ", "-")
         content = sanitize_toon_content(entry.get("content", ""))
-        tags = ",".join(t.strip().lower() for t in entry.get("tags", "").split(","))
-        source = entry.get("source", "pending-verification").strip() or "pending-verification"
-        rows.append(f'  {eid},{title},"{content}","{tags}",{source},false,pending')
+        tags = sanitize_toon_content(
+            ",".join(t.strip().lower() for t in entry.get("tags", "").split(","))
+        )
+        raw_source = entry.get("source", "pending-verification").strip() or "pending-verification"
+        source = sanitize_toon_content(raw_source)
+        rows.append(f'  {eid},{title},"{content}","{tags}","{source}",false,pending')
     return rows
 
 
@@ -164,7 +168,7 @@ def _normalize_legacy_keys(entries: list[dict]) -> list[dict]:
 # GitHub push
 # ---------------------------------------------------------------------------
 
-async def _push_to_github(
+async def push_to_github(
     rows: list[str],
     file_path: str,
     topic: str,
@@ -218,10 +222,11 @@ async def _push_to_github(
         ref_resp.raise_for_status()
         main_sha = ref_resp.json()["object"]["sha"]
 
-        # 4. Create feature branch
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        # 4. Create feature branch (microsecond + random suffix to avoid collisions)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        rand = secrets.token_hex(2)  # 4 hex chars
         safe_topic = re.sub(r"[^a-z0-9-]", "", topic.lower().replace(" ", "-"))[:30]
-        new_branch = f"knowledge/{safe_topic}-{ts}"
+        new_branch = f"knowledge/{safe_topic}-{ts}-{rand}"
 
         create_resp = await client.post(
             f"{repo_base}/git/refs",
@@ -317,16 +322,19 @@ def _append_toon_row(file_content: str, row: str) -> str:
     pattern = r"(knowledge\[)(\d+)(\]\{[^}]+\}:)"
     match = re.search(pattern, file_content)
 
-    if match:
-        current_count = int(match.group(2))
-        new_count = current_count + 1
+    if match is None:
+        raise ValueError(
+            "TOON header missing or malformed: expected 'knowledge[N]{...}:' block"
+        )
+    current_count = int(match.group(2))
+    new_count = current_count + 1
 
-        if clean_row.strip().startswith("AUTO,"):
-            clean_row = clean_row.replace("AUTO,", f"{new_count},", 1)
-            if not clean_row.startswith("  "):
-                clean_row = f"  {clean_row}"
+    if clean_row.strip().startswith("AUTO,"):
+        clean_row = clean_row.replace("AUTO,", f"{new_count},", 1)
+        if not clean_row.startswith("  "):
+            clean_row = f"  {clean_row}"
 
-        file_content = re.sub(pattern, f"\\g<1>{new_count}\\g<3>", file_content)
+    file_content = re.sub(pattern, f"\\g<1>{new_count}\\g<3>", file_content)
 
     if file_content.endswith("\n"):
         file_content += clean_row + "\n"
@@ -356,7 +364,7 @@ async def extract_ground_truths(
 
     all_results: list[dict] = []
     for query in queries[:5]:
-        results = await _search_searxng(query)
+        results = await search_searxng(query)
         all_results.extend(results)
         logger.info("SearXNG: %d results for '%s'", len(results), query)
 
@@ -394,17 +402,25 @@ async def extract_ground_truths(
     if not resp.success:
         return {"status": "llm_failed", "topic": topic, "error": resp.error}
 
-    entries = _parse_entries(resp.text)
-    if not entries:
+    try:
+        entries = _parse_entries(resp.text)
+    except _ParseFailed as exc:
         return {
             "status": "parse_failed",
             "topic": topic,
-            "error": "Could not parse LLM output as JSON array",
+            "error": f"Could not parse LLM output as JSON array: {exc}",
             "raw_output": resp.text[:500],
         }
 
+    if not entries:
+        return {
+            "status": "empty",
+            "topic": topic,
+            "error": "LLM returned an empty entry array",
+        }
+
     entries = _normalize_legacy_keys(entries)
-    toon_rows = _format_toon_rows(entries)
+    toon_rows = format_toon_rows(entries)
 
     if not target_file:
         topic_id = _detect_topic_id(topic)
@@ -423,7 +439,7 @@ async def extract_ground_truths(
     }
 
     if push_to_github:
-        gh_result = await _push_to_github(
+        gh_result = await push_to_github(
             toon_rows,
             target_file,
             topic,
@@ -435,6 +451,26 @@ async def extract_ground_truths(
     return result
 
 
-def _parse_entries(raw: str) -> list[dict] | None:
-    """Parse JSON array from LLM output."""
-    return parse_json_array(raw)
+class _ParseFailed(Exception):
+    """LLM output could not be parsed as a JSON array."""
+
+
+def _parse_entries(raw: str) -> list[dict]:
+    """Parse JSON array from LLM output.
+
+    Returns:
+        list[dict]: parsed entries (possibly empty if the LLM returned `[]`).
+
+    Raises:
+        _ParseFailed: the output was not a valid JSON array.
+    """
+    parsed = parse_json_array(raw)
+    if parsed is None:
+        raise _ParseFailed("parse_json_array returned None")
+    return parsed
+
+
+# --- backward-compat aliases ---
+_search_searxng = search_searxng
+_format_toon_rows = format_toon_rows
+_push_to_github = push_to_github

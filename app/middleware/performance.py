@@ -1,12 +1,13 @@
 """Scaffold Engine — Performance logging middleware.
 
 Two components:
-  1. HTTP middleware: logs request duration for all endpoints
-  2. log_model_call(): persists model-level metrics from ModelResponse to performance_logs
-
-Step 9 of 23-step build plan.
+  1. HTTP middleware: logs request duration for all endpoints. Emits both
+     duration_ms (int) and duration_s (float) to make percentile aggregation
+     across log stores straightforward. /health polling is gated to DEBUG
+     when fast (below threshold) and INFO when slow.
+  2. log_model_call(): persists model-level metrics to performance_logs.
+     model/endpoint strings are truncated to column widths before insert.
 """
-
 from __future__ import annotations
 
 import logging
@@ -20,11 +21,24 @@ from app.database import async_session
 
 logger = logging.getLogger("scaffold.perf")
 
+# Column width guards for performance_logs text columns.
+_MODEL_MAX = 200
+_ENDPOINT_MAX = 200
+
+# /health polling: log at DEBUG when duration is below threshold, INFO above.
+_HEALTH_PATH = "/health"
+_HEALTH_SLOW_MS = 200
+
+
+def _truncate(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
 
 # ---------------------------------------------------------------------------
 # HTTP request timing middleware
 # ---------------------------------------------------------------------------
-
 class PerformanceMiddleware(BaseHTTPMiddleware):
     """Log wall-clock duration of every HTTP request."""
 
@@ -33,15 +47,23 @@ class PerformanceMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         start = time.monotonic()
         response = await call_next(request)
-        elapsed_ms = int((time.monotonic() - start) * 1000)
+        elapsed_s = time.monotonic() - start
+        elapsed_ms = int(elapsed_s * 1000)
 
-        logger.info(
-            "http_request_completed: method=%s path=%s status=%d duration_ms=%d",
-            request.method, request.url.path,
-            response.status_code, elapsed_ms,
+        path = request.url.path
+        # Gate noisy /health polling: DEBUG below threshold, INFO above.
+        if path == _HEALTH_PATH and elapsed_ms < _HEALTH_SLOW_MS:
+            level = logging.DEBUG
+        else:
+            level = logging.INFO
+
+        logger.log(
+            level,
+            "http_request_completed: method=%s path=%s status=%d "
+            "duration_ms=%d duration_s=%.3f",
+            request.method, path,
+            response.status_code, elapsed_ms, elapsed_s,
         )
-
-        # Add timing header for observability
         response.headers["X-Request-Duration-Ms"] = str(elapsed_ms)
         return response
 
@@ -49,7 +71,6 @@ class PerformanceMiddleware(BaseHTTPMiddleware):
 # ---------------------------------------------------------------------------
 # Model call metric persistence
 # ---------------------------------------------------------------------------
-
 async def log_model_call(
     *,
     model: str,
@@ -85,8 +106,8 @@ async def log_model_call(
                          :job_id, :node_id)
                 """),
                 {
-                    "model": model,
-                    "endpoint": endpoint,
+                    "model": _truncate(model, _MODEL_MAX),
+                    "endpoint": _truncate(endpoint, _ENDPOINT_MAX),
                     "request_type": request_type,
                     "ttft_ms": ttft_ms,
                     "total_duration_ms": total_duration_ms,

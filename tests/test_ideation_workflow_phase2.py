@@ -17,7 +17,7 @@ async def test_research_happy_path():
     }
     db = _mock_db_for_claim(claimed)
 
-    _mod._search_searxng = AsyncMock(return_value=[
+    _mod.search_searxng = AsyncMock(return_value=[
         {"title": "RAG Guide", "url": "https://e.com/a", "content": "chunk..."},
     ])
     distilled = [{"content": "RAG benefits from chunking"}]
@@ -34,7 +34,7 @@ async def test_research_happy_path():
     _mod.parse_json_array = MagicMock(return_value=distilled)
     _mod.parse_json_object = MagicMock(return_value=workflow)
     _mod.ingest_entries = AsyncMock(return_value={"new": 1, "versioned": 0})
-    _mod._format_toon_rows = MagicMock(return_value=["row1"])
+    _mod.format_toon_rows = MagicMock(return_value=["row1"])
 
     result = await _mod.research_and_compile(job_id="job-001", db=db)
 
@@ -85,7 +85,7 @@ async def test_research_uses_model_router_not_general():
     }
     db = _mock_db_for_claim(claimed)
 
-    _mod._search_searxng = AsyncMock(return_value=[
+    _mod.search_searxng = AsyncMock(return_value=[
         {"title": "T", "url": "https://e.com/x", "content": "snip"},
     ])
     _mod.model_router = MagicMock()
@@ -100,7 +100,7 @@ async def test_research_uses_model_router_not_general():
         "configuration": {"domain": "eng"},
     })
     _mod.ingest_entries = AsyncMock(return_value={"new": 1, "versioned": 0})
-    _mod._format_toon_rows = MagicMock(return_value=["r"])
+    _mod.format_toon_rows = MagicMock(return_value=["r"])
     _mod.get_model = MagicMock(return_value="qwen3:4b")
 
     await _mod.research_and_compile(job_id="job-mr", db=db)
@@ -130,7 +130,7 @@ async def test_research_user_feedback_folded_into_brief():
     }
     db = _mock_db_for_claim(claimed)
 
-    _mod._search_searxng = AsyncMock(return_value=[
+    _mod.search_searxng = AsyncMock(return_value=[
         {"title": "T", "url": "https://e.com/y", "content": "snip"},
     ])
     _mod.model_router = MagicMock()
@@ -145,7 +145,7 @@ async def test_research_user_feedback_folded_into_brief():
         "configuration": {"domain": "eng"},
     })
     _mod.ingest_entries = AsyncMock(return_value={"new": 1, "versioned": 0})
-    _mod._format_toon_rows = MagicMock(return_value=["r"])
+    _mod.format_toon_rows = MagicMock(return_value=["r"])
 
     feedback = "Focus on Python, not Java."
     await _mod.research_and_compile(job_id="job-fb", db=db, user_feedback=feedback)
@@ -168,7 +168,7 @@ async def test_research_empty_search_results_still_reaches_planning():
     }
     db = _mock_db_for_claim(claimed)
 
-    _mod._search_searxng = AsyncMock(return_value=[])  # no results
+    _mod.search_searxng = AsyncMock(return_value=[])  # no results
     _mod.model_router = MagicMock()
     # Only ONE LLM call expected (compile); distillation is skipped
     _mod.model_router.generate = AsyncMock(return_value=_llm_response(
@@ -180,7 +180,7 @@ async def test_research_empty_search_results_still_reaches_planning():
         "configuration": {"domain": "eng"},
     })
     _mod.ingest_entries = AsyncMock(return_value={"new": 0, "versioned": 0})
-    _mod._format_toon_rows = MagicMock(return_value=[])
+    _mod.format_toon_rows = MagicMock(return_value=[])
 
     result = await _mod.research_and_compile(job_id="job-empty", db=db)
 

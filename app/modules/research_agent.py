@@ -33,7 +33,6 @@ from typing import AsyncGenerator
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
-import httpx
 import pdfplumber
 import trafilatura
 from pypdf import PdfReader
@@ -43,6 +42,7 @@ from app import model_router
 from app.config import settings, get_model
 from app.database import async_session
 from app.modules.rag_pipeline import ingest_entries
+from app.utils.http_clients import get_generic_http_client
 from app.utils.llm_parsing import parse_json_array, parse_json_object
 from app.modules.gt_extractor import TOPIC_KEYWORDS
 from app.utils.topic_detection import detect_topic_id
@@ -80,20 +80,32 @@ CATEGORY_ENGINES: dict[str, str] = {
 _EXTRACT_BATCH_FULL_PAGE = 5
 _EXTRACT_BATCH_SNIPPET = 10
 
+# Snapshot schema:
+#   1 = legacy {title, content_hash} projection (pre-2026-04-22)
+#   2 = full entries with content/source_url/confidence_score (current)
+SNAPSHOT_SCHEMA_VERSION = 2
+
 
 # =============================================================================
 # Helpers: source scoring, domain detection, confidence resolution
 # =============================================================================
 
 def _score_source(url: str) -> float:
-    """Reliability score (0.0–1.0) based on URL domain."""
+    """Reliability score (0.0–1.0) based on URL domain.
+
+    Item 11 — Matches on exact host or registrable-suffix only. Substring
+    matching (``if domain_key in hostname``) is vulnerable to lookalike
+    hostnames such as ``fake-github.com.evil.tld`` scoring as ``github.com``.
+    """
     try:
         hostname = urlparse(url).hostname or ""
     except Exception:
         return DEFAULT_SOURCE_SCORE
-    hostname = hostname.lower().removeprefix("www.")
+    host = hostname.lower().removeprefix("www.")
+    if not host:
+        return DEFAULT_SOURCE_SCORE
     for domain_key, score in DOMAIN_SCORES.items():
-        if domain_key in hostname:
+        if host == domain_key or host.endswith("." + domain_key):
             return score
     return DEFAULT_SOURCE_SCORE
 
@@ -161,57 +173,96 @@ async def _await_with_heartbeat(
     heartbeat_payload: dict,
     interval: int | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Yield heartbeat SSE while `task` is running. Caller reads task.result() after."""
+    """Yield heartbeat SSE while ``task`` runs. Caller reads ``task.result()`` after.
+
+    Waits with ``asyncio.wait({task}, timeout=ivl)`` instead of unconditional
+    sleep, so an instantly-completing task (e.g. AsyncMock in tests) adds
+    zero latency. Previously slept a full interval per call regardless of
+    task state, which compounded across iterations.
+    """
     ivl = interval or HEARTBEAT_INTERVAL_SECONDS
     while not task.done():
-        await asyncio.sleep(ivl)
-        if not task.done():
-            yield _sse("heartbeat", heartbeat_payload)
+        done, _pending = await asyncio.wait({task}, timeout=ivl)
+        if task.done():
+            return
+        yield _sse("heartbeat", heartbeat_payload)
 
 
 # =============================================================================
 # Session tracking
 # =============================================================================
 
-async def _guard_concurrent() -> dict | None:
-    """Return existing running-session dict or None."""
+async def _guard_and_create_session(
+    topic: str, depth: str, domain: str,
+) -> tuple[str | None, dict | None]:
+    """Atomically create a 'running' research session.
+
+    Relies on the unique partial index ``uq_research_sessions_single_running``
+    (migration 020) to enforce the singleton-running invariant. Replaces the
+    previous TOCTOU pair (``_guard_concurrent`` SELECT + ``_create_session``
+    INSERT).
+
+    Returns
+    -------
+    (session_id, None)
+        Success — row inserted, caller owns the session.
+    (None, {"id": ..., "topic": ...})
+        Another session is already running. Caller should emit 409.
+    (None, None)
+        Insert raced with a concurrent finalize. Caller should emit 409.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    insert_sql = text(
+        "INSERT INTO research_sessions (topic, depth, domain, status) "
+        "VALUES (:topic, :depth, :domain, 'running') "
+        "RETURNING id"
+    )
+    params = {"topic": topic, "depth": depth, "domain": domain}
+
+    async with async_session() as db:
+        try:
+            result = await db.execute(insert_sql, params)
+            session_id = str(result.scalar_one())
+            await db.commit()
+            return session_id, None
+        except IntegrityError:
+            await db.rollback()
+
     async with async_session() as db:
         row = await db.execute(
             text("SELECT id, topic FROM research_sessions WHERE status = 'running' LIMIT 1")
         )
         existing = row.mappings().first()
-        return dict(existing) if existing else None
-
-
-async def _create_session(topic: str, depth: str, domain: str) -> str:
-    async with async_session() as db:
-        result = await db.execute(
-            text("""
-                INSERT INTO research_sessions (topic, depth, domain, status)
-                VALUES (:topic, :depth, :domain, 'running')
-                RETURNING id
-            """),
-            {"topic": topic, "depth": depth, "domain": domain},
-        )
-        session_id = str(result.scalar_one())
-        await db.commit()
-        return session_id
+        return None, (dict(existing) if existing else None)
 
 
 def _build_snapshot(state: ResearchState) -> dict:
-    """JSON-safe snapshot of ResearchState for persistence."""
+    """JSON-safe snapshot of ResearchState for persistence.
+
+    Persists FULL entries (content, source_url, confidence_score, title,
+    content_hash) so resume can regenerate a faithful summary. The legacy
+    ``entries_projection`` field is retained for read-side back-compat only.
+    """
+    full_entries = []
+    for e in state.all_entries:
+        h = e.get("content_hash") or hashlib.sha256(
+            (e.get("content") or "").encode("utf-8")
+        ).hexdigest()[:16]
+        full_entries.append({
+            "title": e.get("title", ""),
+            "content": e.get("content", ""),
+            "source_url": e.get("source_url"),
+            "confidence_score": e.get("confidence_score"),
+            "content_hash": h,
+        })
+
     return {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "iteration": state.iteration,
         "search_history": sorted(state.search_history),
         "url_history": sorted(state.url_history),
-        "entries_projection": [
-            {
-                "title": e.get("title", ""),
-                "content_hash": e.get("content_hash")
-                    or hashlib.sha256((e.get("content") or "").encode("utf-8")).hexdigest()[:16],
-            }
-            for e in state.all_entries
-        ],
+        "entries": full_entries,
         "outline_facets": state.outline_facets,
         "covered_facets": sorted(state.covered_facets),
         "gap_queries": state.gap_queries,
@@ -323,9 +374,17 @@ async def _atomic_claim_for_resume(session_id: str, reply: str) -> bool:
 
 
 def _rehydrate_state(row: dict) -> ResearchState:
+    """Rehydrate ResearchState from snapshot JSON.
+
+    Supports schema_version:
+      - missing / 1 : legacy ``entries_projection`` (title + content_hash only)
+      - 2           : full ``entries`` with content/source_url/confidence_score
+    """
     snap = row.get("state_snapshot") or {}
     if isinstance(snap, str):
         snap = json.loads(snap) if snap else {}
+
+    version = int(snap.get("schema_version", 1))
 
     state = ResearchState(
         topic=row["topic"],
@@ -338,7 +397,18 @@ def _rehydrate_state(row: dict) -> ResearchState:
     state.outline_facets = list(snap.get("outline_facets", []))
     state.covered_facets = set(snap.get("covered_facets", []))
     state.gap_queries = list(snap.get("gap_queries", []))
-    state.all_entries = list(snap.get("entries_projection", []))
+
+    if version >= 2:
+        state.all_entries = list(snap.get("entries", []))
+    else:
+        # v1 legacy: projection-only, lossy. Summary on resume will be degraded
+        # but the session still completes rather than crashing on KeyError.
+        state.all_entries = list(snap.get("entries_projection", []))
+        logger.warning(
+            "rehydrate_legacy_snapshot: session=%s schema_version=%s entries=%d",
+            row.get("id"), version, len(state.all_entries),
+        )
+
     totals = snap.get("totals", {})
     state.total_ingested = int(totals.get("ingested", 0))
     state.total_rejected = int(totals.get("rejected", 0))
@@ -376,6 +446,75 @@ async def _finalize_session(
             },
         )
         await db.commit()
+
+
+async def _run_with_session_lifecycle(
+    session_id: str,
+    coro_factory,
+    t0: float,
+    topic: str,
+):
+    """Unified cancellation-safe wrapper for all research entry points.
+
+    Three disjoint exits:
+
+    1. Inner flow completes normally
+       The wrapped generator is responsible for calling ``_finalize_session``
+       with its own terminal status (``completed`` / ``failed`` /
+       ``paused_awaiting_reply``). We do nothing here.
+
+    2. Generic ``Exception`` escapes the inner flow
+       Finalize as ``failed`` with a typed error message, emit an SSE
+       ``error`` event, and swallow. The caller sees a clean stream end.
+
+    3. ``CancelledError`` or any other ``BaseException``
+       Client disconnected (or outer task was cancelled). Finalize as
+       ``cancelled`` with ``error_message='client_disconnect'`` BEFORE
+       re-raising so asyncio semantics are preserved.
+
+    The ``finalized`` flag guards against double-finalize when the inner
+    flow partially progressed before raising.
+    """
+    finalized = False
+    try:
+        async for evt in coro_factory():
+            yield evt
+        finalized = True
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        logger.error(
+            "research_entry_failed: session=%s error=%s",
+            session_id, exc, exc_info=True,
+        )
+        try:
+            await _finalize_session(
+                session_id, "failed", elapsed_ms,
+                error_message=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception:
+            logger.exception("finalize_failed_during_error_handler: session=%s", session_id)
+        finalized = True
+        yield _sse("error", {
+            "message": f"Research failed: {exc}",
+            "session_id": session_id,
+            "topic": topic,
+        })
+    finally:
+        if not finalized:
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            logger.warning(
+                "research_cancelled: session=%s elapsed_ms=%d",
+                session_id, elapsed_ms,
+            )
+            try:
+                await _finalize_session(
+                    session_id, "cancelled", elapsed_ms,
+                    error_message="client_disconnect",
+                )
+            except Exception:
+                logger.exception(
+                    "finalize_failed_during_cancel: session=%s", session_id,
+                )
 
 
 # =============================================================================
@@ -423,19 +562,20 @@ def _parse_openapi_ref(s: str) -> str:
 
 
 async def _robots_allowed(url: str, user_agent: str = "ScaffoldEngine/1.0") -> bool:
-    """Fail-open robots.txt check."""
+    """Fail-open robots.txt check.
+
+    Item 12 — Uses shared persistent client with per-call timeout override.
+    """
     try:
         p = urlparse(url)
         robots_url = f"{p.scheme}://{p.netloc}/robots.txt"
-        async with httpx.AsyncClient(
-            timeout=settings.research_fetch_timeout, follow_redirects=True,
-        ) as c:
-            r = await c.get(robots_url)
-            if r.status_code >= 400:
-                return True
-            rp = RobotFileParser()
-            rp.parse(r.text.splitlines())
-            return rp.can_fetch(user_agent, url)
+        client = get_generic_http_client()
+        r = await client.get(robots_url, timeout=settings.research_fetch_timeout)
+        if r.status_code >= 400:
+            return True
+        rp = RobotFileParser()
+        rp.parse(r.text.splitlines())
+        return rp.can_fetch(user_agent, url)
     except Exception as e:
         logger.debug("robots_check_failed: url=%s error=%s", url, e)
         return True
@@ -445,30 +585,31 @@ async def _fetch_url_bounded(url: str, max_bytes: int | None = None) -> str | No
     """Stream-fetch with hard byte cap. Returns text or None on failure/cap."""
     cap = max_bytes or settings.research_max_url_bytes
     try:
-        async with httpx.AsyncClient(
-            timeout=settings.research_url_fetch_timeout, follow_redirects=True,
-        ) as c:
-            async with c.stream(
-                "GET", url, headers={"User-Agent": "ScaffoldEngine/1.0"},
-            ) as resp:
-                if resp.status_code != 200:
-                    logger.warning("url_fetch_status: url=%s status=%d", url, resp.status_code)
+        # Item 12 — shared persistent client; per-call timeout override.
+        client = get_generic_http_client()
+        async with client.stream(
+            "GET", url,
+            headers={"User-Agent": "ScaffoldEngine/1.0"},
+            timeout=settings.research_url_fetch_timeout,
+        ) as resp:
+            if resp.status_code != 200:
+                logger.warning("url_fetch_status: url=%s status=%d", url, resp.status_code)
+                return None
+            cl = resp.headers.get("content-length")
+            if cl and cl.isdigit() and int(cl) > cap:
+                logger.warning("url_fetch_content_length_exceeded: url=%s bytes=%s", url, cl)
+                return None
+            buf = bytearray()
+            async for chunk in resp.aiter_bytes():
+                buf.extend(chunk)
+                if len(buf) > cap:
+                    logger.warning("url_fetch_cap_exceeded: url=%s bytes=%d", url, len(buf))
                     return None
-                cl = resp.headers.get("content-length")
-                if cl and cl.isdigit() and int(cl) > cap:
-                    logger.warning("url_fetch_content_length_exceeded: url=%s bytes=%s", url, cl)
-                    return None
-                buf = bytearray()
-                async for chunk in resp.aiter_bytes():
-                    buf.extend(chunk)
-                    if len(buf) > cap:
-                        logger.warning("url_fetch_cap_exceeded: url=%s bytes=%d", url, len(buf))
-                        return None
-                enc = resp.encoding or "utf-8"
-                try:
-                    return bytes(buf).decode(enc, errors="replace")
-                except LookupError:
-                    return bytes(buf).decode("utf-8", errors="replace")
+            enc = resp.encoding or "utf-8"
+            try:
+                return bytes(buf).decode(enc, errors="replace")
+            except LookupError:
+                return bytes(buf).decode("utf-8", errors="replace")
     except Exception as e:
         logger.warning("url_fetch_failed: url=%s error=%s", url, e)
         return None
@@ -548,7 +689,17 @@ def _chunk_text(text_in: str, max_tokens: int = 1500, overlap_tokens: int = 200)
     if current:
         chunks.append(current)
 
-    return chunks
+    # Item 9 — final post-overlap split pass.
+    # Prepending tail-overlap can push a chunk past ``max_chars``. Enforce
+    # the documented guarantee by hard-splitting any oversized chunk here.
+    final: list[str] = []
+    for c in chunks:
+        if len(c) <= max_chars:
+            final.append(c)
+            continue
+        for i in range(0, len(c), max_chars):
+            final.append(c[i:i + max_chars])
+    return final
 
 
 # =============================================================================
@@ -698,29 +849,29 @@ async def _fetch_and_extract(results: list[dict]) -> list[dict]:
     sem = asyncio.Semaphore(settings.research_fetch_concurrency)
     urls = [r["url"] for r in results if r.get("url")]
 
-    async with httpx.AsyncClient(
-        timeout=settings.research_fetch_timeout, follow_redirects=True,
-    ) as client:
-        async def _fetch_one(url: str) -> dict | None:
-            async with sem:
-                try:
-                    resp = await client.get(url)
-                    if resp.status_code != 200 or not resp.text:
-                        return None
-                    text_out = await asyncio.to_thread(
-                        trafilatura.extract,
-                        resp.text,
-                        output_format="txt",
-                        with_metadata=False,
-                    )
-                    if not text_out or len(text_out) < 100:
-                        return None
-                    return {"url": url, "content": text_out}
-                except Exception as e:
-                    logger.debug("trafilatura_fetch_failed: url=%s error=%s", url, e)
-                    return None
+    # Item 12 — shared persistent client; per-call timeout override.
+    client = get_generic_http_client()
 
-        fetched = await asyncio.gather(*[_fetch_one(u) for u in urls])
+    async def _fetch_one(url: str) -> dict | None:
+        async with sem:
+            try:
+                resp = await client.get(url, timeout=settings.research_fetch_timeout)
+                if resp.status_code != 200 or not resp.text:
+                    return None
+                text_out = await asyncio.to_thread(
+                    trafilatura.extract,
+                    resp.text,
+                    output_format="txt",
+                    with_metadata=False,
+                )
+                if not text_out or len(text_out) < 100:
+                    return None
+                return {"url": url, "content": text_out}
+            except Exception as e:
+                logger.debug("trafilatura_fetch_failed: url=%s error=%s", url, e)
+                return None
+
+    fetched = await asyncio.gather(*[_fetch_one(u) for u in urls])
 
     return [f for f in fetched if f is not None]
 
@@ -1048,10 +1199,19 @@ async def _analyze_gaps(
     state: ResearchState,
     model: str,
 ) -> dict:
-    """Analyze coverage gaps. Retries once on parse failure."""
+    """Analyze coverage gaps. Retries once on parse failure.
+
+    Item 7 — On parse failure, return ``coverage_pct=0`` with an explicit
+    ``reason="gap_analysis_failed"``. The convergence check in
+    ``_execute_iteration_loop`` must NOT treat this as 100% coverage; a
+    failed gap analysis should not silently terminate the run early.
+
+    Item 10 — Sample the last 30 entries directly (``[-30:]``), not
+    ``[-50:][:30]`` which drops entries ``-50..-31`` before re-slicing.
+    """
     entry_summaries = [
         f"[{e.get('facet', '?')}] {e.get('title', '')}: {e.get('content', '')[:100]}"
-        for e in state.all_entries[-50:]
+        for e in state.all_entries[-30:]
     ]
 
     prompt = (
@@ -1059,7 +1219,7 @@ async def _analyze_gaps(
         f"Expected facets: {', '.join(state.outline_facets)}\n"
         f"Entries collected: {len(state.all_entries)}\n"
         f"Iterations completed: {state.iteration}\n\n"
-        f"Sample entries:\n" + "\n".join(entry_summaries[:30])
+        f"Sample entries:\n" + "\n".join(entry_summaries)
     )
 
     for attempt in range(2):
@@ -1074,12 +1234,18 @@ async def _analyze_gaps(
         if attempt == 0:
             logger.info("gap_analysis_retry: attempt 1 failed, retrying")
 
+    logger.warning(
+        "gap_analysis_failed: topic=%s iter=%s entries=%d — "
+        "returning coverage_pct=0 so convergence does not trip",
+        state.topic, state.iteration, len(state.all_entries),
+    )
     return {
-        "coverage_pct": 100,
-        "covered_facets": state.outline_facets,
-        "gap_facets": [],
+        "coverage_pct": 0,
+        "covered_facets": sorted(state.covered_facets),
+        "gap_facets": [f for f in state.outline_facets if f not in state.covered_facets],
         "gap_queries": [],
-        "assessment": "Gap analysis failed — treating as complete.",
+        "assessment": "Gap analysis failed to parse; continuing iteration.",
+        "reason": "gap_analysis_failed",
     }
 
 
@@ -1255,7 +1421,7 @@ async def _execute_iteration_loop(
         ):
             yield hb
         gaps = gap_task.result()
-        coverage = gaps.get("coverage_pct", 100)
+        coverage = gaps.get("coverage_pct", 0)
         state.covered_facets.update(gaps.get("covered_facets", []))
 
         yield _sse("gap_analysis", {
@@ -1836,18 +2002,14 @@ async def run_research(
     domain: str | None = None,
     model_overrides: dict | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Execute research, yielding SSE events. Dispatches to direct modes by prefix."""
+    """Execute research, yielding SSE events. Dispatches to direct modes by prefix.
+
+    Lifecycle is delegated to ``_run_with_session_lifecycle`` so
+    ``CancelledError`` from a disconnected SSE client transitions the
+    session to ``cancelled`` (not stuck in ``running`` for 30 min).
+    """
     t0 = time.monotonic()
     research_domain = domain or _detect_domain(topic)
-
-    existing = await _guard_concurrent()
-    if existing:
-        yield _sse("error", {
-            "message": f"Research already in progress: '{existing['topic']}'",
-            "existing_session": str(existing["id"]),
-            "http_status": 409,
-        })
-        return
 
     # Determine mode + persisted depth label
     if _is_openapi_ref(topic):
@@ -1859,20 +2021,35 @@ async def run_research(
     else:
         mode, state_depth = "topic", depth
 
-    session_id = await _create_session(topic, state_depth, research_domain)
+    session_id, existing = await _guard_and_create_session(
+        topic, state_depth, research_domain,
+    )
+    if session_id is None:
+        payload = {
+            "message": (
+                f"Research already in progress: '{existing['topic']}'"
+                if existing else "Research already in progress"
+            ),
+            "http_status": 409,
+        }
+        if existing:
+            payload["existing_session"] = str(existing["id"])
+        yield _sse("error", payload)
+        return
+
     state = ResearchState(topic=topic, depth=state_depth, domain=research_domain)
 
-    # --- Direct modes: single-iteration, protected by try/except for #4/#5 ---
+    # --- Direct modes: single-iteration ---
     if mode != "topic":
-        yield _sse("research_started", {
-            "topic": topic,
-            "depth": state_depth,
-            "domain": state.domain,
-            "max_iterations": 1,
-            "session_id": session_id,
-            "mode": mode,
-        })
-        try:
+        async def _direct_inner():
+            yield _sse("research_started", {
+                "topic": topic,
+                "depth": state_depth,
+                "domain": state.domain,
+                "max_iterations": 1,
+                "session_id": session_id,
+                "mode": mode,
+            })
             if mode == "openapi":
                 async for evt in _run_research_openapi_mode(
                     _parse_openapi_ref(topic), state, session_id, t0,
@@ -1891,21 +2068,11 @@ async def run_research(
                     topic, state, session_id, extract_m, summary_m, t0,
                 ):
                     yield evt
-        except Exception as exc:
-            elapsed_ms = int((time.monotonic() - t0) * 1000)
-            logger.error(
-                "direct_mode_failed: mode=%s session=%s error=%s",
-                mode, session_id, exc, exc_info=True,
-            )
-            await _finalize_session(
-                session_id, "failed", elapsed_ms,
-                error_message=f"{type(exc).__name__}: {exc}",
-            )
-            yield _sse("error", {
-                "message": f"Research failed: {exc}",
-                "session_id": session_id,
-                "topic": topic,
-            })
+
+        async for evt in _run_with_session_lifecycle(
+            session_id, _direct_inner, t0, topic,
+        ):
+            yield evt
         return
 
     # --- Topic mode ---
@@ -1913,15 +2080,15 @@ async def run_research(
     extract_model = get_model("model_verifier", model_overrides)
     summary_model = get_model("model_verifier", model_overrides)
 
-    yield _sse("research_started", {
-        "topic": topic,
-        "depth": depth,
-        "domain": state.domain,
-        "max_iterations": state.max_iterations,
-        "session_id": session_id,
-    })
+    async def _topic_inner():
+        yield _sse("research_started", {
+            "topic": topic,
+            "depth": depth,
+            "domain": state.domain,
+            "max_iterations": state.max_iterations,
+            "session_id": session_id,
+        })
 
-    try:
         decomposition = await _decompose_topic(topic, model=decompose_model)
         state.outline_facets = decomposition.get("facets", [topic])
         queries = decomposition.get("queries", [])
@@ -1946,16 +2113,29 @@ async def run_research(
         if state.paused:
             return
 
-        summary_task = asyncio.create_task(
-            _generate_summary(state, model=summary_model)
-        )
-        async for hb in _await_with_heartbeat(
-            summary_task, {"status": "summarizing"}
-        ):
-            yield hb
-        summary = summary_task.result()
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        # Item 8: summary failure must not fail the whole run.
+        summary: str | None = None
+        try:
+            summary_task = asyncio.create_task(
+                _generate_summary(state, model=summary_model)
+            )
+            async for hb in _await_with_heartbeat(
+                summary_task, {"status": "summarizing"},
+            ):
+                yield hb
+            summary = summary_task.result()
+        except Exception as summary_exc:
+            logger.warning(
+                "summary_failed: session=%s error=%s",
+                session_id, summary_exc, exc_info=True,
+            )
+            yield _sse("warning", {
+                "stage": "summary",
+                "message": f"Summary generation failed: {summary_exc}",
+                "session_id": session_id,
+            })
 
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
         await _update_session_iteration(session_id, state)
         await _finalize_session(session_id, "completed", elapsed_ms, summary)
 
@@ -1966,21 +2146,11 @@ async def run_research(
             topic=topic,
             summary=summary,
         ))
-    except Exception as exc:
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        logger.error(
-            "research_failed: session=%s error=%s",
-            session_id, exc, exc_info=True,
-        )
-        await _finalize_session(
-            session_id, "failed", elapsed_ms,
-            error_message=f"{type(exc).__name__}: {exc}",
-        )
-        yield _sse("error", {
-            "message": f"Research failed: {exc}",
-            "session_id": session_id,
-            "topic": topic,
-        })
+
+    async for evt in _run_with_session_lifecycle(
+        session_id, _topic_inner, t0, topic,
+    ):
+        yield evt
 
 
 async def resume_research(
@@ -2049,14 +2219,14 @@ async def resume_research(
     extract_model = get_model("model_verifier", model_overrides)
     summary_model = get_model("model_verifier", model_overrides)
 
-    yield _sse("research_resumed", {
-        "session_id": session_id,
-        "topic": topic,
-        "iteration": state.iteration,
-        "reply": reply,
-    })
+    async def _resume_inner():
+        yield _sse("research_resumed", {
+            "session_id": session_id,
+            "topic": topic,
+            "iteration": state.iteration,
+            "reply": reply,
+        })
 
-    try:
         # #142: targeted decompose with reply as gap_focus (replaces 2-query seed)
         decomposition = await _decompose_topic(
             topic,
@@ -2084,16 +2254,29 @@ async def resume_research(
         ):
             yield evt
 
-        summary_task = asyncio.create_task(
-            _generate_summary(state, model=summary_model)
-        )
-        async for hb in _await_with_heartbeat(
-            summary_task, {"status": "summarizing"}
-        ):
-            yield hb
-        summary = summary_task.result()
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        # Item 8: summary failure must not fail the whole resume.
+        summary: str | None = None
+        try:
+            summary_task = asyncio.create_task(
+                _generate_summary(state, model=summary_model)
+            )
+            async for hb in _await_with_heartbeat(
+                summary_task, {"status": "summarizing"},
+            ):
+                yield hb
+            summary = summary_task.result()
+        except Exception as summary_exc:
+            logger.warning(
+                "resume_summary_failed: session=%s error=%s",
+                session_id, summary_exc, exc_info=True,
+            )
+            yield _sse("warning", {
+                "stage": "summary",
+                "message": f"Summary generation failed: {summary_exc}",
+                "session_id": session_id,
+            })
 
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
         await _update_session_iteration(session_id, state)
         await _finalize_session(session_id, "completed", elapsed_ms, summary)
 
@@ -2105,21 +2288,11 @@ async def resume_research(
             summary=summary,
             resumed_from_pause=True,
         ))
-    except Exception as exc:
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        logger.error(
-            "resume_research_failed: session=%s error=%s",
-            session_id, exc, exc_info=True,
-        )
-        await _finalize_session(
-            session_id, "failed", elapsed_ms,
-            error_message=f"Resume failed: {type(exc).__name__}: {exc}",
-        )
-        yield _sse("error", {
-            "message": f"Resume failed: {exc}",
-            "session_id": session_id,
-            "topic": topic,
-        })
+
+    async for evt in _run_with_session_lifecycle(
+        session_id, _resume_inner, t0, topic,
+    ):
+        yield evt
 
 
 async def run_research_pdf(
@@ -2129,38 +2302,47 @@ async def run_research_pdf(
     domain: str | None = None,
     model_overrides: dict | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Entry point for PDF research (called from /research/pdf endpoint)."""
+    """Entry point for PDF research (called from /research/pdf endpoint).
+
+    Lifecycle is delegated to ``_run_with_session_lifecycle`` so client
+    disconnect finalizes the session as ``cancelled`` instead of orphaning
+    it in ``running`` until the 30-min reaper.
+    """
     t0 = time.monotonic()
     research_domain = domain or _detect_domain(filename)
 
-    existing = await _guard_concurrent()
-    if existing:
-        yield _sse("error", {
-            "message": f"Research already in progress: '{existing['topic']}'",
-            "existing_session": str(existing["id"]),
+    session_id, existing = await _guard_and_create_session(
+        filename, "direct_pdf", research_domain,
+    )
+    if session_id is None:
+        payload = {
+            "message": (
+                f"Research already in progress: '{existing['topic']}'"
+                if existing else "Research already in progress"
+            ),
             "http_status": 409,
-        })
+        }
+        if existing:
+            payload["existing_session"] = str(existing["id"])
+        yield _sse("error", payload)
         return
 
-    session_id = await _create_session(filename, "direct_pdf", research_domain)
     state = ResearchState(
         topic=filename, depth="direct_pdf", domain=research_domain,
     )
-
     extract_model = get_model("model_verifier", model_overrides)
     summary_model = get_model("model_verifier", model_overrides)
 
-    yield _sse("research_started", {
-        "topic": filename,
-        "depth": "direct_pdf",
-        "domain": state.domain,
-        "max_iterations": 1,
-        "session_id": session_id,
-        "mode": "direct_pdf",
-        "bytes": len(pdf_bytes),
-    })
-
-    try:
+    async def _pdf_inner():
+        yield _sse("research_started", {
+            "topic": filename,
+            "depth": "direct_pdf",
+            "domain": state.domain,
+            "max_iterations": 1,
+            "session_id": session_id,
+            "mode": "direct_pdf",
+            "bytes": len(pdf_bytes),
+        })
         async for evt in _run_research_pdf_mode(
             pdf_bytes=pdf_bytes,
             filename=filename,
@@ -2172,18 +2354,8 @@ async def run_research_pdf(
             t0=t0,
         ):
             yield evt
-    except Exception as exc:
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        logger.error(
-            "pdf_research_failed: session=%s error=%s",
-            session_id, exc, exc_info=True,
-        )
-        await _finalize_session(
-            session_id, "failed", elapsed_ms,
-            error_message=f"{type(exc).__name__}: {exc}",
-        )
-        yield _sse("error", {
-            "message": f"PDF research failed: {exc}",
-            "session_id": session_id,
-            "topic": filename,
-        })
+
+    async for evt in _run_with_session_lifecycle(
+        session_id, _pdf_inner, t0, filename,
+    ):
+        yield evt

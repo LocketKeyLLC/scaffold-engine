@@ -26,7 +26,7 @@ async def list_prompts(job_id: UUID, db: AsyncSession) -> dict:
     rows = result.fetchall()
 
     if not rows:
-        return {"error": f"No nodes found for job {job_id}"}
+        return {"job_id": str(job_id), "node_count": 0, "nodes": []}
 
     nodes = []
     for r in rows:
@@ -76,6 +76,10 @@ async def get_prompt(job_id: UUID, node_key: str, db: AsyncSession) -> dict:
 
 async def update_prompt(job_id: UUID, node_key: str, new_prompt: str, db: AsyncSession) -> dict:
     """Update the optimized prompt for a node. Only allowed on pending/failed nodes."""
+    if not new_prompt or not new_prompt.strip():
+        return {"error": "new_prompt must be a non-empty string"}
+    if len(new_prompt) > 16384:
+        return {"error": f"new_prompt exceeds 16 KB limit ({len(new_prompt)} bytes)"}
     # Check current status
     result = await db.execute(
         text("""

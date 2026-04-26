@@ -3,11 +3,29 @@
 Fetches an OpenAPI 3.0 or Swagger 2.0 spec, validates it, then emits one
 entry per endpoint with path + method + description + params.
 """
+import asyncio
 import json
 import logging
 from typing import Any, Literal
 
 import httpx
+import yaml
+from openapi_spec_validator import validate as _osv_validate
+from openapi_spec_validator import (
+    OpenAPIV2SpecValidator,
+    OpenAPIV30SpecValidator,
+    OpenAPIV31SpecValidator,
+)
+from openapi_spec_validator.validation.exceptions import (
+    OpenAPIValidationError as _OSVValidationError,
+)
+
+try:
+    from prance import ResolvingParser
+    _PRANCE_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    ResolvingParser = None  # type: ignore[assignment]
+    _PRANCE_AVAILABLE = False
 
 from app.config import settings
 
@@ -64,40 +82,43 @@ async def _fetch_spec(url: str) -> dict[str, Any]:
         pass
 
     try:
-        import yaml
         return yaml.safe_load(text)
-    except Exception as e:
+    except yaml.YAMLError as e:
         raise OpenAPIParseError(f"Spec is neither JSON nor YAML: {e}") from e
 
 
-def _validate_spec(spec: dict) -> Literal["openapi-3", "swagger-2"]:
-    """Validate and return spec version: 'openapi-3' or 'swagger-2' (#153)."""
-    from openapi_spec_validator import validate
-    from openapi_spec_validator.validation.exceptions import OpenAPIValidationError as _ValErr
+def _validate_spec(spec: dict) -> Literal["openapi-3.0", "openapi-3.1", "swagger-2"]:
+    """Detect spec version and validate with the matching backend.
 
-    if "openapi" in spec and str(spec["openapi"]).startswith("3."):
-        version = "openapi-3"
-    elif str(spec.get("swagger", "")).startswith("2."):
+    Returns one of: 'openapi-3.0', 'openapi-3.1', 'swagger-2'. Raises
+    OpenAPIParseError if the spec has no recognizable version field, or
+    OpenAPIValidationError if validation fails.
+    """
+    oa = str(spec.get("openapi", ""))
+    sw = str(spec.get("swagger", ""))
+
+    if oa.startswith("3.1"):
+        version: Literal["openapi-3.0", "openapi-3.1", "swagger-2"] = "openapi-3.1"
+        validator_cls = OpenAPIV31SpecValidator
+    elif oa.startswith("3.0"):
+        version = "openapi-3.0"
+        validator_cls = OpenAPIV30SpecValidator
+    elif sw.startswith("2."):
         version = "swagger-2"
+        validator_cls = OpenAPIV2SpecValidator
     else:
         raise OpenAPIParseError(
-            "Spec missing 'openapi: 3.x' or 'swagger: 2.0' top-level field"
+            "Spec missing recognizable 'openapi: 3.x' or 'swagger: 2.0' top-level field"
         )
 
     try:
-        validate(spec)
-    except _ValErr as e:
-        raise OpenAPIValidationError(f"Spec validation failed: {e}") from e
-    except (
+        _osv_validate(spec, cls=validator_cls)
+    except _OSVValidationError as e:
+        raise OpenAPIValidationError(f"Spec validation failed ({version}): {e}") from e
+    except (TypeError, KeyError, ValueError) as e:
         # #72 — narrowed from bare Exception. Malformed specs commonly raise
-        # jsonschema.ValidationError/SchemaError, referencing.exceptions.Unresolvable,
-        # or TypeError/KeyError on mis-shaped dicts. Anything else is a real bug
-        # we want surfaced, not silently wrapped.
-        TypeError,
-        KeyError,
-        ValueError,
-    ) as e:
-        raise OpenAPIValidationError(f"Spec validation error: {e}") from e
+        # these on mis-shaped dicts; anything else is a real bug we want surfaced.
+        raise OpenAPIValidationError(f"Spec validation error ({version}): {e}") from e
 
     return version
 
@@ -150,6 +171,12 @@ def _build_entry(
     # Merge path-level + operation-level parameters
     op_params = operation.get("parameters") or []
     all_params = list(path_level_params) + list(op_params)
+    # Per-endpoint param cap (#74) — keeps a single huge endpoint from blowing
+    # the canonical_text budget. Overflow surfaced as a footer line.
+    _param_cap = settings.openapi_max_params_per_endpoint
+    _params_overflow = max(0, len(all_params) - _param_cap)
+    if _params_overflow:
+        all_params = all_params[:_param_cap]
 
     # Request body (OpenAPI 3.x only)
     req_body = operation.get("requestBody") or {}
@@ -177,6 +204,8 @@ def _build_entry(
 
     params_text = _format_parameters(all_params)
     if params_text:
+        if _params_overflow:
+            params_text = params_text + "\n  ... (" + str(_params_overflow) + " more)"
         content_parts.append(params_text)
 
     if req_body_desc:
@@ -200,44 +229,71 @@ def _build_entry(
     }
 
 
-def _walk_paths(spec: dict) -> list[dict[str, Any]]:
-    """Extract one entry per (path, method) in spec['paths']."""
+def _walk_paths(spec: dict) -> tuple[list[dict[str, Any]], int]:
+    """Extract one entry per (path, method) in spec['paths'].
+
+    Returns (entries, skipped_param_refs). Parameter dicts that still contain
+    a raw ``$ref`` (i.e. unresolved) are filtered out and counted, since
+    downstream formatters cannot render them and including them would emit
+    misleading "name=?  in=?" lines.
+    """
     entries: list[dict[str, Any]] = []
+    skipped_refs = 0
     paths = spec.get("paths") or {}
+
+    def _filter_param_refs(params: list) -> list[dict]:
+        nonlocal skipped_refs
+        out: list[dict] = []
+        for p in params:
+            if isinstance(p, dict) and "$ref" in p:
+                skipped_refs += 1
+                continue
+            if isinstance(p, dict):
+                out.append(p)
+        return out
 
     for path, path_item in paths.items():
         if not isinstance(path_item, dict):
             continue
-        path_level_params = path_item.get("parameters") or []
+        path_level_params = _filter_param_refs(path_item.get("parameters") or [])
 
         for method, operation in path_item.items():
             if method.lower() not in _HTTP_METHODS:
                 continue
             if not isinstance(operation, dict):
                 continue
-            entries.append(_build_entry(path, method.lower(), operation, path_level_params))
+            op_clean = dict(operation)
+            op_clean["parameters"] = _filter_param_refs(operation.get("parameters") or [])
+            entries.append(_build_entry(path, method.lower(), op_clean, path_level_params))
 
-    return entries
+    if skipped_refs:
+        logger.warning(
+            "_walk_paths: skipped %d parameter entries containing unresolved $ref",
+            skipped_refs,
+        )
+    return entries, skipped_refs
 
 
-async def _resolve_refs(spec: dict, url: str) -> dict:
-    """Resolve $refs via prance. Falls back to unresolved spec on failure (#75).
+async def _resolve_refs(spec: dict, url: str) -> tuple[dict, bool]:
+    """Resolve $refs via prance. Returns (spec, refs_resolved).
 
-    Prance is synchronous, so we wrap in a thread executor. We pass ``spec``
-    as an in-memory source and let prance resolve internal refs; remote refs
-    resolve relative to ``url``.
+    Passes the already-fetched spec to prance via ``spec_string`` so we don't
+    re-fetch the URL. Remote refs still resolve relative to ``url``. On any
+    failure, returns the unresolved spec with refs_resolved=False (#75).
     """
-    import asyncio
-    try:
-        from prance import ResolvingParser
-    except ImportError:
+    if not _PRANCE_AVAILABLE:
         logger.warning("prance not installed — skipping $ref resolution")
-        return spec
+        return spec, False
+
+    spec_string = json.dumps(spec)
 
     def _do_resolve() -> dict:
+        # NOTE: passing both url= and spec_string= breaks in prance >=25 (it
+        # tries to use the parsed URL as a filesystem path). With spec_string
+        # alone, internal $refs resolve but relative *external* refs cannot —
+        # those are an unsupported edge case for inline ingestion.
         parser = ResolvingParser(
-            url=url,
-            spec_string=None,
+            spec_string=spec_string,
             lazy=False,
             strict=False,
             backend="openapi-spec-validator",
@@ -246,10 +302,13 @@ async def _resolve_refs(spec: dict, url: str) -> dict:
 
     loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(None, _do_resolve)
+        resolved = await loop.run_in_executor(None, _do_resolve)
+        return resolved, True
     except Exception as e:
-        logger.warning("prance $ref resolution failed: %s — falling back to unresolved spec", e)
-        return spec
+        logger.warning(
+            "prance $ref resolution failed: %s — falling back to unresolved spec", e
+        )
+        return spec, False
 
 
 async def fetch_and_parse_spec(url: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -268,22 +327,28 @@ async def fetch_and_parse_spec(url: str) -> tuple[list[dict[str, Any]], dict[str
     if not isinstance(spec, dict):
         raise OpenAPIParseError("Spec root is not an object")
 
+    # #75 — resolve $refs FIRST so validation runs against the inlined spec.
+    # Validating before resolution can reject legitimate specs whose $refs
+    # only resolve at runtime, and lets unresolved-ref bugs slip past validation.
+    spec, refs_resolved = await _resolve_refs(spec, url)
+
     version = _validate_spec(spec)
 
-    # #75 — resolve $refs so _walk_paths sees inlined definitions.
-    # Prance's ResolvingParser runs synchronously; wrap in executor.
-    spec = await _resolve_refs(spec, url)
-
     info = spec.get("info") or {}
-    entries = _walk_paths(spec)
-    total = len(entries)
+    entries, skipped_param_refs = _walk_paths(spec)
 
+    total = len(entries)
     cap = settings.openapi_max_endpoints
     truncated = False
     if total > cap:
         logger.warning("OpenAPI spec has %d endpoints, capping at %d", total, cap)
         entries = entries[:cap]
         truncated = True
+
+    # Tag every entry with refs_resolved so downstream consumers can flag
+    # endpoints whose schemas may still contain raw $ref objects.
+    for e in entries:
+        e["refs_resolved"] = refs_resolved
 
     metadata = {
         "version": version,
@@ -292,11 +357,11 @@ async def fetch_and_parse_spec(url: str) -> tuple[list[dict[str, Any]], dict[str
         "total_endpoints": total,
         "ingested_endpoints": len(entries),
         "truncated": truncated,
+        "refs_resolved": refs_resolved,
+        "skipped_param_refs": skipped_param_refs,
     }
-
     logger.info(
-        "OpenAPI fetch: url=%s version=%s endpoints=%d (total=%d truncated=%s)",
-        url, version, len(entries), total, truncated,
+        "OpenAPI fetch: url=%s version=%s endpoints=%d (total=%d truncated=%s refs_resolved=%s)",
+        url, version, len(entries), total, truncated, refs_resolved,
     )
-
     return entries, metadata

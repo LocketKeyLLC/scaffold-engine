@@ -103,3 +103,61 @@ Closed "job stranded forever" holes in `idea_refinement.py` + `ideation_workflow
 **Unrelated deferred**
 - Migration `020_research_sessions_single_running.sql` contains multiple statements
   in one `execute()`; asyncpg rejects. Not touched by this branch.
+
+---
+
+## Ingestion-path silent-failure hardening (Apr 24 2026)
+
+Eliminated silent partial-success modes in GitHub and OpenAPI ingestion paths
+that swallowed critical errors and returned half-empty result sets.
+
+**`app/config.py`** — New settings:
+- `github_blob_concurrency: int = 8` (was hardcoded `_BLOB_CONCURRENCY`)
+- `openapi_max_params_per_endpoint: int = 50`
+
+**`app/utils/github_ingest.py`**
+- `asyncio.gather(..., return_exceptions=True)` collector now re-raises
+  `GitHubRateLimitError` and `GitHubRepoNotFoundError`; only transient
+  exceptions are swallowed.
+- `_fetch_readme` decode failures now raise (previously returned `("", "")`,
+  conflating decode-failure with missing-README).
+- `tree_truncated` initialized to `False` before the `if remaining > 0`
+  block; dropped fragile `'tree_truncated' in locals()` check.
+- `_BLOB_CONCURRENCY` literal moved to `settings.github_blob_concurrency`.
+- `INFO` log now reports both `attempted=` and `files=` so partial-result
+  cases are visible in logs.
+
+**`app/utils/openapi_ingest.py`**
+- `_resolve_refs` now passes the already-fetched spec via `spec_string=`;
+  no more URL re-fetch. Returns `(spec, refs_resolved: bool)`.
+- Validation order reversed: **resolve $refs THEN validate** the inlined
+  spec, so refs that only exist post-resolution don't bypass schema checks.
+- `_validate_spec` selects a version-specific validator (`OpenAPIV2`,
+  `OpenAPIV30`, `OpenAPIV31`) by detecting the spec's top-level version
+  field. Returns `"openapi-3.0" | "openapi-3.1" | "swagger-2"`.
+- `_walk_paths` filters parameter dicts containing raw `$ref` (unresolved)
+  with a logged skip count; returns `(entries, skipped_param_refs)`.
+- Per-endpoint parameter cap: `all_params[:settings.openapi_max_params_per_endpoint]`
+  with a `"... (K more)"` footer when truncated.
+- Metadata gains `refs_resolved: bool` and `skipped_param_refs: int`;
+  every emitted entry is tagged `refs_resolved` for downstream filters.
+- Module imports hoisted to top: `prance`, `yaml`, version-specific
+  validators, `asyncio`. YAML parse error narrowed from `Exception` to
+  `yaml.YAMLError`.
+- prance >=25 incompatibility fix: passing `url=` + `spec_string=` together
+  causes `ParseResult` → `os.PathLike` failure. Now passes `spec_string=`
+  alone; relative external $refs are unsupported (documented in code).
+
+**Tests**
+- `tests/test_openapi_ingest.py` version-label assertion updated:
+  `"openapi-3"` → `"openapi-3.0"`. All 17 ingestion tests pass.
+
+**Acceptance** (live `/research openapi:<url>`)
+- Swagger 2.0 (Petstore): `version=swagger-2 endpoints=20 refs_resolved=True`. ✅
+- Unresolvable-refs path: warning logged, `refs_resolved=False` flagged in
+  both metadata and per-entry. ✅
+
+**Unrelated pre-existing**
+- `tests/test_execution_handler.py` collection error (`ModuleNotFoundError:
+  execution_handler`) — not in scope.
+- `tests/test_auth.py` (2 fixture failures) — not in scope.

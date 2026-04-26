@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -304,10 +304,12 @@ async def list_models() -> list[str]:
         return []
 
 
-async def validate_models(overrides: dict | None = None) -> list[str]:
+async def validate_models(overrides: dict | None = None) -> Optional[list[str]]:
     """
-    Check that all Ollama-routed model roles resolve to tags
-    that actually exist in Ollama. Returns list of missing tags.
+    Check that all Ollama-routed model roles resolve to tags that exist in Ollama.
+    Returns:
+        list[str]: missing role=tag pairs (empty list => all present)
+        None: Ollama unreachable / HTTP error / malformed response
     """
     from app.config import get_model
 
@@ -315,10 +317,7 @@ async def validate_models(overrides: dict | None = None) -> list[str]:
         "model_general", "model_verifier", "model_coder",
         "model_router", "model_fallback", "model_cloud_alt",
     ]
-
-    needed = {}
-    for role in OLLAMA_ROLES:
-        needed[role] = get_model(role, overrides)
+    needed = {role: get_model(role, overrides) for role in OLLAMA_ROLES}
 
     try:
         resp = await _get_client().get(
@@ -326,8 +325,9 @@ async def validate_models(overrides: dict | None = None) -> list[str]:
         )
         resp.raise_for_status()
         data = resp.json()
-    except Exception:
-        return []
+    except Exception as e:
+        logger.error("validate_models: Ollama unreachable: %s", e)
+        return None
 
     available = set()
     for model in data.get("models", []):

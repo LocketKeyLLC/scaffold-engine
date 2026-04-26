@@ -5,7 +5,9 @@ Endpoints: /gt/list, /gt/search, /gt/detail/{entry_id}, /gt/stats.
 """
 
 import asyncio
+import functools
 import logging
+import re
 
 from fastapi import HTTPException
 from pymilvus import Collection
@@ -22,6 +24,42 @@ OUTPUT_FIELDS = [
     "source_url", "domain", "confidence_score", "source_type",
     "supersedes_id",
 ]
+
+def _milvus_safe(fn):
+    """Convert unexpected Milvus errors into HTTP 503 structured responses."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("milvus_call_failed in %s", fn.__name__)
+            raise HTTPException(
+                status_code=503,
+                detail=f"milvus unavailable: {exc.__class__.__name__}",
+            )
+    return wrapper
+
+
+_ENTRY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_DOMAIN_BAD_RE = re.compile(r'[\x00-\x1f"\\]')
+
+
+def validate_entry_id(s: str) -> str:
+    """Reject anything that could escape a Milvus expression string."""
+    if not isinstance(s, str) or not _ENTRY_ID_RE.match(s):
+        raise HTTPException(status_code=400, detail="invalid entry_id")
+    return s
+
+
+def validate_domain(s: str | None) -> str | None:
+    """Reject quote, backslash, newline, control chars in domain filter."""
+    if s is None:
+        return None
+    if not isinstance(s, str) or len(s) > 128 or _DOMAIN_BAD_RE.search(s):
+        raise HTTPException(status_code=400, detail="invalid domain")
+    return s
 
 
 def _get_collection() -> Collection:
@@ -43,22 +81,39 @@ def _join_expr(*parts: str) -> str:
     return " && ".join(p for p in parts if p)
 
 
+def _count_entries(col) -> int:
+    """Accurate row count via count(*) query (vs col.num_entities which lags flush)."""
+    res = col.query(expr="", output_fields=["count(*)"])
+    if res and isinstance(res, list):
+        return int(res[0].get("count(*)", 0))
+    return 0
+
+
 async def gt_list(
     page: int = 1,
     per_page: int = 20,
     include_history: bool = False,
+    domain: str | None = None,
 ) -> dict:
     """Paginated list of TOON entries.
 
     By default hides superseded (version-chained) entries; pass
-    ``include_history=True`` to see all versions.
+    ``include_history=True`` to see all versions. Optional ``domain``
+    filter provides parity with gt_search.
     """
+    domain = validate_domain(domain)
+
+    @_milvus_safe
     def _sync() -> dict:
         col = _get_collection()
         offset = (page - 1) * per_page
-        total = col.num_entities
+        total = _count_entries(col)
 
-        expr = _join_expr("entry_id != ''", _supersede_clause(include_history))
+        expr = _join_expr(
+            "entry_id != ''",
+            f'domain == "{domain}"' if domain else "",
+            _supersede_clause(include_history),
+        )
 
         results = col.query(
             expr=expr,
@@ -105,10 +160,12 @@ async def gt_search(
 
     By default hides superseded (version-chained) entries.
     """
+    domain = validate_domain(domain)
     vector = await embed_query(query)
     if vector is None:
         raise RuntimeError("Empty embedding returned")
 
+    @_milvus_safe
     def _sync() -> dict:
         col = _get_collection()
         search_params = {"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}}
@@ -157,8 +214,12 @@ async def gt_detail(entry_id: str) -> dict:
     """Full content of a specific TOON entry.
 
     Raises:
+        HTTPException(400): entry_id fails validation.
         HTTPException(404): entry not found.
     """
+    entry_id = validate_entry_id(entry_id)
+
+    @_milvus_safe
     def _sync() -> dict:
         col = _get_collection()
         results = col.query(
@@ -199,9 +260,10 @@ async def gt_stats() -> dict:
     results aren't silently truncated at PyMilvus' 16384 default. When the
     collection size exceeds the scan budget, ``truncated: true`` is returned.
     """
+    @_milvus_safe
     def _sync() -> dict:
         col = _get_collection()
-        total = col.num_entities
+        total = _count_entries(col)
         limit = settings.gt_stats_scan_limit
 
         domains: dict[str, int] = {}
@@ -211,6 +273,8 @@ async def gt_stats() -> dict:
         scanned = 0
         offset = 0
         max_offset = 16384  # Milvus hard cap on offset + limit per query
+        last_page_short = False
+        hit_offset_cap = False
 
         while True:
             if offset + limit > max_offset:
@@ -218,6 +282,7 @@ async def gt_stats() -> dict:
                     "gt_stats_scan_capped: offset+limit would exceed Milvus max %d",
                     max_offset,
                 )
+                hit_offset_cap = True
                 break
 
             page = col.query(
@@ -247,12 +312,8 @@ async def gt_stats() -> dict:
             offset += limit
             if last_page_short:
                 break
-        else:
-            # Loop exited via the offset cap (not via "short page" break)
-            pass
 
-        # Only truncated if we bailed due to the offset cap, not natural exhaustion
-        truncated = (offset + limit > max_offset) and not last_page_short if scanned > 0 else False
+        truncated = hit_offset_cap
         if truncated:
             logger.warning(
                 "gt_stats_truncated: scanned=%d of total=%d", scanned, total,

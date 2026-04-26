@@ -1,26 +1,25 @@
-"""Tests for app/utils/http_clients.py (#9.28)."""
+"""Tests for app/utils/http_clients.py (eager-init contract)."""
 import pytest
-
 from app.utils import http_clients
 
 
 @pytest.fixture(autouse=True)
 async def _reset_clients():
-    """Ensure each test starts with no cached clients."""
+    """Each test starts with a cold registry; eager-init before use."""
     await http_clients.close_clients()
+    http_clients.init_clients()
     yield
     await http_clients.close_clients()
 
 
 # ---------------------------------------------------------------------------
-# SearXNG client (#7.5 — follow_redirects=True)
+# SearXNG client
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
-def test_searxng_client_is_lazy():
-    assert http_clients._searxng_client is None
+def test_searxng_client_is_initialized_eagerly():
     c = http_clients.get_searxng_client()
     assert c is not None
-    assert http_clients._searxng_client is c
+    assert http_clients._clients.get("searxng") is c
 
 
 @pytest.mark.smoke
@@ -30,7 +29,7 @@ def test_searxng_client_follows_redirects():
 
 
 @pytest.mark.smoke
-def test_searxng_client_is_cached_across_calls():
+def test_searxng_client_is_singleton_across_calls():
     c1 = http_clients.get_searxng_client()
     c2 = http_clients.get_searxng_client()
     assert c1 is c2
@@ -40,11 +39,10 @@ def test_searxng_client_is_cached_across_calls():
 # GitHub client
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
-def test_github_client_is_lazy_and_cached():
-    assert http_clients._github_client is None
+def test_github_client_is_initialized_and_singleton():
     c1 = http_clients.get_github_client()
     c2 = http_clients.get_github_client()
-    assert c1 is c2 is http_clients._github_client
+    assert c1 is c2 is http_clients._clients.get("github")
 
 
 @pytest.mark.smoke
@@ -55,14 +53,13 @@ def test_github_client_sets_required_headers():
 
 
 # ---------------------------------------------------------------------------
-# Generic client (added for #76)
+# Generic client
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
-def test_generic_client_is_lazy_and_cached():
-    assert http_clients._generic_client is None
+def test_generic_client_is_initialized_and_singleton():
     c1 = http_clients.get_generic_http_client()
     c2 = http_clients.get_generic_http_client()
-    assert c1 is c2 is http_clients._generic_client
+    assert c1 is c2 is http_clients._clients.get("generic")
 
 
 @pytest.mark.smoke
@@ -72,19 +69,27 @@ def test_generic_client_follows_redirects():
 
 
 # ---------------------------------------------------------------------------
+# Lazy-init path is gone: calling a getter with empty registry must raise
+# ---------------------------------------------------------------------------
+@pytest.mark.smoke
+async def test_getters_raise_when_not_initialized():
+    await http_clients.close_clients()
+    with pytest.raises(RuntimeError, match="not initialized"):
+        http_clients.get_searxng_client()
+    with pytest.raises(RuntimeError, match="not initialized"):
+        http_clients.get_github_client()
+    with pytest.raises(RuntimeError, match="not initialized"):
+        http_clients.get_generic_http_client()
+
+
+# ---------------------------------------------------------------------------
 # close_clients
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
-async def test_close_clients_resets_all_three():
+async def test_close_clients_resets_registry():
     http_clients.get_searxng_client()
     http_clients.get_github_client()
     http_clients.get_generic_http_client()
-    assert http_clients._searxng_client is not None
-    assert http_clients._github_client is not None
-    assert http_clients._generic_client is not None
-
+    assert set(http_clients._clients.keys()) == {"searxng", "github", "generic"}
     await http_clients.close_clients()
-
-    assert http_clients._searxng_client is None
-    assert http_clients._github_client is None
-    assert http_clients._generic_client is None
+    assert http_clients._clients == {}

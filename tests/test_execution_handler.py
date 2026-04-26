@@ -10,20 +10,25 @@ Covers fixes:
 Plus regression guards for _skip/_retry response-shape handling.
 """
 
-import sys
-import os
 import json
+import importlib.util
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
-# Make pipelines/ importable
-PIPELINES_DIR = os.path.join(os.path.dirname(__file__), "..", "pipelines")
-sys.path.insert(0, os.path.abspath(PIPELINES_DIR))
+_HANDLER_PATH = Path(__file__).resolve().parents[1] / "pipelines" / "execution_handler.py"
+if not _HANDLER_PATH.exists():
+    pytest.skip(
+        f"execution_handler.py not found at {_HANDLER_PATH} — skipping (expected in pipelines/ directory)",
+        allow_module_level=True,
+    )
 
-import execution_handler  # noqa: E402
-from execution_handler import Pipeline  # noqa: E402
+_SPEC = importlib.util.spec_from_file_location("execution_handler", _HANDLER_PATH)
+execution_handler = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(execution_handler)
+Pipeline = execution_handler.Pipeline
 
 
 # ---------------------------------------------------------------------------

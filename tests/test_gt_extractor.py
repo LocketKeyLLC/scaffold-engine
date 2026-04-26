@@ -80,7 +80,7 @@ class TestDistillationUsesRouterModel:
             total_duration_ms=123,
             error=None,
         )
-        with patch.object(gt, "_search_searxng", AsyncMock(return_value=fake_search)), \
+        with patch.object(gt, "search_searxng", AsyncMock(return_value=fake_search)), \
              patch.object(gt.model_router, "generate", AsyncMock(return_value=fake_resp)) as gen:
             await gt.extract_ground_truths("rag systems")
 

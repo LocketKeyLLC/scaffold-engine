@@ -33,7 +33,7 @@ class TestExecuteAllNodesSSESequence:
 
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job", mock_get_job), \
-             patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+             patch("app.modules.execution_agent._peek_next_node", mock_get_next), \
              patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
             from app.modules.execution_agent import execute_all_nodes
             events = await _collect_sse(execute_all_nodes("job-1"))
@@ -63,7 +63,7 @@ class TestExecuteAllNodesSSESequence:
 
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job", mock_get_job), \
-             patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+             patch("app.modules.execution_agent._peek_next_node", mock_get_next), \
              patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
             from app.modules.execution_agent import execute_all_nodes
             events = await _collect_sse(execute_all_nodes("job-1"))
@@ -94,7 +94,7 @@ class TestExecuteAllNodesSSESequence:
 
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job", mock_get_job), \
-             patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+             patch("app.modules.execution_agent._peek_next_node", mock_get_next), \
              patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
             from app.modules.execution_agent import execute_all_nodes
             events = await _collect_sse(execute_all_nodes("job-1"))
@@ -131,7 +131,7 @@ class TestExecuteAllNodesBlocked:
 
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job", mock_get_job), \
-             patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+             patch("app.modules.execution_agent._peek_next_node", mock_get_next), \
              patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
             from app.modules.execution_agent import execute_all_nodes
             events = await _collect_sse(execute_all_nodes("job-1"))
@@ -191,7 +191,7 @@ class TestExecuteAllNodesAbnormalExit:
 
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job", mock_get_job), \
-             patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+             patch("app.modules.execution_agent._peek_next_node", mock_get_next), \
              patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
             from app.modules.execution_agent import execute_all_nodes
             events = await _collect_sse(execute_all_nodes("job-1"))
@@ -234,7 +234,7 @@ class TestExecuteAllNodesAbnormalExit:
             reraised = False
             with patch("app.modules.execution_agent.async_session", mock_session), \
                  patch("app.modules.execution_agent._get_job", mock_get_job), \
-                 patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+                 patch("app.modules.execution_agent._peek_next_node", mock_get_next), \
                  patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
                 from app.modules.execution_agent import execute_all_nodes
                 try:
@@ -285,7 +285,7 @@ class TestExecuteAllNodesAbnormalExit:
 
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job", mock_get_job), \
-             patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+             patch("app.modules.execution_agent._peek_next_node", mock_get_next), \
              patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
             from app.modules.execution_agent import execute_all_nodes
             events = await _collect_sse(execute_all_nodes("job-1"))

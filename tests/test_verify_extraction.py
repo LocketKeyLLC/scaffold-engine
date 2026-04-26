@@ -1,323 +1,142 @@
 """
-test_verify_extraction.py — Unit tests for the 5-layer JSON extraction pipeline
-in execution_agent._verify_output() and _extract_verify_result().
+Black-box tests for execution_agent._verify_output.
 
-Covers:
-  Layer 1: <think>/<thinking> tag stripping (closed, unclosed, nested)
-  Layer 2: Markdown code fence extraction
-  Layer 3: Direct JSON parse (fast path)
-  Layer 4: json_repair fallback for malformed JSON
-  Layer 5: Brace-find + repair for preamble text
-  Schema:  _extract_verify_result — missing keys, valid, extras
-  Edge:    Empty response, all-think, unparseable, pass=false
+Contract (post-fail-closed refactor):
+  - Returns tuple[Literal["pass","fail"], reason: str, confidence: float]
+  - "pass"   : verifier returned {"pass": true, ...}
+  - "fail"   : verifier said fail OR ANY error path (empty, parse failure,
+               missing schema, chat exception, timeout, unexpected error)
+  - Never returns "skipped" — skip decision is made by the CALLER, not here.
+  - Single-call parsing via app.utils.llm_parsing.parse_json_object.
 """
-import pytest
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+import pytest
 
-def _mock_chat_response(raw_text: str):
-    """Return an AsyncMock that simulates model_router.chat() output."""
-    mock = AsyncMock(return_value=SimpleNamespace(text=raw_text))
-    return mock
+from app.modules import execution_agent
 
 
+def _resp(text: str):
+    return SimpleNamespace(text=text)
 
 
-# ---------------------------------------------------------------------------
-# Layer 1: Think-tag stripping
-# ---------------------------------------------------------------------------
-
-@pytest.mark.smoke
-class TestLayer1ThinkStrip:
-    """<think> and <thinking> blocks must be removed before JSON parsing."""
-
-    async def test_closed_think_tags(self):
-        raw = '<think>I need to evaluate this carefully.</think>{"pass": true, "reason": "correct", "confidence": 0.95}'
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-        assert reason == "correct"
-        assert conf == 0.95
-
-    async def test_closed_thinking_tags(self):
-        raw = '<thinking>Let me reason step by step.</thinking>{"pass": false, "reason": "missing algorithms", "confidence": 0.88}'
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is False
-        assert "missing" in reason.lower()
-
-    async def test_unclosed_think_truncated(self):
-        raw = '<think>This reasoning was truncated by token limit and never clo'
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        # Should skip gracefully (no content after stripping)
-        assert passed is True
-        assert "skipped" in reason.lower()
-        assert conf == 0.0
-
-    async def test_multiline_think_with_json_after(self):
-        raw = (
-            "<think>\nStep 1: Check if task is met.\n"
-            "Step 2: The output contains the required info.\n"
-            "Verdict: pass.\n</think>\n"
-            '{"pass": true, "reason": "all requirements present", "confidence": 0.92}'
-        )
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-        assert conf == 0.92
-
-    async def test_only_think_no_answer(self):
-        raw = "<think>The task asks for sorting algorithms but the output only discusses bubble sort.</think>"
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-        assert "skipped" in reason.lower()
-        assert conf == 0.0
+@pytest.fixture
+def patch_chat():
+    """Yield a mock chat() with configurable return/side_effect."""
+    with patch.object(execution_agent.model_router, "chat", new=AsyncMock()) as m:
+        yield m
 
 
 # ---------------------------------------------------------------------------
-# Layer 2: Markdown fence extraction
+# Happy paths
 # ---------------------------------------------------------------------------
+class TestPassPath:
+    @pytest.mark.asyncio
+    async def test_clean_pass_true(self, patch_chat):
+        patch_chat.return_value = _resp('{"pass": true, "reason": "ok", "confidence": 0.9}')
+        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        assert status == "pass"
+        assert reason == "ok"
+        assert conf == 0.9
 
-@pytest.mark.smoke
-class TestLayer2MarkdownFence:
-    """JSON inside ```json ... ``` fences must be extracted."""
+    @pytest.mark.asyncio
+    async def test_markdown_fenced_pass(self, patch_chat):
+        patch_chat.return_value = _resp('```json\n{"pass": true, "reason": "", "confidence": 1.0}\n```')
+        status, _, _ = await execution_agent._verify_output("t", "o", "m")
+        assert status == "pass"
 
-    async def test_json_fence(self):
-        raw = '```json\n{"pass": true, "reason": "looks good", "confidence": 0.91}\n```'
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-        assert reason == "looks good"
-
-    async def test_bare_fence(self):
-        raw = '```\n{"pass": false, "reason": "incomplete", "confidence": 0.70}\n```'
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is False
-        assert conf == 0.70
-
-    async def test_think_then_fence(self):
-        raw = (
-            "<think>Let me check the requirements.</think>\n"
-            '```json\n{"pass": true, "reason": "requirements met", "confidence": 0.88}\n```'
-        )
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-        assert conf == 0.88
-
-
-# ---------------------------------------------------------------------------
-# Layer 3: Direct JSON parse (fast path)
-# ---------------------------------------------------------------------------
-
-@pytest.mark.smoke
-class TestLayer3DirectParse:
-    """Clean JSON should parse on first try with no extraction needed."""
-
-    async def test_clean_json(self):
-        raw = '{"pass": true, "reason": "three algorithms listed", "confidence": 0.95}'
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-        assert conf == 0.95
-
-    async def test_pass_false(self):
-        raw = '{"pass": false, "reason": "only one algorithm mentioned", "confidence": 0.90}'
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is False
-        assert "one algorithm" in reason
-
-
-# ---------------------------------------------------------------------------
-# Layer 4: json_repair fallback
-# ---------------------------------------------------------------------------
-
-@pytest.mark.smoke
-class TestLayer4JsonRepair:
-    """Malformed JSON should be repaired by json_repair library."""
-
-    async def test_trailing_comma(self):
-        raw = '{"pass": true, "reason": "good output", "confidence": 0.85,}'
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-        assert conf == 0.85
-
-    async def test_single_quotes(self):
-        raw = "{'pass': true, 'reason': 'acceptable', 'confidence': 0.80}"
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-
-
-# ---------------------------------------------------------------------------
-# Layer 5: Brace-find + repair
-# ---------------------------------------------------------------------------
-
-@pytest.mark.smoke
-class TestLayer5BraceFind:
-    """Preamble text before JSON should be skipped via brace-find."""
-
-    async def test_preamble_text(self):
-        raw = 'Here is my analysis of the output:\n{"pass": true, "reason": "meets requirements", "confidence": 0.93}'
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-        assert conf == 0.93
-
-    async def test_preamble_with_malformed_json(self):
-        raw = 'Based on my evaluation:\n{"pass": true, "reason": "correct implementation", "confidence": 0.87,}'
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-        assert conf == 0.87
-
-    async def test_think_then_preamble_then_json(self):
-        raw = (
-            "<think>Checking requirements carefully.</think>\n"
-            "After analysis:\n"
-            '{"pass": false, "reason": "function signature missing", "confidence": 0.91}'
-        )
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is False
-        assert "missing" in reason.lower()
-
-
-# ---------------------------------------------------------------------------
-# Schema validation: _extract_verify_result
-# ---------------------------------------------------------------------------
-
-@pytest.mark.smoke
-class TestExtractVerifyResult:
-    """_extract_verify_result must handle missing keys and type coercion."""
-
-    async def test_valid_schema(self):
-        from app.modules.execution_agent import _extract_verify_result
-        passed, reason, conf = _extract_verify_result(
-            {"pass": True, "reason": "all good", "confidence": 0.95}
-        )
-        assert passed is True
-        assert reason == "all good"
-        assert conf == 0.95
-
-    async def test_missing_pass_key(self):
-        from app.modules.execution_agent import _extract_verify_result
-        passed, reason, conf = _extract_verify_result(
-            {"result": True, "reason": "good"}  # wrong key name
-        )
-        # Should treat as skip
-        assert passed is True
-        assert "skipped" in reason.lower()
-        assert conf == 0.0
-
-    async def test_extra_keys_ignored(self):
-        from app.modules.execution_agent import _extract_verify_result
-        passed, reason, conf = _extract_verify_result(
-            {"pass": False, "reason": "bad", "confidence": 0.8, "notes": "extra field"}
-        )
-        assert passed is False
-        assert conf == 0.8
-
-    async def test_missing_optional_fields(self):
-        from app.modules.execution_agent import _extract_verify_result
-        passed, reason, conf = _extract_verify_result({"pass": True})
-        assert passed is True
-        assert reason == ""
-        assert conf == 0.0
-
-    async def test_string_confidence_coerced(self):
-        from app.modules.execution_agent import _extract_verify_result
-        passed, reason, conf = _extract_verify_result(
-            {"pass": True, "reason": "ok", "confidence": "0.75"}
-        )
-        assert conf == 0.75
-
-
-# ---------------------------------------------------------------------------
-# Edge cases
-# ---------------------------------------------------------------------------
-
-@pytest.mark.smoke
-class TestEdgeCases:
-    """Empty responses, total garbage, whitespace-only."""
-
-    async def test_empty_response(self):
-        with patch("app.model_router.chat", _mock_chat_response("")):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-        assert "skipped" in reason.lower()
-
-    async def test_whitespace_only(self):
-        with patch("app.model_router.chat", _mock_chat_response("   \n\t  ")):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-        assert "skipped" in reason.lower()
-
-    async def test_total_garbage(self):
-        with patch("app.model_router.chat", _mock_chat_response("lorem ipsum dolor sit amet")):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        assert passed is True
-        assert "skipped" in reason.lower()
-        assert conf == 0.0
-
-    async def test_nested_think_with_json_inside(self):
-        """JSON inside think tags should NOT be extracted — only post-think JSON counts."""
-        raw = '<think>{"pass": false, "reason": "bad"}</think>{"pass": true, "reason": "good", "confidence": 0.9}'
-        with patch("app.model_router.chat", _mock_chat_response(raw)):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output("test task", "test output", "qwen2.5:7b")
-        # The post-think JSON should win, not the one inside think tags
-        assert passed is True
+    @pytest.mark.asyncio
+    async def test_think_tags_stripped_then_pass(self, patch_chat):
+        patch_chat.return_value = _resp('<think>deliberating</think>\n{"pass": true, "reason": "good", "confidence": 0.8}')
+        status, reason, _ = await execution_agent._verify_output("t", "o", "m")
+        assert status == "pass"
         assert reason == "good"
 
+    @pytest.mark.asyncio
+    async def test_preamble_then_json(self, patch_chat):
+        patch_chat.return_value = _resp('Here is my verdict: {"pass": true, "reason": "fine", "confidence": 0.7}')
+        status, _, conf = await execution_agent._verify_output("t", "o", "m")
+        assert status == "pass"
+        assert conf == 0.7
+
 
 # ---------------------------------------------------------------------------
-# Exception path (#9.32)
+# Verifier said fail — pass-through
 # ---------------------------------------------------------------------------
-class TestVerifyOutputExceptionPath:
-    """_verify_output wraps every failure path in `try/except Exception` and
-    returns a permissive (True, 'skipped (error)', 0.0). This ensures a
-    broken verifier can't block normal execution.
-    """
+class TestFailPath:
+    @pytest.mark.asyncio
+    async def test_pass_false_returns_fail(self, patch_chat):
+        patch_chat.return_value = _resp('{"pass": false, "reason": "bad output", "confidence": 0.2}')
+        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        assert status == "fail"
+        assert reason == "bad output"
+        assert conf == 0.2
 
-    async def test_chat_raises_is_caught_as_skip(self):
-        """When model_router.chat itself raises, _verify_output must not propagate."""
-        from unittest.mock import AsyncMock
-        broken_chat = AsyncMock(side_effect=RuntimeError("ollama down"))
-        with patch("app.model_router.chat", broken_chat):
-            from app.modules.execution_agent import _verify_output
-            passed, reason, conf = await _verify_output(
-                "test task", "test output", "qwen2.5:7b"
-            )
-        # Permissive fallback: pass=True so the pipeline continues, conf=0 so
-        # downstream scoring knows verification didn't actually happen.
-        assert passed is True
-        assert "skipped" in reason.lower()
+
+# ---------------------------------------------------------------------------
+# All error paths — MUST return "fail", never "skipped"
+# ---------------------------------------------------------------------------
+class TestFailClosedOnErrors:
+    @pytest.mark.asyncio
+    async def test_empty_response(self, patch_chat):
+        patch_chat.return_value = _resp("")
+        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        assert status == "fail"
+        assert "empty" in reason.lower()
+        assert conf == 0.0
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only(self, patch_chat):
+        patch_chat.return_value = _resp("   \n\t  ")
+        status, _, conf = await execution_agent._verify_output("t", "o", "m")
+        assert status == "fail"
+        assert conf == 0.0
+
+    @pytest.mark.asyncio
+    async def test_only_think_no_json(self, patch_chat):
+        patch_chat.return_value = _resp("<think>nothing outside</think>")
+        status, _, _ = await execution_agent._verify_output("t", "o", "m")
+        assert status == "fail"
+
+    @pytest.mark.asyncio
+    async def test_total_garbage(self, patch_chat):
+        patch_chat.return_value = _resp("this is not JSON at all lol")
+        status, _, _ = await execution_agent._verify_output("t", "o", "m")
+        assert status == "fail"
+
+    @pytest.mark.asyncio
+    async def test_missing_pass_key(self, patch_chat):
+        patch_chat.return_value = _resp('{"reason": "forgot pass key", "confidence": 0.5}')
+        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        assert status == "fail"
+        assert "pass" in reason.lower()
+        assert conf == 0.0
+
+    @pytest.mark.asyncio
+    async def test_chat_raises_returns_fail(self, patch_chat):
+        patch_chat.side_effect = RuntimeError("connection refused")
+        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        assert status == "fail"
+        assert "chat failed" in reason.lower() or "connection" in reason.lower()
+        assert conf == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Timeout path
+# ---------------------------------------------------------------------------
+class TestTimeout:
+    @pytest.mark.asyncio
+    async def test_timeout_returns_fail(self, patch_chat, monkeypatch):
+        async def _hang(*_a, **_kw):
+            await asyncio.sleep(5)
+            return _resp('{"pass": true}')
+
+        patch_chat.side_effect = _hang
+        # Force a tiny timeout
+        monkeypatch.setattr(execution_agent.settings, "verify_timeout_seconds", 0.1)
+        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        assert status == "fail"
+        assert "timeout" in reason.lower()
         assert conf == 0.0

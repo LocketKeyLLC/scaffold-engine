@@ -1,0 +1,9 @@
+# Dev override: targets the multi-stage Dockerfile's `dev` stage.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build scaffold-orchestrator
+# Or set COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml in your shell.
+services:
+  scaffold-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev

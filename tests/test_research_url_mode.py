@@ -46,23 +46,23 @@ class TestRobotsAllowed:
     @pytest.mark.asyncio
     async def test_allowed_when_robots_404(self):
         mock_resp = MagicMock(status_code=404, text="")
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value.get = AsyncMock(return_value=mock_resp)
-        with patch("httpx.AsyncClient", return_value=mock_client):
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        with patch.object(ra, "get_generic_http_client", return_value=mock_client):
             assert await ra._robots_allowed("https://example.com/page") is True
 
     @pytest.mark.asyncio
     async def test_allowed_when_exception(self):
-        with patch("httpx.AsyncClient", side_effect=Exception("network down")):
+        with patch.object(ra, "get_generic_http_client", side_effect=Exception("network down")):
             assert await ra._robots_allowed("https://example.com/page") is True
 
     @pytest.mark.asyncio
     async def test_disallowed_by_robots(self):
         robots_txt = "User-agent: *\nDisallow: /private/"
         mock_resp = MagicMock(status_code=200, text=robots_txt)
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value.get = AsyncMock(return_value=mock_resp)
-        with patch("httpx.AsyncClient", return_value=mock_client):
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        with patch.object(ra, "get_generic_http_client", return_value=mock_client):
             allowed = await ra._robots_allowed("https://example.com/private/secret")
             assert allowed is False
 
@@ -70,9 +70,9 @@ class TestRobotsAllowed:
     async def test_allowed_by_robots(self):
         robots_txt = "User-agent: *\nDisallow: /private/"
         mock_resp = MagicMock(status_code=200, text=robots_txt)
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value.get = AsyncMock(return_value=mock_resp)
-        with patch("httpx.AsyncClient", return_value=mock_client):
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        with patch.object(ra, "get_generic_http_client", return_value=mock_client):
             allowed = await ra._robots_allowed("https://example.com/public/page")
             assert allowed is True
 
@@ -90,10 +90,10 @@ class TestFetchUrlBounded:
 
         mock_stream_cm = AsyncMock()
         mock_stream_cm.__aenter__.return_value = mock_resp
-        mock_client_cm = AsyncMock()
-        mock_client_cm.__aenter__.return_value.stream = MagicMock(return_value=mock_stream_cm)
+        mock_client = MagicMock()
+        mock_client.stream = MagicMock(return_value=mock_stream_cm)
 
-        with patch("httpx.AsyncClient", return_value=mock_client_cm):
+        with patch.object(ra, "get_generic_http_client", return_value=mock_client):
             result = await ra._fetch_url_bounded("https://example.com/big")
             assert result is None
 
@@ -111,10 +111,10 @@ class TestFetchUrlBounded:
 
         mock_stream_cm = AsyncMock()
         mock_stream_cm.__aenter__.return_value = mock_resp
-        mock_client_cm = AsyncMock()
-        mock_client_cm.__aenter__.return_value.stream = MagicMock(return_value=mock_stream_cm)
+        mock_client = MagicMock()
+        mock_client.stream = MagicMock(return_value=mock_stream_cm)
 
-        with patch("httpx.AsyncClient", return_value=mock_client_cm):
+        with patch.object(ra, "get_generic_http_client", return_value=mock_client):
             result = await ra._fetch_url_bounded("https://example.com/small")
             assert result == "<html><body>hello world</body></html>"
 
@@ -126,10 +126,10 @@ class TestFetchUrlBounded:
 
         mock_stream_cm = AsyncMock()
         mock_stream_cm.__aenter__.return_value = mock_resp
-        mock_client_cm = AsyncMock()
-        mock_client_cm.__aenter__.return_value.stream = MagicMock(return_value=mock_stream_cm)
+        mock_client = MagicMock()
+        mock_client.stream = MagicMock(return_value=mock_stream_cm)
 
-        with patch("httpx.AsyncClient", return_value=mock_client_cm):
+        with patch.object(ra, "get_generic_http_client", return_value=mock_client):
             result = await ra._fetch_url_bounded("https://example.com/err")
             assert result is None
 
@@ -147,10 +147,10 @@ class TestFetchUrlBounded:
 
         mock_stream_cm = AsyncMock()
         mock_stream_cm.__aenter__.return_value = mock_resp
-        mock_client_cm = AsyncMock()
-        mock_client_cm.__aenter__.return_value.stream = MagicMock(return_value=mock_stream_cm)
+        mock_client = MagicMock()
+        mock_client.stream = MagicMock(return_value=mock_stream_cm)
 
-        with patch("httpx.AsyncClient", return_value=mock_client_cm):
+        with patch.object(ra, "get_generic_http_client", return_value=mock_client):
             result = await ra._fetch_url_bounded("https://example.com/streaming")
             assert result is None
 
@@ -183,8 +183,7 @@ class TestRunResearchUrlMode:
         """URL topic -> skips decompose/search, reaches research_complete."""
         fake_resp = MagicMock(success=True, text='[{"title":"T","content":"body content here long enough","tags":"","source":"https://example.com/page","source_type":"community"}]', error=None)
 
-        with patch.object(ra, "_guard_concurrent", AsyncMock(return_value=None)), \
-             patch.object(ra, "_create_session", AsyncMock(return_value=42)), \
+        with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(42), None))), \
              patch.object(ra, "_robots_allowed", AsyncMock(return_value=True)), \
              patch.object(ra, "_fetch_url_bounded", AsyncMock(return_value="<html>x</html>")), \
              patch("asyncio.to_thread", AsyncMock(return_value="Clean article body " * 30)), \
@@ -213,8 +212,7 @@ class TestRunResearchUrlMode:
     async def test_url_mode_robots_blocked(self):
         """Robots disallow -> error event, no ingestion."""
         ingest_mock = AsyncMock()
-        with patch.object(ra, "_guard_concurrent", AsyncMock(return_value=None)), \
-             patch.object(ra, "_create_session", AsyncMock(return_value=43)), \
+        with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(43), None))), \
              patch.object(ra, "_robots_allowed", AsyncMock(return_value=False)), \
              patch.object(ra, "ingest_entries", ingest_mock), \
              patch.object(ra, "_finalize_session", AsyncMock()):
@@ -232,8 +230,7 @@ class TestRunResearchUrlMode:
     @pytest.mark.asyncio
     async def test_url_mode_fetch_failed(self):
         """Fetch returns None -> error event."""
-        with patch.object(ra, "_guard_concurrent", AsyncMock(return_value=None)), \
-             patch.object(ra, "_create_session", AsyncMock(return_value=44)), \
+        with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(44), None))), \
              patch.object(ra, "_robots_allowed", AsyncMock(return_value=True)), \
              patch.object(ra, "_fetch_url_bounded", AsyncMock(return_value=None)), \
              patch.object(ra, "_finalize_session", AsyncMock()):
@@ -249,8 +246,7 @@ class TestRunResearchUrlMode:
     async def test_topic_mode_unchanged(self):
         """Non-URL topic still takes the normal decompose/search path."""
         decompose_mock = AsyncMock(return_value={"facets": ["a"], "queries": [], "topic_complexity": "low"})
-        with patch.object(ra, "_guard_concurrent", AsyncMock(return_value=None)), \
-             patch.object(ra, "_create_session", AsyncMock(return_value=45)), \
+        with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(45), None))), \
              patch.object(ra, "_decompose_topic", decompose_mock), \
              patch.object(ra, "_search_queries", AsyncMock(return_value=[])), \
              patch.object(ra, "_generate_summary", AsyncMock(return_value="s")), \
