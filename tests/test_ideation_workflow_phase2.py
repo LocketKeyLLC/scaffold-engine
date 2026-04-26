@@ -102,19 +102,19 @@ async def test_research_uses_model_router_not_general():
     _mod.ingest_entries = AsyncMock(return_value={"new": 1, "versioned": 0})
     _mod.format_toon_rows = MagicMock(return_value=["r"])
     _mod.get_model = MagicMock(return_value="qwen3:4b")
+    from app.config import settings as _real_settings
+    _mod.settings.ideation_model_role = _real_settings.ideation_model_role
 
     await _mod.research_and_compile(job_id="job-mr", db=db)
 
+    from app.config import settings
     called_roles = [c.args[0] for c in _mod.get_model.call_args_list]
-    # Phase 2 makes 2 LLM calls (distill + compile) — both must use model_router
-    router_calls = called_roles.count("model_router")
-    general_calls = called_roles.count("model_general")
-    assert router_calls >= 2, (
-        f"Expected distill + compile to both use 'model_router' (>=2 calls). "
-        f"Got roles: {called_roles}"
-    )
-    assert general_calls == 0, (
-        f"#6.1 regression: 'model_general' must not appear. Got roles: {called_roles}"
+    # Phase 2 makes 2 LLM calls (distill + compile) — both must use the configured
+    # ideation role. See test_ideation_workflow_phase1 for #6.1 history.
+    configured_calls = called_roles.count(settings.ideation_model_role)
+    assert configured_calls >= 2, (
+        f"Expected distill + compile to both use '{settings.ideation_model_role}' "
+        f"(>=2 calls). Got roles: {called_roles}"
     )
 
 

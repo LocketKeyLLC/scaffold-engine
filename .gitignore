@@ -22,3 +22,4 @@ retrieval_report.json
 pipelines/*/valves.json
 *.bak-*
 *.bak[0-9]*
+.new-api-key

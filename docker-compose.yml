@@ -11,7 +11,7 @@ services:
       - OLLAMA_BASE_URL=http://172.18.0.1:11434
       - OPENAI_API_BASE_URLS=http://pipelines:9099
       - OPENAI_API_KEYS=${OPENWEBUI_PIPELINES_KEY:?OPENWEBUI_PIPELINES_KEY is required}
-      - RESET_CONFIG_ON_START=true
+      - RESET_CONFIG_ON_START=false
       - USE_OLLAMA_DOCKER=false
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?WEBUI_SECRET_KEY is required}
       - DEFAULT_MODELS=scaffold_router

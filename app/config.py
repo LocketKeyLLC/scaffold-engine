@@ -90,8 +90,8 @@ class Settings(BaseSettings):
     # Reranker tuning (moved from rag_pipeline.py module constants)
     rerank_max_candidates: int = Field(default=32, ge=1, le=512)
     rerank_doc_truncate: int = Field(default=2000, ge=100, le=20000)
-    rerank_warn_ms: int = Field(default=1500, ge=0, le=60000)
-    rerank_error_ms: int = Field(default=5000, ge=0, le=300000)
+    rerank_warn_ms: int = Field(default=30000, ge=0, le=60000)
+    rerank_error_ms: int = Field(default=120000, ge=0, le=300000)
 
     searxng_url: str = "http://searxng:8080"
     redis_url: str = "redis://scaffold-redis:6379/0"
@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
     model_coder: str = "qwen2.5-coder:7b"
     model_general: str = "qwen3-vl:235b-instruct-cloud"
+    # Ideation phase model role (Apr 26 2026): which ROLE_FIELDS entry to
+    # use for analyze/distill/compile. "model_router" = local 4b (audit
+    # #6.1 default, slower on CPU). "model_general" = cloud 235b (faster,
+    # network required). Override: IDEATION_MODEL_ROLE.
+    ideation_model_role: str = "model_general"
     model_verifier: str = "qwen2.5:7b"
     model_cloud_heavy: str = "qwen3-vl:235b-instruct-cloud"
     model_cloud_alt: str = "qwen3.5:397b-cloud"

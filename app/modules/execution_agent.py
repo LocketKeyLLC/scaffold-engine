@@ -849,6 +849,8 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
             ),
         }
 
+    new_retry_count = row.retry_count + 1
+
     # ---- Stage 2: Load full DAG topology ----
     all_rows = (await db.execute(
         text("""

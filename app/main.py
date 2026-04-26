@@ -115,6 +115,18 @@ async def lifespan(app: FastAPI):
     from app.utils.http_clients import init_clients
     init_clients()
 
+    # Pre-warm reranker (Apr 26 2026): avoid ~13s cold-load on first user request.
+    # Opt out: SCAFFOLD_PREWARM_RERANKER=false
+    if os.getenv("SCAFFOLD_PREWARM_RERANKER", "true").strip().lower() not in ("0", "false", "no", "off"):
+        try:
+            import asyncio
+            from app.rerankers import _get_cross_encoder
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _get_cross_encoder)
+            logger.info("reranker_prewarmed")
+        except Exception as exc:
+            logger.warning("reranker_prewarm_failed: %s", exc)
+
     # Optional startup cleanup
     if os.getenv("CLEANUP_ON_STARTUP", "").lower() == "true":
         logger.info('event="startup_cleanup_begin"')

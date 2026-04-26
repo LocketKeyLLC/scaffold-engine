@@ -312,8 +312,28 @@ class Pipeline:
         body: dict,
     ) -> Generator[str, None, None]:
         msg = user_message.strip()
-        # Strip Open WebUI context wrapper (use last segment after </context>).
-        msg = re.split(r"</context>\s*", msg, maxsplit=1, flags=re.DOTALL)[-1].strip()
+        # Strip Open WebUI context wrapper. Apr 26 2026: hardened from a
+        # single-tag regex (only matched </context>) to a multi-wrapper sweep
+        # plus a heuristic warning when a long message looks like it carries
+        # an unrecognized wrapper. Closes overview "Known Open Issues" #9.
+        for closing_tag in ("</context>", "</documents>", "</source>"):
+            if closing_tag in msg:
+                msg = msg.rsplit(closing_tag, 1)[-1].strip()
+                break
+        else:
+            # No known wrapper matched. If the message looks like it might
+            # contain one (long + leading angle bracket), warn so format
+            # drift is visible instead of silently feeding a context dump
+            # into triage.
+            if len(msg) > 2000 and msg.startswith("<"):
+                # Pipelines runs in its own container — use print() since the
+                # Open WebUI Pipelines logger isn't always wired up.
+                print(
+                    f"[scaffold_router] WARN: message starts with '<' and is "
+                    f"{len(msg)} chars but no known closing tag matched. "
+                    f"Open WebUI may have changed wrapper format. "
+                    f"First 80 chars: {msg[:80]!r}"
+                )
 
         body["stream"] = True
 

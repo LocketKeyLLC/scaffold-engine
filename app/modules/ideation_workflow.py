@@ -126,7 +126,7 @@ async def analyze_and_confirm(
 
     resp = await model_router.generate(
         "Assess this brief:\n" + json.dumps(brief, indent=2),
-        model=model or get_model("model_general", model_overrides),
+        model=model or get_model(settings.ideation_model_role, model_overrides),
         system=FEASIBILITY_SYSTEM,
         temperature=0.2,
         max_tokens=2048,
@@ -280,7 +280,7 @@ async def research_and_compile(
             topic_str = brief.get("title", "unknown")
             resp = await model_router.generate(
                 DISTILL_PROMPT.format(topic=topic_str, results=results_text),
-                model=model or get_model("model_general", model_overrides),
+                model=model or get_model(settings.ideation_model_role, model_overrides),
                 system=DISTILL_SYSTEM,
                 temperature=0.2,
                 max_tokens=4096,
@@ -322,7 +322,7 @@ async def research_and_compile(
             "Compile an execution plan from this context:\n"
             + compile_context
             + feedback_section,
-            model=model or get_model("model_general", model_overrides),
+            model=model or get_model(settings.ideation_model_role, model_overrides),
             system=COMPILE_SYSTEM,
             temperature=0.3,
             max_tokens=4096,

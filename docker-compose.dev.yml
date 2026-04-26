@@ -7,3 +7,6 @@ services:
       context: .
       dockerfile: Dockerfile
       target: dev
+    environment:
+      # Drift fix (Apr 26 2026): prevent stale .pyc / AST cache after host file edits.
+      PYTHONDONTWRITEBYTECODE: "1"

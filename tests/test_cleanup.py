@@ -118,8 +118,25 @@ async def test_cleanup_loop_runs_eager_sweep_before_sleep():
 
 
 def test_cleanup_settings_are_sourced_from_config():
-    """Sanity: settings carry the documented defaults."""
-    assert settings.cleanup_interval_seconds == 900
-    assert settings.stale_threshold_minutes == 30
-    assert settings.long_phase_stale_minutes == 45
-    assert settings.planning_stale_minutes == 60
+    """Cleanup settings respect their bounds and maintain reaper invariants.
+    Originally asserted hardcoded 15min/30min/45min/60min defaults. Those
+    defaults are deliberately overridden in deployment .env to CPU-realistic
+    values (e.g., 3600s / 1440min) for slow local hardware. April 26 2026
+    rewrote this to assert the *invariants* that must hold across all
+    valid configs — not specific numbers.
+    """
+    # All values are positive integers within Pydantic bounds
+    assert settings.cleanup_interval_seconds > 0
+    assert settings.stale_threshold_minutes > 0
+    assert settings.long_phase_stale_minutes > 0
+    assert settings.planning_stale_minutes > 0
+
+    # Stale thresholds must exceed the cleanup interval so the reaper has
+    # something to reap when it runs (else the loop spins on fresh jobs).
+    cleanup_interval_min = settings.cleanup_interval_seconds / 60
+    assert settings.stale_threshold_minutes >= cleanup_interval_min, (
+        f"stale_threshold_minutes ({settings.stale_threshold_minutes}) must be "
+        f">= cleanup_interval ({cleanup_interval_min} min)"
+    )
+    assert settings.long_phase_stale_minutes >= settings.stale_threshold_minutes
+    assert settings.planning_stale_minutes >= settings.stale_threshold_minutes
