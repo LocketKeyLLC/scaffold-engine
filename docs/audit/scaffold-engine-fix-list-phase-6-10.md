@@ -7,6 +7,15 @@
 
 ---
 
+**Status:** Reconciled 2026-04-27 — open items: 2 (#7.8, #7.9; both
+genuine future work — prompt revision history feature, structured
+prompt-history dict refactor).
+**Note:** Items marked `[x]` without a commit hash were verified as
+shipped during normal development; hash recording was inconsistent
+through Apr 2026.
+
+---
+
 ## 🔴 Critical (runtime bugs / data integrity / security)
 
 ### Phase 6 — Ideation + GT
