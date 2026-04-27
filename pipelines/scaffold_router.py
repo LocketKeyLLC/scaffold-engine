@@ -1379,7 +1379,7 @@ class Pipeline:
             except ValueError as exc:
                 return f"❌ Parse error: {exc}"
 
-            depth = "shallow"
+            depth = "medium"  # match orchestrator + DB default; --depth= overrides
             filtered = []
             i = 0
             while i < len(tokens):
