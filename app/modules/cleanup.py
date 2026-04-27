@@ -26,6 +26,24 @@ logger = logging.getLogger(__name__)
 _background_tasks: Set[asyncio.Task] = set()
 
 
+_REAP_ORPHAN_NODES_SQL = """
+    UPDATE dag_nodes
+    SET status = 'pending',
+        updated_at = NOW()
+    WHERE status = 'running'
+      AND started_at IS NOT NULL
+      AND started_at < NOW() - make_interval(mins => :threshold_min)
+    RETURNING id, job_id, node_key
+"""
+
+_REFRESH_PARENT_JOBS_SQL = """
+    UPDATE jobs
+    SET updated_at = NOW()
+    WHERE id = ANY(CAST(:job_ids AS uuid[]))
+      AND status IN ('running', 'executing')
+    RETURNING id
+"""
+
 _REAP_RUNNING_SQL = """
     UPDATE jobs
     SET status = 'failed',
@@ -93,6 +111,33 @@ async def reap_stale_jobs(db: AsyncSession) -> dict:
     base_min = settings.stale_threshold_minutes
     long_min = settings.long_phase_stale_minutes
     plan_min = settings.planning_stale_minutes
+    orphan_min = settings.node_orphan_threshold_minutes
+
+    # Stage 0 — reset orphaned dag_nodes (executor died mid-run).
+    # Must run BEFORE the job reapers: _REAP_RUNNING_SQL refuses to fail a
+    # job with a running node, so an orphaned node permanently locks its
+    # parent. Reset → 'pending' lets /execute/all resume on next invocation.
+    r0 = await db.execute(
+        text(_REAP_ORPHAN_NODES_SQL),
+        {"threshold_min": orphan_min},
+    )
+    orphan_rows = r0.fetchall()
+    orphan_nodes_reset = len(orphan_rows)
+
+    if orphan_nodes_reset:
+        # Touch parent jobs so the next reap cycle doesn't immediately fail
+        # the freshly-recovered job (which still sits in 'executing').
+        affected_job_ids = list({str(row.job_id) for row in orphan_rows})
+        await db.execute(
+            text(_REFRESH_PARENT_JOBS_SQL),
+            {"job_ids": affected_job_ids},
+        )
+        for row in orphan_rows:
+            logger.warning(
+                "orphan_node_reset job_id=%s node_key=%s threshold_min=%d",
+                row.job_id, row.node_key, orphan_min,
+            )
+
 
     r1 = await db.execute(
         text(_REAP_RUNNING_SQL),
@@ -135,16 +180,18 @@ async def reap_stale_jobs(db: AsyncSession) -> dict:
 
     await db.commit()
 
-    if (running_failed or long_phase_failed or planning_cancelled
-            or research_failed or paused_cancelled):
+    if (orphan_nodes_reset or running_failed or long_phase_failed
+            or planning_cancelled or research_failed or paused_cancelled):
         logger.info(
-            "stale_jobs_reaped running_to_failed=%d long_phase_to_failed=%d "
-            "planning_to_cancelled=%d research_to_failed=%d paused_to_cancelled=%d",
-            running_failed, long_phase_failed, planning_cancelled,
-            research_failed, paused_cancelled,
+            "stale_jobs_reaped orphan_nodes_reset=%d running_to_failed=%d "
+            "long_phase_to_failed=%d planning_to_cancelled=%d "
+            "research_to_failed=%d paused_to_cancelled=%d",
+            orphan_nodes_reset, running_failed, long_phase_failed,
+            planning_cancelled, research_failed, paused_cancelled,
         )
 
     return {
+        "orphan_nodes_reset": orphan_nodes_reset,
         "running_to_failed": running_failed,
         "long_phase_to_failed": long_phase_failed,
         "planning_to_cancelled": planning_cancelled,
