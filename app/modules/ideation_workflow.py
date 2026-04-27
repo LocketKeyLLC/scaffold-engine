@@ -16,6 +16,7 @@ from __future__ import annotations
 
 # stdlib
 import json
+import asyncio
 
 # third-party
 import structlog
@@ -341,6 +342,11 @@ async def research_and_compile(
                 "http_status": 502,
             }
 
+    except asyncio.CancelledError:
+        log.warning("phase2_cancelled", reason="client_disconnect")
+        async with async_session() as cancel_db:
+            await _cancel_job(cancel_db, job_id, "client_disconnect")
+        raise
     except Exception as e:
         err = f"phase2 exception: {e}"
         log.exception("phase2_unhandled_exception")
@@ -408,3 +414,15 @@ async def _fail_job(db: AsyncSession, job_id: str, error: str) -> None:
     )
     await db.commit()
     logger.error("phase2_job_failed", job_id=job_id, error=error)
+
+async def _cancel_job(db: AsyncSession, job_id: str, reason: str) -> None:
+    """Mark a job as cancelled (used for client_disconnect during Phase 2)."""
+    await db.execute(
+        text(
+            "UPDATE jobs SET status = 'cancelled', error_summary = :err "
+            "WHERE id = :id"
+        ),
+        {"err": reason, "id": job_id},
+    )
+    await db.commit()
+
