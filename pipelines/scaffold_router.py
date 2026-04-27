@@ -1175,13 +1175,24 @@ class Pipeline:
 
         if status in ("running", "executing", "planning", "researching", "refining"):
             total = data.get("total_nodes") or data.get("task_count") or 0
-            done = data.get("completed_nodes") or data.get("nodes_completed") or 0
-            current = data.get("current_node") or {}
-            if isinstance(current, dict) and current:
-                cur_str = f", currently running: {current.get('node_key','?')} ({current.get('title','?')})"
-            else:
-                cur_str = ""
-            return f"⏳ Status: **{status}** — {done}/{total} nodes complete{cur_str}"
+            # #1: orchestrator returns per-status `counts` and a `nodes` array.
+            # Earlier code asked for `completed_nodes`/`current_node` which were
+            # never emitted, so progress always read "0/N". Derive from counts.
+            counts = data.get("counts") or {}
+            done = int(counts.get("done", 0)) + int(counts.get("skipped", 0))
+            failed = int(counts.get("failed", 0))
+            running_node = next(
+                (n for n in (data.get("nodes") or [])
+                 if isinstance(n, dict) and n.get("status") == "running"),
+                None,
+            )
+            cur_str = (
+                f", currently running: {running_node.get('node_key','?')} "
+                f"({running_node.get('title','?')})"
+                if running_node else ""
+            )
+            fail_str = f", {failed} failed" if failed else ""
+            return f"⏳ Status: **{status}** — {done}/{total} nodes complete{fail_str}{cur_str}"
 
         if status in ("failed", "blocked", "cancelled"):
             err = (data.get("error_summary") or data.get("error")
