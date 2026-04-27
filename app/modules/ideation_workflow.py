@@ -71,7 +71,6 @@ COMPILE_SYSTEM = (
     '    {"step": 1, "action": "what to do", "tool": "LLM|CodeGen|SearXNG|Milvus", "notes": "details"}\n'
     '  ],\n'
     '  "configuration": {\n'
-    '    "recommended_model": "model tag",\n'
     '    "temperature": 0.3,\n'
     '    "domain": "prompt|rag|llm|spec|eng",\n'
     '    "estimated_nodes": 3\n'
