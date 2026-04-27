@@ -748,7 +748,7 @@ async def research_reply_endpoint(body: ResearchReplyInput, request: Request):
 async def research_pdf_endpoint(
     request: Request,
     file: UploadFile = File(...),
-    extractor: str = Query("auto", regex="^(auto|pypdf|plumber)$"),
+    extractor: str = Query("auto", pattern="^(auto|pypdf|plumber)$"),
     domain: str | None = Query(None),
 ):
     """PDF ingestion: upload PDF → extract → ingest → stream SSE."""
