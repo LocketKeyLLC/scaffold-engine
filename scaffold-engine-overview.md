@@ -656,3 +656,58 @@ Suite: **547 passed**, 2 pre-existing auth failures out of scope, 30 skipped.
 - Architectural improvements: 3 (reranker pre-warm, configurable ideation model, defensive context strip)
 - Drift items addressed: 1 (`.pyc` cache)
 - Test suite restored to 547 passing baseline
+
+### 2026-04-27 (Round 6) — backlog completion + middleware test coverage
+
+**Suite:** 576 passed, 31 skipped, 3 known-fail out-of-scope (2× auth, 1× integration). Net +28 tests vs Round 5 (548 → 576).
+
+**Bug fixes (4)**
+- **`/results` displayed `0/N completed` mid-execution** — pipeline asked the orchestrator for `completed_nodes`/`current_node`, but the API returns per-status `counts` dict + `nodes` array. Pipeline now derives `done` from `counts` (sum of `done` + `skipped`), surfaces failure count, and locates the running node from the array. Smoke-test against a completed job verified the math: `total: 7`, `counts: {'done': 7}`. Pipeline-only fix; orchestrator contract unchanged.
+- **Orphaned executors locked their parent jobs forever** — `_REAP_RUNNING_SQL` has a `NOT EXISTS running node` guard that explicitly refuses to fail a job with a running node (correct for live work, but turns into a permanent lock when the node itself is orphaned by a crashed/restarted executor). Added `Stage 0` to `reap_stale_jobs`: dag_nodes with `status='running'` and `started_at` older than `node_orphan_threshold_minutes` (default 60min, env override `NODE_ORPHAN_THRESHOLD_MINUTES`, bounded `[5,1440]`) reset to `pending`. Parent jobs' `updated_at` is touched so the next reap cycle doesn't immediately fail the freshly-recovered job. Per-node `WARNING` + cumulative `INFO` log lines. Manufactured-orphan test verified end-to-end: injected → `/jobs/cleanup` → `orphan_nodes_reset: 1` → node confirmed `pending`. Commit `3b1efb8`.
+- **DAG generator emitted `recommended_model: gpt-4o`** — `COMPILE_SYSTEM` prompt asked the LLM to recommend a model, but nothing in the codebase ever read `configuration.recommended_model`. The LLM had no awareness of the local Ollama stack and defaulted to its training-data prior (gpt-4o, claude-3-opus, etc.). Removed the field from the prompt schema; `configuration` now contains only `temperature`, `domain`, `estimated_nodes` — all consumed. Role-routing via `model_router.get_model()` was already the source of truth. `grep` verified zero readers across `app/`, `pipelines/`, `tests/`. Also removed orphaned `app/modules/ideation_workflow.py.bak-20260425`. Commit `4239fb6`.
+- **`/schedule add` defaulted depth to 'shallow'** while `ScheduleCreate.depth` and `scheduled_jobs.depth` both default to `'medium'`. Three-way drift: user-facing default depended on which surface received input. Pipeline default aligned to `'medium'`; `--depth=<level>` explicit override behavior unchanged. The broader "scheduled depth hardcoded shallow" overview note predated the `depth` column, scheduler wiring, and pipeline parser shipping — only the default was misaligned. Commit `dce5e2f`.
+
+**Test/hygiene (5)**
+- **Cleanup test regression from orphan fix** — `test_cleanup.py` asserted "five counts / five SQL statements". Stage 0 brought it to six (plus a conditional seventh `_REFRESH_PARENT_JOBS_SQL` when orphans exist). Helper `_db_with_counts` updated to take 6 counts, with a new `_orphan_row()` factory providing `.job_id` / `.node_key` attrs (Stage 0 reads both). Two new tests: `test_reap_stale_jobs_orphan_reset_count_propagates` and `test_reap_stale_jobs_runs_seven_sql_statements_when_orphans_found`. Commit `c9588ba`.
+- **`PytestUnraisableExceptionWarning`** — `_extract_entries` is wrapped in `asyncio.create_task()` inside `_execute_iteration_loop`. When tests patched it with `new_callable=AsyncMock`, the inner `_execute_mock_call` coroutine was left un-awaited inside the task wrapper (known `unittest.mock` + `create_task` quirk). Replaced `AsyncMock + return_value` with `side_effect=<plain async fn>`. Verified with `-W error::pytest.PytestUnraisableExceptionWarning`. Commit `05a1e7d`.
+- **FastAPI `Query(regex=)` deprecation** — single occurrence at `/research/pdf` form: `extractor` query param. FastAPI 0.100+ deprecated `regex=` in favor of `pattern=` (Pydantic v2 alignment). One-line change, no behavior delta. Removes the only `DeprecationWarning` emitted by the test suite. Commit `d504b3b`.
+- **Audit fix lists reconciled** — Round 3 reported the lists "need pruning" citing ~5 stale items. Inspection found only 1 truly open in `fix-list.md` (`#9`, transitive ref to a closed item) and 2 genuinely open in `phase-6-10.md` (`#7.8` prompt revision history, `#7.9` structured prompt-history dict — both real future work). Ticked `#9` and added a reconciliation banner to both files noting that the ~106 items checked-but-unhashed reflect inconsistent commit-hash recording during Apr 2026, not stale work. Per-file open counts: `fix-list.md=0`, `phase-6-10.md=2`. Commit `8cce1b9`.
+- **Middleware test coverage** — overview claimed "13 modules without dedicated tests"; cross-referencing showed actual gap was 3, all in `app/middleware/`. Added 28 tests across three files:
+  - `test_request_id_middleware.py` (5): inbound `X-Request-ID` honored, uuid4().hex generation, distinct ID per request, contextvar cleared after request, empty inbound header treated as missing.
+  - `test_error_logging_middleware.py` (12): `_classify_error` mapping for timeout / connect_timeout / http_error / validation family / unrecoverable; pass-through; structured 500 body; `error_logs` persist with classified `error_type`; secondary persistence failure does not break the user response (regression guard for Apr 26 `import httpx` bug).
+  - `test_performance_middleware.py` (11): `_truncate` (None / under / at / over with ellipsis); `X-Request-Duration-Ms` header; `/health` fast → DEBUG, slow → INFO, non-/health → INFO; `log_model_call` truncates `model` / `endpoint` to column widths and `error_message` to 500 chars; `log_model_call` swallows DB failures.
+
+  Initial slow-`/health` test deadlocked patching `time.monotonic` (uvicorn calls it more than twice per request). Rewrote to patch `_HEALTH_SLOW_MS=0` instead — deterministic INFO classification without time-faking. Commit `d13b0dd`.
+
+**Cumulative open list:**
+- ~~`/results` reports 0/N completed mid-execution~~ — fixed
+- ~~Concurrent-execution guard doesn't detect orphaned executors~~ — fixed
+- ~~DAG generator emits `recommended_model: gpt-4o` from training data~~ — fixed
+- ~~Scheduled depth hardcoded shallow~~ — was misdiagnosed; only the default was misaligned, fixed
+- ~~`PytestUnraisableExceptionWarning`~~ — fixed
+- ~~Audit fix lists need pruning~~ — reconciled (work was already done, just untracked)
+- ~~13 modules without dedicated tests~~ — actual gap was 3, all closed
+
+**Remaining (environmental, not code):**
+- Triage CPU latency on long conversations (qwen3:4b on CPU; mitigation requires GPU or smaller model)
+- Open WebUI file routing intermittent (UI-side; hard refresh + new chat resolves)
+
+**Round 6 totals:** 9 commits, +28 tests, 7 user-visible/code issues closed, 0 regressions remaining.
+
+--- a/scaffold-engine-overview.md
++++ b/scaffold-engine-overview.md
+@@ -693,3 +693,16 @@
+ **Remaining (environmental, not code):**
+ - Triage CPU latency on long conversations (qwen3:4b on CPU; mitigation requires GPU or smaller model)
+ - Open WebUI file routing intermittent (UI-side; hard refresh + new chat resolves)
+
+ **Round 6 totals:** 9 commits, +28 tests, 7 user-visible/code issues closed, 0 regressions remaining.
++
++### 2026-04-27 (Round 7) — Phase 2 client-disconnect handling
++
++**Suite:** 578 passed, 31 skipped, 2 known-fail out-of-scope (auth). +1 test vs Round 6.
++
++**Bug fix (1)**
++- **Phase 2 client disconnects stranded jobs in `planning` with empty `research_data`** — `research_and_compile()` caught `Exception` but not `asyncio.CancelledError`, so SSE client disconnects during long Phase 2 runs (CPU runs of 8–24min are common) skipped `_fail_job` entirely. Jobs landed with `refined_brief` populated but `research_data` null and were only caught by the reaper at the 24h `planning_min` threshold. Added explicit `CancelledError` handler that calls new `_cancel_job` helper (`error_summary='client_disconnect'`), then re-raises to preserve asyncio task semantics. Mirrors the `_run_with_session_lifecycle` pattern in `research_agent.py`. Test `test_ideation_phase2_cancel.py` patches `search_searxng` to raise `CancelledError` mid-flight and asserts the UPDATE fires with the expected params. Discovered via two stranded jobs (`59745a88-…`, `e0a9b5ee-…`). Commit `2a7642b`.
++
++**Cumulative open list:** unchanged from Round 6.
