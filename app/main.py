@@ -26,6 +26,7 @@ from app.database import get_db, engine, async_session
 from app.logging_config import setup_logging
 from app.middleware.error_logging import ErrorLoggingMiddleware
 from app.middleware.performance import PerformanceMiddleware
+from app.middleware.request_id import RequestIdMiddleware
 from app.modules.dag_generator import generate_dag as _generate_dag
 from app.modules.execution_agent import execute_next_node, skip_node, retry_failed_node, execute_all_nodes
 from app.modules.execution_handler import execution_status
@@ -89,21 +90,42 @@ async def lifespan(app: FastAPI):
         logger.warning("milvus_connection_failed: uri=%s error=%s", settings.milvus_uri, e)
 
     # Database connectivity is verified by first request via get_db()
-    # Run schema migrations before anything else touches the DB (#10)
-    try:
-        from app.migrations import run_migrations
-        mig_result = await run_migrations()
-        if mig_result.get("status") == "error":
-            logger.error("migrations_failed_at_startup: %s", mig_result)
-        elif mig_result.get("applied"):
-            logger.info(
-                "migrations_applied_at_startup: count=%d files=%s",
-                len(mig_result["applied"]), mig_result["applied"],
-            )
-    except Exception as exc:
-        logger.error("migrations_hook_crashed: error=%s", exc)
+    # Run schema migrations before anything else touches the DB (#10).
+    # Opt out with SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false (default: true).
+    import os
+    _run_migs = os.getenv("SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP", "true").strip().lower()
+    if _run_migs not in ("0", "false", "no", "off"):
+        try:
+            from app.migrations import run_migrations
+            mig_result = await run_migrations()
+            if mig_result.get("status") == "error":
+                logger.error("migrations_failed_at_startup: %s", mig_result)
+            elif mig_result.get("applied"):
+                logger.info(
+                    "migrations_applied_at_startup: count=%d files=%s",
+                    len(mig_result["applied"]), mig_result["applied"],
+                )
+        except Exception as exc:
+            logger.error("migrations_hook_crashed: error=%s", exc)
+    else:
+        logger.info("migrations_skipped_by_env: SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=%s", _run_migs)
 
     logger.info("engine_started: log_level=%s", settings.log_level)
+    # Eager-init shared HTTP clients (searxng, github, generic) — no lazy path
+    from app.utils.http_clients import init_clients
+    init_clients()
+
+    # Pre-warm reranker (Apr 26 2026): avoid ~13s cold-load on first user request.
+    # Opt out: SCAFFOLD_PREWARM_RERANKER=false
+    if os.getenv("SCAFFOLD_PREWARM_RERANKER", "true").strip().lower() not in ("0", "false", "no", "off"):
+        try:
+            import asyncio
+            from app.rerankers import _get_cross_encoder
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _get_cross_encoder)
+            logger.info("reranker_prewarmed")
+        except Exception as exc:
+            logger.warning("reranker_prewarm_failed: %s", exc)
 
     # Optional startup cleanup
     if os.getenv("CLEANUP_ON_STARTUP", "").lower() == "true":
@@ -142,6 +164,10 @@ async def lifespan(app: FastAPI):
     from app.utils.http_clients import close_clients
     await close_clients()
     milvus_connections.disconnect("default")
+    try:
+        await engine.dispose()
+    except Exception as exc:
+        logger.warning('event="engine_dispose_failed" error=%s', exc)
     logger.info("engine_stopped")
 
 
@@ -153,8 +179,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Middleware executes in reverse registration order:
+# incoming request: Performance (outer) -> ErrorLogging (inner) -> endpoint.
+# ErrorLogging re-raises HTTPException so Performance still times 4xx paths.
 app.add_middleware(ErrorLoggingMiddleware)
 app.add_middleware(PerformanceMiddleware)
+# RequestId is outermost: binds request_id contextvar BEFORE perf + error layers
+app.add_middleware(RequestIdMiddleware)
 app.include_router(status_router)
 
 
@@ -291,8 +322,16 @@ async def cleanup_stale_jobs(db: AsyncSession = Depends(get_db)):
 
 
 async def _require_valid_models(overrides: dict | None = None):
-    """Raise 422 if any Ollama-routed models are missing."""
+    """Raise 503 if Ollama unreachable, 422 if models missing."""
     missing = await validate_models(overrides)
+    if missing is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "ollama_unreachable",
+                "hint": "Check Ollama with: curl http://localhost:11434/api/tags",
+            },
+        )
     if missing:
         raise HTTPException(
             status_code=422,
@@ -302,6 +341,66 @@ async def _require_valid_models(overrides: dict | None = None):
                 "hint": "Check Ollama with: curl http://localhost:11434/api/tags",
             },
         )
+
+
+async def _sse_with_disconnect_watch(request: Request, source):
+    """Interleave SSE keepalive comments to force Starlette to notice
+    client disconnect quickly.
+
+    Starlette's ``listen_for_disconnect`` only raises when uvicorn's ASGI
+    ``receive`` delivers an ``http.disconnect`` message, which in turn
+    only happens when the server-side socket is actively probed. During
+    long generator awaits (LLM calls, HTTP fetches), no probe occurs, so
+    a ``kill -9`` on the client can go undetected for 30+ minutes.
+
+    Fix: emit an SSE comment line (``: keepalive\n\n``) every
+    ``KEEPALIVE_INTERVAL`` seconds when the underlying generator is idle.
+    Each comment write exercises the socket; a write to a dead socket
+    raises ``ConnectionError`` which Starlette surfaces as a cancellation
+    into the generator. The lifecycle wrapper in ``research_agent``
+    catches the ``CancelledError`` in its ``finally`` block and finalizes
+    the session as ``cancelled`` with ``error_message='client_disconnect'``.
+    """
+    KEEPALIVE_INTERVAL = 2.0  # seconds
+    gen = source.__aiter__()
+    next_task: asyncio.Task | None = None
+
+    try:
+        while True:
+            if next_task is None:
+                next_task = asyncio.create_task(gen.__anext__())
+
+            done, _pending = await asyncio.wait(
+                {next_task}, timeout=KEEPALIVE_INTERVAL,
+            )
+            if not done:
+                # Generator is still computing — emit a socket-probing comment.
+                # If the client is gone, this write fails and Starlette cancels us.
+                yield ": keepalive\n\n"
+                continue
+
+            try:
+                chunk = next_task.result()
+            except StopAsyncIteration:
+                return
+            finally:
+                next_task = None
+
+            yield chunk
+    finally:
+        if next_task is not None and not next_task.done():
+            next_task.cancel()
+            try:
+                await next_task
+            except (asyncio.CancelledError, StopAsyncIteration, Exception):
+                pass
+        aclose = getattr(gen, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                pass
+
 
 @app.post("/ideas")
 async def submit_idea(body: IdeaInput, db=Depends(get_db)):
@@ -439,10 +538,22 @@ async def extract_gt(body: GtInput):
 
 
 @app.get("/gt/list")
-async def gt_list_endpoint(page: int = 1, per_page: int = 20, include_history: bool = False):
+async def gt_list_endpoint(
+    page: int = 1,
+    per_page: int = 20,
+    include_history: bool = False,
+    domain: str | None = None,
+):
     """Step 19: Paginated list of all TOON entries."""
     try:
-        return await gt_list(page=page, per_page=per_page, include_history=include_history)
+        return await gt_list(
+            page=page,
+            per_page=per_page,
+            include_history=include_history,
+            domain=domain,
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("/gt/list failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -452,6 +563,8 @@ async def gt_search_endpoint(body: GtSearchInput):
     """Step 19: Semantic search TOON entries."""
     try:
         return await gt_search(query=body.query, top_k=body.top_k, domain=body.domain, include_history=body.include_history)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("/gt/search failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -473,6 +586,8 @@ async def gt_stats_endpoint():
     """Step 19: Collection summary."""
     try:
         return await gt_stats()
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("/gt/stats failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -564,14 +679,17 @@ async def optimize_endpoint(body: PromptOptimizeInput):
 
 
 @app.post("/execute", response_model=ExecutionResult, tags=["Step 15"])
-async def execute_next(body: ExecuteNextInput, db: AsyncSession = Depends(get_db)):
-    """Step 15: Execute the next pending DAG node for a job."""
+async def execute_next(body: ExecuteNextInput):
+    """Step 15: Execute the next pending DAG node for a job.
+
+    No DB dependency: execute_next_node manages its own short-lived sessions.
+    """
     await _require_valid_models(body.model_overrides)
     return await execute_next_node(
         job_id=body.job_id,
-        db=db,
         skip_optimize=body.skip_optimize,
         skip_verify=body.skip_verify,
+        model_overrides=body.model_overrides,
     )
 
 
@@ -589,39 +707,48 @@ async def execute_all_endpoint(body: ExecuteNextInput):
     )
 
 @app.post("/research", tags=["Research"])
-async def research_endpoint(body: ResearchInput):
-    """Autonomous research: decompose topic → search → extract → ingest → iterate."""
+async def research_endpoint(body: ResearchInput, request: Request):
+    """Autonomous research: decompose topic → search → extract → ingest → iterate.
+
+    Wrapped in ``_sse_with_disconnect_watch`` so that client disconnect
+    propagates a ``CancelledError`` into the research generator within ~1s,
+    allowing the lifecycle wrapper to finalize the session as ``cancelled``.
+    """
     await _require_valid_models(body.model_overrides)
+    source = run_research(
+        topic=body.topic,
+        depth=body.depth,
+        domain=body.domain,
+        model_overrides=body.model_overrides,
+    )
     return StreamingResponse(
-        run_research(
-            topic=body.topic,
-            depth=body.depth,
-            domain=body.domain,
-            model_overrides=body.model_overrides,
-        ),
+        _sse_with_disconnect_watch(request, source),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},
     )
 
 
 @app.post("/research/reply", tags=["Research"])
-async def research_reply_endpoint(body: ResearchReplyInput):
+async def research_reply_endpoint(body: ResearchReplyInput, request: Request):
     """Resume a paused research session with the user's clarification reply."""
     await _require_valid_models(body.model_overrides)
+    source = resume_research(
+        session_id=body.session_id,
+        user_reply=body.reply,
+        model_overrides=body.model_overrides,
+    )
     return StreamingResponse(
-        resume_research(
-            session_id=body.session_id,
-            user_reply=body.reply,
-            model_overrides=body.model_overrides,
-        ),
+        _sse_with_disconnect_watch(request, source),
         media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no"},
     )
 
 
 @app.post("/research/pdf", tags=["Research"])
 async def research_pdf_endpoint(
+    request: Request,
     file: UploadFile = File(...),
-    extractor: str = Query("auto", regex="^(auto|pypdf|plumber)$"),
+    extractor: str = Query("auto", pattern="^(auto|pypdf|plumber)$"),
     domain: str | None = Query(None),
 ):
     """PDF ingestion: upload PDF → extract → ingest → stream SSE."""
@@ -636,14 +763,15 @@ async def research_pdf_endpoint(
 
     await _require_valid_models(None)
 
+    source = run_research_pdf(
+        pdf_bytes=pdf_bytes,
+        filename=file.filename,
+        extractor=extractor,
+        domain=domain,
+        model_overrides=None,
+    )
     return StreamingResponse(
-        run_research_pdf(
-            pdf_bytes=pdf_bytes,
-            filename=file.filename,
-            extractor=extractor,
-            domain=domain,
-            model_overrides=None,
-        ),
+        _sse_with_disconnect_watch(request, source),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},
     )
@@ -714,9 +842,6 @@ async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_d
         CronTrigger.from_crontab(body.cron_expression, timezone=body.timezone)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"invalid cron expression or timezone: {exc}")
-
-    if body.depth not in ("shallow", "medium", "deep"):
-        raise HTTPException(status_code=422, detail="depth must be shallow|medium|deep")
 
     await _require_valid_models(body.model_overrides)
 

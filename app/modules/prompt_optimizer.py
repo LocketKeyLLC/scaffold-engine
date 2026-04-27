@@ -11,7 +11,7 @@ from typing import Optional
 
 
 from app import model_router
-from app.config import get_model, settings
+from app.config import get_model
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +29,6 @@ FILLER_PATTERNS: list[tuple[str, str]] = [
     (r"^(I'll help you|I can help|Happy to help)[^\.]*\.\s*", ""),
     (r"\bThanks?\b[!\.]*\s*$", ""),
     (r"\bThank you\b[!\.]*\s*$", ""),
-    (r"\bsomewhat\b\s*", ""),
-    (r"\brather\b\s*", ""),
-    (r"\bquite\b\s*", ""),
-    (r"\bvery\b\s*", ""),
 ]
 
 _FILLER_RE: list[tuple[re.Pattern, str]] = [
@@ -47,6 +43,7 @@ class AnalysisResult:
     hedge_count: int
     has_imperative_structure: bool
     issues: list[str] = field(default_factory=list)
+    structured_issues: dict[str, int] = field(default_factory=dict)
 
 @dataclass
 class OptimizationResult:
@@ -74,19 +71,54 @@ def _deterministic_strip(text: str) -> str:
     result = re.sub(r"\n{3,}", "\n\n", result)
     return result.strip()
 
+# Imperative opener: case-insensitive verb at start (optionally preceded by
+# brief framing like "Please " or "Now,"), allowing 1+ lowercase letters.
+# Stop-list rules out common non-imperative leads ("the", "a", "is", "i").
+_IMPERATIVE_RE = re.compile(
+    r"^\s*(?:please\s+|kindly\s+|now,?\s+)?([a-z]+)\b",
+    re.IGNORECASE,
+)
+_NON_IMPERATIVE_LEADS = frozenset({
+    "the", "a", "an", "i", "we", "you", "they", "it",
+    "is", "are", "was", "were", "be", "been", "being",
+    "this", "that", "these", "those", "my", "our", "your",
+    "what", "why", "how", "when", "where", "who",
+    "maybe", "perhaps",
+})
+
+
+def _has_imperative_opener(text: str) -> bool:
+    m = _IMPERATIVE_RE.match(text)
+    if not m:
+        return False
+    return m.group(1).lower() not in _NON_IMPERATIVE_LEADS
+
+
 def _analyze(text: str) -> AnalysisResult:
     filler_count = sum(len(pat.findall(text)) for pat, _ in _FILLER_RE)
     hedge_words = ["maybe", "perhaps", "try to", "attempt to", "sort of", "kind of"]
     hedge_count = sum(text.lower().count(w) for w in hedge_words)
-    has_imperative = bool(re.match(r"^[A-Z][a-z]+(?:\s+[a-z])", text))
-    issues = []
+    has_imperative = _has_imperative_opener(text)
+    over_length = len(text) > 2000
+    # Structural form: stable issue_type keys with counts. Used for diffs.
+    structured: dict[str, int] = {}
+    if filler_count > 0:
+        structured["filler"] = filler_count
+    if hedge_count > 0:
+        structured["hedging"] = hedge_count
+    if not has_imperative:
+        structured["non_imperative_opener"] = 1
+    if over_length:
+        structured["over_length"] = 1
+    # Human-readable form (back-compat for issues: list[str]).
+    issues: list[str] = []
     if filler_count > 0:
         issues.append(f"{filler_count} filler/boilerplate pattern(s) detected")
     if hedge_count > 0:
         issues.append(f"{hedge_count} hedging expression(s) detected")
     if not has_imperative:
         issues.append("Non-imperative opening; consider starting with an action verb")
-    if len(text) > 2000:
+    if over_length:
         issues.append("Prompt exceeds 2000 chars; consider chunking or abstracting")
     return AnalysisResult(
         token_count=_approx_tokens(text),
@@ -94,6 +126,7 @@ def _analyze(text: str) -> AnalysisResult:
         hedge_count=hedge_count,
         has_imperative_structure=has_imperative,
         issues=issues,
+        structured_issues=structured,
     )
 
 def _clarity_score(original_tokens, final_tokens, issues_before, issues_after, intent_preserved):
@@ -131,10 +164,11 @@ TASK: Determine if the OPTIMIZED prompt preserves ALL semantic intent of the ORI
 """
 
 async def _llm_optimize(pre_cleaned: str, model: str) -> str:
+    from app.utils.llm_parsing import strip_think_tags
     messages = [{"role": "user", "content": f"Rewrite this prompt following all rules:\n\n{pre_cleaned}"}]
     messages = [{"role": "system", "content": OPTIMIZE_SYSTEM}] + messages
     resp = await model_router.chat(messages=messages, model=model)
-    return resp.text.strip()
+    return strip_think_tags(resp.text or "").strip()
 
 async def _llm_verify(original: str, optimized: str, model: str) -> tuple[bool, str]:
     """Verify the optimized prompt preserves the semantic intent of the original.
@@ -199,7 +233,7 @@ async def optimize_prompt(
         OptimizationResult with original, optimized, and pre_cleaned text plus
         token counts, reduction %, clarity score, and preservation verdict.
     """
-    opt_model = model_optimizer or get_model("model_verifier", model_overrides)
+    opt_model = model_optimizer or get_model("model_general", model_overrides)
     ver_model = model_verifier or get_model("model_verifier", model_overrides)
 
     analysis = _analyze(prompt)
@@ -217,8 +251,8 @@ async def optimize_prompt(
             # #6.12 — keep intent_preserved=False so callers/clarity score
             # reflect the real verify outcome. Rollback to pre_cleaned is a
             # safety fallback, not evidence the optimized prompt was valid.
-            logger.warning("Intent not preserved: %s — falling back to pre_cleaned", reason)
-            optimized = pre_cleaned
+            logger.warning("Intent not preserved: %s — falling back to original", reason)
+            optimized = prompt
 
     post_analysis = _analyze(optimized)
     issues_after = len(post_analysis.issues)
@@ -226,7 +260,21 @@ async def optimize_prompt(
     token_after = post_analysis.token_count
     reduction_pct = round((token_before - token_after) / token_before * 100, 1) if token_before > 0 else 0.0
     clarity = _clarity_score(token_before, token_after, issues_before, issues_after, intent_preserved)
-    issues_resolved = [i for i in analysis.issues if i not in post_analysis.issues]
+    # Structural diff: an issue is "resolved" when its type either disappeared
+    # or its count strictly decreased post-optimization. Avoids exact-string
+    # mismatches (e.g., "3 hedging" vs "1 hedging" no longer falsely "unresolved").
+    _pre = analysis.structured_issues
+    _post = post_analysis.structured_issues
+    _resolved_types = {
+        t for t, c in _pre.items() if _post.get(t, 0) < c
+    }
+    _ISSUE_LABELS = {
+        "filler": "filler/boilerplate patterns",
+        "hedging": "hedging expressions",
+        "non_imperative_opener": "non-imperative opener",
+        "over_length": "over-length prompt",
+    }
+    issues_resolved = [_ISSUE_LABELS.get(t, t) for t in sorted(_resolved_types)]
 
     return OptimizationResult(
         original_prompt=prompt,

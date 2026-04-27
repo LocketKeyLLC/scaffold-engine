@@ -154,3 +154,34 @@ async def test_optimize_prompt_populates_all_result_fields():
     assert result.token_count_before > 0
     assert result.token_count_after > 0
     assert isinstance(result.issues_found, list)
+
+
+# ---------------------------------------------------------------------------
+# Regressions: think-tag leak + semantic-shift filler removal (TASK 7-fix)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_llm_optimize_strips_think_tags():
+    """_llm_optimize must drop <think>...</think> blocks from model output."""
+    fake_resp = SimpleNamespace(text="<think>internal reasoning</think>Write a summary.")
+    with patch.object(po.model_router, "chat", new=AsyncMock(return_value=fake_resp)):
+        out = await po._llm_optimize("raw prompt", model="fake-model")
+    assert "<think>" not in out
+    assert "internal reasoning" not in out
+    assert out == "Write a summary."
+
+
+@pytest.mark.smoke
+def test_deterministic_strip_preserves_very():
+    """'very' is semantically load-bearing — must survive deterministic strip."""
+    text = "Write a very specific answer about Rust ownership."
+    out = po._deterministic_strip(text)
+    assert "very" in out.lower()
+
+
+@pytest.mark.smoke
+def test_deterministic_strip_preserves_quite_rather_somewhat():
+    """Other semantic-shift hedges preserved too."""
+    text = "The result is quite rather somewhat complete."
+    out = po._deterministic_strip(text)
+    for word in ("quite", "rather", "somewhat"):
+        assert word in out.lower(), f"{word} was stripped"

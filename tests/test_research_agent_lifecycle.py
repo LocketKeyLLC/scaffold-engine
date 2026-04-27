@@ -109,10 +109,8 @@ class TestDirectModeFinalization:
         async def _raise(*a, **kw):
             raise RuntimeError("network fail")
 
-        with patch("app.modules.research_agent._guard_concurrent",
-                   new_callable=AsyncMock, return_value=None), \
-             patch("app.modules.research_agent._create_session",
-                   new_callable=AsyncMock, return_value="sess-gh-fail"), \
+        with patch("app.modules.research_agent._guard_and_create_session",
+                   new_callable=AsyncMock, return_value=("sess-gh-fail", None)), \
              patch("app.modules.research_agent._finalize_session", finalize_mock), \
              patch("app.utils.github_ingest.fetch_repo_content", new=AsyncMock(side_effect=_raise)):
 
@@ -138,10 +136,8 @@ class TestDirectModeFinalization:
         from app.modules.research_agent import run_research
 
         finalize_mock = AsyncMock()
-        with patch("app.modules.research_agent._guard_concurrent",
-                   new_callable=AsyncMock, return_value=None), \
-             patch("app.modules.research_agent._create_session",
-                   new_callable=AsyncMock, return_value="sess-url-robots"), \
+        with patch("app.modules.research_agent._guard_and_create_session",
+                   new_callable=AsyncMock, return_value=("sess-url-robots", None)), \
              patch("app.modules.research_agent._finalize_session", finalize_mock), \
              patch("app.modules.research_agent._robots_allowed",
                    new_callable=AsyncMock, return_value=False):
@@ -165,10 +161,8 @@ class TestRunResearchErrorMessage:
         async def _boom(*a, **kw):
             raise ValueError("decompose blew up")
 
-        with patch("app.modules.research_agent._guard_concurrent",
-                   new_callable=AsyncMock, return_value=None), \
-             patch("app.modules.research_agent._create_session",
-                   new_callable=AsyncMock, return_value="sess-topic-fail"), \
+        with patch("app.modules.research_agent._guard_and_create_session",
+                   new_callable=AsyncMock, return_value=("sess-topic-fail", None)), \
              patch("app.modules.research_agent._finalize_session", finalize_mock), \
              patch("app.modules.research_agent._decompose_topic",
                    new_callable=AsyncMock, side_effect=_boom):

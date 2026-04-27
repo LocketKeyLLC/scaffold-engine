@@ -155,7 +155,7 @@ async def test_search_searxng_respects_max_results():
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
 async def test_extract_ground_truths_short_circuits_when_no_results():
-    with patch.object(gx, "_search_searxng", AsyncMock(return_value=[])):
+    with patch.object(gx, "search_searxng", AsyncMock(return_value=[])):
         result = await gx.extract_ground_truths("nothing-topic")
     assert result["status"] == "no_results"
     assert result["topic"] == "nothing-topic"
@@ -177,7 +177,7 @@ async def test_extract_ground_truths_dedupes_by_url():
     # The real code path calls model_router.generate, not .chat.
     fake_generate_resp = SimpleNamespace(text="[]", success=True)
 
-    with patch.object(gx, "_search_searxng", side_effect=fake_search), \
+    with patch.object(gx, "search_searxng", side_effect=fake_search), \
          patch.object(gx.model_router, "generate", AsyncMock(return_value=fake_generate_resp)):
         result = await gx.extract_ground_truths("topic")
 

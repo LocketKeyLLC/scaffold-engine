@@ -18,5 +18,5 @@ CREATE TABLE IF NOT EXISTS research_sessions (
     completed_at    TIMESTAMPTZ
 );
 
-CREATE INDEX idx_research_sessions_status ON research_sessions(status);
-CREATE INDEX idx_research_sessions_created_at ON research_sessions(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_research_sessions_status ON research_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_research_sessions_created_at ON research_sessions(created_at DESC);

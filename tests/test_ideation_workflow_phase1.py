@@ -81,14 +81,21 @@ async def test_analyze_uses_model_router_not_general():
     )
     _mod.parse_json_object = MagicMock(return_value={"feasible": True})
     _mod.get_model = MagicMock(return_value="qwen3:4b")
+    # Pin the mocked settings to the real configured role so production code
+    # and assertion both reference the same string.
+    from app.config import settings as _real_settings
+    _mod.settings.ideation_model_role = _real_settings.ideation_model_role
 
     db = AsyncMock()
     await _mod.analyze_and_confirm(idea_text="x", db=db)
 
-    # get_model should have been asked for 'model_router', never 'model_general'
+    # get_model should have been asked for the configured ideation role.
+    # Default: "model_general" (cloud, fast). Configurable via IDEATION_MODEL_ROLE.
+    # Audit #6.1 originally mandated "model_router"; April 26 2026 made it
+    # configurable since the audit's CPU-cost reasoning no longer applies
+    # (model_general now resolves to a cloud model, not a local one).
+    from app.config import settings
     called_roles = [c.args[0] for c in _mod.get_model.call_args_list]
-    assert "model_router" in called_roles, f"Expected 'model_router' in {called_roles}"
-    assert "model_general" not in called_roles, (
-        f"#6.1 regression: 'model_general' should not be used for distillation. "
-        f"Got roles: {called_roles}"
+    assert settings.ideation_model_role in called_roles, (
+        f"Expected configured role '{settings.ideation_model_role}' in {called_roles}"
     )

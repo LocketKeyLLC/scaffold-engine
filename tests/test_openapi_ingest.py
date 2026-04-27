@@ -76,10 +76,10 @@ def _mock_fetch_response(spec: dict):
 async def test_parse_openapi_3_happy_path():
     from app.utils import openapi_ingest
 
-    with patch("app.utils.openapi_ingest.httpx.AsyncClient", return_value=_mock_fetch_response(OPENAPI_3_MINIMAL)):
+    with patch("app.utils.http_clients.get_generic_http_client", return_value=_mock_fetch_response(OPENAPI_3_MINIMAL)):
         entries, meta = await openapi_ingest.fetch_and_parse_spec("https://example.com/spec.json")
 
-    assert meta["version"] == "openapi-3"
+    assert meta["version"] == "openapi-3.0"
     assert meta["title"] == "Test API"
     assert meta["total_endpoints"] == 3
     assert meta["ingested_endpoints"] == 3
@@ -97,7 +97,7 @@ async def test_parse_openapi_3_happy_path():
 async def test_parse_swagger_2_happy_path():
     from app.utils import openapi_ingest
 
-    with patch("app.utils.openapi_ingest.httpx.AsyncClient", return_value=_mock_fetch_response(SWAGGER_2_MINIMAL)):
+    with patch("app.utils.http_clients.get_generic_http_client", return_value=_mock_fetch_response(SWAGGER_2_MINIMAL)):
         entries, meta = await openapi_ingest.fetch_and_parse_spec("https://example.com/swagger.json")
 
     assert meta["version"] == "swagger-2"
@@ -124,7 +124,7 @@ async def test_endpoint_cap_enforced(monkeypatch):
         },
     }
 
-    with patch("app.utils.openapi_ingest.httpx.AsyncClient", return_value=_mock_fetch_response(big_spec)):
+    with patch("app.utils.http_clients.get_generic_http_client", return_value=_mock_fetch_response(big_spec)):
         entries, meta = await openapi_ingest.fetch_and_parse_spec("https://example.com/big.json")
 
     assert meta["total_endpoints"] == 5
@@ -140,7 +140,7 @@ async def test_missing_version_field_raises():
 
     bad_spec = {"paths": {"/x": {"get": {}}}}  # no version marker
 
-    with patch("app.utils.openapi_ingest.httpx.AsyncClient", return_value=_mock_fetch_response(bad_spec)):
+    with patch("app.utils.http_clients.get_generic_http_client", return_value=_mock_fetch_response(bad_spec)):
         with pytest.raises(openapi_ingest.OpenAPIParseError):
             await openapi_ingest.fetch_and_parse_spec("https://example.com/bad.json")
 
@@ -153,7 +153,7 @@ async def test_validation_failure_raises():
     # Missing required 'info' field for OpenAPI 3
     invalid_spec = {"openapi": "3.0.0", "paths": {}}
 
-    with patch("app.utils.openapi_ingest.httpx.AsyncClient", return_value=_mock_fetch_response(invalid_spec)):
+    with patch("app.utils.http_clients.get_generic_http_client", return_value=_mock_fetch_response(invalid_spec)):
         with pytest.raises(openapi_ingest.OpenAPIValidationError):
             await openapi_ingest.fetch_and_parse_spec("https://example.com/invalid.json")
 
@@ -172,7 +172,7 @@ async def test_fetch_error_raises():
     client.__aenter__ = AsyncMock(return_value=client)
     client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("app.utils.openapi_ingest.httpx.AsyncClient", return_value=client):
+    with patch("app.utils.http_clients.get_generic_http_client", return_value=client):
         with pytest.raises(openapi_ingest.OpenAPIFetchError):
             await openapi_ingest.fetch_and_parse_spec("https://missing.example.com/spec.json")
 

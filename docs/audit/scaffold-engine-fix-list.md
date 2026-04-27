@@ -8,6 +8,14 @@ Total items: **155**
 
 ---
 
+**Status:** Reconciled 2026-04-27 — open items: 0 (Phases 1–5b)
+**Note:** Items marked `[x]` without a commit hash were verified as
+shipped during normal development; hash recording was inconsistent
+through Apr 2026. Treat the lists as authoritative; raise drift
+findings only if regression is observed.
+
+---
+
 ## CRITICAL (9)
 
 ### Phase 2 — main.py
@@ -27,7 +35,7 @@ Total items: **155**
 - [x] **#8** **Cron timezone hardcoded UTC** — `settings.scheduler_timezone` effectively dead; crons fire at UTC regardless of config — ✅ `ad06f3d`
 
 ### Phase 2 — main.py (UX-adjacent)
-- [ ] **#9** *(see #1)*
+- [x] **#9** *(see #1 — closed transitively)*
 
 ---
 

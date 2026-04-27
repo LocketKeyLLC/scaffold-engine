@@ -5,22 +5,25 @@
   - title           (legacy alias: topic)
   - source_url      (legacy alias: source)
   - domain_tags     (legacy alias: tags)
-Legacy aliases are still accepted on ingest for backward compatibility;
-all reads and writes to Milvus use the canonical names.
 
 #116 Milvus expression safety:
-  pymilvus .query(expr=...) and .search(expr=...) do not accept bind
-  parameters the way SQLAlchemy does. Interpolated values are escaped
-  inline (see _keyword_search safe_word pattern). Do not add quotes
-  around int/bool values.
+  pymilvus expr= accepts interpolated literals, not bind params.
+  Keyword terms are restricted to ASCII alphanumeric (strips LIKE
+  wildcards % _, backslash, quotes). Domain strings have " and \\
+  escaped. Do not add quotes around int/bool values.
+
+Domain contract (no silent defaults):
+  - domain=None   → no partition filter (searches all partitions)
+  - domain=""     → ValueError
+  - domain="eng"  → filter to that partition
 
 Query flow:
-  1. Embed query (qwen3-embedding:8b, MRL truncated to 512d)
-  2. Milvus ANN search (HNSW_SQ8 COSINE on toon_v2)
-  3. Keyword search (canonical_text/title filter)
-  4. RRF fusion of both result sets
-  5. Cross-encoder rerank (Qwen3-Reranker-0.6B via sentence-transformers)
-  6. Confidence filter + dynamic top-k
+  1. Embed query
+  2. Vector ANN + keyword search in parallel
+  3. RRF fusion (dataclasses.replace — no mutation)
+  4. Cross-encoder rerank (with empty-items fallback)
+  5. Confidence filter + dynamic top-k
+  6. Post-query supersedes sweep (drops superseded ancestors)
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ import hashlib
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pymilvus import Collection
@@ -38,7 +41,7 @@ from app.utils.milvus_utils import get_collection
 from app.rerankers import rerank as cross_encoder_rerank
 
 from app import model_router
-from app.config import settings
+from app.config import settings, VALID_DOMAINS
 from app.utils.staleness import compute_expires_at
 from app.utils.embedding_cache import get_cache, truncate_and_normalize, normalize_cache_text
 
@@ -50,18 +53,18 @@ logger = logging.getLogger("scaffold.rag")
 COLLECTION_NAME = "toon_v2"
 EMBED_DIM = 512
 DEFAULT_TOP_K = 10
-MAX_TOP_K = 100  # #119: hard cap on top_k
+MAX_TOP_K = 100  # #119
 CONFIDENCE_THRESHOLD = 0.8
-RRF_K = 60  # RRF smoothing constant
+RRF_K = 60
 
-# #33: reranker limits
-RERANK_MAX_CANDIDATES = 20  # max pairs sent to cross-encoder
-RERANK_DOC_TRUNCATE = 500   # chars per doc passed to reranker
-RERANK_WARN_MS = 5000       # log at WARNING above this latency
-RERANK_ERROR_MS = 15000     # log at ERROR above this latency
+# Reranker tuning lives in app.config.settings (rerank_max_candidates, etc.)
 
-# #109/#111: keyword-search tuning
-KEYWORD_MAX_TERMS = 5       # max words per keyword expression
+# Max hops for version-chain walk-forward (cycle protection).
+_VERSION_CHAIN_WALK_MAX = 8
+
+# #109/#111
+KEYWORD_MAX_TERMS = 5
+_KEYWORD_TERM_RE = re.compile(r"[a-z0-9]+")
 _STOPWORDS = frozenset({
     "the", "and", "for", "are", "but", "not", "you", "all", "can",
     "has", "was", "one", "our", "out", "how", "what", "when",
@@ -75,7 +78,6 @@ _STOPWORDS = frozenset({
 
 @dataclass
 class RagResult:
-    """Single retrieval result."""
     content: str = ""
     title: str = ""
     tags: str = ""
@@ -91,10 +93,44 @@ class RagResult:
     supersedes_id: str = ""
 
 
-# ---------------------------------------------------------------------------
-# Milvus collection (delegates to shared utility)
-# ---------------------------------------------------------------------------
 _get_collection = get_collection
+
+
+# ---------------------------------------------------------------------------
+# Domain expression helper
+# ---------------------------------------------------------------------------
+
+def _escape_literal(s: str) -> str:
+    """Escape \\ and \" for safe interpolation into Milvus expr literals."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _domain_expr(domain: str | None) -> str | None:
+    """Translate a single-domain arg → Milvus expr clause.
+
+    None → None  (caller is responsible for fan-out across VALID_DOMAINS)
+    ""   → ValueError (no silent default)
+    else → 'domain == "<escaped>"'
+    """
+    if domain == "":
+        raise ValueError('domain="" is not allowed; pass None to search all partitions')
+    if domain is None:
+        return None
+    return f'domain == "{_escape_literal(domain)}"'
+
+
+def _iter_search_domains(domain: str | None) -> list[str]:
+    """Expand a user-supplied domain arg into the list of domains to fan out to.
+
+    Milvus partition-key isolation rejects both "no expr" and "IN" exprs, so a
+    caller asking for domain=None is served by running one == search per
+    configured partition and merging the results.
+    """
+    if domain is None:
+        return sorted(VALID_DOMAINS)
+    if domain == "":
+        raise ValueError('domain="" is not allowed; pass None to search all partitions')
+    return [domain]
 
 
 # ---------------------------------------------------------------------------
@@ -102,17 +138,13 @@ _get_collection = get_collection
 # ---------------------------------------------------------------------------
 
 async def _embed_query(query: str) -> list[float] | None:
-    """Embed query (thin wrapper — delegates to app.utils.embedding.embed_query).
-
-    Kept for backward compatibility with internal rag_pipeline callers.
-    External modules should import ``embed_query`` from app.utils.embedding.
-    """
+    """Embed query — delegates to app.utils.embedding.embed_query."""
     from app.utils.embedding import embed_query as _public_embed_query
     return await _public_embed_query(query)
 
 
 async def _embed_content(content: str) -> list[float] | None:
-    """Embed content text (no instruction prefix), MRL truncation, and cache."""
+    """Embed content (no instruction prefix), MRL truncation, cache."""
     cache = get_cache()
     cached = await cache.get(content)
     if cached:
@@ -127,6 +159,56 @@ async def _embed_content(content: str) -> list[float] | None:
     return truncated
 
 
+async def _embed_contents_batch(texts: list[str]) -> list[list[float] | None]:
+    """Batch embed texts, honoring cache. Falls back to serial if model_router
+    rejects list input or returns mismatched length.
+    """
+    cache = get_cache()
+    out: list[list[float] | None] = [None] * len(texts)
+    misses: list[tuple[int, str]] = []
+
+    for i, t in enumerate(texts):
+        if not t:
+            continue
+        hit = await cache.get(t)
+        if hit is not None:
+            out[i] = hit
+        else:
+            misses.append((i, t))
+
+    batch = max(1, int(settings.embedding_batch_size))
+    for start in range(0, len(misses), batch):
+        chunk = misses[start : start + batch]
+        chunk_texts = [t for _, t in chunk]
+        embs = None
+        try:
+            embs = await model_router.embed(
+                chunk_texts, model=settings.model_embedder_pipeline
+            )
+        except Exception as e:
+            logger.info("batch embed not supported or failed (%s); falling back to serial", e)
+
+        if embs and len(embs) == len(chunk):
+            for (idx, txt), vec in zip(chunk, embs):
+                if not vec:
+                    continue
+                truncated = truncate_and_normalize(vec)
+                await cache.put(txt, truncated)
+                out[idx] = truncated
+        else:
+            for idx, txt in chunk:
+                try:
+                    ev = await model_router.embed(txt, model=settings.model_embedder_pipeline)
+                    if ev and ev[0]:
+                        truncated = truncate_and_normalize(ev[0])
+                        await cache.put(txt, truncated)
+                        out[idx] = truncated
+                except Exception as e:
+                    logger.warning("serial embed failed for idx=%d: %s", idx, e)
+
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Vector search
 # ---------------------------------------------------------------------------
@@ -137,51 +219,61 @@ async def _vector_search(
     top_k: int,
     domain: str | None = None,
 ) -> list[RagResult]:
-    """ANN search in Milvus using query embedding (off event loop)."""
+    """ANN search in Milvus (off event loop).
+
+    Fans out one search per partition when domain is None. Under partition-key
+    isolation Milvus rejects both "no expr" and "IN" over the partition key,
+    so per-partition == exprs are the only safe path.
+    """
+    domains = _iter_search_domains(domain)
+
     def _sync() -> list[RagResult]:
-        try:
-            search_kwargs = dict(
-                data=[query_embedding],
-                anns_field="dense_vector",
-                param={"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}},
-                limit=top_k,
-                output_fields=["canonical_text", "title", "domain_tags", "source_url", "entry_id", "domain", "confidence_score", "version", "supersedes_id"],
-            )
-            search_domain = domain or "eng"
-            search_kwargs["expr"] = f'domain == "{search_domain}"'
-
-            if collection is None:
-                return []
-
-            results = collection.search(**search_kwargs)
-
-            hits = []
-            for hit in results[0]:
-                entity = hit.entity
-                tags_list = entity.get("domain_tags", [])
-                tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
-                hits.append(RagResult(
-                    content=entity.get("canonical_text", ""),
-                    title=entity.get("title", ""),
-                    tags=tags_str,
-                    source_url=entity.get("source_url", ""),
-                    entry_id=entity.get("entry_id", ""),
-                    domain=entity.get("domain", ""),
-                    vector_score=float(hit.score),
-                    version=entity.get("version", 1),
-                    supersedes_id=entity.get("supersedes_id", ""),
-                ))
-            return hits
-        except Exception as e:
-            logger.warning("Vector search failed: %s", e)
+        if collection is None:
             return []
+        all_hits: list[RagResult] = []
+        for d in domains:
+            try:
+                search_kwargs: dict[str, Any] = dict(
+                    data=[query_embedding],
+                    anns_field="dense_vector",
+                    param={"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}},
+                    limit=top_k,
+                    expr=f'domain == "{_escape_literal(d)}"',
+                    output_fields=[
+                        "canonical_text", "title", "domain_tags", "source_url",
+                        "entry_id", "domain", "confidence_score", "version",
+                        "supersedes_id",
+                    ],
+                )
+                results = collection.search(**search_kwargs)
+                for hit in results[0]:
+                    entity = hit.entity
+                    tags_list = entity.get("domain_tags", [])
+                    tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
+                    all_hits.append(RagResult(
+                        content=entity.get("canonical_text", ""),
+                        title=entity.get("title", ""),
+                        tags=tags_str,
+                        source_url=entity.get("source_url", ""),
+                        entry_id=entity.get("entry_id", ""),
+                        domain=entity.get("domain", ""),
+                        vector_score=float(hit.score),
+                        version=entity.get("version", 1),
+                        supersedes_id=entity.get("supersedes_id", ""),
+                    ))
+            except Exception as e:
+                logger.warning("Vector search failed (domain=%s): %s", d, e)
+                continue
+        # Merge across partitions: sort by score desc, keep top_k
+        all_hits.sort(key=lambda r: r.vector_score, reverse=True)
+        return all_hits[:top_k]
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _sync)
 
 
 # ---------------------------------------------------------------------------
-# Keyword search (canonical_text/title filter via Milvus expressions)
+# Keyword search
 # ---------------------------------------------------------------------------
 
 async def _keyword_search(
@@ -190,64 +282,70 @@ async def _keyword_search(
     top_k: int,
     domain: str | None = None,
 ) -> list[RagResult]:
-    """Keyword-based search using Milvus query expressions (off event loop)."""
-    # #109: stopwords promoted to module-level _STOPWORDS
-    words = [w.strip().lower() for w in query.split() if len(w.strip()) >= 3 and w.strip().lower() not in _STOPWORDS]
+    """Keyword-based search (off event loop).
 
+    Tokens are restricted to [a-z0-9]+ via _KEYWORD_TERM_RE — eliminates
+    LIKE wildcards, escape chars, and quotes from the interpolation path.
+
+    Fans out one query per partition when domain is None (partition-key
+    isolation rejects IN and unfiltered exprs).
+    """
+    tokens = _KEYWORD_TERM_RE.findall(query.lower())
+    words = [t for t in tokens if len(t) >= 3 and t not in _STOPWORDS]
     if not words:
         return []
 
-    # #110: Milvus `like` is case-sensitive. Input is already lowercased
-    # above, and canonical_text is stored lowercased at ingest, so matching
-    # works. If ingest casing policy changes, revisit this.
-    conditions = []
-    for word in words[:KEYWORD_MAX_TERMS]:  # #111
-        safe_word = word.replace("'", "\\'").replace('"', '\\"')
-        conditions.append(f'canonical_text like "%{safe_word}%"')
-        conditions.append(f'title like "%{safe_word}%"')
+    conditions: list[str] = []
+    for word in words[:KEYWORD_MAX_TERMS]:
+        conditions.append(f'canonical_text like "%{word}%"')
+        conditions.append(f'title like "%{word}%"')
+    keyword_expr = " or ".join(conditions)
 
-    expr = " or ".join(conditions)
-    search_domain = domain or "eng"
-    expr = f'domain == "{search_domain}" and ({expr})'
+    domains = _iter_search_domains(domain)
 
     def _sync() -> list[RagResult]:
-        try:
-            if collection is None:
-                return []
-
-            results = collection.query(
-                expr=expr,
-                output_fields=["canonical_text", "title", "domain_tags", "source_url", "entry_id", "domain", "version", "supersedes_id"],
-                limit=top_k,
-            )
-
-            hits = []
-            for r in results:
-                content_lower = r.get("canonical_text", "").lower()
-                title_lower = r.get("title", "").lower()
-                match_count = sum(1 for w in words if w in content_lower or w in title_lower)
-                score = match_count / len(words) if words else 0.0
-                tags_list = r.get("domain_tags", [])
-                tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
-
-                hits.append(RagResult(
-                    content=r.get("canonical_text", ""),
-                    title=r.get("title", ""),
-                    tags=tags_str,
-                    source_url=r.get("source_url", ""),
-                    entry_id=r.get("entry_id", ""),
-                    domain=r.get("domain", ""),
-                    keyword_score=score,
-                    version=r.get("version", 1),
-                    supersedes_id=r.get("supersedes_id", ""),
-                ))
-            return hits
-        except Exception as e:
-            logger.warning("Keyword search failed: %s", e)
+        if collection is None:
             return []
+        all_hits: list[RagResult] = []
+        for d in domains:
+            expr = f'domain == "{_escape_literal(d)}" and ({keyword_expr})'
+            try:
+                results = collection.query(
+                    expr=expr,
+                    output_fields=[
+                        "canonical_text", "title", "domain_tags", "source_url",
+                        "entry_id", "domain", "version", "supersedes_id",
+                    ],
+                    limit=top_k,
+                )
+                for r in results:
+                    content_lower = r.get("canonical_text", "").lower()
+                    title_lower = r.get("title", "").lower()
+                    match_count = sum(1 for w in words if w in content_lower or w in title_lower)
+                    score = match_count / len(words) if words else 0.0
+                    tags_list = r.get("domain_tags", [])
+                    tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
+                    all_hits.append(RagResult(
+                        content=r.get("canonical_text", ""),
+                        title=r.get("title", ""),
+                        tags=tags_str,
+                        source_url=r.get("source_url", ""),
+                        entry_id=r.get("entry_id", ""),
+                        domain=r.get("domain", ""),
+                        keyword_score=score,
+                        version=r.get("version", 1),
+                        supersedes_id=r.get("supersedes_id", ""),
+                    ))
+            except Exception as e:
+                logger.warning("Keyword search failed (domain=%s): %s", d, e)
+                continue
+        all_hits.sort(key=lambda r: r.keyword_score, reverse=True)
+        return all_hits[:top_k]
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _sync)
+
+
 # ---------------------------------------------------------------------------
 # RRF fusion
 # ---------------------------------------------------------------------------
@@ -257,16 +355,10 @@ def _rrf_fuse(
     keyword_results: list[RagResult],
     k: int = RRF_K,
 ) -> list[RagResult]:
-    """Reciprocal Rank Fusion of vector and keyword result sets.
+    """Reciprocal Rank Fusion.
 
-    #112: dedup key is entry_id (stable primary key) rather than content[:200].
-    Content-prefix dedup was buggy in two directions:
-      - False merge: two distinct entries with shared prefix (legal boilerplate,
-        common intros) collapsed into one.
-      - False split: same entry_id from both paths with differently formatted
-        canonical_text failed to merge and double-counted the RRF score.
-    Results missing entry_id fall back to content[:200] so malformed rows still
-    participate in fusion rather than being silently dropped.
+    Uses dataclasses.replace for accumulator updates so upstream RagResult
+    instances from vector_results / keyword_results are never mutated.
     """
     merged: dict[str, RagResult] = {}
 
@@ -275,41 +367,73 @@ def _rrf_fuse(
 
     for rank, result in enumerate(vector_results):
         key = _key(result)
-        if key not in merged:
-            merged[key] = result
-        merged[key].rrf_score += 1.0 / (k + rank + 1)
-        merged[key].vector_score = max(merged[key].vector_score, result.vector_score)
+        base = merged.get(key, result)
+        merged[key] = replace(
+            base,
+            rrf_score=base.rrf_score + 1.0 / (k + rank + 1),
+            vector_score=max(base.vector_score, result.vector_score),
+        )
 
-    for rank, result in enumerate(sorted(keyword_results, key=lambda r: r.keyword_score, reverse=True)):
+    sorted_kw = sorted(keyword_results, key=lambda r: r.keyword_score, reverse=True)
+    for rank, result in enumerate(sorted_kw):
         key = _key(result)
-        if key not in merged:
-            merged[key] = result
-        merged[key].rrf_score += 1.0 / (k + rank + 1)
-        merged[key].keyword_score = max(merged[key].keyword_score, result.keyword_score)
+        base = merged.get(key, result)
+        merged[key] = replace(
+            base,
+            rrf_score=base.rrf_score + 1.0 / (k + rank + 1),
+            keyword_score=max(base.keyword_score, result.keyword_score),
+        )
 
-    fused = sorted(merged.values(), key=lambda r: r.rrf_score, reverse=True)
-    return fused
+    return sorted(merged.values(), key=lambda r: r.rrf_score, reverse=True)
 
 
 # ---------------------------------------------------------------------------
 # Cross-encoder reranking
 # ---------------------------------------------------------------------------
+
 async def _rerank(
     query: str,
     results: list[RagResult],
     top_k: int,
-) -> list[RagResult]:
-    """Rerank results using CrossEncoder (sentence-transformers), RRF fallback."""
-    if not results:
-        return []
+) -> tuple[list[RagResult], dict[str, Any]]:
+    """Rerank via CrossEncoder. Returns (ranked, meta).
 
-    docs = [r.content[:RERANK_DOC_TRUNCATE] for r in results[:RERANK_MAX_CANDIDATES]]
+    meta contains: backend, skipped_rerank, warnings (list[str]).
+    """
+    meta: dict[str, Any] = {"backend": None, "skipped_rerank": False, "warnings": []}
+
+    if not results:
+        return [], meta
+
+    max_cand = int(settings.rerank_max_candidates)
+    doc_trunc = int(settings.rerank_doc_truncate)
+    warn_ms = int(settings.rerank_warn_ms)
+    error_ms = int(settings.rerank_error_ms)
+
+    docs = [r.content[:doc_trunc] for r in results[:max_cand]]
 
     loop = asyncio.get_running_loop()
     rr = await loop.run_in_executor(None, cross_encoder_rerank, query, docs, len(docs))
 
+    meta["backend"] = getattr(rr, "backend", None)
+
+    # Empty items but non-empty docs = reranker silently produced nothing.
+    # Surface as an explicit WARNING and fall back to RRF ordering.
+    if not rr.items and docs:
+        logger.warning(
+            "rerank_skipped: backend=%s returned 0 items for %d docs; falling back to RRF order",
+            meta["backend"], len(docs),
+        )
+        meta["skipped_rerank"] = True
+        meta["warnings"].append("reranker_returned_no_items")
+        for r in results:
+            r.rerank_score = r.rrf_score
+            r.final_score = r.rrf_score
+        results.sort(key=lambda r: r.final_score, reverse=True)
+        return results[:top_k], meta
+
     score_map = {item.index: item.score for item in rr.items}
-    for i, r in enumerate(results[:RERANK_MAX_CANDIDATES]):
+    for i, r in enumerate(results[:max_cand]):
         if i in score_map:
             r.rerank_score = score_map[i]
             r.final_score = score_map[i]
@@ -317,12 +441,16 @@ async def _rerank(
             r.rerank_score = r.rrf_score
             r.final_score = r.rrf_score
 
-    for r in results[RERANK_MAX_CANDIDATES:]:
+    for r in results[max_cand:]:
         r.rerank_score = r.rrf_score
         r.final_score = r.rrf_score
 
     scores = [item.score for item in rr.items]
-    _log_reranker = logger.error if rr.latency_ms > RERANK_ERROR_MS else logger.warning if rr.latency_ms > RERANK_WARN_MS else logger.info
+    _log_reranker = (
+        logger.error if rr.latency_ms > error_ms
+        else logger.warning if rr.latency_ms > warn_ms
+        else logger.info
+    )
     _log_reranker(
         "reranker_decision",
         extra=dict(
@@ -337,12 +465,47 @@ async def _rerank(
     )
 
     results.sort(key=lambda r: r.final_score, reverse=True)
-    return results[:top_k]
+    return results[:top_k], meta
+
+
+# ---------------------------------------------------------------------------
+# Supersedes sweep
+# ---------------------------------------------------------------------------
+
+async def _lookup_superseded(
+    collection: Collection, entry_ids: list[str]
+) -> set[str]:
+    """Return the subset of entry_ids that are superseded by some other row.
+
+    Queries: supersedes_id IN (entry_ids). A hit means some newer row points
+    at one of our ids → that id is stale. Closes overview issue #7.
+    """
+    if not entry_ids:
+        return set()
+
+    quoted = [f'"{_escape_literal(eid)}"' for eid in entry_ids]
+    expr = f"supersedes_id in [{', '.join(quoted)}]"
+
+    def _sync() -> set[str]:
+        try:
+            rows = collection.query(
+                expr=expr,
+                output_fields=["supersedes_id"],
+                limit=max(1, len(entry_ids) * 4),
+            )
+            return {r.get("supersedes_id", "") for r in rows if r.get("supersedes_id")}
+        except Exception as e:
+            logger.warning("supersedes_lookup_failed: %s", e)
+            return set()
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync)
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 async def query_rag(
     query: str,
     *,
@@ -352,13 +515,12 @@ async def query_rag(
     skip_rerank: bool = False,
     include_history: bool = False,
 ) -> dict[str, Any]:
-    """Full RAG pipeline: embed -> search -> fuse -> rerank -> filter."""
-    # #119: cap top_k to protect Milvus and reranker from runaway requests.
+    """Full RAG pipeline: embed → search → fuse → rerank → filter → supersede-sweep."""
     top_k = max(1, min(top_k, MAX_TOP_K))
     t0 = time.monotonic()
 
-    # #120-inverse: get_collection() makes 3 Milvus RPCs; run off the event loop
-    # to match the ingest_entries pattern and avoid blocking other requests.
+    warnings: list[str] = []
+
     loop = asyncio.get_running_loop()
     collection = await loop.run_in_executor(None, _get_collection)
     if collection is None:
@@ -366,6 +528,7 @@ async def query_rag(
             "status": "error",
             "error": f"Collection '{COLLECTION_NAME}' not available",
             "results": [],
+            "metadata": {"warnings": ["collection_unavailable"], "reranker_backend": None},
         }
 
     query_embedding = await _embed_query(query)
@@ -374,6 +537,7 @@ async def query_rag(
             "status": "error",
             "error": "Failed to generate query embedding",
             "results": [],
+            "metadata": {"warnings": ["embed_failed"], "reranker_backend": None},
         }
 
     vector_results, keyword_results = await asyncio.gather(
@@ -388,38 +552,47 @@ async def query_rag(
 
     fused = _rrf_fuse(vector_results, keyword_results)
 
+    rerank_meta: dict[str, Any] = {"skipped_rerank": False, "backend": None, "warnings": []}
     if skip_rerank or not fused:
         for r in fused:
             r.final_score = r.rrf_score
         ranked = fused[:top_k]
+        if skip_rerank:
+            rerank_meta["skipped_rerank"] = True
     else:
-        ranked = await _rerank(query, fused, top_k)
+        ranked, rerank_meta = await _rerank(query, fused, top_k)
 
-    # #29: confidence_threshold is only meaningful for reranker scores.
-    # RRF scores top at ~0.016 and would always fail a reasonable threshold.
-    # When skip_rerank=True, bypass the filter and return ranked results as-is.
-    # When confidence_threshold<=0.0, also bypass (documented disable via #121).
-    if skip_rerank or confidence_threshold <= 0.0:
+    warnings.extend(rerank_meta.get("warnings", []))
+    backend = rerank_meta.get("backend")
+    skipped_rerank = rerank_meta.get("skipped_rerank", False)
+
+    below_threshold = False
+    fell_back_to_top3 = False
+    if skip_rerank or skipped_rerank or confidence_threshold <= 0.0:
         filtered = ranked
-        too_strict = False
     else:
         filtered = [r for r in ranked if r.final_score >= confidence_threshold]
-        too_strict = len(filtered) == 0 and len(ranked) > 0
-        if too_strict:
-            # #113: scale fallback with top_k instead of hardcoded 3.
+        if len(filtered) == 0 and len(ranked) > 0:
+            below_threshold = True
+            fell_back_to_top3 = True
             filtered = ranked[:min(3, top_k)]
+            warnings.append("below_threshold")
+            warnings.append("fell_back_to_top3")
+
+    # Post-query supersedes sweep (Milvus lookup on all returned entry_ids)
+    if not include_history and filtered:
+        entry_ids = [r.entry_id for r in filtered if r.entry_id]
+        if entry_ids:
+            superseded = await _lookup_superseded(collection, entry_ids)
+            if superseded:
+                filtered = [r for r in filtered if r.entry_id not in superseded]
 
     latency_ms = round((time.monotonic() - t0) * 1000, 1)
     top_score = round(filtered[0].final_score, 4) if filtered else 0.0
     logger.info(
         "retrieval_completed: query='%s' domain=%s n_results=%d top_score=%.4f latency_ms=%.1f",
-        query[:200], domain or "all", len(filtered), top_score, latency_ms,
+        query[:200], domain if domain is not None else "all", len(filtered), top_score, latency_ms,
     )
-
-    # Filter to latest versions unless history requested
-    if not include_history:
-        superseded_ids = {r.supersedes_id for r in filtered if r.supersedes_id}
-        filtered = [r for r in filtered if r.entry_id not in superseded_ids]
 
     result_dicts = []
     for r in filtered:
@@ -451,18 +624,23 @@ async def query_rag(
             "keyword_hits": len(keyword_results),
             "fused_count": len(fused),
             "confidence_threshold": confidence_threshold,
-            "threshold_relaxed": too_strict,
-            "reranked": not skip_rerank,
+            "threshold_relaxed": fell_back_to_top3,
+            "below_threshold": below_threshold,
+            "fell_back_to_top3": fell_back_to_top3,
+            "reranked": not (skip_rerank or skipped_rerank),
+            "skipped_rerank": skipped_rerank or skip_rerank,
+            "reranker_backend": backend,
+            "warnings": warnings,
+            "latency_ms": latency_ms,
         },
     }
 
 
 # ---------------------------------------------------------------------------
-# Ingest entries into Milvus (TOON schema)
+# Ingest
 # ---------------------------------------------------------------------------
 
 def _build_embedding_text(entry: dict) -> str:
-    """Construct embedding text from title + domain_tags + canonical_text."""
     parts = []
     if entry.get("title"):
         parts.append(entry["title"])
@@ -474,20 +652,61 @@ def _build_embedding_text(entry: dict) -> str:
     return "\n".join(parts)
 
 
-def _content_hash(text: str) -> str:
-    """SHA-256 hash of normalized text for dedup (#130 — shared helper)."""
-    return hashlib.sha256(normalize_cache_text(text).encode()).hexdigest()
+def _content_hash(text_: str) -> str:
+    return hashlib.sha256(normalize_cache_text(text_).encode()).hexdigest()
+
+
+async def _walk_to_latest_version(
+    collection: Collection,
+    entry_id: str,
+    version: int,
+    safe_domain: str,
+) -> tuple[str, int]:
+    """Walk the supersedes chain forward. Cycle-capped at _VERSION_CHAIN_WALK_MAX."""
+    current_eid = entry_id
+    current_version = version
+    loop = asyncio.get_running_loop()
+
+    for _ in range(_VERSION_CHAIN_WALK_MAX):
+        safe_eid = _escape_literal(current_eid)
+
+        def _sync(eid=safe_eid) -> list[dict]:
+            try:
+                return collection.query(
+                    expr=f'supersedes_id == "{eid}" and domain == "{safe_domain}"',
+                    output_fields=["entry_id", "version"],
+                    limit=1,
+                )
+            except Exception as e:
+                logger.debug("version_walk_query_failed: %s", e)
+                return []
+
+        rows = await loop.run_in_executor(None, _sync)
+        if not rows:
+            return current_eid, current_version
+        newer = rows[0]
+        next_eid = newer.get("entry_id", "")
+        next_version = int(newer.get("version", current_version + 1))
+        if not next_eid or next_eid == current_eid:
+            break
+        current_eid = next_eid
+        current_version = next_version
+
+    return current_eid, current_version
 
 
 async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
-    """Embed and insert knowledge entries into toon_v2.
+    """Embed and upsert knowledge entries into toon_v2.
 
-    Returns breakdown: {"new": N, "versioned": M, "rejected": K, "skipped_hash": S}.
-    new + versioned = successfully inserted rows.
+    Returns: {new, versioned, rejected, skipped_hash, skipped_empty}.
+    Upsert is keyed on entry_id, closing the hash-check+insert race where
+    two concurrent ingests of the same logical entry would duplicate.
     """
-    stats = {"new": 0, "versioned": 0, "rejected": 0, "skipped_hash": 0, "skipped_empty": 0}  # #117
+    stats = {"new": 0, "versioned": 0, "rejected": 0, "skipped_hash": 0, "skipped_empty": 0}
     if not entries:
         return stats
+    if domain == "":
+        raise ValueError('domain="" is not allowed for ingest')
 
     loop = asyncio.get_running_loop()
     collection = await loop.run_in_executor(None, _get_collection)
@@ -496,11 +715,14 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
         return stats
 
     now = int(time.time())
+    safe_domain = _escape_literal(domain)
 
+    # ---- Pass 1: normalize + exact-hash filter ----
+    prepared: list[dict] = []
     for entry in entries:
         content = entry.get("content", "") or entry.get("canonical_text", "")
         if not content:
-            stats["skipped_empty"] += 1  # #117
+            stats["skipped_empty"] += 1
             continue
 
         title = entry.get("title", entry.get("topic", "unknown")).strip()
@@ -515,15 +737,13 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
         source_url = entry.get("source", entry.get("source_url", "scaffold-engine"))
         source_type = entry.get("source_type", "ai_generated")
         confidence = entry.get("confidence_score", 0.60)
-
         ch = _content_hash(content)
 
-        # --- Dedup: exact hash check ---
         try:
             existing = await loop.run_in_executor(
                 None,
-                lambda: collection.query(
-                    expr=f'content_hash == "{ch}" and domain == "{domain}"',
+                lambda h=ch: collection.query(
+                    expr=f'content_hash == "{h}" and domain == "{safe_domain}"',
                     output_fields=["entry_id"],
                     limit=1,
                 ),
@@ -535,21 +755,35 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
         except Exception as e:
             logger.debug("dedup_check_failed: %s", e)
 
-        embedding_text = _build_embedding_text({
+        embed_text = _build_embedding_text({
             "title": title,
             "domain_tags": domain_tags,
             "canonical_text": content,
         })
+        prepared.append({
+            "title": title, "content": content, "domain_tags": domain_tags,
+            "source_url": source_url, "source_type": source_type,
+            "confidence": confidence, "ch": ch, "embed_text": embed_text,
+        })
 
-        vector = await _embed_content(embedding_text)
+    if not prepared:
+        return stats
+
+    # ---- Pass 2: batch embed ----
+    vectors = await _embed_contents_batch([p["embed_text"] for p in prepared])
+
+    dedup_threshold = float(settings.semantic_dedup_threshold)
+    version_threshold = float(settings.version_chain_threshold)
+
+    # ---- Pass 3: semantic dedup + version chain + upsert ----
+    for p, vector in zip(prepared, vectors):
         if vector is None:
-            logger.warning("ingest_embed_failed for title=%s", title)
+            logger.warning("ingest_embed_failed for title=%s", p["title"])
             continue
-        # Version chain tracking
+
         new_version = 1
         new_supersedes = ""
 
-# --- Dedup: semantic similarity check — auto-reject above threshold ---
         try:
             sim_results = await loop.run_in_executor(
                 None,
@@ -557,19 +791,20 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
                     data=[v],
                     anns_field="dense_vector",
                     param={"metric_type": "COSINE", "params": {"ef": 32}},
-                    limit=1,
-                    expr=f'domain == "{domain}"',
+                    limit=5,
+                    expr=f'domain == "{safe_domain}"',
                     output_fields=["entry_id", "content_hash", "version", "supersedes_id"],
                 ),
             )
             if sim_results and sim_results[0]:
                 top_hit = sim_results[0][0]
                 sim_score = float(top_hit.score)
-                if sim_score > settings.semantic_dedup_threshold and top_hit.entity.get("content_hash") != ch:
+
+                if sim_score >= dedup_threshold and top_hit.entity.get("content_hash") != p["ch"]:
                     existing_eid = top_hit.entity.get("entry_id", str(top_hit.id))
                     logger.info(
                         "dedup_rejected: sim=%.4f title='%s' existing='%s'",
-                        sim_score, title[:50], existing_eid,
+                        sim_score, p["title"][:50], existing_eid,
                     )
                     try:
                         async with async_session() as session:
@@ -578,70 +813,69 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
                                     "INSERT INTO dedup_log (new_content_hash, existing_entry_id, similarity_score, action_taken) "
                                     "VALUES (:hash, :eid, :score, 'rejected')"
                                 ),
-                                {"hash": ch, "eid": existing_eid, "score": sim_score},
+                                {"hash": p["ch"], "eid": existing_eid, "score": sim_score},
                             )
                             await session.commit()
                     except Exception as db_err:
                         logger.error("dedup_log_write_failed: %s", db_err)
                     stats["rejected"] += 1
-                    continue  # Skip insertion
-                elif sim_score >= 0.90:
-                    # VERSION CHAIN: same topic, updated content
-                    old_entry = top_hit.entity
-                    old_version = old_entry.get("version", 1)
-                    old_entry_id = old_entry.get("entry_id", str(top_hit.id))
-                    new_version = old_version + 1
-                    new_supersedes = old_entry_id
+                    continue
+                elif sim_score >= version_threshold:
+                    # Walk forward to latest version to avoid mid-chain pointers.
+                    candidate_eid = top_hit.entity.get("entry_id", str(top_hit.id))
+                    candidate_version = int(top_hit.entity.get("version", 1))
+                    latest_eid, latest_version = await _walk_to_latest_version(
+                        collection, candidate_eid, candidate_version, safe_domain
+                    )
+                    new_version = latest_version + 1
+                    new_supersedes = latest_eid
                     logger.info(
-                        "version_chain_created: v%d supersedes='%s' sim=%.4f title='%s'",
-                        new_version, old_entry_id, sim_score, title[:50],
+                        "version_chain_linked: v%d supersedes='%s' sim=%.4f title='%s'",
+                        new_version, latest_eid, sim_score, p["title"][:50],
                     )
         except Exception as e:
             logger.debug("semantic_dedup_failed: %s", e)
 
-        # #114: build URL-safe slug. Strip non-alphanumeric, collapse
-        # separators, trim edges. Falls back to "untitled" if title is
-        # empty/all-punctuation so entry_id always has a middle segment.
-        _slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
+        _slug = re.sub(r"[^a-z0-9]+", "-", p["title"].lower()).strip("-")[:60]
         topic_slug = _slug or "untitled"
-        entry_id = f"scaffold-{topic_slug}-{ch[:8]}"
+        entry_id = f"scaffold-{topic_slug}-{p['ch'][:8]}"
 
         row = [{
             "entry_id": entry_id,
-            "title": title,
-            "canonical_text": content,
+            "title": p["title"],
+            "canonical_text": p["content"],
             "domain": domain,
-            "domain_tags": domain_tags,
-            "confidence_score": float(confidence),
-            "source_type": source_type,
-            "source_url": source_url,
-            "content_hash": ch,
+            "domain_tags": p["domain_tags"],
+            "confidence_score": float(p["confidence"]),
+            "source_type": p["source_type"],
+            "source_url": p["source_url"],
+            "content_hash": p["ch"],
             "model_id": settings.model_embedder_id,
             "version": new_version,
             "supersedes_id": new_supersedes,
             "created_at": now,
             "updated_at": now,
-            "expires_at": compute_expires_at(source_type, now),
+            "expires_at": compute_expires_at(p["source_type"], now),
             "dense_vector": vector,
         }]
 
         try:
             await loop.run_in_executor(
-                None, lambda r=row: collection.insert(r)
+                None, lambda r=row: collection.upsert(r)
             )
             if new_supersedes:
                 stats["versioned"] += 1
             else:
                 stats["new"] += 1
         except Exception as e:
-            logger.warning("ingest_insert_failed: %s", e)
+            logger.warning("ingest_upsert_failed: %s", e)
 
     inserted = stats["new"] + stats["versioned"]
     if inserted > 0:
         await loop.run_in_executor(None, collection.flush)
         logger.info(
             "ingested %d (new=%d versioned=%d rejected=%d hash_skipped=%d) into toon_v2",
-            inserted, stats["new"], stats["versioned"], stats["rejected"], stats["skipped_hash"],  # #117 skipped_empty in stats dict
+            inserted, stats["new"], stats["versioned"], stats["rejected"], stats["skipped_hash"],
         )
 
     return stats

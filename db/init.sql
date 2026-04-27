@@ -192,3 +192,10 @@ BEGIN
     END IF;
 END;
 $$;
+
+-- Migration tracking table (also created by app/migrations.py on first run).
+-- Declared here so fresh DB init has it available before the runner executes.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    filename   TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

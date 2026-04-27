@@ -60,7 +60,7 @@ def test_compute_expires_at_zero_is_treated_as_explicit_not_sentinel():
 async def test_sweep_expired_returns_ok_on_empty():
     fake_col = MagicMock()
     fake_col.query.return_value = []
-    with patch.object(staleness, "_get_collection", return_value=fake_col):
+    with patch.object(staleness, "get_collection", return_value=fake_col):
         result = await staleness.sweep_expired()
     assert result["status"] == "ok"
     assert result["expired_count"] == 0
@@ -80,7 +80,7 @@ async def test_sweep_expired_deletes_and_returns_titles():
         ],
         [],
     ]
-    with patch.object(staleness, "_get_collection", return_value=fake_col):
+    with patch.object(staleness, "get_collection", return_value=fake_col):
         result = await staleness.sweep_expired()
 
     assert result["status"] == "ok"
@@ -100,7 +100,7 @@ async def test_sweep_expired_paginates():
     page1 = [{"entry_id": f"id{i}", "title": f"T{i}"} for i in range(1000)]
     page2 = [{"entry_id": f"id{i}", "title": f"T{i}"} for i in range(1000, 1005)]
     fake_col.query.side_effect = [page1, page2]
-    with patch.object(staleness, "_get_collection", return_value=fake_col):
+    with patch.object(staleness, "get_collection", return_value=fake_col):
         result = await staleness.sweep_expired()
     assert result["expired_count"] == 1005
     assert fake_col.query.call_count == 2
@@ -113,7 +113,7 @@ async def test_sweep_expired_caps_titles_at_50():
     fake_col = MagicMock()
     entries = [{"entry_id": f"id{i}", "title": f"T{i}"} for i in range(120)]
     fake_col.query.side_effect = [entries, []]
-    with patch.object(staleness, "_get_collection", return_value=fake_col):
+    with patch.object(staleness, "get_collection", return_value=fake_col):
         result = await staleness.sweep_expired()
     assert result["expired_count"] == 120
     assert len(result["deleted"]) == 50
@@ -128,7 +128,7 @@ async def test_sweep_expired_escapes_quotes_in_ids():
         [{"entry_id": 'has"quote', "title": "Weird"}],
         [],
     ]
-    with patch.object(staleness, "_get_collection", return_value=fake_col):
+    with patch.object(staleness, "get_collection", return_value=fake_col):
         await staleness.sweep_expired()
     # The delete expression must escape the inner quote so Milvus can parse it
     expr = fake_col.delete.call_args.kwargs.get("expr") or fake_col.delete.call_args.args[0]
@@ -138,6 +138,6 @@ async def test_sweep_expired_escapes_quotes_in_ids():
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_sweep_expired_returns_error_when_collection_unavailable():
-    with patch.object(staleness, "_get_collection", return_value=None):
+    with patch.object(staleness, "get_collection", return_value=None):
         result = await staleness.sweep_expired()
     assert result["status"] == "error"

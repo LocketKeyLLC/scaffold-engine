@@ -89,13 +89,13 @@ class TestStatsTruncation:
     @pytest.mark.asyncio
     async def test_stats_reports_truncated(self):
         fake_col = MagicMock()
-        fake_col.num_entities = 500_000
         page = [
             {"title": f"t{i}", "domain": "rag", "domain_tags": ["x"], "source_type": "tech_docs"}
             for i in range(16384)
         ]
         fake_col.query.return_value = page
         with patch.object(gt_browser, "_get_collection", return_value=fake_col), \
+             patch.object(gt_browser, "_count_entries", return_value=500_000), \
              patch.object(gt_browser.settings, "gt_stats_scan_limit", 16384):
             result = await gt_browser.gt_stats()
         assert result["truncated"] is True
@@ -105,11 +105,11 @@ class TestStatsTruncation:
     @pytest.mark.asyncio
     async def test_stats_not_truncated_when_all_scanned(self):
         fake_col = MagicMock()
-        fake_col.num_entities = 100
         fake_col.query.return_value = [
             {"title": "t", "domain": "rag", "domain_tags": ["x"], "source_type": "tech_docs"}
         ] * 100
-        with patch.object(gt_browser, "_get_collection", return_value=fake_col):
+        with patch.object(gt_browser, "_get_collection", return_value=fake_col), \
+             patch.object(gt_browser, "_count_entries", return_value=100):
             result = await gt_browser.gt_stats()
         assert result["truncated"] is False
         assert result["scanned"] == 100

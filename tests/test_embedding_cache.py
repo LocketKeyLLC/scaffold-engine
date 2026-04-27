@@ -44,12 +44,14 @@ def test_encoded_size_is_four_bytes_per_dim():
 
 
 # ---------------------------------------------------------------------------
-# Cache key
+# Cache key — now embedv3 with :d{dim}: segment
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
-def test_cache_key_uses_embedv2_prefix():
-    c = EmbeddingCache()
-    assert c._cache_key("anything").startswith("embedv2:")
+def test_cache_key_uses_embedv3_prefix_and_dim_segment():
+    c = EmbeddingCache(dim=512)
+    k = c._cache_key("anything")
+    assert k.startswith("embedv3:")
+    assert ":d512:" in k
 
 
 @pytest.mark.smoke
@@ -65,49 +67,56 @@ def test_cache_key_differs_by_model_id():
     assert c1._cache_key("same text") != c2._cache_key("same text")
 
 
+@pytest.mark.smoke
+def test_cache_key_differs_by_dim():
+    c1 = EmbeddingCache(dim=512)
+    c2 = EmbeddingCache(dim=768)
+    assert c1._cache_key("same text") != c2._cache_key("same text")
+
+
 # ---------------------------------------------------------------------------
 # get / put hit-miss + tiering
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_get_returns_none_on_total_miss():
-    c = EmbeddingCache()
+    c = EmbeddingCache(dim=512)
     fake_redis = AsyncMock()
     fake_redis.get.return_value = None
     with patch.object(c, "_get_redis", AsyncMock(return_value=fake_redis)):
         result = await c.get("never-seen")
     assert result is None
     assert c._misses == 1
-    assert c._hits == 0
+    assert c.hits == 0
 
 
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_get_hits_memory_tier_after_put():
-    c = EmbeddingCache()
+    c = EmbeddingCache(dim=512)
     emb = [0.1] * 512
     fake_redis = AsyncMock()
     with patch.object(c, "_get_redis", AsyncMock(return_value=fake_redis)):
         await c.put("text", emb)
         result = await c.get("text")
     assert result == emb
-    assert c._hits == 1
-    # Memory hit should NOT touch Redis
+    assert c._l1_hits == 1
+    assert c._l2_hits == 0
     fake_redis.get.assert_not_called()
 
 
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_get_falls_back_to_redis_tier_and_populates_memory():
-    c = EmbeddingCache()
+    c = EmbeddingCache(dim=512)
     emb = [0.25] * 512
     fake_redis = AsyncMock()
     fake_redis.get.return_value = _encode_embedding(emb)
     with patch.object(c, "_get_redis", AsyncMock(return_value=fake_redis)):
         result = await c.get("text")
     assert result == pytest.approx(emb, rel=1e-5)
-    assert c._hits == 1
-    # Memory tier should now contain it
+    assert c._l1_hits == 0
+    assert c._l2_hits == 1
     key = c._cache_key("text")
     assert key in c._memory
 
@@ -115,34 +124,82 @@ async def test_get_falls_back_to_redis_tier_and_populates_memory():
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_put_calls_setex_with_ttl():
-    c = EmbeddingCache()
+    c = EmbeddingCache(dim=512)
     fake_redis = AsyncMock()
     with patch.object(c, "_get_redis", AsyncMock(return_value=fake_redis)):
         await c.put("text", [0.1] * 512)
     fake_redis.setex.assert_awaited_once()
     args, _ = fake_redis.setex.call_args
     # args = (key, ttl_seconds, blob)
-    assert args[0].startswith("embedv2:")
+    assert args[0].startswith("embedv3:")
+    assert ":d512:" in args[0]
     assert isinstance(args[1], int) and args[1] > 0
     assert isinstance(args[2], bytes)
 
 
 # ---------------------------------------------------------------------------
-# LRU eviction (#128)
+# Dim validation
+# ---------------------------------------------------------------------------
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_put_rejects_dim_mismatch():
+    c = EmbeddingCache(dim=512)
+    fake_redis = AsyncMock()
+    with patch.object(c, "_get_redis", AsyncMock(return_value=fake_redis)):
+        await c.put("text", [0.1] * 10)
+    assert c._dim_mismatches == 1
+    assert len(c._memory) == 0
+    fake_redis.setex.assert_not_awaited()
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_get_drops_payload_on_dim_mismatch():
+    c = EmbeddingCache(dim=512)
+    # Redis returns a 10-dim blob where we expect 512
+    bad = _encode_embedding([0.1] * 10)
+    fake_redis = AsyncMock()
+    fake_redis.get.return_value = bad
+    with patch.object(c, "_get_redis", AsyncMock(return_value=fake_redis)):
+        result = await c.get("text")
+    assert result is None
+    assert c._misses == 1
+    assert c._dim_mismatches == 1
+    fake_redis.delete.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# LRU eviction (#128) — now also covers repeat-put refresh
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_memory_lru_evicts_oldest(monkeypatch):
     monkeypatch.setattr(ec.settings, "embedding_cache_memory_size", 2)
-    c = EmbeddingCache()
+    c = EmbeddingCache(dim=1)
     fake_redis = AsyncMock()
     with patch.object(c, "_get_redis", AsyncMock(return_value=fake_redis)):
         await c.put("a", [0.1])
         await c.put("b", [0.2])
-        await c.put("c", [0.3])  # should evict "a"
+        await c.put("c", [0.3])  # evicts "a"
     assert len(c._memory) == 2
     assert c._evictions == 1
     assert c._cache_key("a") not in c._memory
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_repeat_put_refreshes_lru_position(monkeypatch):
+    monkeypatch.setattr(ec.settings, "embedding_cache_memory_size", 2)
+    c = EmbeddingCache(dim=1)
+    fake_redis = AsyncMock()
+    with patch.object(c, "_get_redis", AsyncMock(return_value=fake_redis)):
+        await c.put("a", [0.1])
+        await c.put("b", [0.2])
+        await c.put("a", [0.15])  # repeat — refresh "a" to most-recent
+        await c.put("c", [0.3])   # should evict "b", not "a"
+    assert c._cache_key("a") in c._memory
+    assert c._cache_key("b") not in c._memory
+    assert c._cache_key("c") in c._memory
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +208,7 @@ async def test_memory_lru_evicts_oldest(monkeypatch):
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_redis_failure_counter_resets_on_success():
-    c = EmbeddingCache()
+    c = EmbeddingCache(dim=512)
     c._redis_failures = 2
     fake_redis = AsyncMock()
     fake_redis.get.return_value = None
@@ -163,7 +220,7 @@ async def test_redis_failure_counter_resets_on_success():
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_redis_failure_counter_increments_on_error():
-    c = EmbeddingCache()
+    c = EmbeddingCache(dim=512)
     fake_redis = AsyncMock()
     fake_redis.get.side_effect = ConnectionError("nope")
     with patch.object(c, "_get_redis", AsyncMock(return_value=fake_redis)):
@@ -173,16 +230,21 @@ async def test_redis_failure_counter_increments_on_error():
 
 
 # ---------------------------------------------------------------------------
-# Stats exposed (#128)
+# Stats exposed (#128) — L1/L2 split
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
-def test_stats_exposes_counters():
+def test_stats_exposes_l1_l2_counters():
     c = EmbeddingCache()
-    c._hits = 3
+    c._l1_hits = 2
+    c._l2_hits = 1
     c._misses = 7
     c._evictions = 2
+    c._dim_mismatches = 1
     stats = c.stats
+    assert stats["l1_hits"] == 2
+    assert stats["l2_hits"] == 1
     assert stats["hits"] == 3
     assert stats["misses"] == 7
     assert stats["evictions"] == 2
+    assert stats["dim_mismatches"] == 1
     assert stats["hit_rate"] == pytest.approx(0.3)

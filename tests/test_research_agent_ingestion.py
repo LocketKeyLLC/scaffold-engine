@@ -17,8 +17,7 @@ class TestIngestionBreakdown:
         fake_entries = [{"content": "fact", "facet": "x", "source": "http://a"}]
         fake_stats = {"new": 3, "versioned": 2, "rejected": 1, "skipped_hash": 4}
 
-        with patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
-             patch("app.modules.research_agent._create_session", new_callable=AsyncMock, return_value="sess-1"), \
+        with patch("app.modules.research_agent._guard_and_create_session", new_callable=AsyncMock, return_value=("sess-1", None)), \
              patch("app.modules.research_agent._update_session_iteration", new_callable=AsyncMock), \
              patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
              patch("app.modules.research_agent._decompose_topic", new_callable=AsyncMock,
@@ -66,8 +65,7 @@ class TestIngestionBreakdown:
             {"coverage_pct": 100, "gap_queries": []},
         ]
 
-        with patch("app.modules.research_agent._guard_concurrent", new_callable=AsyncMock, return_value=None), \
-             patch("app.modules.research_agent._create_session", new_callable=AsyncMock, return_value="sess-2"), \
+        with patch("app.modules.research_agent._guard_and_create_session", new_callable=AsyncMock, return_value=("sess-2", None)), \
              patch("app.modules.research_agent._update_session_iteration", new_callable=AsyncMock), \
              patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
              patch("app.modules.research_agent._decompose_topic", new_callable=AsyncMock,

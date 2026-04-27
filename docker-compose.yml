@@ -10,12 +10,13 @@ services:
     environment:
       - OLLAMA_BASE_URL=http://172.18.0.1:11434
       - OPENAI_API_BASE_URLS=http://pipelines:9099
-      - OPENAI_API_KEYS=0p3n-w3bu!
-      - RESET_CONFIG_ON_START=true
+      - OPENAI_API_KEYS=${OPENWEBUI_PIPELINES_KEY:?OPENWEBUI_PIPELINES_KEY is required}
+      - RESET_CONFIG_ON_START=false
       - USE_OLLAMA_DOCKER=false
-      - WEBUI_SECRET_KEY=
-      - AIOHTTP_CLIENT_TIMEOUT=7200
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?WEBUI_SECRET_KEY is required}
       - DEFAULT_MODELS=scaffold_router
+    env_file:
+      - .env
     volumes:
       - open-webui:/app/backend/data
     restart: always
@@ -26,6 +27,10 @@ services:
     container_name: open-webui-pipelines
     ports:
       - "9099:9099"
+    environment:
+      - PIPELINES_API_KEY=${OPENWEBUI_PIPELINES_KEY:?OPENWEBUI_PIPELINES_KEY is required}
+    env_file:
+      - .env
     volumes:
       - ./pipelines:/app/pipelines
     restart: always
@@ -45,11 +50,13 @@ services:
     image: postgres:16
     container_name: scaffold-postgres
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_DB: scaffold_engine
       POSTGRES_USER: ${POSTGRES_USER:-scaffold}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scaffold_dev_pw}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    env_file:
+      - .env
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -66,11 +73,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: runtime
     container_name: scaffold-orchestrator
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-scaffold}:${POSTGRES_PASSWORD:-scaffold_dev_pw}@scaffold-postgres:5432/scaffold_engine
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-scaffold}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@scaffold-postgres:5432/scaffold_engine
       OLLAMA_BASE_URL: http://172.18.0.1:11434
       MILVUS_URI: http://milvus-standalone:19530
       SEARXNG_URL: http://searxng:8080
@@ -86,20 +94,20 @@ services:
       MODEL_VERIFIER: qwen2.5:7b
       MODEL_CLOUD_ALT: qwen3.5:397b-cloud
       MODEL_FALLBACK: qwen3.5:latest
-      CLOUD_TIMEOUT: "600"
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_MAX_FILES: "50"
-      GITHUB_TIMEOUT: "30"
-      LOCAL_TIMEOUT: "1800"
       HF_HOME: /code/.cache/huggingface
       MAX_RETRIES: "3"
       HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
       HF_HUB_VERBOSITY: "error"
       TOKENIZERS_PARALLELISM: "false"
-      SCAFFOLD_API_KEY: "${SCAFFOLD_API_KEY}"
+      SCAFFOLD_API_KEY: "${SCAFFOLD_API_KEY:?SCAFFOLD_API_KEY is required (or set SCAFFOLD_AUTH_DISABLED=1)}"
+      SCAFFOLD_AUTH_DISABLED: "${SCAFFOLD_AUTH_DISABLED:-0}"
       SCHEDULER_ENABLED: "true"
       SCHEDULER_TIMEZONE: "UTC"
+    env_file:
+      - .env
     volumes:
       - ./app:/code/app:ro
       - ./tests:/code/tests:ro

@@ -78,12 +78,17 @@ class TestExecuteIterationLoop:
         state = ResearchState(topic="t", depth="shallow")
         state.outline_facets = ["f"]
 
+        # _extract_entries is wrapped in asyncio.create_task() inside the loop.
+        # AsyncMock + create_task leaves an inner mock coroutine un-awaited
+        # (PytestUnraisableExceptionWarning). Use a plain async fn via side_effect.
+        async def _fake_extract(*_a, **_kw):
+            return [{"title": "T", "content": "C", "source": "http://a", "facet": "f"}]
+
         with patch("app.modules.research_agent._search_queries",
                    new_callable=AsyncMock,
                    return_value=[{"url": "http://a", "title": "t", "content": "c", "facet": "f"}]), \
              patch("app.modules.research_agent._extract_entries",
-                   new_callable=AsyncMock,
-                   return_value=[{"title": "T", "content": "C", "source": "http://a", "facet": "f"}]), \
+                   side_effect=_fake_extract), \
              patch("app.modules.research_agent._analyze_gaps",
                    new_callable=AsyncMock,
                    return_value={"coverage_pct": 100, "gap_queries": []}), \
@@ -115,12 +120,15 @@ class TestExecuteIterationLoop:
         state = ResearchState(topic="t", depth="medium")  # 2 iterations max
         state.outline_facets = ["f"]
 
+        # See note in sibling test re: AsyncMock + create_task quirk.
+        async def _fake_extract(*_a, **_kw):
+            return [{"title": "T", "content": "C", "source": "http://a", "facet": "f"}]
+
         with patch("app.modules.research_agent._search_queries",
                    new_callable=AsyncMock,
                    return_value=[{"url": "http://a", "title": "t", "content": "c", "facet": "f"}]), \
              patch("app.modules.research_agent._extract_entries",
-                   new_callable=AsyncMock,
-                   return_value=[{"title": "T", "content": "C", "source": "http://a", "facet": "f"}]), \
+                   side_effect=_fake_extract), \
              patch("app.modules.research_agent._analyze_gaps",
                    new_callable=AsyncMock,
                    return_value={

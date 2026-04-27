@@ -78,6 +78,8 @@ def _make_result(rows):
     """Create a mock result that iterates over rows."""
     result = MagicMock()
     result.__iter__ = lambda self: iter(rows)
+    # New COUNT(*) call in get_logs expects .scalar() -> int
+    result.scalar = MagicMock(return_value=len(rows))
     result.first = lambda: rows[0] if rows else None
     return result
 
@@ -193,7 +195,7 @@ class TestGetStatus:
         count_rows = [_make_row(status="planning", cnt=1)]
         jobs_rows = [
             _make_row(
-                id="job-null",
+                id="55555555-5555-4555-8555-555555555555",
                 status="planning",
                 node_count=0,
                 created_at=None,
@@ -243,12 +245,13 @@ class TestGetLogs:
 
         job_result = _make_result([job_row])
         nodes_result = _make_result(node_rows)
-        db = _make_db([job_result, nodes_result])
+        count_result = _make_result(node_rows)
+        db = _make_db([job_result, count_result, nodes_result])
 
-        resp = await get_logs(job_id="test-job-1", include_output=False, db=db)
+        resp = await get_logs(job_id="11111111-1111-4111-8111-111111111111", include_output=False, include_compiled=True, db=db, limit=100, offset=0)
 
         assert isinstance(resp, LogsResponse)
-        assert resp.job_id == "test-job-1"
+        assert resp.job_id == "11111111-1111-4111-8111-111111111111"
         assert resp.job_status == "completed"
         assert resp.node_count == 2
         assert resp.compiled_output == "Final result here"
@@ -264,7 +267,7 @@ class TestGetLogs:
         db = _make_db([empty_result])
 
         with pytest.raises(HTTPException) as exc_info:
-            await get_logs(job_id="nonexistent", include_output=False, db=db)
+            await get_logs(job_id="22222222-2222-4222-8222-222222222222", include_output=False, db=db, limit=100, offset=0)
 
         assert exc_info.value.status_code == 404
         assert "Job not found" in exc_info.value.detail
@@ -287,9 +290,9 @@ class TestGetLogs:
             ),
         ]
 
-        db = _make_db([_make_result([job_row]), _make_result(node_rows)])
+        db = _make_db([_make_result([job_row]), _make_result(node_rows), _make_result(node_rows)])
 
-        resp = await get_logs(job_id="job-trunc", include_output=False, db=db)
+        resp = await get_logs(job_id="33333333-3333-4333-8333-333333333333", include_output=False, db=db, limit=100, offset=0)
 
         assert len(resp.nodes[0].output_preview) == 501  # 500 + "…"
         assert resp.nodes[0].output_preview.endswith("…")
@@ -312,9 +315,9 @@ class TestGetLogs:
             ),
         ]
 
-        db = _make_db([_make_result([job_row]), _make_result(node_rows)])
+        db = _make_db([_make_result([job_row]), _make_result(node_rows), _make_result(node_rows)])
 
-        resp = await get_logs(job_id="job-full", include_output=True, db=db)
+        resp = await get_logs(job_id="44444444-4444-4444-8444-444444444444", include_output=True, db=db, limit=100, offset=0)
 
         assert resp.nodes[0].output_preview == long_output
 
@@ -335,9 +338,9 @@ class TestGetLogs:
             ),
         ]
 
-        db = _make_db([_make_result([job_row]), _make_result(node_rows)])
+        db = _make_db([_make_result([job_row]), _make_result(node_rows), _make_result(node_rows)])
 
-        resp = await get_logs(job_id="job-null", include_output=False, db=db)
+        resp = await get_logs(job_id="55555555-5555-4555-8555-555555555555", include_output=False, db=db, limit=100, offset=0)
 
         assert resp.nodes[0].output_preview is None
 
@@ -346,9 +349,9 @@ class TestGetLogs:
         """Job with no DAG nodes returns empty node list."""
         job_row = _make_row(status="planning", compiled_output=None)
 
-        db = _make_db([_make_result([job_row]), _make_result([])])
+        db = _make_db([_make_result([job_row]), _make_result([]), _make_result([])])
 
-        resp = await get_logs(job_id="job-empty", include_output=False, db=db)
+        resp = await get_logs(job_id="66666666-6666-4666-8666-666666666666", include_output=False, db=db, limit=100, offset=0)
 
         assert resp.node_count == 0
         assert resp.nodes == []
@@ -366,9 +369,9 @@ class TestGetLogs:
                       domain=None, output_text="error", confidence=None, updated_at=None),
         ]
 
-        db = _make_db([_make_result([job_row]), _make_result(node_rows)])
+        db = _make_db([_make_result([job_row]), _make_result(node_rows), _make_result(node_rows)])
 
-        resp = await get_logs(job_id="job-ordered", include_output=False, db=db)
+        resp = await get_logs(job_id="77777777-7777-4777-8777-777777777777", include_output=False, db=db, limit=100, offset=0)
 
         keys = [n.node_key for n in resp.nodes]
         assert keys == ["T1", "T2", "T3"]

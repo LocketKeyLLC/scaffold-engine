@@ -12,7 +12,7 @@ API_URL   ?= http://localhost:8000
 ## Testing
 ## ──────────────────────────────────────────────
 
-test: ## Run all tests in Docker (57+ passing)
+test: ## Run all tests in Docker (~547 passing, 31 skipped)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v
 
 agent: ## Run execution agent tests only
@@ -27,7 +27,7 @@ bench: ## Run performance benchmark suite
 ci: ## Run CI-safe tests (no live Ollama/Milvus needed)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v \
 		--ignore=tests/eval_retrieval.py \
-		-k "not integration"
+		-m "not validate"
 
 ## ──────────────────────────────────────────────
 ## Build & Ops
@@ -74,3 +74,6 @@ help: ## Show this help
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 .DEFAULT_GOAL := help
+
+migrate: ## Apply pending DB migrations inside the orchestrator container
+	docker exec scaffold-orchestrator python -m app.migrations

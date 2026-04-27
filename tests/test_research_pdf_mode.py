@@ -176,8 +176,7 @@ class TestRunResearchPdf:
             error=None,
         )
 
-        with patch.object(ra, "_guard_concurrent", AsyncMock(return_value=None)), \
-             patch.object(ra, "_create_session", AsyncMock(return_value=100)), \
+        with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(100), None))), \
              patch.object(ra.model_router, "generate", AsyncMock(return_value=fake_llm)), \
              patch.object(ra, "ingest_entries", AsyncMock(return_value={"new": 1, "versioned": 0, "rejected": 0, "skipped_hash": 0})), \
              patch.object(ra, "_generate_summary", AsyncMock(return_value="summary")), \
@@ -205,8 +204,7 @@ class TestRunResearchPdf:
     @pytest.mark.asyncio
     async def test_oversize_pdf_rejected(self):
         big_pdf = b"X" * (21 * 1024 * 1024)  # 21 MB
-        with patch.object(ra, "_guard_concurrent", AsyncMock(return_value=None)), \
-             patch.object(ra, "_create_session", AsyncMock(return_value=101)), \
+        with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(101), None))), \
              patch.object(ra, "_finalize_session", AsyncMock()):
 
             events = []
@@ -223,8 +221,7 @@ class TestRunResearchPdf:
     @pytest.mark.asyncio
     async def test_scanned_pdf_emits_error(self):
         pdf_bytes = _make_test_pdf("x " * 5)
-        with patch.object(ra, "_guard_concurrent", AsyncMock(return_value=None)), \
-             patch.object(ra, "_create_session", AsyncMock(return_value=102)), \
+        with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(102), None))), \
              patch.object(ra, "_extract_pdf_text", AsyncMock(side_effect=RuntimeError("PDF appears to be scanned"))), \
              patch.object(ra, "_finalize_session", AsyncMock()):
 
@@ -241,7 +238,7 @@ class TestRunResearchPdf:
     @pytest.mark.asyncio
     async def test_concurrent_research_blocked(self):
         existing = {"id": "xxx", "topic": "other research"}
-        with patch.object(ra, "_guard_concurrent", AsyncMock(return_value=existing)):
+        with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(None, existing))):
             events = []
             async for blob in ra.run_research_pdf(b"fake", filename="blocked.pdf"):
                 events.append(blob)
@@ -259,8 +256,7 @@ class TestRunResearchPdf:
         extract_mock = AsyncMock(return_value=("extracted text " * 40, 1, "plumber"))
         fake_llm = MagicMock(success=True, text='[]', error=None)
 
-        with patch.object(ra, "_guard_concurrent", AsyncMock(return_value=None)), \
-             patch.object(ra, "_create_session", AsyncMock(return_value=103)), \
+        with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(103), None))), \
              patch.object(ra, "_extract_pdf_text", extract_mock), \
              patch.object(ra.model_router, "generate", AsyncMock(return_value=fake_llm)), \
              patch.object(ra, "ingest_entries", AsyncMock(return_value={"new": 0, "versioned": 0, "rejected": 0, "skipped_hash": 0})), \
@@ -277,12 +273,11 @@ class TestRunResearchPdf:
     @pytest.mark.asyncio
     async def test_domain_override(self):
         pdf_bytes = _make_test_pdf("content " * 50)
-        create_session_mock = AsyncMock(return_value=104)
+        guard_mock = AsyncMock(return_value=("sid-104", None))
         ingest_mock = AsyncMock(return_value={"new": 1, "versioned": 0, "rejected": 0, "skipped_hash": 0})
         fake_llm = MagicMock(success=True, text='[{"title":"T","content":"C","tags":"","source":"pdf://x.pdf","source_type":"tech_docs"}]', error=None)
 
-        with patch.object(ra, "_guard_concurrent", AsyncMock(return_value=None)), \
-             patch.object(ra, "_create_session", create_session_mock), \
+        with patch.object(ra, "_guard_and_create_session", guard_mock), \
              patch.object(ra.model_router, "generate", AsyncMock(return_value=fake_llm)), \
              patch.object(ra, "ingest_entries", ingest_mock), \
              patch.object(ra, "_generate_summary", AsyncMock(return_value="s")), \
@@ -293,7 +288,7 @@ class TestRunResearchPdf:
                 pass
 
             # session created with spec domain
-            args = create_session_mock.call_args.args
+            args = guard_mock.call_args.args
             assert "spec" in args
 
             # ingest called with spec domain

@@ -110,7 +110,7 @@ class TestSSEWireFormat:
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job",
                    AsyncMock(return_value={"status": "executing", "id": "j1"})), \
-             patch("app.modules.execution_agent._get_next_node",
+             patch("app.modules.execution_agent._peek_next_node",
                    AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
              patch("app.modules.execution_agent.execute_next_node",
                    AsyncMock(side_effect=[_done("T1", "X"), _COMPLETE])):
@@ -126,7 +126,7 @@ class TestSSEWireFormat:
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job",
                    AsyncMock(return_value={"status": "executing", "id": "j1"})), \
-             patch("app.modules.execution_agent._get_next_node",
+             patch("app.modules.execution_agent._peek_next_node",
                    AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
              patch("app.modules.execution_agent.execute_next_node",
                    AsyncMock(side_effect=[_done("T1", "X"), _COMPLETE])):
@@ -144,7 +144,7 @@ class TestSSEWireFormat:
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job",
                    AsyncMock(return_value={"status": "executing", "id": "j1"})), \
-             patch("app.modules.execution_agent._get_next_node",
+             patch("app.modules.execution_agent._peek_next_node",
                    AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
              patch("app.modules.execution_agent.execute_next_node",
                    AsyncMock(side_effect=[_done("T1", "X"), _COMPLETE])):
@@ -168,7 +168,7 @@ class TestEventSequenceContract:
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job",
                    AsyncMock(return_value={"status": "executing", "id": "j1"})), \
-             patch("app.modules.execution_agent._get_next_node",
+             patch("app.modules.execution_agent._peek_next_node",
                    AsyncMock(side_effect=[
                        _node("T1", "A", "LLM"),
                        _node("T2", "B", "SearXNG"),
@@ -191,7 +191,7 @@ class TestEventSequenceContract:
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job",
                    AsyncMock(return_value={"status": "executing", "id": "j1"})), \
-             patch("app.modules.execution_agent._get_next_node",
+             patch("app.modules.execution_agent._peek_next_node",
                    AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
              patch("app.modules.execution_agent.execute_next_node",
                    AsyncMock(side_effect=[_failed("T1", "X"), _COMPLETE])):
@@ -209,7 +209,7 @@ class TestEventSequenceContract:
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job",
                    AsyncMock(return_value={"status": "executing", "id": "j1"})), \
-             patch("app.modules.execution_agent._get_next_node",
+             patch("app.modules.execution_agent._peek_next_node",
                    AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
              patch("app.modules.execution_agent.execute_next_node",
                    AsyncMock(side_effect=[_done("T1", "X"), _COMPLETE])):
@@ -232,7 +232,7 @@ class TestPipelineCompleteStructure:
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job",
                    AsyncMock(return_value={"status": "executing", "id": "j1"})), \
-             patch("app.modules.execution_agent._get_next_node",
+             patch("app.modules.execution_agent._peek_next_node",
                    AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
              patch("app.modules.execution_agent.execute_next_node",
                    AsyncMock(side_effect=[result, _COMPLETE])):
@@ -314,7 +314,7 @@ class TestNodeStartEvent:
         with patch("app.modules.execution_agent.async_session", mock_session), \
              patch("app.modules.execution_agent._get_job",
                    AsyncMock(return_value={"status": "executing", "id": "j1"})), \
-             patch("app.modules.execution_agent._get_next_node",
+             patch("app.modules.execution_agent._peek_next_node",
                    AsyncMock(side_effect=[
                        _node("T1", "Research", "Milvus"), None])), \
              patch("app.modules.execution_agent.execute_next_node",

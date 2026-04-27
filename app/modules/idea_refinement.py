@@ -22,6 +22,8 @@ from app.utils.llm_parsing import parse_json_object
 
 logger = logging.getLogger("scaffold.refine")
 
+ALLOWED_DOMAINS = {"prompt", "rag", "llm", "spec", "eng"}
+
 # ---------------------------------------------------------------------------
 # Refinement prompt
 # ---------------------------------------------------------------------------
@@ -60,6 +62,25 @@ Return ONLY the JSON object. No preamble, no markdown."""
 # Core refinement logic
 # ---------------------------------------------------------------------------
 
+
+def _truncate_title(text_in: str, max_chars: int = 80) -> str:
+    """Trim a title to ``max_chars`` at a word boundary, appending an ellipsis.
+
+    Returns ``text_in`` unchanged if it already fits. If trimming lands
+    inside a word, walks back to the previous space; if there is no space
+    in the budget, falls back to a hard cut. The ellipsis (…) is
+    counted against ``max_chars``.
+    """
+    t = (text_in or "").strip()
+    if len(t) <= max_chars:
+        return t
+    budget = max_chars - 1  # reserve 1 char for the ellipsis
+    cut = t[:budget]
+    space = cut.rfind(" ")
+    if space >= max_chars // 2:  # only walk back if it's not absurdly short
+        cut = cut[:space]
+    return cut.rstrip(" ,;:.-") + "…"
+
 async def refine_idea(
     idea_text: str,
     db: AsyncSession,
@@ -72,34 +93,38 @@ async def refine_idea(
 
     Returns dict with job_id, status, and refined_brief.
     """
-    # 1. Create job record in pending state
+    # 0. Validate domain override if supplied
+    if domain is not None and domain not in ALLOWED_DOMAINS:
+        raise ValueError(
+            f"invalid domain override {domain!r}; allowed: {sorted(ALLOWED_DOMAINS)}"
+        )
+
+    # 1. Create job directly in 'refining' state (single INSERT, single commit)
     result = await db.execute(
         text("""
             INSERT INTO jobs (title, input_text, status)
-            VALUES (:title, :input_text, 'pending')
+            VALUES (:title, :input_text, 'refining')
             RETURNING id
         """),
-        {"title": idea_text[:80], "input_text": idea_text},
+        {"title": _truncate_title(idea_text), "input_text": idea_text},
     )
     job_id = result.scalar_one()
-    logger.info("job_created: job=%s", job_id)
-
-    # 2. Transition to refining
-    await db.execute(
-        text("UPDATE jobs SET status = 'refining' WHERE id = :id"),
-        {"id": job_id},
-    )
     await db.commit()
+    logger.info("job_created: job=%s status=refining", job_id)
 
-    # 3. Call LLM for structured brief
+    # 2. Call LLM for structured brief (guarded)
     prompt = REFINE_PROMPT.format(idea=idea_text)
-    resp = await model_router.generate(
-        prompt,
-        model=model or get_model("model_general", model_overrides),
-        system=REFINE_SYSTEM,
-        temperature=0.3,
-        max_tokens=2048,
-    )
+    try:
+        resp = await model_router.generate(
+            prompt,
+            model=model or get_model("model_general", model_overrides),
+            system=REFINE_SYSTEM,
+            temperature=0.3,
+            max_tokens=2048,
+        )
+    except Exception as e:
+        await _fail_job(db, job_id, f"LLM refinement exception: {e}")
+        raise
 
     if not resp.success:
         await _fail_job(db, job_id, f"LLM refinement failed: {resp.error}")
@@ -109,7 +134,7 @@ async def refine_idea(
             "error": resp.error,
         }
 
-    # 4. Parse LLM output
+    # 3. Parse LLM output
     brief = parse_json_object(resp.text)
     if brief is None:
         await _fail_job(db, job_id, f"Failed to parse LLM output as JSON")
@@ -120,12 +145,12 @@ async def refine_idea(
             "raw_output": resp.text[:500],
         }
 
-    # 4b. Override domain if user supplied one
+    # 3b. Override domain if user supplied one
     if domain:
         brief["domain"] = domain
 
-    # 5. Update job with refined brief, transition to planning
-    title = brief.get("title", idea_text[:80])
+    # 4. Update job with refined brief, transition to planning
+    title = _truncate_title(brief.get("title") or idea_text)
     await db.execute(
         text("""
             UPDATE jobs

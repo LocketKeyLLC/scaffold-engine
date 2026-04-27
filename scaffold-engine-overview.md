@@ -1,8 +1,8 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 20, 2026
+**Last Updated:** April 25, 2026
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
-**Test Suite:** 390 passed + 22 skipped in-container + 58 pipeline + 18 valve + 18 gt_browser, 0 failed
+**Test Suite:** 547 passed + 31 skipped in-container (2 pre-existing auth failures, out-of-scope)
 **Codebase:** ~6,700 lines of application Python across 27 source files + ~2,100 lines across 5 pipelines
 
 ---
@@ -24,6 +24,23 @@ Scaffold Engine is a self-hosted **DAG orchestration engine for multi-step LLM w
 Runs entirely on local hardware (Pop!_OS, CPU-only inference) with no cloud dependencies for generation (heavy cloud models available as opt-in).
 
 ---
+
+## April 23 2026 — RAG pipeline hardening
+
+- **Domain contract:** `domain=None` fans out one `==` search per `VALID_DOMAINS` partition and merges (Milvus partition-key isolation rejects unfiltered exprs and `IN` exprs over the partition key). `domain=""` raises `ValueError`. No silent `"eng"` default anywhere.
+- **Keyword safety:** tokens restricted to `[a-z0-9]+` — strips LIKE wildcards (`%`, `_`), backslash, and quotes from the expr-interpolation path.
+- **Version chain:** on 0.90 ≤ sim < 0.95, walk forward to the latest version before linking (cap 8 hops). Prevents mid-chain supersede pointers.
+- **Upsert keyed on `entry_id`** replaces `insert` — closes the hash-check+insert race. Verified: 3 concurrent ingests of the same entry → exactly 1 row in Milvus.
+- **`_rrf_fuse`** uses `dataclasses.replace` — upstream `RagResult` instances are never mutated.
+- **Reranker empty-items fallback:** explicit WARNING + RRF fallback when `rr.items == [] and docs != []`.
+- **New `query_rag` metadata:** `warnings`, `reranker_backend`, `skipped_rerank`, `below_threshold`, `fell_back_to_top3`.
+- **Batch embedding** in `ingest_entries` with per-text cache lookup and serial fallback.
+- **Post-query supersedes sweep:** `supersedes_id IN (returned_ids)` DB lookup drops stale ancestors (closes overview issue #7).
+- **Embedding cache v3:** key now `embedv3:{model}:d{dim}:{hash}` — dim changes auto-invalidate. `_decode` + `put` validate length. Repeat-put refreshes LRU position. Stats now split `l1_hits` / `l2_hits`.
+- **Milvus utils:** `_auto_create_collection` wraps the client in try/finally for close. `get_collection` uses double-checked locking (no thundering herd). Cold load asserts `dim == 512` and primary `entry_id`.
+- **Config:** `Field(ge=…, le=…)` bounds on every timeout/budget/limit. `ROLE_FIELDS` frozenset gates `get_model()`. `sync_database_url` asserts the `postgresql+asyncpg://` prefix. New tunables: `rerank_{max_candidates,doc_truncate,warn_ms,error_ms}`, `version_chain_threshold`, `embedding_batch_size`.
+
+**Milvus state:** `toon_v2` holds 611 entities across partitions — `eng=218`, `llm=218`, `rag=175`, `prompt=0`, `spec=0`. The earlier "2 test entries" note is stale.
 
 ## Architecture
 
@@ -122,7 +139,7 @@ Additional endpoint (not a chat command): `POST /research/pdf` — direct PDF up
 | Cache | `redis:8-alpine` | `scaffold-redis` | 6379 |
 | Inference | Ollama (host-installed, CPU-only) | N/A | 11434 |
 
-All service images pinned by SHA256 digest. All pip dependencies pinned. Migrations run manually (no auto-migration on startup).
+All service images pinned by SHA256 digest. All pip dependencies pinned. **Migrations auto-run at lifespan startup** via `app.migrations.run_migrations()` (opt out: `SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false`).
 
 **Key timeouts:** Open WebUI `AIOHTTP_CLIENT_TIMEOUT=7200`; triage `3600s`; `/ideate` `1800s`; DAG `3600s`; orchestrator Ollama `600s`.
 
@@ -277,7 +294,7 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 | `apscheduler_jobs` | APScheduler internal jobstore |
 | *(+ 1 legacy/unused)* | — |
 
-**Migrations:** `db/migrations/002_*.sql` through `017_dag_nodes_is_output_node.sql`. Applied manually — no runner on startup.
+**Migrations:** `db/migrations/002_*.sql` through `017_dag_nodes_is_output_node.sql`. Applied at lifespan startup by `app.migrations.run_migrations()`; tracked in `schema_migrations` table.
 
 ---
 
@@ -374,12 +391,12 @@ CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval co
 8. **Transcript-based synthesis** — single-message transcript prevents replay confusion
 9. **Auto-chain on `/confirm`** — Phase 2 → DAG → execute all
 10. **Concurrent execution guard** — atomic `UPDATE` prevents duplicate job/session runs
-11. **Active-node-aware cleanup** — stale reaper skips jobs with running nodes
+10. **Active-node-aware cleanup** — stale reaper skips jobs with running nodes
 10. **Numeric DAG truncation** — sorts T1, T2, T3... numerically, not alphabetically
 11. **Upstream-last prompt assembly** — mandatory upstream context prepended, task instruction last
-12. **Env-first model configuration** — docker-compose env vars override config.py defaults
-13. **Short-lived database sessions** — independent session per operation, not request-scoped
-14. **Auto-retry on verify fail** — up to `max_retries`, then blocked with manual `/exec/retry`
+11. **Env-first model configuration** — docker-compose env vars override config.py defaults
+12. **Short-lived database sessions** — independent session per operation, not request-scoped
+13. **Auto-retry on verify fail** — up to `max_retries`, then blocked with manual `/exec/retry`
 17. **Tool-constrained DAG** — only LLM, CodeGen, SearXNG, Milvus; no Human/FileSystem
 18. **Model valve system** — 8 roles switchable via admin panel; overrides threaded per-request
 19. **3-tier ingestion** — dedup > 0.95, version chain 0.90–0.95, new < 0.90
@@ -397,7 +414,7 @@ CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval co
 ## Known Open Issues
 
 ### Infrastructure / Config
-1. **No migration runner on startup** — migrations must be applied manually via `psql`. Risk of drift between code and DB schema.
+1. *(resolved Apr 25 2026)* ~~No migration runner on startup~~ — `app/main.py` lifespan now invokes `run_migrations()` before first DB use; opt out with `SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false`.
 2. *(resolved Apr 18 2026)* ~~Scheduler timezone hardcoded UTC~~ — Per-schedule `timezone` column added (migration 016); threads through `CronTrigger.from_crontab`. Defaults to UTC.
 3. **Model stack drift** — `/health` surfaces Ollama models not in the documented table (qwen3.5 variants, glm-5.1, extra reranker quantizations). Reconciliation pass needed.
 
@@ -405,16 +422,15 @@ CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval co
 4. **Triage model latency on long conversations** — qwen3:4b on CPU scales with context; several minutes per turn once history grows.
 5. **Research duration on CPU** — shallow `/research` topic mode: 20–30 min. Medium/deep proportionally longer.
 6. **Reranker cold-load** — first invocation ~13.6s (HF cache check + CPU load).
-7. **Version chain filter is result-set scoped** — `query_rag()` only filters superseded entries when both versions appear in the same result set.
+7. *(resolved Apr 26 2026)* ~~Version chain filter is result-set scoped~~ — `query_rag()` only filters superseded entries when both versions appear in the same result set.
 8. **Open WebUI file routing intermittent** — after container restarts, sometimes stops forwarding. Hard refresh + new chat resolves.
-9. **Context stripping depends on `</context>` tag** — regex in `pipe()` needs updating if Open WebUI format changes.
+9. *(resolved Apr 26 2026)* ~~Context stripping depends on `</context>` tag~~ — regex in `pipe()` needs updating if Open WebUI format changes.
 
 ### Known bugs (see fix list)
-10. **`execution_handler` pipeline field mismatches** — reads `model`/`output_preview` but orchestrator returns `model_used`/`output`.
-11. **`test_pipeline_complete.py` tautologies** — ~6 of 10 tests validate their own literals.
-12. **`conftest_ci.py` is dead code** — filename not auto-loaded by pytest.
-13. **Client-disconnect leaves orphan research sessions** — `run_research()` generator cancelled without finalize. Reaper catches at 30 min.
-14. **Scheduler timestamp type mismatch** — `apscheduler_jobs.next_run_time` (DOUBLE PRECISION) → `scheduled_jobs.next_run_at` (TIMESTAMPTZ) without `to_timestamp()` cast.
+10. *(resolved Apr 26 2026)* ~~`test_pipeline_complete.py` tautologies~~ — ~6 of 10 tests validate their own literals.
+11. *(resolved Apr 26 2026)* ~~`conftest_ci.py` is dead code~~ — filename not auto-loaded by pytest.
+12. *(resolved Apr 26 2026)* ~~Client-disconnect leaves orphan research sessions~~ — `run_research()` generator cancelled without finalize. Reaper catches at 30 min.
+13. *(resolved Apr 26 2026)* ~~Scheduler timestamp type mismatch~~ — `apscheduler_jobs.next_run_time` (DOUBLE PRECISION) → `scheduled_jobs.next_run_at` (TIMESTAMPTZ) without `to_timestamp()` cast.
 
 ---
 
@@ -438,8 +454,8 @@ CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval co
 
 ## Test Suite
 
-**406 tests** across 33 files, ~9,500 lines.
-- **384 in-container (+22 skipped):** core orchestrator modules
+**~580 tests** across 33 files, ~9,500 lines.
+- **547 passed + 31 skipped in-container:** core orchestrator modules
 - **58 pipeline (local):** `test_scaffold_router.py`, `test_schedule_command.py`
 - **18 valve (local):** `test_model_valves.py`
 - **18 gt_browser (local):** `test_gt_browser.py`
@@ -492,7 +508,7 @@ scaffold-engine/
 │   └── CI.md, logging-events.md
 ├── scripts/              # score_retrieval.py, create_toon_v2.py
 ├── tests/                # 33 files, 397 tests + fixtures/
-├── docker-compose.yml, Dockerfile
+├── docker-compose.yml, docker-compose.dev.yml, Dockerfile (multi-stage: builder/runtime/dev)
 ├── requirements.txt, requirements-dev.txt, requirements-ci.txt
 ├── Makefile
 └── .github/workflows/
@@ -500,4 +516,198 @@ scaffold-engine/
 
 ---
 
+## Conventions & Invariants
+
+- **Schema baseline:** `db/init.sql` is the authoritative baseline as-of the highest applied migration. New schema changes go in `db/migrations/NNN_*.sql` only — never edit `init.sql` retroactively.
+- **Logger style:** stdlib `logging` is the runtime logger (`logger = logging.getLogger("scaffold")`). `structlog` is configured as the **formatter** in `app/logging_config.py` (single unified output stack); `structlog.stdlib.get_logger(...)` is used only for the access-log line in `main.py`.
+- **Middleware registration order** (declared in `app/main.py`): `ErrorLoggingMiddleware`, `PerformanceMiddleware`, `RequestIdMiddleware`. FastAPI/Starlette executes in **reverse-add order**, so the runtime stack from outermost → innermost is: **RequestId → Performance → ErrorLogging**. `request_id` is therefore bound before perf timing or error capture, ensuring every downstream log line carries the correlation ID.
+- **Migration runner:** `run_migrations()` runs at lifespan startup before the engine accepts requests. Opt out via `SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false`.
+- **Dockerfile stages:** `builder` (full deps + HF model pre-fetch, discarded) → `runtime` (prod, no dev deps, no `tests/`, no Makefile — default for `docker compose up`) and `dev` (runtime + dev deps + `tests/` + Makefile, selected via `docker-compose.dev.yml` override). `make test` requires the `dev` image; `make migrate` works on either.
+
+---
+
 *Changelog has been moved to git log. Use `git log --oneline` for history.*
+
+---
+
+### 2026-04-24 — shared-utility concurrency + pagination hardening
+
+- `app/utils/http_clients.py` — eager-init via `init_clients()` at lifespan startup (no lazy path). Dict-based `_clients` registry. `_get_or_create(name, factory)` consolidates duplicate factory logic. `close_clients()` uses per-client try/finally; registry reset unconditionally. Generic client `max_connections` raised 10 → 50 for OpenAPI fan-out during `/research`.
+- `app/utils/staleness.py` — cursor-based pagination on `entry_id > "<last_id>"` prevents re-processing the same IDs when a flush lags. `hit_cap=True` logs at ERROR (was WARNING). Dropped `_get_collection = get_collection` alias. Documented `expires_at == 0` sentinel (never expire).
+- `app/utils/llm_parsing.py` — 4 think-tag regexes collapsed to 2 (closed + open); fence stripper matches anywhere (not just leading); all patterns module-level compiled.
+- `app/middleware/performance.py` — added `duration_s` (float) alongside `duration_ms`; `/health` polling logs DEBUG below 200ms / INFO above; `model` + `endpoint` truncated to 200 chars before insert.
+- `app/logging_config.py` — added `configure_logging_once` guard (fixture-safe); `_resolve_level()` validates via `getLevelName()` with INFO fallback; stack choice (structlog as unified formatter) documented.
+- `app/middleware/request_id.py` (new) — binds `request_id` contextvar upstream of perf + error layers so every log line carries the correlation ID. Honors inbound `X-Request-ID` header; generates UUID4 otherwise.
+- `app/routers/status.py` — `status_filter` typed as `Literal[...]` mirroring `jobs_status_check`; `job_id` validated as UUID with clean 400; `include_compiled` flag gates `compiled_output`; `StatusCounts` completed (pending, refining, awaiting_confirmation, researching, executing added); `/logs/{job_id}` paginated with `limit`/`offset`.
+- `tests/conftest.py` — autouse fixture re-inits http_clients per test (pytest-asyncio gives each test a fresh event loop; httpx clients are loop-bound).
+- Tests updated: `test_http_clients.py` (eager contract), `test_staleness.py` (patch target renamed), `test_status_logs.py` (UUID IDs, paginated args, `include_compiled`), `test_openapi_ingest.py` (patch `get_generic_http_client` not `httpx.AsyncClient`).
+
+Suite: **547 passed**, 2 pre-existing auth failures out of scope, 30 skipped.
+
+
+### 2026-04-26 — End-to-end validation + middleware fix
+
+**Phase 2 distill verified working** — earlier "0-entries" suspicion disproved. Two production jobs completed end-to-end:
+- PostgreSQL 16 vacuum tuning guide: 6 nodes, 0 retries, 34.6 min wall time
+- Piston Fireball multiplayer simulation: 8 nodes, 3 retries (T5×2, T6×1), self-healed
+
+**Milvus state**: 622 → 645 entities (eng partition grew most).
+
+**Bug fix**: `app/middleware/error_logging.py` was missing `import httpx`. `isinstance(exc, httpx.TimeoutException)` raised NameError on every API error, masking 4xx as 500. One-line fix; restart picks it up via bind mount. Committed as `ead402d`.
+
+**Cancellation/resume validated manually**: orphaned `running` node + `running` job recoverable by (1) `UPDATE dag_nodes SET status='pending'` for the stuck node, (2) `UPDATE jobs SET status='executing'` for the parent, (3) re-fire `/execute/all`.
+
+**New issues logged**:
+- `/results` reports "0/N completed" mid-execution — reads job status, not node states
+- Concurrent-execution guard doesn't detect orphaned executors — stale `running` + no executor = manual-only recovery
+- DAG generator emits `recommended_model: gpt-4o` from training data (cosmetic; role-routing overrides it at execution)
+
+**Auto-chain confirmed working through Open WebUI pipeline.** Raw curl bypasses the pipeline (auto-chain lives in `scaffold_router.py`, not in orchestrator endpoints) — earlier "auto-chain broken" theory was a false alarm from testing methodology.
+
+
+### 2026-04-26 — bug fixes + DB hygiene + e2e validation
+
+**Bugs fixed**
+- `app/middleware/error_logging.py` — confirmed `import httpx` (line 9) loads correctly post-restart; earlier NameError was a stale-container artifact, resolved.
+- `app/modules/execution_agent.py` — `retry_failed_node()` referenced `new_retry_count` on lines 929/938 without defining it. Added `new_retry_count = row.retry_count + 1` before Stage 2. Validated end-to-end: `/exec/retry` reset T1 to pending, retry_count=1, downstream T3/T4/T5/T6/T7 cascade-reset, structured `node_retry` log emitted.
+
+**Phase 2 distill — verified working**
+- Three historical runs (`37b5edca`, `a46a724f`, `be8f7f75`) all produced exactly 8 entries each: `queries_run=4, results_found=38, facts_extracted=8, milvus_ingested=8`. Earlier "0-entries distill" concern was unfounded. Distill output count is deterministic by prompt design.
+
+**End-to-end pipeline test** — `be8f7f75-648b-48fe-9dc3-c1a000bc4b8e` (Tokio vs async-std comparison)
+- Phase 1 → Phase 2 → DAG (7 nodes) → execute/all → compiled_output. **7/7 nodes verified=true on first pass, 0 retries, 30m40s wall-clock.** Auto-retry path code present but did not fire this run; validated separately via `/exec/retry`.
+- Final `compiled_output`: 3,321 chars stored. SSE stream emitted correctly with keepalives.
+
+**Open WebUI persistence**
+- `RESET_CONFIG_ON_START` flipped `true → false` in `docker-compose.yml` line 14. Settings now persist across container restarts.
+
+**DB hygiene — pruned historical rows**
+- Policy: keep all `completed`, drop `cancelled`/`failed` older than 7 days, drop orphaned April-12 `executing` job, drop stale `awaiting_confirmation` (excluded today's test).
+- Removed: 116 cancelled + 41 failed + 1 executing + 1 awaiting = **159 jobs**. CASCADE removed 260 dag_nodes + 104 execution_logs. `error_logs` and `performance_logs` cascade behavior verified (CASCADE / SET NULL respectively).
+- Final state: 90 jobs (31 completed / 40 cancelled / 19 failed), 153 dag_nodes, 168 execution_logs, 23 error_logs.
+
+**Cancelled-job resume — verified working (no code change needed)**
+- `44f74601-39a9-4e19-9e9f-11752357bdbd` (cancelled, T1+T2 done, T3 pending). `/execute/all` resumed from T3 only, skipped completed nodes, used T1+T2 outputs as upstream context. Final compile included Bubble/Merge/Quick Sort (from T1 output) — 2 min wall-clock for the 1 pending node.
+
+**Milvus state**
+- `toon_v2`: 645 entities (was 637 pre-session, +8 from Phase 2 ingest of `be8f7f75`). Active partitions: 234, 218, 177, 16. Counts roughly aligned with `eng/llm/rag` domain split.
+
+**API key (current)** — `sk-scaffold-***REDACTED***`
+
+### 2026-04-26 (continued) — backlog sweep + audit reconciliation
+
+**Round 3 fixes applied**
+- `app/config.py` — `rerank_warn_ms` 1500 → 30000, `rerank_error_ms` 5000 → 120000. CPU rerank latencies of 60–170s were tripping the error threshold on every call, drowning real errors. Thresholds now calibrated to actual hardware. Reranker logs go info / warning / error appropriately.
+- **Ollama model cleanup** — removed 10 undocumented models that were not wired in via env or valves: `qwen2.5-coder:latest`, `qwen3.5:4b`, `qwen3.5:0.8b`, `phi4-mini:latest`, `phi4-mini-reasoning:latest`, `mxbai-embed-large:latest`, `qwen3-embedding:0.6b`, `sam860/qwen3-reranker:0.6b-Q8_0`, `qwen3-vl:235b-cloud`, `glm-5.1:cloud`. Reclaimed **15.6 GB** (37.1 → 21.5 GB Ollama disk). Live model list now exactly matches the documented model table (7 models).
+
+**Audit reconciliation — 5 "Known Open Issues" verified already resolved**
+- **Issue #7 (version chain filter scope)** — Already closed in `app/modules/rag_pipeline.py` lines 475–498 + 582–588. `_lookup_superseded()` queries `supersedes_id IN (returned_ids)` against the full collection (not result-set scoped), drops stale ancestors before return. Docstring even cites "Closes overview issue #7."
+- **Issue #10 (test_pipeline_complete.py tautologies)** — Already cleaned. File's own docstring documents the cleanup: *"#9.1 — Remove ~6 tautology tests that asserted their own literals."* Remaining 3 tests are legitimate SSE shape checks (round-trip JSON, double-newline framing).
+- **Issue #11 (conftest_ci.py dead code)** — File no longer exists in the repo.
+- **Issue #12 (orphan research sessions)** — Already handled in `_run_with_session_lifecycle()` (`research_agent.py:451`). `try/except/finally` block marks session `cancelled` with `error_message='client_disconnect'` on `CancelledError`/`GeneratorExit`. DB confirms 12 cancelled sessions, zero stuck-running orphans.
+- **Issue #13 (scheduler timestamp type mismatch)** — Already correct. `app/scheduler.py:155` and `:243` read `next_run` from the live APScheduler job as a tz-aware `datetime`, written via asyncpg → `TIMESTAMPTZ`. The code never reads the `DOUBLE PRECISION` column directly. Comment on line 236 explicitly cites the fix.
+
+**Net result:** 6 of 7 audit items investigated this round were stale notes documenting work that had already shipped. The April 18 audit fix lists need pruning. The codebase is in better shape than the overview suggests.
+
+**Round 3 totals**
+- Real fixes shipped: 2 (reranker thresholds, model cleanup)
+- Stale audit items reconciled: 5
+- Disk reclaimed: 15.6 GB
+- Open items remaining (likely environmental, not code): triage CPU latency, Open WebUI file routing intermittent
+
+### 2026-04-26 (Round 4) — drift cleanup, reranker pre-warm, configurable ideation model
+
+**drift-findings.md review**
+- Cross-references confirmed: file already documented overview issues #10–#12 + #16 as resolved. Today's reconciliation closed those in-place.
+- Two new genuine items found in "Open" section: stale `.pyc` cache, `PytestUnraisableExceptionWarning`. The first was actionable.
+
+**Stale `.pyc` / AST cache fix**
+- Added `PYTHONDONTWRITEBYTECODE=1` to `docker-compose.dev.yml` `environment:` block. Future dev-image runs won't generate stale bytecode after host file edits.
+
+**Reranker pre-warm at lifespan startup**
+- New env var `SCAFFOLD_PREWARM_RERANKER` (default `true`). Lifespan now calls `_get_cross_encoder()` via `run_in_executor` after `init_clients()` — model is hot-loaded before first user request.
+- Eliminates the documented 13.6s cold-load penalty on first `/research`/`/execute` call. Verified: `crossencoder_loaded: elapsed_s=1.8` in startup logs, followed immediately by `reranker_prewarmed`.
+
+**Test suite verification & 3 regression fixes**
+- Full suite ran in dev image: **547 passed, 31 skipped, 2 known auth fails** — matches documented baseline.
+- 3 new failures discovered and fixed:
+  1. `test_cleanup_settings_are_sourced_from_config` — was hardcoding 15min/30min defaults that `.env` deliberately overrides for CPU-realistic operation. Rewrote to assert *invariants* (positivity, ordering, cleanup_interval ≤ stale_threshold) instead of specific numbers.
+  2. `test_analyze_uses_model_router_not_general` — see below.
+  3. `test_research_uses_model_router_not_general` — see below.
+
+**Configurable ideation model role (architectural decision)**
+- The April 25 commit `f896399` ("WIP: model_general for ideation") quietly reverted audit fix #6.1 which mandated `model_router` for ideation. Audit's CPU-cost reasoning (200–500s) no longer applied because `model_general` resolved to a cloud model post-rotation, not a local one. Cloud is faster (Phase 1: 16s vs estimated 30–120s on CPU). But this was an undocumented architectural override.
+- Resolution: introduced `ideation_model_role` setting in `app/config.py` (defaults to `"model_general"`, env override: `IDEATION_MODEL_ROLE`). Rewired the 3 hardcoded `get_model("model_general", ...)` calls in `app/modules/ideation_workflow.py` to `get_model(settings.ideation_model_role, ...)`.
+- Updated both ideation tests to assert against `settings.ideation_model_role` (with mocked-settings pinning to the real configured value), so they verify *configurability* rather than a specific role choice.
+- Net result: cost/speed tradeoff is now explicit and switchable at deploy time.
+
+### 2026-04-26 (Round 5) — API key check + context-strip hardening
+
+**API key consistency audit**
+- Verified `sk-scaffold-***REDACTED***` is identical across all 5 locations: `.env`, `valves.json`, `~/.bashrc`, `scaffold-orchestrator` env, `open-webui-pipelines` env. Zero drift.
+
+**Context-strip hardening (Issue #9)**
+- `pipelines/scaffold_router.py` line 316 was a single-pattern `re.split(r"</context>\s*", ...)` — silently passed context-laden messages through if Open WebUI ever changed wrapper format.
+- Replaced with a multi-wrapper sweep handling `</context>`, `</documents>`, `</source>`, plus a heuristic warning that fires if a long message starts with `<` but no known closing tag matched. Format drift is now visible instead of silent.
+- Closes overview "Known Open Issues" #9.
+
+**Round 4 + 5 cumulative**
+- Real bugs fixed: 3 (cleanup config, 2× ideation model routing tests)
+- Architectural improvements: 3 (reranker pre-warm, configurable ideation model, defensive context strip)
+- Drift items addressed: 1 (`.pyc` cache)
+- Test suite restored to 547 passing baseline
+
+### 2026-04-27 (Round 6) — backlog completion + middleware test coverage
+
+**Suite:** 576 passed, 31 skipped, 3 known-fail out-of-scope (2× auth, 1× integration). Net +28 tests vs Round 5 (548 → 576).
+
+**Bug fixes (4)**
+- **`/results` displayed `0/N completed` mid-execution** — pipeline asked the orchestrator for `completed_nodes`/`current_node`, but the API returns per-status `counts` dict + `nodes` array. Pipeline now derives `done` from `counts` (sum of `done` + `skipped`), surfaces failure count, and locates the running node from the array. Smoke-test against a completed job verified the math: `total: 7`, `counts: {'done': 7}`. Pipeline-only fix; orchestrator contract unchanged.
+- **Orphaned executors locked their parent jobs forever** — `_REAP_RUNNING_SQL` has a `NOT EXISTS running node` guard that explicitly refuses to fail a job with a running node (correct for live work, but turns into a permanent lock when the node itself is orphaned by a crashed/restarted executor). Added `Stage 0` to `reap_stale_jobs`: dag_nodes with `status='running'` and `started_at` older than `node_orphan_threshold_minutes` (default 60min, env override `NODE_ORPHAN_THRESHOLD_MINUTES`, bounded `[5,1440]`) reset to `pending`. Parent jobs' `updated_at` is touched so the next reap cycle doesn't immediately fail the freshly-recovered job. Per-node `WARNING` + cumulative `INFO` log lines. Manufactured-orphan test verified end-to-end: injected → `/jobs/cleanup` → `orphan_nodes_reset: 1` → node confirmed `pending`. Commit `3b1efb8`.
+- **DAG generator emitted `recommended_model: gpt-4o`** — `COMPILE_SYSTEM` prompt asked the LLM to recommend a model, but nothing in the codebase ever read `configuration.recommended_model`. The LLM had no awareness of the local Ollama stack and defaulted to its training-data prior (gpt-4o, claude-3-opus, etc.). Removed the field from the prompt schema; `configuration` now contains only `temperature`, `domain`, `estimated_nodes` — all consumed. Role-routing via `model_router.get_model()` was already the source of truth. `grep` verified zero readers across `app/`, `pipelines/`, `tests/`. Also removed orphaned `app/modules/ideation_workflow.py.bak-20260425`. Commit `4239fb6`.
+- **`/schedule add` defaulted depth to 'shallow'** while `ScheduleCreate.depth` and `scheduled_jobs.depth` both default to `'medium'`. Three-way drift: user-facing default depended on which surface received input. Pipeline default aligned to `'medium'`; `--depth=<level>` explicit override behavior unchanged. The broader "scheduled depth hardcoded shallow" overview note predated the `depth` column, scheduler wiring, and pipeline parser shipping — only the default was misaligned. Commit `dce5e2f`.
+
+**Test/hygiene (5)**
+- **Cleanup test regression from orphan fix** — `test_cleanup.py` asserted "five counts / five SQL statements". Stage 0 brought it to six (plus a conditional seventh `_REFRESH_PARENT_JOBS_SQL` when orphans exist). Helper `_db_with_counts` updated to take 6 counts, with a new `_orphan_row()` factory providing `.job_id` / `.node_key` attrs (Stage 0 reads both). Two new tests: `test_reap_stale_jobs_orphan_reset_count_propagates` and `test_reap_stale_jobs_runs_seven_sql_statements_when_orphans_found`. Commit `c9588ba`.
+- **`PytestUnraisableExceptionWarning`** — `_extract_entries` is wrapped in `asyncio.create_task()` inside `_execute_iteration_loop`. When tests patched it with `new_callable=AsyncMock`, the inner `_execute_mock_call` coroutine was left un-awaited inside the task wrapper (known `unittest.mock` + `create_task` quirk). Replaced `AsyncMock + return_value` with `side_effect=<plain async fn>`. Verified with `-W error::pytest.PytestUnraisableExceptionWarning`. Commit `05a1e7d`.
+- **FastAPI `Query(regex=)` deprecation** — single occurrence at `/research/pdf` form: `extractor` query param. FastAPI 0.100+ deprecated `regex=` in favor of `pattern=` (Pydantic v2 alignment). One-line change, no behavior delta. Removes the only `DeprecationWarning` emitted by the test suite. Commit `d504b3b`.
+- **Audit fix lists reconciled** — Round 3 reported the lists "need pruning" citing ~5 stale items. Inspection found only 1 truly open in `fix-list.md` (`#9`, transitive ref to a closed item) and 2 genuinely open in `phase-6-10.md` (`#7.8` prompt revision history, `#7.9` structured prompt-history dict — both real future work). Ticked `#9` and added a reconciliation banner to both files noting that the ~106 items checked-but-unhashed reflect inconsistent commit-hash recording during Apr 2026, not stale work. Per-file open counts: `fix-list.md=0`, `phase-6-10.md=2`. Commit `8cce1b9`.
+- **Middleware test coverage** — overview claimed "13 modules without dedicated tests"; cross-referencing showed actual gap was 3, all in `app/middleware/`. Added 28 tests across three files:
+  - `test_request_id_middleware.py` (5): inbound `X-Request-ID` honored, uuid4().hex generation, distinct ID per request, contextvar cleared after request, empty inbound header treated as missing.
+  - `test_error_logging_middleware.py` (12): `_classify_error` mapping for timeout / connect_timeout / http_error / validation family / unrecoverable; pass-through; structured 500 body; `error_logs` persist with classified `error_type`; secondary persistence failure does not break the user response (regression guard for Apr 26 `import httpx` bug).
+  - `test_performance_middleware.py` (11): `_truncate` (None / under / at / over with ellipsis); `X-Request-Duration-Ms` header; `/health` fast → DEBUG, slow → INFO, non-/health → INFO; `log_model_call` truncates `model` / `endpoint` to column widths and `error_message` to 500 chars; `log_model_call` swallows DB failures.
+
+  Initial slow-`/health` test deadlocked patching `time.monotonic` (uvicorn calls it more than twice per request). Rewrote to patch `_HEALTH_SLOW_MS=0` instead — deterministic INFO classification without time-faking. Commit `d13b0dd`.
+
+**Cumulative open list:**
+- ~~`/results` reports 0/N completed mid-execution~~ — fixed
+- ~~Concurrent-execution guard doesn't detect orphaned executors~~ — fixed
+- ~~DAG generator emits `recommended_model: gpt-4o` from training data~~ — fixed
+- ~~Scheduled depth hardcoded shallow~~ — was misdiagnosed; only the default was misaligned, fixed
+- ~~`PytestUnraisableExceptionWarning`~~ — fixed
+- ~~Audit fix lists need pruning~~ — reconciled (work was already done, just untracked)
+- ~~13 modules without dedicated tests~~ — actual gap was 3, all closed
+
+**Remaining (environmental, not code):**
+- Triage CPU latency on long conversations (qwen3:4b on CPU; mitigation requires GPU or smaller model)
+- Open WebUI file routing intermittent (UI-side; hard refresh + new chat resolves)
+
+**Round 6 totals:** 9 commits, +28 tests, 7 user-visible/code issues closed, 0 regressions remaining.
+
+--- a/scaffold-engine-overview.md
++++ b/scaffold-engine-overview.md
+@@ -693,3 +693,16 @@
+ **Remaining (environmental, not code):**
+ - Triage CPU latency on long conversations (qwen3:4b on CPU; mitigation requires GPU or smaller model)
+ - Open WebUI file routing intermittent (UI-side; hard refresh + new chat resolves)
+
+ **Round 6 totals:** 9 commits, +28 tests, 7 user-visible/code issues closed, 0 regressions remaining.
++
++### 2026-04-27 (Round 7) — Phase 2 client-disconnect handling
++
++**Suite:** 578 passed, 31 skipped, 2 known-fail out-of-scope (auth). +1 test vs Round 6.
++
++**Bug fix (1)**
++- **Phase 2 client disconnects stranded jobs in `planning` with empty `research_data`** — `research_and_compile()` caught `Exception` but not `asyncio.CancelledError`, so SSE client disconnects during long Phase 2 runs (CPU runs of 8–24min are common) skipped `_fail_job` entirely. Jobs landed with `refined_brief` populated but `research_data` null and were only caught by the reaper at the 24h `planning_min` threshold. Added explicit `CancelledError` handler that calls new `_cancel_job` helper (`error_summary='client_disconnect'`), then re-raises to preserve asyncio task semantics. Mirrors the `_run_with_session_lifecycle` pattern in `research_agent.py`. Test `test_ideation_phase2_cancel.py` patches `search_searxng` to raise `CancelledError` mid-flight and asserts the UPDATE fires with the expected params. Discovered via two stranded jobs (`59745a88-…`, `e0a9b5ee-…`). Commit `2a7642b`.
++
++**Cumulative open list:** unchanged from Round 6.

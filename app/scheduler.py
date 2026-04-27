@@ -7,6 +7,7 @@ and capture of the real research_sessions.id into scheduled_jobs.last_job_id.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -92,14 +93,31 @@ async def shutdown_scheduler() -> None:
 
 
 async def _rehydrate() -> None:
-    """Re-add enabled schedules from DB on startup (source of truth = scheduled_jobs)."""
+    """Re-add enabled schedules from DB on startup (source of truth = scheduled_jobs).
+
+    Per-row try/except: a single bad cron expression (or other row-level defect)
+    is logged and skipped. Other schedules still register.
+    """
     async with async_session() as db:
         rows = (await db.execute(text(
             "SELECT id, topic, depth, cron_expression, timezone "
             "FROM scheduled_jobs WHERE enabled = TRUE"
         ))).mappings().all()
+    ok = skipped = 0
     for r in rows:
-        _add_job(r["id"], r["topic"], r["depth"], r["cron_expression"], r["timezone"])
+        try:
+            _add_job(r["id"], r["topic"], r["depth"], r["cron_expression"], r["timezone"])
+            ok += 1
+        except Exception as exc:
+            skipped += 1
+            logger.error(
+                'event="schedule_rehydrate_skipped" schedule_id=%s cron=%r tz=%r error=%s',
+                r.get("id"), r.get("cron_expression"), r.get("timezone"), exc,
+            )
+    if skipped:
+        logger.warning(
+            'event="schedule_rehydrate_summary" ok=%d skipped=%d', ok, skipped,
+        )
 
 
 def _add_job(
@@ -174,20 +192,47 @@ async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> Non
                 if sid:
                     session_id = sid
 
+    timed_out = False
     try:
-        await asyncio.wait_for(_consume(), timeout=settings.scheduler_job_timeout)
-    except asyncio.TimeoutError:
-        status = "timeout"
-        logger.error(
-            'event="scheduled_research_timeout" schedule_id=%s timeout=%ds',
-            schedule_id, settings.scheduler_job_timeout,
-        )
-    except Exception as exc:
-        status = "failed"
-        logger.error(
-            'event="scheduled_research_failed" schedule_id=%s error=%s',
-            schedule_id, exc,
-        )
+        try:
+            await asyncio.wait_for(_consume(), timeout=settings.scheduler_job_timeout)
+        except asyncio.TimeoutError:
+            timed_out = True
+            status = "timeout"
+            logger.error(
+                'event="scheduled_research_timeout" schedule_id=%s session_id=%s timeout=%ds',
+                schedule_id, session_id, settings.scheduler_job_timeout,
+            )
+        except Exception as exc:
+            status = "failed"
+            logger.error(
+                'event="scheduled_research_failed" schedule_id=%s session_id=%s error=%s',
+                schedule_id, session_id, exc,
+            )
+    finally:
+        # On timeout, run_research was cancelled mid-stream — its session row
+        # stays 'running' and waits 30 min for the reaper. Finalize it here so
+        # downstream consumers see 'cancelled' immediately.
+        if timed_out and session_id:
+            try:
+                async with async_session() as db:
+                    await db.execute(text("""
+                        UPDATE research_sessions
+                        SET status = 'cancelled',
+                            error_message = COALESCE(error_message,
+                                'Scheduled run exceeded scheduler_job_timeout'),
+                            updated_at = NOW(),
+                            completed_at = NOW()
+                        WHERE id = :sid
+                          AND status IN ('pending', 'running')
+                    """), {"sid": session_id})
+                    await db.commit()
+            except Exception as exc:
+                logger.error(
+                    'event="scheduled_research_cancel_write_failed" '
+                    'schedule_id=%s session_id=%s error=%s',
+                    schedule_id, session_id, exc,
+                )
 
     # Compute next_run_at from the live scheduler job (avoids the DOUBLE-PRECISION
     # → TIMESTAMPTZ type mismatch that the old subquery had).
@@ -198,7 +243,7 @@ async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> Non
             next_run = job.next_run_time  # already a tz-aware datetime
 
     async with async_session() as db:
-        await db.execute(text("""
+        result = await db.execute(text("""
             UPDATE scheduled_jobs
             SET last_run_at = :ts,
                 last_status = :st,
@@ -216,6 +261,20 @@ async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> Non
             "id": schedule_id,
         })
         await db.commit()
+        if result.rowcount == 0:
+            logger.warning(
+                'event="scheduled_research_result_write_skipped" '
+                'schedule_id=%s session_id=%s reason="row_missing"',
+                schedule_id, session_id,
+            )
+
+    if status == "success":
+        logger.info(
+            'event="scheduled_research_completed" schedule_id=%s session_id=%s '
+            'duration_s=%.1f',
+            schedule_id, session_id,
+            (datetime.now(timezone.utc) - started).total_seconds(),
+        )
 
 
 def _extract_session_id(event) -> Optional[str]:
@@ -233,7 +292,6 @@ def _extract_session_id(event) -> Optional[str]:
     if '"session_id"' not in event:
         return None
     try:
-        import json
         for line in event.splitlines():
             if line.startswith("data:"):
                 payload = json.loads(line[5:].strip())
