@@ -328,7 +328,7 @@ class Pipeline:
             if len(msg) > 2000 and msg.startswith("<"):
                 # Pipelines runs in its own container — use print() since the
                 # Open WebUI Pipelines logger isn't always wired up.
-                print(
+                print(  # noqa: T201
                     f"[scaffold_router] WARN: message starts with '<' and is "
                     f"{len(msg)} chars but no known closing tag matched. "
                     f"Open WebUI may have changed wrapper format. "

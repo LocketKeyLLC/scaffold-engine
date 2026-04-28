@@ -87,6 +87,15 @@ ALL_VALVE_KEYS = [
     "model_cloud_alt",
 ]
 
+OVERRIDE_VALVE_KEYS = [
+    "model_general",
+    "model_verifier",
+    "model_coder",
+    "model_router",
+    "model_fallback",
+    "model_cloud_alt",
+]
+
 SETTINGS_ROLES = [
     "model_general",
     "model_verifier",
@@ -144,7 +153,9 @@ class TestGetModel:
             assert isinstance(result, str) and len(result) > 0, f"{role} failed"
 
     def test_override_bypasses_missing_settings_attr(self):
-        result = get_model("model_embedder", {"model_embedder": "qwen3-embedding:8b"})
+        # Uses an allowlisted role; the test name is historical — the point
+        # is that the override path doesn't touch the settings object.
+        result = get_model("model_embedder_pipeline", {"model_embedder_pipeline": "qwen3-embedding:8b"})
         assert result == "qwen3-embedding:8b"
 
 
@@ -155,13 +166,13 @@ class TestGetModel:
 class TestModelOverrides:
     """_model_overrides() returns all 8 valve keys with correct values."""
 
-    def test_returns_all_eight_keys(self, pipe):
+    def test_returns_all_six_override_keys(self, pipe):
         result = pipe._model_overrides()
-        assert set(result.keys()) == set(ALL_VALVE_KEYS)
+        assert set(result.keys()) == set(OVERRIDE_VALVE_KEYS)
 
     def test_values_match_valve_defaults(self, pipe):
         result = pipe._model_overrides()
-        for key in ALL_VALVE_KEYS:
+        for key in OVERRIDE_VALVE_KEYS:
             assert result[key] == getattr(pipe.valves, key), (
                 f"{key}: expected {getattr(pipe.valves, key)!r}, got {result[key]!r}"
             )
@@ -173,7 +184,7 @@ class TestModelOverrides:
 
     def test_no_extra_keys(self, pipe):
         result = pipe._model_overrides()
-        assert len(result) == 8
+        assert len(result) == 6
 
 
 # ===================================================================

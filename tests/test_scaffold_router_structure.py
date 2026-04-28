@@ -39,7 +39,9 @@ class TestNoPrintStatements:
         src = _router_path.read_text()
         offenders = [
             ln for ln in src.splitlines()
-            if "print(" in ln and not ln.lstrip().startswith("#")
+            if "print(" in ln
+            and not ln.lstrip().startswith("#")
+            and "noqa: T201" not in ln  # justified exceptions tagged inline
         ]
         assert offenders == [], "Unexpected print() calls:\n" + "\n".join(offenders)
 

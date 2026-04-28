@@ -524,11 +524,21 @@ class TestResultsCommand:
     def test_running_shows_progress(self, pipe):
         with patch("scaffold_router.requests.get") as mg:
             resp = MagicMock(status_code=200)
+            # Round 6 (Apr 27 2026): /results derives progress from the
+            # counts dict + nodes array (the orchestrator API contract).
             resp.json.return_value = {
-                "status": "running",
+                "job_status": "running",
                 "total_nodes": 7,
-                "completed_nodes": 3,
-                "current_node": {"node_key": "T4", "title": "write_report"},
+                "counts": {"done": 3, "running": 1, "pending": 3},
+                "nodes": [
+                    {"node_key": "T1", "title": "step 1", "status": "done"},
+                    {"node_key": "T2", "title": "step 2", "status": "done"},
+                    {"node_key": "T3", "title": "step 3", "status": "done"},
+                    {"node_key": "T4", "title": "write_report", "status": "running"},
+                    {"node_key": "T5", "title": "step 5", "status": "pending"},
+                    {"node_key": "T6", "title": "step 6", "status": "pending"},
+                    {"node_key": "T7", "title": "step 7", "status": "pending"},
+                ],
             }
             mg.return_value = resp
             out = pipe._handle_results(["/results", "j"])
@@ -588,17 +598,23 @@ class TestScheduleDepthFlag:
             pipe._handle_schedule('/schedule add "* * * * *" --depth medium my topic')
         assert captured["json"]["depth"] == "medium"
 
-    def test_default_depth_shallow(self, pipe):
+    def test_default_depth_medium(self, pipe):
+        """When --depth is omitted, the pipeline now defaults to 'medium'.
+
+        Round 6 (Apr 27 2026): aligned the pipeline default with
+        ScheduleCreate.depth and scheduled_jobs.depth, both of which
+        default to 'medium'. Previously was 'shallow' — three-way drift.
+        """
         captured = {}
         def _mp(url, **kw):
             captured["json"] = kw.get("json")
             resp = MagicMock(status_code=200)
             resp.json.return_value = {"id": 3, "topic": "foo",
-                                      "cron_expression": "0 0 * * *", "depth": "shallow"}
+                                      "cron_expression": "0 0 * * *", "depth": "medium"}
             return resp
         with patch("scaffold_router.requests.post", side_effect=_mp):
             pipe._handle_schedule('/schedule add "0 0 * * *" foo')
-        assert captured["json"]["depth"] == "shallow"
+        assert captured["json"]["depth"] == "medium"
 
     def test_invalid_depth_value(self, pipe):
         out = pipe._handle_schedule('/schedule add "* * * * *" --depth=insane topic')

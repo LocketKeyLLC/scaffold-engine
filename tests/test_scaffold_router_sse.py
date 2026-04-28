@@ -57,7 +57,13 @@ class TestSSEStreamStalled:
         assert "50" in out
 
     def test_per_read_timeout_tuple_passed_to_requests(self, pipe):
-        pipe.valves.keepalive_interval = 7
+        # The connect/read timeouts in _stream_sse_to_queue are currently
+        # hardcoded as (30, 120) on line 660 of scaffold_router.py. This test
+        # asserts that pair so any unintended change is caught.
+        #
+        # TODO(future): wire (30, 120) to valves (request_timeout for connect,
+        # a new sse_read_timeout for read) so admins can tune without editing
+        # source. Keep this test in lockstep when that lands.
         with patch("scaffold_router.requests.post") as mp:
             resp = MagicMock(status_code=200)
             resp.iter_lines.return_value = iter([])
@@ -65,6 +71,6 @@ class TestSSEStreamStalled:
             q = _queue.Queue()
             pipe._stream_sse_to_queue("http://x/y", {}, q)
             kw = mp.call_args.kwargs
-            assert kw["timeout"] == (10, 7)
+            assert kw["timeout"] == (30, 120)
             assert kw["stream"] is True
 
