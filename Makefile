@@ -6,13 +6,13 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test agent eval bench build logs clean status health ci help
+.PHONY: test agent eval bench build logs logs-follow restart dev-up migrate clean status health ci help
 
 ## ──────────────────────────────────────────────
 ## Testing
 ## ──────────────────────────────────────────────
 
-test: ## Run all tests in Docker (~547 passing, 31 skipped)
+test: ## Run all tests in Docker (~745 passing, 5 skipped)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v
 
 agent: ## Run execution agent tests only
@@ -41,6 +41,15 @@ logs: ## Tail orchestrator logs (last 50 lines)
 
 logs-follow: ## Follow orchestrator logs in real time
 	docker logs $(CONTAINER) -f
+
+restart: ## Restart the orchestrator (no rebuild)
+	$(COMPOSE) restart $(CONTAINER)
+
+dev-up: ## Bring up orchestrator with the dev image (mounts pipelines/, Dockerfile, .github/)
+	$(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml up -d $(CONTAINER)
+
+migrate: ## Apply pending DB migrations inside the orchestrator container
+	docker exec $(CONTAINER) python -m app.migrations
 
 ## ──────────────────────────────────────────────
 ## API Operations
@@ -74,6 +83,3 @@ help: ## Show this help
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 .DEFAULT_GOAL := help
-
-migrate: ## Apply pending DB migrations inside the orchestrator container
-	docker exec scaffold-orchestrator python -m app.migrations
