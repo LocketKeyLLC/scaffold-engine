@@ -13,7 +13,10 @@ Tier: make validate
 import pytest
 
 from app.modules.rag_pipeline import query_rag
-pytestmark = pytest.mark.skip(reason="Golden queries require repopulated toon_v2 knowledge base — skipped until Phase 2 data migration complete")
+# Per-query KB-availability skips below (3 queries currently active; 4 skipped
+# pending KB content). The previous module-level pytestmark.skip was removed
+# 2026-04-28 after live KB inspection (664 entries: eng=261, llm=218, rag=175,
+# spec=8, prompt=0).
 
 # ---------------------------------------------------------------------------
 # Golden queries: (query, domain, expected_topic_substring)
@@ -23,46 +26,53 @@ pytestmark = pytest.mark.skip(reason="Golden queries require repopulated toon_v2
 # resilient to minor topic rewording in TOON files.
 # ---------------------------------------------------------------------------
 
+_NEEDS_PROMPT_KB = pytest.mark.skip(
+    reason="prompt partition is empty (0 entries) - skip until prompt-domain TOONs are ingested"
+)
+_NEEDS_LLM_QUANTIZ = pytest.mark.skip(
+    reason="llm partition (218 entries) does not currently include a quantization doc - skip until ingested"
+)
+_NEEDS_SPEC_TOON = pytest.mark.skip(
+    reason="spec partition (8 entries) does not currently include the TOON spec doc - skip until ingested"
+)
+
 GOLDEN_QUERIES = [
-    # --- prompt domain (30 entries) ---
-    (
+    # --- prompt domain (currently 0 entries; skipped) ---
+    pytest.param(
         "How does function calling work in LLM tool use?",
-        "prompt",
-        "function-calling",
+        "prompt", "function-calling",
+        marks=_NEEDS_PROMPT_KB,
     ),
-    (
+    pytest.param(
         "What is chain of thought prompting?",
-        "prompt",
-        "chain-of-thought",
+        "prompt", "chain-of-thought",
+        marks=_NEEDS_PROMPT_KB,
     ),
-    # --- rag domain (15 entries) ---
-    (
+    # --- rag domain (175 entries) ---
+    pytest.param(
         "How does hybrid search combine dense and sparse retrieval?",
-        "rag",
-        "hybrid",
+        "rag", "hybrid",
     ),
-    # --- llm domain (13 entries) ---
-    (
+    # --- llm domain (218 entries) ---
+    pytest.param(
         "What is quantization and how does it reduce model size?",
-        "llm",
-        "quantiz",
+        "llm", "quantiz",
+        marks=_NEEDS_LLM_QUANTIZ,
     ),
-    # --- spec domain (11 entries) ---
-    (
+    # --- spec domain (8 entries) ---
+    pytest.param(
         "Describe the TOON file format specification and its pipeline stages",
-        "spec",
-        "toon",
+        "spec", "toon",
+        marks=_NEEDS_SPEC_TOON,
     ),
-    # --- eng domain (14 entries) ---
-    (
+    # --- eng domain (261 entries) ---
+    pytest.param(
         "What are common software design patterns like singleton or factory?",
-        "eng",
-        "pattern",
+        "eng", "pattern",
     ),
-    (
+    pytest.param(
         "Explain the principles of test-driven development",
-        "eng",
-        "test",
+        "eng", "test",
     ),
 ]
 
@@ -77,7 +87,6 @@ GOLDEN_QUERIES = [
 @pytest.mark.parametrize(
     "query, domain, expected_substr",
     GOLDEN_QUERIES,
-    ids=[f"{q[1]}-{q[2]}" for q in GOLDEN_QUERIES],
 )
 async def test_golden_retrieval(query: str, domain: str, expected_substr: str):
     """Assert the expected document appears in top-3 for a golden query."""
