@@ -245,7 +245,7 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 |---|---|---|
 | `POST` | `/ideate` | Phase 1: Refine + feasibility → halt at `awaiting_confirmation` |
 | `POST` | `/ideate/confirm` | Phase 2: Research → ingest → compile → `planning` |
-| `POST` | `/ideas` | Direct idea refinement (skips ideation workflow) |
+| `POST` | `/ideas` | Direct idea refinement (lands in `awaiting_confirmation`, same as `/ideate`) |
 | `POST` | `/dag` | Generate DAG from refined idea |
 | `GET` | `/dag/{job_id}` | Retrieve DAG + job status |
 | `POST` | `/execute` | Execute next pending DAG node |
