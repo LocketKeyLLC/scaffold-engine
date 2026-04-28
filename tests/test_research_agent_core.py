@@ -183,8 +183,16 @@ class TestExtractEntries:
 
     @pytest.mark.asyncio
     async def test_batches_large_input(self):
-        with patch("app.modules.research_agent.model_router") as mock_mr:
+        # Must mock _fetch_and_extract -- otherwise the test triggers real
+        # network fetches against the fake URLs (https://ex.com/{i}). In
+        # isolation that resolves quickly; under load (full suite, with
+        # other tests' httpx clients warmed up) it can take 30+ seconds
+        # and trip the global pytest --timeout=30 limit.
+        with patch("app.modules.research_agent.model_router") as mock_mr, \
+             patch("app.modules.research_agent._fetch_and_extract",
+                   new_callable=AsyncMock) as mock_fetch:
             mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_EXTRACTION))
+            mock_fetch.return_value = []
             from app.modules.research_agent import _extract_entries
 
             results = [
