@@ -114,6 +114,7 @@ class Pipeline:
         # Triage
         triage_model: str = "qwen3:4b"
         triage_history_window: int = 8  # last N turns sent to triage; first user msg always pinned
+        log_pipe_inputs: bool = False  # diagnostic: log body keys + message shape on every pipe() call
         ollama_url: str = "http://172.18.0.1:11434"
 
         # Model overrides
@@ -323,6 +324,41 @@ class Pipeline:
     # Main entry
     # ------------------------------------------------------------------
 
+    def _log_pipe_inputs(
+        self, user_message: str, messages: List[dict], body: dict
+    ) -> None:
+        """One-shot diagnostic log of pipe() inputs.
+
+        Gated on valves.log_pipe_inputs. Captures the shape of OWUI
+        payloads to diagnose intermittent file-routing failures (cases
+        where uploaded file content does not appear in user_message).
+        """
+        try:
+            body_keys = sorted(body.keys()) if isinstance(body, dict) else []
+            meta = body.get("metadata") if isinstance(body, dict) else None
+            meta_keys = sorted(meta.keys()) if isinstance(meta, dict) else []
+            files_field = body.get("files") if isinstance(body, dict) else None
+            files_meta = meta.get("files") if isinstance(meta, dict) else None
+            files_count = (
+                len(files_field) if isinstance(files_field, list)
+                else len(files_meta) if isinstance(files_meta, list)
+                else 0
+            )
+            file_ids = body.get("file_ids") if isinstance(body, dict) else None
+            last_role = messages[-1].get("role") if messages else None
+            um_len = len(user_message)
+            head = user_message[:80].replace("\n", "\\n")
+            tail = user_message[-80:].replace("\n", "\\n") if um_len > 80 else ""
+            print(  # noqa: T201
+                f"[scaffold_router] PIPE_INPUTS body_keys={body_keys} "
+                f"metadata_keys={meta_keys} files_count={files_count} "
+                f"file_ids={file_ids!r} messages_n={len(messages)} "
+                f"last_role={last_role!r} user_message_len={um_len} "
+                f"head={head!r} tail={tail!r}"
+            )
+        except Exception as e:
+            print(f"[scaffold_router] PIPE_INPUTS log failed: {e}")  # noqa: T201
+
     def pipe(
         self,
         user_message: str,
@@ -330,6 +366,8 @@ class Pipeline:
         messages: List[dict],
         body: dict,
     ) -> Generator[str, None, None]:
+        if self.valves.log_pipe_inputs:
+            self._log_pipe_inputs(user_message, messages, body)
         msg = user_message.strip()
         # Strip Open WebUI context wrapper. Apr 26 2026: hardened from a
         # single-tag regex (only matched </context>) to a multi-wrapper sweep

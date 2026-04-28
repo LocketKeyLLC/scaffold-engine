@@ -352,3 +352,42 @@ class TestWindowMessages:
         assert out[0]["content"] == "seed"
         assert [m["content"] for m in out[1:]] == ["u7", "u8", "u9"]
 
+@pytest.mark.smoke
+class TestLogPipeInputs:
+    """_log_pipe_inputs: diagnostic logger for OWUI file-routing failures."""
+
+    def test_logs_when_called(self, pipe, capsys):
+        """Helper writes a PIPE_INPUTS line to stdout when invoked."""
+        pipe._log_pipe_inputs("hello", [{"role": "user", "content": "hi"}], {"k": 1})
+        out = capsys.readouterr().out
+        assert "PIPE_INPUTS" in out
+        assert "user_message_len=5" in out
+        assert "messages_n=1" in out
+
+    def test_captures_body_keys_and_files(self, pipe, capsys):
+        """Body keys and files_count surface in the log line."""
+        body = {"files": [{"id": "a"}, {"id": "b"}], "stream": True}
+        pipe._log_pipe_inputs("x", [], body)
+        out = capsys.readouterr().out
+        assert "files_count=2" in out
+        assert "'files'" in out and "'stream'" in out
+
+    def test_captures_metadata_files(self, pipe, capsys):
+        """Falls back to metadata.files when top-level files missing."""
+        body = {"metadata": {"files": [{"id": "a"}]}}
+        pipe._log_pipe_inputs("x", [], body)
+        out = capsys.readouterr().out
+        assert "files_count=1" in out
+        assert "metadata_keys=['files']" in out
+
+    def test_handles_non_dict_body(self, pipe, capsys):
+        """Non-dict body is tolerated — no exception, sane defaults."""
+        pipe._log_pipe_inputs("x", [], None)
+        out = capsys.readouterr().out
+        assert "PIPE_INPUTS" in out
+        assert "files_count=0" in out
+
+    def test_disabled_by_default(self, pipe, capsys):
+        """Valve is False by default; pipe() must not call the logger."""
+        assert pipe.valves.log_pipe_inputs is False
+
