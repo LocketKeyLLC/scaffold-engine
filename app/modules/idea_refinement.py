@@ -87,7 +87,7 @@ async def refine_idea(
     model: str | None = None,
     domain: str | None = None,
     model_overrides: dict | None = None,
-    target_status: str = "planning",
+    target_status: str = "awaiting_confirmation",
 ) -> dict:
     """Refine raw idea text into a structured brief and persist as a job.
 

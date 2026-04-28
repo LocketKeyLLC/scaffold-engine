@@ -83,14 +83,14 @@ class TestRefineIdeaHappyPath:
         assert "job_id" in result
         assert result["job_id"] == "job-abc-123"
 
-    def test_returns_status_planning(self):
+    def test_returns_status_awaiting_confirmation(self):
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
             mock_mr.generate = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             result = _run(refine_idea("Build a CLI tool", db))
-        assert result["status"] == "planning"
+        assert result["status"] == "awaiting_confirmation"
 
     def test_returns_refined_brief(self):
         db = _make_db()
@@ -204,15 +204,18 @@ class TestRefineIdeaTargetStatus:
             "target_status parameter must drive the returned status, not be ignored."
         )
 
-    def test_default_target_status_is_planning(self):
-        """When target_status is not supplied, default 'planning' must be returned."""
+    def test_default_target_status_is_awaiting_confirmation(self):
+        """When target_status is not supplied, default 'awaiting_confirmation' must be returned.
+
+        (Default changed from 'planning' so /ideas-created jobs no longer
+        orphan in planning awaiting a manual /dag call. See commit message.)"""
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
             mock_mr.generate = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             result = _run(refine_idea("Build a tool", db))
-        assert result["status"] == "planning"
+        assert result["status"] == "awaiting_confirmation"
 
 
 # ===========================================================================

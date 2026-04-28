@@ -125,7 +125,7 @@ async def test_reranker_direct():
 @pytest.mark.timeout(180)
 @pytest.mark.asyncio
 async def test_job_submission():
-    """POST /ideas creates a job and returns job_id + status 'planning'."""
+    """POST /ideas creates a job and returns job_id + status 'awaiting_confirmation'."""
     payload = {
         "idea": "List three sorting algorithms",
         "domain": "eng",
@@ -139,6 +139,6 @@ async def test_job_submission():
 
     body = resp.json()
     assert "job_id" in body, f"Response missing job_id: {body}"
-    assert body.get("status") == "planning", f"Expected status 'planning', got {body.get('status')}"
+    assert body.get("status") == "awaiting_confirmation", f"Expected status 'awaiting_confirmation', got {body.get('status')}"
     assert isinstance(body["job_id"], str)
     assert len(body["job_id"]) > 0
