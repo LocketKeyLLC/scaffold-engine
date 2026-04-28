@@ -7,7 +7,7 @@
 
 ---
 
-**Status:** Reconciled 2026-04-27 — open items: 2 (#7.8, #7.9; both
+**Status:** Reconciled 2026-04-27 — open items: 0 (#7.8, #7.9 closed 2026-04-28; both
 genuine future work — prompt revision history feature, structured
 prompt-history dict refactor).
 **Note:** Items marked `[x]` without a commit hash were verified as
@@ -73,7 +73,7 @@ through Apr 2026.
 - [x] **#7.5** SearXNG client in `http_clients` missing `follow_redirects=True` — 301/302 responses fail silently.
 - [x] **#7.6** `execution_handler.deps_met` logic inconsistent with `execute_next_node` — excludes `'skipped'` status.
 - [x] **#7.7** `actionable` filter in `execution_handler` includes `'failed'` status, but `/execute` won't re-pick failed nodes without explicit `/exec/retry`.
-- [ ] **#7.8** No prompt revision history (Phase 8 #119 workflow) — edits overwrite without audit trail.
+- [x] **#7.8** No prompt revision history (Phase 8 #119 workflow) — edits overwrite without audit trail. — ✅ migration `022_prompt_revisions.sql` + `update_prompt()` revision tracking + `GET /prompts/{job_id}/{node_key}/history`
 
 ### Phase 8a — scaffold_router
 - [x] **#8.6** Command prefix matching uses `startswith()` without word boundary — `/executor` matches `/exec`, `/confirmation` matches `/confirm`. — ✅ `2989f0b`
@@ -136,7 +136,7 @@ through Apr 2026.
 - [x] **#6.23** Inconsistent `logger.bind(session_id=...)` usage across phases. — ✅ `02bdc22`
 
 ### Phase 7
-- [ ] **#7.9** `prompt_inspector` (orchestrator module) returns prompt history data structured as flat dict — consider structured model.
+- [x] **#7.9** `prompt_inspector` (orchestrator module) returns prompt history data structured as flat dict — consider structured model. — ✅ `PromptRevision` + `PromptHistoryResponse` Pydantic models in `app/schemas.py`
 
 ### Phase 8
 - [x] **#8.22** `gt_browser` pagination lacks "previous page" hint. — ✅ `94f74bb`

@@ -35,7 +35,7 @@ from app.modules.gt_extractor import extract_ground_truths
 from app.modules.idea_refinement import refine_idea
 from app.modules.ideation_workflow import analyze_and_confirm, research_and_compile
 from app.modules.research_agent import run_research, run_research_pdf, resume_research
-from app.modules.prompt_inspector import list_prompts, get_prompt, update_prompt
+from app.modules.prompt_inspector import list_prompts, get_prompt, update_prompt, get_history
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag as _query_rag
 from app.routers.status import router as status_router
@@ -615,6 +615,21 @@ async def prompts_detail(job_id: str, node_key: str, db: AsyncSession = Depends(
         return result
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid job_id format")
+
+
+@app.get("/prompts/{job_id}/{node_key}/history")
+async def prompts_history(job_id: str, node_key: str, db: AsyncSession = Depends(get_db)):
+    """Return the audit trail of prompt edits for a node, newest-first.
+
+    Closes audit items #7.8 (no audit trail) and #7.9 (structured response).
+    """
+    try:
+        result = await get_history(UUID(job_id), node_key, db)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
 
 
 @app.post("/prompts/{job_id}/{node_key}")

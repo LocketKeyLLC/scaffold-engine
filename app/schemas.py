@@ -497,3 +497,20 @@ class ExecRetryInput(BaseModel):
     job_id: str
     node_key: str
 
+class PromptRevision(BaseModel):
+    """Single historical prompt revision (audit items #7.8, #7.9)."""
+    revision_number: int
+    prompt_text: str
+    edited_at: datetime
+    edited_by: str | None = None
+    source: str = "manual"
+
+
+class PromptHistoryResponse(BaseModel):
+    """Response for GET /prompts/{job_id}/{node_key}/history."""
+    job_id: str
+    node_key: str
+    current_prompt: str
+    revision_count: int
+    revisions: list[PromptRevision]
+

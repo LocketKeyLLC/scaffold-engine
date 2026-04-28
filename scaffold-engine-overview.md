@@ -270,6 +270,7 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 | `GET` | `/logs` | Execution logs |
 | `GET` | `/prompts/{job_id}[/{node_key}]` | Prompt inspection |
 | `POST` | `/prompts/{job_id}/{node_key}` | Update node prompt |
+| `GET` | `/prompts/{job_id}/{node_key}/history` | Prompt revision audit trail |
 | `GET` | `/health` | Postgres + Ollama + Milvus + Redis |
 
 ---
@@ -294,7 +295,7 @@ All roles routable via Open WebUI admin valves. Priority: **valve > env var > co
 | `apscheduler_jobs` | APScheduler internal jobstore |
 | *(+ 1 legacy/unused)* | — |
 
-**Migrations:** `db/migrations/002_*.sql` through `017_dag_nodes_is_output_node.sql`. Applied at lifespan startup by `app.migrations.run_migrations()`; tracked in `schema_migrations` table.
+**Migrations:** `db/migrations/002_*.sql` through `022_prompt_revisions.sql`. Applied at lifespan startup by `app.migrations.run_migrations()`; tracked in `schema_migrations` table.
 
 ---
 
