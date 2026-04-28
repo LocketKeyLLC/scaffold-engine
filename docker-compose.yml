@@ -47,7 +47,7 @@ services:
     networks:
       - ai-network
   scaffold-postgres:
-    image: postgres:16
+    image: postgres:16@sha256:2586e2a95d1c9b31cb2967feb562948f7d364854453d703039b6efa45fe48417
     container_name: scaffold-postgres
     ports:
       - "127.0.0.1:5432:5432"
@@ -149,7 +149,7 @@ services:
     networks:
       - ai-network
   scaffold-redis:
-    image: redis:8-alpine
+    image: redis:8-alpine@sha256:81b6f81d6a6c5b9019231a2e8eb10085e3a139a34f833dcc965a8a959b040b72
     container_name: scaffold-redis
     command: >
       redis-server --save 60 1000
