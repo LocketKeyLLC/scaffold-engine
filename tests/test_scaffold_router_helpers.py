@@ -293,3 +293,62 @@ class TestFmt:
 # to the orchestrator. We "mock" (fake) the requests library so no
 # real network calls happen during testing.
 
+@pytest.mark.smoke
+class TestWindowMessages:
+    """_window_messages: caps triage history to last N turns; pins first user message."""
+
+    def test_returns_input_when_under_window(self, pipe):
+        """Conversation shorter than window: pass through unchanged."""
+        msgs = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+        ]
+        pipe.valves.triage_history_window = 8
+        assert pipe._window_messages(msgs) == msgs
+
+    def test_pins_first_user_when_outside_window(self, pipe):
+        """First user message is preserved when older than the tail window."""
+        msgs = [{"role": "user", "content": "seed"}]
+        msgs += [{"role": "assistant", "content": f"a{i}"} for i in range(5)]
+        msgs += [{"role": "user", "content": f"u{i}"} for i in range(5)]
+        pipe.valves.triage_history_window = 4
+        out = pipe._window_messages(msgs)
+        assert out[0] == {"role": "user", "content": "seed"}
+        assert len(out) == 5  # 1 pinned + 4 tail
+        assert out[-4:] == msgs[-4:]
+
+    def test_no_duplicate_when_first_user_in_tail(self, pipe):
+        """If the first user message already lies inside the tail, don't duplicate it."""
+        msgs = [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+        ]
+        pipe.valves.triage_history_window = 8
+        out = pipe._window_messages(msgs)
+        assert out == msgs  # under-window passthrough; no dup
+
+    def test_returns_tail_only_when_no_user_message(self, pipe):
+        """Edge: assistant-only messages → just return last N."""
+        msgs = [{"role": "assistant", "content": f"a{i}"} for i in range(10)]
+        pipe.valves.triage_history_window = 3
+        out = pipe._window_messages(msgs)
+        assert out == msgs[-3:]
+
+    def test_window_size_one_floor(self, pipe):
+        """A window value of 0 or negative is clamped to 1; first user still pinned."""
+        msgs = [{"role": "user", "content": f"u{i}"} for i in range(5)]
+        pipe.valves.triage_history_window = 0
+        out = pipe._window_messages(msgs)
+        # n clamped to 1; first user (u0) outside tail -> pinned + tail (u4)
+        assert out == [msgs[0], msgs[-1]]
+
+    def test_preserves_message_order(self, pipe):
+        """Pinned-then-tail must remain chronological."""
+        msgs = [{"role": "user", "content": "seed"}]
+        msgs += [{"role": "user", "content": f"u{i}"} for i in range(10)]
+        pipe.valves.triage_history_window = 3
+        out = pipe._window_messages(msgs)
+        assert out[0]["content"] == "seed"
+        assert [m["content"] for m in out[1:]] == ["u7", "u8", "u9"]
+

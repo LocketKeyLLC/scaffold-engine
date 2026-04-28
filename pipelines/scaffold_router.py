@@ -113,6 +113,7 @@ class Pipeline:
 
         # Triage
         triage_model: str = "qwen3:4b"
+        triage_history_window: int = 8  # last N turns sent to triage; first user msg always pinned
         ollama_url: str = "http://172.18.0.1:11434"
 
         # Model overrides
@@ -234,8 +235,26 @@ class Pipeline:
     # Triage / synthesis
     # ------------------------------------------------------------------
 
+    def _window_messages(self, messages: List[dict]) -> List[dict]:
+        """Cap triage history to last N turns; always pin the first user message.
+
+        Mitigates qwen3:4b CPU latency growth on long conversations.
+        Window size is set by valves.triage_history_window.
+        """
+        n = max(1, int(self.valves.triage_history_window))
+        if len(messages) <= n:
+            return messages
+        first_user_idx = next(
+            (i for i, m in enumerate(messages) if m.get("role") == "user"),
+            None,
+        )
+        tail = messages[-n:]
+        if first_user_idx is None or first_user_idx >= len(messages) - n:
+            return tail
+        return [messages[first_user_idx]] + tail
+
     def _call_triage(self, messages: List[dict]) -> str:
-        clean = self._clean_messages(messages)
+        clean = self._window_messages(self._clean_messages(messages))
         payload = {
             "model": self.valves.triage_model,
             "messages": [{"role": "system", "content": TRIAGE_SYSTEM_PROMPT}] + clean,
