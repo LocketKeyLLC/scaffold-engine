@@ -695,20 +695,40 @@ Suite: **547 passed**, 2 pre-existing auth failures out of scope, 30 skipped.
 
 **Round 6 totals:** 9 commits, +28 tests, 7 user-visible/code issues closed, 0 regressions remaining.
 
---- a/scaffold-engine-overview.md
-+++ b/scaffold-engine-overview.md
-@@ -693,3 +693,16 @@
- **Remaining (environmental, not code):**
- - Triage CPU latency on long conversations (qwen3:4b on CPU; mitigation requires GPU or smaller model)
- - Open WebUI file routing intermittent (UI-side; hard refresh + new chat resolves)
+### 2026-04-27 (Round 7) — Phase 2 client-disconnect handling
 
- **Round 6 totals:** 9 commits, +28 tests, 7 user-visible/code issues closed, 0 regressions remaining.
-+
-+### 2026-04-27 (Round 7) — Phase 2 client-disconnect handling
-+
-+**Suite:** 578 passed, 31 skipped, 2 known-fail out-of-scope (auth). +1 test vs Round 6.
-+
-+**Bug fix (1)**
-+- **Phase 2 client disconnects stranded jobs in `planning` with empty `research_data`** — `research_and_compile()` caught `Exception` but not `asyncio.CancelledError`, so SSE client disconnects during long Phase 2 runs (CPU runs of 8–24min are common) skipped `_fail_job` entirely. Jobs landed with `refined_brief` populated but `research_data` null and were only caught by the reaper at the 24h `planning_min` threshold. Added explicit `CancelledError` handler that calls new `_cancel_job` helper (`error_summary='client_disconnect'`), then re-raises to preserve asyncio task semantics. Mirrors the `_run_with_session_lifecycle` pattern in `research_agent.py`. Test `test_ideation_phase2_cancel.py` patches `search_searxng` to raise `CancelledError` mid-flight and asserts the UPDATE fires with the expected params. Discovered via two stranded jobs (`59745a88-…`, `e0a9b5ee-…`). Commit `2a7642b`.
-+
-+**Cumulative open list:** unchanged from Round 6.
+**Suite:** 578 passed, 31 skipped, 2 known-fail out-of-scope (auth). +1 test vs Round 6.
+
+**Bug fix (1)**
+- **Phase 2 client disconnects stranded jobs in `planning` with empty `research_data`** — `research_and_compile()` caught `Exception` but not `asyncio.CancelledError`, so SSE client disconnects during long Phase 2 runs (CPU runs of 8–24min are common) skipped `_fail_job` entirely. Jobs landed with `refined_brief` populated but `research_data` null and were only caught by the reaper at the 24h `planning_min` threshold. Added explicit `CancelledError` handler that calls new `_cancel_job` helper (`error_summary='client_disconnect'`), then re-raises to preserve asyncio task semantics. Mirrors the `_run_with_session_lifecycle` pattern in `research_agent.py`. Test `test_ideation_phase2_cancel.py` patches `search_searxng` to raise `CancelledError` mid-flight and asserts the UPDATE fires with the expected params. Discovered via two stranded jobs (`59745a88-…`, `e0a9b5ee-…`). Commit `2a7642b`.
+
+**Cumulative open list:** unchanged from Round 6.
+
+### 2026-04-28 (Round 8) — endpoint contracts, audit closeout, test suite expansion, DX polish
+
+**Suite:** 745 passed, 5 skipped (KB-availability), 0 failing. Stable across consecutive runs. +167 vs Round 7 baseline (578 → 745).
+
+**Bug fixes (3)**
+- **`/ideas` endpoint contract gap** — `refine_idea()` defaulted `target_status="planning"`, so jobs created via `/ideas` (including the validate-tier integration test running on every `make test`) landed in `planning` with no auto-chain forward. They orphaned and were reaped at the 24h `planning_min` threshold. Default flipped to `awaiting_confirmation`, matching `/ideate`. Three test assertions updated. Discovered via 9 stranded "List Three Sorting Algorithms" jobs spanning 3 days, all from the same test. Commit `eb64c1e`.
+- **`test_batches_large_input` flakiness** — test mocked only `model_router`, leaving `_fetch_and_extract` to attempt real httpx fetches against the fake URLs (`https://ex.com/0..14`). In isolation: ~3s. Under full-suite load with warmed httpx clients: 30+s, tripping the global `--timeout=30`. Mocked the fetch too, forcing the snippet-fallback path. Runtime now deterministic at ~1.6s, +3 tests came out of flake-skip. Commit `c1d0940`.
+- **Auth tests singleton-reload pattern** — `test_valid_key_is_accepted` and `test_no_key_configured_disables_auth` had been failing for weeks tagged "out of scope". Two real issues: (1) Pydantic Settings is a singleton instantiated at first `app.config` import, so reloading `app.auth` alone left `settings.scaffold_api_key` pinned to the original value — fixture now reloads BOTH; (2) the second test name claimed "missing key disables auth" but the documented contract is that empty key WITHOUT explicit `SCAFFOLD_AUTH_DISABLED=1` raises `RuntimeError` at import. Fixture now sets the opt-out flag and the test renamed to reflect actual behavior. Teardown also fixed (was leaving modules in invalid state). Commit `3600a64`.
+
+**Feature (1)**
+- **Prompt revision history** (audit items #7.8 + #7.9, both closed) — full audit trail for DAG node prompt edits. New `prompt_revisions` table (migration 022) with composite FK to `dag_nodes`, monotonic `revision_number` per (job_id, node_key), `source` CHECK constraint (manual/optimizer/initial/system). `update_prompt()` rewritten to archive the OLD prompt as an immutable revision before applying the new value. New `get_history()` function + `GET /prompts/{job_id}/{node_key}/history` endpoint returning newest-first. `PromptRevision` and `PromptHistoryResponse` Pydantic models in schemas (closes #7.9 "structured model"). 7 new tests (first edit, increment, empty-old skip, status guard, invalid source, ordering, missing node). Commit `3d2c034`.
+
+**Test suite hardening (3)**
+- **Phase 2 client-disconnect handler** (Round 7 work, applied this round) — `research_and_compile()` now mirrors the `_run_with_session_lifecycle` pattern from `research_agent.py`. Commit `2a7642b`.
+- **17 previously-skipped tests unlocked** — pipeline + infra tests under `test_scaffold_router_*.py`, `test_model_valves.py`, `test_gt_browser.py`, `test_execution_handler.py`, `test_sse_streaming.py`, `test_infra_scaffolding.py` were skipping because they probe `pipelines/`, `Dockerfile`, and `.github/` — none mounted into the orchestrator container by design. Added dev-only mounts in `docker-compose.dev.yml`. Flushed out 4 stale test assertions (model_valves expecting 8 keys when filter correctly returns 6, schedule depth default mismatch from Round 6, `/results` mock shape mismatch from same Round 6 fix, hardcoded SSE timeout test). Also added inline `# noqa: T201` support to the no-prints structural test. Commit `0bc1ae8`.
+- **6 obsolete compile-strategy-1 tests deleted** — all `@pytest.mark.skip` with the reason "Strategy 1 (title-heuristic) removed; superseded by is_output_node marker". Tests for deleted code carry no value. File: 322 → 247 lines. Commit `13aeda8`.
+- **3 of 7 golden retrieval tests activated** — live KB inspection (664 entries: eng=261, llm=218, rag=175, spec=8, prompt=0) showed 3 queries had retrievable matches. Module-level skip removed; per-query skips with precise reasons left for the 4 that need KB content. Commit `fd434e8`.
+
+**Hygiene + DX (5)**
+- **Bare-except audit** — 31 sites reviewed across `app/` and `pipelines/`. 30 found legitimate (health-check fallbacks, JSON parsing, finalize-during-cancel, etc.). One (`scheduler.py` force-shutdown fallback) gained a debug log so future failures are visible. Commit `5a5f7ce`.
+- **`redis>=5.0.0` pinned to 7.4.0** — sole unpinned dep, violated the "all dependencies pinned" invariant. Commit `1c43e2f`.
+- **`postgres:16` and `redis:8-alpine` pinned by SHA256** — every other compose image was SHA-pinned; these two were the outliers. Commits `9f1da00`.
+- **Complete `.env.example`** — was a 1-line stub (only `GITHUB_TOKEN`), missing 14+ vars the orchestrator consumes. Rebuilt as a 139-line documented template with three tiers: REQUIRED (4 vars), RUNTIME-LIKELY (8), ADVANCED (every `config.py` knob commented out with defaults). Also fixed `.gitignore` so the file could actually be tracked. Commits `9f1da00`, `260e8f5`.
+- **README + Makefile polish** — repo had no README at all. New 55-line README serves as the front door (pipeline diagram, prerequisites, quick start, common operations, project layout, pointer to overview). Makefile: stale `~547 passing` comment fixed to `~745`, `migrate` target moved up next to other ops targets, two new targets (`restart`, `dev-up`). Commit `e258089`.
+
+**Multi-axis security/error/log audit** — 0 hardcoded secrets, 0 SQL injection vectors, 0 dangerous patterns (`eval`/`exec`/`pickle.load`/`shell=True`/`verify=False`), 0 f-string log violations, all HTTP calls have timeouts, all `HTTPException` calls have status codes, all `raise` statements are legitimate re-raises. Codebase is genuinely clean across all surveyed axes — Round 1–6 fix work consolidated quality.
+
+**Round 8 totals:** 14 commits, +167 tests, 3 bug fixes, 1 feature, 17 tests unlocked, 6 obsolete tests deleted, 2 audit items closed (list now empty), 0 regressions. Test suite is stable across runs and the strongest it has ever been.
