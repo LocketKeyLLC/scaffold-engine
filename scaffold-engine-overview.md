@@ -424,7 +424,7 @@ CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval co
 5. **Research duration on CPU** — shallow `/research` topic mode: 20–30 min. Medium/deep proportionally longer.
 6. **Reranker cold-load** — first invocation ~13.6s (HF cache check + CPU load).
 7. *(resolved Apr 26 2026)* ~~Version chain filter is result-set scoped~~ — `query_rag()` only filters superseded entries when both versions appear in the same result set.
-8. **Open WebUI file routing intermittent** — after container restarts, sometimes stops forwarding. Hard refresh + new chat resolves.
+8. *(diagnostic Apr 28 2026)* **Open WebUI file routing intermittent** — after container restarts, sometimes stops forwarding. Hard refresh + new chat resolves. Round 9 added gated `_log_pipe_inputs` diagnostic (`log_pipe_inputs` valve) to capture payload shape on next failure.
 9. *(resolved Apr 26 2026)* ~~Context stripping depends on `</context>` tag~~ — regex in `pipe()` needs updating if Open WebUI format changes.
 
 ### Known bugs (see fix list)
@@ -614,7 +614,7 @@ Suite: **547 passed**, 2 pre-existing auth failures out of scope, 30 skipped.
 - Real fixes shipped: 2 (reranker thresholds, model cleanup)
 - Stale audit items reconciled: 5
 - Disk reclaimed: 15.6 GB
-- Open items remaining (likely environmental, not code): triage CPU latency, Open WebUI file routing intermittent
+- Open items remaining (likely environmental, not code): triage CPU latency, Open WebUI file routing intermittent *(both addressed in Round 9)*
 
 ### 2026-04-26 (Round 4) — drift cleanup, reranker pre-warm, configurable ideation model
 
@@ -690,8 +690,8 @@ Suite: **547 passed**, 2 pre-existing auth failures out of scope, 30 skipped.
 - ~~13 modules without dedicated tests~~ — actual gap was 3, all closed
 
 **Remaining (environmental, not code):**
-- Triage CPU latency on long conversations (qwen3:4b on CPU; mitigation requires GPU or smaller model)
-- Open WebUI file routing intermittent (UI-side; hard refresh + new chat resolves)
+- ~~Triage CPU latency on long conversations~~ — mitigated in Round 9 via history windowing (commit `d94a55b`)
+- ~~Open WebUI file routing intermittent~~ — diagnostic shipped in Round 9 (commit `a7cf8a1`); awaiting captured failure for targeted fix
 
 **Round 6 totals:** 9 commits, +28 tests, 7 user-visible/code issues closed, 0 regressions remaining.
 
@@ -732,3 +732,18 @@ Suite: **547 passed**, 2 pre-existing auth failures out of scope, 30 skipped.
 **Multi-axis security/error/log audit** — 0 hardcoded secrets, 0 SQL injection vectors, 0 dangerous patterns (`eval`/`exec`/`pickle.load`/`shell=True`/`verify=False`), 0 f-string log violations, all HTTP calls have timeouts, all `HTTPException` calls have status codes, all `raise` statements are legitimate re-raises. Codebase is genuinely clean across all surveyed axes — Round 1–6 fix work consolidated quality.
 
 **Round 8 totals:** 14 commits, +167 tests, 3 bug fixes, 1 feature, 17 tests unlocked, 6 obsolete tests deleted, 2 audit items closed (list now empty), 0 regressions. Test suite is stable across runs and the strongest it has ever been.
+
+### 2026-04-28 (Round 9) — environmental backlog mitigation
+
+**Suite:** 756 passed, 5 skipped, 0 failing. +11 vs Round 8 baseline (745 → 756).
+
+**Triage CPU latency mitigation (commit `d94a55b`)**
+- Every plain message previously sent the entire chat history to qwen3:4b on CPU; wall time grew linearly with turn count. New `_window_messages()` helper in `pipelines/scaffold_router.py` caps history to the last N turns (default 8) while always pinning the first user message so the model retains the original goal as the conversation grows. Wired into `_call_triage` only — `_synthesize_idea` (one-shot on `/go`) intentionally untouched.
+- New valve `triage_history_window` (default 8, OWUI-tunable). 6 new tests in `TestWindowMessages`.
+
+**OWUI file-routing diagnostic (commit `a7cf8a1`)**
+- File uploads occasionally fail to inline content into `user_message` after container restarts. Symptom is intermittent and we had no captured payload to target. Shipped `_log_pipe_inputs()` — gated diagnostic that captures `body` keys, `metadata` keys, `files_count`, `file_ids`, message count, last role, and head/tail of `user_message` when the new valve `log_pipe_inputs` is enabled.
+- Default off; flip in OWUI admin when symptoms recur. Targeted fallback fix deferred until a real PIPE_INPUTS sample tells us which OWUI field carries the dropped content. 5 new tests in `TestLogPipeInputs`.
+
+**Round 9 totals:** 2 commits, +11 tests, 1 environmental issue mitigated, 1 instrumented for future fix, 0 regressions.
+
