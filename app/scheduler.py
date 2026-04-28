@@ -89,7 +89,7 @@ async def shutdown_scheduler() -> None:
         try:
             sched.shutdown(wait=False)
         except Exception:
-            pass
+            logger.debug("scheduler_force_shutdown_failed", exc_info=True)
 
 
 async def _rehydrate() -> None:
