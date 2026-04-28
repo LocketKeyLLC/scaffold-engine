@@ -6,54 +6,6 @@ and helpers live in _execution_agent_shared.
 from tests._execution_agent_shared import *  # noqa: F401, F403
 
 @pytest.mark.smoke
-@pytest.mark.skip(reason="Strategy 1 (title-heuristic) removed; superseded by is_output_node marker (Strategy 0).")
-class TestCompileOutputStrategy1:
-    """Strategy 1: output-titled node gets priority. [REMOVED]"""
-
-    async def test_output_node_preferred(self):
-        db = make_mock_db([
-            {"node_key": "T1", "title": "Research topic", "tool": "SearXNG",
-             "status": "done", "output_text": "search results here"},
-            {"node_key": "T2", "title": "Summarize output", "tool": "LLM",
-             "status": "done", "output_text": "final summary"},
-            {"node_key": "T3", "title": "Review", "tool": "LLM",
-             "status": "done", "output_text": "looks good"},
-        ])
-        from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
-        assert result == "final summary"
-
-    async def test_output_node_case_insensitive(self):
-        db = make_mock_db([
-            {"node_key": "T1", "title": "Final OUTPUT Document", "tool": "LLM",
-             "status": "done", "output_text": "the deliverable"},
-        ])
-        from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
-        assert result == "the deliverable"
-
-    async def test_output_node_not_done_skipped(self):
-        db = make_mock_db([
-            {"node_key": "T1", "title": "Compile output", "tool": "LLM",
-             "status": "failed", "output_text": None},
-            {"node_key": "T2", "title": "Research", "tool": "LLM",
-             "status": "done", "output_text": "fallback content"},
-        ])
-        from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
-        assert "fallback content" in result
-
-    async def test_output_node_none_text_returns_empty(self):
-        db = make_mock_db([
-            {"node_key": "T1", "title": "Generate output", "tool": "LLM",
-             "status": "done", "output_text": None},
-        ])
-        from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
-        assert result == ""
-
-
-@pytest.mark.smoke
 class TestCompileOutputStrategy2:
     """Strategy 2: last CodeGen terminal node is the deliverable."""
 
@@ -265,21 +217,6 @@ class TestCompileOutputExplicitMarker:
         from app.modules.execution_agent import _compile_output
         result = await _compile_output("job-1", db)
         assert result == "EXPLICIT WINNER"
-
-    @pytest.mark.skip(reason="Strategy 1 title-heuristic removed; superseded by is_output_node.")
-    async def test_falls_back_to_heuristics_when_no_explicit_marker(self):
-        db = make_mock_db([
-            {"node_key": "T1", "title": "Research", "tool": "LLM",
-             "status": "done", "output_text": "research data",
-             "is_output_node": False},
-            {"node_key": "T2", "title": "Generate output", "tool": "LLM",
-             "status": "done", "output_text": "heuristic-selected",
-             "is_output_node": False},
-        ])
-        from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
-        assert result == "heuristic-selected"
-
     async def test_explicit_marker_but_not_done_falls_through(self):
         db = make_mock_db([
             {"node_key": "T1", "title": "Research", "tool": "LLM",
@@ -308,15 +245,3 @@ class TestCompileOutputExplicitMarker:
         assert "alpha" in result
         assert "beta" in result
         assert "---" in result
-
-    @pytest.mark.skip(reason="Strategy 1 title-heuristic removed; superseded by is_output_node.")
-    async def test_backward_compat_no_marker_key(self):
-        db = make_mock_db([
-            {"node_key": "T1", "title": "Research", "tool": "LLM",
-             "status": "done", "output_text": "legacy row"},
-            {"node_key": "T2", "title": "Final output", "tool": "LLM",
-             "status": "done", "output_text": "legacy heuristic pick"},
-        ])
-        from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
-        assert result == "legacy heuristic pick"
