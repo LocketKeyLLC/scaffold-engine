@@ -18,6 +18,7 @@ retrieval_report.json
 
 # Local backups containing secrets
 .env.*
+!.env.example
 .env.backup*
 pipelines/*/valves.json
 *.bak-*
