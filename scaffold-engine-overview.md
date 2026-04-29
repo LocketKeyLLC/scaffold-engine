@@ -745,5 +745,20 @@ Suite: **547 passed**, 2 pre-existing auth failures out of scope, 30 skipped.
 - File uploads occasionally fail to inline content into `user_message` after container restarts. Symptom is intermittent and we had no captured payload to target. Shipped `_log_pipe_inputs()` — gated diagnostic that captures `body` keys, `metadata` keys, `files_count`, `file_ids`, message count, last role, and head/tail of `user_message` when the new valve `log_pipe_inputs` is enabled.
 - Default off; flip in OWUI admin when symptoms recur. Targeted fallback fix deferred until a real PIPE_INPUTS sample tells us which OWUI field carries the dropped content. 5 new tests in `TestLogPipeInputs`.
 
-**Round 9 totals:** 2 commits, +11 tests, 1 environmental issue mitigated, 1 instrumented for future fix, 0 regressions.
+**Triage UX restructure (commits `a7fe0a0` + `a5a287b`)**
+- Replaced TRIAGE_SYSTEM_PROMPT with an enforced 4-section template (Scope so far / Options / Gaps / My pick). Live testing showed the model passively assuming user intent; new structure forces it to surface options, name gaps, and recommend defaults every turn. Forbidden-output rules ban markdown tables, emoji, fenced blocks, and horizontal rules. A worked mid-conversation example anchors the model when scope is mostly clear but not locked. Exit-to-summary only fires when all four Gaps read "✓ covered".
 
+**Valves resilience (commit `a7fe0a0`)**
+- Discovered while diagnosing a 401 on `/ideate`: `pipelines/main.py:193` rewrites `valves.json` to `{}` whenever the file is missing on container startup, silently wiping every saved value. Three-layer defense added — `valves.template.json` tracked in git with sensible defaults, `_bootstrap_valves_from_template()` seeds an empty live file from the template at `__init__`, `_apply_env_fallbacks()` fills empty `api_key`/`orchestrator_url`/`ollama_url` from `SCAFFOLD_*` env vars. End-to-end verified: deleted live valves.json → restart → re-seeded → env fallback filled api_key → /ideate returned 200. `.gitignore` cleaned of duplicate + stale entries.
+
+**Execution-node output discipline (commit `2a7b392`)**
+- Live `/execute/all` test surfaced that the call site at `_run_inference` was sending only a user message — no system prompt — so qwen3-vl:235b freelanced into 350-line essays with tables, emoji, and editorialising. Added `EXECUTION_SYSTEM_LLM` (strict prose) and `EXECUTION_SYSTEM_CODEGEN` (code-first, code-friendly markdown), routed by `_system_for_tool()` based on `tool` field.
+
+**DAG generator tool selection (commit `2a7b392`)**
+- Strict CodeGen prompt exposed a planning-side bug: the DAG generator picked `tool=CodeGen` for "List supported image files" because the original guide just said "CodeGen = code generation or script writing". Tightened the rule with explicit anti-examples (listing, naming, designing, documentation → LLM) and a positive definition (deliverable IS executable code). LLM marked `DEFAULT` loudly. Added a 5-node CLI-tool worked example showing the right 1:4 CodeGen:LLM ratio.
+
+**Verified end-to-end (CLI tool that converts screenshots to a searchable PDF)**
+- Before: T2 incorrectly tagged CodeGen, failed verification 3× ("includes unnecessary and unrelated content such as installation instructions and a Bash script"), blocked the job at T2.
+- After: same idea, fresh DAG. T1=Choose image formats (LLM), T2=Design CLI structure (LLM), T3=Write OCR to PDF script (CodeGen), T4=Document usage instructions (LLM), T5=Validate end-to-end workflow (LLM). 5/5 nodes done, 0 retries. T1 output went from ~3500 chars of markdown chrome to 814 chars of focused prose. T3 emitted a working ~30-line bash script with brief context, no tangents.
+
+**Round 9 totals:** 6 commits, +31 tests (745 → 776), 0 regressions. 2 environmental items addressed (1 mitigated, 1 instrumented). 1 latent silent-failure bug discovered + fixed (valves wipe-on-restart). 2 architectural improvements (triage UX + execution node discipline + DAG tool selection).
