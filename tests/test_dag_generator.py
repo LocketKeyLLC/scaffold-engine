@@ -281,3 +281,42 @@ class TestDomainValidation:
             result, _warnings = _dag_gen.validate_dag(dag)
             t1 = next(n for n in result if n["id"] == "T1")
             assert t1.get("domain") == domain, f"Domain {domain} was not preserved"
+
+class TestToolSelectionGuide:
+    """The DAG-generation prompt must steer the LLM away from over-using CodeGen.
+
+    Live test (Apr 29 2026) showed the model picking CodeGen for "list supported
+    file extensions" — a non-code task — because the original tool guide just
+    said "CodeGen = code generation or script writing." This class locks in
+    the tightened guidance.
+    """
+
+    def test_codegen_rule_has_anti_examples(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # Must explicitly call out non-code tasks that should NOT be CodeGen
+        assert "Do NOT use CodeGen" in DAG_SYSTEM
+        assert "listing file extensions" in DAG_SYSTEM
+        assert "documentation" in DAG_SYSTEM
+
+    def test_codegen_rule_has_positive_examples(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # Concrete examples of what CodeGen IS for
+        assert "Write the parser" in DAG_SYSTEM or "API endpoint" in DAG_SYSTEM
+
+    def test_llm_marked_as_default(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The fallback must be loud — model should default LLM, not CodeGen
+        assert "DEFAULT" in DAG_SYSTEM
+
+    def test_cli_example_pattern_present(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The CLI-tool example shows the right CodeGen/LLM split (1 CodeGen, 4 LLM)
+        assert "Build a CLI tool that converts screenshots" in DAG_SYSTEM
+        # The example must label "Document usage" as LLM, not CodeGen
+        assert "Documentation about code is LLM" in DAG_SYSTEM
+
+    def test_text_about_code_routes_to_llm(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The key principle: discussing/listing/explaining code is LLM territory
+        assert "even one ABOUT code" in DAG_SYSTEM
+

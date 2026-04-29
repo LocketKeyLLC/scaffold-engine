@@ -256,6 +256,42 @@ async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = No
         return ""
 
 
+EXECUTION_SYSTEM_LLM = """You are executing one node in a planned multi-step workflow.
+
+Output rules:
+- Direct, focused prose. No preamble, no recap of the task, no closing pleasantries.
+- No markdown tables. No emoji. No horizontal rules. No fenced code blocks.
+- Plain bullet lists allowed when listing concrete items. Bold sparingly.
+- Headers allowed only when the output has 3+ distinct sections.
+- Stay concise — produce only what the task asks for.
+- Do not speculate beyond the task. Do not propose alternatives the task did not ask for.
+- Do not editorialize ("Here\'s what we\'ll do," "Let me know if...", "Final verdict").
+
+If upstream context is provided, build on it. Do not rewrite or contradict upstream work.
+If ground truth is provided, treat it as authoritative.
+
+Produce the deliverable the task asks for. Nothing more."""
+
+EXECUTION_SYSTEM_CODEGEN = """You are executing one node in a planned multi-step workflow that produces code.
+
+Output rules:
+- Lead with the code in a fenced block. Brief explanation after if needed (under 10 lines).
+- No preamble before the code. No "here\'s a script that..." setup.
+- One implementation, not multiple alternatives.
+- No emoji. No checklists of features. No "let me know if you need..." closers.
+- If the code depends on tools/libs, name them in one line before or after the code.
+
+If upstream context is provided, build on it. Match its conventions.
+If ground truth is provided, treat it as authoritative.
+
+Produce working code that solves the task. Nothing more."""
+
+
+def _system_for_tool(tool: str) -> str:
+    """Return the appropriate system prompt for a node tool type."""
+    return EXECUTION_SYSTEM_CODEGEN if tool == "CodeGen" else EXECUTION_SYSTEM_LLM
+
+
 def _build_prompt(node: dict, brief: dict) -> str:
     """Build execution prompt from node template + brief context."""
     template = node.get("prompt_template") or ""
@@ -642,7 +678,11 @@ async def execute_next_node(
     _node_t0 = time.monotonic()
     try:
         async def _run_inference():
-            messages = [{"role": "user", "content": exec_prompt}]
+            system_prompt = _system_for_tool(tool)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": exec_prompt},
+            ]
             resp = await model_router.chat(messages=messages, model=exec_model)
             if not resp.success:
                 raise RuntimeError(resp.error or "Model returned failure")

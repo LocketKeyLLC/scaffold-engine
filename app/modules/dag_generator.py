@@ -76,8 +76,18 @@ Rules:
     - When tool is Milvus, you MUST set "domain" to the most relevant knowledge domain: "prompt" (prompt engineering), "rag" (retrieval-augmented generation), "eng" (software engineering), "llm" (large language models), "spec" (specifications/architecture). If unsure, set "domain" to null.
     - When tool is NOT Milvus, set "domain" to null.
   * SearXNG = web search for EXTERNAL, current, or live information NOT in the knowledge base.
-  * CodeGen = code generation or script writing.
-  * LLM = general reasoning, summarization, analysis (default for everything else).
+  * CodeGen = the deliverable IS executable code. The node produces a working
+    script, function, module, or class as its primary output. The user runs the
+    output. Examples: "Write the parser", "Implement the API endpoint",
+    "Generate the Dockerfile". Do NOT use CodeGen for: listing file extensions,
+    naming variables, designing schemas, choosing libraries, writing
+    documentation, listing requirements, or describing what code should do.
+    If the deliverable is a list, plan, decision, design doc, or explanation —
+    even one ABOUT code — use LLM, not CodeGen.
+  * LLM = general reasoning, summarization, analysis, planning, listing,
+    decision-making, design, explanation, and documentation. This is the
+    DEFAULT — use it whenever the deliverable is text rather than executable
+    code.
 - Each node must produce DISTINCT output that no other node produces. Do NOT create multiple nodes that generate the same artifact (e.g., do not have separate "design script" and "write script" nodes that both produce the full script).
 - Later nodes must EXTEND or VALIDATE earlier work, never recreate it. For example: T1 writes the code → T2 writes tests for it → T3 validates both — NOT T1 designs code → T2 rewrites the same code → T3 rewrites it again.
 - If a task can be accomplished in one node, use one node. Prefer fewer, focused nodes over many overlapping ones.
@@ -90,6 +100,18 @@ EXAMPLE (4-node DAG for "Research the history of solar panels and summarize find
     {"id": "T2", "name": "Retrieve internal KB context", "type": "research", "inputs": ["solar panel keywords"], "outputs": ["KB matches"], "depends_on": ["T1"], "tool": "Milvus", "domain": "eng", "assigned_model": null, "notes": "Check knowledge base for any stored solar energy references"},
     {"id": "T3", "name": "Synthesize and summarize", "type": "action", "inputs": ["raw search results", "KB matches"], "outputs": ["summary draft"], "depends_on": ["T1", "T2"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Combine sources into a coherent summary"},
     {"id": "T4", "name": "Format final output", "type": "output", "inputs": ["summary draft"], "outputs": ["final summary document"], "depends_on": ["T3"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Write final summary to file"}
+  ]
+}
+
+EXAMPLE (5-node DAG for "Build a CLI tool that converts screenshots to a searchable PDF"):
+{
+  "strategy": "sequential",
+  "tasks": [
+    {"id": "T1", "name": "Decide library stack", "type": "decision", "inputs": ["project goals"], "outputs": ["chosen libraries and why"], "depends_on": [], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Pick OCR + PDF libs (e.g., pytesseract, pypdf) — text decision, NOT code"},
+    {"id": "T2", "name": "List supported file types", "type": "decision", "inputs": ["chosen libraries"], "outputs": ["list of extensions"], "depends_on": ["T1"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Plain list of extensions like .png .jpg — LLM not CodeGen"},
+    {"id": "T3", "name": "Write the CLI script", "type": "action", "inputs": ["library stack", "file types"], "outputs": ["working Python script"], "depends_on": ["T1", "T2"], "tool": "CodeGen", "domain": null, "assigned_model": null, "notes": "Real code is the deliverable — CodeGen"},
+    {"id": "T4", "name": "Document usage", "type": "action", "inputs": ["working Python script"], "outputs": ["README content"], "depends_on": ["T3"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Documentation about code is LLM, not CodeGen"},
+    {"id": "T5", "name": "Validate end-to-end", "type": "validation", "inputs": ["working Python script", "README content"], "outputs": ["validation report"], "depends_on": ["T3", "T4"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Validation is reasoning, not code"}
   ]
 }"""
 

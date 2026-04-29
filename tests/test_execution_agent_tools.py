@@ -132,3 +132,62 @@ class TestSkipNodeReturnShape:
         assert validated.status == "error"
         assert validated.message is not None
         assert "not found" in validated.message.lower()
+
+class TestSystemPromptRouting:
+    """_system_for_tool routes LLM/CodeGen tool nodes to the right system prompt.
+
+    The execution agent now sends a system message constraining model output
+    style. LLM nodes get strict prose rules; CodeGen nodes get code-friendly
+    rules that allow fenced blocks. This class verifies the routing.
+    """
+
+    def test_llm_tool_gets_strict_prompt(self):
+        from app.modules.execution_agent import _system_for_tool, EXECUTION_SYSTEM_LLM
+        assert _system_for_tool("LLM") is EXECUTION_SYSTEM_LLM
+
+    def test_codegen_tool_gets_code_prompt(self):
+        from app.modules.execution_agent import (
+            _system_for_tool,
+            EXECUTION_SYSTEM_CODEGEN,
+        )
+        assert _system_for_tool("CodeGen") is EXECUTION_SYSTEM_CODEGEN
+
+    def test_unknown_tool_falls_back_to_llm_prompt(self):
+        from app.modules.execution_agent import _system_for_tool, EXECUTION_SYSTEM_LLM
+        # Milvus/SearXNG/anything else -> default to strict LLM rules
+        assert _system_for_tool("Milvus") is EXECUTION_SYSTEM_LLM
+        assert _system_for_tool("SearXNG") is EXECUTION_SYSTEM_LLM
+        assert _system_for_tool("") is EXECUTION_SYSTEM_LLM
+        assert _system_for_tool("nonsense") is EXECUTION_SYSTEM_LLM
+
+    def test_llm_prompt_forbids_markdown_chrome(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        # Spot-check the constraint surface
+        assert "No markdown tables" in EXECUTION_SYSTEM_LLM
+        assert "No emoji" in EXECUTION_SYSTEM_LLM
+        assert "No fenced code blocks" in EXECUTION_SYSTEM_LLM
+
+    def test_codegen_prompt_allows_code_blocks(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_CODEGEN
+        # CodeGen should NOT forbid fenced blocks (the LLM rule)
+        assert "No fenced code blocks" not in EXECUTION_SYSTEM_CODEGEN
+        # And SHOULD lead with the code
+        assert "Lead with the code" in EXECUTION_SYSTEM_CODEGEN
+
+    def test_both_prompts_warn_against_emoji(self):
+        from app.modules.execution_agent import (
+            EXECUTION_SYSTEM_LLM,
+            EXECUTION_SYSTEM_CODEGEN,
+        )
+        assert "No emoji" in EXECUTION_SYSTEM_LLM
+        assert "No emoji" in EXECUTION_SYSTEM_CODEGEN
+
+    def test_both_prompts_handle_upstream_context(self):
+        from app.modules.execution_agent import (
+            EXECUTION_SYSTEM_LLM,
+            EXECUTION_SYSTEM_CODEGEN,
+        )
+        # Both prompts must instruct the model how to treat upstream node outputs
+        for prompt in (EXECUTION_SYSTEM_LLM, EXECUTION_SYSTEM_CODEGEN):
+            assert "upstream" in prompt.lower()
+
