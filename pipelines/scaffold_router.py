@@ -14,6 +14,7 @@ is migrated into stream_timeout on pipeline init.
 
 from typing import Generator, List
 import json
+import os
 import logging
 import queue
 import re
@@ -33,44 +34,49 @@ if not logger.handlers:
 # Module-level prompts (#8.13)
 # --------------------------------------------------------------------
 
-TRIAGE_SYSTEM_PROMPT = """You are a hands-on project planning assistant for Scaffold Engine. Respond ONLY in English.
-The user has an idea they want to build. Your job is to actively help them
-shape it into a clear, actionable scope — not just ask questions.
+TRIAGE_SYSTEM_PROMPT = """You are a hands-on project planning assistant for Scaffold Engine.
+Respond ONLY in English.
 
-How to help:
-- If the user provides a document, file, or specification, treat its content
-  as primary project context. Do NOT ask the user to re-explain what is already
-  in the document. Reference the document content directly. If the document
-  already defines what is being built, constraints, and success criteria,
-  summarize the scope from the document and suggest /go immediately.
-- When the user describes something broad, break it into concrete options.
-  Present 2-3 approaches with brief pros and cons for each.
-- Make recommendations. Say which option you think best fits their stated goals
-  and why.
-- When the user picks a direction, help refine it further. Suggest specific
-  components, technologies, or steps that would be involved.
-- If something is ambiguous, propose a sensible default and ask if it works:
-  "I'd suggest X because Y — does that work for you?"
-- Keep responses focused and concise. No walls of text.
-- One topic per response. Don't try to resolve everything at once.
+Your job: turn vague ideas into specific, buildable scope by surfacing
+options, naming gaps, and recommending defaults. Do not assume — ask,
+list, recommend.
 
-Before suggesting /go, make sure these details are nailed down:
-- WHAT specifically is being built (not just a category like "game server" —
-  which game? which server software? what mods or plugins?)
-- WHAT hardware or infrastructure it runs on (OS, CPU, RAM, storage, network)
-- WHAT the success criteria are (what does "done" look like?)
-- ANY key constraints (budget, timeline, existing equipment, skill level)
+If the user provides a document, file, or specification, treat its
+content as primary context. Do not ask the user to re-explain anything
+already in the document.
 
-Do NOT suggest /go until the idea is specific enough that someone else could
-start building it from the description alone.
+EVERY RESPONSE follows this exact structure with these exact headers:
 
-Your goal is to collaboratively arrive at a specific, well-defined idea that
-includes: what is being built, the key components, and the desired outcome.
+**Scope so far:**
+One line summarizing what is clear about the build. If nothing is clear
+yet, write "Not enough yet — see Gaps below."
 
-When the scope is solid, write a clear 2-4 sentence summary of the final idea
-and tell the user: "Type `/go` when you're ready to launch."
+**Options:**
+When there is a real choice (architecture, technology, approach), list
+2–3 options with a one-line tradeoff each. If there is no meaningful
+choice at this point, write "None — direction is clear" and skip to Gaps.
 
-Do NOT execute anything. Do NOT invent requirements the user hasn't agreed to."""
+**Gaps:**
+Always shown. List every detail still missing from these four buckets:
+- WHAT specifically is being built
+- HARDWARE / infrastructure (OS, CPU, RAM, storage, network)
+- SUCCESS criteria (what "done" looks like)
+- CONSTRAINTS (budget, timeline, equipment, skill)
+If a bucket is fully covered, mark it "✓ covered" on its own line.
+
+**My pick:**
+Recommend ONE concrete default for the most important open decision.
+State why in one sentence. End with: "Say so or override."
+
+Rules:
+- Keep each section short. No walls of text.
+- One topic per response — pick the most important gap to push on.
+- Do not invent requirements the user has not agreed to.
+- Do not execute anything.
+
+When all four Gaps buckets are "✓ covered," replace the four sections
+with a 2-4 sentence scope summary and write:
+"Type `/go` when you're ready to launch."""
 
 
 SYNTHESIS_SYSTEM_PROMPT = (
@@ -137,7 +143,9 @@ class Pipeline:
     def __init__(self):
         self.id = "scaffold_router"
         self.name = "Scaffold Router"
+        self._bootstrap_valves_from_template()
         self.valves = self.Valves()
+        self._apply_env_fallbacks()
         self.logger = logger
 
         # Migrate legacy dag_timeout (#8.8 compat)
@@ -157,8 +165,73 @@ class Pipeline:
     # Helpers
     # ------------------------------------------------------------------
 
+    def _bootstrap_valves_from_template(self) -> None:
+        """If live valves.json is missing or empty {}, seed from template.
+
+        Pipelines main.py writes {} to valves.json whenever it is missing
+        on container startup, which loses every saved value. We ship a
+        valves.template.json next to the live file with sensible defaults
+        (no secrets) and copy it in if the live file is empty.
+        """
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            sub = os.path.join(here, "scaffold_router")
+            live = os.path.join(sub, "valves.json")
+            tmpl = os.path.join(sub, "valves.template.json")
+            if not os.path.exists(tmpl):
+                return  # nothing to seed from
+            needs_seed = False
+            if not os.path.exists(live):
+                needs_seed = True
+            else:
+                with open(live, "r") as f:
+                    content = f.read().strip()
+                if content in ("", "{}"):
+                    needs_seed = True
+            if not needs_seed:
+                return
+            with open(tmpl, "r") as f:
+                tmpl_data = f.read()
+            with open(live, "w") as f:
+                f.write(tmpl_data)
+            print(  # noqa: T201
+                f"[scaffold_router] Seeded {live!r} from template "
+                f"(was missing or empty {{}})."
+            )
+        except Exception as e:
+            print(f"[scaffold_router] Bootstrap valves failed: {e}")  # noqa: T201
+
+    def _apply_env_fallbacks(self) -> None:
+        """Fill empty string-valued valves from environment variables.
+
+        Pipelines main.py rewrites valves.json to {} whenever the file
+        is missing on container startup, which silently wipes saved
+        config (most painfully: api_key). When a valve loads as empty,
+        we look up the matching SCAFFOLD_* env var as a fallback so
+        a wiped/regenerated valves.json does not block the pipeline.
+
+        Env var naming: api_key -> SCAFFOLD_API_KEY, ollama_url ->
+        SCAFFOLD_OLLAMA_URL, etc.
+        """
+        env_map = {
+            "api_key": "SCAFFOLD_API_KEY",
+            "orchestrator_url": "SCAFFOLD_ORCHESTRATOR_URL",
+            "ollama_url": "SCAFFOLD_OLLAMA_URL",
+        }
+        for valve_name, env_name in env_map.items():
+            current = getattr(self.valves, valve_name, None)
+            if isinstance(current, str) and not current:
+                env_val = os.getenv(env_name, "")
+                if env_val:
+                    setattr(self.valves, valve_name, env_val)
+                    print(  # noqa: T201
+                        f"[scaffold_router] Valve {valve_name!r} empty; "
+                        f"loaded from {env_name}."
+                    )
+
     def _auth_headers(self) -> dict:
-        return {"X-API-Key": self.valves.api_key}
+        key = self.valves.api_key or os.getenv("SCAFFOLD_API_KEY", "")
+        return {"X-API-Key": key}
 
     _EMBEDDER_EXPECTED_DIM = 512
 

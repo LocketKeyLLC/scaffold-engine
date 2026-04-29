@@ -20,7 +20,10 @@ retrieval_report.json
 .env.*
 !.env.example
 .env.backup*
-pipelines/*/valves.json
 *.bak-*
 *.bak[0-9]*
 .new-api-key
+
+# Pipeline valves: live file gets rewritten to {} by upstream main.py on missing-file
+# startup; we track the template instead and let the bootstrap helper copy it on first run.
+pipelines/*/valves.json

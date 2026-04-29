@@ -391,3 +391,83 @@ class TestLogPipeInputs:
         """Valve is False by default; pipe() must not call the logger."""
         assert pipe.valves.log_pipe_inputs is False
 
+@pytest.mark.smoke
+class TestEnvFallbacks:
+    """_apply_env_fallbacks: empty valves recover from SCAFFOLD_* env vars."""
+
+    def test_empty_api_key_loads_from_env(self, pipe, monkeypatch):
+        """Empty api_key valve loads SCAFFOLD_API_KEY from env."""
+        monkeypatch.setenv("SCAFFOLD_API_KEY", "sk-test-from-env")
+        pipe.valves.api_key = ""
+        pipe._apply_env_fallbacks()
+        assert pipe.valves.api_key == "sk-test-from-env"
+
+    def test_nonempty_valve_not_overwritten(self, pipe, monkeypatch):
+        """If valve is already set, env is not consulted."""
+        monkeypatch.setenv("SCAFFOLD_API_KEY", "sk-from-env")
+        pipe.valves.api_key = "sk-from-valve"
+        pipe._apply_env_fallbacks()
+        assert pipe.valves.api_key == "sk-from-valve"
+
+    def test_missing_env_leaves_empty(self, pipe, monkeypatch):
+        """If valve empty AND env missing, value stays empty (no crash)."""
+        monkeypatch.delenv("SCAFFOLD_API_KEY", raising=False)
+        pipe.valves.api_key = ""
+        pipe._apply_env_fallbacks()
+        assert pipe.valves.api_key == ""
+
+    def test_auth_headers_falls_back_to_env(self, pipe, monkeypatch):
+        """_auth_headers reads env when valve empty (belt + braces)."""
+        monkeypatch.setenv("SCAFFOLD_API_KEY", "sk-fallback")
+        pipe.valves.api_key = ""
+        assert pipe._auth_headers() == {"X-API-Key": "sk-fallback"}
+
+    def test_orchestrator_url_fallback(self, pipe, monkeypatch):
+        """Other env-mapped valves also fall back."""
+        monkeypatch.setenv("SCAFFOLD_ORCHESTRATOR_URL", "http://test:8000")
+        pipe.valves.orchestrator_url = ""
+        pipe._apply_env_fallbacks()
+        assert pipe.valves.orchestrator_url == "http://test:8000"
+
+
+@pytest.mark.smoke
+class TestBootstrapValves:
+    """_bootstrap_valves_from_template: seed empty valves.json from template."""
+
+    def test_seeds_empty_live_file(self, pipe, tmp_path, monkeypatch):
+        """Empty {} live file gets replaced with template content."""
+        sub = tmp_path / "scaffold_router"
+        sub.mkdir()
+        tmpl = sub / "valves.template.json"
+        tmpl.write_text('{"api_key":"","triage_model":"qwen3:4b"}')
+        live = sub / "valves.json"
+        live.write_text("{}")
+        monkeypatch.setattr(
+            "os.path.dirname",
+            lambda _: str(tmp_path),
+        )
+        pipe._bootstrap_valves_from_template()
+        assert "qwen3:4b" in live.read_text()
+
+    def test_no_op_when_template_missing(self, pipe, tmp_path, monkeypatch):
+        """Missing template = silent no-op (no crash)."""
+        sub = tmp_path / "scaffold_router"
+        sub.mkdir()
+        live = sub / "valves.json"
+        live.write_text("{}")
+        monkeypatch.setattr("os.path.dirname", lambda _: str(tmp_path))
+        pipe._bootstrap_valves_from_template()  # must not raise
+        assert live.read_text() == "{}"
+
+    def test_skips_when_live_has_real_content(self, pipe, tmp_path, monkeypatch):
+        """Live file with real values is left alone."""
+        sub = tmp_path / "scaffold_router"
+        sub.mkdir()
+        (sub / "valves.template.json").write_text('{"api_key":"FROM_TMPL"}')
+        live = sub / "valves.json"
+        live.write_text('{"api_key":"FROM_USER"}')
+        monkeypatch.setattr("os.path.dirname", lambda _: str(tmp_path))
+        pipe._bootstrap_valves_from_template()
+        assert "FROM_USER" in live.read_text()
+        assert "FROM_TMPL" not in live.read_text()
+

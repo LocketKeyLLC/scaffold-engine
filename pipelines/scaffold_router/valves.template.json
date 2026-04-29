@@ -1,0 +1,13 @@
+{
+  "api_key": "",
+  "orchestrator_url": "http://scaffold-orchestrator:8000",
+  "request_timeout": 300,
+  "stream_timeout": 86400,
+  "triage_timeout": 86400,
+  "dag_timeout": 86400,
+  "keepalive_interval": 10,
+  "triage_model": "qwen3:4b",
+  "triage_history_window": 8,
+  "log_pipe_inputs": false,
+  "ollama_url": "http://172.18.0.1:11434"
+}
