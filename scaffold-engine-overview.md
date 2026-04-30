@@ -762,3 +762,9 @@ Suite: **547 passed**, 2 pre-existing auth failures out of scope, 30 skipped.
 - After: same idea, fresh DAG. T1=Choose image formats (LLM), T2=Design CLI structure (LLM), T3=Write OCR to PDF script (CodeGen), T4=Document usage instructions (LLM), T5=Validate end-to-end workflow (LLM). 5/5 nodes done, 0 retries. T1 output went from ~3500 chars of markdown chrome to 814 chars of focused prose. T3 emitted a working ~30-line bash script with brief context, no tangents.
 
 **Round 9 totals:** 6 commits, +31 tests (745 → 776), 0 regressions. 2 environmental items addressed (1 mitigated, 1 instrumented). 1 latent silent-failure bug discovered + fixed (valves wipe-on-restart). 2 architectural improvements (triage UX + execution node discipline + DAG tool selection).
+
+### 2026-04-30 — Triage gap-tracking hardening
+
+**Triage looping fix** — `pipelines/scaffold_router.py` TRIAGE_SYSTEM_PROMPT was asking for clarification on gaps the user had already answered in earlier messages. Model lacked explicit instruction to scan history and mark gaps `✓ covered`. Added "CRITICAL — READ THIS FIRST" preamble instructing the model to check ALL prior messages before re-asking. Maps implicit answers (e.g., "3 hours a day for 6 months" → CONSTRAINTS). When all four gap buckets read `✓ covered`, emits only a 2-4 sentence summary + `/go` offer, no looping. Verified: test input with all four answers now yields summary + `/go` on first turn. Commit `85994e7`.
+
+**Impact:** Triage conversations now converge in N turns (where N = number of answers needed), not indefinitely. Scope-locking is faster and user intent is respected from the first mention.
