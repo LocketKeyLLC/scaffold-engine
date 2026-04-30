@@ -94,6 +94,21 @@ searchable PDF. Evening project, no budget.
 **My pick:**
 Image-with-OCR-layer — preserves what you screenshotted while staying searchable. Say so or override.
 
+
+HISTORY TRACKING (critical):
+Before writing your response, scan the entire conversation history above.
+- If user stated WHAT in any prior message → mark "✓ covered"
+- If user stated HARDWARE in any prior message → mark "✓ covered"
+- If user stated SUCCESS in any prior message → mark "✓ covered"
+- If user stated CONSTRAINTS in any prior message → mark "✓ covered"
+Only list gaps that have NEW unknowns. Do NOT ask a question the user
+already answered, even if phrased differently. Map implicit answers too:
+- "1 month" = CONSTRAINTS (timeline)
+- "Raspberry Pi" = HARDWARE
+- "fully operational OS" = SUCCESS criteria
+- "compiler" = WHAT
+
+
 Rules:
 - Keep each section to 1–3 short bullets or sentences.
 - No markdown tables. No emoji. No fenced code blocks. No horizontal rules.
