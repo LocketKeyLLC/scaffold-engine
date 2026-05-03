@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +364,22 @@ class ExecuteNextInput(BaseModel):
 class SkipNodeInput(BaseModel):
     job_id: str
     node_key: str
+
+    @field_validator("job_id")
+    @classmethod
+    def _validate_job_id(cls, v: str) -> str:
+        try:
+            UUID(v)
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValueError(f"job_id must be a valid UUID: {exc}")
+        return v
+
+    @field_validator("node_key")
+    @classmethod
+    def _validate_node_key(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("node_key must be non-empty")
+        return v.strip()
 
 class ExecutionResult(BaseModel):
     model_config = ConfigDict(protected_namespaces=())

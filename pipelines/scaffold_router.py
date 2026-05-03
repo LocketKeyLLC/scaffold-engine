@@ -1301,7 +1301,9 @@ class Pipeline:
                     headers=self._auth_headers(),
                     timeout=self.valves.request_timeout,
                 )
-                return self._fmt(r)
+                if r.status_code >= 400:
+                    return self._fmt(r)
+                return self._render_status(r.json())
 
             return f"Unknown command: `{cmd}`\nType `/help` for available commands."
 
@@ -1313,6 +1315,50 @@ class Pipeline:
             self.logger.exception("Command `%s` failed", cmd)
             return ("⚠️ Internal error processing command. "
                     "See server logs for details.")
+
+    # ------------------------------------------------------------------
+    # /status renderer
+    # ------------------------------------------------------------------
+    def _render_status(self, data: dict) -> str:
+        counts = data.get("status_counts") or {}
+        total = data.get("total_jobs", 0)
+        recent = data.get("recent_jobs") or []
+
+        # Active = anything not in a terminal state
+        terminal = {"completed", "failed", "cancelled", "blocked"}
+        active_total = sum(v for k, v in counts.items() if k not in terminal and v)
+
+        lines = [f"## 📊 Job Status — {total} total, {active_total} active"]
+
+        # Counts table (drop zero rows for noise reduction)
+        nonzero = [(k, v) for k, v in counts.items() if v]
+        if nonzero:
+            lines.append("")
+            lines.append("| Status | Count |")
+            lines.append("|---|---:|")
+            for k, v in sorted(nonzero, key=lambda kv: -kv[1]):
+                lines.append(f"| {k} | {v} |")
+
+        if recent:
+            icon = {
+                "completed": "✅", "failed": "❌", "cancelled": "🚫",
+                "blocked": "⛔", "awaiting_confirmation": "⏸️",
+                "executing": "⏳", "running": "⏳", "planning": "🧠",
+                "researching": "🔍", "refining": "✏️", "pending": "⏳",
+            }
+            lines.append("")
+            lines.append(f"**Recent jobs (last {len(recent)}):**")
+            lines.append("")
+            lines.append("| Status | Job ID | Nodes | Updated |")
+            lines.append("|---|---|---:|---|")
+            for j in recent:
+                st = j.get("status", "?")
+                jid = j.get("id", "?")
+                short = jid[:8] if isinstance(jid, str) else "?"
+                nc = j.get("node_count", 0)
+                upd = (j.get("updated_at") or "")[:16].replace("T", " ")
+                lines.append(f"| {icon.get(st, '')} {st} | `{short}` | {nc} | {upd} |")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # /results handler (#8.1)
@@ -1374,8 +1420,37 @@ class Pipeline:
 
         if status in ("failed", "blocked", "cancelled"):
             err = (data.get("error_summary") or data.get("error")
-                   or data.get("message") or "no details")
-            return f"⚠️ Status: **{status}** — {err}"
+                   or data.get("message") or "")
+            counts = data.get("counts") or {}
+            total = data.get("total_nodes") or 0
+            done = int(counts.get("done", 0)) + int(counts.get("skipped", 0))
+            failed_n = int(counts.get("failed", 0))
+            failed_nodes = [
+                n for n in (data.get("nodes") or [])
+                if isinstance(n, dict) and n.get("status") == "failed"
+            ]
+            lines = [f"⚠️ Status: **{status}** — {done}/{total} nodes complete, {failed_n} failed"]
+            if err:
+                lines.append(f"_{err}_")
+            if failed_nodes:
+                lines.append("")
+                lines.append("**Failed nodes:**")
+                lines.append("")
+                lines.append("| Node | Title | Model |")
+                lines.append("|---|---|---|")
+                for n in failed_nodes:
+                    lines.append(
+                        f"| `{n.get('node_key','?')}` | {n.get('title','?')} "
+                        f"| `{n.get('assigned_model') or 'default'}` |"
+                    )
+                first = failed_nodes[0].get("node_key", "?")
+                lines.append("")
+                lines.append(
+                    f"**Recovery options:**  \n"
+                    f"• `/exec retry {job_id} {first}` — reset failed node and re-run  \n"
+                    f"• `/skip {job_id} {first}` — mark skipped and continue downstream"
+                )
+            return "\n".join(lines)
 
         if status == "awaiting_confirmation":
             return (f"⏸️ Status: **{status}** — job is waiting for your review.\n"
@@ -1635,11 +1710,11 @@ class Pipeline:
 | `/optimize <prompt>` | Optimize a prompt |
 | `/rag <query>` | Query the knowledge base |
 | `/status` | List active jobs |
-| `/model <sub>` | Manage model assignments (list/set/reset/available) |
+| `/model <sub>` | Manage models (list/available/set/reset/probe/help) |
 | `/schedule <sub>` | Manage scheduled research (list/add/delete) |
 | `/research <topic>` | Research a topic (web), URL, `github:owner/repo`, or `openapi:<url>` |
 | `/research/reply <session_id> <msg>` | Resume a paused research session |
-| `/research/pdf <url>` | Research a PDF document |
+| `/research/pdf` | Upload a PDF (multipart via `POST /research/pdf` or browser at `GET /research/pdf`) |
 | `/help` | Show this message |
 
 **Workflow:** Describe your idea → discuss scope → `/go` → review feasibility → `/confirm` → execution."""

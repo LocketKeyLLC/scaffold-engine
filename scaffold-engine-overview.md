@@ -787,3 +787,37 @@ Suite: **547 passed**, 2 pre-existing auth failures out of scope, 30 skipped.
 **Known minor observations (not bugs):**
 - Gap-analyzer pause path is rare — coverage_threshold convergence is the common terminal state for shallow/medium runs. Resume endpoint validated via injected session, not natural pause.
 - PDF mode's first request stranded with `Research already in progress` (orphan from prior curl client disconnect). Force-cleanup via DB UPDATE was needed before retry. Reaper would have caught it eventually.
+
+2026-05-03 — User-facing component testing + 6 fixes
+Test pass: Open WebUI walkthrough of all 5 pipelines + every / command. Findings split into trivial doc drift, real bugs, and one investigative non-issue.
+Suite touched at the pipeline layer; no orchestrator test changes. Test count unchanged.
+Bug fixes (6)
+
+/help doc drift — /model <sub> description omitted probe subcommand; /research/pdf <url> advertised a URL arg that does not exist (real contract is multipart POST or browser form at GET /research/pdf). Two-line fix in pipelines/scaffold_router.py::_help.
+/skip leaked asyncpg DataError on bad UUID — SkipNodeInput accepted job_id: str and let asyncpg blow up at the SQL boundary. Added field_validator on job_id (UUID-parse) and node_key (non-empty), so malformed input now returns a clean Pydantic 422 with field path. Schema-level fix in app/schemas.py; orchestrator restart picks it up.
+/gt search 503 on partition-key isolation — app/modules/gt_browser.py::gt_search called col.search() with a single domain == clause that became expr=None when domain=None, which Milvus 2.5 partition-key isolation rejects. Fan-out pattern from the Apr-23 rag_pipeline hardening applied: when domain is None, iterate sorted(VALID_DOMAINS), run one search per partition, merge by best score per entry_id, sort by score, top-k. Response payload now includes domains_searched. Verified end-to-end against KB at 1011 entries.
+/results for blocked/failed/cancelled jobs returned "no details" — pipeline-side renderer ignored the orchestrator's counts + nodes array (same shape that the Round 6 fix taught the running-state branch to read). Rewrote _handle_results terminal-state branch to surface a done/total nodes complete, N failed summary, a per-failed-node table (key, title, model), and inline recovery commands (/exec retry and /skip pre-filled with job_id and node_key). Pipeline-only fix.
+/status raw JSON dump — _fmt(r) printed the response unchanged. Added _render_status with: header line (N total, M active), counts table sorted desc and zero-rows dropped, and a recent-jobs table with status icons, short job IDs, node count, and trimmed updated_at. Pipeline-only fix.
+Valves API key wipe-on-restart for 4 pipelines — Round 9 had hardened only scaffold_router. The other four (dag_viewer, gt_browser, prompt_inspector, execution_handler) silently lost their saved api_key whenever OWUI Pipelines main.py rewrote valves.json to {} on container restart, surfacing as 401s. Three-layer defense added per pipeline (mirrors scaffold_router's pattern):
+
+valves.template.json tracked next to each pipeline's existing valves.json
+_bootstrap_valves re-seeds from template if live file is missing or {}
+_apply_env_fallbacks fills empty string-valued valves from SCAFFOLD_API_KEY / SCAFFOLD_ORCHESTRATOR_URL, and persists the resolved values back to disk — critical, because OWUI's "Updated valves for module" path runs after our __init__ and would otherwise re-wipe in-memory values.
+Helpers are inlined per-pipeline rather than imported from a shared module, because OWUI Pipelines treats every .py under /app/pipelines/ as a pipeline candidate; a sibling _valves_helpers.py gets auto-discovered and quarantined. Initial shared-module attempt did exactly this, then crashed all four pipelines on import and shuffled them to pipelines/failed/ — caught and reverted.
+Verified by wiping all four valves.json files, restarting, and confirming the bootstrap → env-load → disk-persist chain in container logs, plus a successful /dagviz call against a known job.
+
+
+
+Investigated, no action
+
+/rag 195s latency from prior session — re-ran cold and warm; current latency 13–15 s on 4-domain fan-out with CrossEncoder rerank. Reranker pre-warm fires correctly at lifespan startup (crossencoder_loaded: elapsed_s=1.9 then reranker_prewarmed). The 195 s data point predates pre-warm shipping (or coincided with the partition-key error path retrying). No bug; further reduction would require parallel fan-out in rag_pipeline._iter_search_domains callers, which is non-trivial and out of scope for this pass.
+
+Logged but not fixed
+
+22 stranded awaiting_confirmation jobs > 4 days old. Reaper not catching them; check cleanup.reap_stale_jobs thresholds for that state.
+/dag is unreachable in normal flow: /idea lands jobs in awaiting_confirmation and /confirm auto-chains through Phase 2 + DAG + execute. There is no path that lands a job in planning for /dag to act on. Decide whether to delete the command, document it as internal, or have it accept awaiting_confirmation (skipping research).
+Blocked job 01ab243e T2 (CodeGen) failed verification 3× — same "List supported image files" tagged as CodeGen issue from Round 9 worked-example, suggesting the Round-9 DAG-generator prompt update did not fully eliminate the mis-tagging.
+/optimize produces minimal optimization on short prompts (e.g. "Write a function that sorts a list" → "Define a function that sorts a list"). Cosmetic.
+
+KB state: toon_v2 at 1011 entries (eng=341, llm=483, rag=171, spec=8, prompt=0). Verified active end-to-end via /idea Build a Python script that lists files in a directory sorted by size descending → /confirm → 4 nodes verified=true on first pass, 0 retries.
+Total this session: 6 fixes shipped, 4 issues logged, 0 regressions. Pipeline-side persistence story now consistent across all 5 pipelines.

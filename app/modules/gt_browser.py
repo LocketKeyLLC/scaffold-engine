@@ -12,7 +12,7 @@ import re
 from fastapi import HTTPException
 from pymilvus import Collection
 
-from app.config import settings
+from app.config import settings, VALID_DOMAINS
 from app.utils.embedding import embed_query
 from app.utils.milvus_utils import get_collection
 
@@ -158,6 +158,9 @@ async def gt_search(
 ) -> dict:
     """Semantic search against TOON entries.
 
+    Milvus 2.5 partition-key isolation rejects searches without a
+    `domain == "..."` clause. When domain=None we fan out across all
+    VALID_DOMAINS and merge by score (mirrors rag_pipeline pattern).
     By default hides superseded (version-chained) entries.
     """
     domain = validate_domain(domain)
@@ -165,44 +168,50 @@ async def gt_search(
     if vector is None:
         raise RuntimeError("Empty embedding returned")
 
+    domains_to_search = sorted(VALID_DOMAINS) if domain is None else [domain]
+
     @_milvus_safe
     def _sync() -> dict:
         col = _get_collection()
         search_params = {"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}}
-        expr = _join_expr(
-            f'domain == "{domain}"' if domain else "",
-            _supersede_clause(include_history),
-        ) or None
-
-        results = col.search(
-            data=[vector],
-            anns_field="dense_vector",
-            param=search_params,
-            limit=top_k,
-            output_fields=OUTPUT_FIELDS,
-            expr=expr,
-        )
-
-        entries = []
-        for hits in results:
-            for hit in hits:
-                entity = hit.entity
-                tags_list = entity.get("domain_tags", [])
-                tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
-                entries.append({
-                    "entry_id": entity.get("entry_id", ""),
-                    "title": entity.get("title", ""),
-                    "domain": entity.get("domain", ""),
-                    "tags": tags_str,
-                    "snippet": (entity.get("canonical_text", "") or "")[:200],
-                    "score": round(hit.score, 4),
-                    "confidence": entity.get("confidence_score", 0.0),
-                })
-
+        merged: dict[str, dict] = {}
+        for d in domains_to_search:
+            expr = _join_expr(
+                'domain == "' + d + '"',
+                _supersede_clause(include_history),
+            )
+            results = col.search(
+                data=[vector],
+                anns_field="dense_vector",
+                param=search_params,
+                limit=top_k,
+                output_fields=OUTPUT_FIELDS,
+                expr=expr,
+            )
+            for hits in results:
+                for hit in hits:
+                    entity = hit.entity
+                    eid = entity.get("entry_id", "")
+                    score = round(hit.score, 4)
+                    if eid in merged and merged[eid]["score"] >= score:
+                        continue
+                    tags_list = entity.get("domain_tags", [])
+                    tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
+                    merged[eid] = {
+                        "entry_id": eid,
+                        "title": entity.get("title", ""),
+                        "domain": entity.get("domain", ""),
+                        "tags": tags_str,
+                        "snippet": (entity.get("canonical_text", "") or "")[:200],
+                        "score": score,
+                        "confidence": entity.get("confidence_score", 0.0),
+                    }
+        entries = sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:top_k]
         return {
             "query": query,
             "top_k": top_k,
             "include_history": include_history,
+            "domains_searched": domains_to_search,
             "results": entries,
         }
 

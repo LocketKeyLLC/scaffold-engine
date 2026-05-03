@@ -65,6 +65,71 @@ def _format_output(output: str, max_chars: int = 600) -> str:
     return f"{truncated}{suffix}"
 
 
+# ---------------------------------------------------------------------------
+# Valves persistence helpers (inlined per-pipeline — OWUI Pipelines auto-
+# discovers every sibling .py as a pipeline candidate, so a shared module
+# cannot live alongside).
+# ---------------------------------------------------------------------------
+import os as _vp_os
+
+
+def _bootstrap_valves(pipeline_id: str) -> None:
+    try:
+        here = _vp_os.path.dirname(_vp_os.path.abspath(__file__))
+        sub = _vp_os.path.join(here, pipeline_id)
+        live = _vp_os.path.join(sub, "valves.json")
+        tmpl = _vp_os.path.join(sub, "valves.template.json")
+        if not _vp_os.path.exists(tmpl):
+            return
+        needs_seed = False
+        if not _vp_os.path.exists(live):
+            needs_seed = True
+        else:
+            with open(live, "r") as f:
+                content = f.read().strip()
+            if content in ("", "{}"):
+                needs_seed = True
+        if not needs_seed:
+            return
+        with open(tmpl, "r") as f:
+            tmpl_data = f.read()
+        with open(live, "w") as f:
+            f.write(tmpl_data)
+        print(f"[{pipeline_id}] Seeded valves.json from template.")
+    except Exception as e:
+        print(f"[{pipeline_id}] Bootstrap valves failed: {e}")
+
+
+_VP_ENV_MAP = {
+    "api_key": "SCAFFOLD_API_KEY",
+    "orchestrator_url": "SCAFFOLD_ORCHESTRATOR_URL",
+}
+
+
+def _apply_env_fallbacks(pipeline_id: str, valves) -> None:
+    import json as _vp_json
+    changed = False
+    for valve_name, env_name in _VP_ENV_MAP.items():
+        current = getattr(valves, valve_name, None)
+        if isinstance(current, str) and not current:
+            env_val = _vp_os.getenv(env_name, "")
+            if env_val:
+                setattr(valves, valve_name, env_val)
+                changed = True
+                print(f"[{pipeline_id}] Valve {valve_name!r} loaded from {env_name}.", flush=True)
+    if changed:
+        try:
+            here = _vp_os.path.dirname(_vp_os.path.abspath(__file__))
+            live = _vp_os.path.join(here, pipeline_id, "valves.json")
+            payload = {k: getattr(valves, k) for k in valves.model_dump().keys()}
+            with open(live, "w") as f:
+                _vp_json.dump(payload, f)
+            print(f"[{pipeline_id}] Persisted env-fallback values to {live!r}.", flush=True)
+        except Exception as e:
+            print(f"[{pipeline_id}] Persist failed: {e}", flush=True)
+
+
+
 class Pipeline:
     class Valves(BaseModel):
         api_key: str = ""
@@ -76,7 +141,9 @@ class Pipeline:
     def __init__(self):
         self.id = "execution_handler"
         self.name = "execution_handler"
+        _bootstrap_valves("execution_handler")
         self.valves = self.Valves()
+        _apply_env_fallbacks("execution_handler", self.valves)
 
     async def on_startup(self):
         pass
