@@ -520,6 +520,8 @@ class Pipeline:
             yield from self._handle_go(msg, messages); return
         if self._is_cmd(msg, "/research/reply"):
             yield from self._handle_research_reply(msg); return
+        if self._is_cmd(msg, "/research/list", "/research/find", "/research/rename", "/research/delete", "/research/help"):
+            yield from self._handle_research_mgmt(msg); return
         if self._is_cmd(msg, "/research"):
             yield from self._handle_research(msg); return
         if self._is_cmd(msg, "/execute"):
@@ -584,11 +586,6 @@ class Pipeline:
         yield from self._research_reply_and_stream(session_id, user_reply)
 
     def _handle_research(self, msg: str) -> Generator[str, None, None]:
-        # Phase D: management subcommand intercept (list/find/rename/delete/help)
-        mgmt = self._research_mgmt_intercept(msg)
-        if mgmt is not None:
-            yield mgmt
-            return
         parts = msg.split(None, 1)
         if len(parts) < 2:
             yield ("Usage: `/research <topic>` — research a topic and ingest.\n\n"
@@ -597,6 +594,7 @@ class Pipeline:
                    "- `/research <url>` — fetch and extract one URL\n"
                    "- `/research github:owner/repo` — ingest README + docs\n"
                    "- `/research openapi:<url>` — ingest OpenAPI/Swagger spec\n\n"
+                   "Manage sessions: `/research/help`\n"
                    "Options: `--depth shallow|medium|deep` to control iteration count.")
             return
         raw_args = parts[1]
@@ -1372,7 +1370,6 @@ class Pipeline:
     # Phase D — /jobs and /research management subcommands
     # ------------------------------------------------------------------
 
-    _MGMT_RESEARCH_SUBS = {"list", "find", "rename", "delete", "help"}
 
     def _ensure_pending_deletes(self):
         if not hasattr(self, "_pending_deletes"):
@@ -1422,11 +1419,11 @@ class Pipeline:
         return (
             "**`/research` Management Subcommands**\n\n"
             "| Command | Description |\n|---|---|\n"
-            "| `/research list` | List recent research sessions (latest 25) |\n"
-            "| `/research find <text>` | Search by topic |\n"
-            "| `/research rename <id> <new topic>` | Rename a session |\n"
-            "| `/research delete <id>` | Preview what will be deleted |\n"
-            "| `/research delete <id> confirm` | Permanently delete |\n\n"
+            "| `/research/list` | List recent research sessions (latest 25) |\n"
+            "| `/research/find <text>` | Search by topic |\n"
+            "| `/research/rename <id> <new topic>` | Rename a session |\n"
+            "| `/research/delete <id>` | Preview what will be deleted |\n"
+            "| `/research/delete <id> confirm` | Permanently delete |\n\n"
             "_Autonomous research:_ `/research <topic>`, `/research <url>`, "
             "`/research github:owner/repo`, `/research openapi:<url>`."
         )
@@ -1571,36 +1568,29 @@ class Pipeline:
 
     # /research subcommand handling -------------------------------------
 
-    def _research_mgmt_intercept(self, msg: str):
-        """If msg looks like a management subcommand, handle and return a str.
-        Returns None to signal fall-through to autonomous research.
-        """
-        parts = msg.split(None, 3)
-        if len(parts) < 2:
-            return None
-        sub = parts[1].strip()
-        if sub not in self._MGMT_RESEARCH_SUBS:
-            return None
+    def _handle_research_mgmt(self, msg: str) -> Generator[str, None, None]:
+        """Handle /research/<sub> management commands."""
         self._ensure_pending_deletes()
+        parts = msg.split(None, 2)
+        sub = parts[0].strip().lower()[len("/research/"):]
         if sub == "help":
-            return self._research_mgmt_help()
+            yield self._research_mgmt_help(); return
         if sub == "list":
-            return self._research_list_action(query=None)
+            yield self._research_list_action(query=None); return
         if sub == "find":
-            if len(parts) < 3:
-                return "Usage: `/research find <text>`"
-            return self._research_list_action(query=" ".join(parts[2:]))
+            if len(parts) < 2:
+                yield "Usage: `/research/find <text>`"; return
+            yield self._research_list_action(query=" ".join(parts[1:])); return
         if sub == "rename":
-            if len(parts) < 4:
-                return "Usage: `/research rename <session_id> <new topic>`"
-            return self._research_rename_action(parts[2], parts[3])
-        if sub == "delete":
             if len(parts) < 3:
-                return "Usage: `/research delete <session_id>`"
-            session_id = parts[2]
-            confirm = (len(parts) > 3 and parts[3].strip().lower() == "confirm")
-            return self._research_delete_action(session_id, confirm)
-        return None
+                yield "Usage: `/research/rename <session_id> <new topic>`"; return
+            yield self._research_rename_action(parts[1], parts[2]); return
+        if sub == "delete":
+            if len(parts) < 2:
+                yield "Usage: `/research/delete <session_id>`"; return
+            session_id = parts[1]
+            confirm = (len(parts) > 2 and parts[2].strip().lower() == "confirm")
+            yield self._research_delete_action(session_id, confirm); return
 
     def _research_list_action(self, query) -> str:
         params = {"limit": 25}
@@ -1655,7 +1645,7 @@ class Pipeline:
             pending = self._pending_deletes.get(("research", session_id))
             if not pending or time.time() - pending > 300:
                 return (f"⚠️ No recent preview for `{session_id[:8]}`. "
-                        f"Run `/research delete {session_id}` first.")
+                        f"Run `/research/delete {session_id}` first.")
             try:
                 r = requests.delete(
                     f"{self.valves.orchestrator_url}/research/sessions/{session_id}",
@@ -1694,7 +1684,7 @@ class Pipeline:
             f"- Entries ingested into KB: {match.get('total_entries_ingested', 0)} "
             f"(KB entries are NOT deleted)\n\n"
             f"This drops only the session metadata. To proceed:\n"
-            f"`/research delete {session_id} confirm`"
+            f"`/research/delete {session_id} confirm`"
         )
 
     # ------------------------------------------------------------------
@@ -2034,26 +2024,45 @@ class Pipeline:
     def _help(self) -> str:
         return """**Scaffold Router Commands**
 
+**Workflow:** describe your idea → triage chat → `/go` → review → `/confirm` → execution.
+
+**🗣 Scope & kickoff**
 | Command | Description |
 |---|---|
-| *(plain message)* | Discuss your idea with the triage assistant |
-| `/go` or `/run` | Launch the pipeline with your discussed idea |
-| `/idea <text>` | Submit idea directly (skip triage) |
-| `/dag <job_id>` | Generate DAG from refined idea |
-| `/execute <job_id>` | Execute all pending DAG nodes |
-| `/confirm <job_id> [feedback]` | Confirm ideation Phase 2 (research) |
-| `/results <job_id>` | View a completed job's output or current status |
-| `/skip <job_id> <node_key>` | Skip a specific node |
-| `/optimize <prompt>` | Optimize a prompt |
-| `/rag <query>` | Query the knowledge base |
-| `/status` | List active jobs |
-| `/model <sub>` | Manage models (list/available/set/reset/probe/help) |
-| `/schedule <sub>` | Manage scheduled research (list/add/delete) |
-| `/jobs <sub>` | Manage jobs (list/find/rename/delete/help) |
-| `/research <topic>` | Research a topic (web), URL, `github:owner/repo`, or `openapi:<url>` |
-| `/research <sub>` | Manage sessions (list/find/rename/delete/help) |
-| `/research/reply <session_id> <msg>` | Resume a paused research session |
-| `/research/pdf` | Upload a PDF (multipart via `POST /research/pdf` or browser at `GET /research/pdf`) |
-| `/help` | Show this message |
+| *(plain message)* | Chat with the triage assistant to scope your idea. |
+| `/go` or `/run` | Lock the scoped idea, run Phase 1, halt at confirmation gate. |
+| `/idea <text>` | Submit an idea directly to Phase 1 (skips triage). |
+| `/confirm <job_id> [feedback]` | Approve a refined idea; auto-chains research → DAG → execute. |
 
-**Workflow:** Describe your idea → discuss scope → `/go` → review feasibility → `/confirm` → execution."""
+**⚙ Workflow control**
+| Command | Description |
+|---|---|
+| `/execute <job_id>` | Run all pending DAG nodes (use after cancel or if auto-chain stalls). |
+| `/skip <job_id> <node_key>` | Skip a specific node so downstream can proceed. |
+| `/results <job_id>` | View output, in-flight progress, or failure details + recovery hints. |
+| `/status` | List active jobs grouped by state. |
+
+**📚 Knowledge base**
+| Command | Description |
+|---|---|
+| `/rag <query>` | Search the Milvus knowledge base. |
+| `/research <topic>` | Autonomous web research → distill → ingest. |
+| `/research <url>` | Ingest a single web page. |
+| `/research github:<owner>/<repo>` | Ingest a repo's README, docs, and module docstrings. |
+| `/research openapi:<url>` | Ingest an OpenAPI spec, one entry per endpoint. |
+| `/research/reply <session_id> <msg>` | Resume a paused research session. |
+| `/research/pdf` | Upload a PDF — drag-drop at `GET /research/pdf` or `curl -F file=@x.pdf`. |
+
+**🗂 Manage saved work**
+| Command | Description |
+|---|---|
+| `/jobs <sub>` | List/filter/find/rename/delete jobs. `/jobs help` for details. |
+| `/research/<sub>` | List/find/rename/delete research sessions. `/research/help` for details. |
+| `/schedule <sub>` | Recurring research crons (list/add/delete). |
+
+**🔧 Configuration & utilities**
+| Command | Description |
+|---|---|
+| `/model <sub>` | Models per role — list/available/set/reset/probe. |
+| `/optimize <prompt>` | Tighten and improve a prompt. |
+| `/help` | Show this message."""

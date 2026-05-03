@@ -107,7 +107,6 @@ Compiled output displayed in chat
 | `/confirm <job_id> <feedback>` | Approve with modifications |
 | `/execute <job_id>` | Manually execute all nodes |
 | `/idea <text>` | Submit idea directly to Phase 1 (skip triage) |
-| `/dag <job_id>` | Generate DAG for a job in `planning` state |
 | `/skip <job_id> <node_key>` | Skip a specific DAG node |
 | `/optimize <prompt>` | Optimize a prompt |
 | `/rag <query>` | Query the Milvus knowledge base |
@@ -117,6 +116,8 @@ Compiled output displayed in chat
 | `/research github:<owner>/<repo>` | Ingest README + docs + module docstrings |
 | `/research openapi:<url>` | Ingest OpenAPI/Swagger spec as per-endpoint entries |
 | `/research/reply <session_id> <msg>` | Resume paused research session |
+| `/research/<sub>` | Manage research sessions: `list`, `find`, `rename`, `delete`, `help` |
+| `/jobs <sub>` | Manage jobs: `list`, `find`, `rename`, `delete`, `help` |
 | `/schedule <sub>` | Manage scheduled research: `list`, `add [--depth=<level>]`, `delete`, `help` |
 | `/status` | List active jobs |
 | `/results <job_id>` | View a completed job's output, progress, or failure reason |
@@ -821,3 +822,10 @@ Blocked job 01ab243e T2 (CodeGen) failed verification 3× — same "List support
 
 KB state: toon_v2 at 1011 entries (eng=341, llm=483, rag=171, spec=8, prompt=0). Verified active end-to-end via /idea Build a Python script that lists files in a directory sorted by size descending → /confirm → 4 nodes verified=true on first pass, 0 retries.
 Total this session: 6 fixes shipped, 4 issues logged, 0 regressions. Pipeline-side persistence story now consistent across all 5 pipelines.
+### 2026-05-03 — Command UX restructure
+
+- **`/help` regrouped** — flat 19-row table replaced with 5 grouped sections (Scope & kickoff, Workflow control, Knowledge base, Manage saved work, Configuration & utilities). Workflow line now sits at the top of the help output.
+- **`/research` mgmt disambiguated to slash form** — `/research/list`, `/research/find`, `/research/rename`, `/research/delete`, `/research/help`. Old space-form removed; `/research <anything-else>` now unambiguously means autonomous research (topic / url / `github:` / `openapi:`). Mirrors existing `/research/reply` and `/research/pdf` separator style. Pipeline-only change; orchestrator endpoints unchanged.
+- **`/dag` dropped from user-facing `/help`** — endpoint and dispatcher retained for advanced/scripted callers; documented as internal. Overview's known issue ("`/dag` is unreachable in normal flow") closes as documentation-only.
+- **Two undocumented surfaces added to the command table** — `/jobs <sub>` and `/research/<sub>` (both shipped earlier; previously only discoverable via help text).
+- **Issue logged for separate work:** `/research <topic>` summary occasionally bleeds unrelated training-data content (observed: "kubernetes pods" → Svelte/Todo.svelte tutorial). Likely a research summary prompt issue against the 235b cloud model — not a regression from this round.
