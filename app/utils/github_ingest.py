@@ -116,7 +116,7 @@ def _select_tree_files(tree: list[dict], remaining_cap: int) -> list[dict]:
     low signal-to-noise. If you need deeper coverage, prefer adding content
     to docs/ so it is captured by the .md filter.
     """
-    docs = [e for e in tree if e["path"].startswith(_DOCS_PREFIX) and e["path"].endswith(".md")]
+    docs = [e for e in tree if e["path"].endswith(".md") and (e["path"].startswith(_DOCS_PREFIX) or "/" not in e["path"])]
     pyfiles = [e for e in tree if e["path"].endswith(".py") and "/" not in e["path"]]
     selected = docs + pyfiles
     if len(selected) > remaining_cap:
