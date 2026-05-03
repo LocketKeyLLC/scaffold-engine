@@ -1,6 +1,6 @@
 # Scaffold Engine — Project Overview
 
-**Last Updated:** April 25, 2026
+**Last Updated:** May 1, 2026
 **Repo:** `LocketKeyLLC/scaffold-engine` on GitHub | `~/scaffold-engine` locally
 **Test Suite:** 547 passed + 31 skipped in-container (2 pre-existing auth failures, out-of-scope)
 **Codebase:** ~6,700 lines of application Python across 27 source files + ~2,100 lines across 5 pipelines
@@ -768,3 +768,22 @@ Suite: **547 passed**, 2 pre-existing auth failures out of scope, 30 skipped.
 **Triage looping fix** — `pipelines/scaffold_router.py` TRIAGE_SYSTEM_PROMPT was asking for clarification on gaps the user had already answered in earlier messages. Model lacked explicit instruction to scan history and mark gaps `✓ covered`. Added "CRITICAL — READ THIS FIRST" preamble instructing the model to check ALL prior messages before re-asking. Maps implicit answers (e.g., "3 hours a day for 6 months" → CONSTRAINTS). When all four gap buckets read `✓ covered`, emits only a 2-4 sentence summary + `/go` offer, no looping. Verified: test input with all four answers now yields summary + `/go` on first turn. Commit `85994e7`.
 
 **Impact:** Triage conversations now converge in N turns (where N = number of answers needed), not indefinitely. Scope-locking is faster and user intent is respected from the first mention.
+
+### 2026-05-01 — `/research` end-to-end validation + GitHub ingest fix
+
+**All 5 `/research` modes verified working via Open WebUI:**
+- `/research <topic>` (medium depth) — 100 entries, gap analyzer converged at 85% coverage
+- `/research <url>` — 70 entries from a single Wikipedia page
+- `/research github:owner/repo` — fixed (see below); 6 entries from anthropics/anthropic-sdk-python
+- `/research openapi:<url>` — 19 endpoints from petstore3 spec, 3.6 min
+- `/research/pdf` — 18 entries from 11-page Transformer paper, 18 min
+- `/research/reply <session_id> <msg>` — pause/resume validated via injected paused session
+- `/schedule add/list/delete` — full lifecycle validated
+
+**Bug fix (commit `2a47022`)** — `app/utils/github_ingest.py:_select_tree_files()` filter required `docs/` prefix on `.md` files. Repos that keep README, CHANGELOG, api.md, etc. at root (like `anthropics/anthropic-sdk-python`) had only the dedicated README endpoint result; the tree-walk found 0 attemptable files. Filter now accepts `.md` files in `docs/` OR at root level (no `/` in path). Verified: `attempted` went from 0 → 9 for the same repo.
+
+**KB state:** 695 → ~909 entities across testing session.
+
+**Known minor observations (not bugs):**
+- Gap-analyzer pause path is rare — coverage_threshold convergence is the common terminal state for shallow/medium runs. Resume endpoint validated via injected session, not natural pause.
+- PDF mode's first request stranded with `Research already in progress` (orphan from prior curl client disconnect). Force-cleanup via DB UPDATE was needed before retry. Reaper would have caught it eventually.
