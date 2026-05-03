@@ -584,6 +584,11 @@ class Pipeline:
         yield from self._research_reply_and_stream(session_id, user_reply)
 
     def _handle_research(self, msg: str) -> Generator[str, None, None]:
+        # Phase D: management subcommand intercept (list/find/rename/delete/help)
+        mgmt = self._research_mgmt_intercept(msg)
+        if mgmt is not None:
+            yield mgmt
+            return
         parts = msg.split(None, 1)
         if len(parts) < 2:
             yield ("Usage: `/research <topic>` — research a topic and ingest.\n\n"
@@ -1241,6 +1246,8 @@ class Pipeline:
                 return self._handle_schedule(msg)
             if cmd == "/results":          # #8.1
                 return self._handle_results(parts)
+            if cmd == "/jobs":
+                return self._handle_jobs(msg)
             if cmd == "/idea":
                 if len(parts) < 2:
                     return "Usage: /idea <description>"
@@ -1359,6 +1366,336 @@ class Pipeline:
                 upd = (j.get("updated_at") or "")[:16].replace("T", " ")
                 lines.append(f"| {icon.get(st, '')} {st} | `{short}` | {nc} | {upd} |")
         return "\n".join(lines)
+
+
+    # ------------------------------------------------------------------
+    # Phase D — /jobs and /research management subcommands
+    # ------------------------------------------------------------------
+
+    _MGMT_RESEARCH_SUBS = {"list", "find", "rename", "delete", "help"}
+
+    def _ensure_pending_deletes(self):
+        if not hasattr(self, "_pending_deletes"):
+            self._pending_deletes = {}
+
+    def _format_job_row(self, j: dict) -> str:
+        icon = {
+            "completed": "✅", "failed": "❌", "cancelled": "🚫",
+            "blocked": "⛔", "awaiting_confirmation": "⏸️",
+            "executing": "⏳", "running": "⏳", "planning": "🧠",
+            "researching": "🔍", "refining": "✏️", "pending": "⏳",
+        }.get(j.get("status", ""), "")
+        short = (j.get("id") or "")[:8]
+        upd = (j.get("updated_at") or "")[:16].replace("T", " ")
+        return (
+            f"| {icon} {j.get('status','')} | `{short}` | {j.get('title','')[:60]} "
+            f"| {j.get('node_count', 0)} | {upd} |"
+        )
+
+    def _format_session_row(self, sess: dict) -> str:
+        icon = {
+            "completed": "✅", "failed": "❌", "cancelled": "🚫",
+            "running": "⏳", "pending": "⏳",
+            "paused_awaiting_reply": "⏸️",
+        }.get(sess.get("status", ""), "")
+        short = (sess.get("id") or "")[:8]
+        upd = (sess.get("updated_at") or "")[:16].replace("T", " ")
+        return (
+            f"| {icon} {sess.get('status','')} | `{short}` | {sess.get('topic','')[:60]} "
+            f"| {sess.get('depth','')} | {sess.get('total_entries_ingested', 0)} | {upd} |"
+        )
+
+    def _jobs_help(self) -> str:
+        return (
+            "**`/jobs` Commands**\n\n"
+            "| Command | Description |\n|---|---|\n"
+            "| `/jobs` | List recent jobs (latest 25) |\n"
+            "| `/jobs <status>` | Filter by status (completed, failed, blocked, ...) |\n"
+            "| `/jobs find <text>` | Search by title |\n"
+            "| `/jobs rename <id> <new title>` | Rename a job |\n"
+            "| `/jobs delete <id>` | Preview what will be deleted |\n"
+            "| `/jobs delete <id> confirm` | Permanently delete (within 5 min of preview) |\n"
+            "| `/jobs help` | Show this message |"
+        )
+
+    def _research_mgmt_help(self) -> str:
+        return (
+            "**`/research` Management Subcommands**\n\n"
+            "| Command | Description |\n|---|---|\n"
+            "| `/research list` | List recent research sessions (latest 25) |\n"
+            "| `/research find <text>` | Search by topic |\n"
+            "| `/research rename <id> <new topic>` | Rename a session |\n"
+            "| `/research delete <id>` | Preview what will be deleted |\n"
+            "| `/research delete <id> confirm` | Permanently delete |\n\n"
+            "_Autonomous research:_ `/research <topic>`, `/research <url>`, "
+            "`/research github:owner/repo`, `/research openapi:<url>`."
+        )
+
+    _VALID_JOB_STATUSES = {
+        "pending", "refining", "awaiting_confirmation", "researching",
+        "planning", "executing", "running", "completed", "failed",
+        "cancelled", "blocked",
+    }
+
+    def _handle_jobs(self, msg: str) -> str:
+        """Top-level /jobs command dispatcher."""
+        self._ensure_pending_deletes()
+        parts = msg.split(None, 3)
+        sub = parts[1] if len(parts) > 1 else ""
+
+        # /jobs (no args) -> list
+        if not sub:
+            return self._jobs_list_action(status=None, query=None)
+
+        if sub == "help":
+            return self._jobs_help()
+        if sub in self._VALID_JOB_STATUSES:
+            return self._jobs_list_action(status=sub, query=None)
+        if sub == "find":
+            if len(parts) < 3:
+                return "Usage: `/jobs find <text>`"
+            return self._jobs_list_action(status=None, query=" ".join(parts[2:]))
+        if sub == "rename":
+            if len(parts) < 4:
+                return "Usage: `/jobs rename <job_id> <new title>`"
+            return self._jobs_rename_action(parts[2], parts[3])
+        if sub == "delete":
+            if len(parts) < 3:
+                return "Usage: `/jobs delete <job_id>`"
+            job_id = parts[2]
+            confirm = (len(parts) > 3 and parts[3].strip().lower() == "confirm")
+            return self._jobs_delete_action(job_id, confirm)
+        return f"Unknown subcommand: `{sub}`\n\n" + self._jobs_help()
+
+    def _jobs_list_action(self, status, query) -> str:
+        params = {"limit": 25}
+        if status:
+            params["status"] = status
+        if query:
+            params["q"] = query
+        try:
+            r = requests.get(
+                f"{self.valves.orchestrator_url}/jobs",
+                params=params,
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            return f"⚠️ {e}"
+        if r.status_code >= 400:
+            return self._fmt(r)
+        data = r.json()
+        jobs = data.get("jobs", [])
+        total = data.get("total", 0)
+        header_bits = []
+        if status:
+            header_bits.append(f"status=`{status}`")
+        if query:
+            header_bits.append(f"title~`{query}`")
+        header = "## 📋 Jobs"
+        if header_bits:
+            header += f" — filtered ({', '.join(header_bits)})"
+        header += f" — {len(jobs)} of {total}"
+        if not jobs:
+            return header + "\n\n_No matching jobs._"
+        rows = ["", "| Status | ID | Title | Nodes | Updated |", "|---|---|---|---:|---|"]
+        rows.extend(self._format_job_row(j) for j in jobs)
+        return "\n".join([header] + rows)
+
+    def _jobs_rename_action(self, job_id: str, title: str) -> str:
+        try:
+            r = requests.patch(
+                f"{self.valves.orchestrator_url}/jobs/{job_id}",
+                json={"title": title.strip()},
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            return f"⚠️ {e}"
+        if r.status_code == 404:
+            return f"Job not found: `{job_id}`"
+        if r.status_code >= 400:
+            return self._fmt(r)
+        d = r.json()
+        return f"✅ Renamed `{(d.get('id') or '')[:8]}`: **{d.get('title')}**"
+
+    def _jobs_delete_action(self, job_id: str, confirm: bool) -> str:
+        self._ensure_pending_deletes()
+        if confirm:
+            pending = self._pending_deletes.get(("job", job_id))
+            import time
+            if not pending or time.time() - pending > 300:
+                return (f"⚠️ No recent preview for `{job_id[:8]}`. "
+                        f"Run `/jobs delete {job_id}` first.")
+            try:
+                r = requests.delete(
+                    f"{self.valves.orchestrator_url}/jobs/{job_id}",
+                    headers=self._auth_headers(),
+                    timeout=self.valves.request_timeout,
+                )
+            except requests.exceptions.RequestException as e:
+                return f"⚠️ {e}"
+            if r.status_code == 404:
+                return f"Job not found: `{job_id}`"
+            if r.status_code >= 400:
+                return self._fmt(r)
+            self._pending_deletes.pop(("job", job_id), None)
+            return f"🗑️ Deleted job `{job_id[:8]}`."
+        # Preview path
+        try:
+            r = requests.get(
+                f"{self.valves.orchestrator_url}/exec/status/{job_id}",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            return f"⚠️ {e}"
+        if r.status_code == 404:
+            return f"Job not found: `{job_id}`"
+        if r.status_code >= 400:
+            return self._fmt(r)
+        d = r.json()
+        title = d.get("job_title") or "(untitled)"
+        status = d.get("job_status") or "?"
+        total = d.get("total_nodes") or 0
+        import time
+        self._pending_deletes[("job", job_id)] = time.time()
+        return (
+            f"⚠️ **About to delete job** `{job_id[:8]}`\n\n"
+            f"- Title: **{title}**\n"
+            f"- Status: `{status}`\n"
+            f"- DAG nodes that will cascade: {total}\n\n"
+            f"This is irreversible. To proceed, type:\n"
+            f"`/jobs delete {job_id} confirm`"
+        )
+
+    # /research subcommand handling -------------------------------------
+
+    def _research_mgmt_intercept(self, msg: str):
+        """If msg looks like a management subcommand, handle and return a str.
+        Returns None to signal fall-through to autonomous research.
+        """
+        parts = msg.split(None, 3)
+        if len(parts) < 2:
+            return None
+        sub = parts[1].strip()
+        if sub not in self._MGMT_RESEARCH_SUBS:
+            return None
+        self._ensure_pending_deletes()
+        if sub == "help":
+            return self._research_mgmt_help()
+        if sub == "list":
+            return self._research_list_action(query=None)
+        if sub == "find":
+            if len(parts) < 3:
+                return "Usage: `/research find <text>`"
+            return self._research_list_action(query=" ".join(parts[2:]))
+        if sub == "rename":
+            if len(parts) < 4:
+                return "Usage: `/research rename <session_id> <new topic>`"
+            return self._research_rename_action(parts[2], parts[3])
+        if sub == "delete":
+            if len(parts) < 3:
+                return "Usage: `/research delete <session_id>`"
+            session_id = parts[2]
+            confirm = (len(parts) > 3 and parts[3].strip().lower() == "confirm")
+            return self._research_delete_action(session_id, confirm)
+        return None
+
+    def _research_list_action(self, query) -> str:
+        params = {"limit": 25}
+        if query:
+            params["q"] = query
+        try:
+            r = requests.get(
+                f"{self.valves.orchestrator_url}/research/sessions",
+                params=params,
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            return f"⚠️ {e}"
+        if r.status_code >= 400:
+            return self._fmt(r)
+        data = r.json()
+        sessions = data.get("sessions", [])
+        total = data.get("total", 0)
+        header = "## 🔍 Research Sessions"
+        if query:
+            header += f" — topic~`{query}`"
+        header += f" — {len(sessions)} of {total}"
+        if not sessions:
+            return header + "\n\n_No matching sessions._"
+        rows = ["", "| Status | ID | Topic | Depth | Entries | Updated |",
+                "|---|---|---|---|---:|---|"]
+        rows.extend(self._format_session_row(s) for s in sessions)
+        return "\n".join([header] + rows)
+
+    def _research_rename_action(self, session_id: str, topic: str) -> str:
+        try:
+            r = requests.patch(
+                f"{self.valves.orchestrator_url}/research/sessions/{session_id}",
+                json={"topic": topic.strip()},
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            return f"⚠️ {e}"
+        if r.status_code == 404:
+            return f"Research session not found: `{session_id}`"
+        if r.status_code >= 400:
+            return self._fmt(r)
+        d = r.json()
+        return f"✅ Renamed `{(d.get('id') or '')[:8]}`: **{d.get('topic')}**"
+
+    def _research_delete_action(self, session_id: str, confirm: bool) -> str:
+        self._ensure_pending_deletes()
+        import time
+        if confirm:
+            pending = self._pending_deletes.get(("research", session_id))
+            if not pending or time.time() - pending > 300:
+                return (f"⚠️ No recent preview for `{session_id[:8]}`. "
+                        f"Run `/research delete {session_id}` first.")
+            try:
+                r = requests.delete(
+                    f"{self.valves.orchestrator_url}/research/sessions/{session_id}",
+                    headers=self._auth_headers(),
+                    timeout=self.valves.request_timeout,
+                )
+            except requests.exceptions.RequestException as e:
+                return f"⚠️ {e}"
+            if r.status_code == 404:
+                return f"Research session not found: `{session_id}`"
+            if r.status_code >= 400:
+                return self._fmt(r)
+            self._pending_deletes.pop(("research", session_id), None)
+            return f"🗑️ Deleted research session `{session_id[:8]}`."
+        # Preview
+        try:
+            r = requests.get(
+                f"{self.valves.orchestrator_url}/research/sessions",
+                params={"limit": 100},
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            return f"⚠️ {e}"
+        if r.status_code >= 400:
+            return self._fmt(r)
+        sessions = r.json().get("sessions", [])
+        match = next((s for s in sessions if s.get("id") == session_id), None)
+        if not match:
+            return f"Research session not found: `{session_id}`"
+        self._pending_deletes[("research", session_id)] = time.time()
+        return (
+            f"⚠️ **About to delete research session** `{session_id[:8]}`\n\n"
+            f"- Topic: **{match.get('topic','')}**\n"
+            f"- Status: `{match.get('status','')}`\n"
+            f"- Entries ingested into KB: {match.get('total_entries_ingested', 0)} "
+            f"(KB entries are NOT deleted)\n\n"
+            f"This drops only the session metadata. To proceed:\n"
+            f"`/research delete {session_id} confirm`"
+        )
 
     # ------------------------------------------------------------------
     # /results handler (#8.1)
@@ -1712,7 +2049,9 @@ class Pipeline:
 | `/status` | List active jobs |
 | `/model <sub>` | Manage models (list/available/set/reset/probe/help) |
 | `/schedule <sub>` | Manage scheduled research (list/add/delete) |
+| `/jobs <sub>` | Manage jobs (list/find/rename/delete/help) |
 | `/research <topic>` | Research a topic (web), URL, `github:owner/repo`, or `openapi:<url>` |
+| `/research <sub>` | Manage sessions (list/find/rename/delete/help) |
 | `/research/reply <session_id> <msg>` | Resume a paused research session |
 | `/research/pdf` | Upload a PDF (multipart via `POST /research/pdf` or browser at `GET /research/pdf`) |
 | `/help` | Show this message |

@@ -173,6 +173,7 @@ class Settings(BaseSettings):
     stale_threshold_minutes: int = Field(default=30, ge=1, le=1440)
     planning_stale_minutes: int = Field(default=60, ge=1, le=1440)
     long_phase_stale_minutes: int = Field(default=45, ge=1, le=1440)
+    awaiting_confirmation_stale_minutes: int = Field(default=10080, ge=60, le=43200)  # 7d default, max 30d
     # #2 — orphan detection: dag_nodes stuck in 'running' past this threshold
     # are treated as orphaned (executor died) and reset to 'pending' for
     # automatic re-execution. Default 60min > worst observed single-node

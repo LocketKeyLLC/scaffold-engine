@@ -57,6 +57,13 @@ from app.schemas import (
     ScheduleCreate,
     ScheduleResponse,
     SkipNodeInput,
+    JobRenameInput,
+    JobSummary,
+    JobListResponse,
+    ResearchSessionRenameInput,
+    ResearchSessionSummary,
+    ResearchSessionListResponse,
+    DeleteResponse,
 )
 
 logger = logging.getLogger("scaffold")
@@ -897,3 +904,221 @@ async def delete_schedule(schedule_id: int, db: AsyncSession = Depends(get_db)):
     return {"deleted": schedule_id}
 
 
+
+
+# phase_c_management_endpoints --------------------------------------------------
+# Job + research-session management endpoints (Phase C)
+# ------------------------------------------------------------------------------
+
+@app.get("/jobs", response_model=JobListResponse, tags=["Management"])
+async def list_jobs(
+    status: str | None = None,
+    q: str | None = None,
+    limit: int = 25,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    """Paginated job list with optional status filter and title search."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit must be 1..100")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must be >= 0")
+
+    where_clauses = []
+    params: dict = {}
+    if status:
+        valid = {"pending", "refining", "awaiting_confirmation", "researching",
+                 "planning", "executing", "running", "completed", "failed",
+                 "cancelled", "blocked"}
+        if status not in valid:
+            raise HTTPException(status_code=422, detail=f"invalid status: {status}")
+        where_clauses.append("j.status = :status")
+        params["status"] = status
+    if q:
+        where_clauses.append("j.title ILIKE :q")
+        params["q"] = f"%{q.strip()}%"
+
+    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    total_row = await db.execute(text(f"SELECT COUNT(*) FROM jobs j {where_sql}"), params)
+    total = total_row.scalar() or 0
+
+    params["limit"] = limit
+    params["offset"] = offset
+    rows = await db.execute(text(f"""
+        SELECT j.id, j.title, j.status, j.created_at, j.updated_at,
+               COALESCE(n.cnt, 0) AS node_count
+        FROM jobs j
+        LEFT JOIN (SELECT job_id, COUNT(*) AS cnt FROM dag_nodes GROUP BY job_id) n
+          ON n.job_id = j.id
+        {where_sql}
+        ORDER BY j.updated_at DESC
+        LIMIT :limit OFFSET :offset
+    """), params)
+    jobs = [
+        JobSummary(
+            id=str(r.id),
+            title=r.title or "",
+            status=r.status,
+            node_count=r.node_count,
+            created_at=r.created_at.isoformat(),
+            updated_at=r.updated_at.isoformat(),
+        )
+        for r in rows.fetchall()
+    ]
+    return JobListResponse(jobs=jobs, total=total, limit=limit, offset=offset)
+
+
+@app.delete("/jobs/{job_id}", response_model=DeleteResponse, tags=["Management"])
+async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
+    """Hard-delete a job. Cascade removes dag_nodes / execution_logs / artifacts /
+    error_logs (FK ON DELETE CASCADE). Sets performance_logs.job_id NULL."""
+    try:
+        from uuid import UUID
+        UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+
+    r = await db.execute(text("DELETE FROM jobs WHERE id = :id RETURNING id"), {"id": job_id})
+    deleted = r.fetchone() is not None
+    if not deleted:
+        await db.commit()
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+    await db.commit()
+    return DeleteResponse(deleted=True, id=job_id)
+
+
+@app.patch("/jobs/{job_id}", response_model=JobSummary, tags=["Management"])
+async def rename_job(job_id: str, body: JobRenameInput, db: AsyncSession = Depends(get_db)):
+    """Rename a job (set title)."""
+    try:
+        from uuid import UUID
+        UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+
+    r = await db.execute(text("""
+        UPDATE jobs SET title = :title, updated_at = NOW()
+        WHERE id = :id
+        RETURNING id, title, status, created_at, updated_at,
+                  (SELECT COUNT(*) FROM dag_nodes WHERE job_id = :id) AS node_count
+    """), {"id": job_id, "title": body.title})
+    row = r.fetchone()
+    if not row:
+        await db.commit()
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+    await db.commit()
+    return JobSummary(
+        id=str(row.id), title=row.title, status=row.status,
+        node_count=row.node_count or 0,
+        created_at=row.created_at.isoformat(),
+        updated_at=row.updated_at.isoformat(),
+    )
+
+
+@app.get("/research/sessions", response_model=ResearchSessionListResponse, tags=["Management"])
+async def list_research_sessions(
+    status: str | None = None,
+    q: str | None = None,
+    limit: int = 25,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    """Paginated research session list with optional status + topic search."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit must be 1..100")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must be >= 0")
+
+    where_clauses = []
+    params: dict = {}
+    if status:
+        where_clauses.append("status = :status")
+        params["status"] = status
+    if q:
+        where_clauses.append("topic ILIKE :q")
+        params["q"] = f"%{q.strip()}%"
+    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    total_row = await db.execute(text(f"SELECT COUNT(*) FROM research_sessions {where_sql}"), params)
+    total = total_row.scalar() or 0
+
+    params["limit"] = limit
+    params["offset"] = offset
+    rows = await db.execute(text(f"""
+        SELECT id, topic, status, depth, domain, iterations_completed,
+               total_entries_ingested, coverage_pct, created_at, updated_at
+        FROM research_sessions
+        {where_sql}
+        ORDER BY updated_at DESC
+        LIMIT :limit OFFSET :offset
+    """), params)
+    sessions = [
+        ResearchSessionSummary(
+            id=str(r.id),
+            topic=r.topic,
+            status=r.status,
+            depth=r.depth,
+            domain=r.domain,
+            iterations_completed=r.iterations_completed,
+            total_entries_ingested=r.total_entries_ingested,
+            coverage_pct=r.coverage_pct,
+            created_at=r.created_at.isoformat(),
+            updated_at=r.updated_at.isoformat(),
+        )
+        for r in rows.fetchall()
+    ]
+    return ResearchSessionListResponse(sessions=sessions, total=total, limit=limit, offset=offset)
+
+
+@app.delete("/research/sessions/{session_id}", response_model=DeleteResponse, tags=["Management"])
+async def delete_research_session(session_id: str, db: AsyncSession = Depends(get_db)):
+    """Hard-delete a research session. Note: KB entries already in Milvus are NOT
+    removed; this only drops the session metadata + state snapshot."""
+    try:
+        from uuid import UUID
+        UUID(session_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="session_id must be a valid UUID")
+
+    r = await db.execute(text("DELETE FROM research_sessions WHERE id = :id RETURNING id"),
+                          {"id": session_id})
+    deleted = r.fetchone() is not None
+    if not deleted:
+        await db.commit()
+        raise HTTPException(status_code=404, detail=f"research_session not found: {session_id}")
+    await db.commit()
+    return DeleteResponse(deleted=True, id=session_id)
+
+
+@app.patch("/research/sessions/{session_id}", response_model=ResearchSessionSummary, tags=["Management"])
+async def rename_research_session(session_id: str, body: ResearchSessionRenameInput, db: AsyncSession = Depends(get_db)):
+    """Rename a research session (set topic)."""
+    try:
+        from uuid import UUID
+        UUID(session_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="session_id must be a valid UUID")
+
+    r = await db.execute(text("""
+        UPDATE research_sessions SET topic = :topic, updated_at = NOW()
+        WHERE id = :id
+        RETURNING id, topic, status, depth, domain, iterations_completed,
+                  total_entries_ingested, coverage_pct, created_at, updated_at
+    """), {"id": session_id, "topic": body.topic})
+    row = r.fetchone()
+    if not row:
+        await db.commit()
+        raise HTTPException(status_code=404, detail=f"research_session not found: {session_id}")
+    await db.commit()
+    return ResearchSessionSummary(
+        id=str(row.id), topic=row.topic, status=row.status,
+        depth=row.depth, domain=row.domain,
+        iterations_completed=row.iterations_completed,
+        total_entries_ingested=row.total_entries_ingested,
+        coverage_pct=row.coverage_pct,
+        created_at=row.created_at.isoformat(),
+        updated_at=row.updated_at.isoformat(),
+    )
+
+# end phase_c_management_endpoints ---------------------------------------------

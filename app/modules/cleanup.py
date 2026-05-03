@@ -78,6 +78,16 @@ _REAP_PLANNING_SQL = """
     RETURNING id
 """
 
+_REAP_AWAITING_CONFIRMATION_SQL = """
+    UPDATE jobs
+    SET status = 'cancelled',
+        error_summary = 'Awaiting confirmation gate timeout (no user reply)',
+        updated_at = NOW()
+    WHERE status = 'awaiting_confirmation'
+      AND updated_at < NOW() - make_interval(mins => :threshold_min)
+    RETURNING id
+"""
+
 _REAP_RESEARCH_SESSIONS_SQL = """
     UPDATE research_sessions
     SET status = 'failed',
@@ -111,6 +121,7 @@ async def reap_stale_jobs(db: AsyncSession) -> dict:
     base_min = settings.stale_threshold_minutes
     long_min = settings.long_phase_stale_minutes
     plan_min = settings.planning_stale_minutes
+    awaiting_min = settings.awaiting_confirmation_stale_minutes
     orphan_min = settings.node_orphan_threshold_minutes
 
     # Stage 0 — reset orphaned dag_nodes (executor died mid-run).
@@ -163,6 +174,11 @@ async def reap_stale_jobs(db: AsyncSession) -> dict:
     )
     planning_cancelled = len(r3.fetchall())
 
+    r3b = await db.execute(
+        text(_REAP_AWAITING_CONFIRMATION_SQL),
+        {"threshold_min": awaiting_min},
+    )
+    awaiting_cancelled = len(r3b.fetchall())
     r4 = await db.execute(
         text(_REAP_RESEARCH_SESSIONS_SQL),
         {
@@ -181,13 +197,14 @@ async def reap_stale_jobs(db: AsyncSession) -> dict:
     await db.commit()
 
     if (orphan_nodes_reset or running_failed or long_phase_failed
-            or planning_cancelled or research_failed or paused_cancelled):
+            or planning_cancelled or awaiting_cancelled or research_failed or paused_cancelled):
         logger.info(
             "stale_jobs_reaped orphan_nodes_reset=%d running_to_failed=%d "
             "long_phase_to_failed=%d planning_to_cancelled=%d "
+            "awaiting_to_cancelled=%d "
             "research_to_failed=%d paused_to_cancelled=%d",
             orphan_nodes_reset, running_failed, long_phase_failed,
-            planning_cancelled, research_failed, paused_cancelled,
+            planning_cancelled, awaiting_cancelled, research_failed, paused_cancelled,
         )
 
     return {
@@ -195,6 +212,7 @@ async def reap_stale_jobs(db: AsyncSession) -> dict:
         "running_to_failed": running_failed,
         "long_phase_to_failed": long_phase_failed,
         "planning_to_cancelled": planning_cancelled,
+        "awaiting_to_cancelled": awaiting_cancelled,
         "research_to_failed": research_failed,
         "paused_to_cancelled": paused_cancelled,
     }

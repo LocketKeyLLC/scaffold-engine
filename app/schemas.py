@@ -530,3 +530,74 @@ class PromptHistoryResponse(BaseModel):
     revision_count: int
     revisions: list[PromptRevision]
 
+
+
+# ---------------- Job + research-session management (Phase C) ----------------
+
+class JobRenameInput(BaseModel):
+    title: str
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("title must be non-empty")
+        if len(v) > 200:
+            raise ValueError("title must be 200 characters or fewer")
+        return v
+
+
+class JobSummary(BaseModel):
+    id: str
+    title: str
+    status: str
+    node_count: int = 0
+    created_at: str
+    updated_at: str
+
+
+class JobListResponse(BaseModel):
+    jobs: list[JobSummary]
+    total: int
+    limit: int
+    offset: int
+
+
+class ResearchSessionRenameInput(BaseModel):
+    topic: str
+
+    @field_validator("topic")
+    @classmethod
+    def _validate_topic(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("topic must be non-empty")
+        if len(v) > 500:
+            raise ValueError("topic must be 500 characters or fewer")
+        return v
+
+
+class ResearchSessionSummary(BaseModel):
+    id: str
+    topic: str
+    status: str
+    depth: str
+    domain: str
+    iterations_completed: int
+    total_entries_ingested: int
+    coverage_pct: float | None = None
+    created_at: str
+    updated_at: str
+
+
+class ResearchSessionListResponse(BaseModel):
+    sessions: list[ResearchSessionSummary]
+    total: int
+    limit: int
+    offset: int
+
+
+class DeleteResponse(BaseModel):
+    deleted: bool
+    id: str
