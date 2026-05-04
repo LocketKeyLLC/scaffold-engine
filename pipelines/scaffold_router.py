@@ -18,6 +18,9 @@ import os
 import logging
 import queue
 import re
+import argparse
+import difflib
+import unicodedata
 import shlex
 import threading
 import time
@@ -28,6 +31,173 @@ from pydantic import BaseModel
 logger = logging.getLogger("scaffold_router")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
+
+
+# --------------------------------------------------------------------
+# Argument parsing helpers (Tier 1 #1 — shared parser foundation)
+# --------------------------------------------------------------------
+
+KNOWN_COMMANDS: tuple = (
+    "/go", "/run", "/confirm", "/execute", "/idea", "/skip", "/optimize",
+    "/rag", "/model", "/research", "/research/reply", "/research/list",
+    "/research/find", "/research/rename", "/research/delete", "/research/help",
+    "/research/pdf", "/jobs", "/schedule", "/status", "/results", "/help",
+)
+
+KNOWN_SUBCOMMANDS: dict = {
+    "/model": ("list", "available", "set", "reset", "probe", "test", "help"),
+    "/jobs": ("list", "find", "rename", "delete", "help"),
+    "/schedule": ("list", "add", "delete", "run-now", "help"),
+}
+
+_PLACEHOLDER_RE = re.compile(r"^[<\[(].+[>\])]$")
+_PLACEHOLDER_TOKENS = frozenset({
+    "query", "topic", "url", "message", "id", "session_id", "job_id",
+    "node_key", "cron", "model", "prompt", "text", "feedback",
+})
+
+_DASH_VARIANTS = ("\u2014", "\u2013", "\u2012", "\u2212")  # em, en, figure, minus
+
+_SINGLE_DASH_FLAG_RE = re.compile(r"(?<![\w-])-([a-zA-Z][a-zA-Z0-9-]+)(?=[\s=]|$)")
+
+
+def _normalize_input(s: str):
+    """NFKC-normalize and rewrite unicode dashes + single-dash long flags.
+
+    Returns (normalized, rewrites). `rewrites` is a list of "before -> after"
+    strings for any substitution made; empty if input was already canonical.
+    Used by #13 to surface a confirmation when the parser silently rewrites.
+    """
+    if not s:
+        return s, []
+    norm = unicodedata.normalize("NFKC", s)
+    rewrites = []
+
+    for ch in _DASH_VARIANTS:
+        if ch in norm:
+            rewrites.append(f"`{ch}` -> `--`")
+            norm = norm.replace(ch, "--")
+
+    seen_flags = set()
+    def _expand(m):
+        flag = m.group(1)
+        if flag not in seen_flags:
+            rewrites.append(f"`-{flag}` -> `--{flag}`")
+            seen_flags.add(flag)
+        return f"--{flag}"
+    norm = _SINGLE_DASH_FLAG_RE.sub(_expand, norm)
+
+    return norm, rewrites
+
+
+def _is_placeholder(value: str) -> bool:
+    """True if value looks like an unfilled command placeholder."""
+    if not value:
+        return True
+    v = value.strip()
+    if not v:
+        return True
+    if _PLACEHOLDER_RE.match(v):
+        return True
+    if v.lower() in _PLACEHOLDER_TOKENS:
+        return True
+    return False
+
+
+def _suggest_command(token: str, candidates=None):
+    """Up to 3 close matches for an unknown command or subcommand."""
+    pool = candidates if candidates is not None else KNOWN_COMMANDS
+    return difflib.get_close_matches(token, pool, n=3, cutoff=0.6)
+
+
+class _ChatArgError(Exception):
+    """Raised by CommandParser when input is malformed; message is chat-ready."""
+
+
+class CommandParser:
+    """argparse wrapper with chat-friendly errors and residual-positional capture.
+
+    Usage:
+        p = CommandParser("research", "Autonomous web research")
+        p.add_argument("--depth", choices=["shallow", "medium", "deep"], default="medium")
+        p.add_example("/research kubernetes pods --depth=deep")
+        args, residual = p.parse(raw_args_string)
+    """
+
+    def __init__(self, name: str, description: str = ""):
+        self.name = name
+        self.description = description
+        self._parser = argparse.ArgumentParser(
+            prog=f"/{name}",
+            description=description,
+            add_help=False,
+            exit_on_error=False,
+        )
+        self._examples = []
+
+    def add_argument(self, *args, **kwargs):
+        return self._parser.add_argument(*args, **kwargs)
+
+    def add_example(self, example: str) -> None:
+        self._examples.append(example)
+
+    def parse(self, raw: str):
+        try:
+            tokens = shlex.split(raw) if raw else []
+        except ValueError as e:
+            raise _ChatArgError(
+                f"Could not parse `/{self.name}` input: {e}. Check for unmatched quotes."
+            )
+        try:
+            ns, rest = self._parser.parse_known_args(tokens)
+        except (argparse.ArgumentError, SystemExit) as e:
+            raise _ChatArgError(self._format_parse_error(str(e)))
+        # parse_known_args silently sweeps unknown flags into `rest`; surface them.
+        unknown_flags = [t for t in rest if t.startswith("-") and len(t) > 1]
+        if unknown_flags:
+            bad = unknown_flags[0].split("=", 1)[0]
+            valid_flags = [f for a in self._parser._actions for f in a.option_strings]
+            close = difflib.get_close_matches(bad, valid_flags, n=1, cutoff=0.6)
+            hint = f" Did you mean `{close[0]}`?" if close else ""
+            raise _ChatArgError(
+                f"Unknown flag `{bad}` for `/{self.name}`.{hint} "
+                f"Run `/{self.name} --help` for options."
+            )
+        return ns, " ".join(rest).strip(), rest
+
+    def help_text(self) -> str:
+        lines = [f"**`/{self.name}`** - {self.description}".rstrip(" -"), ""]
+        flag_lines = []
+        for action in self._parser._actions:
+            if not action.option_strings:
+                continue
+            flags = ", ".join(f"`{f}`" for f in action.option_strings)
+            choices = f" ({'|'.join(map(str, action.choices))})" if action.choices else ""
+            default = ""
+            if action.default not in (None, argparse.SUPPRESS, False, ""):
+                default = f" [default: {action.default}]"
+            help_str = f" - {action.help}" if action.help else ""
+            flag_lines.append(f"  {flags}{choices}{default}{help_str}")
+        if flag_lines:
+            lines.append("**Flags:**")
+            lines.extend(flag_lines)
+            lines.append("")
+        if self._examples:
+            lines.append("**Examples:**")
+            for ex in self._examples:
+                lines.append(f"  `{ex}`")
+        return "\n".join(lines).rstrip()
+
+    def _format_parse_error(self, err: str) -> str:
+        m = re.search(r"unrecognized arguments?: (\S+)", err)
+        if m:
+            bad = m.group(1)
+            valid_flags = [f for a in self._parser._actions for f in a.option_strings]
+            close = difflib.get_close_matches(bad, valid_flags, n=1, cutoff=0.6)
+            hint = f" Did you mean `{close[0]}`?" if close else ""
+            return (f"Unknown flag `{bad}` for `/{self.name}`.{hint} "
+                    f"Run `/{self.name} --help` for options.")
+        return f"`/{self.name}`: {err} Run `/{self.name} --help` for options."
 
 
 # --------------------------------------------------------------------
@@ -515,6 +685,12 @@ class Pipeline:
 
         body["stream"] = True
 
+        # Normalize input (Tier 1 #1): NFKC + unicode-dash -> `--` + `-flag` -> `--flag`.
+        # Surface rewrites so the parser's behavior is visible (Tier 1 #13).
+        msg, _rewrites = _normalize_input(msg)
+        if _rewrites:
+            yield f"_Note: interpreted {', '.join(_rewrites)}._\n\n"
+
         # Word-boundary command dispatch (#8.6)
         if self._is_cmd(msg, "/go", "/run"):
             yield from self._handle_go(msg, messages); return
@@ -586,29 +762,40 @@ class Pipeline:
         yield from self._research_reply_and_stream(session_id, user_reply)
 
     def _handle_research(self, msg: str) -> Generator[str, None, None]:
+        # Parser shared by /research and /schedule add (Tier 1 #1, #2, #3, #5).
+        parser = CommandParser("research", "Autonomous web research")
+        parser.add_argument(
+            "--depth", choices=["shallow", "medium", "deep"], default="medium",
+            help="Research iteration count",
+        )
+        parser.add_example("/research kubernetes pods --depth=deep")
+        parser.add_example("/research https://example.com/article")
+        parser.add_example("/research github:owner/repo")
+        parser.add_example("/research openapi:https://api.example.com/openapi.json")
+
         parts = msg.split(None, 1)
-        if len(parts) < 2:
-            yield ("Usage: `/research <topic>` — research a topic and ingest.\n\n"
-                   "Sources:\n"
-                   "- `/research <topic>` — web search via SearXNG\n"
-                   "- `/research <url>` — fetch and extract one URL\n"
-                   "- `/research github:owner/repo` — ingest README + docs\n"
-                   "- `/research openapi:<url>` — ingest OpenAPI/Swagger spec\n\n"
-                   "Manage sessions: `/research/help`\n"
-                   "Options: `--depth shallow|medium|deep` to control iteration count.")
+        raw_args = parts[1] if len(parts) > 1 else ""
+
+        # Per-command help (#5).
+        if raw_args.strip() in ("--help", "-h", "help"):
+            yield parser.help_text() + "\n\nManage sessions: `/research/help`"
             return
-        raw_args = parts[1]
-        depth = "medium"
-        m = re.search(r"--depth\s+(shallow|medium|deep)", raw_args)
-        if m:
-            depth = m.group(1)
-            raw_args = (raw_args[:m.start()] + raw_args[m.end():]).strip()
-        topic = raw_args.strip()
-        if not topic:
-            yield "Usage: `/research <topic>`"
+
+        try:
+            args, topic, _ = parser.parse(raw_args)
+        except _ChatArgError as e:
+            yield str(e)
             return
-        yield f"🔬 Researching: **{topic}** (depth: {depth})\n\n"
-        yield from self._research_and_stream(topic, depth)
+
+        # Placeholder rejection (#3).
+        if _is_placeholder(topic):
+            yield ("It looks like the topic is missing or a placeholder. "
+                   "Try `/research what changed in the codebase last week`.\n\n"
+                   + parser.help_text())
+            return
+
+        yield f"🔬 Researching: **{topic}** (depth: {args.depth})\n\n"
+        yield from self._research_and_stream(topic, args.depth)
 
     def _handle_execute(self, msg: str) -> Generator[str, None, None]:
         parts = msg.split()
@@ -1310,6 +1497,12 @@ class Pipeline:
                     return self._fmt(r)
                 return self._render_status(r.json())
 
+            close = _suggest_command(cmd)
+            if close:
+                hint = "\n".join(f"  - `{c}`" for c in close)
+                return (f"Unknown command: `{cmd}`\n\n"
+                        f"Closest matches:\n{hint}\n\n"
+                        f"Type `/help` for the full list.")
             return f"Unknown command: `{cmd}`\nType `/help` for available commands."
 
         except requests.exceptions.Timeout:
@@ -1920,7 +2113,14 @@ class Pipeline:
         base = self.valves.orchestrator_url
         hdr = self._auth_headers()
 
-        if sub == "help" or sub not in ("list", "add", "delete"):
+        valid_subs = ("list", "add", "delete", "help")
+        if sub != "help" and sub not in valid_subs:
+            close = difflib.get_close_matches(sub, valid_subs, n=2, cutoff=0.6)
+            hint = ""
+            if close:
+                hint = "\n\nClosest matches:\n" + "\n".join(f"  - `/schedule {c}`" for c in close)
+            return f"Unknown subcommand: `/schedule {sub}`{hint}\n\nRun `/schedule help` for the full list."
+        if sub == "help":
             return (
                 "**Schedule commands:**\n"
                 "- `/schedule list` — show all schedules\n"
@@ -1928,7 +2128,7 @@ class Pipeline:
                 "  Example: `/schedule add \"0 9 * * 1\" --depth=medium kubernetes news`\n"
                 "- `/schedule delete <id>`\n\n"
                 "Cron format: `minute hour day month weekday` (UTC)\n"
-                "Depth defaults to `shallow`."
+                "Depth defaults to `medium`."
             )
 
         if sub == "list":
@@ -1952,40 +2152,33 @@ class Pipeline:
             return "\n".join(lines)
 
         if sub == "add":
-            if len(parts) < 3:
+            # CommandParser shared with /research (Tier 1 #1, #2, #3, #5).
+            parser = CommandParser("schedule add", "Create a recurring research schedule")
+            parser.add_argument(
+                "--depth", choices=["shallow", "medium", "deep"], default="medium",
+                help="Research iteration count",
+            )
+            parser.add_example('/schedule add "0 9 * * 1" --depth=medium kubernetes news')
+
+            raw_args = parts[2] if len(parts) >= 3 else ""
+            if raw_args.strip() in ("--help", "-h", "help"):
+                return parser.help_text() + "\n\nCron: `minute hour day month weekday` (UTC)."
+            if not raw_args.strip():
                 return "Usage: `/schedule add <cron> [--depth=<level>] <topic>`"
+
             try:
-                tokens = shlex.split(parts[2])
-            except ValueError as exc:
-                return f"❌ Parse error: {exc}"
-
-            depth = "medium"  # match orchestrator + DB default; --depth= overrides
-            filtered = []
-            i = 0
-            while i < len(tokens):
-                tok = tokens[i]
-                if tok.startswith("--depth="):
-                    val = tok.split("=", 1)[1].lower()
-                    if val not in ("shallow", "medium", "deep"):
-                        return f"❌ Invalid --depth value: `{val}`. Use shallow, medium, or deep."
-                    depth = val
-                    i += 1
-                elif tok == "--depth":
-                    if i + 1 >= len(tokens):
-                        return "❌ `--depth` requires a value"
-                    val = tokens[i + 1].lower()
-                    if val not in ("shallow", "medium", "deep"):
-                        return f"❌ Invalid --depth value: `{val}`. Use shallow, medium, or deep."
-                    depth = val
-                    i += 2
-                else:
-                    filtered.append(tok)
-                    i += 1
-
-            if len(filtered) < 2:
+                args, _, positional = parser.parse(raw_args)
+            except _ChatArgError as exc:
+                return str(exc)
+            if len(positional) < 2:
                 return "Usage: `/schedule add \"<cron>\" [--depth=<level>] <topic>`"
-            cron_expr = filtered[0]
-            topic = " ".join(filtered[1:])
+
+            cron_expr = positional[0]
+            topic = " ".join(positional[1:])
+            if _is_placeholder(topic):
+                return ("It looks like the topic is missing or a placeholder. "
+                        "Try `/schedule add \"0 9 * * 1\" kubernetes news`.")
+            depth = args.depth
             try:
                 r = requests.post(
                     f"{base}/schedule", headers=hdr,
