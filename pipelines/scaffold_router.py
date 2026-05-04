@@ -1437,6 +1437,8 @@ class Pipeline:
                 if len(parts) < 2:
                     return "Usage: /idea <description>"
                 text = " ".join(parts[1:])
+                if _is_placeholder(text):
+                    return "It looks like the description is missing or a placeholder. Try `/idea Build a CLI that converts screenshots to a searchable PDF`."
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/ideate",
                     json={"idea": text, "model_overrides": self._model_overrides()},
@@ -1457,6 +1459,8 @@ class Pipeline:
             if cmd == "/skip":
                 if len(parts) < 3:
                     return "Usage: /skip <job_id> <node_key>"
+                if _is_placeholder(parts[1]) or _is_placeholder(parts[2]):
+                    return "It looks like job_id or node_key is missing or a placeholder. Try `/skip 01ab243e T2`."
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/skip",
                     json={"job_id": parts[1], "node_key": parts[2]},
@@ -1468,6 +1472,8 @@ class Pipeline:
                 if len(parts) < 2:
                     return "Usage: /optimize <prompt text>"
                 text = " ".join(parts[1:])
+                if _is_placeholder(text):
+                    return "It looks like the prompt is missing or a placeholder. Try `/optimize Write a function that returns the nth Fibonacci number`."
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/optimize",
                     json={"prompt": text, "skip_verify": False,
@@ -1480,6 +1486,8 @@ class Pipeline:
                 if len(parts) < 2:
                     return "Usage: /rag <query>"
                 text = " ".join(parts[1:])
+                if _is_placeholder(text):
+                    return "It looks like the query is missing or a placeholder. Try `/rag what changed in the codebase last week`."
                 r = requests.post(
                     f"{self.valves.orchestrator_url}/rag",
                     json={"query": text, "top_k": 5},
@@ -1655,7 +1663,11 @@ class Pipeline:
             job_id = parts[2]
             confirm = (len(parts) > 3 and parts[3].strip().lower() == "confirm")
             return self._jobs_delete_action(job_id, confirm)
-        return f"Unknown subcommand: `{sub}`\n\n" + self._jobs_help()
+        close = difflib.get_close_matches(sub, ("help", "find", "rename", "delete") + tuple(self._VALID_JOB_STATUSES), n=2, cutoff=0.6)
+        hint = ""
+        if close:
+            hint = "\n\nClosest matches:\n" + "\n".join(f"  - `/jobs {c}`" for c in close)
+        return f"Unknown subcommand: `/jobs {sub}`{hint}\n\n" + self._jobs_help()
 
     def _jobs_list_action(self, status, query) -> str:
         params = {"limit": 25}
@@ -1784,6 +1796,12 @@ class Pipeline:
             session_id = parts[1]
             confirm = (len(parts) > 2 and parts[2].strip().lower() == "confirm")
             yield self._research_delete_action(session_id, confirm); return
+        # Unknown subcommand fuzzy fallback (Tier 1 #4).
+        close = difflib.get_close_matches(sub, ("help", "list", "find", "rename", "delete"), n=2, cutoff=0.6)
+        hint = ""
+        if close:
+            hint = "\n\nClosest matches:\n" + "\n".join(f"  - `/research/{c}`" for c in close)
+        yield f"Unknown subcommand: `/research/{sub}`{hint}\n\n" + self._research_mgmt_help()
 
     def _research_list_action(self, query) -> str:
         params = {"limit": 25}
@@ -2006,7 +2024,11 @@ class Pipeline:
         if sub == "reset":     return self._model_reset()
         if sub == "probe":     return self._model_probe()
         if sub == "help":      return self._model_help()
-        return f"Unknown subcommand: `{sub}`\n\n{self._model_help()}"
+        close = difflib.get_close_matches(sub, ("list", "available", "set", "reset", "probe", "help"), n=2, cutoff=0.6)
+        hint = ""
+        if close:
+            hint = "\n\nClosest matches:\n" + "\n".join(f"  - `/model {c}`" for c in close)
+        return f"Unknown subcommand: `/model {sub}`{hint}\n\n{self._model_help()}"
 
     def _model_list(self) -> str:
         lines = ["| Role | Current Model | Default? |", "|---|---|---|"]
