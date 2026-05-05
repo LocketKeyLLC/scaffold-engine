@@ -796,7 +796,14 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
                 top_hit = sim_results[0][0]
                 sim_score = float(top_hit.score)
 
-                if sim_score >= dedup_threshold and top_hit.entity.get("content_hash") != p["ch"]:
+                if sim_score >= dedup_threshold:
+                    # The exact-hash filter at L738-750 catches identity matches
+                    # in serial flow. Concurrent ingests can race past it (Entry
+                    # A is mid-pipeline with hash H; Entry B reaches Pass 1
+                    # before A is upserted, also passes Pass 1; Pass 3 sees A
+                    # already in Milvus). Reject by similarity unconditionally
+                    # here so the racing duplicate doesn't slip into the
+                    # version-chain branch.
                     existing_eid = top_hit.entity.get("entry_id", str(top_hit.id))
                     logger.info(
                         "dedup_rejected: sim=%.4f title='%s' existing='%s'",
@@ -829,6 +836,21 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
                         "version_chain_linked: v%d supersedes='%s' sim=%.4f title='%s'",
                         new_version, latest_eid, sim_score, p["title"][:50],
                     )
+                    # Audit: superseded entries get a dedup_log row alongside
+                    # rejections (invariant #9). Action='versioned' to
+                    # distinguish from outright rejection.
+                    try:
+                        async with async_session() as session:
+                            await session.execute(
+                                text(
+                                    "INSERT INTO dedup_log (new_content_hash, existing_entry_id, similarity_score, action_taken) "
+                                    "VALUES (:hash, :eid, :score, 'versioned')"
+                                ),
+                                {"hash": p["ch"], "eid": latest_eid, "score": sim_score},
+                            )
+                            await session.commit()
+                    except Exception as db_err:
+                        logger.error("dedup_log_write_failed: %s", db_err)
         except Exception as e:
             logger.debug("semantic_dedup_failed: %s", e)
 
