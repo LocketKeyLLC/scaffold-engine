@@ -11,7 +11,7 @@ Step 6 of 23-step build plan.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -27,16 +27,11 @@ JobStatus = Literal[
     "assisted_executing", "assisted_running", "assisted_paused",
 ]
 
-# Runtime-iterable mirror of JobStatus. Single source of truth for the
-# whitelist used by /jobs filter validation, the jobs.status CHECK
-# constraint, and any future status-aware paths (e.g. cleanup reaper).
-# Keep this and JobStatus literal in lockstep — adding a new status here
-# without updating the literal (or vice versa) silently breaks validation.
-JOB_STATUSES: tuple[str, ...] = (
-    "pending", "refining", "awaiting_confirmation", "researching", "planning", "executing",
-    "running", "completed", "failed", "cancelled", "blocked",
-    "assisted_executing", "assisted_running", "assisted_paused",
-)
+# Runtime-iterable mirror of JobStatus, derived directly from the Literal
+# so the two cannot drift. Used by /jobs filter validation and any future
+# status-aware code paths (cleanup reaper, etc.). Adding a new status to
+# JobStatus automatically extends this tuple.
+JOB_STATUSES: tuple[str, ...] = get_args(JobStatus)
 
 # Statuses the cleanup reaper must NOT touch on its normal cadence.
 # Assist sessions are user-driven and may legitimately stay open for
@@ -62,8 +57,7 @@ NodeType = Literal["task", "decision", "parallel_group", "checkpoint"]
 LogLevel = Literal["debug", "info", "warning", "error", "critical"]
 
 ErrorType = Literal[
-    "transient", "model_failure", "timeout",
-    "validation", "structural", "unrecoverable",
+    "transient", "timeout", "validation", "unrecoverable",
 ]
 
 RecoveryAction = Literal["retry", "model_swap", "dag_replan", "manual", "none"]
@@ -94,7 +88,7 @@ class JobBase(BaseModel):
     title: str
     description: str | None = None
     input_text: str | None = None
-    meta: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class JobCreate(JobBase):
@@ -107,7 +101,7 @@ class JobUpdate(BaseModel):
     status: JobStatus | None = None
     refined_brief: dict[str, Any] | None = None
     error_summary: str | None = None
-    meta: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class JobRead(JobBase):
@@ -247,7 +241,7 @@ class ArtifactBase(BaseModel):
     file_path: str | None = None
     mime_type: str = "text/plain"
     size_bytes: int | None = None
-    meta: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ArtifactCreate(ArtifactBase):

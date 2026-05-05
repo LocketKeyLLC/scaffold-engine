@@ -1,8 +1,15 @@
 -- Scaffold Engine — PostgreSQL Schema
 -- Creates the 8 core tables that existed at project inception (#87).
 -- Additional tables (dedup_log, research_sessions, scheduled_jobs,
--- apscheduler_jobs, + legacy) come from migrations 002–013.
+-- apscheduler_jobs, prompt_revisions, assist_sessions, assist_steps,
+-- + legacy) come from migrations 002–025.
 -- Idempotent (safe to re-run).
+--
+-- Baseline currency: this file expresses post-migration-025 state for
+-- jobs.status (14 statuses incl. assisted_*) and error_logs.error_type
+-- (4 values, 'model_failure' and 'structural' dropped). The migration
+-- runner advances any DB that bootstraps from a stricter baseline by
+-- reapplying 002-025 in order.
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
@@ -12,7 +19,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     title TEXT NOT NULL,
     description TEXT,
     status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'refining', 'planning', 'executing', 'running', 'completed', 'failed', 'cancelled', 'blocked', 'awaiting_confirmation', 'researching')),
+        CHECK (status IN (
+            'pending', 'refining', 'awaiting_confirmation', 'researching',
+            'planning', 'executing', 'running',
+            'completed', 'failed', 'cancelled', 'blocked',
+            'assisted_executing', 'assisted_running', 'assisted_paused'
+        )),
     input_text TEXT,
     refined_brief JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -72,7 +84,7 @@ CREATE TABLE IF NOT EXISTS error_logs (
     job_id UUID REFERENCES jobs(id) ON DELETE CASCADE,
     node_id UUID REFERENCES dag_nodes(id) ON DELETE SET NULL,
     error_type TEXT NOT NULL
-        CHECK (error_type IN ('transient', 'model_failure', 'timeout', 'validation', 'structural', 'unrecoverable')),
+        CHECK (error_type IN ('transient', 'timeout', 'validation', 'unrecoverable')),
     error_message TEXT NOT NULL,
     stack_trace TEXT,
     model_used TEXT,
@@ -163,6 +175,10 @@ CREATE INDEX IF NOT EXISTS idx_performance_logs_model ON performance_logs(model)
 CREATE INDEX IF NOT EXISTS idx_performance_logs_created ON performance_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_blockers_status ON blockers(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+-- The next two indexes are also (re-)created by migration 006_add_indexes.sql
+-- (CREATE INDEX IF NOT EXISTS makes both sides idempotent). Kept here so a
+-- DB bootstrapping straight from init.sql has them without waiting on the
+-- runner; migration 006 is the historical source of record.
 CREATE INDEX IF NOT EXISTS idx_dag_nodes_domain ON dag_nodes(domain);
 CREATE INDEX IF NOT EXISTS idx_performance_logs_job_id ON performance_logs(job_id);
 
