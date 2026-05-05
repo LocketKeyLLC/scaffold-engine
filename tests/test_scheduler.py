@@ -62,17 +62,18 @@ class TestAddRemoveSchedule:
         mock_scheduler.get_job.return_value = mock_job
         sched_mod._scheduler = mock_scheduler
 
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.execute = AsyncMock()
-        mock_session.commit = AsyncMock()
+        # add_schedule now runs inside the caller's session; the caller
+        # commits. The test passes a session-shaped mock and asserts the
+        # UPDATE executed and the returned next_run matches the job's.
+        mock_db = MagicMock()
+        mock_db.execute = AsyncMock()
 
-        with patch.object(sched_mod, "async_session", return_value=mock_session):
-            await sched_mod.add_schedule(42, "test", "medium", "0 9 * * 1")
-            mock_scheduler.add_job.assert_called_once()
-            mock_session.execute.assert_called_once()
-            mock_session.commit.assert_called_once()
+        next_run = await sched_mod.add_schedule(
+            mock_db, 42, "test", "medium", "0 9 * * 1",
+        )
+        mock_scheduler.add_job.assert_called_once()
+        mock_db.execute.assert_called_once()
+        assert next_run == "2026-04-21T09:00:00+00:00"
         sched_mod._scheduler = None
 
     @pytest.mark.asyncio
@@ -150,16 +151,14 @@ class TestTimezoneThreading:
         mock_scheduler.get_job.return_value = mock_job
         sched_mod._scheduler = mock_scheduler
 
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.execute = AsyncMock()
-        mock_session.commit = AsyncMock()
+        mock_db = MagicMock()
+        mock_db.execute = AsyncMock()
 
-        with patch.object(sched_mod, "async_session", return_value=mock_session), \
-             patch("app.scheduler.CronTrigger.from_crontab") as mock_crontab:
+        with patch("app.scheduler.CronTrigger.from_crontab") as mock_crontab:
             mock_crontab.return_value = MagicMock()
-            await sched_mod.add_schedule(99, "topic", "medium", "0 9 * * *", "America/New_York")
+            await sched_mod.add_schedule(
+                mock_db, 99, "topic", "medium", "0 9 * * *", "America/New_York",
+            )
             mock_crontab.assert_called_once_with("0 9 * * *", timezone="America/New_York")
 
         sched_mod._scheduler = None

@@ -839,16 +839,22 @@ async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_d
     """), {"topic": body.topic, "depth": body.depth, "cron": body.cron_expression, "tz": body.timezone})
     row = result.mappings().first()
 
-    # Register with APScheduler before committing — if registration fails,
-    # the DB row should not persist (would orphan the schedule until next
-    # restart's lifespan rehydration). Commit only after successful add.
+    # APScheduler registration + next_run_at UPDATE both run in this same
+    # session so the UPDATE can see the still-uncommitted INSERT. On any
+    # failure, db.rollback() unwinds the INSERT and add_schedule() has
+    # already removed its APScheduler entry, leaving system state aligned.
     try:
-        await add_schedule(row["id"], row["topic"], row["depth"], row["cron_expression"], row["timezone"])
+        next_run = await add_schedule(
+            db, row["id"], row["topic"], row["depth"],
+            row["cron_expression"], row["timezone"],
+        )
+        await db.commit()
     except Exception as exc:
         await db.rollback()
         raise HTTPException(status_code=502, detail=f"scheduler registration failed: {exc}")
-    await db.commit()
-    return dict(row)
+    response = dict(row)
+    response["next_run_at"] = next_run
+    return response
 
 
 @app.get("/schedule")
@@ -864,13 +870,12 @@ async def list_schedules(db: AsyncSession = Depends(get_db)):
 
 @app.delete("/schedule/{schedule_id}")
 async def delete_schedule(schedule_id: int, db: AsyncSession = Depends(get_db)):
-    from app.scheduler import remove_schedule
-    result = await db.execute(text("DELETE FROM scheduled_jobs WHERE id = :id RETURNING id"),
-                              {"id": schedule_id})
-    if not result.mappings().first():
+    from app.scheduler import delete_schedule as _scheduler_delete
+
+    deleted = await _scheduler_delete(db, schedule_id)
+    if not deleted:
         raise HTTPException(status_code=404, detail="schedule not found")
     await db.commit()
-    await remove_schedule(schedule_id)
     return {"deleted": schedule_id}
 
 

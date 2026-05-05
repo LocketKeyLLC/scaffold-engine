@@ -141,31 +141,109 @@ def _add_job(
 
 
 async def add_schedule(
+    db,
     schedule_id: int,
     topic: str,
     depth: str,
     cron_expr: str,
     tz: str = "UTC",
-) -> None:
-    """Register a new schedule and write the computed next_run_at back to the DB."""
+) -> Optional[datetime]:
+    """Register a new schedule and write next_run_at in the caller's session.
+
+    Symmetric register-with-rollback: the APScheduler entry is created
+    first, then the next_run_at UPDATE runs in ``db`` (caller's session).
+    The caller is responsible for committing. If anything in this function
+    raises after APScheduler registration, the in-memory job is unregistered
+    so that the caller's subsequent rollback leaves the system aligned.
+
+    Returns the computed next_run_time so the caller can populate its
+    response payload without a re-read.
+    """
     if _scheduler is None:
         logger.warning('event="add_schedule_skipped" reason="scheduler_disabled"')
-        return
+        return None
 
     _add_job(schedule_id, topic, depth, cron_expr, tz)
-    job = _scheduler.get_job(f"schedule_{schedule_id}")
-    next_run = job.next_run_time if job else None  # datetime with tzinfo — safe for TIMESTAMPTZ
-
-    async with async_session() as db:
+    try:
+        job = _scheduler.get_job(f"schedule_{schedule_id}")
+        next_run = job.next_run_time if job else None  # tz-aware datetime → TIMESTAMPTZ
         await db.execute(text(
             "UPDATE scheduled_jobs "
             "SET next_run_at = :nr, updated_at = NOW() "
             "WHERE id = :id"
         ), {"nr": next_run, "id": schedule_id})
-        await db.commit()
+        return next_run
+    except Exception:
+        # Caller will roll back ``db``; unregister the APScheduler entry so
+        # the runtime state matches the caller's view post-rollback.
+        try:
+            _scheduler.remove_job(f"schedule_{schedule_id}")
+        except Exception as cleanup_exc:
+            logger.warning(
+                'event="add_schedule_rollback_cleanup_failed" '
+                'schedule_id=%s error=%s',
+                schedule_id, cleanup_exc,
+            )
+        raise
+
+
+async def delete_schedule(db, schedule_id: int) -> bool:
+    """Unregister + delete a schedule in the caller's session.
+
+    Symmetric to ``add_schedule``: APScheduler is unregistered first, then
+    the DB row is deleted in ``db``. If the DB delete raises, the schedule
+    is re-registered from the row we read up-front so APScheduler stays in
+    sync with the caller's eventual rollback.
+
+    Returns False when no row exists for ``schedule_id`` (caller should 404
+    without committing). Returns True after a successful delete; the caller
+    is responsible for committing ``db``.
+    """
+    result = await db.execute(text(
+        "SELECT topic, depth, cron_expression, timezone "
+        "FROM scheduled_jobs WHERE id = :id"
+    ), {"id": schedule_id})
+    row = result.mappings().first()
+    if not row:
+        return False
+
+    if _scheduler is not None:
+        job_id = f"schedule_{schedule_id}"
+        if _scheduler.get_job(job_id):
+            _scheduler.remove_job(job_id)
+
+    try:
+        await db.execute(
+            text("DELETE FROM scheduled_jobs WHERE id = :id"),
+            {"id": schedule_id},
+        )
+    except Exception:
+        # Re-register so APScheduler stays aligned with the DB row that
+        # the caller's rollback will preserve.
+        if _scheduler is not None:
+            try:
+                _add_job(
+                    schedule_id, row["topic"], row["depth"],
+                    row["cron_expression"], row["timezone"],
+                )
+            except Exception as readd_exc:
+                logger.error(
+                    'event="delete_schedule_re_add_failed" '
+                    'schedule_id=%s error=%s',
+                    schedule_id, readd_exc,
+                )
+        raise
+    return True
 
 
 async def remove_schedule(schedule_id: int) -> None:
+    """APScheduler-only unregister (no DB write).
+
+    Retained for callers that need to detach a job from APScheduler without
+    touching ``scheduled_jobs`` (e.g. test fixtures). End-user delete flow
+    should use :func:`delete_schedule` for symmetric DB+APScheduler
+    semantics.
+    """
     if _scheduler is None:
         return
     job_id = f"schedule_{schedule_id}"
