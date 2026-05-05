@@ -29,6 +29,12 @@ services:
       - "9099:9099"
     environment:
       - PIPELINES_API_KEY=${OPENWEBUI_PIPELINES_KEY:?OPENWEBUI_PIPELINES_KEY is required}
+      # Forwarded to pipeline _apply_env_fallbacks so a wiped valves.json
+      # can recover api_key/url/ollama from env. Without these the 4 non-
+      # router pipelines silently use baked-in defaults after rotation.
+      - SCAFFOLD_API_KEY=${SCAFFOLD_API_KEY:?SCAFFOLD_API_KEY is required}
+      - SCAFFOLD_ORCHESTRATOR_URL=${SCAFFOLD_ORCHESTRATOR_URL:-http://scaffold-orchestrator:8000}
+      - SCAFFOLD_OLLAMA_URL=${SCAFFOLD_OLLAMA_URL:-http://172.18.0.1:11434}
     env_file:
       - .env
     volumes:

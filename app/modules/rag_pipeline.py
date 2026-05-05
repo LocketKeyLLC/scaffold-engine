@@ -419,6 +419,8 @@ async def _rerank(
 
     # Empty items but non-empty docs = reranker silently produced nothing.
     # Surface as an explicit WARNING and fall back to RRF ordering.
+    # Uses dataclasses.replace to honor _rrf_fuse's no-mutation contract —
+    # callers may hold references to results that pre-date this rerank.
     if not rr.items and docs:
         logger.warning(
             "rerank_skipped: backend=%s returned 0 items for %d docs; falling back to RRF order",
@@ -426,24 +428,18 @@ async def _rerank(
         )
         meta["skipped_rerank"] = True
         meta["warnings"].append("reranker_returned_no_items")
-        for r in results:
-            r.rerank_score = r.rrf_score
-            r.final_score = r.rrf_score
-        results.sort(key=lambda r: r.final_score, reverse=True)
-        return results[:top_k], meta
+        rebuilt = [replace(r, rerank_score=r.rrf_score, final_score=r.rrf_score) for r in results]
+        rebuilt.sort(key=lambda r: r.final_score, reverse=True)
+        return rebuilt[:top_k], meta
 
     score_map = {item.index: item.score for item in rr.items}
+    rebuilt: list[RagResult] = []
     for i, r in enumerate(results[:max_cand]):
-        if i in score_map:
-            r.rerank_score = score_map[i]
-            r.final_score = score_map[i]
-        else:
-            r.rerank_score = r.rrf_score
-            r.final_score = r.rrf_score
-
+        score = score_map.get(i, r.rrf_score)
+        rebuilt.append(replace(r, rerank_score=score, final_score=score))
     for r in results[max_cand:]:
-        r.rerank_score = r.rrf_score
-        r.final_score = r.rrf_score
+        rebuilt.append(replace(r, rerank_score=r.rrf_score, final_score=r.rrf_score))
+    results = rebuilt
 
     scores = [item.score for item in rr.items]
     _log_reranker = (

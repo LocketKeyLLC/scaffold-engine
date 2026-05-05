@@ -26,6 +26,21 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run ON scheduled_jobs (next_r
 
 -- APScheduler's internal jobstore (managed by SQLAlchemyJobStore, schema is APScheduler's)
 -- We pre-create the table so migrations stay in our control rather than runtime DDL
+--
+-- ╔══════════════════════════════════════════════════════════════════════════╗
+-- ║ DO NOT alter `next_run_time` away from DOUBLE PRECISION (epoch seconds). ║
+-- ║                                                                          ║
+-- ║ APScheduler's SQLAlchemyJobStore reads/writes this column as a numeric   ║
+-- ║ POSIX timestamp. Changing the type to TIMESTAMPTZ (or anything else)     ║
+-- ║ silently breaks the scheduler's index queries and missed-fire detection. ║
+-- ║                                                                          ║
+-- ║ The user-facing `scheduled_jobs.next_run_at` is TIMESTAMPTZ; the two are ║
+-- ║ deliberately different types and live in separate tables. Do NOT JOIN    ║
+-- ║ them without explicit `to_timestamp(next_run_time)` conversion.          ║
+-- ║                                                                          ║
+-- ║ Coordinate any apscheduler_jobs schema change with the pinned APScheduler║
+-- ║ version in requirements.txt. See docs/audit/drift-findings.md.           ║
+-- ╚══════════════════════════════════════════════════════════════════════════╝
 CREATE TABLE IF NOT EXISTS apscheduler_jobs (
     id              VARCHAR(191) PRIMARY KEY,
     next_run_time   DOUBLE PRECISION,

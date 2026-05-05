@@ -64,6 +64,14 @@ class EmbeddingCache:
         self._evictions = 0
         self._redis_failures = 0
         self._dim_mismatches = 0
+        # Surface dim+model_id at construction so a mismatch with stored
+        # keys produces a one-line diagnostic in startup logs rather than
+        # silent miss-storms after a config change.
+        logger.info(
+            "embedding_cache: init key_prefix=%s model_id=%s dim=%d "
+            "(keys not matching this dim will read as miss + invalidate)",
+            _KEY_PREFIX, self.model_id, self.dim,
+        )
 
     async def _get_redis(self) -> aioredis.Redis:
         # Fast path

@@ -449,15 +449,22 @@ class TestBootstrapValves:
         pipe._bootstrap_valves_from_template()
         assert "qwen3:4b" in live.read_text()
 
-    def test_no_op_when_template_missing(self, pipe, tmp_path, monkeypatch):
-        """Missing template = silent no-op (no crash)."""
+    def test_raises_when_template_missing(self, pipe, tmp_path, monkeypatch):
+        """Missing template = RuntimeError (fail closed).
+
+        Bootstrap must refuse to start the pipeline when the template is
+        absent — silent no-op hides volume-mount misconfigurations and
+        leaves the pipeline running with whatever stale state happened to
+        be on disk. See HIGH #5 in the May 2026 review.
+        """
+        import pytest
         sub = tmp_path / "scaffold_router"
         sub.mkdir()
         live = sub / "valves.json"
         live.write_text("{}")
         monkeypatch.setattr("os.path.dirname", lambda _: str(tmp_path))
-        pipe._bootstrap_valves_from_template()  # must not raise
-        assert live.read_text() == "{}"
+        with pytest.raises(RuntimeError, match="valves.template.json missing"):
+            pipe._bootstrap_valves_from_template()
 
     def test_skips_when_live_has_real_content(self, pipe, tmp_path, monkeypatch):
         """Live file with real values is left alone."""

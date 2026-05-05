@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test agent eval bench build logs logs-follow restart dev-up migrate clean status health ci help
+.PHONY: test agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -50,6 +50,12 @@ dev-up: ## Bring up orchestrator with the dev image (mounts pipelines/, Dockerfi
 
 migrate: ## Apply pending DB migrations inside the orchestrator container
 	docker exec $(CONTAINER) python -m app.migrations
+
+clean-pyc: ## Drop stale .pyc / __pycache__ in repo and inside the dev container
+	find . -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+	find . -name '*.pyc' -delete 2>/dev/null || true
+	-docker exec $(CONTAINER) find /code -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
+	@echo "Removed .pyc / __pycache__ from host and container."
 
 ## ──────────────────────────────────────────────
 ## API Operations

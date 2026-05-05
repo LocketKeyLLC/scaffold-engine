@@ -101,28 +101,12 @@ __pycache__ -exec rm -rf {} +`).
 **Possible fix:** Add `PYTHONDONTWRITEBYTECODE=1` to the dev compose
 env or a Makefile target for `make clean-pyc`.
 
-### `PytestUnraisableExceptionWarning: Invalid file descriptor: -1`
-**Context:** Emitted by `tests/test_rag_pipeline.py` during full-suite
-runs. Does not fail tests; benign event-loop teardown race.
-**Severity:** Low — warning only.
-**Possible fix:** Enable `tracemalloc` to identify which test creates
-the unclosed descriptor. Likely `asyncio.new_event_loop()` in a test
-helper that doesn't clean up.
-
-### Open Overview Issue #16 (timestamp mismatch) — resolved, remove
-**Context:** `scaffold-engine-overview.md` "Known Open Issues" #16
-describes the `scheduled_jobs.next_run_time` DOUBLE PRECISION →
-TIMESTAMPTZ mismatch. This was resolved in `ad06f3d` via Python-side
-datetime retrieval.
-**Severity:** Informational — overview file drift.
-**Action:** Remove from overview during Phase 10 rewrite.
-
-### Overview "Known Open Issues" #10–#12 — resolved, remove
-**Context:** #10 (distillation regression, resolved in `02bdc22`),
-#11 (target_status hardcode, resolved in `02bdc22`), #12 (execution_handler
-field mismatches, resolved in `cd039ce`) are all listed as open.
-**Severity:** Informational — overview file drift.
-**Action:** Remove from overview during Phase 10 rewrite.
+### `PytestUnraisableExceptionWarning: Invalid file descriptor: -1` — RESOLVED
+**Context:** Emitted by `tests/test_rag_pipeline.py` during full-suite runs.
+**Resolution:** `tests/test_rag_pipeline.py:_run()` was leaking event loops
+via `asyncio.new_event_loop().run_until_complete(...)` without a
+matching `loop.close()`. Wrapped in try/finally; the descriptor warning
+no longer fires.
 
 ---
 

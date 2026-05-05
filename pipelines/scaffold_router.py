@@ -390,34 +390,38 @@ class Pipeline:
         on container startup, which loses every saved value. We ship a
         valves.template.json next to the live file with sensible defaults
         (no secrets) and copy it in if the live file is empty.
+
+        Fails closed on missing template — the pipeline cannot run without
+        valid bootstrap state, and silent fall-through hides volume-mount
+        misconfigurations.
         """
-        try:
-            here = os.path.dirname(os.path.abspath(__file__))
-            sub = os.path.join(here, "scaffold_router")
-            live = os.path.join(sub, "valves.json")
-            tmpl = os.path.join(sub, "valves.template.json")
-            if not os.path.exists(tmpl):
-                return  # nothing to seed from
-            needs_seed = False
-            if not os.path.exists(live):
-                needs_seed = True
-            else:
-                with open(live, "r") as f:
-                    content = f.read().strip()
-                if content in ("", "{}"):
-                    needs_seed = True
-            if not needs_seed:
-                return
-            with open(tmpl, "r") as f:
-                tmpl_data = f.read()
-            with open(live, "w") as f:
-                f.write(tmpl_data)
-            print(  # noqa: T201
-                f"[scaffold_router] Seeded {live!r} from template "
-                f"(was missing or empty {{}})."
+        here = os.path.dirname(os.path.abspath(__file__))
+        sub = os.path.join(here, "scaffold_router")
+        live = os.path.join(sub, "valves.json")
+        tmpl = os.path.join(sub, "valves.template.json")
+        if not os.path.exists(tmpl):
+            raise RuntimeError(
+                f"[scaffold_router] valves.template.json missing at {tmpl!r}; "
+                f"verify ./pipelines volume mount in docker-compose.yml."
             )
-        except Exception as e:
-            print(f"[scaffold_router] Bootstrap valves failed: {e}")  # noqa: T201
+        needs_seed = False
+        if not os.path.exists(live):
+            needs_seed = True
+        else:
+            with open(live, "r") as f:
+                content = f.read().strip()
+            if content in ("", "{}"):
+                needs_seed = True
+        if not needs_seed:
+            return
+        with open(tmpl, "r") as f:
+            tmpl_data = f.read()
+        with open(live, "w") as f:
+            f.write(tmpl_data)
+        print(  # noqa: T201
+            f"[scaffold_router] Seeded {live!r} from template "
+            f"(was missing or empty {{}})."
+        )
 
     def _apply_env_fallbacks(self) -> None:
         """Fill empty string-valued valves from environment variables.
@@ -428,6 +432,12 @@ class Pipeline:
         we look up the matching SCAFFOLD_* env var as a fallback so
         a wiped/regenerated valves.json does not block the pipeline.
 
+        Int valves (timeouts) take env override only if the field was
+        not present in valves.json at all — i.e. the user has not
+        explicitly configured it via the OWUI valve UI. This preserves
+        the valve > env > default priority order documented in
+        ARCHITECTURE.md.
+
         Env var naming: api_key -> SCAFFOLD_API_KEY, ollama_url ->
         SCAFFOLD_OLLAMA_URL, etc.
         """
@@ -436,6 +446,23 @@ class Pipeline:
             "orchestrator_url": "SCAFFOLD_ORCHESTRATOR_URL",
             "ollama_url": "SCAFFOLD_OLLAMA_URL",
         }
+        env_int_map = {
+            "request_timeout": "SCAFFOLD_REQUEST_TIMEOUT",
+            "stream_timeout": "SCAFFOLD_STREAM_TIMEOUT",
+            "triage_timeout": "SCAFFOLD_TRIAGE_TIMEOUT",
+        }
+        # Read live valves.json to distinguish "user-set default" from
+        # "field absent" for int valves.
+        here = os.path.dirname(os.path.abspath(__file__))
+        live = os.path.join(here, "scaffold_router", "valves.json")
+        try:
+            with open(live, "r") as _fh:
+                import json as _json
+                saved = _json.load(_fh)
+                if not isinstance(saved, dict):
+                    saved = {}
+        except Exception:
+            saved = {}
         for valve_name, env_name in env_map.items():
             current = getattr(self.valves, valve_name, None)
             if isinstance(current, str) and not current:
@@ -446,6 +473,30 @@ class Pipeline:
                         f"[scaffold_router] Valve {valve_name!r} empty; "
                         f"loaded from {env_name}."
                     )
+        for valve_name, env_name in env_int_map.items():
+            if valve_name in saved:
+                continue
+            env_val = os.getenv(env_name, "")
+            if not env_val:
+                continue
+            try:
+                setattr(self.valves, valve_name, int(env_val))
+                print(  # noqa: T201
+                    f"[scaffold_router] Valve {valve_name!r} loaded from "
+                    f"{env_name} (int)."
+                )
+            except (ValueError, TypeError):
+                print(  # noqa: T201
+                    f"[scaffold_router] {env_name}={env_val!r} not int; ignored."
+                )
+        # Drift warning: api_key in valves.json differs from env.
+        saved_key = saved.get("api_key", "")
+        env_key = os.getenv("SCAFFOLD_API_KEY", "")
+        if saved_key and env_key and saved_key != env_key:
+            print(  # noqa: T201
+                "[scaffold_router] WARNING: api_key in valves.json differs "
+                "from SCAFFOLD_API_KEY env. Using valves.json value."
+            )
 
     def _auth_headers(self) -> dict:
         key = self.valves.api_key or os.getenv("SCAFFOLD_API_KEY", "")

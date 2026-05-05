@@ -74,40 +74,56 @@ import os as _vp_os
 
 
 def _bootstrap_valves(pipeline_id: str) -> None:
-    try:
-        here = _vp_os.path.dirname(_vp_os.path.abspath(__file__))
-        sub = _vp_os.path.join(here, pipeline_id)
-        live = _vp_os.path.join(sub, "valves.json")
-        tmpl = _vp_os.path.join(sub, "valves.template.json")
-        if not _vp_os.path.exists(tmpl):
-            return
-        needs_seed = False
-        if not _vp_os.path.exists(live):
-            needs_seed = True
-        else:
+    here = _vp_os.path.dirname(_vp_os.path.abspath(__file__))
+    sub = _vp_os.path.join(here, pipeline_id)
+    live = _vp_os.path.join(sub, "valves.json")
+    tmpl = _vp_os.path.join(sub, "valves.template.json")
+    if not _vp_os.path.exists(tmpl):
+        raise RuntimeError(
+            f"[{pipeline_id}] valves.template.json missing at {tmpl!r}; "
+            f"the pipeline cannot bootstrap. Verify the ./pipelines volume "
+            f"mount in docker-compose.yml is present."
+        )
+    needs_seed = False
+    if not _vp_os.path.exists(live):
+        needs_seed = True
+    else:
+        try:
             with open(live, "r") as f:
                 content = f.read().strip()
-            if content in ("", "{}"):
-                needs_seed = True
-        if not needs_seed:
-            return
-        with open(tmpl, "r") as f:
-            tmpl_data = f.read()
-        with open(live, "w") as f:
-            f.write(tmpl_data)
-        print(f"[{pipeline_id}] Seeded valves.json from template.")
-    except Exception as e:
-        print(f"[{pipeline_id}] Bootstrap valves failed: {e}")
+        except OSError as e:
+            raise RuntimeError(f"[{pipeline_id}] cannot read valves.json: {e}")
+        if content in ("", "{}"):
+            needs_seed = True
+    if not needs_seed:
+        return
+    with open(tmpl, "r") as f:
+        tmpl_data = f.read()
+    with open(live, "w") as f:
+        f.write(tmpl_data)
+    print(f"[{pipeline_id}] Seeded valves.json from template.")
 
 
 _VP_ENV_MAP = {
     "api_key": "SCAFFOLD_API_KEY",
     "orchestrator_url": "SCAFFOLD_ORCHESTRATOR_URL",
 }
+_VP_ENV_INT_MAP = {
+    "request_timeout": "SCAFFOLD_REQUEST_TIMEOUT",
+}
 
 
 def _apply_env_fallbacks(pipeline_id: str, valves) -> None:
     import json as _vp_json
+    here = _vp_os.path.dirname(_vp_os.path.abspath(__file__))
+    live = _vp_os.path.join(here, pipeline_id, "valves.json")
+    try:
+        with open(live, "r") as _fh:
+            saved = _vp_json.load(_fh)
+            if not isinstance(saved, dict):
+                saved = {}
+    except Exception:
+        saved = {}
     changed = False
     for valve_name, env_name in _VP_ENV_MAP.items():
         current = getattr(valves, valve_name, None)
@@ -117,6 +133,22 @@ def _apply_env_fallbacks(pipeline_id: str, valves) -> None:
                 setattr(valves, valve_name, env_val)
                 changed = True
                 print(f"[{pipeline_id}] Valve {valve_name!r} loaded from {env_name}.", flush=True)
+    for valve_name, env_name in _VP_ENV_INT_MAP.items():
+        if valve_name in saved:
+            continue
+        env_val = _vp_os.getenv(env_name, "")
+        if not env_val:
+            continue
+        try:
+            setattr(valves, valve_name, int(env_val))
+            changed = True
+            print(f"[{pipeline_id}] Valve {valve_name!r} loaded from {env_name} (int).", flush=True)
+        except (ValueError, TypeError):
+            print(f"[{pipeline_id}] {env_name}={env_val!r} is not an int; ignoring.", flush=True)
+    saved_key = saved.get("api_key", "")
+    env_key = _vp_os.getenv("SCAFFOLD_API_KEY", "")
+    if saved_key and env_key and saved_key != env_key:
+        print(f"[{pipeline_id}] WARNING: api_key in valves.json differs from SCAFFOLD_API_KEY env. Using valves.json value.", flush=True)
     if changed:
         try:
             here = _vp_os.path.dirname(_vp_os.path.abspath(__file__))
@@ -137,6 +169,8 @@ class Pipeline:
         # 310s = orchestrator per-node execute timeout (300s) + 10s slack for
         # network and JSON serialization. See execution_agent.execute_next_node.
         request_timeout: int = 310
+        # Snappy management endpoints (status, skip, retry) — 30s default.
+        quick_timeout: int = 30
 
     def __init__(self):
         self.id = "execution_handler"
@@ -172,7 +206,7 @@ class Pipeline:
             resp = requests.get(
                 f"{self.valves.orchestrator_url}/exec/status/{job_id}",
                 headers={"X-API-Key": self.valves.api_key},
-                timeout=30,
+                timeout=self.valves.quick_timeout,
             )
         except requests.exceptions.RequestException as e:
             return f"❌ Connection error: {e}"
@@ -322,7 +356,7 @@ class Pipeline:
                 f"{self.valves.orchestrator_url}/skip",
                 json={"job_id": job_id, "node_key": node_key},
                 headers={"X-API-Key": self.valves.api_key},
-                timeout=30,
+                timeout=self.valves.quick_timeout,
             )
         except requests.exceptions.RequestException as e:
             return f"❌ Connection error: {e}"
@@ -355,7 +389,7 @@ class Pipeline:
                 f"{self.valves.orchestrator_url}/exec/retry",
                 json={"job_id": job_id, "node_key": node_key},
                 headers={"X-API-Key": self.valves.api_key},
-                timeout=30,
+                timeout=self.valves.quick_timeout,
             )
         except requests.exceptions.RequestException as e:
             return f"❌ Connection error: {e}"

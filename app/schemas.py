@@ -26,6 +26,16 @@ JobStatus = Literal[
     "running", "completed", "failed", "cancelled", "blocked",
 ]
 
+# Runtime-iterable mirror of JobStatus. Single source of truth for the
+# whitelist used by /jobs filter validation, the jobs.status CHECK
+# constraint, and any future status-aware paths (e.g. cleanup reaper).
+# Keep this and JobStatus literal in lockstep — adding a new status here
+# without updating the literal (or vice versa) silently breaks validation.
+JOB_STATUSES: tuple[str, ...] = (
+    "pending", "refining", "awaiting_confirmation", "researching", "planning", "executing",
+    "running", "completed", "failed", "cancelled", "blocked",
+)
+
 NodeStatus = Literal["pending", "running", "done", "failed", "skipped"]
 
 NodeType = Literal["task", "decision", "parallel_group", "checkpoint"]

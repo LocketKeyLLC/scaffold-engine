@@ -75,6 +75,8 @@ def _get_cross_encoder():
                         "crossencoder_load_retry: attempt=%d/%d error=%s retry_in=%.1fs",
                         attempt, _MAX_ATTEMPTS, e, delay,
                     )
+                    # Sync sleep is intentional: callers invoke this via
+                    # run_in_executor, so we are off the event loop.
                     time.sleep(delay)
 
         _load_failed = True

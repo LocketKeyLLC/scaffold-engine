@@ -37,10 +37,29 @@ def _strip_markdown_fences(text: str) -> str:
 
 
 def _extract_by_brackets(text: str, open_b: str, close_b: str):
-    """Pull the outermost bracket-delimited substring from text."""
+    """Pull the outermost bracket-delimited substring from text.
+
+    Counts nesting depth from the first `open_b` and returns the slice up
+    to its matching `close_b`. Trailing junk after the matched close
+    bracket is dropped, which matters for malformed LLM output like
+    `{"k": "v"}} extra` — `rfind` would have included the second `}`.
+    Falls back to `rfind` semantics if no balanced match is found, so
+    the downstream `repair_json` still has something to chew on.
+    """
     start = text.find(open_b)
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == open_b:
+            depth += 1
+        elif ch == close_b:
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
     end = text.rfind(close_b)
-    if start != -1 and end > start:
+    if end > start:
         return text[start : end + 1]
     return None
 

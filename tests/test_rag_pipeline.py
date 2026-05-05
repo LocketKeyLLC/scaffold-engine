@@ -6,7 +6,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    # Create + close explicitly. A leaked loop produces the
+    # `PytestUnraisableExceptionWarning: Invalid file descriptor: -1`
+    # benign-but-noisy teardown warning during full-suite runs.
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def _make_rag_result(**kwargs):

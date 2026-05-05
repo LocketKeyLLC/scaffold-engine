@@ -216,7 +216,7 @@ async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> Non
         if timed_out and session_id:
             try:
                 async with async_session() as db:
-                    await db.execute(text("""
+                    result = await db.execute(text("""
                         UPDATE research_sessions
                         SET status = 'cancelled',
                             error_message = COALESCE(error_message,
@@ -227,6 +227,17 @@ async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> Non
                           AND status IN ('pending', 'running')
                     """), {"sid": session_id})
                     await db.commit()
+                    # Zero rows = the session moved off pending/running before
+                    # we got here (user /cancel, reaper, or successful resume
+                    # racing with the timeout). Log so silent state-machine
+                    # divergences are visible in audit, not just gone.
+                    if result.rowcount == 0:
+                        logger.warning(
+                            'event="scheduled_research_cancel_no_op" '
+                            'schedule_id=%s session_id=%s '
+                            'reason="session_already_terminal_or_concurrent_update"',
+                            schedule_id, session_id,
+                        )
             except Exception as exc:
                 logger.error(
                     'event="scheduled_research_cancel_write_failed" '

@@ -38,6 +38,7 @@ from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag as _query_rag
 from app.routers.status import router as status_router
 from app.schemas import (
+    JOB_STATUSES,
     ConfirmInput,
     DagInput,
     ExecRetryInput,
@@ -835,9 +836,16 @@ async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_d
                   run_count, failure_count, created_at
     """), {"topic": body.topic, "depth": body.depth, "cron": body.cron_expression, "tz": body.timezone})
     row = result.mappings().first()
-    await db.commit()
 
-    await add_schedule(row["id"], row["topic"], row["depth"], row["cron_expression"], row["timezone"])
+    # Register with APScheduler before committing — if registration fails,
+    # the DB row should not persist (would orphan the schedule until next
+    # restart's lifespan rehydration). Commit only after successful add.
+    try:
+        await add_schedule(row["id"], row["topic"], row["depth"], row["cron_expression"], row["timezone"])
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=502, detail=f"scheduler registration failed: {exc}")
+    await db.commit()
     return dict(row)
 
 
@@ -887,10 +895,7 @@ async def list_jobs(
     where_clauses = []
     params: dict = {}
     if status:
-        valid = {"pending", "refining", "awaiting_confirmation", "researching",
-                 "planning", "executing", "running", "completed", "failed",
-                 "cancelled", "blocked"}
-        if status not in valid:
+        if status not in JOB_STATUSES:
             raise HTTPException(status_code=422, detail=f"invalid status: {status}")
         where_clauses.append("j.status = :status")
         params["status"] = status
@@ -942,9 +947,7 @@ async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
 
     r = await db.execute(text("DELETE FROM jobs WHERE id = :id RETURNING id"), {"id": job_id})
-    deleted = r.fetchone() is not None
-    if not deleted:
-        await db.commit()
+    if r.fetchone() is None:
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
     await db.commit()
     return DeleteResponse(deleted=True, id=job_id)
@@ -966,7 +969,6 @@ async def rename_job(job_id: str, body: JobRenameInput, db: AsyncSession = Depen
     """), {"id": job_id, "title": body.title})
     row = r.fetchone()
     if not row:
-        await db.commit()
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
     await db.commit()
     return JobSummary(
@@ -1046,9 +1048,7 @@ async def delete_research_session(session_id: str, db: AsyncSession = Depends(ge
 
     r = await db.execute(text("DELETE FROM research_sessions WHERE id = :id RETURNING id"),
                           {"id": session_id})
-    deleted = r.fetchone() is not None
-    if not deleted:
-        await db.commit()
+    if r.fetchone() is None:
         raise HTTPException(status_code=404, detail=f"research_session not found: {session_id}")
     await db.commit()
     return DeleteResponse(deleted=True, id=session_id)
@@ -1070,7 +1070,6 @@ async def rename_research_session(session_id: str, body: ResearchSessionRenameIn
     """), {"id": session_id, "topic": body.topic})
     row = r.fetchone()
     if not row:
-        await db.commit()
         raise HTTPException(status_code=404, detail=f"research_session not found: {session_id}")
     await db.commit()
     return ResearchSessionSummary(
