@@ -46,6 +46,15 @@ ASSIST_PROTECTED_STATUSES: tuple[str, ...] = (
     "assisted_executing", "assisted_running", "assisted_paused",
 )
 
+# Whitelist of values the research_sessions.status column accepts. Mirror
+# of the values written by app.modules.research_state and the pause flow
+# from migration 013. Used by /research/sessions list filtering so an
+# arbitrary status string can't ILIKE-match unrelated rows.
+RESEARCH_SESSION_STATUSES: tuple[str, ...] = (
+    "pending", "running", "paused_awaiting_reply",
+    "completed", "failed", "cancelled",
+)
+
 NodeStatus = Literal["pending", "running", "done", "failed", "skipped"]
 
 NodeType = Literal["task", "decision", "parallel_group", "checkpoint"]

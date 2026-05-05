@@ -40,6 +40,7 @@ from app.routers.assist import router as assist_router
 from app.routers.status import router as status_router
 from app.schemas import (
     JOB_STATUSES,
+    RESEARCH_SESSION_STATUSES,
     ConfirmInput,
     DagInput,
     ExecRetryInput,
@@ -454,6 +455,10 @@ async def ideate_confirm_endpoint(body: ConfirmInput, db=Depends(get_db)):
 @app.get("/dag/{job_id}")
 async def get_dag(job_id: str, db: AsyncSession = Depends(get_db)):
     """Step 18: Retrieve DAG nodes + job status for a job."""
+    try:
+        UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
     row = await db.execute(
         text("SELECT status FROM jobs WHERE id = :id"),
         {"id": job_id},
@@ -511,6 +516,10 @@ async def query_rag(body: RagInput):
 @app.get("/rag/dedup")
 async def list_dedup_log(limit: int = 50, offset: int = 0):
     """List logged near-duplicate rejections for manual review."""
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=422, detail="limit must be 1..200")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must be >= 0")
     async with async_session() as session:
         result = await session.execute(
             text(
@@ -553,6 +562,17 @@ async def gt_list_endpoint(
     domain: str | None = None,
 ):
     """Step 19: Paginated list of all TOON entries."""
+    if page < 1:
+        raise HTTPException(status_code=422, detail="page must be >= 1")
+    if per_page < 1 or per_page > 100:
+        raise HTTPException(status_code=422, detail="per_page must be 1..100")
+    if domain is not None:
+        from app.config import VALID_DOMAINS
+        if domain not in VALID_DOMAINS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"domain must be one of {sorted(VALID_DOMAINS)}",
+            )
     return await gt_list(
         page=page,
         per_page=per_page,
@@ -683,12 +703,22 @@ async def execute_next(body: ExecuteNextInput):
     No DB dependency: execute_next_node manages its own short-lived sessions.
     """
     await _require_valid_models(body.model_overrides)
-    return await execute_next_node(
+    result = await execute_next_node(
         job_id=body.job_id,
         skip_optimize=body.skip_optimize,
         skip_verify=body.skip_verify,
         model_overrides=body.model_overrides,
     )
+    # Parity with /ideas, /dag, /rag: convert dict-error responses to a real
+    # HTTP error so clients can dispatch on status code instead of having to
+    # inspect the body. ExecutionResult lets ``error`` flow through; callers
+    # that want soft failure can read execution_status() instead.
+    if isinstance(result, dict) and result.get("status") == "failed" and result.get("error"):
+        raise HTTPException(
+            status_code=result.get("http_status", 500),
+            detail=result["error"],
+        )
+    return result
 
 
 @app.post("/execute/all", tags=["Step 15"])
@@ -750,7 +780,9 @@ async def research_pdf_endpoint(
     domain: str | None = Query(None),
 ):
     """PDF ingestion: upload PDF → extract → ingest → stream SSE."""
-    if not file.filename.lower().endswith(".pdf"):
+    # UploadFile.filename is str | None per Starlette; multipart uploads
+    # without a filename header would crash on .lower() — guard explicitly.
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="File must be a PDF")
 
     pdf_bytes = await file.read()
@@ -871,14 +903,32 @@ async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_d
 
 
 @app.get("/schedule")
-async def list_schedules(db: AsyncSession = Depends(get_db)):
+async def list_schedules(
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=422, detail="limit must be 1..200")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must be >= 0")
+    total = (await db.execute(
+        text("SELECT COUNT(*) FROM scheduled_jobs")
+    )).scalar() or 0
     rows = (await db.execute(text("""
         SELECT id, topic, depth, cron_expression, timezone, enabled,
                last_run_at, last_status, last_job_id, next_run_at,
                run_count, failure_count, created_at
-        FROM scheduled_jobs ORDER BY created_at DESC
-    """))).mappings().all()
-    return {"schedules": [dict(r) for r in rows]}
+        FROM scheduled_jobs
+        ORDER BY created_at DESC
+        LIMIT :limit OFFSET :offset
+    """), {"limit": limit, "offset": offset})).mappings().all()
+    return {
+        "schedules": [dict(r) for r in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.delete("/schedule/{schedule_id}")
@@ -1016,6 +1066,8 @@ async def list_research_sessions(
     where_clauses = []
     params: dict = {}
     if status:
+        if status not in RESEARCH_SESSION_STATUSES:
+            raise HTTPException(status_code=422, detail=f"invalid status: {status}")
         where_clauses.append("status = :status")
         params["status"] = status
     if q:
