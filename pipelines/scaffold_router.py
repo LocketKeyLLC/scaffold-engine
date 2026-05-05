@@ -503,7 +503,9 @@ class Pipeline:
                 print(  # noqa: T201
                     f"[scaffold_router] {env_name}={env_val!r} not int; ignored."
                 )
-        # Drift warning: api_key in valves.json differs from env.
+        # Drift warning: api_key in valves.json differs from env. The
+        # print is captured in container logs (ops surface); set the
+        # flag so user-facing 401s can include a UX hint as well.
         saved_key = saved.get("api_key", "")
         env_key = os.getenv("SCAFFOLD_API_KEY", "")
         if saved_key and env_key and saved_key != env_key:
@@ -511,10 +513,30 @@ class Pipeline:
                 "[scaffold_router] WARNING: api_key in valves.json differs "
                 "from SCAFFOLD_API_KEY env. Using valves.json value."
             )
+            self._api_key_drift_detected = True
+        else:
+            self._api_key_drift_detected = False
 
     def _auth_headers(self) -> dict:
         key = self.valves.api_key or os.getenv("SCAFFOLD_API_KEY", "")
         return {"X-API-Key": key}
+
+    def _drift_hint(self) -> str:
+        """Markdown block to append on 401 responses when valves/env disagree.
+
+        The print at init goes to container logs (ops surface) but not the
+        OWUI chat (user surface). When the orchestrator rejects auth, the
+        most likely cause is one of the two values being stale; this surfaces
+        that hypothesis directly to the user without leaking either key.
+        """
+        if not getattr(self, "_api_key_drift_detected", False):
+            return ""
+        return (
+            "\n\n⚠️ This pipeline detected that `api_key` in `valves.json` "
+            "differs from `SCAFFOLD_API_KEY` in the environment. The 401 "
+            "above is likely caused by one of those values being stale. "
+            "Reconcile both sides and reload the pipeline."
+        )
 
     _EMBEDDER_EXPECTED_DIM = 512
 
@@ -908,11 +930,13 @@ class Pipeline:
                 err = r.json().get("message") or r.json().get("detail") or r.text[:200]
             except Exception:
                 err = r.text[:200]
+            drift = self._drift_hint() if r.status_code == 401 else ""
             yield (
                 f"\n⚠️ Research phase failed: {err}\n\n"
                 f"Retry options:\n"
                 f"- `/confirm {job_id}` — re-run research and planning\n"
-                f"- `/jobs` — check job status\n"
+                f"- `/jobs` — check job status"
+                f"{drift}\n"
             )
             return
 
@@ -933,11 +957,13 @@ class Pipeline:
             return
         r = res
         if r.status_code >= 400:
+            drift = self._drift_hint() if r.status_code == 401 else ""
             yield (
                 f"\n⚠️ DAG generation failed (HTTP {r.status_code}).\n\n"
                 f"Research finished — only the plan step failed. Retry options:\n"
                 f"- `/dag {job_id}` — regenerate the execution plan\n"
-                f"- `/jobs` — check job status\n"
+                f"- `/jobs` — check job status"
+                f"{drift}\n"
             )
             return
         try:
