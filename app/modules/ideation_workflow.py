@@ -17,9 +17,9 @@ from __future__ import annotations
 # stdlib
 import json
 import asyncio
+import logging
 
 # third-party
-import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,7 +43,7 @@ from app.utils.job_utils import fail_job as _fail_job
 from app.utils.llm_parsing import parse_json_array, parse_json_object
 from app.utils.topic_detection import detect_topic_id
 
-logger = structlog.stdlib.get_logger("scaffold.ideation")
+logger = logging.getLogger("scaffold.ideation")
 
 
 FEASIBILITY_SYSTEM = (
@@ -106,8 +106,7 @@ async def analyze_and_confirm(
         Dict with ``job_id``, ``status``, ``refined_brief``, ``feasibility``, and
         ``message``. On refinement failure, returns the refine_idea failure dict.
     """
-    log = logger.bind(phase="ideation.phase1")
-    log.info("phase1_start", idea_preview=idea_text[:80])
+    logger.info("phase1_start: idea_preview=%s", idea_text[:80])
 
     refine_result = await refine_idea(
         idea_text,
@@ -118,12 +117,13 @@ async def analyze_and_confirm(
         target_status="awaiting_confirmation",
     )
     if refine_result["status"] == "failed":
-        log.warning("phase1_refinement_failed", error=refine_result.get("error"))
+        logger.warning(
+            "phase1_refinement_failed: error=%s", refine_result.get("error"),
+        )
         return refine_result
 
     job_id = refine_result["job_id"]
     brief = refine_result["refined_brief"]
-    log = log.bind(job_id=job_id)
 
     resp = await model_router.generate(
         "Assess this brief:\n" + json.dumps(brief, indent=2),
@@ -136,7 +136,10 @@ async def analyze_and_confirm(
     feasibility = parse_json_object(resp.text) if resp.success else None
     feasibility_fallback = feasibility is None
     if feasibility_fallback:
-        log.warning("phase1_feasibility_fallback", llm_success=resp.success)
+        logger.warning(
+            "phase1_feasibility_fallback: job_id=%s llm_success=%s",
+            job_id, resp.success,
+        )
         feasibility = {
             "feasible": True,
             "confidence": 0.5,
@@ -156,7 +159,10 @@ async def analyze_and_confirm(
     )
     await db.commit()
 
-    log.info("phase1_complete", feasible=feasibility.get("feasible"))
+    logger.info(
+        "phase1_complete: job_id=%s feasible=%s",
+        job_id, feasibility.get("feasible"),
+    )
     return {
         "job_id": job_id,
         "status": "awaiting_confirmation",
@@ -199,8 +205,6 @@ async def research_and_compile(
         ``workflow``. On failure/conflict, returns dict with ``status="failed"``
         or ``status="conflict"`` and an ``http_status`` hint (409 / 404).
     """
-    log = logger.bind(phase="ideation.phase2", job_id=job_id)
-
     # Atomic claim
     claim = await db.execute(
         text(
@@ -224,13 +228,16 @@ async def research_and_compile(
         )
         existing = check.mappings().first()
         if not existing:
-            log.warning("phase2_job_not_found")
+            logger.warning("phase2_job_not_found: job_id=%s", job_id)
             return {
                 "status": "failed",
                 "error": f"Job {job_id} not found",
                 "http_status": 404,
             }
-        log.warning("phase2_claim_conflict", actual_status=existing["status"])
+        logger.warning(
+            "phase2_claim_conflict: job_id=%s actual_status=%s",
+            job_id, existing["status"],
+        )
         return {
             "status": "conflict",
             "error": (
@@ -247,9 +254,10 @@ async def research_and_compile(
     if user_feedback:
         brief["user_feedback"] = user_feedback
 
-    # Close the claim session — we don't hold it across network I/O.
-    await db.commit()
-    await db.close()
+    # FastAPI's get_db owns ``db``'s lifecycle and will close it on
+    # request teardown. We do not touch it again here — the long network
+    # I/O block below uses fresh short-lived sessions for each write —
+    # so there is no need to close the request-scoped session manually.
 
     try:
         # Step 1: SearXNG research
@@ -268,7 +276,10 @@ async def research_and_compile(
                 if url and url not in seen_urls:
                     seen_urls.add(url)
                     all_results.append(r)
-            log.info("phase2_search", query=q, result_count=len(results))
+            logger.info(
+                "phase2_search: job_id=%s query=%r result_count=%d",
+                job_id, q, len(results),
+            )
 
         # Step 2: LLM distillation (router/4b)
         entries: list[dict] = []
@@ -288,7 +299,9 @@ async def research_and_compile(
             )
             if resp.success:
                 entries = parse_json_array(resp.text) or []
-            log.info("phase2_distill", entry_count=len(entries))
+            logger.info(
+                "phase2_distill: job_id=%s entry_count=%d", job_id, len(entries),
+            )
 
         # Step 3: TOON + Milvus ingest
         toon_rows = format_toon_rows(entries) if entries else []
@@ -296,7 +309,7 @@ async def research_and_compile(
         if entries:
             stats = await ingest_entries(entries, domain=brief.get("domain", "eng"))
             ingest_count = stats["new"] + stats["versioned"]
-            log.info("phase2_ingest", **stats)
+            logger.info("phase2_ingest: job_id=%s stats=%s", job_id, stats)
 
         # Optional GitHub push
         gh_result = None
@@ -333,7 +346,7 @@ async def research_and_compile(
         if workflow is None:
             # Compile failure is fatal — do not emit empty workflow_steps.
             err = f"compile step failed (llm_success={resp.success}): {getattr(resp, 'error', None)}"
-            log.error("phase2_compile_failed", error=err)
+            logger.error("phase2_compile_failed: job_id=%s error=%s", job_id, err)
             async with async_session() as fail_db:
                 await _fail_job(fail_db, job_id, err)
             return {
@@ -344,13 +357,15 @@ async def research_and_compile(
             }
 
     except asyncio.CancelledError:
-        log.warning("phase2_cancelled", reason="client_disconnect")
+        logger.warning(
+            "phase2_cancelled: job_id=%s reason=client_disconnect", job_id,
+        )
         async with async_session() as cancel_db:
             await _cancel_job(cancel_db, job_id, "client_disconnect")
         raise
     except Exception as e:
         err = f"phase2 exception: {e}"
-        log.exception("phase2_unhandled_exception")
+        logger.exception("phase2_unhandled_exception: job_id=%s", job_id)
         async with async_session() as fail_db:
             await _fail_job(fail_db, job_id, err)
         raise
@@ -378,12 +393,11 @@ async def research_and_compile(
         )
         await write_db.commit()
 
-    log.info(
-        "phase2_complete",
-        queries_run=len(queries[:query_cap]),
-        results_found=len(all_results),
-        facts_extracted=len(entries),
-        milvus_ingested=ingest_count,
+    logger.info(
+        "phase2_complete: job_id=%s queries_run=%d results_found=%d "
+        "facts_extracted=%d milvus_ingested=%d",
+        job_id, len(queries[:query_cap]), len(all_results),
+        len(entries), ingest_count,
     )
     return {
         "job_id": job_id,
