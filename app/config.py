@@ -178,6 +178,11 @@ class Settings(BaseSettings):
     planning_stale_minutes: int = Field(default=60, ge=1, le=1440)
     long_phase_stale_minutes: int = Field(default=45, ge=1, le=1440)
     awaiting_confirmation_stale_minutes: int = Field(default=10080, ge=60, le=43200)  # 7d default, max 30d
+    # Assist Mode: an assist_session with last_activity_at older than this
+    # is treated as abandoned and the owning job moves to 'cancelled'.
+    # Long default (7d) because manual implementation legitimately spans
+    # multiple working days.
+    assist_idle_threshold_days: int = Field(default=7, ge=1, le=90)
     # #2 — orphan detection: dag_nodes stuck in 'running' past this threshold
     # are treated as orphaned (executor died) and reset to 'pending' for
     # automatic re-execution. Default 60min > worst observed single-node

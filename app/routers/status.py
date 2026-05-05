@@ -33,6 +33,9 @@ JobStatus = Literal[
     "failed",
     "cancelled",
     "blocked",
+    "assisted_executing",
+    "assisted_running",
+    "assisted_paused",
 ]
 
 
@@ -49,6 +52,9 @@ class StatusCounts(BaseModel):
     failed: int = 0
     cancelled: int = 0
     blocked: int = 0
+    assisted_executing: int = 0
+    assisted_running: int = 0
+    assisted_paused: int = 0
 
 
 class JobSummary(BaseModel):

@@ -42,12 +42,17 @@ KNOWN_COMMANDS: tuple = (
     "/rag", "/model", "/research", "/research/reply", "/research/list",
     "/research/find", "/research/rename", "/research/delete", "/research/help",
     "/research/pdf", "/jobs", "/schedule", "/status", "/results", "/help",
+    "/assist", "/assist/next", "/assist/submit", "/assist/skip",
+    "/assist/handoff", "/assist/pause", "/assist/resume", "/assist/done",
+    "/assist/friction", "/assist/help",
 )
 
 KNOWN_SUBCOMMANDS: dict = {
     "/model": ("list", "available", "set", "reset", "probe", "test", "help"),
     "/jobs": ("list", "find", "rename", "delete", "help"),
     "/schedule": ("list", "add", "delete", "run-now", "help"),
+    "/assist": ("next", "submit", "skip", "handoff", "pause", "resume",
+                "done", "friction", "help"),
 }
 
 _PLACEHOLDER_RE = re.compile(r"^[<\[(].+[>\])]$")
@@ -340,6 +345,15 @@ class Pipeline:
         triage_history_window: int = 8  # last N turns sent to triage; first user msg always pinned
         log_pipe_inputs: bool = False  # diagnostic: log body keys + message shape on every pipe() call
         ollama_url: str = "http://172.18.0.1:11434"
+
+        # ── Assistant Mode ─────────────────────────────────────────────
+        # When true, /confirm routes the job into Assist Mode (interactive
+        # walk-through) instead of /execute/all (autonomous). Default off
+        # to preserve existing UX.
+        assist_after_confirm: bool = False
+        assist_default_handoff_policy: str = "manual"           # manual | auto_on_skip | auto_all_remaining
+        assist_default_replan_policy: str = "context_only"      # context_only | selective | full | disabled
+        assist_max_evidence_chars: int = 200_000
 
         # Model overrides
         model_general: str = "qwen3-vl:235b-instruct-cloud"
@@ -751,6 +765,13 @@ class Pipeline:
             yield from self._handle_research_mgmt(msg); return
         if self._is_cmd(msg, "/research"):
             yield from self._handle_research(msg); return
+        if self._is_cmd(
+            msg,
+            "/assist", "/assist/next", "/assist/submit", "/assist/skip",
+            "/assist/handoff", "/assist/pause", "/assist/resume",
+            "/assist/done", "/assist/friction", "/assist/help",
+        ):
+            yield from self._handle_assist(msg); return
         if self._is_cmd(msg, "/execute"):
             yield from self._handle_execute(msg); return
         if self._is_cmd(msg, "/confirm"):
@@ -906,6 +927,13 @@ class Pipeline:
             yield "\n⚠️ Unexpected response from DAG generation."
             return
 
+        # If the operator opted into Assist Mode auto-routing, hand off to
+        # /assist/start instead of /execute/all. Default valve is False.
+        if self.valves.assist_after_confirm:
+            yield f"📋 Execution plan ready — entering Assist Mode for {num_nodes} steps...\n\n"
+            yield from self._assist_start(job_id)
+            return
+
         yield f"📋 Execution plan ready — running {num_nodes} steps...\n\n"
         yield from self._execute_and_stream(job_id, num_nodes)
 
@@ -926,6 +954,359 @@ class Pipeline:
             {"session_id": session_id, "reply": user_reply,
              "model_overrides": self._model_overrides()},
         )
+
+    # ------------------------------------------------------------------
+    # /assist — Assistant Mode chat surface
+    # ------------------------------------------------------------------
+
+    _ASSIST_HELP = (
+        "**Assistant Mode** — walk through a job's DAG step-by-step with human evidence.\n\n"
+        "| Command | Description |\n"
+        "|---|---|\n"
+        "| `/assist <job_id>` | Start a session and render the first step. |\n"
+        "| `/assist next <session_id>` | Fetch the next pending step. |\n"
+        "| `` /assist submit <session_id> <node_key>\\n```evidence``` `` | Submit human evidence (multi-line via triple-backtick fence). |\n"
+        "| `/assist skip <session_id> <node_key>` | Skip a node. |\n"
+        "| `/assist handoff <session_id> <node_key> [single\\|all]` | Hand a node back to autonomous executor. |\n"
+        "| `/assist pause <session_id>` | Pause; resume later. |\n"
+        "| `/assist resume <session_id>` | Resume a paused session. |\n"
+        "| `/assist done <session_id>` | Show the compiled output. |\n"
+        "| `/assist friction <session_id> <node_key> <note>` | Log a friction note for post-mortem. |\n"
+        "| `/assist help` | Show this message. |\n\n"
+        "_Tip: paste multi-line evidence inside a triple-backtick fence; it will be captured intact._"
+    )
+
+    @staticmethod
+    def _extract_fenced(msg: str) -> tuple[str, str]:
+        """Split a message into (head, fenced_body). If no triple-backtick
+        fence is present, fenced_body is empty and head is msg."""
+        if "```" not in msg:
+            return msg, ""
+        head, _, rest = msg.partition("```")
+        # rest may begin with a language tag on the first line; strip the
+        # first line if it has no whitespace and is short (looks like 'bash').
+        first_nl = rest.find("\n")
+        if 0 < first_nl < 30 and " " not in rest[:first_nl] and "`" not in rest[:first_nl]:
+            rest = rest[first_nl + 1:]
+        body, _, _ = rest.partition("```")
+        return head.strip(), body.strip()
+
+    def _render_step(self, step: dict) -> str:
+        """Format a /assist/next response as markdown chat output."""
+        if step.get("status") in ("completed", "abandoned", "cancelled"):
+            return f"✅ **Session `{step['session_id']}` is {step['status']}.** Run `/assist done {step['session_id']}` to view the compiled output."
+        if not step.get("node_key"):
+            counts = step.get("step_counts", {})
+            counts_str = ", ".join(f"{k}={v}" for k, v in counts.items()) or "n/a"
+            return (
+                f"⏳ **No claimable step right now.**\n\n"
+                f"Step roll-up: {counts_str}\n\n"
+                f"Some steps may already be presented to you and waiting on submit. "
+                f"Use `/assist next {step['session_id']}` again after you submit."
+            )
+        upstream = step.get("upstream_outputs") or {}
+        upstream_block = ""
+        if upstream:
+            upstream_block = "**Upstream outputs:**\n\n"
+            for nk, txt in upstream.items():
+                preview = txt if len(txt) <= 800 else txt[:800] + f"\n… [{len(txt) - 800} more chars]"
+                upstream_block += f"_{nk}:_\n```\n{preview}\n```\n\n"
+        deps = step.get("depends_on") or []
+        deps_str = ", ".join(deps) if deps else "(none)"
+        return (
+            f"### Step `{step['node_key']}` — {step.get('title', '?')}\n\n"
+            f"**Tool:** `{step.get('tool', 'LLM')}`  |  "
+            f"**Domain:** `{step.get('domain') or 'n/a'}`  |  "
+            f"**Depends on:** {deps_str}\n\n"
+            f"{upstream_block}"
+            f"**Task prompt:**\n\n```\n{step.get('base_prompt', '')}\n```\n\n"
+            f"**When done, submit your evidence:**\n"
+            f"````\n"
+            f"/assist submit {step['session_id']} {step['node_key']}\n"
+            f"```\n"
+            f"<your output here — command output, file diff, summary, anything>\n"
+            f"```\n"
+            f"````\n"
+        )
+
+    def _handle_assist(self, msg: str) -> Generator[str, None, None]:
+        """Dispatch /assist subcommands. Stateless — session_id is echoed
+        back to the user and accepted as the first arg of each follow-up,
+        same pattern as `/research/reply <session_id>`."""
+        head, fenced = self._extract_fenced(msg)
+        parts = head.split(None, 4)
+        cmd = parts[0] if parts else "/assist"
+
+        # /assist help
+        if cmd == "/assist/help" or (cmd == "/assist" and len(parts) > 1 and parts[1] == "help"):
+            yield self._ASSIST_HELP; return
+
+        # /assist <job_id> — start
+        if cmd == "/assist":
+            if len(parts) < 2:
+                yield self._ASSIST_HELP; return
+            arg1 = parts[1]
+            # /assist <subcommand> ... — route to subcommand handler
+            if arg1 in ("next", "submit", "skip", "handoff", "pause", "resume", "done", "friction"):
+                # Re-prepend the subcommand and route via the slash-form below.
+                yield from self._dispatch_assist_sub(arg1, parts[2:], fenced); return
+            # Otherwise treat arg1 as job_id
+            job_id = arg1
+            yield from self._assist_start(job_id); return
+
+        # Slash-form subcommands: /assist/next, /assist/submit, etc.
+        if cmd.startswith("/assist/"):
+            sub = cmd.split("/", 2)[2]  # "next" / "submit" / ...
+            yield from self._dispatch_assist_sub(sub, parts[1:], fenced); return
+
+        yield self._ASSIST_HELP
+
+    def _dispatch_assist_sub(self, sub: str, args: list, fenced: str) -> Generator[str, None, None]:
+        if sub == "next":
+            if not args:
+                yield "Usage: `/assist next <session_id>`"; return
+            yield from self._assist_next(args[0]); return
+        if sub == "submit":
+            if len(args) < 2:
+                yield "Usage: `/assist submit <session_id> <node_key>` followed by triple-backtick fenced evidence."; return
+            yield from self._assist_submit(args[0], args[1], fenced or (" ".join(args[2:]) if len(args) > 2 else "")); return
+        if sub == "skip":
+            if len(args) < 2:
+                yield "Usage: `/assist skip <session_id> <node_key>`"; return
+            yield from self._assist_skip(args[0], args[1]); return
+        if sub == "handoff":
+            if len(args) < 2:
+                yield "Usage: `/assist handoff <session_id> <node_key> [single|all]`"; return
+            mode = (args[2] if len(args) > 2 else "single").lower()
+            mode = "all_remaining" if mode in ("all", "all_remaining") else "single"
+            yield from self._assist_handoff(args[0], args[1], mode); return
+        if sub == "pause":
+            if not args:
+                yield "Usage: `/assist pause <session_id>`"; return
+            yield from self._assist_simple_post(args[0], "pause"); return
+        if sub == "resume":
+            if not args:
+                yield "Usage: `/assist resume <session_id>`"; return
+            yield from self._assist_simple_post(args[0], "resume"); return
+        if sub == "done":
+            if not args:
+                yield "Usage: `/assist done <session_id>`"; return
+            yield from self._assist_done(args[0]); return
+        if sub == "friction":
+            if len(args) < 3:
+                yield "Usage: `/assist friction <session_id> <node_key> <note>`"; return
+            yield from self._assist_friction(args[0], args[1], " ".join(args[2:])); return
+        yield self._ASSIST_HELP
+
+    def _assist_start(self, job_id: str) -> Generator[str, None, None]:
+        try:
+            r = requests.post(
+                f"{self.valves.orchestrator_url}/assist/start",
+                json={
+                    "job_id": job_id,
+                    "handoff_policy": self.valves.assist_default_handoff_policy,
+                    "replan_policy": self.valves.assist_default_replan_policy,
+                },
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            yield f"❌ Connection error: {e}"; return
+        if r.status_code >= 400:
+            yield f"❌ Could not start assist session: HTTP {r.status_code} {r.text[:200]}"; return
+        d = r.json()
+        sid = d["session_id"]
+        yield (
+            f"🤝 **Assist session started** — `{sid}`\n\n"
+            f"Job `{d['job_id']}` is now in `assisted_executing` ({d['pending_steps']} pending step(s)).\n\n"
+            f"Fetching first step...\n\n---\n\n"
+        )
+        yield from self._assist_next(sid)
+
+    def _assist_next(self, session_id: str) -> Generator[str, None, None]:
+        try:
+            r = requests.get(
+                f"{self.valves.orchestrator_url}/assist/{session_id}/next",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            yield f"❌ Connection error: {e}"; return
+        if r.status_code == 404:
+            yield f"❌ Session `{session_id}` not found."; return
+        if r.status_code >= 400:
+            yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+        yield self._render_step(r.json())
+
+    def _assist_submit(self, session_id: str, node_key: str, evidence: str) -> Generator[str, None, None]:
+        if not evidence:
+            yield "Empty evidence. Wrap your output in a triple-backtick fence and resend."; return
+        if len(evidence) > self.valves.assist_max_evidence_chars:
+            yield (f"❌ Evidence is {len(evidence)} chars; cap is "
+                   f"{self.valves.assist_max_evidence_chars}. Trim and resend."); return
+        try:
+            r = requests.post(
+                f"{self.valves.orchestrator_url}/assist/{session_id}/submit",
+                json={
+                    "node_key": node_key,
+                    "output": evidence,
+                    "evidence_kind": "text",
+                    "action": "submit",
+                },
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            yield f"❌ Connection error: {e}"; return
+        if r.status_code >= 400:
+            yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+        d = r.json()
+        if d.get("no_op"):
+            yield f"ℹ️ Step `{node_key}` already `{d['status']}`. No change."; return
+        next_nk = d.get("next_node_key")
+        msg = f"✅ Step `{node_key}` committed. "
+        if next_nk:
+            msg += f"Next: `{next_nk}`. Run `/assist next {session_id}` to fetch."
+        else:
+            msg += f"All steps terminal — run `/assist done {session_id}` to view compiled output."
+        yield msg
+
+    def _assist_skip(self, session_id: str, node_key: str) -> Generator[str, None, None]:
+        try:
+            r = requests.post(
+                f"{self.valves.orchestrator_url}/assist/{session_id}/submit",
+                json={"node_key": node_key, "output": "", "action": "skip"},
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            yield f"❌ Connection error: {e}"; return
+        if r.status_code >= 400:
+            yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+        d = r.json()
+        next_nk = d.get("next_node_key")
+        msg = f"⏭ Step `{node_key}` skipped. "
+        if next_nk:
+            msg += f"Next: `{next_nk}`."
+        else:
+            msg += f"All steps terminal — run `/assist done {session_id}`."
+        yield msg
+
+    def _assist_handoff(self, session_id: str, node_key: str, mode: str) -> Generator[str, None, None]:
+        # SSE stream — reuse existing _stream_sse_to_queue plumbing.
+        yield f"🤖 Handing `{node_key}` back to autonomous executor (mode: `{mode}`)...\n\n"
+        url = f"{self.valves.orchestrator_url}/assist/{session_id}/handoff"
+        body = {"node_key": node_key, "mode": mode}
+        # Reuse the generic streaming runner used by /research.
+        yield from self._stream_sse_with_keepalive(url, body)
+
+    def _stream_sse_with_keepalive(self, url: str, body: dict) -> Generator[str, None, None]:
+        """Minimal SSE consumer for assist handoff. Mirrors the queue loop
+        used in _handle_research but emits assist_* events plus the
+        standard execution events from the underlying executor."""
+        import queue as _q
+        import threading as _th
+        q: _q.Queue = _q.Queue()
+        reader = _th.Thread(
+            target=self._stream_sse_to_queue,
+            args=(url, body, q), daemon=True,
+        )
+        reader.start()
+        while True:
+            try:
+                msg_type, f1, f2 = q.get(timeout=self.valves.keepalive_interval)
+            except _q.Empty:
+                yield "​"; continue
+            if msg_type == "connected":
+                continue
+            if msg_type == "heartbeat":
+                yield "​"; continue
+            if msg_type == "http_error":
+                yield f"⚠️ Handoff failed (HTTP {f1}): {(f2 or '')[:200]}"; return
+            if msg_type == "error":
+                yield f"\n⚠️ Connection error: {f1}"; return
+            if msg_type == "done":
+                break
+            event_type, data = f1, f2
+            try:
+                payload = json.loads(data)
+            except Exception:
+                continue
+            if event_type == "assist_handoff_started":
+                yield f"\n🟢 Autonomous executor took over `{payload.get('node_key', '?')}`.\n"
+            elif event_type == "assist_handoff_done":
+                yield f"\n✅ Handoff complete. Run `/assist next {payload.get('session_id', '?')}` to continue.\n"
+            elif event_type == "node_started":
+                yield f"  ▶ {payload.get('node_key', '?')} — {payload.get('title', '?')}\n"
+            elif event_type == "node_completed":
+                yield f"  ✓ {payload.get('node_key', '?')} (model: {payload.get('model', '?')})\n"
+            elif event_type == "node_failed":
+                yield f"  ✗ {payload.get('node_key', '?')}: {payload.get('error', '?')}\n"
+            elif event_type == "error":
+                yield f"\n⚠️ {payload.get('detail') or payload}\n"; return
+
+    def _assist_simple_post(self, session_id: str, action: str) -> Generator[str, None, None]:
+        try:
+            r = requests.post(
+                f"{self.valves.orchestrator_url}/assist/{session_id}/{action}",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            yield f"❌ Connection error: {e}"; return
+        if r.status_code >= 400:
+            yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+        d = r.json()
+        yield f"✅ Session `{session_id}` -> `{d.get('status', action)}`."
+
+    def _assist_done(self, session_id: str) -> Generator[str, None, None]:
+        # Pull session, then job's compiled_output via /exec/status.
+        try:
+            r = requests.get(
+                f"{self.valves.orchestrator_url}/assist/{session_id}",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            yield f"❌ Connection error: {e}"; return
+        if r.status_code == 404:
+            yield f"❌ Session `{session_id}` not found."; return
+        if r.status_code >= 400:
+            yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+        sess = r.json()
+        job_id = sess.get("job_id")
+        try:
+            r2 = requests.get(
+                f"{self.valves.orchestrator_url}/exec/status/{job_id}",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            yield f"❌ Connection error: {e}"; return
+        if r2.status_code >= 400:
+            yield f"⚠️ Compiled output not available (HTTP {r2.status_code})."; return
+        d = r2.json()
+        compiled = d.get("compiled_output") or "_(no compiled output yet)_"
+        yield (
+            f"### Assist session `{session_id}` summary\n\n"
+            f"- Status: `{sess.get('status')}`\n"
+            f"- Job: `{job_id}` → `{d.get('status', '?')}`\n\n"
+            f"---\n\n## Compiled output\n\n{compiled}\n"
+        )
+
+    def _assist_friction(self, session_id: str, node_key: str, note: str) -> Generator[str, None, None]:
+        try:
+            r = requests.post(
+                f"{self.valves.orchestrator_url}/assist/{session_id}/friction",
+                json={"node_key": node_key, "note": note},
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            yield f"❌ Connection error: {e}"; return
+        if r.status_code >= 400:
+            yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+        yield f"📝 Friction note recorded for `{node_key}` in session `{session_id}`."
 
     # ------------------------------------------------------------------
     # Long-poll with keepalive (DRY helper, #8.7)

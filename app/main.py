@@ -36,6 +36,7 @@ from app.modules.research_agent import run_research, run_research_pdf, resume_re
 from app.modules.prompt_inspector import list_prompts, get_prompt, update_prompt, get_history
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag as _query_rag
+from app.routers.assist import router as assist_router
 from app.routers.status import router as status_router
 from app.schemas import (
     JOB_STATUSES,
@@ -192,6 +193,7 @@ app.add_middleware(PerformanceMiddleware)
 # RequestId is outermost: binds request_id contextvar BEFORE perf + error layers
 app.add_middleware(RequestIdMiddleware)
 app.include_router(status_router)
+app.include_router(assist_router)
 
 
 # Note: request-id binding + X-Request-ID header are handled by RequestIdMiddleware

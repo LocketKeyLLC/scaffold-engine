@@ -102,6 +102,8 @@ Compiled output displayed in chat
 
 **Job status flow:** `pending → refining → awaiting_confirmation → researching → planning → executing → running → completed/failed/cancelled/blocked`
 
+**Assist Mode branch:** after `/dag` completes, the operator may opt into `assisted_executing → assisted_running → completed` instead of the autonomous `executing → running → completed`. Assist Mode coexists with autonomous; per-node handoff flips a single node back into the autonomous executor and returns control on the next.
+
 ## Application Modules
 
 ### Core
@@ -132,7 +134,10 @@ Compiled output displayed in chat
 | `modules/gt_browser.py` | 271 | GT browsing/search/detail/stats (async-safe, supersede filter) |
 | `modules/prompt_inspector.py` | 116 | Prompt analysis + revision |
 | `modules/execution_handler.py` | 73 | Execution status queries |
-| `modules/cleanup.py` | 145 | Stale-job reaper (15-min loop, unified `reap_stale_jobs`) |
+| `modules/cleanup.py` | 145 | Stale-job reaper (15-min loop, unified `reap_stale_jobs`; status-aware — skips `assisted_*`) |
+| `modules/prompt_assembly.py` | ~240 | Shared upstream-last prompt assembly used by Assist Mode and (eventually) autonomous executor |
+| `modules/assist_agent.py` | ~480 | Assist Mode session lifecycle + step state machine; mirrors human evidence to `dag_nodes.output_text` |
+| `modules/assist_replan.py` | ~210 | Divergence detection + selective subgraph reset for Assist Mode |
 
 ### Routers & Middleware
 | File | Lines | Purpose |
@@ -167,6 +172,7 @@ Compiled output displayed in chat
 ### scaffold_router Valves (admin-configurable)
 - **Connection:** `api_key`, `orchestrator_url`, `request_timeout=30`, `stream_timeout=3600`, `triage_timeout=3600`, `keepalive_interval=10`, `ollama_url`, `dag_timeout` *(legacy alias, migrated to stream_timeout on init)*
 - **Triage:** `triage_model=qwen3:4b`
+- **Assist Mode:** `assist_after_confirm=False` (auto-route `/confirm` into assist), `assist_default_handoff_policy=manual`, `assist_default_replan_policy=context_only`, `assist_max_evidence_chars=200000`
 - **Model overrides (8 roles):** `model_general`, `model_verifier`, `model_coder`, `model_embedder`, `model_reranker`, `model_router`, `model_fallback`, `model_cloud_alt`
 
 ## API Endpoints
@@ -202,10 +208,20 @@ Compiled output displayed in chat
 | `POST` | `/prompts/{job_id}/{node_key}` | Update node prompt |
 | `GET` | `/prompts/{job_id}/{node_key}/history` | Prompt revision audit trail |
 | `GET` | `/health` | Postgres + Ollama + Milvus + Redis |
+| `POST` | `/assist/start` | Promote a job into Assist Mode (interactive walkthrough) |
+| `GET` | `/assist/{session_id}` | Session + per-step status roll-up |
+| `GET` | `/assist/{session_id}/next` | Claim the next pending step + render upstream-last context |
+| `POST` | `/assist/{session_id}/submit` | Record human evidence (`action='submit'` or `'skip'`) |
+| `POST` | `/assist/{session_id}/handoff` | Hand a node back to the autonomous executor (SSE) |
+| `POST` | `/assist/{session_id}/pause` | Pause an active assist session |
+| `POST` | `/assist/{session_id}/resume` | Resume a paused session |
+| `DELETE` | `/assist/{session_id}` | Abandon (cancel job + close session) |
+| `POST` | `/assist/{session_id}/friction` | Append a friction note for post-mortem |
+| `GET` | `/assist/{session_id}/friction` | List friction notes |
 
 ## Database Schema (PostgreSQL 16)
 
-**13 tables** in the `scaffold_engine` database:
+**15 tables** in the `scaffold_engine` database:
 
 | Table | Purpose |
 |---|---|
@@ -221,9 +237,11 @@ Compiled output displayed in chat
 | `research_sessions` | `/research` session state (status, snapshot, pause fields) |
 | `scheduled_jobs` | User-facing schedule metadata |
 | `apscheduler_jobs` | APScheduler internal jobstore |
+| `assist_sessions` | Assist Mode sessions (one per job; status, policies, last_activity_at) |
+| `assist_steps` | Per-(session,node_key) state with human evidence + friction notes |
 | *(+ 1 legacy/unused)* | — |
 
-**Migrations:** `db/migrations/002_*.sql` through `022_prompt_revisions.sql`. Applied at lifespan startup by `app.migrations.run_migrations()`; tracked in `schema_migrations` table.
+**Migrations:** `db/migrations/002_*.sql` through `023_assist_mode.sql`. Applied at lifespan startup by `app.migrations.run_migrations()`; tracked in `schema_migrations` table.
 
 ## RAG Pipeline
 
@@ -282,6 +300,30 @@ APScheduler (in-process, SQLAlchemyJobStore) runs recurring `/research` jobs bas
 - **Job timeout** — each scheduled run bounded by `scheduler_job_timeout` (default 3600s); timeout marks `last_status='timeout'`
 - **last_job_id** — populated with the real `research_sessions.id` captured from the SSE stream
 - **Graceful shutdown** — bounded by `scheduler_shutdown_timeout` (default 30s); in-flight jobs get a grace window before being dropped
+
+### Assistant Mode
+
+A human-in-the-loop sibling subsystem to the autonomous executor. After `/dag` produces an execution plan, the operator may opt into Assist Mode (interactive walkthrough) instead of `/execute/all` (autonomous run). The two paths coexist; per-node handoff flips a single node back into the autonomous executor and returns control on the next.
+
+**Lifecycle:**
+- `assist_sessions` row per job (UNIQUE constraint — one active session per job).
+- Session status: `active → paused → completed | abandoned | cancelled`.
+- Job status: `assisted_executing → assisted_running → completed`.
+
+**Per-step state machine:**
+`pending → presented → awaiting_input → received → applied → committed`. Branches: `skipped`, `handed_off`, `escalated`.
+
+**Mirror-to-dag_nodes invariant:** on commit, `assist_steps.evidence` is mirrored to `dag_nodes.output_text` and `dag_nodes.status='done'` in the same transaction. The existing `_compile_output`, `_fetch_upstream_outputs`, and downstream RAG-grounding paths see human output identical to autonomous output — no changes required to those paths.
+
+**Re-plan policies (configured per-session):**
+- `context_only` (default) — no regeneration. Downstream upstream-last assembly absorbs divergence implicitly. Zero LLM cost.
+- `selective` — divergence detector (qwen2.5:7b) flags major divergences; the affected subgraph is reset for re-walking.
+- `full` — regenerate all pending nodes (discouraged).
+- `disabled` — skip detection.
+
+**Reaper interaction:** `cleanup.reap_stale_jobs` skips `assisted_*` statuses on the normal cadence. A separate idle sweep (`assist_idle_threshold_days`, default 7) cancels truly abandoned sessions.
+
+**Friction log:** `/assist/{session_id}/friction` records per-step notes for post-mortem.
 
 ### Retrieval Quality Metrics
 
@@ -386,6 +428,7 @@ Additional endpoint (not a chat command): `POST /research/pdf` — direct PDF up
 25. **Session state snapshots** — written at each iteration boundary for pause/resume
 26. **Explicit output-node marker** — DAG generator flags leaf nodes with `is_output_node=TRUE` at INSERT time. `_compile_output` prefers explicit markers (Strategy 0) before falling through to title-heuristic / last-CodeGen / concatenation strategies. Replaces fragile string-matching on node titles.
 27. **Endpoint-layer model validation** — `_require_valid_models` runs only at user-reachable endpoints (`/execute/all`, `/ideate`, `/ideate/confirm`, `/dag`, `/research`), never inside `execute_next_node`. Prevents N redundant Ollama `/api/tags` calls per DAG run and keeps the internal function library-callable.
+28. **Assist Mode mirror invariant** — human-supplied evidence in `assist_steps.evidence` is mirrored to `dag_nodes.output_text` in the same transaction as the step commit. This single invariant lets the existing `_compile_output`, `_fetch_upstream_outputs`, and downstream RAG-grounding paths consume human output indistinguishably from autonomous output — no changes to those paths required.
 
 ## Test Suite
 

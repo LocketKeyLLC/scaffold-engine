@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 JobStatus = Literal[
     "pending", "refining", "awaiting_confirmation", "researching", "planning", "executing",
     "running", "completed", "failed", "cancelled", "blocked",
+    "assisted_executing", "assisted_running", "assisted_paused",
 ]
 
 # Runtime-iterable mirror of JobStatus. Single source of truth for the
@@ -34,6 +35,15 @@ JobStatus = Literal[
 JOB_STATUSES: tuple[str, ...] = (
     "pending", "refining", "awaiting_confirmation", "researching", "planning", "executing",
     "running", "completed", "failed", "cancelled", "blocked",
+    "assisted_executing", "assisted_running", "assisted_paused",
+)
+
+# Statuses the cleanup reaper must NOT touch on its normal cadence.
+# Assist sessions are user-driven and may legitimately stay open for
+# days; the reaper consults `assist_sessions.last_activity_at` separately
+# (see app/modules/cleanup.py:_REAP_ABANDONED_ASSIST_SQL).
+ASSIST_PROTECTED_STATUSES: tuple[str, ...] = (
+    "assisted_executing", "assisted_running", "assisted_paused",
 )
 
 NodeStatus = Literal["pending", "running", "done", "failed", "skipped"]

@@ -59,6 +59,38 @@ _REAP_RUNNING_SQL = """
     RETURNING id
 """
 
+# Assist Mode: jobs in 'assisted_*' statuses are user-driven and not
+# touched by the running/long-phase reapers above (their WHERE clauses
+# already exclude assisted_* implicitly because the IN-list is
+# whitelisted). This separate reaper finalises ABANDONED assist sessions
+# only — those whose `last_activity_at` is older than
+# settings.assist_idle_threshold_days. The owning job is moved to
+# 'cancelled' with an explicit error_summary.
+_REAP_ABANDONED_ASSIST_SQL = """
+    WITH stale AS (
+        SELECT s.id AS session_id, s.job_id
+        FROM assist_sessions s
+        WHERE s.status IN ('active', 'paused')
+          AND s.last_activity_at < NOW() - make_interval(days => :threshold_days)
+    ),
+    closed_sessions AS (
+        UPDATE assist_sessions
+        SET status = 'abandoned',
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id IN (SELECT session_id FROM stale)
+        RETURNING id
+    )
+    UPDATE jobs
+    SET status = 'cancelled',
+        error_summary = COALESCE(error_summary,
+            'Assist session abandoned (idle > threshold)'),
+        updated_at = NOW()
+    WHERE id IN (SELECT job_id FROM stale)
+      AND status IN ('assisted_executing', 'assisted_running', 'assisted_paused')
+    RETURNING id
+"""
+
 _REAP_LONG_PHASE_SQL = """
     UPDATE jobs
     SET status = 'failed',
@@ -194,17 +226,29 @@ async def reap_stale_jobs(db: AsyncSession) -> dict:
     )
     paused_cancelled = len(r5.fetchall())
 
+    # Assist Mode idle sweep — long-threshold cancellation of abandoned
+    # sessions. Defaults to 7 days; configurable via settings.
+    assist_threshold_days = getattr(settings, "assist_idle_threshold_days", 7)
+    r6 = await db.execute(
+        text(_REAP_ABANDONED_ASSIST_SQL),
+        {"threshold_days": assist_threshold_days},
+    )
+    assist_abandoned = len(r6.fetchall())
+
     await db.commit()
 
     if (orphan_nodes_reset or running_failed or long_phase_failed
-            or planning_cancelled or awaiting_cancelled or research_failed or paused_cancelled):
+            or planning_cancelled or awaiting_cancelled or research_failed
+            or paused_cancelled or assist_abandoned):
         logger.info(
             "stale_jobs_reaped orphan_nodes_reset=%d running_to_failed=%d "
             "long_phase_to_failed=%d planning_to_cancelled=%d "
             "awaiting_to_cancelled=%d "
-            "research_to_failed=%d paused_to_cancelled=%d",
+            "research_to_failed=%d paused_to_cancelled=%d "
+            "assist_abandoned=%d",
             orphan_nodes_reset, running_failed, long_phase_failed,
-            planning_cancelled, awaiting_cancelled, research_failed, paused_cancelled,
+            planning_cancelled, awaiting_cancelled, research_failed,
+            paused_cancelled, assist_abandoned,
         )
 
     return {
@@ -215,6 +259,7 @@ async def reap_stale_jobs(db: AsyncSession) -> dict:
         "awaiting_to_cancelled": awaiting_cancelled,
         "research_to_failed": research_failed,
         "paused_to_cancelled": paused_cancelled,
+        "assist_abandoned": assist_abandoned,
     }
 
 

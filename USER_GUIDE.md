@@ -41,6 +41,7 @@ One pause point (the confirmation gate). Everything else auto-chains.
 | Submit an idea fast (skip the chat) | `/idea <text>` |
 | Lock the scope and refine | `/go` |
 | Approve and execute | `/confirm <job_id>` |
+| Walk through it yourself with help | `/assist <job_id>` |
 | See what's running | `/status` |
 | Read a finished job | `/results <job_id>` |
 | Search what the system knows | `/rag <query>` |
@@ -103,6 +104,50 @@ Shows a job's output, in-flight progress, or failure details. For failed/blocked
 
 ### `/status`
 Lists active jobs grouped by state, with recent activity. Quick overview of what's running, what's stuck, and what's done.
+
+---
+
+## 🤝 Assistant Mode (manual implementation)
+
+Sometimes you don't want the engine to *run* the plan — you want to do it yourself, with the engine acting as a co-pilot. Assistant Mode walks you through the DAG one node at a time, shows you the prompt + upstream context for each step, and captures whatever you do (command output, a file diff, free text) as that node's output. Subsequent nodes pick up your output as their upstream context — exactly like the autonomous run.
+
+### `/assist <job_id>`
+Promotes a job into Assist Mode and renders the first step. The job moves from `planning`/`executing` to `assisted_executing`.
+
+**Example:**
+> `/assist a4f2c891-...`
+
+### `/assist next <session_id>`
+Fetches the next pending step (with deps satisfied) and shows you the prompt + upstream outputs.
+
+### `` /assist submit <session_id> <node_key> ``
+Submits your work as the node's output. **Multi-line evidence in a triple-backtick fence:**
+
+````
+/assist submit <session_id> <node_key>
+```
+$ ls -la
+total 4
+drwxr-xr-x  2 me me 4096 Jan 1 00:00 .
+```
+````
+
+### `/assist skip <session_id> <node_key>`
+Skips a node — downstream nodes still proceed.
+
+### `/assist handoff <session_id> <node_key> [single|all]`
+Hands a node back to the autonomous executor. `single` returns control on the next step; `all` lets autonomous take the rest of the DAG.
+
+### `/assist pause <session_id>` / `/assist resume <session_id>`
+Pauses / resumes; sessions persist across days.
+
+### `/assist done <session_id>`
+Shows the compiled output once all steps are terminal.
+
+### `/assist friction <session_id> <node_key> <note>`
+Logs a note for later post-mortem ("docs were wrong", "took 3 attempts").
+
+> **Tip:** to make `/confirm` route into Assist Mode automatically, the admin can flip the `assist_after_confirm` valve on `scaffold_router`.
 
 ---
 
