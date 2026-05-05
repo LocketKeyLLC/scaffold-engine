@@ -202,11 +202,21 @@ async def fetch_repo_content(owner: str, repo: str) -> list[dict[str, Any]]:
             *(_fetch_one(e) for e in selected), return_exceptions=True,
         )
         for item in fetched:
+            # CancelledError is a BaseException (Py3.8+), not Exception, so
+            # the broader catch below does NOT cover it; without this branch
+            # a cancelled child slips through as a non-dict result and
+            # crashes downstream consumers. Re-raise so cancellation
+            # propagates to the caller's await.
+            if isinstance(item, asyncio.CancelledError):
+                raise item
             if isinstance(item, (GitHubRateLimitError, GitHubRepoNotFoundError)):
                 # Critical errors must NOT be swallowed — propagate so caller
                 # sees the real failure mode instead of a silent partial result.
                 raise item
-            if isinstance(item, Exception):
+            if isinstance(item, BaseException):
+                # Any other exception (including unexpected BaseException
+                # subclasses) is logged and skipped — the task that raised
+                # is dropped from results but the rest of the fetch succeeds.
                 logger.warning("Blob fetch failed (transient): %s", item)
                 continue
             if item is not None:
