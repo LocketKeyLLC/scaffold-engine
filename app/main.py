@@ -89,9 +89,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("ollama_connection_failed: url=%s error=%s", settings.ollama_base_url, e)
 
-    # Verify Milvus
+    # Verify Milvus — PyMilvus is sync; wrap so the event loop is not
+    # blocked during the (potentially slow) initial connect handshake.
     try:
-        milvus_connections.connect(alias="default", uri=settings.milvus_uri)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: milvus_connections.connect(alias="default", uri=settings.milvus_uri),
+        )
         logger.info("milvus_connected: uri=%s", settings.milvus_uri)
     except Exception as e:
         logger.warning("milvus_connection_failed: uri=%s error=%s", settings.milvus_uri, e)
@@ -169,7 +174,15 @@ async def lifespan(app: FastAPI):
     await close_client()
     from app.utils.http_clients import close_clients
     await close_clients()
-    milvus_connections.disconnect("default")
+    # PyMilvus disconnect is sync; wrap on the same async-first principle
+    # as the startup connect above.
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, lambda: milvus_connections.disconnect("default"),
+        )
+    except Exception as exc:
+        logger.warning('event="milvus_disconnect_failed" error=%s', exc)
     try:
         await engine.dispose()
     except Exception as exc:
