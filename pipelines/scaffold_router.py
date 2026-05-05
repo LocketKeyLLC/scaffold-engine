@@ -895,7 +895,12 @@ class Pipeline:
             payload, self.valves.stream_timeout,
         )
         if not ok:
-            yield f"\n⚠️ Research phase error: {res}"
+            yield (
+                f"\n⚠️ Research phase error: {res}\n\n"
+                f"Retry options:\n"
+                f"- `/confirm {job_id}` — re-run research and planning\n"
+                f"- `/jobs` — check job status\n"
+            )
             return
         r = res
         if r.status_code >= 400:
@@ -903,7 +908,12 @@ class Pipeline:
                 err = r.json().get("message") or r.json().get("detail") or r.text[:200]
             except Exception:
                 err = r.text[:200]
-            yield f"\n⚠️ Research phase failed: {err}"
+            yield (
+                f"\n⚠️ Research phase failed: {err}\n\n"
+                f"Retry options:\n"
+                f"- `/confirm {job_id}` — re-run research and planning\n"
+                f"- `/jobs` — check job status\n"
+            )
             return
 
         yield "\n✅ Research complete — generating execution plan...\n\n"
@@ -914,11 +924,21 @@ class Pipeline:
             self.valves.stream_timeout,
         )
         if not ok:
-            yield f"\n⚠️ DAG generation error: {res}"
+            yield (
+                f"\n⚠️ DAG generation error: {res}\n\n"
+                f"Research finished — only the plan step failed. Retry options:\n"
+                f"- `/dag {job_id}` — regenerate the execution plan\n"
+                f"- `/jobs` — check job status\n"
+            )
             return
         r = res
         if r.status_code >= 400:
-            yield f"\n⚠️ DAG generation failed (HTTP {r.status_code})."
+            yield (
+                f"\n⚠️ DAG generation failed (HTTP {r.status_code}).\n\n"
+                f"Research finished — only the plan step failed. Retry options:\n"
+                f"- `/dag {job_id}` — regenerate the execution plan\n"
+                f"- `/jobs` — check job status\n"
+            )
             return
         try:
             dag_data = r.json()
@@ -1418,10 +1438,18 @@ class Pipeline:
                 yield "\n\nCouldn't reach the engine. Try again in a moment."
             else:
                 yield f"\n\n⚠️ Error during planning: {err}"
+            yield (
+                f"\n\nResearch finished — only the plan step failed. "
+                f"Retry with `/dag {job_id}` or check status with `/jobs`.\n"
+            )
             return
         r = res
         if r.status_code >= 400:
             yield "\n\nI wasn't able to plan that. Please rephrase or simplify."
+            yield (
+                f"\n\nResearch finished — only the plan step failed. "
+                f"Retry with `/dag {job_id}` or check status with `/jobs`.\n"
+            )
             return
         try:
             dag_data = r.json()
