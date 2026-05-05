@@ -10,6 +10,13 @@ addopts = [
     "--timeout=30",
 ]
 asyncio_mode = "auto"
+# Share one event loop across the session. Without this, each async test gets
+# a fresh loop, but module-level async resources (app.database.engine,
+# asyncpg pools) bind to the first loop and fail with "Event loop is closed"
+# in subsequent tests' cleanup. The integration suite hits this directly;
+# mock-based tests are unaffected.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 markers = [
     "smoke: Fast sanity checks - unit tests, extraction pipeline (<2 min)",
     "validate: Integration tests - API, reranker, verifier (<15 min)",

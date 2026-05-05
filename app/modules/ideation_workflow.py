@@ -39,6 +39,7 @@ from app.modules.gt_extractor import (
 )
 from app.modules.idea_refinement import refine_idea
 from app.modules.rag_pipeline import ingest_entries
+from app.utils.job_utils import fail_job as _fail_job
 from app.utils.llm_parsing import parse_json_array, parse_json_object
 from app.utils.topic_detection import detect_topic_id
 
@@ -402,18 +403,6 @@ async def research_and_compile(
         ),
     }
 
-
-async def _fail_job(db: AsyncSession, job_id: str, error: str) -> None:
-    """Mark job as failed with error summary."""
-    await db.execute(
-        text(
-            "UPDATE jobs SET status = 'failed', error_summary = :error "
-            "WHERE id = :id"
-        ),
-        {"error": error[:1000], "id": job_id},
-    )
-    await db.commit()
-    logger.error("phase2_job_failed", job_id=job_id, error=error)
 
 async def _cancel_job(db: AsyncSession, job_id: str, reason: str) -> None:
     """Mark a job as cancelled (used for client_disconnect during Phase 2)."""

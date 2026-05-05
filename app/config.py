@@ -1,6 +1,10 @@
 """Scaffold Engine configuration — loaded from environment variables."""
-from pydantic import Field, SecretStr
+import logging
+
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
+
+_logger = logging.getLogger("scaffold.config")
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +199,23 @@ class Settings(BaseSettings):
     log_level: str = "info"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
+
+    @model_validator(mode="after")
+    def _warn_timeout_vs_reaper(self) -> "Settings":
+        """If node_timeout_seconds >= stale_threshold_minutes*60 the reaper can
+        mark a job 'failed' while a node is still mid-inference. Warn loudly at
+        import time; don't fail startup since misconfig is recoverable.
+        """
+        reaper_seconds = self.stale_threshold_minutes * 60
+        if self.node_timeout_seconds >= reaper_seconds:
+            _logger.warning(
+                "config_timeout_reaper_overlap: "
+                "node_timeout_seconds=%d >= stale_threshold_minutes*60=%d — "
+                "reaper may mark live jobs failed mid-execution. "
+                "Lower node_timeout_seconds or raise stale_threshold_minutes.",
+                self.node_timeout_seconds, reaper_seconds,
+            )
+        return self
 
 
 settings = Settings()

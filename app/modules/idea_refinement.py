@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import json
 import logging
-from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
 from app.config import get_model
+from app.utils.job_utils import fail_job as _fail_job
 from app.utils.llm_parsing import parse_json_object
 
 logger = logging.getLogger("scaffold.refine")
@@ -178,19 +178,3 @@ async def refine_idea(
     }
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-async def _fail_job(db: AsyncSession, job_id: UUID, error: str) -> None:
-    """Mark job as failed with error summary."""
-    await db.execute(
-        text("""
-            UPDATE jobs
-            SET status = 'failed', error_summary = :error
-            WHERE id = :id
-        """),
-        {"error": error[:1000], "id": job_id},
-    )
-    await db.commit()
-    logger.error("job_failed: job=%s error=%s", job_id, error)

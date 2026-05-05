@@ -4,13 +4,11 @@ import asyncio
 import logging
 import os
 import time
-import uuid as _uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from uuid import UUID
 
 import httpx
-import structlog
 from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, Query
 from pymilvus import connections as milvus_connections, utility, Collection
 from sqlalchemy import text
@@ -99,7 +97,6 @@ async def lifespan(app: FastAPI):
     # Database connectivity is verified by first request via get_db()
     # Run schema migrations before anything else touches the DB (#10).
     # Opt out with SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false (default: true).
-    import os
     _run_migs = os.getenv("SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP", "true").strip().lower()
     if _run_migs not in ("0", "false", "no", "off"):
         try:
@@ -196,23 +193,11 @@ app.add_middleware(RequestIdMiddleware)
 app.include_router(status_router)
 
 
-@app.middleware("http")
-async def request_id_middleware(request: Request, call_next):
-    structlog.contextvars.clear_contextvars()
-    request_id = request.headers.get("X-Request-ID", str(_uuid.uuid4()))
-    structlog.contextvars.bind_contextvars(request_id=request_id)
-    start = time.perf_counter_ns()
-    response = await call_next(request)
-    duration_ms = (time.perf_counter_ns() - start) / 1_000_000
-    structlog.stdlib.get_logger("api.access").info(
-        "http_request",
-        http_method=request.method,
-        http_path=request.url.path,
-        http_status=response.status_code,
-        duration_ms=round(duration_ms, 2),
-    )
-    response.headers["X-Request-ID"] = request_id
-    return response
+# Note: request-id binding + X-Request-ID header are handled by RequestIdMiddleware
+# (app/middleware/request_id.py); per-request access logging by PerformanceMiddleware
+# (app/middleware/performance.py). A previous duplicate function-based middleware
+# here generated a second UUID and emitted an access log without the request_id
+# contextvar bound — removed.
 
 
 # ── Health check (no auth — exempt from global require_api_key) ──────
@@ -552,52 +537,27 @@ async def gt_list_endpoint(
     domain: str | None = None,
 ):
     """Step 19: Paginated list of all TOON entries."""
-    try:
-        return await gt_list(
-            page=page,
-            per_page=per_page,
-            include_history=include_history,
-            domain=domain,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("/gt/list failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+    return await gt_list(
+        page=page,
+        per_page=per_page,
+        include_history=include_history,
+        domain=domain,
+    )
 
 @app.post("/gt/search")
 async def gt_search_endpoint(body: GtSearchInput):
     """Step 19: Semantic search TOON entries."""
-    try:
-        return await gt_search(query=body.query, top_k=body.top_k, domain=body.domain, include_history=body.include_history)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("/gt/search failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+    return await gt_search(query=body.query, top_k=body.top_k, domain=body.domain, include_history=body.include_history)
 
 @app.get("/gt/detail/{entry_id}")
 async def gt_detail_endpoint(entry_id: str):
     """Step 19: Full content of a specific TOON entry."""
-    try:
-        return await gt_detail(entry_id=entry_id)
-    except HTTPException:
-        # Propagate 4xx untouched (e.g. 404 from missing entry)
-        raise
-    except Exception as e:
-        logger.error("/gt/detail failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+    return await gt_detail(entry_id=entry_id)
 
 @app.get("/gt/stats")
 async def gt_stats_endpoint():
     """Step 19: Collection summary."""
-    try:
-        return await gt_stats()
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("/gt/stats failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+    return await gt_stats()
 
 
 @app.get("/prompts/{job_id}")
@@ -938,6 +898,9 @@ async def list_jobs(
         where_clauses.append("j.title ILIKE :q")
         params["q"] = f"%{q.strip()}%"
 
+    # SAFE: where_clauses contain only bind-parameter placeholders (:status, :q);
+    # all user values flow through `params` dict. Do not interpolate user input
+    # into where_clauses directly without enum/whitelist validation first.
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
     total_row = await db.execute(text(f"SELECT COUNT(*) FROM jobs j {where_sql}"), params)
@@ -974,7 +937,6 @@ async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
     """Hard-delete a job. Cascade removes dag_nodes / execution_logs / artifacts /
     error_logs (FK ON DELETE CASCADE). Sets performance_logs.job_id NULL."""
     try:
-        from uuid import UUID
         UUID(job_id)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
@@ -992,7 +954,6 @@ async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
 async def rename_job(job_id: str, body: JobRenameInput, db: AsyncSession = Depends(get_db)):
     """Rename a job (set title)."""
     try:
-        from uuid import UUID
         UUID(job_id)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
@@ -1038,6 +999,9 @@ async def list_research_sessions(
     if q:
         where_clauses.append("topic ILIKE :q")
         params["q"] = f"%{q.strip()}%"
+    # SAFE: where_clauses contain only bind-parameter placeholders (:status, :q);
+    # all user values flow through `params` dict. Do not interpolate user input
+    # into where_clauses directly without enum/whitelist validation first.
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
     total_row = await db.execute(text(f"SELECT COUNT(*) FROM research_sessions {where_sql}"), params)
@@ -1076,7 +1040,6 @@ async def delete_research_session(session_id: str, db: AsyncSession = Depends(ge
     """Hard-delete a research session. Note: KB entries already in Milvus are NOT
     removed; this only drops the session metadata + state snapshot."""
     try:
-        from uuid import UUID
         UUID(session_id)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="session_id must be a valid UUID")
@@ -1095,7 +1058,6 @@ async def delete_research_session(session_id: str, db: AsyncSession = Depends(ge
 async def rename_research_session(session_id: str, body: ResearchSessionRenameInput, db: AsyncSession = Depends(get_db)):
     """Rename a research session (set topic)."""
     try:
-        from uuid import UUID
         UUID(session_id)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="session_id must be a valid UUID")

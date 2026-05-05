@@ -44,7 +44,9 @@ A complete pipeline run on CPU takes 30 to 60 minutes for a non-trivial topic. S
 
 ## Where to learn more
 
-The single source of truth for everything else (architecture, full API reference, model stack, RAG pipeline internals, design decisions, performance benchmarks, every fix to date) lives in scaffold-engine-overview.md.
+- docs/ARCHITECTURE.md — design reference: stack, architecture, RAG pipeline, model stack, performance benchmarks, design decisions.
+- docs/CHANGELOG.md — chronological hardening log: every dated fix with file paths, function names, and commit hashes.
+- USER_GUIDE.md — end-user CLI/API guide.
 
 ## Status
 

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
 from app.config import get_model
+from app.utils.job_utils import fail_job as _fail_job
 from app.utils.llm_parsing import parse_json_object
 
 logger = logging.getLogger("scaffold.dag")
@@ -140,19 +141,30 @@ async def generate_dag(
     """
     uid = UUID(job_id)
 
-    # 1. Fetch job and its refined brief
+    # 1. Fetch job + refined brief + existing dag_nodes count under a row lock.
+    # FOR UPDATE serializes concurrent /dag calls on the same job_id so the
+    # status + node-count checks below are race-free with the INSERT block.
+    # Lock is released on commit/rollback at the end of this transaction.
     result = await db.execute(
-        text("SELECT status, refined_brief FROM jobs WHERE id = :id"),
+        text("""
+            SELECT j.status, j.refined_brief,
+                   (SELECT COUNT(*) FROM dag_nodes WHERE job_id = j.id) AS node_count
+            FROM jobs j
+            WHERE j.id = :id
+            FOR UPDATE OF j
+        """),
         {"id": uid},
     )
     row = result.first()
     if not row:
+        await db.rollback()
         return {"error": f"Job {job_id} not found"}
 
-    status, brief = row
+    status, brief, node_count = row
     # H6: accept 'planning' OR 'running' — execute_all_nodes flips to 'running'
     # before calling generate_dag on auto-gen path.
     if status not in ("planning", "running"):
+        await db.rollback()
         return {
             "error": "Job is not in an executable planning/running status",
             "job_id": job_id,
@@ -160,18 +172,14 @@ async def generate_dag(
             "http_status": 409,
         }
     if not brief:
+        await db.rollback()
         return {"error": "Job has no refined_brief — run idea refinement first"}
 
-    # 1b. Idempotency guard — reject if DAG already exists
-    existing = await db.execute(
-        text("SELECT COUNT(*) FROM dag_nodes WHERE job_id = :jid"),
-        {"jid": uid},
-    )
-    node_count = existing.scalar() or 0
-    if node_count > 0:
+    if (node_count or 0) > 0:
         logger.warning(
             "idempotency_rejected: job=%s existing_nodes=%d", job_id, node_count
         )
+        await db.rollback()
         return {
             "error": "DAG already exists for this job",
             "job_id": job_id,
@@ -633,13 +641,3 @@ def _map_node_type(task_type: str) -> str:
 
 
 
-async def _fail_job(db: AsyncSession, job_id: UUID, error: str) -> None:
-    await db.execute(
-        text("""
-            UPDATE jobs SET status = 'failed', error_summary = :error
-            WHERE id = :id
-        """),
-        {"error": error[:1000], "id": job_id},
-    )
-    await db.commit()
-    logger.error("dag_generation_failed: job=%s error=%s", job_id, error)
