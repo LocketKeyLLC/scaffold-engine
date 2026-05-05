@@ -106,27 +106,40 @@ async def _seed_baseline_if_established(db, applied: set[str]) -> None:
 
 
 def _has_own_transaction(sql: str) -> bool:
-    """True if the migration file already manages its own BEGIN/COMMIT.
+    """True if the migration file authors its own outer BEGIN/COMMIT.
 
-    asyncpg refuses BEGIN/COMMIT inside an outer transaction. Files that
-    self-manage (e.g., migration 013) must be executed at autocommit.
+    asyncpg refuses BEGIN/COMMIT inside an active transaction. The runner
+    always wraps applies in an outer SQLAlchemy transaction (with
+    per-migration SAVEPOINTs), so any author-supplied outer BEGIN/COMMIT
+    must be stripped before the body is executed.
     """
     import re
     return bool(re.search(r"^\s*BEGIN\s*;", sql, re.IGNORECASE | re.MULTILINE))
 
 
+def _strip_outer_transaction(sql: str) -> str:
+    """Strip the leading BEGIN; and trailing COMMIT; from a migration.
+
+    Atomicity is preserved by the per-migration SAVEPOINT opened by
+    ``_apply_one`` via ``db.begin_nested()``. Only the outermost pair is
+    stripped; nested BEGIN/COMMIT (none currently present) would still
+    fail — and should, because asyncpg can't run them mid-transaction.
+    """
+    import re
+    sql = re.sub(r"^\s*BEGIN\s*;", "", sql, count=1, flags=re.IGNORECASE | re.MULTILINE)
+    sql = re.sub(r"\s*COMMIT\s*;\s*\Z", "", sql, count=1, flags=re.IGNORECASE)
+    return sql
+
+
 async def _apply_one(db, path: Path) -> None:
-    """Apply a single migration + record it.
+    """Apply a single migration + record it inside a SAVEPOINT.
 
-    Uses ``exec_driver_sql`` for the migration body so asyncpg sends raw
-    SQL via ``execute()`` instead of a prepared statement — this is the
-    only path that accepts multiple semicolon-separated commands.
-    The tracking INSERT is parameterized as before.
-
-    Files containing their own ``BEGIN;``/``COMMIT;`` are executed at
-    autocommit; the tracking row is then recorded in a follow-up txn.
-    All other files run inside a single wrapping transaction so DDL +
-    tracking commit together.
+    The runner holds the outer SQLAlchemy transaction (and the advisory
+    lock) for the whole apply run. Each migration runs in a SAVEPOINT
+    (``db.begin_nested()``); on failure, only that migration's effects
+    roll back, the outer txn keeps successfully-applied migrations alive,
+    and the runner returns an error after which the outer commit
+    persists everything that did succeed.
     """
     sql = path.read_text()
     if not sql.strip():
@@ -134,30 +147,28 @@ async def _apply_one(db, path: Path) -> None:
         return
 
     if _has_own_transaction(sql):
-        # File controls its own transaction. Acquire a fresh raw asyncpg
-        # connection (no SQLAlchemy-managed txn) and run at autocommit,
-        # then record the tracking row in a separate transaction.
-        async with db.begin():
-            conn = await db.connection()
-            raw = await conn.get_raw_connection()
-            await raw.driver_connection.execute(sql)
-            await db.execute(
-                text("INSERT INTO schema_migrations (filename) VALUES (:f)"),
-                {"f": path.name},
-            )
-    else:
-        async with db.begin():
-            conn = await db.connection()
-            await conn.exec_driver_sql(sql)
-            await db.execute(
-                text("INSERT INTO schema_migrations (filename) VALUES (:f)"),
-                {"f": path.name},
-            )
+        sql = _strip_outer_transaction(sql)
+
+    async with db.begin_nested():
+        conn = await db.connection()
+        await conn.exec_driver_sql(sql)
+        await db.execute(
+            text("INSERT INTO schema_migrations (filename) VALUES (:f)"),
+            {"f": path.name},
+        )
     logger.info("migration_applied: file=%s", path.name)
 
 
 async def run_migrations() -> dict:
-    """Apply any unapplied migrations. Returns a summary dict."""
+    """Apply any unapplied migrations. Returns a summary dict.
+
+    Holds a single outer transaction across the entire run so the
+    transactional advisory lock is retained for the full apply loop —
+    concurrent runners block until the holder commits or rolls back.
+    Each migration runs in a SAVEPOINT so a single failure rolls back
+    only that migration; the outer commit then persists any earlier
+    successes.
+    """
     if not _MIGRATIONS_DIR.exists():
         logger.warning("migrations_dir_missing: path=%s", _MIGRATIONS_DIR)
         return {"status": "skipped", "reason": "dir_missing", "applied": []}
@@ -167,11 +178,8 @@ async def run_migrations() -> dict:
         return {"status": "ok", "applied": []}
 
     applied_this_run: list[str] = []
-    failed_file: str | None = None
 
     async with async_session() as db:
-        # Advisory lock scoped to this transaction; auto-released on commit
-        # or rollback. Serializes concurrent runner invocations.
         async with db.begin():
             await db.execute(
                 text("SELECT pg_advisory_xact_lock(:k)"),
@@ -184,22 +192,21 @@ async def run_migrations() -> dict:
 
             pending = [p for p in files if p.name not in already_applied]
 
-        for path in pending:
-            try:
-                await _apply_one(db, path)
-                applied_this_run.append(path.name)
-            except Exception as exc:
-                failed_file = path.name
-                logger.error(
-                    "migration_failed: file=%s error=%s",
-                    path.name, exc,
-                )
-                return {
-                    "status": "error",
-                    "error": str(exc),
-                    "failed_file": failed_file,
-                    "applied": applied_this_run,
-                }
+            for path in pending:
+                try:
+                    await _apply_one(db, path)
+                    applied_this_run.append(path.name)
+                except Exception as exc:
+                    logger.error(
+                        "migration_failed: file=%s error=%s",
+                        path.name, exc,
+                    )
+                    return {
+                        "status": "error",
+                        "error": str(exc),
+                        "failed_file": path.name,
+                        "applied": applied_this_run,
+                    }
 
     logger.info(
         "migrations_complete: applied_count=%d total_files=%d",
