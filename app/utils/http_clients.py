@@ -81,11 +81,30 @@ def _build_generic() -> httpx.AsyncClient:
     return client
 
 
+def _build_ollama() -> httpx.AsyncClient:
+    # Ollama dispatch: per-call timeout overrides the client default
+    # (model_router selects cloud_timeout vs local_timeout per request),
+    # so we set the client default to local_timeout as a safety net for
+    # any caller that forgets to pass an explicit timeout.
+    client = httpx.AsyncClient(
+        base_url=settings.ollama_base_url,
+        timeout=float(settings.local_timeout),
+        limits=httpx.Limits(
+            max_connections=20,
+            max_keepalive_connections=10,
+            keepalive_expiry=30,
+        ),
+    )
+    logger.info("Ollama client initialized: %s", settings.ollama_base_url)
+    return client
+
+
 def init_clients() -> None:
     """Eager-init all shared clients. Call once from app lifespan startup."""
     _get_or_create("searxng", _build_searxng)
     _get_or_create("github", _build_github)
     _get_or_create("generic", _build_generic)
+    _get_or_create("ollama", _build_ollama)
 
 
 def get_searxng_client() -> httpx.AsyncClient:
@@ -106,6 +125,13 @@ def get_generic_http_client() -> httpx.AsyncClient:
     client = _clients.get("generic")
     if client is None or client.is_closed:
         raise RuntimeError("Generic HTTP client not initialized; call init_clients() at startup")
+    return client
+
+
+def get_ollama_client() -> httpx.AsyncClient:
+    client = _clients.get("ollama")
+    if client is None or client.is_closed:
+        raise RuntimeError("Ollama client not initialized; call init_clients() at startup")
     return client
 
 

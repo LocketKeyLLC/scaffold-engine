@@ -22,30 +22,32 @@ from app.config import settings
 logger = logging.getLogger("scaffold.router")
 
 # ---------------------------------------------------------------------------
-# Persistent HTTP client for Ollama connection pooling
+# Ollama HTTP client — delegates to the shared pool in app.utils.http_clients
+# (initialized eagerly at app lifespan startup; closed by close_clients()).
 # ---------------------------------------------------------------------------
-_client: httpx.AsyncClient | None = None
 
 
 def _get_client() -> httpx.AsyncClient:
-    """Return the module-level AsyncClient, creating one if needed."""
-    global _client
-    if _client is None or _client.is_closed:
-        if _client is not None and _client.is_closed:
-            logger.warning("httpx_client_recreated: client was closed, creating new one")
-        _client = httpx.AsyncClient(
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-        )
-    return _client
+    """Return the shared Ollama AsyncClient.
+
+    Kept as a thin wrapper rather than importing ``get_ollama_client``
+    everywhere so existing tests that ``patch.object(model_router,
+    "_get_client", return_value=...)`` continue to work without
+    modification.
+    """
+    from app.utils.http_clients import get_ollama_client
+    return get_ollama_client()
 
 
 async def close_client() -> None:
-    """Shut down the persistent HTTP client."""
-    global _client
-    if _client is not None:
-        await _client.aclose()
-        _client = None
-        logger.info("httpx_client_closed")
+    """No-op retained for backward compatibility.
+
+    The Ollama client is owned by ``app.utils.http_clients`` and is
+    closed by its ``close_clients()`` shutdown hook. This function is
+    preserved so existing callers in main.py's lifespan don't break;
+    new code should rely on ``close_clients()`` directly.
+    """
+    return None
 
 # ---------------------------------------------------------------------------
 # Cloud model detection
