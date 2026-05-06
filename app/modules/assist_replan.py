@@ -256,5 +256,21 @@ async def maybe_replan(
             db=db, session_id=session_id, job_id=job_id,
             root_node_key=node_key, divergence=div,
         )
-    logger.warning("unknown_replan_policy policy=%r — skipping", policy)
-    return None
+    if policy == "disabled":
+        # Operator opted out of replan-on-divergence entirely — no-op
+        # but mark the divergence so it's still observable in audit.
+        await db.execute(
+            text("""
+                UPDATE assist_steps SET divergence = TRUE, updated_at = NOW()
+                 WHERE session_id = :sid AND node_key = :nk
+            """),
+            {"sid": session_id, "nk": node_key},
+        )
+        await db.commit()
+        return None
+    # The replan_policy column has a CHECK constraint (migration 023)
+    # restricting values to context_only/selective/full/disabled. Reaching
+    # here means the constraint was bypassed or the row pre-dates the
+    # constraint — fail loud so the data is reconciled rather than silently
+    # ignored.
+    raise ValueError(f"unknown replan_policy: {policy!r}")

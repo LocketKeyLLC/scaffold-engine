@@ -9,6 +9,7 @@ Extracts ground truths for a topic via:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import re
@@ -363,7 +364,12 @@ async def extract_ground_truths(
         queries = [topic, f"{topic} best practices", f"{topic} technical details"]
 
     all_results: list[dict] = []
-    for query in queries[:5]:
+    for i, query in enumerate(queries[:5]):
+        # Sleep between calls (mirror research_agent.py rate limiting). The
+        # first call doesn't need to wait — only inter-call gaps matter for
+        # not starving a shared SearXNG instance.
+        if i > 0:
+            await asyncio.sleep(settings.research_searxng_delay)
         results = await search_searxng(query)
         all_results.extend(results)
         logger.info("SearXNG: %d results for '%s'", len(results), query)

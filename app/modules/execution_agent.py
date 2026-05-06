@@ -252,8 +252,12 @@ Produce working code that solves the task. Nothing more."""
 
 
 def _system_for_tool(tool: str) -> str:
-    """Return the appropriate system prompt for a node tool type."""
-    return EXECUTION_SYSTEM_CODEGEN if tool == "CodeGen" else EXECUTION_SYSTEM_LLM
+    """Return the appropriate system prompt for a node tool type.
+
+    Case-insensitive: VALID_TOOLS uses ``"CodeGen"`` but a hand-edited
+    row carrying ``"codegen"`` should still get the codegen system prompt.
+    """
+    return EXECUTION_SYSTEM_CODEGEN if tool.lower() == "codegen" else EXECUTION_SYSTEM_LLM
 
 
 def _build_prompt(node: dict, brief: dict) -> str:
@@ -477,10 +481,15 @@ async def execute_next_node(
         node_key = node["node_key"]
         _raw_model = node.get("assigned_model", "")
         _assigned = _raw_model if _raw_model and str(_raw_model).lower() not in ("none", "null") else ""
+        # Tool comparisons are case-insensitive — VALID_TOOLS pins the
+        # canonical capitalization, but defensive matching here keeps the
+        # node's downstream behavior consistent if a DAG generator emits a
+        # lowercase variant or a hand-edited row carries one.
         tool = (node.get("tool") or "LLM").strip()
+        tool_lower = tool.lower()
 
         # CodeGen override — only when assigned_model is blank.
-        if tool == "CodeGen" and not _assigned:
+        if tool_lower == "codegen" and not _assigned:
             exec_model = get_model("model_coder", model_overrides)
         else:
             exec_model = _assigned or get_model("model_general", model_overrides)
@@ -534,12 +543,12 @@ async def execute_next_node(
     rag_query = f"{project_goal}: {title}" if project_goal else title
     job_domain = brief.get("domain") if brief else None
 
-    if tool == "Milvus":
+    if tool_lower == "milvus":
         rag_block = await _milvus_search(title, node_key=node_key, domain=node_snapshot.get("domain"))
         if rag_block:
             raw_prompt = f"{raw_prompt}\n\n## Knowledge Base Results\n{rag_block}"
             logger.info("milvus_context_injected: chars=%d node='%s'", len(rag_block), title)
-    elif tool == "SearXNG":
+    elif tool_lower == "searxng":
         search_results = await _searxng_search(title)
         raw_prompt = f"{raw_prompt}\n\n## Web Search Results\n{search_results}"
         logger.info("searxng_context_injected: chars=%d node='%s'", len(search_results), title)
