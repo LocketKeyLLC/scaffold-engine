@@ -1549,11 +1549,18 @@ class Pipeline:
         """
         keep = self.valves.keepalive_interval
         max_idle = max(300, 5 * keep)
+        # The read-timeout drives how often a silent server triggers a
+        # ReadTimeout and we emit a heartbeat. Tying it to ``keep`` keeps
+        # the heartbeat cadence honest: each ReadTimeout cycle covers
+        # exactly ``keep`` wall-clock seconds, so ``idle_seconds += keep``
+        # below counts real elapsed time. Lower bound 30s to avoid
+        # thrashing on tiny keep values.
+        read_timeout = max(30, keep)
 
         try:
             r = requests.post(
                 url, json=payload, headers=self._auth_headers(),
-                stream=True, timeout=(30, 120),
+                stream=True, timeout=(30, read_timeout),
             )
         except requests.exceptions.ConnectionError as e:
             event_queue.put(("error", f"cannot reach orchestrator: {e}", None)); return
@@ -1573,6 +1580,7 @@ class Pipeline:
         event_type = None
         data_buffer = ""
         idle_seconds = 0
+        malformed_lines = 0  # SSE lines we don't recognize (no event: / data: prefix)
 
         try:
             while True:
@@ -1594,9 +1602,23 @@ class Pipeline:
                         elif line.startswith("data:"):
                             # SSE spec: multi-line data fields join with newline.
                             data_buffer += ("\n" if data_buffer else "") + line[5:].lstrip()
+                        elif line.startswith(":"):
+                            # SSE comment frames (e.g. ": keepalive") — ignore.
+                            pass
+                        else:
+                            malformed_lines += 1
                     # Iterator exhausted — server closed cleanly
                     if event_type and data_buffer:
                         event_queue.put(("event", event_type, data_buffer))
+                    if malformed_lines:
+                        # Surface to operator logs (not user UX). A non-zero
+                        # count signals an upstream SSE producer that's not
+                        # framing per spec (event:/data:/comment).
+                        print(  # noqa: T201
+                            f"[scaffold_router] SSE: dropped "
+                            f"{malformed_lines} unrecognized line(s) from {url}",
+                            flush=True,
+                        )
                     event_queue.put(("done", None, None))
                     return
                 except requests.exceptions.ReadTimeout:
