@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help
+.PHONY: test agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help bootstrap doctor
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -28,6 +28,16 @@ ci: ## Run CI-safe tests (no live Ollama/Milvus needed)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v \
 		--ignore=tests/eval_retrieval.py \
 		-m "not validate"
+
+## ──────────────────────────────────────────────
+## Setup
+## ──────────────────────────────────────────────
+
+bootstrap: ## First-time setup: generate .env, create network/volumes, build + start stack
+	@bash scripts/bootstrap.sh $(BOOTSTRAP_ARGS)
+
+doctor: ## Health audit: probe every dep + verify key sync (read-only)
+	@bash scripts/doctor.sh
 
 ## ──────────────────────────────────────────────
 ## Build & Ops
