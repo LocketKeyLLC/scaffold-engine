@@ -88,15 +88,23 @@ def _apply_env_fallbacks(pipeline_id: str, valves) -> bool:
                 saved = {}
     except Exception:
         saved = {}
+    env_override = _vp_os.getenv("SCAFFOLD_VALVES_ENV_OVERRIDE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
     changed = False
     for valve_name, env_name in _VP_ENV_MAP.items():
         current = getattr(valves, valve_name, None)
-        if isinstance(current, str) and not current:
-            env_val = _vp_os.getenv(env_name, "")
-            if env_val:
-                setattr(valves, valve_name, env_val)
-                changed = True
-                print(f"[{pipeline_id}] Valve {valve_name!r} loaded from {env_name}.", flush=True)
+        env_val = _vp_os.getenv(env_name, "")
+        if not isinstance(current, str):
+            continue
+        if not current and env_val:
+            setattr(valves, valve_name, env_val)
+            changed = True
+            print(f"[{pipeline_id}] Valve {valve_name!r} loaded from {env_name}.", flush=True)
+        elif env_override and env_val and current != env_val:
+            setattr(valves, valve_name, env_val)
+            changed = True
+            print(f"[{pipeline_id}] Valve {valve_name!r} OVERRIDE from {env_name} (env > valve precedence).", flush=True)
     for valve_name, env_name in _VP_ENV_INT_MAP.items():
         if valve_name in saved:
             continue
@@ -109,11 +117,12 @@ def _apply_env_fallbacks(pipeline_id: str, valves) -> bool:
             print(f"[{pipeline_id}] Valve {valve_name!r} loaded from {env_name} (int).", flush=True)
         except (ValueError, TypeError):
             print(f"[{pipeline_id}] {env_name}={env_val!r} is not an int; ignoring.", flush=True)
+    # In env_override mode env already won above, so drift is resolved — no warning, no flag.
     saved_key = saved.get("api_key", "")
     env_key = _vp_os.getenv("SCAFFOLD_API_KEY", "")
-    drift_detected = bool(saved_key and env_key and saved_key != env_key)
+    drift_detected = bool(saved_key and env_key and saved_key != env_key) and not env_override
     if drift_detected:
-        print(f"[{pipeline_id}] WARNING: api_key in valves.json differs from SCAFFOLD_API_KEY env. Using valves.json value.", flush=True)
+        print(f"[{pipeline_id}] WARNING: api_key in valves.json differs from SCAFFOLD_API_KEY env. Using valves.json value. (Set SCAFFOLD_VALVES_ENV_OVERRIDE=true to make env win.)", flush=True)
     if changed:
         try:
             here = _vp_os.path.dirname(_vp_os.path.abspath(__file__))

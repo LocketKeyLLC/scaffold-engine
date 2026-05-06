@@ -35,6 +35,10 @@ services:
       - SCAFFOLD_API_KEY=${SCAFFOLD_API_KEY:?SCAFFOLD_API_KEY is required}
       - SCAFFOLD_ORCHESTRATOR_URL=${SCAFFOLD_ORCHESTRATOR_URL:-http://scaffold-orchestrator:8000}
       - SCAFFOLD_OLLAMA_URL=${SCAFFOLD_OLLAMA_URL:-http://172.18.0.1:11434}
+      # When true, .env beats valves.json for managed string fields
+      # (api_key, orchestrator_url, ollama_url) — eliminates rotation
+      # drift. Default false preserves OWUI valve UI as source of truth.
+      - SCAFFOLD_VALVES_ENV_OVERRIDE=${SCAFFOLD_VALVES_ENV_OVERRIDE:-false}
     env_file:
       - .env
     volumes:

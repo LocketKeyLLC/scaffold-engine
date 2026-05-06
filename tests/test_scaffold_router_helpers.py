@@ -431,6 +431,49 @@ class TestEnvFallbacks:
 
 
 @pytest.mark.smoke
+class TestEnvOverridePrecedence:
+    """SCAFFOLD_VALVES_ENV_OVERRIDE: when true, env beats non-empty valve."""
+
+    def test_override_true_env_beats_valve(self, pipe, monkeypatch):
+        monkeypatch.setenv("SCAFFOLD_VALVES_ENV_OVERRIDE", "true")
+        monkeypatch.setenv("SCAFFOLD_API_KEY", "sk-from-env")
+        pipe.valves.api_key = "sk-stale-from-valve"
+        pipe._apply_env_fallbacks()
+        assert pipe.valves.api_key == "sk-from-env"
+
+    def test_override_unset_keeps_valve(self, pipe, monkeypatch):
+        """Default (override unset): non-empty valve wins. Backward-compat guard."""
+        monkeypatch.delenv("SCAFFOLD_VALVES_ENV_OVERRIDE", raising=False)
+        monkeypatch.setenv("SCAFFOLD_API_KEY", "sk-from-env")
+        pipe.valves.api_key = "sk-from-valve"
+        pipe._apply_env_fallbacks()
+        assert pipe.valves.api_key == "sk-from-valve"
+
+    def test_override_false_keeps_valve(self, pipe, monkeypatch):
+        monkeypatch.setenv("SCAFFOLD_VALVES_ENV_OVERRIDE", "false")
+        monkeypatch.setenv("SCAFFOLD_API_KEY", "sk-from-env")
+        pipe.valves.api_key = "sk-from-valve"
+        pipe._apply_env_fallbacks()
+        assert pipe.valves.api_key == "sk-from-valve"
+
+    def test_override_url_too(self, pipe, monkeypatch):
+        """Override mode covers all managed string valves, not just api_key."""
+        monkeypatch.setenv("SCAFFOLD_VALVES_ENV_OVERRIDE", "1")
+        monkeypatch.setenv("SCAFFOLD_ORCHESTRATOR_URL", "http://prod:8000")
+        pipe.valves.orchestrator_url = "http://stale:8000"
+        pipe._apply_env_fallbacks()
+        assert pipe.valves.orchestrator_url == "http://prod:8000"
+
+    def test_override_with_empty_env_keeps_valve(self, pipe, monkeypatch):
+        """Override only fires when env_val is non-empty; empty env != force-clear."""
+        monkeypatch.setenv("SCAFFOLD_VALVES_ENV_OVERRIDE", "true")
+        monkeypatch.delenv("SCAFFOLD_API_KEY", raising=False)
+        pipe.valves.api_key = "sk-from-valve"
+        pipe._apply_env_fallbacks()
+        assert pipe.valves.api_key == "sk-from-valve"
+
+
+@pytest.mark.smoke
 class TestBootstrapValves:
     """_bootstrap_valves_from_template: seed empty valves.json from template."""
 

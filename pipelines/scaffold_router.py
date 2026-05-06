@@ -453,11 +453,18 @@ class Pipeline:
         we look up the matching SCAFFOLD_* env var as a fallback so
         a wiped/regenerated valves.json does not block the pipeline.
 
+        Precedence (default): valve > env > default. Setting the env
+        var ``SCAFFOLD_VALVES_ENV_OVERRIDE`` to a truthy value (1/true/
+        yes/on) flips the precedence to env > valve for the managed
+        string fields (api_key, orchestrator_url, ollama_url). This is
+        the recommended setting for prod: ``.env`` becomes the single
+        source of truth for these and rotation drift is impossible.
+
         Int valves (timeouts) take env override only if the field was
         not present in valves.json at all — i.e. the user has not
-        explicitly configured it via the OWUI valve UI. This preserves
-        the valve > env > default priority order documented in
-        ARCHITECTURE.md.
+        explicitly configured it via the OWUI valve UI. ENV_OVERRIDE
+        does not apply to int valves (timeouts are tunable per-pipeline
+        via the OWUI UI; we don't want a single env to clobber that).
 
         Env var naming: api_key -> SCAFFOLD_API_KEY, ollama_url ->
         SCAFFOLD_OLLAMA_URL, etc.
@@ -472,6 +479,9 @@ class Pipeline:
             "stream_timeout": "SCAFFOLD_STREAM_TIMEOUT",
             "triage_timeout": "SCAFFOLD_TRIAGE_TIMEOUT",
         }
+        env_override = os.getenv("SCAFFOLD_VALVES_ENV_OVERRIDE", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
         # Read live valves.json to distinguish "user-set default" from
         # "field absent" for int valves.
         here = os.path.dirname(os.path.abspath(__file__))
@@ -486,14 +496,21 @@ class Pipeline:
             saved = {}
         for valve_name, env_name in env_map.items():
             current = getattr(self.valves, valve_name, None)
-            if isinstance(current, str) and not current:
-                env_val = os.getenv(env_name, "")
-                if env_val:
-                    setattr(self.valves, valve_name, env_val)
-                    print(  # noqa: T201
-                        f"[scaffold_router] Valve {valve_name!r} empty; "
-                        f"loaded from {env_name}."
-                    )
+            env_val = os.getenv(env_name, "")
+            if not isinstance(current, str):
+                continue
+            if not current and env_val:
+                setattr(self.valves, valve_name, env_val)
+                print(  # noqa: T201
+                    f"[scaffold_router] Valve {valve_name!r} empty; "
+                    f"loaded from {env_name}."
+                )
+            elif env_override and env_val and current != env_val:
+                setattr(self.valves, valve_name, env_val)
+                print(  # noqa: T201
+                    f"[scaffold_router] Valve {valve_name!r} OVERRIDE "
+                    f"from {env_name} (env > valve precedence)."
+                )
         for valve_name, env_name in env_int_map.items():
             if valve_name in saved:
                 continue
@@ -513,12 +530,15 @@ class Pipeline:
         # Drift warning: api_key in valves.json differs from env. The
         # print is captured in container logs (ops surface); set the
         # flag so user-facing 401s can include a UX hint as well.
+        # In env_override mode, env already won above so drift is
+        # already resolved — no warning, no flag.
         saved_key = saved.get("api_key", "")
         env_key = os.getenv("SCAFFOLD_API_KEY", "")
-        if saved_key and env_key and saved_key != env_key:
+        if saved_key and env_key and saved_key != env_key and not env_override:
             print(  # noqa: T201
                 "[scaffold_router] WARNING: api_key in valves.json differs "
-                "from SCAFFOLD_API_KEY env. Using valves.json value."
+                "from SCAFFOLD_API_KEY env. Using valves.json value. "
+                "(Set SCAFFOLD_VALVES_ENV_OVERRIDE=true to make env win.)"
             )
             self._api_key_drift_detected = True
         else:
