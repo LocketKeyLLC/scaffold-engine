@@ -72,11 +72,17 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
 
 
 def _classify_error(exc: Exception) -> str:
-    """Map exception type to error_type enum value."""
+    """Map exception type to error_type enum value.
+
+    ValueError and KeyError typically reflect bad user input or missing
+    expected keys at boundaries; TypeError is almost always a programmer
+    error (wrong arg count / type), so it joins the unrecoverable bucket
+    rather than being misreported as user-validation noise.
+    """
     if isinstance(exc, httpx.TimeoutException):
         return "timeout"
     if isinstance(exc, httpx.HTTPError):
         return "transient"
-    if isinstance(exc, (ValueError, TypeError, KeyError)):
+    if isinstance(exc, (ValueError, KeyError)):
         return "validation"
     return "unrecoverable"

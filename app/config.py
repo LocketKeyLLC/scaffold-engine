@@ -200,8 +200,12 @@ class Settings(BaseSettings):
     execution_global_retry_cap: int = Field(default=20, ge=0, le=1000)
     sse_keepalive_seconds: float = Field(default=15.0, ge=1.0, le=300.0)
 
-    # Logging
+    # Logging — all three values were previously read directly via
+    # ``os.getenv`` in app/main.py; centralizing here so logging config
+    # flows through the same Settings layer as everything else.
     log_level: str = "info"
+    log_json_format: bool = True
+    log_file: str | None = None
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

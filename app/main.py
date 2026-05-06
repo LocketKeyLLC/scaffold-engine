@@ -71,9 +71,9 @@ logger = logging.getLogger("scaffold")
 templates = Jinja2Templates(directory="app/templates")
 
 setup_logging(
-    json_logs=os.getenv("LOG_JSON_FORMAT", "true").lower() == "true",
-    log_level=os.getenv("LOG_LEVEL", settings.log_level),
-    log_file=os.getenv("LOG_FILE"),
+    json_logs=settings.log_json_format,
+    log_level=settings.log_level,
+    log_file=settings.log_file,
 )
 
 
@@ -235,10 +235,11 @@ async def health():
     async def _check_ollama():
         t0 = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.get(f"{settings.ollama_base_url}/api/tags")
-                resp.raise_for_status()
-                models = [m["name"] for m in resp.json().get("models", [])]
+            from app.utils.http_clients import get_ollama_client
+            client = get_ollama_client()
+            resp = await client.get(f"{settings.ollama_base_url}/api/tags", timeout=5.0)
+            resp.raise_for_status()
+            models = [m["name"] for m in resp.json().get("models", [])]
             return {"status": "up", "latency_ms": round((time.monotonic() - t0) * 1000), "models_loaded": models}
         except Exception:
             return {"status": "down", "latency_ms": round((time.monotonic() - t0) * 1000), "models_loaded": []}
@@ -271,8 +272,21 @@ async def health():
                 "entry_count": 0,
             }
 
-    pg, ollama, milvus = await asyncio.gather(
-        _check_pg(), _check_ollama(), _check_milvus(),
+    async def _check_redis():
+        cache_stats: dict = {}
+        try:
+            from app.utils.embedding_cache import get_cache
+            cache = get_cache()
+            cache_stats = cache.stats
+            redis_conn = await cache._get_redis()
+            await asyncio.wait_for(redis_conn.ping(), timeout=2.0)
+            key_count = await asyncio.wait_for(redis_conn.dbsize(), timeout=2.0)
+            return {"status": "up", "keys": key_count}, cache_stats
+        except Exception:
+            return {"status": "down", "keys": 0}, cache_stats
+
+    pg, ollama, milvus, redis_pair = await asyncio.gather(
+        _check_pg(), _check_ollama(), _check_milvus(), _check_redis(),
         return_exceptions=True,
     )
     if isinstance(pg, Exception):
@@ -281,19 +295,10 @@ async def health():
         ollama = {"status": "down", "latency_ms": 0, "models_loaded": []}
     if isinstance(milvus, Exception):
         milvus = {"status": "down", "latency_ms": 0, "collection_count": 0, "entry_count": 0}
-
-    # Redis + cache stats (reuse async connection from embedding cache)
-    cache_stats: dict = {}
-    try:
-        from app.utils.embedding_cache import get_cache
-        _cache = get_cache()
-        cache_stats = _cache.stats
-        _redis_conn = await _cache._get_redis()
-        await asyncio.wait_for(_redis_conn.ping(), timeout=2.0)
-        _key_count = await asyncio.wait_for(_redis_conn.dbsize(), timeout=2.0)
-        redis_info = {"status": "up", "keys": _key_count}
-    except Exception:
-        redis_info = {"status": "down", "keys": 0}
+    if isinstance(redis_pair, Exception):
+        redis_info, cache_stats = {"status": "down", "keys": 0}, {}
+    else:
+        redis_info, cache_stats = redis_pair
     checks = {"postgresql": pg, "ollama": ollama, "milvus": milvus, "redis": redis_info, "embedding_cache": cache_stats}
     pg_up = pg["status"] == "up"
     ollama_up = ollama["status"] == "up"

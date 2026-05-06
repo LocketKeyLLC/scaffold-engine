@@ -15,6 +15,7 @@ import time
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.responses import StreamingResponse
 from sqlalchemy import text
 
 from app.database import async_session
@@ -64,7 +65,11 @@ class PerformanceMiddleware(BaseHTTPMiddleware):
             request.method, path,
             response.status_code, elapsed_ms, elapsed_s,
         )
-        response.headers["X-Request-Duration-Ms"] = str(elapsed_ms)
+        # Streaming responses have already emitted headers when call_next
+        # returns; mutating ``response.headers`` here is a silent no-op for
+        # the wire. Skip the header set so the intent is clear.
+        if not isinstance(response, StreamingResponse):
+            response.headers["X-Request-Duration-Ms"] = str(elapsed_ms)
         return response
 
 

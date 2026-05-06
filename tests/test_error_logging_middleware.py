@@ -39,15 +39,21 @@ def test_classify_http_error_returns_transient():
 
 @pytest.mark.parametrize("exc", [
     ValueError("bad input"),
-    TypeError("wrong type"),
     KeyError("missing"),
 ])
 def test_classify_validation_family(exc):
+    """ValueError + KeyError typically reflect bad user input."""
     assert _classify_error(exc) == "validation"
 
 
-def test_classify_unknown_returns_unrecoverable():
-    assert _classify_error(RuntimeError("???")) == "unrecoverable"
+@pytest.mark.parametrize("exc", [
+    TypeError("wrong type"),
+    RuntimeError("???"),
+])
+def test_classify_unknown_returns_unrecoverable(exc):
+    """TypeError joins the unrecoverable bucket — almost always programmer
+    error (wrong arg count / type), not user-validation noise."""
+    assert _classify_error(exc) == "unrecoverable"
 
 
 # ---------- middleware integration tests ----------
