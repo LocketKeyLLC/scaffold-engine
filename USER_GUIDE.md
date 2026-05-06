@@ -10,8 +10,9 @@ A beginner-friendly reference for using Scaffold Engine through Open WebUI.
 
 **First-time install (fresh clone):**
 1. `make bootstrap` — generates `.env`, creates the docker network + volumes, builds and starts every container. Takes 5–10 min on first run.
-2. `make doctor` — verifies every dependency. Re-run anytime something looks off.
-3. Open the Open WebUI chat at **http://localhost:3000** and create your admin account.
+2. `make init` *(optional)* — interactive wizard to pick a provider per role (default Ollama) and collect API keys for cloud providers. Skip if you only use local Ollama.
+3. `make doctor` — verifies every dependency. Re-run anytime something looks off.
+4. Open the Open WebUI chat at **http://localhost:3000** and create your admin account.
 
 **Day-to-day:**
 1. Open **http://localhost:3000**.
@@ -19,6 +20,28 @@ A beginner-friendly reference for using Scaffold Engine through Open WebUI.
 3. Start a new chat and type a message. That's it — you're in.
 
 If a command fails with `401 Unauthorized`, the pipeline lost its API key. With `SCAFFOLD_VALVES_ENV_OVERRIDE=true` in `.env` (the bootstrap default) just `docker compose up -d` to refresh; otherwise `docker restart open-webui-pipelines` and check `make doctor` for drift.
+
+---
+
+## Configuration: `.env` is the single source of truth
+
+Everything Scaffold Engine reads at runtime — secrets, API keys, per-role provider routing, timeouts — comes from **`.env`** in the repo root. Containers inherit it via docker-compose; pipelines read it through env-fallback when `SCAFFOLD_VALVES_ENV_OVERRIDE=true` (the bootstrap default).
+
+**To change configuration:**
+
+| Goal | Command |
+|---|---|
+| Pick which provider serves which role (Ollama / OpenAI / OpenAI-compatible) | `make init` |
+| Generate / rotate API keys + secrets from scratch | `make bootstrap --force` |
+| Wipe stale baked-in `api_key` values in `pipelines/*/valves.json` | `make sync-valves` |
+| Verify everything matches | `make doctor` |
+| Apply a `.env` change to the running stack | `make restart` |
+
+**Per-role provider routing.** Each model role (`MODEL_GENERAL`, `MODEL_VERIFIER`, …) has a corresponding `MODEL_<ROLE>_PROVIDER` setting. Default is `ollama`; set to `openai` to route that role through `OPENAI_API_KEY` + `OPENAI_BASE_URL`. The reranker is config-locked and stays out of the provider system.
+
+**OpenAI-compatible endpoints.** `OPENAI_BASE_URL` defaults to `https://api.openai.com/v1` but can point at vLLM, LocalAI, Ollama-OpenAI-mode, or any compatible server — one provider implementation, many backends.
+
+**Friendly errors.** When a role-routed call fails, the error is enriched with `[role=<role> provider=<provider>]` and a remediation hint (rotate key, raise timeout, switch provider, etc.) — so the message you see in `make doctor`, the orchestrator logs, or an OWUI failure response tells you exactly what to fix.
 
 ---
 

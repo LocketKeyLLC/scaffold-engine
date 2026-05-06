@@ -237,6 +237,66 @@ def _reject_role_model_collision(role: str | None, model: str | None) -> None:
         )
 
 
+def _format_provider_error(resp: ModelResponse, role: str) -> str:
+    """Sprint G.1 — enrich a failed ModelResponse with role + provider
+    context + a remediation hint matching the failure shape.
+
+    The enriched string format is::
+
+        [role=<role> provider=<provider>] <original error> — <hint>
+
+    so that downstream consumers (job error_summary, OWUI SSE, logs) all
+    inherit the same actionable text. Patterns recognized: 401 / 403 /
+    404 / 429 / Timeout. Anything else just gets the structured prefix
+    so users still see which role/provider failed.
+    """
+    base = (resp.error or "unknown error").strip()
+    provider = resp.provider or "unknown"
+    role_env = role.upper()
+
+    hint = ""
+    lower = base.lower()
+    if "401" in base or "unauthorized" in lower:
+        if provider == "openai":
+            hint = (
+                " — OPENAI_API_KEY rejected. Rotate at "
+                "https://platform.openai.com/api-keys, update .env, "
+                "and run 'make doctor' to verify."
+            )
+        elif provider == "ollama":
+            hint = " — Ollama doesn't use auth; check OLLAMA_BASE_URL is reachable."
+        else:
+            hint = f" — rotate the {provider} API key in .env."
+    elif "403" in base or "forbidden" in lower:
+        hint = (
+            f" — key lacks access. Check {provider} account permissions "
+            f"and OPENAI_BASE_URL if pointing at a custom endpoint."
+        )
+    elif "404" in base or "not found" in lower or "no such model" in lower:
+        hint = (
+            f" — model unavailable on this provider. Set MODEL_{role_env} "
+            f"in .env to a tag the provider serves "
+            f"(see provider's /models endpoint)."
+        )
+    elif "429" in base or "rate limit" in lower or "quota" in lower:
+        hint = (
+            f" — {provider} rate-limit or quota exceeded. Back off, "
+            f"or switch MODEL_{role_env}_PROVIDER to a different backend."
+        )
+    elif "timeout" in lower:
+        if provider == "openai":
+            hint = " — call exceeded OPENAI_TIMEOUT. Raise it in .env (or shrink the prompt)."
+        elif provider == "ollama":
+            hint = (
+                " — Ollama call exceeded its timeout. Raise CLOUD_TIMEOUT "
+                "(for cloud-suffixed models) or LOCAL_TIMEOUT in .env."
+            )
+        else:
+            hint = f" — {provider} call timed out. Raise the provider's timeout setting."
+
+    return f"[role={role} provider={provider}] {base}{hint}"
+
+
 async def generate(
     prompt: str,
     model: str | None = None,
@@ -257,11 +317,14 @@ async def generate(
     _reject_role_model_collision(role, model)
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
-        return await provider.generate(
+        resp = await provider.generate(
             resolved_model, prompt,
             system=system, temperature=temperature, max_tokens=max_tokens,
             fallback=fallback,
         )
+        if not resp.success:
+            resp.error = _format_provider_error(resp, role)
+        return resp
 
     model = model or settings.model_general
     payload: dict[str, Any] = {
@@ -289,11 +352,14 @@ async def chat(
     _reject_role_model_collision(role, model)
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
-        return await provider.chat_completion(
+        resp = await provider.chat_completion(
             resolved_model, messages,
             temperature=temperature, max_tokens=max_tokens,
             fallback=fallback,
         )
+        if not resp.success:
+            resp.error = _format_provider_error(resp, role)
+        return resp
 
     model = model or settings.model_general
     payload: dict[str, Any] = {

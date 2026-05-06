@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help bootstrap doctor
+.PHONY: test agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help bootstrap doctor init sync-valves
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -38,6 +38,12 @@ bootstrap: ## First-time setup: generate .env, create network/volumes, build + s
 
 doctor: ## Health audit: probe every dep + verify key sync (read-only)
 	@bash scripts/doctor.sh
+
+init: ## Provider/model wizard: pick per-role provider + collect API keys, update .env
+	@bash scripts/init.sh
+
+sync-valves: ## Wipe baked-in api_key from pipelines/*/valves.json (.env becomes single source)
+	@bash scripts/sync_valves.sh
 
 ## ──────────────────────────────────────────────
 ## Build & Ops

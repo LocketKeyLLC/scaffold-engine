@@ -410,3 +410,154 @@ async def test_legacy_model_arg_still_works():
     assert resp.text == "legacy"
     args, _ = fake.call_args
     assert args[2] == "qwen"
+
+
+# ---------------------------------------------------------------------------
+# Sprint G.1 — provider-aware error enrichment
+# ---------------------------------------------------------------------------
+def _err_resp(error: str, provider: str = "openai") -> "model_router.ModelResponse":
+    return model_router.ModelResponse(
+        model="gpt-4o-mini", success=False, error=error, provider=provider,
+    )
+
+
+@pytest.mark.smoke
+def test_format_provider_error_401_openai_includes_rotation_hint():
+    out = model_router._format_provider_error(
+        _err_resp("HTTP 401: Incorrect API key"), "model_general",
+    )
+    assert "[role=model_general provider=openai]" in out
+    assert "HTTP 401: Incorrect API key" in out
+    assert "OPENAI_API_KEY" in out
+    assert "make doctor" in out
+
+
+@pytest.mark.smoke
+def test_format_provider_error_401_ollama_does_not_suggest_key_rotation():
+    """Ollama doesn't use auth — a 401 means the proxy/base URL is misconfigured,
+    not a missing key. Hint must reflect that."""
+    out = model_router._format_provider_error(
+        _err_resp("HTTP 401: Unauthorized", provider="ollama"), "model_general",
+    )
+    assert "OLLAMA_BASE_URL" in out
+    assert "rotate" not in out.lower() or "doesn't use auth" in out
+
+
+@pytest.mark.smoke
+def test_format_provider_error_404_model_not_found_names_setting():
+    out = model_router._format_provider_error(
+        _err_resp("HTTP 404: model `gpt-9` not found"), "model_general",
+    )
+    assert "MODEL_GENERAL" in out
+    assert "404" in out
+
+
+@pytest.mark.smoke
+def test_format_provider_error_429_suggests_provider_swap():
+    out = model_router._format_provider_error(
+        _err_resp("HTTP 429: rate_limit_exceeded"), "model_verifier",
+    )
+    assert "MODEL_VERIFIER_PROVIDER" in out
+    assert "rate-limit" in out.lower() or "quota" in out.lower()
+
+
+@pytest.mark.smoke
+def test_format_provider_error_timeout_openai_names_openai_timeout():
+    out = model_router._format_provider_error(
+        _err_resp("Timeout after 600s", provider="openai"), "model_general",
+    )
+    assert "OPENAI_TIMEOUT" in out
+
+
+@pytest.mark.smoke
+def test_format_provider_error_timeout_ollama_names_cloud_or_local_timeout():
+    out = model_router._format_provider_error(
+        _err_resp("Timeout after 1800s", provider="ollama"), "model_general",
+    )
+    assert "CLOUD_TIMEOUT" in out
+    assert "LOCAL_TIMEOUT" in out
+
+
+@pytest.mark.smoke
+def test_format_provider_error_unknown_pattern_still_has_prefix():
+    """Even unmatched errors must carry the role/provider prefix so the
+    user knows which call failed."""
+    out = model_router._format_provider_error(
+        _err_resp("something weird went wrong"), "model_coder",
+    )
+    assert "[role=model_coder provider=openai]" in out
+    assert "something weird" in out
+
+
+@pytest.mark.smoke
+def test_format_provider_error_handles_empty_error():
+    """Defensive: a None/empty resp.error must not crash; fallback to
+    'unknown error' so the prefix and hint pipeline still renders."""
+    resp = model_router.ModelResponse(
+        model="m", success=False, error=None, provider="openai",
+    )
+    out = model_router._format_provider_error(resp, "model_general")
+    assert "[role=model_general provider=openai]" in out
+    assert "unknown error" in out
+
+
+@pytest.mark.asyncio
+async def test_generate_role_path_enriches_error_on_failure():
+    """End-to-end: when role= is set and the provider returns success=False,
+    model_router.generate must return a response whose .error is enriched."""
+    fake = AsyncMock(return_value=model_router.ModelResponse(
+        model="m", success=False, error="HTTP 401: invalid api key",
+        provider="ollama",
+    ))
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        resp = await model_router.generate("hi", role="model_general")
+    assert resp.success is False
+    assert "[role=model_general provider=ollama]" in resp.error
+    assert "HTTP 401: invalid api key" in resp.error
+
+
+@pytest.mark.asyncio
+async def test_chat_role_path_enriches_error_on_failure():
+    fake = AsyncMock(return_value=model_router.ModelResponse(
+        model="m", success=False, error="Timeout after 300s",
+        provider="ollama",
+    ))
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        resp = await model_router.chat(
+            [{"role": "user", "content": "x"}], role="model_verifier",
+        )
+    assert resp.success is False
+    assert "[role=model_verifier provider=ollama]" in resp.error
+    # Ollama timeout hint mentions both timeout settings since the router
+    # picks based on cloud-vs-local at dispatch time.
+    assert "CLOUD_TIMEOUT" in resp.error
+    assert "LOCAL_TIMEOUT" in resp.error
+
+
+@pytest.mark.asyncio
+async def test_legacy_model_path_does_not_enrich_error():
+    """Legacy model= path has no role context, so enrichment must NOT fire —
+    the raw upstream error stays as-is for backwards compatibility with
+    existing log parsers and tests."""
+    fake = AsyncMock(return_value=model_router.ModelResponse(
+        model="qwen", success=False, error="HTTP 500: oops", provider="ollama",
+    ))
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        resp = await model_router.generate("p", model="qwen")
+    assert resp.error == "HTTP 500: oops"
+    assert "[role=" not in resp.error
+
+
+@pytest.mark.asyncio
+async def test_role_path_does_not_enrich_on_success():
+    """Successful responses must NOT be touched — only failures get the
+    enrichment so users don't see a confusing prefix on every reply."""
+    ok = model_router.ModelResponse(
+        text="hi", model="m", success=True, provider="ollama",
+    )
+    fake = AsyncMock(return_value=ok)
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        resp = await model_router.generate("p", role="model_general")
+    assert resp.success is True
+    assert resp.error is None
+    assert resp.text == "hi"
