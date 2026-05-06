@@ -243,12 +243,25 @@ async def remove_schedule(schedule_id: int) -> None:
     touching ``scheduled_jobs`` (e.g. test fixtures). End-user delete flow
     should use :func:`delete_schedule` for symmetric DB+APScheduler
     semantics.
+
+    Distinguishes the two no-op cases at the log layer so failures are
+    easier to diagnose: "scheduler not initialized" vs "job not currently
+    registered".
     """
     if _scheduler is None:
+        logger.debug(
+            'event="remove_schedule_noop" reason="scheduler_not_initialized" '
+            'schedule_id=%s', schedule_id,
+        )
         return
     job_id = f"schedule_{schedule_id}"
     if _scheduler.get_job(job_id):
         _scheduler.remove_job(job_id)
+    else:
+        logger.debug(
+            'event="remove_schedule_noop" reason="job_not_registered" '
+            'schedule_id=%s', schedule_id,
+        )
 
 
 async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> None:
