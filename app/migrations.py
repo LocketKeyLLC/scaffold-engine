@@ -141,7 +141,10 @@ async def _apply_one(db, path: Path) -> None:
     and the runner returns an error after which the outer commit
     persists everything that did succeed.
     """
-    sql = path.read_text()
+    # path.read_text is sync I/O; offload so a slow disk doesn't block the
+    # event loop while the advisory lock is held.
+    loop = asyncio.get_running_loop()
+    sql = await loop.run_in_executor(None, path.read_text)
     if not sql.strip():
         logger.warning("migration_empty_skipped: file=%s", path.name)
         return
