@@ -117,7 +117,40 @@ else
     warn "Ollama not reachable — install Ollama or set MODEL_*_PROVIDER to a cloud provider"
 fi
 
-# ---- 6. API-key sync between .env and orchestrator container --------
+# ---- 6. OpenAI provider (if configured) -----------------------------
+hdr "OpenAI provider"
+
+if [[ -f "$ENV_FILE" ]]; then
+    OPENAI_KEY="$(grep -E '^OPENAI_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+    OPENAI_URL="$(grep -E '^OPENAI_BASE_URL=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '"')"
+    OPENAI_URL="${OPENAI_URL:-https://api.openai.com/v1}"
+
+    OPENAI_BOUND_ROLES="$(grep -E '^MODEL_[A-Z_]+_PROVIDER=openai' "$ENV_FILE" | sed -E 's/^(MODEL_[A-Z_]+_PROVIDER)=.*/\1/' || true)"
+
+    if [[ -z "${OPENAI_KEY:-}" ]] && [[ -z "$OPENAI_BOUND_ROLES" ]]; then
+        info "OPENAI_API_KEY empty; no role bound to 'openai' — provider unused (OK)"
+    elif [[ -z "${OPENAI_KEY:-}" ]] && [[ -n "$OPENAI_BOUND_ROLES" ]]; then
+        fail "MODEL_*_PROVIDER=openai is set for: $(echo $OPENAI_BOUND_ROLES | tr '\n' ' ') but OPENAI_API_KEY is empty"
+    else
+        # Probe /models — read-only, ~150ms when reachable
+        HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+            -H "Authorization: Bearer $OPENAI_KEY" \
+            "${OPENAI_URL%/}/models" 2>/dev/null || echo 000)"
+        case "$HTTP_CODE" in
+            200) pass "OpenAI reachable at $OPENAI_URL (key OK)" ;;
+            401) fail "OpenAI 401 — OPENAI_API_KEY invalid; rotate at the provider console" ;;
+            403) fail "OpenAI 403 — key lacks access to the configured base URL" ;;
+            429) warn "OpenAI 429 — rate-limited; key works but quota exhausted" ;;
+            000) warn "OpenAI unreachable at $OPENAI_URL (network or DNS)" ;;
+            *)   fail "OpenAI returned HTTP $HTTP_CODE at $OPENAI_URL/models" ;;
+        esac
+        if [[ -n "$OPENAI_BOUND_ROLES" ]]; then
+            info "roles routed to openai: $(echo $OPENAI_BOUND_ROLES | tr '\n' ' ')"
+        fi
+    fi
+fi
+
+# ---- 7. API-key sync between .env and orchestrator container --------
 hdr "API key sync"
 
 if [[ -f "$ENV_FILE" ]] && docker ps --format '{{.Names}}' | grep -qx scaffold-orchestrator; then
@@ -134,7 +167,7 @@ if [[ -f "$ENV_FILE" ]] && docker ps --format '{{.Names}}' | grep -qx scaffold-o
     fi
 fi
 
-# ---- 7. Schema migrations -------------------------------------------
+# ---- 8. Schema migrations -------------------------------------------
 hdr "Schema migrations"
 
 if docker ps --format '{{.Names}}' | grep -qx scaffold-postgres; then

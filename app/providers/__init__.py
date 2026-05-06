@@ -132,6 +132,7 @@ def _autoload() -> None:
     # only that provider is unregistered; the rest still work.
     for mod in (
         "app.providers.ollama",
+        "app.providers.openai",
     ):
         try:
             __import__(mod)

@@ -138,6 +138,17 @@ class Settings(BaseSettings):
     model_cloud_alt_provider: str = "ollama"
     model_embedder_pipeline_provider: str = "ollama"
 
+    # OpenAI-compatible provider config (Sprint F). The base URL defaults to
+    # api.openai.com but can be overridden to point at any OpenAI-compatible
+    # endpoint (vLLM, LocalAI, Ollama OpenAI-mode, ...) — one provider, many
+    # backends. The provider raises ProviderUnavailableError at call time if
+    # the key is empty when it's actually needed, so leaving the key blank
+    # while no role is bound to "openai" is fine.
+    openai_api_key: SecretStr = SecretStr("")
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_timeout: int = Field(default=600, ge=1, le=86400)
+    openai_organization: str = ""
+
     # Timeouts (seconds)
     cloud_timeout: int = Field(default=3600, ge=1, le=86400)
     local_timeout: int = Field(default=1800, ge=1, le=86400)

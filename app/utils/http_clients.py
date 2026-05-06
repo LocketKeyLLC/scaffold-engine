@@ -99,12 +99,40 @@ def _build_ollama() -> httpx.AsyncClient:
     return client
 
 
+def _build_openai() -> httpx.AsyncClient:
+    """OpenAI-compatible client. ``openai_base_url`` defaults to api.openai.com
+    but can point at any OpenAI-compatible endpoint (vLLM, LocalAI, Ollama in
+    OpenAI-mode, etc.) — that's the value of using the OpenAI shape: one
+    provider works against a wide ecosystem of servers.
+
+    Auth header is added per-request inside the provider so a key rotation
+    doesn't require rebuilding the client.
+    """
+    headers = {"User-Agent": "scaffold-engine"}
+    if settings.openai_organization:
+        headers["OpenAI-Organization"] = settings.openai_organization
+    client = httpx.AsyncClient(
+        base_url=settings.openai_base_url,
+        timeout=float(settings.openai_timeout),
+        headers=headers,
+        follow_redirects=True,
+        limits=httpx.Limits(
+            max_connections=20,
+            max_keepalive_connections=10,
+            keepalive_expiry=30,
+        ),
+    )
+    logger.info("OpenAI client initialized: %s", settings.openai_base_url)
+    return client
+
+
 def init_clients() -> None:
     """Eager-init all shared clients. Call once from app lifespan startup."""
     _get_or_create("searxng", _build_searxng)
     _get_or_create("github", _build_github)
     _get_or_create("generic", _build_generic)
     _get_or_create("ollama", _build_ollama)
+    _get_or_create("openai", _build_openai)
 
 
 def get_searxng_client() -> httpx.AsyncClient:
@@ -132,6 +160,13 @@ def get_ollama_client() -> httpx.AsyncClient:
     client = _clients.get("ollama")
     if client is None or client.is_closed:
         raise RuntimeError("Ollama client not initialized; call init_clients() at startup")
+    return client
+
+
+def get_openai_client() -> httpx.AsyncClient:
+    client = _clients.get("openai")
+    if client is None or client.is_closed:
+        raise RuntimeError("OpenAI client not initialized; call init_clients() at startup")
     return client
 
 

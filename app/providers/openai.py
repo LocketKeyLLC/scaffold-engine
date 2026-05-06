@@ -1,0 +1,268 @@
+"""OpenAI-compatible provider.
+
+Targets ``api.openai.com`` by default but works against any OpenAI-compatible
+endpoint (vLLM, LocalAI, Ollama in OpenAI mode, …) via the ``OPENAI_BASE_URL``
+setting. That's the value of using the OpenAI shape: one provider implementation
+covers a wide ecosystem of servers.
+
+Implementation choices
+- Raw httpx through the shared client (``app.utils.http_clients.get_openai_client``)
+  rather than the ``openai`` Python SDK. Keeps the dependency surface flat,
+  matches the OllamaProvider pattern, and makes mocking trivial.
+- Auth header built per-call so a key rotation doesn't require rebuilding
+  the client.
+- ``dimensions=embedding_dim`` is sent on every embed call so server output
+  matches the orchestrator's locked 512-dim shape. Models that ignore this
+  parameter (e.g. ``text-embedding-ada-002``) will return their native
+  dim — the orchestrator's downstream truncate_and_normalize handles that.
+- Streaming and native tool calls are advertised as supported but the
+  concrete impls are deferred to later sprints (uniformity + tool-call
+  abstraction). Calling ``stream_chat`` today raises ProviderCapabilityError
+  via the base class default.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any
+
+import httpx
+
+from app.providers.base import (
+    LLMProvider,
+    ModelResponse,
+    ProviderUnavailableError,
+)
+
+logger = logging.getLogger("scaffold.providers.openai")
+
+
+class OpenAIProvider(LLMProvider):
+    """OpenAI-compatible backend."""
+
+    name = "openai"
+    supports_chat = True
+    supports_embeddings = True
+    supports_streaming = True   # advertised; concrete stream_chat deferred
+    supports_native_tools = True  # advertised; concrete tool_call deferred
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _auth_headers() -> dict[str, str]:
+        """Build per-call Authorization header. Empty key surfaces as
+        ProviderUnavailableError at call time rather than a silent 401."""
+        from app.config import settings
+        key = settings.openai_api_key.get_secret_value()
+        if not key:
+            raise ProviderUnavailableError(
+                "openai_api_key is empty. Set OPENAI_API_KEY in your "
+                "environment (or .env) and re-run, OR change the role's "
+                "MODEL_<ROLE>_PROVIDER setting away from 'openai'."
+            )
+        return {"Authorization": f"Bearer {key}"}
+
+    @staticmethod
+    def _client() -> httpx.AsyncClient:
+        from app.utils.http_clients import get_openai_client
+        return get_openai_client()
+
+    @staticmethod
+    def _format_http_error(resp: httpx.Response) -> str:
+        """Extract the error message from an OpenAI error envelope, falling
+        back to the raw body. Provider returns this in ModelResponse.error
+        so users see the upstream reason, not a generic HTTP code."""
+        try:
+            body = resp.json()
+            msg = body.get("error", {}).get("message")
+            if msg:
+                return f"HTTP {resp.status_code}: {msg}"
+        except Exception:
+            pass
+        return f"HTTP {resp.status_code}: {resp.text[:200]}"
+
+    # ------------------------------------------------------------------
+    # chat_completion (POST /chat/completions)
+    # ------------------------------------------------------------------
+
+    async def chat_completion(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        timeout: int = 600,
+        **opts: Any,
+    ) -> ModelResponse:
+        from app.config import settings
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        # Pass through any caller extras (response_format, top_p, …) that the
+        # OpenAI API understands. ``fallback`` is Ollama-specific and is
+        # ignored here on purpose.
+        for k, v in opts.items():
+            if k in {"fallback"}:
+                continue
+            payload[k] = v
+
+        effective_timeout = timeout if timeout != 600 else settings.openai_timeout
+        return await self._request(
+            "/chat/completions", payload, model, effective_timeout,
+            text_extractor=self._extract_chat_text,
+        )
+
+    # ------------------------------------------------------------------
+    # embed (POST /embeddings)
+    # ------------------------------------------------------------------
+
+    async def embed(
+        self,
+        model: str,
+        texts: list[str],
+        *,
+        timeout: int = 120,
+    ) -> list[list[float]]:
+        from app.config import settings
+        payload: dict[str, Any] = {
+            "model": model,
+            "input": texts,
+            "dimensions": settings.embedding_dim,
+            "encoding_format": "float",
+        }
+        try:
+            headers = self._auth_headers()
+        except ProviderUnavailableError as exc:
+            logger.error("openai_embed_unavailable: %s", exc)
+            return []
+        try:
+            resp = await self._client().post(
+                "/embeddings", json=payload, headers=headers, timeout=timeout,
+            )
+        except httpx.TimeoutException:
+            logger.error("openai_embed_timeout after %ds", timeout)
+            return []
+        except Exception as exc:
+            logger.error("openai_embed_exception: %s", exc)
+            return []
+
+        if resp.status_code != 200:
+            logger.error("openai_embed_http_error: %s", self._format_http_error(resp))
+            return []
+        data = resp.json()
+        items = data.get("data", [])
+        # Sort by index defensively — the API returns in input order but the
+        # spec guarantees only that the index field marks the original slot.
+        items.sort(key=lambda x: x.get("index", 0))
+        return [item.get("embedding", []) for item in items]
+
+    # ------------------------------------------------------------------
+    # list_models (GET /models)
+    # ------------------------------------------------------------------
+
+    async def list_models(self) -> list[str]:
+        try:
+            headers = self._auth_headers()
+        except ProviderUnavailableError as exc:
+            logger.warning("openai_list_models_unavailable: %s", exc)
+            return []
+        try:
+            resp = await self._client().get("/models", headers=headers)
+        except Exception as exc:
+            logger.error("openai_list_models_exception: %s", exc)
+            return []
+        if resp.status_code != 200:
+            logger.error("openai_list_models_http_error: %s", self._format_http_error(resp))
+            return []
+        data = resp.json()
+        return [item.get("id", "") for item in data.get("data", []) if item.get("id")]
+
+    # ------------------------------------------------------------------
+    # Internal: request + parse helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_chat_text(data: dict[str, Any]) -> str:
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        return (choices[0].get("message") or {}).get("content", "") or ""
+
+    async def _request(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        model: str,
+        timeout: int,
+        *,
+        text_extractor,
+    ) -> ModelResponse:
+        try:
+            headers = self._auth_headers()
+        except ProviderUnavailableError as exc:
+            return ModelResponse(
+                model=model, success=False, error=str(exc),
+                provider=self.name,
+            )
+
+        start = time.monotonic()
+        try:
+            resp = await self._client().post(
+                endpoint, json=payload, headers=headers, timeout=timeout,
+            )
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            if resp.status_code != 200:
+                return ModelResponse(
+                    model=model, success=False,
+                    error=self._format_http_error(resp),
+                    total_duration_ms=elapsed_ms,
+                    provider=self.name,
+                )
+            data = resp.json()
+            text = text_extractor(data)
+            usage = data.get("usage") or {}
+            tokens_prompt = usage.get("prompt_tokens")
+            tokens_completion = usage.get("completion_tokens")
+            tps = None
+            if tokens_completion and elapsed_ms > 0:
+                tps = round(tokens_completion / (elapsed_ms / 1000), 2)
+            return ModelResponse(
+                text=(text or "").strip(),
+                model=data.get("model", model),
+                success=True,
+                total_duration_ms=elapsed_ms,
+                tokens_prompt=tokens_prompt,
+                tokens_completion=tokens_completion,
+                tokens_per_sec=tps,
+                provider=self.name,
+                raw=data,
+            )
+        except httpx.TimeoutException:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            return ModelResponse(
+                model=model, success=False,
+                error=f"Timeout after {timeout}s",
+                total_duration_ms=elapsed_ms,
+                provider=self.name,
+            )
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            return ModelResponse(
+                model=model, success=False, error=str(exc),
+                total_duration_ms=elapsed_ms,
+                provider=self.name,
+            )
+
+
+# Register the singleton at import time. ``app/providers/__init__.py``
+# triggers this via its ``_autoload`` helper.
+from app.providers import register  # noqa: E402
+
+register("openai", OpenAIProvider())
