@@ -53,7 +53,14 @@ CREATE TABLE IF NOT EXISTS dag_nodes (
     output_text TEXT,
     output_artifact_id UUID,
     confidence FLOAT DEFAULT NULL,
+    -- domain values are constrained to app.config.VALID_DOMAINS
+    -- ('prompt', 'rag', 'eng', 'llm', 'spec' — longest=6); width=10 leaves
+    -- headroom but is intentionally narrow so any drift is caught at INSERT.
     domain VARCHAR(10) DEFAULT NULL,
+    -- tool values are constrained to app.config.VALID_TOOLS
+    -- ('LLM', 'CodeGen', 'SearXNG', 'Milvus' — longest=7); width=50 is
+    -- legacy-wide and could be tightened in a future migration if drift
+    -- becomes an issue.
     tool VARCHAR(50) DEFAULT 'LLM',
     retry_count INT NOT NULL DEFAULT 0,
     max_retries INT NOT NULL DEFAULT 3,
@@ -174,6 +181,9 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_job_id ON artifacts(job_id);
 CREATE INDEX IF NOT EXISTS idx_performance_logs_model ON performance_logs(model);
 CREATE INDEX IF NOT EXISTS idx_performance_logs_created ON performance_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_blockers_status ON blockers(status);
+-- idx_jobs_status was added with the original baseline (pre-runner). No
+-- migration file declares it because it predates the schema_migrations
+-- table; documented here so future audits don't re-flag it as orphaned.
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 -- The next two indexes are also (re-)created by migration 006_add_indexes.sql
 -- (CREATE INDEX IF NOT EXISTS makes both sides idempotent). Kept here so a
