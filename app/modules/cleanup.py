@@ -104,6 +104,8 @@ _REAP_LONG_PHASE_SQL = """
 _REAP_PLANNING_SQL = """
     UPDATE jobs
     SET status = 'cancelled',
+        error_summary = COALESCE(error_summary,
+            'Stale planning state — exceeded planning_stale_minutes'),
         updated_at = NOW()
     WHERE status = 'planning'
       AND updated_at < NOW() - make_interval(mins => :threshold_min)

@@ -80,7 +80,7 @@ from app.modules.research_state import (
     _update_session_iteration,
 )
 
-logger = logging.getLogger("scaffold.research")
+logger = logging.getLogger("scaffold.research.agent")
 
 
 # =============================================================================

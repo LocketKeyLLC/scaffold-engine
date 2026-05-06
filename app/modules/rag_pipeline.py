@@ -399,6 +399,11 @@ def _rrf_fuse(
     merged: dict[str, RagResult] = {}
 
     def _key(result: RagResult) -> str:
+        # entry_id is the canonical identity. The content[:200] fallback
+        # exists for the rare case where an upstream search returned a row
+        # without entry_id; collisions are possible there (two distinct
+        # rows sharing a 200-char prefix), but accepting that occasional
+        # over-merge is preferable to dropping the result entirely.
         return result.entry_id or result.content[:200]
 
     for rank, result in enumerate(vector_results):

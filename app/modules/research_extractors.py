@@ -22,7 +22,7 @@ from app.modules.gt_extractor import TOPIC_KEYWORDS
 from app.utils.http_clients import get_generic_http_client
 from app.utils.topic_detection import detect_topic_id
 
-logger = logging.getLogger("scaffold.research")
+logger = logging.getLogger("scaffold.research.extractors")
 
 
 def _ra():
