@@ -105,6 +105,42 @@ def _escape_literal(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _normalize_entry(entry: dict) -> dict:
+    """Map an entry dict's loose alias keys onto the canonical names.
+
+    LLM-produced entries arrive with one of two synonym pairs each
+    (``content`` / ``canonical_text``, ``title`` / ``topic``,
+    ``tags`` / ``domain_tags``, ``source`` / ``source_url``). Centralizing
+    the normalization here lets every caller use canonical names downstream
+    and makes a future "drop alias support" decision a one-line change.
+
+    Returned shape (canonical names) — caller may treat as a typed dict:
+        content (str), title (str), domain_tags (list[str]), source_url
+        (str), source_type (str), confidence (float).
+    """
+    content = entry.get("content") or entry.get("canonical_text") or ""
+    title = (entry.get("title") or entry.get("topic") or "unknown").strip()
+
+    tags_raw = entry.get("tags") if entry.get("tags") is not None else entry.get("domain_tags", "")
+    if isinstance(tags_raw, str):
+        domain_tags = [t.strip() for t in tags_raw.split(",") if t.strip()][:20]
+    elif isinstance(tags_raw, list):
+        domain_tags = tags_raw[:20]
+    else:
+        domain_tags = []
+
+    source_url = entry.get("source") or entry.get("source_url") or "scaffold-engine"
+
+    return {
+        "content": content,
+        "title": title,
+        "domain_tags": domain_tags,
+        "source_url": source_url,
+        "source_type": entry.get("source_type", "ai_generated"),
+        "confidence": entry.get("confidence_score", 0.60),
+    }
+
+
 def _domain_expr(domain: str | None) -> str | None:
     """Translate a single-domain arg → Milvus expr clause.
 
@@ -716,23 +752,17 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
     # ---- Pass 1: normalize + exact-hash filter ----
     prepared: list[dict] = []
     for entry in entries:
-        content = entry.get("content", "") or entry.get("canonical_text", "")
+        norm = _normalize_entry(entry)
+        content = norm["content"]
         if not content:
             stats["skipped_empty"] += 1
             continue
 
-        title = entry.get("title", entry.get("topic", "unknown")).strip()
-        tags_raw = entry.get("tags", entry.get("domain_tags", ""))
-        if isinstance(tags_raw, str):
-            domain_tags = [t.strip() for t in tags_raw.split(",") if t.strip()][:20]
-        elif isinstance(tags_raw, list):
-            domain_tags = tags_raw[:20]
-        else:
-            domain_tags = []
-
-        source_url = entry.get("source", entry.get("source_url", "scaffold-engine"))
-        source_type = entry.get("source_type", "ai_generated")
-        confidence = entry.get("confidence_score", 0.60)
+        title = norm["title"]
+        domain_tags = norm["domain_tags"]
+        source_url = norm["source_url"]
+        source_type = norm["source_type"]
+        confidence = norm["confidence"]
         ch = _content_hash(content)
 
         try:
