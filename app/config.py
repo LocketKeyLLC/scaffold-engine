@@ -123,6 +123,21 @@ class Settings(BaseSettings):
     model_cloud_alt: str = "qwen3.5:397b-cloud"
     model_fallback: str = "qwen3.5:latest"
 
+    # Per-role provider routing (Sprint E). Each role names which backend
+    # serves it; default "ollama" preserves pre-Sprint-E behavior. Override
+    # with MODEL_<ROLE>_PROVIDER env vars. The reranker is exempt — it runs
+    # as a CrossEncoder singleton outside the provider system. Any value
+    # other than a registered provider raises ProviderError at call time
+    # via app.providers.provider_for_role.
+    model_general_provider: str = "ollama"
+    model_verifier_provider: str = "ollama"
+    model_coder_provider: str = "ollama"
+    model_router_provider: str = "ollama"
+    model_fallback_provider: str = "ollama"
+    model_cloud_heavy_provider: str = "ollama"
+    model_cloud_alt_provider: str = "ollama"
+    model_embedder_pipeline_provider: str = "ollama"
+
     # Timeouts (seconds)
     cloud_timeout: int = Field(default=3600, ge=1, le=86400)
     local_timeout: int = Field(default=1800, ge=1, le=86400)

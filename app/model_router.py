@@ -6,18 +6,27 @@ Ollama dispatch with:
   - Performance metric capture (for Step 9 middleware)
 
 Step 7 of 23-step build plan.
+
+Sprint E refactor: ``ModelResponse`` is now defined in
+``app.providers.base`` and re-exported here so existing imports keep
+working. Concrete provider classes live in ``app.providers.*``;
+``OllamaProvider`` delegates back into this module so tests that
+``patch.object(model_router, "_call_ollama", ...)`` keep intercepting
+all dispatch paths — including those reached through the provider
+abstraction. The provider abstraction is what later sprints (E.7+)
+use to route per-role calls to non-Ollama backends.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import httpx
 
 from app.config import settings
+from app.providers.base import ModelResponse  # noqa: F401 — public re-export
 
 logger = logging.getLogger("scaffold.router")
 
@@ -76,28 +85,6 @@ def _smart_fallback(model: str, default_fallback: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Response container
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ModelResponse:
-    """Unified response from any Ollama call."""
-
-    text: str = ""
-    model: str = ""
-    success: bool = True
-    error: str | None = None
-    ttft_ms: int | None = None
-    total_duration_ms: int = 0
-    tokens_prompt: int | None = None
-    tokens_completion: int | None = None
-    tokens_per_sec: float | None = None
-    retries: int = 0
-    fallback_used: bool = False
-    raw: dict[str, Any] = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
 # Core dispatch
 # ---------------------------------------------------------------------------
 
@@ -121,6 +108,7 @@ async def _call_ollama(
                 success=False,
                 error=f"HTTP {resp.status_code}: {resp.text[:200]}",
                 total_duration_ms=elapsed_ms,
+                provider="ollama",
             )
 
         data = resp.json()
@@ -151,6 +139,7 @@ async def _call_ollama(
             tokens_prompt=tokens_prompt,
             tokens_completion=tokens_completion,
             tokens_per_sec=tps,
+            provider="ollama",
             raw=data,
             )
 
@@ -161,6 +150,7 @@ async def _call_ollama(
             success=False,
             error=f"Timeout after {timeout}s",
             total_duration_ms=elapsed_ms,
+            provider="ollama",
         )
     except Exception as e:
         elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -169,6 +159,7 @@ async def _call_ollama(
             success=False,
             error=str(e),
             total_duration_ms=elapsed_ms,
+            provider="ollama",
         )
 
 
@@ -188,7 +179,7 @@ async def _dispatch_with_retry(
     fallback = fallback or _smart_fallback(model, settings.model_fallback)
 
     # Phase 1: retry primary model
-    last_resp = ModelResponse(model=model, success=False, error="no attempt")
+    last_resp = ModelResponse(model=model, success=False, error="no attempt", provider="ollama")
     for attempt in range(retries):
         payload["model"] = model
         last_resp = await _call_ollama(

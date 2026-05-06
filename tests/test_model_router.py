@@ -238,3 +238,66 @@ async def test_validate_models_returns_missing_list():
     # Most role tags won't be in our 1-model fake response; expect a list
     assert isinstance(missing, list)
     assert len(missing) >= 1  # at least one role isn't qwen3:4b
+
+
+# ---------------------------------------------------------------------------
+# Sprint E — ModelResponse stamps provider="ollama" on every path; the
+# canonical class is now app.providers.base.ModelResponse and the
+# model_router re-export must remain identity-equal to it.
+# ---------------------------------------------------------------------------
+@pytest.mark.smoke
+def test_model_response_reexport_is_canonical():
+    from app.providers.base import ModelResponse as Canonical
+    assert model_router.ModelResponse is Canonical
+
+
+@pytest.mark.smoke
+async def test_call_ollama_stamps_provider_on_success():
+    fake_client = AsyncMock()
+    fake_client.post.return_value = _mk_response(200, {"response": "ok"})
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        resp = await model_router._call_ollama("/api/generate", {}, "m", 30)
+    assert resp.provider == "ollama"
+
+
+@pytest.mark.smoke
+async def test_call_ollama_stamps_provider_on_http_error():
+    fake_client = AsyncMock()
+    fake_client.post.return_value = _mk_response(500, {}, text="boom")
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        resp = await model_router._call_ollama("/api/generate", {}, "m", 30)
+    assert resp.provider == "ollama"
+
+
+@pytest.mark.smoke
+async def test_call_ollama_stamps_provider_on_timeout():
+    fake_client = AsyncMock()
+    fake_client.post.side_effect = httpx.TimeoutException("boom")
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        resp = await model_router._call_ollama("/api/generate", {}, "m", 5)
+    assert resp.provider == "ollama"
+
+
+@pytest.mark.smoke
+async def test_call_ollama_stamps_provider_on_unexpected_exception():
+    fake_client = AsyncMock()
+    fake_client.post.side_effect = RuntimeError("kaboom")
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        resp = await model_router._call_ollama("/api/generate", {}, "m", 5)
+    assert resp.provider == "ollama"
+
+
+@pytest.mark.smoke
+async def test_dispatch_with_retry_initial_response_carries_provider():
+    """If every attempt errors before _call_ollama returns, the synthetic
+    'no attempt' starter must still carry provider='ollama' so downstream
+    metric capture has a non-empty field."""
+    async def always_fail(endpoint, payload, model, timeout):
+        return model_router.ModelResponse(
+            model=model, success=False, error="x", provider="ollama",
+        )
+    with patch.object(model_router, "_call_ollama", side_effect=always_fail):
+        resp = await model_router._dispatch_with_retry(
+            "/api/generate", {}, "same", fallback="same", max_retries=1,
+        )
+    assert resp.provider == "ollama"
