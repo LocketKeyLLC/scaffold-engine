@@ -253,8 +253,14 @@ class Pipeline:
         except requests.exceptions.RequestException as e:
             return f"❌ Connection error: {e}"
 
-    # Client-side prompt length cap (#8.26). Orchestrator will re-validate.
-    _MAX_PROMPT_CHARS = 32_000
+    # Client-side prompt length cap. MUST stay aligned with
+    # app/config.py:Settings.prompt_max_chars (default 16_384) so the
+    # OWUI pre-check fails at the same threshold as the orchestrator's
+    # update_prompt() server-side check. If the cap moves at the
+    # orchestrator, update this constant to match — the values do not
+    # auto-sync because the pipelines run in a separate container with
+    # no app.config import path.
+    _MAX_PROMPT_CHARS = 16_384
 
     def _edit(self, raw_message: str) -> str:
         """Single-step edit: /prompt edit <job_id> <node_key> <new prompt>

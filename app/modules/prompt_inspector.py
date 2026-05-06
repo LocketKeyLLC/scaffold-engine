@@ -8,6 +8,8 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
+
 logger = logging.getLogger("scaffold.prompt_inspector")
 
 
@@ -95,8 +97,9 @@ async def update_prompt(
     """
     if not new_prompt or not new_prompt.strip():
         return {"error": "new_prompt must be a non-empty string"}
-    if len(new_prompt) > 16384:
-        return {"error": f"new_prompt exceeds 16 KB limit ({len(new_prompt)} bytes)"}
+    cap = settings.prompt_max_chars
+    if len(new_prompt) > cap:
+        return {"error": f"new_prompt exceeds {cap}-character limit ({len(new_prompt)} chars)"}
     if source not in ("manual", "optimizer", "initial", "system"):
         return {"error": f"invalid source '{source}'"}
 

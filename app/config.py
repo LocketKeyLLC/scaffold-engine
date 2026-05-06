@@ -200,6 +200,12 @@ class Settings(BaseSettings):
     execution_global_retry_cap: int = Field(default=20, ge=0, le=1000)
     sse_keepalive_seconds: float = Field(default=15.0, ge=1.0, le=300.0)
 
+    # Manual prompt-edit cap (POST /prompts/{job_id}/{node_key}). Both
+    # the orchestrator-side update_prompt() and the OWUI prompt_inspector
+    # pipeline pre-check against this value so the user sees a consistent
+    # limit regardless of where the cap fires.
+    prompt_max_chars: int = Field(default=16_384, ge=1024, le=1_000_000)
+
     # Logging — all three values were previously read directly via
     # ``os.getenv`` in app/main.py; centralizing here so logging config
     # flows through the same Settings layer as everything else.
