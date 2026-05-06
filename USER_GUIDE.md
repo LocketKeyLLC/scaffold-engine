@@ -8,11 +8,17 @@ A beginner-friendly reference for using Scaffold Engine through Open WebUI.
 
 ## Getting started
 
-1. Open the Open WebUI chat at **http://localhost:3000**.
+**First-time install (fresh clone):**
+1. `make bootstrap` — generates `.env`, creates the docker network + volumes, builds and starts every container. Takes 5–10 min on first run.
+2. `make doctor` — verifies every dependency. Re-run anytime something looks off.
+3. Open the Open WebUI chat at **http://localhost:3000** and create your admin account.
+
+**Day-to-day:**
+1. Open **http://localhost:3000**.
 2. Make sure the model selector shows **scaffold_router** (or a name containing "scaffold").
 3. Start a new chat and type a message. That's it — you're in.
 
-If a command fails with `401 Unauthorized`, the pipeline lost its API key. Restart the pipelines container: `docker restart open-webui-pipelines`.
+If a command fails with `401 Unauthorized`, the pipeline lost its API key. With `SCAFFOLD_VALVES_ENV_OVERRIDE=true` in `.env` (the bootstrap default) just `docker compose up -d` to refresh; otherwise `docker restart open-webui-pipelines` and check `make doctor` for drift.
 
 ---
 
