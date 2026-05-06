@@ -69,7 +69,10 @@ _VP_ENV_INT_MAP = {
 }
 
 
-def _apply_env_fallbacks(pipeline_id: str, valves) -> None:
+def _apply_env_fallbacks(pipeline_id: str, valves) -> bool:
+    """Returns True iff valves.json's api_key differs from the environment.
+    Caller stores the bool on the Pipeline so 401 paths can append a
+    drift hint to the user-visible response."""
     import json as _vp_json
     here = _vp_os.path.dirname(_vp_os.path.abspath(__file__))
     live = _vp_os.path.join(here, pipeline_id, "valves.json")
@@ -103,7 +106,8 @@ def _apply_env_fallbacks(pipeline_id: str, valves) -> None:
             print(f"[{pipeline_id}] {env_name}={env_val!r} is not an int; ignoring.", flush=True)
     saved_key = saved.get("api_key", "")
     env_key = _vp_os.getenv("SCAFFOLD_API_KEY", "")
-    if saved_key and env_key and saved_key != env_key:
+    drift_detected = bool(saved_key and env_key and saved_key != env_key)
+    if drift_detected:
         print(f"[{pipeline_id}] WARNING: api_key in valves.json differs from SCAFFOLD_API_KEY env. Using valves.json value.", flush=True)
     if changed:
         try:
@@ -115,7 +119,7 @@ def _apply_env_fallbacks(pipeline_id: str, valves) -> None:
             print(f"[{pipeline_id}] Persisted env-fallback values to {live!r}.", flush=True)
         except Exception as e:
             print(f"[{pipeline_id}] Persist failed: {e}", flush=True)
-
+    return drift_detected
 
 
 class Pipeline:
@@ -133,7 +137,22 @@ class Pipeline:
         self.name = "gt_browser"
         _bootstrap_valves("gt_browser")
         self.valves = self.Valves()
-        _apply_env_fallbacks("gt_browser", self.valves)
+        self._api_key_drift_detected = _apply_env_fallbacks(
+            "gt_browser", self.valves,
+        )
+
+    def _drift_hint(self) -> str:
+        """Markdown line appended to user-visible 401 responses so the
+        valves.json / SCAFFOLD_API_KEY env mismatch surfaces in the OWUI
+        UI rather than only in the container logs."""
+        if not getattr(self, "_api_key_drift_detected", False):
+            return ""
+        return (
+            "\n\n⚠️ This pipeline detected that `api_key` in `valves.json` "
+            "differs from `SCAFFOLD_API_KEY` in the environment. The 401 "
+            "above is likely caused by one of those values being stale. "
+            "Reconcile both sides and reload the pipeline."
+        )
 
     async def on_startup(self):
         pass
@@ -224,7 +243,8 @@ class Pipeline:
 
         data = self._call("GET", "/gt/list", params={"page": page, "per_page": per_page})
         if "_error" in data:
-            return f"❌ {data['_error']}"
+            hint = self._drift_hint() if data.get("_status_code") == 401 else ""
+            return f"❌ {data['_error']}{hint}"
 
         total = data.get("total", 0)
         total_pages = data.get("total_pages", 1)
@@ -262,7 +282,8 @@ class Pipeline:
         """Semantic search TOON entries."""
         data = self._call("POST", "/gt/search", json_body={"query": query, "top_k": 10})
         if "_error" in data:
-            return f"❌ {data['_error']}"
+            hint = self._drift_hint() if data.get("_status_code") == 401 else ""
+            return f"❌ {data['_error']}{hint}"
 
         results = data.get("results", [])
         if not results:
@@ -293,7 +314,8 @@ class Pipeline:
         if data.get("_status_code") == 404:
             return f"❌ Entry not found: `{entry_id}`"
         if "_error" in data:
-            return f"❌ {data['_error']}"
+            hint = self._drift_hint() if data.get("_status_code") == 401 else ""
+            return f"❌ {data['_error']}{hint}"
 
         lines = [
             f"📄 **Entry:** `{data.get('entry_id', '—')}`\n",
@@ -308,7 +330,8 @@ class Pipeline:
         """Collection summary."""
         data = self._call("GET", "/gt/stats")
         if "_error" in data:
-            return f"❌ {data['_error']}"
+            hint = self._drift_hint() if data.get("_status_code") == 401 else ""
+            return f"❌ {data['_error']}{hint}"
 
         total = data.get("total_entries", 0)
         topics = data.get("domains", {}) or {}

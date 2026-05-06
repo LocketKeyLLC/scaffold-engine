@@ -110,7 +110,10 @@ _VP_ENV_INT_MAP = {
 }
 
 
-def _apply_env_fallbacks(pipeline_id: str, valves) -> None:
+def _apply_env_fallbacks(pipeline_id: str, valves) -> bool:
+    """Returns True iff valves.json's api_key differs from the environment.
+    Caller stores the bool on the Pipeline so 401 paths can append a
+    drift hint to the user-visible response."""
     import json as _vp_json
     here = _vp_os.path.dirname(_vp_os.path.abspath(__file__))
     live = _vp_os.path.join(here, pipeline_id, "valves.json")
@@ -147,7 +150,8 @@ def _apply_env_fallbacks(pipeline_id: str, valves) -> None:
     # Drift warning: api_key in valves.json differs from env (silent rotation hazard).
     saved_key = saved.get("api_key", "")
     env_key = _vp_os.getenv("SCAFFOLD_API_KEY", "")
-    if saved_key and env_key and saved_key != env_key:
+    drift_detected = bool(saved_key and env_key and saved_key != env_key)
+    if drift_detected:
         print(f"[{pipeline_id}] WARNING: api_key in valves.json differs from SCAFFOLD_API_KEY env. Using valves.json value.", flush=True)
     if changed:
         try:
@@ -159,7 +163,7 @@ def _apply_env_fallbacks(pipeline_id: str, valves) -> None:
             print(f"[{pipeline_id}] Persisted env-fallback values to {live!r}.", flush=True)
         except Exception as e:
             print(f"[{pipeline_id}] Persist failed: {e}", flush=True)
-
+    return drift_detected
 
 
 class Pipeline:
@@ -173,7 +177,22 @@ class Pipeline:
         self.name = "DAG Viewer"
         _bootstrap_valves("dag_viewer")
         self.valves = self.Valves()
-        _apply_env_fallbacks("dag_viewer", self.valves)
+        self._api_key_drift_detected = _apply_env_fallbacks(
+            "dag_viewer", self.valves,
+        )
+
+    def _drift_hint(self) -> str:
+        """Markdown line appended to user-visible 401 responses so the
+        valves.json / SCAFFOLD_API_KEY env mismatch surfaces in the OWUI
+        UI rather than only in the container logs."""
+        if not getattr(self, "_api_key_drift_detected", False):
+            return ""
+        return (
+            "\n\n⚠️ This pipeline detected that `api_key` in `valves.json` "
+            "differs from `SCAFFOLD_API_KEY` in the environment. The 401 "
+            "above is likely caused by one of those values being stale. "
+            "Reconcile both sides and reload the pipeline."
+        )
 
     async def on_startup(self):  # #8.27 — parity with other pipelines
         pass
@@ -202,7 +221,8 @@ class Pipeline:
             if r.status_code == 404:
                 return f"⚠️ Job `{job_id}` not found."
             if r.status_code != 200:
-                return f"⚠️ Error {r.status_code}: {r.text[:200]}"
+                hint = self._drift_hint() if r.status_code == 401 else ""
+                return f"⚠️ Error {r.status_code}: {r.text[:200]}{hint}"
 
             data = r.json()
             nodes = data.get("nodes", [])
