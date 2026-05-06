@@ -234,11 +234,22 @@ def get_model(role: str, overrides: dict | None = None) -> str:
     """Return model tag: override > env var > default.
 
     Restricted to ROLE_FIELDS allowlist to prevent arbitrary attribute access.
+    Empty-string overrides are rejected explicitly rather than silently
+    falling through to the default — pass the role's setting tag, or omit
+    the entry entirely.
     """
     if role not in ROLE_FIELDS:
         raise ValueError(
             f"unknown role {role!r}; must be one of {sorted(ROLE_FIELDS)}"
         )
-    if overrides and overrides.get(role):
-        return overrides[role]
+    if overrides and role in overrides:
+        override_value = overrides[role]
+        if override_value is None:
+            # Omit-the-key semantics: caller explicitly nulled the override.
+            return getattr(settings, role)
+        if not isinstance(override_value, str) or not override_value.strip():
+            raise ValueError(
+                f"override for role {role!r} must be a non-empty string"
+            )
+        return override_value
     return getattr(settings, role)

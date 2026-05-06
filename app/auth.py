@@ -22,14 +22,19 @@ if not _RAW_KEY:
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
+# Paths exempt from API-key auth. Health probes need to be accessible
+# without credentials so external orchestrators (compose healthchecks,
+# uptime pingers, etc.) can read the dependency status. Adding a future
+# /healthz alias is a one-line set extension here.
+_AUTH_EXEMPT_PATHS = frozenset({"/health"})
+
 
 async def require_api_key(
     request: Request,
     key: str | None = Security(api_key_header),
 ) -> str:
     """Validate X-API-Key header. Returns the key on success, raises 401 on failure."""
-    # Health checks bypass auth
-    if request.url.path == "/health":
+    if request.url.path in _AUTH_EXEMPT_PATHS:
         return ""
 
     # Explicit opt-out only — empty key with no opt-out would have raised at import

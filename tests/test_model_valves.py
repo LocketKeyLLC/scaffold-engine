@@ -18,6 +18,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Load app/config.py via importlib (Docker-safe)
 # ---------------------------------------------------------------------------
@@ -139,11 +141,17 @@ class TestGetModel:
         result = get_model("model_verifier", overrides)
         assert result == settings.model_verifier
 
-    def test_override_with_empty_string_falls_through(self):
-        result = get_model("model_coder", {"model_coder": ""})
-        assert result == settings.model_coder
+    def test_override_with_empty_string_raises(self):
+        """Empty-string overrides are rejected explicitly so callers can't
+        silently misconfigure a role by passing whitespace."""
+        with pytest.raises(ValueError, match="non-empty string"):
+            get_model("model_coder", {"model_coder": ""})
+        with pytest.raises(ValueError, match="non-empty string"):
+            get_model("model_coder", {"model_coder": "   "})
 
     def test_override_with_none_value_falls_through(self):
+        """None retains the omit-the-key semantics: caller is explicitly
+        nulling the override and wants the default."""
         result = get_model("model_router", {"model_router": None})
         assert result == settings.model_router
 

@@ -199,12 +199,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Middleware executes in reverse registration order:
-# incoming request: Performance (outer) -> ErrorLogging (inner) -> endpoint.
-# ErrorLogging re-raises HTTPException so Performance still times 4xx paths.
+# Middleware executes in reverse registration order: incoming request
+# flows RequestId (outermost) -> Performance -> ErrorLogging (innermost) ->
+# endpoint. HTTPException is intercepted by Starlette's own ExceptionMiddleware
+# before it can reach our ErrorLoggingMiddleware.dispatch — so 4xx paths
+# return through the perf middleware normally and ErrorLogging only ever
+# sees genuine 5xx exceptions.
 app.add_middleware(ErrorLoggingMiddleware)
 app.add_middleware(PerformanceMiddleware)
-# RequestId is outermost: binds request_id contextvar BEFORE perf + error layers
 app.add_middleware(RequestIdMiddleware)
 app.include_router(status_router)
 app.include_router(assist_router)
@@ -285,20 +287,16 @@ async def health():
         except Exception:
             return {"status": "down", "keys": 0}, cache_stats
 
+    # Each _check_* wraps its body in try/except Exception and returns a
+    # dict on failure, so gather() cannot surface Exception objects from
+    # these tasks; ``return_exceptions=True`` is left in only as
+    # belt-and-suspenders for BaseException-derived cases (which we'd
+    # actually want to propagate, not absorb).
     pg, ollama, milvus, redis_pair = await asyncio.gather(
         _check_pg(), _check_ollama(), _check_milvus(), _check_redis(),
         return_exceptions=True,
     )
-    if isinstance(pg, Exception):
-        pg = {"status": "down", "latency_ms": 0}
-    if isinstance(ollama, Exception):
-        ollama = {"status": "down", "latency_ms": 0, "models_loaded": []}
-    if isinstance(milvus, Exception):
-        milvus = {"status": "down", "latency_ms": 0, "collection_count": 0, "entry_count": 0}
-    if isinstance(redis_pair, Exception):
-        redis_info, cache_stats = {"status": "down", "keys": 0}, {}
-    else:
-        redis_info, cache_stats = redis_pair
+    redis_info, cache_stats = redis_pair
     checks = {"postgresql": pg, "ollama": ollama, "milvus": milvus, "redis": redis_info, "embedding_cache": cache_stats}
     pg_up = pg["status"] == "up"
     ollama_up = ollama["status"] == "up"
@@ -406,7 +404,10 @@ async def _sse_with_disconnect_watch(request: Request, source):
             next_task.cancel()
             try:
                 await next_task
-            except (asyncio.CancelledError, StopAsyncIteration, Exception):
+            except BaseException:
+                # Best-effort cleanup: swallow CancelledError + any
+                # exception the inner generator surfaces during shutdown
+                # so we don't mask the outer flow's exit reason.
                 pass
         aclose = getattr(gen, "aclose", None)
         if aclose is not None:
@@ -793,8 +794,12 @@ async def research_pdf_endpoint(
     pdf_bytes = await file.read()
     if not pdf_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
-    if len(pdf_bytes) > 20 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail=f"PDF exceeds 20MB cap ({len(pdf_bytes)} bytes)")
+    if len(pdf_bytes) > settings.research_max_pdf_bytes:
+        cap_mb = settings.research_max_pdf_bytes // (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=f"PDF exceeds {cap_mb}MB cap ({len(pdf_bytes)} bytes)",
+        )
 
     await _require_valid_models(None)
 
