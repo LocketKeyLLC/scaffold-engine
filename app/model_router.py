@@ -216,16 +216,53 @@ async def _dispatch_with_retry(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _resolve_role(role: str, overrides: dict | None) -> tuple[str, "LLMProvider"]:  # noqa: F821
+    """Resolve (model_tag, provider_singleton) for a role.
+
+    Sprint E.7 seam: imported lazily so the model_router module stays
+    importable even if app.providers fails to initialize (e.g., a third-
+    party SDK is missing). Lazy import also avoids the circular-import
+    problem — app.providers.ollama imports model_router.
+    """
+    from app.config import get_model
+    from app.providers import provider_for_role
+    return get_model(role, overrides), provider_for_role(role, overrides)
+
+
+def _reject_role_model_collision(role: str | None, model: str | None) -> None:
+    if role and model:
+        raise ValueError(
+            "pass either role= (provider-routed) or model= (legacy direct), "
+            "not both"
+        )
+
+
 async def generate(
     prompt: str,
     model: str | None = None,
     *,
+    role: str | None = None,
+    overrides: dict | None = None,
     system: str | None = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
     fallback: str | None = None,
 ) -> ModelResponse:
-    """Generate text with /api/generate."""
+    """Generate text. ``role=`` routes via the provider abstraction.
+
+    Pass ``role="model_general"`` (etc.) to dispatch through whichever
+    provider is bound to that role in settings/overrides. Pass ``model=``
+    for the legacy direct-Ollama path. The two are mutually exclusive.
+    """
+    _reject_role_model_collision(role, model)
+    if role:
+        resolved_model, provider = _resolve_role(role, overrides)
+        return await provider.generate(
+            resolved_model, prompt,
+            system=system, temperature=temperature, max_tokens=max_tokens,
+            fallback=fallback,
+        )
+
     model = model or settings.model_general
     payload: dict[str, Any] = {
         "model": model,
@@ -242,11 +279,22 @@ async def chat(
     messages: list[dict[str, str]],
     model: str | None = None,
     *,
+    role: str | None = None,
+    overrides: dict | None = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
     fallback: str | None = None,
 ) -> ModelResponse:
-    """Chat completion with /api/chat."""
+    """Chat completion. ``role=`` routes via the provider abstraction."""
+    _reject_role_model_collision(role, model)
+    if role:
+        resolved_model, provider = _resolve_role(role, overrides)
+        return await provider.chat_completion(
+            resolved_model, messages,
+            temperature=temperature, max_tokens=max_tokens,
+            fallback=fallback,
+        )
+
     model = model or settings.model_general
     payload: dict[str, Any] = {
         "model": model,
@@ -260,10 +308,22 @@ async def chat(
 async def embed(
     text: str | list[str],
     model: str | None = None,
+    *,
+    role: str | None = None,
+    overrides: dict | None = None,
 ) -> list[list[float]]:
-    """Get embeddings via /api/embed. Returns list of vectors."""
-    model = model or settings.model_embedder_pipeline
+    """Get embeddings. ``role=`` routes via the provider abstraction.
+
+    Returns a list of vectors regardless of dispatch path.
+    """
+    _reject_role_model_collision(role, model)
     inputs = text if isinstance(text, list) else [text]
+
+    if role:
+        resolved_model, provider = _resolve_role(role, overrides)
+        return await provider.embed(resolved_model, inputs)
+
+    model = model or settings.model_embedder_pipeline
     payload: dict[str, Any] = {
         "model": model,
         "input": inputs,
@@ -278,11 +338,21 @@ async def embed(
 async def classify(
     prompt: str,
     model: str | None = None,
+    *,
+    role: str | None = None,
+    overrides: dict | None = None,
 ) -> ModelResponse:
     """Lightweight classification/routing call (low temperature)."""
-    model = model or settings.model_router
+    _reject_role_model_collision(role, model)
+    if role is None and model is None:
+        # Default to the router role (preserves prior behavior of using
+        # settings.model_router) — but go through the provider seam so
+        # callers benefit from per-role provider routing when configured.
+        role = "model_router"
     return await generate(
-        prompt, model, temperature=0.1, max_tokens=256, fallback=None,
+        prompt, model,
+        role=role, overrides=overrides,
+        temperature=0.1, max_tokens=256, fallback=None,
     )
 
 

@@ -85,7 +85,10 @@ class TestDistillationUsesRouterModel:
             await gt.extract_ground_truths("rag systems")
 
         assert gen.call_count == 1
-        assert gen.call_args.kwargs["model"] == gt.settings.model_router
+        # Sprint E.7: distill defaults to role="model_router" (no caller override
+        # passed). The model tag itself resolves inside model_router.generate.
+        assert gen.call_args.kwargs.get("role") == "model_router"
+        assert "model" not in gen.call_args.kwargs
 
 
 @pytest.mark.smoke

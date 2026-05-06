@@ -16,7 +16,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
-from app.config import get_model
 from app.utils.job_utils import fail_job as _fail_job
 from app.utils.llm_parsing import parse_json_object
 
@@ -114,13 +113,17 @@ async def refine_idea(
 
     # 2. Call LLM for structured brief (guarded)
     prompt = REFINE_PROMPT.format(idea=idea_text)
+    route_kwargs = (
+        {"model": model} if model
+        else {"role": "model_general", "overrides": model_overrides}
+    )
     try:
         resp = await model_router.generate(
             prompt,
-            model=model or get_model("model_general", model_overrides),
             system=REFINE_SYSTEM,
             temperature=0.3,
             max_tokens=2048,
+            **route_kwargs,
         )
     except Exception as e:
         await _fail_job(db, job_id, f"LLM refinement exception: {e}")

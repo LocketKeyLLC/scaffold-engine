@@ -397,12 +397,13 @@ async def extract_ground_truths(
     )
 
     prompt = DISTILL_PROMPT.format(topic=topic, results=results_text)
+    route_kwargs = {"model": model} if model else {"role": "model_router"}
     resp = await model_router.generate(
         prompt,
-        model=model or settings.model_router,
         system=DISTILL_SYSTEM,
         temperature=0.2,
         max_tokens=4096,
+        **route_kwargs,
     )
 
     if not resp.success:

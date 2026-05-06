@@ -186,7 +186,7 @@ async def _embed_content(content: str) -> list[float] | None:
     if cached:
         return cached
 
-    embeddings = await model_router.embed(content, model=settings.model_embedder_pipeline)
+    embeddings = await model_router.embed(content, role="model_embedder_pipeline")
     if not embeddings or not embeddings[0]:
         return None
 
@@ -219,7 +219,7 @@ async def _embed_contents_batch(texts: list[str]) -> list[list[float] | None]:
         embs = None
         try:
             embs = await model_router.embed(
-                chunk_texts, model=settings.model_embedder_pipeline
+                chunk_texts, role="model_embedder_pipeline",
             )
         except Exception as e:
             logger.info("batch embed not supported or failed (%s); falling back to serial", e)
@@ -234,7 +234,7 @@ async def _embed_contents_batch(texts: list[str]) -> list[list[float] | None]:
         else:
             for idx, txt in chunk:
                 try:
-                    ev = await model_router.embed(txt, model=settings.model_embedder_pipeline)
+                    ev = await model_router.embed(txt, role="model_embedder_pipeline")
                     if ev and ev[0]:
                         truncated = truncate_and_normalize(ev[0])
                         await cache.put(txt, truncated)

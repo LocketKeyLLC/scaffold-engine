@@ -22,7 +22,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
-from app.config import get_model
 from app.utils.job_utils import fail_job as _fail_job
 from app.utils.llm_parsing import parse_json_object
 
@@ -191,12 +190,16 @@ async def generate_dag(
 
     # 2. Call LLM for decomposition
     prompt = DAG_PROMPT.format(brief=json.dumps(brief_data, indent=2))
+    route_kwargs = (
+        {"model": model} if model
+        else {"role": "model_general", "overrides": model_overrides}
+    )
     resp = await model_router.generate(
         prompt,
-        model=model or get_model("model_general", model_overrides),
         system=DAG_SYSTEM,
         temperature=0.3,
         max_tokens=4096,
+        **route_kwargs,
     )
 
     if not resp.success:

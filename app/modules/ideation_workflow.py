@@ -27,7 +27,7 @@ from app.database import async_session
 
 # local
 from app import model_router
-from app.config import get_model, settings
+from app.config import settings
 from app.modules.gt_extractor import (
     DISTILL_PROMPT,
     DISTILL_SYSTEM,
@@ -125,12 +125,16 @@ async def analyze_and_confirm(
     job_id = refine_result["job_id"]
     brief = refine_result["refined_brief"]
 
+    route_kwargs = (
+        {"model": model} if model
+        else {"role": settings.ideation_model_role, "overrides": model_overrides}
+    )
     resp = await model_router.generate(
         "Assess this brief:\n" + json.dumps(brief, indent=2),
-        model=model or get_model(settings.ideation_model_role, model_overrides),
         system=FEASIBILITY_SYSTEM,
         temperature=0.2,
         max_tokens=2048,
+        **route_kwargs,
     )
 
     feasibility = parse_json_object(resp.text) if resp.success else None
@@ -290,12 +294,16 @@ async def research_and_compile(
                 for r in all_results[:distill_cap]
             )
             topic_str = brief.get("title", "unknown")
+            distill_route = (
+                {"model": model} if model
+                else {"role": settings.ideation_model_role, "overrides": model_overrides}
+            )
             resp = await model_router.generate(
                 DISTILL_PROMPT.format(topic=topic_str, results=results_text),
-                model=model or get_model(settings.ideation_model_role, model_overrides),
                 system=DISTILL_SYSTEM,
                 temperature=0.2,
                 max_tokens=4096,
+                **distill_route,
             )
             if resp.success:
                 entries = parse_json_array(resp.text) or []
@@ -332,14 +340,18 @@ async def research_and_compile(
             },
             indent=2,
         )
+        compile_route = (
+            {"model": model} if model
+            else {"role": settings.ideation_model_role, "overrides": model_overrides}
+        )
         resp = await model_router.generate(
             "Compile an execution plan from this context:\n"
             + compile_context
             + feedback_section,
-            model=model or get_model(settings.ideation_model_role, model_overrides),
             system=COMPILE_SYSTEM,
             temperature=0.3,
             max_tokens=4096,
+            **compile_route,
         )
 
         workflow = parse_json_object(resp.text) if resp.success else None

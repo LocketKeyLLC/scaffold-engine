@@ -1,36 +1,44 @@
-"""Regression test for #6.3: gt_extractor distillation must use settings.model_router,
-not settings.model_general (the slow cloud model).
+"""Regression test for #6.3: gt_extractor distillation must default to the
+``model_router`` role (small/fast), not ``model_general`` (slow cloud).
+
+After Sprint E.7 the call site references the role by name (``role="model_router"``)
+rather than a settings attribute. We assert on that string at the AST level —
+robust, fast, and catches future regressions cleanly without requiring runtime
+SearXNG / DB / scaffolding.
 """
+import ast
+
 import pytest
 
 
 @pytest.mark.smoke
-def test_gt_distill_uses_model_router_as_default():
-    """Source-level check: the distill call site must reference settings.model_router.
-
-    We verify via AST rather than runtime mocking because the distillation path
-    involves SearXNG + DB + many fake scaffolds. An AST check is robust, fast,
-    and catches future regressions cleanly.
-    """
-    import ast
+def test_gt_distill_uses_model_router_role_as_default():
     with open("/code/app/modules/gt_extractor.py") as f:
-        tree = ast.parse(f.read())
+        source = f.read()
+    tree = ast.parse(source)
 
-    # Find all Attribute nodes that reference settings.*
-    settings_attrs = set()
+    # Find every model_router.generate(...) call and inspect its keyword args.
+    # The default route_kwargs literal — {"model": model} if model else {"role": "model_router"}
+    # — is what we want to see; if a future edit defaults to "model_general"
+    # (or any other role), this fails.
+    role_strings_used: set[str] = set()
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "settings"
-        ):
-            settings_attrs.add(node.attr)
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if (
+                    isinstance(k, ast.Constant)
+                    and k.value == "role"
+                    and isinstance(v, ast.Constant)
+                    and isinstance(v.value, str)
+                ):
+                    role_strings_used.add(v.value)
 
-    assert "model_router" in settings_attrs, (
-        f"#6.3 regression: gt_extractor should reference settings.model_router. "
-        f"settings.* attrs found: {settings_attrs}"
+    assert "model_router" in role_strings_used, (
+        f"#6.3 regression: gt_extractor distill must default to "
+        f'role="model_router". role strings found: {role_strings_used}'
     )
-    assert "model_general" not in settings_attrs, (
-        f"#6.3 regression: settings.model_general should NOT appear in gt_extractor. "
-        f"settings.* attrs found: {settings_attrs}"
+    assert "model_general" not in role_strings_used, (
+        f"#6.3 regression: role=\"model_general\" must NOT appear in "
+        f"gt_extractor (it's the slow cloud default). "
+        f"role strings found: {role_strings_used}"
     )

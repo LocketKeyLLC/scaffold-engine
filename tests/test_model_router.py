@@ -301,3 +301,112 @@ async def test_dispatch_with_retry_initial_response_carries_provider():
             "/api/generate", {}, "same", fallback="same", max_retries=1,
         )
     assert resp.provider == "ollama"
+
+
+# ---------------------------------------------------------------------------
+# Sprint E.7 — role= dispatches through the provider abstraction.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_generate_role_routes_through_provider():
+    """role= resolves to (model, provider) and dispatches through the
+    provider's generate(); patching _call_ollama still intercepts because
+    OllamaProvider delegates back into model_router."""
+    fake = AsyncMock(return_value=model_router.ModelResponse(
+        text="role-routed", model="m", success=True, provider="ollama",
+    ))
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        resp = await model_router.generate("hi", role="model_general")
+    assert resp.success is True
+    assert resp.text == "role-routed"
+    assert resp.provider == "ollama"
+
+
+@pytest.mark.asyncio
+async def test_chat_role_routes_through_provider():
+    fake = AsyncMock(return_value=model_router.ModelResponse(
+        text="ok", model="m", success=True, provider="ollama",
+    ))
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        resp = await model_router.chat(
+            [{"role": "user", "content": "hi"}], role="model_verifier",
+        )
+    assert resp.success is True
+    args, _ = fake.call_args
+    assert args[0] == "/api/chat"
+
+
+@pytest.mark.asyncio
+async def test_embed_role_returns_list_of_vectors():
+    embedding = [[0.1, 0.2, 0.3]]
+    fake = AsyncMock(return_value=model_router.ModelResponse(
+        model="m", success=True, provider="ollama",
+        raw={"embeddings": embedding},
+    ))
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        result = await model_router.embed("hello", role="model_embedder_pipeline")
+    assert result == embedding
+    args, _ = fake.call_args
+    assert args[0] == "/api/embed"
+
+
+@pytest.mark.asyncio
+async def test_classify_default_routes_through_router_role():
+    """classify() with no args must route through model_router role —
+    preserves prior default of using settings.model_router but now via
+    the provider seam."""
+    from app.config import settings
+    captured: dict = {}
+
+    async def fake(endpoint, payload, model, timeout):
+        captured["model"] = model
+        captured["endpoint"] = endpoint
+        return model_router.ModelResponse(
+            text="cls", model=model, success=True, provider="ollama",
+        )
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        resp = await model_router.classify("classify this")
+    assert resp.success is True
+    assert captured["model"] == settings.model_router
+    assert captured["endpoint"] == "/api/generate"
+
+
+@pytest.mark.asyncio
+async def test_role_and_model_together_raises():
+    with pytest.raises(ValueError, match="not both"):
+        await model_router.generate("p", model="x", role="model_general")
+    with pytest.raises(ValueError, match="not both"):
+        await model_router.chat(
+            [{"role": "user", "content": "x"}], model="x", role="model_general",
+        )
+    with pytest.raises(ValueError, match="not both"):
+        await model_router.embed("x", model="m", role="model_embedder_pipeline")
+
+
+@pytest.mark.asyncio
+async def test_role_with_overrides_resolves_model_and_provider():
+    """overrides dict feeds both get_model() and provider_for_role()."""
+    fake = AsyncMock(return_value=model_router.ModelResponse(
+        text="ok", model="custom-tag", success=True, provider="ollama",
+    ))
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        await model_router.generate(
+            "hi",
+            role="model_general",
+            overrides={"model_general": "custom-tag",
+                       "model_general_provider": "ollama"},
+        )
+    args, _ = fake.call_args
+    assert args[2] == "custom-tag"
+
+
+@pytest.mark.asyncio
+async def test_legacy_model_arg_still_works():
+    """Existing callers passing model=... must keep working unchanged."""
+    fake = AsyncMock(return_value=model_router.ModelResponse(
+        text="legacy", model="qwen", success=True, provider="ollama",
+    ))
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        resp = await model_router.generate("p", model="qwen")
+    assert resp.text == "legacy"
+    args, _ = fake.call_args
+    assert args[2] == "qwen"

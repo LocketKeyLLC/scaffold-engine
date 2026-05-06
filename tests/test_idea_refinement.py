@@ -227,22 +227,22 @@ class TestRefineIdeaModelOverrides:
     """refine_idea() passes model_overrides through to get_model."""
 
     def test_model_overrides_used(self):
+        """Sprint E.7: model_overrides flows through as ``overrides=`` to
+        model_router.generate alongside ``role="model_general"``. The actual
+        model lookup happens inside model_router (covered there)."""
         db = _make_db()
         resp = _make_llm_response()
-        with patch("app.modules.idea_refinement.model_router") as mock_mr, \
-             patch("app.modules.idea_refinement.get_model",
-                   return_value="custom-model:7b") as mock_gm:
+        with patch("app.modules.idea_refinement.model_router") as mock_mr:
             mock_mr.generate = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             _run(refine_idea(
                 "Build a tool", db,
                 model_overrides={"model_general": "custom-model:7b"},
             ))
-        # get_model should have been called with the overrides dict
-        mock_gm.assert_called_once_with(
-            "model_general",
-            {"model_general": "custom-model:7b"},
-        )
+        call_kwargs = mock_mr.generate.call_args.kwargs
+        assert call_kwargs.get("role") == "model_general"
+        assert call_kwargs.get("overrides") == {"model_general": "custom-model:7b"}
+        assert "model" not in call_kwargs
 
 
 # ===========================================================================

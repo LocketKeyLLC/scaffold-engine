@@ -31,7 +31,7 @@ async def embed_query(query: str) -> list[float] | None:
         return cached
 
     embeddings = await model_router.embed(
-        query_text, model=settings.model_embedder_pipeline
+        query_text, role="model_embedder_pipeline",
     )
     if not embeddings or not embeddings[0]:
         logger.warning("embed_query: empty embedding for query=%r", query[:60])
