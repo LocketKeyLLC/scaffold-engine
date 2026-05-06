@@ -272,10 +272,17 @@ class Pipeline:
             "|---|---|---|",
         ]
         if truncated:
+            dropped_keys = [n["node_key"] for n in nodes[_MAX_NODES_RENDERED:]]
+            # Show up to 20 dropped keys inline so the user can spot
+            # whether a node they care about was clipped; full list is
+            # available via /jobs + /dag/{job_id}.
+            shown = ", ".join(f"`{k}`" for k in dropped_keys[:20])
+            more = f" (+{len(dropped_keys) - 20} more)" if len(dropped_keys) > 20 else ""
             header.insert(
                 0,
                 f"⚠️  DAG has {total_nodes} nodes; rendering first "
-                f"{_MAX_NODES_RENDERED} only.\n",
+                f"{_MAX_NODES_RENDERED} only.\n\n"
+                f"**Dropped from diagram:** {shown}{more}\n",
             )
 
         return "\n".join(mermaid_lines) + "\n" + "\n".join(header + summary_rows)
