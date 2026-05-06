@@ -29,7 +29,7 @@ from sqlalchemy import text
 
 from app.config import settings
 
-logger = logging.getLogger("scaffold")
+logger = logging.getLogger("scaffold.prompt_assembly")
 
 
 EXECUTION_SYSTEM_LLM = """You are executing one node in a planned multi-step workflow.

@@ -13,7 +13,7 @@ from typing import Optional
 from app import model_router
 from app.config import get_model
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("scaffold.prompt_optimizer")
 
 FILLER_PATTERNS: list[tuple[str, str]] = [
     (r"\bplease\b\s*", ""),

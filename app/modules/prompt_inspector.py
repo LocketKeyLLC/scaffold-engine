@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("scaffold.prompt_inspector")
 
 
 async def list_prompts(job_id: UUID, db: AsyncSession) -> dict:
