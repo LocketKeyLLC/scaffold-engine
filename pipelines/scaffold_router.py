@@ -849,8 +849,15 @@ class Pipeline:
             return
         session_id = parts[1].strip()
         user_reply = parts[2].strip()
-        if not user_reply:
-            yield "Reply cannot be empty."
+        if _is_placeholder(session_id):
+            yield (
+                "Looks like a placeholder slipped through. Replace "
+                f"`{session_id}` with the actual session ID from the "
+                "research-paused message."
+            )
+            return
+        if not user_reply or _is_placeholder(user_reply):
+            yield "Reply cannot be empty (or a placeholder)."
             return
         yield f"▶️ Resuming session `{session_id}` ...\n\n"
         yield from self._research_reply_and_stream(session_id, user_reply)
@@ -906,9 +913,23 @@ class Pipeline:
             yield "Usage: `/confirm <job_id> [feedback]`"
             return
         job_id = parts[1]
+        if _is_placeholder(job_id):
+            yield (
+                "Looks like a placeholder slipped through. Replace "
+                f"`{job_id}` with the actual job_id from the analysis output."
+            )
+            return
         payload = {"job_id": job_id, "model_overrides": self._model_overrides()}
         if len(parts) > 2:
-            payload["feedback"] = parts[2]
+            feedback = parts[2]
+            if _is_placeholder(feedback):
+                yield (
+                    "Feedback looks like a placeholder. Either rerun without "
+                    f"feedback (`/confirm {job_id}`) or replace `{feedback}` "
+                    "with your actual adjustments."
+                )
+                return
+            payload["feedback"] = feedback
 
         yield "🔬 Starting research and knowledge ingestion — this may take several minutes on CPU...\n\n"
 
