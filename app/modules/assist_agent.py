@@ -344,7 +344,7 @@ async def submit_step(
 
     job_id = str(step["job_id"])
     if action == "skip":
-        await db.execute(
+        step_res = await db.execute(
             text("""
                 UPDATE assist_steps
                    SET status = 'skipped',
@@ -357,7 +357,7 @@ async def submit_step(
             """),
             {"id": step["step_id"], "meta": meta_json, "fn": friction_note},
         )
-        await db.execute(
+        node_res = await db.execute(
             text("""
                 UPDATE dag_nodes
                    SET status = 'skipped', updated_at = NOW(), completed_at = NOW()
@@ -369,7 +369,7 @@ async def submit_step(
         committed_status = "skipped"
     else:
         # Mirror to dag_nodes.output_text + flip to 'done'. Same transaction.
-        await db.execute(
+        step_res = await db.execute(
             text("""
                 UPDATE assist_steps
                    SET status = 'committed',
@@ -388,7 +388,7 @@ async def submit_step(
                 "fn": friction_note,
             },
         )
-        await db.execute(
+        node_res = await db.execute(
             text("""
                 UPDATE dag_nodes
                    SET output_text = :out,
@@ -401,6 +401,19 @@ async def submit_step(
             {"jid": job_id, "nk": node_key, "out": evidence},
         )
         committed_status = "committed"
+
+    # Mirror invariant: assist_steps row updated → matching dag_nodes row
+    # should also have updated unless it was already terminal. assist_steps
+    # is row-locked above so step_res.rowcount is always 1; if dag_nodes
+    # rowcount is 0, the corresponding node was already 'done' or 'skipped'
+    # from another code path (rare — most likely a stale execute_next_node
+    # racing with assist). Log loudly so the divergence is visible.
+    if step_res.rowcount == 1 and node_res.rowcount == 0:
+        logger.warning(
+            "assist_mirror_divergence: session_id=%s node_key=%s "
+            "assist_step_status=%s dag_node_already_terminal=true",
+            session_id, node_key, committed_status,
+        )
 
     await db.execute(
         text("""

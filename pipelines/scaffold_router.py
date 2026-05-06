@@ -1354,11 +1354,32 @@ class Pipeline:
             yield f"⚠️ Compiled output not available (HTTP {r2.status_code})."; return
         d = r2.json()
         compiled = d.get("compiled_output") or "_(no compiled output yet)_"
+        sess_status = sess.get("status")
+        job_status = d.get("status", "?")
+        # Reconciliation: session and job status come from two tables. They
+        # can diverge if the assist branch left a step terminal while the
+        # job stayed in an intermediate state. Surface the divergence so the
+        # user sees an explicit cue rather than a confusing pairing.
+        divergence = ""
+        terminal_session = {"completed", "cancelled", "abandoned"}
+        terminal_job = {"completed", "failed", "cancelled"}
+        if sess_status in terminal_session and job_status not in terminal_job:
+            divergence = (
+                f"\n⚠️ Session is terminal (`{sess_status}`) but job is still "
+                f"`{job_status}`. Run `/jobs` to inspect, or `/exec/retry` if "
+                "a node needs another attempt.\n"
+            )
+        elif sess_status not in terminal_session and job_status in terminal_job:
+            divergence = (
+                f"\n⚠️ Job is terminal (`{job_status}`) but session is still "
+                f"`{sess_status}`. Reload may be needed.\n"
+            )
         yield (
             f"### Assist session `{session_id}` summary\n\n"
-            f"- Status: `{sess.get('status')}`\n"
-            f"- Job: `{job_id}` → `{d.get('status', '?')}`\n\n"
-            f"---\n\n## Compiled output\n\n{compiled}\n"
+            f"- Status: `{sess_status}`\n"
+            f"- Job: `{job_id}` → `{job_status}`\n"
+            f"{divergence}"
+            f"\n---\n\n## Compiled output\n\n{compiled}\n"
         )
 
     def _assist_friction(self, session_id: str, node_key: str, note: str) -> Generator[str, None, None]:
