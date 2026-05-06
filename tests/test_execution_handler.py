@@ -72,7 +72,7 @@ class TestApproveFieldNames:
             "awaiting_approval": True,
         })
         p = _pipeline()
-        with patch.object(execution_handler.requests, "post", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "post", return_value=resp):
             result = p._approve(["/exec", "approve", "job-123"])
 
         assert "qwen3:4b" in result, "model_used must be surfaced"
@@ -87,7 +87,7 @@ class TestApproveFieldNames:
             "model_used": "qwen3:4b",
         })
         p = _pipeline()
-        with patch.object(execution_handler.requests, "post", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "post", return_value=resp):
             result = p._approve(["/exec", "approve", "job-123"])
 
         assert "Short inline output." in result
@@ -103,7 +103,7 @@ class TestApproveFieldNames:
             "model_used": "qwen3:4b",
         })
         p = _pipeline()
-        with patch.object(execution_handler.requests, "post", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "post", return_value=resp):
             result = p._approve(["/exec", "approve", "job-123"])
 
         assert "900 chars truncated" in result, \
@@ -120,7 +120,7 @@ class TestApproveFieldNames:
             "confidence": 0.92,
         })
         p = _pipeline()
-        with patch.object(execution_handler.requests, "post", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "post", return_value=resp):
             result = p._approve(["/exec", "approve", "job-123"])
 
         assert "Verified" in result
@@ -136,7 +136,7 @@ class TestApproveFieldNames:
             "verification_reason": "output contradicts context",
         })
         p = _pipeline()
-        with patch.object(execution_handler.requests, "post", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "post", return_value=resp):
             result = p._approve(["/exec", "approve", "job-123"])
 
         assert "Failed" in result or "⚠️" in result
@@ -159,7 +159,7 @@ class TestStatusDefensiveAccess:
             # counts intentionally missing
         })
         p = _pipeline()
-        with patch.object(execution_handler.requests, "get", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "get", return_value=resp):
             result = p._status(["/exec", "status", "job-1"])
 
         assert "Test Job" in result
@@ -168,7 +168,7 @@ class TestStatusDefensiveAccess:
     def test_empty_response_does_not_crash(self):
         resp = _mock_resp(json_data={})
         p = _pipeline()
-        with patch.object(execution_handler.requests, "get", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "get", return_value=resp):
             result = p._status(["/exec", "status", "job-1"])
 
         # Should render with 'unknown'/defaults, not raise KeyError
@@ -178,7 +178,7 @@ class TestStatusDefensiveAccess:
         """execution_status() returns HTTP 200 with {'error': ...} on job-not-found."""
         resp = _mock_resp(json_data={"error": "Job xxx not found"})
         p = _pipeline()
-        with patch.object(execution_handler.requests, "get", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "get", return_value=resp):
             result = p._status(["/exec", "status", "xxx"])
 
         assert "not found" in result
@@ -192,7 +192,7 @@ class TestStatusDefensiveAccess:
             "nodes": [{"node_key": "T1"}],  # missing status, execution_order, etc.
         })
         p = _pipeline()
-        with patch.object(execution_handler.requests, "get", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "get", return_value=resp):
             result = p._status(["/exec", "status", "job-1"])
 
         assert "T1" in result
@@ -212,7 +212,7 @@ class TestNonJsonResponse:
             raise_on_json=True,
         )
         p = _pipeline()
-        with patch.object(execution_handler.requests, "get", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "get", return_value=resp):
             result = p._status(["/exec", "status", "job-1"])
 
         assert "non-JSON" in result
@@ -225,7 +225,7 @@ class TestNonJsonResponse:
             raise_on_json=True,
         )
         p = _pipeline()
-        with patch.object(execution_handler.requests, "post", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "post", return_value=resp):
             result = p._approve(["/exec", "approve", "job-1"])
 
         assert "non-JSON" in result
@@ -234,7 +234,7 @@ class TestNonJsonResponse:
     def test_skip_handles_non_json(self):
         resp = _mock_resp(status_code=500, text="internal error", raise_on_json=True)
         p = _pipeline()
-        with patch.object(execution_handler.requests, "post", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "post", return_value=resp):
             result = p._skip(["/exec", "skip", "job-1", "T1"])
 
         assert "non-JSON" in result
@@ -242,7 +242,7 @@ class TestNonJsonResponse:
     def test_retry_handles_non_json(self):
         resp = _mock_resp(status_code=500, text="internal error", raise_on_json=True)
         p = _pipeline()
-        with patch.object(execution_handler.requests, "post", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "post", return_value=resp):
             result = p._retry(["/exec", "retry", "job-1", "T1"])
 
         assert "non-JSON" in result
@@ -258,7 +258,7 @@ class TestSkipResponseShape:
     def test_success_branch(self):
         resp = _mock_resp(json_data={"status": "skipped", "node_key": "T1"})
         p = _pipeline()
-        with patch.object(execution_handler.requests, "post", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "post", return_value=resp):
             result = p._skip(["/exec", "skip", "job-1", "T1"])
 
         assert "skipped" in result
@@ -269,7 +269,7 @@ class TestSkipResponseShape:
             "status": "error", "message": "Node T99 not found",
         })
         p = _pipeline()
-        with patch.object(execution_handler.requests, "post", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "post", return_value=resp):
             result = p._skip(["/exec", "skip", "job-1", "T99"])
 
         assert "❌" in result
@@ -280,7 +280,7 @@ class TestRetryResponseShape:
     def test_reset_branch(self):
         resp = _mock_resp(json_data={"status": "reset", "node_key": "T1"})
         p = _pipeline()
-        with patch.object(execution_handler.requests, "post", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "post", return_value=resp):
             result = p._retry(["/exec", "retry", "job-1", "T1"])
 
         assert "reset to pending" in result
@@ -290,7 +290,7 @@ class TestRetryResponseShape:
             "status": "error", "message": "Node T99 not found",
         })
         p = _pipeline()
-        with patch.object(execution_handler.requests, "post", return_value=resp):
+        with patch.object(execution_handler._HTTP_SESSION, "post", return_value=resp):
             result = p._retry(["/exec", "retry", "job-1", "T99"])
 
         assert "❌" in result

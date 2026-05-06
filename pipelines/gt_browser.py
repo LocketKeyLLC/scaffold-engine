@@ -9,6 +9,11 @@ from typing import Optional, List
 from pydantic import BaseModel, Field
 
 
+# Module-level Session for connection reuse. Tests patch
+# ``_HTTP_SESSION.get`` / ``.post`` directly.
+_HTTP_SESSION = requests.Session()
+
+
 # ─── SHARED: status icons — keep in sync across pipelines (#8.17) ───
 # Pipelines load as isolated single-file modules; no shared imports possible.
 # If you add/rename a status, update every pipeline file that has this block.
@@ -203,9 +208,9 @@ class Pipeline:
         headers = {"X-API-Key": self.valves.api_key}
         try:
             if method == "GET":
-                resp = requests.get(url, params=params, headers=headers, timeout=self.valves.request_timeout)
+                resp = _HTTP_SESSION.get(url, params=params, headers=headers, timeout=self.valves.request_timeout)
             else:
-                resp = requests.post(url, json=json_body, headers=headers, timeout=self.valves.request_timeout)
+                resp = _HTTP_SESSION.post(url, json=json_body, headers=headers, timeout=self.valves.request_timeout)
         except requests.Timeout:
             return {"_error": f"Timeout after {self.valves.request_timeout}s", "_status_code": None}
         except requests.RequestException as e:

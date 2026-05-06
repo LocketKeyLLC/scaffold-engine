@@ -61,7 +61,7 @@ class TestSSEStreamStalled:
         # ``valves.keepalive_interval`` (with a 30s lower bound) so each
         # ReadTimeout cycle covers exactly one heartbeat window. With the
         # default keepalive_interval=10, that bottoms out at 30.
-        with patch("scaffold_router.requests.post") as mp:
+        with patch("scaffold_router._HTTP_SESSION.post") as mp:
             resp = MagicMock(status_code=200)
             resp.iter_lines.return_value = iter([])
             mp.return_value = resp

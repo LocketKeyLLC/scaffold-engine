@@ -172,19 +172,19 @@ class TestPerPageValve:
 class TestHttpLibrary:
     def test_uses_requests_get(self, pipe):
         fake_resp = _mock_response(200, {"total": 0, "total_pages": 0, "entries": []})
-        with patch.object(_mod.requests, "get", return_value=fake_resp) as mock_get:
+        with patch.object(_mod._HTTP_SESSION, "get", return_value=fake_resp) as mock_get:
             pipe._call("GET", "/gt/list", params={"page": 1, "per_page": 20})
         mock_get.assert_called_once()
 
     def test_uses_requests_post(self, pipe):
         fake_resp = _mock_response(200, {"results": []})
-        with patch.object(_mod.requests, "post", return_value=fake_resp) as mock_post:
+        with patch.object(_mod._HTTP_SESSION, "post", return_value=fake_resp) as mock_post:
             pipe._call("POST", "/gt/search", json_body={"query": "x", "top_k": 10})
         mock_post.assert_called_once()
 
     def test_non_json_response_handled(self, pipe):
         fake_resp = _mock_response(502, json_data=None, text="<html>Bad Gateway</html>")
-        with patch.object(_mod.requests, "get", return_value=fake_resp):
+        with patch.object(_mod._HTTP_SESSION, "get", return_value=fake_resp):
             data = pipe._call("GET", "/gt/stats")
         assert "_error" in data
         assert "non-JSON" in data["_error"]
@@ -192,7 +192,7 @@ class TestHttpLibrary:
 
     def test_404_returns_status_code(self, pipe):
         fake_resp = _mock_response(404, {"detail": "entry not found"})
-        with patch.object(_mod.requests, "get", return_value=fake_resp):
+        with patch.object(_mod._HTTP_SESSION, "get", return_value=fake_resp):
             data = pipe._call("GET", "/gt/detail/bogus")
         assert data.get("_status_code") == 404
         assert "_error" in data

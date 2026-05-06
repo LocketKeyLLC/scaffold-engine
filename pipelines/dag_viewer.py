@@ -12,6 +12,11 @@ import requests
 from pydantic import BaseModel
 
 
+# Module-level Session for connection reuse. Tests patch
+# ``_HTTP_SESSION.get`` directly.
+_HTTP_SESSION = requests.Session()
+
+
 
 
 # ─── SHARED: status icons — keep in sync across pipelines (#8.17) ───
@@ -213,7 +218,7 @@ class Pipeline:
         job_id = parts[1].strip()
 
         try:
-            r = requests.get(
+            r = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/dag/{job_id}",
                 headers={"X-API-Key": self.valves.api_key},
                 timeout=self.valves.request_timeout,

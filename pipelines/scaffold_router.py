@@ -28,6 +28,13 @@ import time
 import requests
 from pydantic import BaseModel
 
+# Module-level Session for connection reuse across the many orchestrator
+# HTTP calls a pipeline makes during a chat session. ``requests.X(...)``
+# would open a fresh TCP connection per call; ``_HTTP_SESSION.X(...)``
+# reuses the keep-alive pool. Tests patch ``_HTTP_SESSION.get`` /
+# ``.post`` / ``.delete`` directly (see tests/_scaffold_router_setup.py).
+_HTTP_SESSION = requests.Session()
+
 logger = logging.getLogger("scaffold_router")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
@@ -544,7 +551,7 @@ class Pipeline:
         """POST /api/embeddings; verify dim == 512. Returns (ok, msg)."""
         target = model or self.valves.model_embedder
         try:
-            r = requests.post(
+            r = _HTTP_SESSION.post(
                 f"{self.valves.ollama_url}/api/embeddings",
                 json={"model": target, "prompt": "dimension probe"},
                 timeout=self.valves.request_timeout,
@@ -640,7 +647,7 @@ class Pipeline:
             "stream": False,
         }
         try:
-            r = requests.post(
+            r = _HTTP_SESSION.post(
                 f"{self.valves.ollama_url}/v1/chat/completions",
                 json=payload,
                 timeout=self.valves.triage_timeout,
@@ -673,7 +680,7 @@ class Pipeline:
             "stream": False,
         }
         try:
-            r = requests.post(
+            r = _HTTP_SESSION.post(
                 f"{self.valves.ollama_url}/v1/chat/completions",
                 json=payload,
                 timeout=self.valves.triage_timeout,
@@ -1167,7 +1174,7 @@ class Pipeline:
 
     def _assist_start(self, job_id: str) -> Generator[str, None, None]:
         try:
-            r = requests.post(
+            r = _HTTP_SESSION.post(
                 f"{self.valves.orchestrator_url}/assist/start",
                 json={
                     "job_id": job_id,
@@ -1192,7 +1199,7 @@ class Pipeline:
 
     def _assist_next(self, session_id: str) -> Generator[str, None, None]:
         try:
-            r = requests.get(
+            r = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/assist/{session_id}/next",
                 headers=self._auth_headers(),
                 timeout=self.valves.request_timeout,
@@ -1212,7 +1219,7 @@ class Pipeline:
             yield (f"❌ Evidence is {len(evidence)} chars; cap is "
                    f"{self.valves.assist_max_evidence_chars}. Trim and resend."); return
         try:
-            r = requests.post(
+            r = _HTTP_SESSION.post(
                 f"{self.valves.orchestrator_url}/assist/{session_id}/submit",
                 json={
                     "node_key": node_key,
@@ -1240,7 +1247,7 @@ class Pipeline:
 
     def _assist_skip(self, session_id: str, node_key: str) -> Generator[str, None, None]:
         try:
-            r = requests.post(
+            r = _HTTP_SESSION.post(
                 f"{self.valves.orchestrator_url}/assist/{session_id}/submit",
                 json={"node_key": node_key, "output": "", "action": "skip"},
                 headers=self._auth_headers(),
@@ -1314,7 +1321,7 @@ class Pipeline:
 
     def _assist_simple_post(self, session_id: str, action: str) -> Generator[str, None, None]:
         try:
-            r = requests.post(
+            r = _HTTP_SESSION.post(
                 f"{self.valves.orchestrator_url}/assist/{session_id}/{action}",
                 headers=self._auth_headers(),
                 timeout=self.valves.request_timeout,
@@ -1329,7 +1336,7 @@ class Pipeline:
     def _assist_done(self, session_id: str) -> Generator[str, None, None]:
         # Pull session, then job's compiled_output via /exec/status.
         try:
-            r = requests.get(
+            r = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/assist/{session_id}",
                 headers=self._auth_headers(),
                 timeout=self.valves.request_timeout,
@@ -1343,7 +1350,7 @@ class Pipeline:
         sess = r.json()
         job_id = sess.get("job_id")
         try:
-            r2 = requests.get(
+            r2 = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/exec/status/{job_id}",
                 headers=self._auth_headers(),
                 timeout=self.valves.request_timeout,
@@ -1384,7 +1391,7 @@ class Pipeline:
 
     def _assist_friction(self, session_id: str, node_key: str, note: str) -> Generator[str, None, None]:
         try:
-            r = requests.post(
+            r = _HTTP_SESSION.post(
                 f"{self.valves.orchestrator_url}/assist/{session_id}/friction",
                 json={"node_key": node_key, "note": note},
                 headers=self._auth_headers(),
@@ -1410,7 +1417,7 @@ class Pipeline:
 
         def _call():
             try:
-                result[0] = requests.post(
+                result[0] = _HTTP_SESSION.post(
                     url, json=payload, headers=self._auth_headers(), timeout=timeout,
                 )
             except Exception as e:
@@ -1558,7 +1565,7 @@ class Pipeline:
         read_timeout = max(30, keep)
 
         try:
-            r = requests.post(
+            r = _HTTP_SESSION.post(
                 url, json=payload, headers=self._auth_headers(),
                 stream=True, timeout=(30, read_timeout),
             )
@@ -1835,7 +1842,7 @@ class Pipeline:
             yield "\n⏳ Fetching final output...\n"
             time.sleep(3)
             try:
-                sr = requests.get(
+                sr = _HTTP_SESSION.get(
                     f"{self.valves.orchestrator_url}/exec/status/{job_id}",
                     headers=self._auth_headers(),
                     timeout=self.valves.request_timeout,
@@ -1909,7 +1916,7 @@ class Pipeline:
         for attempt in range(3):
             time.sleep(5 if attempt == 0 else 10)
             try:
-                r = requests.get(
+                r = _HTTP_SESSION.get(
                     f"{self.valves.orchestrator_url}/exec/status/{job_id}",
                     headers=self._auth_headers(),
                     timeout=self.valves.request_timeout,
@@ -1953,7 +1960,7 @@ class Pipeline:
 
     def _poll_compiled_output(self, job_id: str) -> str:
         try:
-            r = requests.get(
+            r = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/exec/status/{job_id}",
                 headers=self._auth_headers(),
                 timeout=self.valves.request_timeout,
@@ -1989,7 +1996,7 @@ class Pipeline:
                 text = " ".join(parts[1:])
                 if _is_placeholder(text):
                     return "It looks like the description is missing or a placeholder. Try `/idea Build a CLI that converts screenshots to a searchable PDF`."
-                r = requests.post(
+                r = _HTTP_SESSION.post(
                     f"{self.valves.orchestrator_url}/ideate",
                     json={"idea": text, "model_overrides": self._model_overrides()},
                     headers=self._auth_headers(),
@@ -1999,7 +2006,7 @@ class Pipeline:
             if cmd == "/dag":
                 if len(parts) < 2:
                     return "Usage: /dag <job_id>"
-                r = requests.post(
+                r = _HTTP_SESSION.post(
                     f"{self.valves.orchestrator_url}/dag",
                     json={"job_id": parts[1], "model_overrides": self._model_overrides()},
                     headers=self._auth_headers(),
@@ -2011,7 +2018,7 @@ class Pipeline:
                     return "Usage: /skip <job_id> <node_key>"
                 if _is_placeholder(parts[1]) or _is_placeholder(parts[2]):
                     return "It looks like job_id or node_key is missing or a placeholder. Try `/skip 01ab243e T2`."
-                r = requests.post(
+                r = _HTTP_SESSION.post(
                     f"{self.valves.orchestrator_url}/skip",
                     json={"job_id": parts[1], "node_key": parts[2]},
                     headers=self._auth_headers(),
@@ -2024,7 +2031,7 @@ class Pipeline:
                 text = " ".join(parts[1:])
                 if _is_placeholder(text):
                     return "It looks like the prompt is missing or a placeholder. Try `/optimize Write a function that returns the nth Fibonacci number`."
-                r = requests.post(
+                r = _HTTP_SESSION.post(
                     f"{self.valves.orchestrator_url}/optimize",
                     json={"prompt": text, "skip_verify": False,
                           "model_overrides": self._model_overrides()},
@@ -2038,7 +2045,7 @@ class Pipeline:
                 text = " ".join(parts[1:])
                 if _is_placeholder(text):
                     return "It looks like the query is missing or a placeholder. Try `/rag what changed in the codebase last week`."
-                r = requests.post(
+                r = _HTTP_SESSION.post(
                     f"{self.valves.orchestrator_url}/rag",
                     json={"query": text, "top_k": 5},
                     headers=self._auth_headers(),
@@ -2046,7 +2053,7 @@ class Pipeline:
                 )
                 return self._fmt(r)
             if cmd == "/status":
-                r = requests.get(
+                r = _HTTP_SESSION.get(
                     f"{self.valves.orchestrator_url}/status",
                     headers=self._auth_headers(),
                     timeout=self.valves.request_timeout,
@@ -2226,7 +2233,7 @@ class Pipeline:
         if query:
             params["q"] = query
         try:
-            r = requests.get(
+            r = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/jobs",
                 params=params,
                 headers=self._auth_headers(),
@@ -2256,7 +2263,7 @@ class Pipeline:
 
     def _jobs_rename_action(self, job_id: str, title: str) -> str:
         try:
-            r = requests.patch(
+            r = _HTTP_SESSION.patch(
                 f"{self.valves.orchestrator_url}/jobs/{job_id}",
                 json={"title": title.strip()},
                 headers=self._auth_headers(),
@@ -2280,7 +2287,7 @@ class Pipeline:
                 return (f"⚠️ No recent preview for `{job_id[:8]}`. "
                         f"Run `/jobs delete {job_id}` first.")
             try:
-                r = requests.delete(
+                r = _HTTP_SESSION.delete(
                     f"{self.valves.orchestrator_url}/jobs/{job_id}",
                     headers=self._auth_headers(),
                     timeout=self.valves.request_timeout,
@@ -2295,7 +2302,7 @@ class Pipeline:
             return f"🗑️ Deleted job `{job_id[:8]}`."
         # Preview path
         try:
-            r = requests.get(
+            r = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/exec/status/{job_id}",
                 headers=self._auth_headers(),
                 timeout=self.valves.request_timeout,
@@ -2358,7 +2365,7 @@ class Pipeline:
         if query:
             params["q"] = query
         try:
-            r = requests.get(
+            r = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/research/sessions",
                 params=params,
                 headers=self._auth_headers(),
@@ -2384,7 +2391,7 @@ class Pipeline:
 
     def _research_rename_action(self, session_id: str, topic: str) -> str:
         try:
-            r = requests.patch(
+            r = _HTTP_SESSION.patch(
                 f"{self.valves.orchestrator_url}/research/sessions/{session_id}",
                 json={"topic": topic.strip()},
                 headers=self._auth_headers(),
@@ -2408,7 +2415,7 @@ class Pipeline:
                 return (f"⚠️ No recent preview for `{session_id[:8]}`. "
                         f"Run `/research/delete {session_id}` first.")
             try:
-                r = requests.delete(
+                r = _HTTP_SESSION.delete(
                     f"{self.valves.orchestrator_url}/research/sessions/{session_id}",
                     headers=self._auth_headers(),
                     timeout=self.valves.request_timeout,
@@ -2423,7 +2430,7 @@ class Pipeline:
             return f"🗑️ Deleted research session `{session_id[:8]}`."
         # Preview
         try:
-            r = requests.get(
+            r = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/research/sessions",
                 params={"limit": 100},
                 headers=self._auth_headers(),
@@ -2458,7 +2465,7 @@ class Pipeline:
         job_id = parts[1].strip()
 
         try:
-            r = requests.get(
+            r = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/exec/status/{job_id}",
                 headers=self._auth_headers(),
                 timeout=self.valves.request_timeout,
@@ -2592,7 +2599,7 @@ class Pipeline:
 
     def _model_available(self) -> str:
         try:
-            r = requests.get(f"{self.valves.ollama_url}/api/tags",
+            r = _HTTP_SESSION.get(f"{self.valves.ollama_url}/api/tags",
                              timeout=self.valves.request_timeout)
             r.raise_for_status()
             models = r.json().get("models", [])
@@ -2624,7 +2631,7 @@ class Pipeline:
 
         if role_key != "model_reranker":
             try:
-                r = requests.get(f"{self.valves.ollama_url}/api/tags",
+                r = _HTTP_SESSION.get(f"{self.valves.ollama_url}/api/tags",
                                  timeout=self.valves.request_timeout)
                 r.raise_for_status()
                 available = {m["name"] for m in r.json().get("models", [])}
@@ -2705,7 +2712,7 @@ class Pipeline:
 
         if sub == "list":
             try:
-                r = requests.get(f"{base}/schedule", headers=hdr,
+                r = _HTTP_SESSION.get(f"{base}/schedule", headers=hdr,
                                  timeout=self.valves.request_timeout)
                 r.raise_for_status()
                 rows = r.json().get("schedules", [])
@@ -2752,7 +2759,7 @@ class Pipeline:
                         "Try `/schedule add \"0 9 * * 1\" kubernetes news`.")
             depth = args.depth
             try:
-                r = requests.post(
+                r = _HTTP_SESSION.post(
                     f"{base}/schedule", headers=hdr,
                     timeout=self.valves.request_timeout,
                     json={"topic": topic, "cron_expression": cron_expr,
@@ -2773,7 +2780,7 @@ class Pipeline:
             return "Usage: `/schedule delete <id>`"
         sid = int(parts[2].strip())
         try:
-            r = requests.delete(f"{base}/schedule/{sid}", headers=hdr,
+            r = _HTTP_SESSION.delete(f"{base}/schedule/{sid}", headers=hdr,
                                 timeout=self.valves.request_timeout)
             if r.status_code == 404:
                 return f"❌ Schedule #{sid} not found"

@@ -227,28 +227,28 @@ class TestPayloadInclusion:
         return mock_post
 
     def test_idea_includes_overrides(self, pipe):
-        with patch.object(_router_mod.requests, "post") as mock_post:
+        with patch.object(_router_mod._HTTP_SESSION, "post") as mock_post:
             self._run_command(pipe, "/idea build a web scraper", mock_post)
             assert mock_post.called
             payload = mock_post.call_args[1].get("json", {})
             assert "model_overrides" in payload
 
     def test_dag_includes_overrides(self, pipe):
-        with patch.object(_router_mod.requests, "post") as mock_post:
+        with patch.object(_router_mod._HTTP_SESSION, "post") as mock_post:
             self._run_command(pipe, "/dag test-job-1", mock_post)
             assert mock_post.called
             payload = mock_post.call_args[1].get("json", {})
             assert "model_overrides" in payload
 
     def test_optimize_includes_overrides(self, pipe):
-        with patch.object(_router_mod.requests, "post") as mock_post:
+        with patch.object(_router_mod._HTTP_SESSION, "post") as mock_post:
             self._run_command(pipe, "/optimize write a better prompt", mock_post)
             assert mock_post.called
             payload = mock_post.call_args[1].get("json", {})
             assert "model_overrides" in payload
 
     def test_rag_includes_overrides(self, pipe):
-        with patch.object(_router_mod.requests, "post") as mock_post:
+        with patch.object(_router_mod._HTTP_SESSION, "post") as mock_post:
             self._run_command(pipe, "/rag kubernetes networking", mock_post)
             assert mock_post.called
             payload = mock_post.call_args[1].get("json", {})
@@ -256,7 +256,7 @@ class TestPayloadInclusion:
 
     def test_overrides_reflect_custom_valves(self, pipe):
         pipe.valves.model_general = "my-custom:13b"
-        with patch.object(_router_mod.requests, "post") as mock_post:
+        with patch.object(_router_mod._HTTP_SESSION, "post") as mock_post:
             self._run_command(pipe, "/idea test idea", mock_post)
             payload = mock_post.call_args[1].get("json", {})
             assert payload["model_overrides"]["model_general"] == "my-custom:13b"

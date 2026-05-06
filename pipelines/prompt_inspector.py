@@ -10,6 +10,11 @@ from typing import Optional
 from pydantic import BaseModel
 
 
+# Module-level Session for connection reuse. Tests patch
+# ``_HTTP_SESSION.get`` / ``.post`` directly.
+_HTTP_SESSION = requests.Session()
+
+
 # ─── SHARED: status icons — keep in sync across pipelines (#8.17) ───
 # Pipelines load as isolated single-file modules; no shared imports possible.
 # If you add/rename a status, update every pipeline file that has this block.
@@ -174,7 +179,7 @@ class Pipeline:
 
         job_id = parts[2]
         try:
-            resp = requests.get(
+            resp = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/prompts/{job_id}",
                 headers={"X-API-Key": self.valves.api_key},
                 timeout=self.valves.request_timeout
@@ -212,7 +217,7 @@ class Pipeline:
 
         job_id, node_key = parts[2], parts[3]
         try:
-            resp = requests.get(
+            resp = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/prompts/{job_id}/{node_key}",
                 headers={"X-API-Key": self.valves.api_key},
                 timeout=self.valves.request_timeout
@@ -295,7 +300,7 @@ class Pipeline:
 
     def _post_prompt(self, job_id: str, node_key: str, new_prompt: str) -> str:
         try:
-            resp = requests.post(
+            resp = _HTTP_SESSION.post(
                 f"{self.valves.orchestrator_url}/prompts/{job_id}/{node_key}",
                 json={"prompt": new_prompt},
                 headers={"X-API-Key": self.valves.api_key},

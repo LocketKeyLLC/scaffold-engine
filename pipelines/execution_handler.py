@@ -11,6 +11,13 @@ from typing import Optional
 from pydantic import BaseModel
 
 
+# Module-level Session for connection reuse. ``_HTTP_SESSION.X(...)``
+# replaces ``requests.X(...)`` so each chat-driven call reuses the
+# keep-alive pool instead of opening a fresh TCP connection. Tests
+# patch ``_HTTP_SESSION.get`` / ``.post`` directly.
+_HTTP_SESSION = requests.Session()
+
+
 # ─── SHARED: status icons — keep in sync across pipelines (#8.17) ───
 # Pipelines load as isolated single-file modules; no shared imports possible.
 # execution_handler has additional job-lifecycle states (executing, planning,
@@ -226,7 +233,7 @@ class Pipeline:
 
         job_id = parts[2]
         try:
-            resp = requests.get(
+            resp = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/exec/status/{job_id}",
                 headers={"X-API-Key": self.valves.api_key},
                 timeout=self.valves.quick_timeout,
@@ -308,7 +315,7 @@ class Pipeline:
 
         job_id = parts[2]
         try:
-            resp = requests.post(
+            resp = _HTTP_SESSION.post(
                 f"{self.valves.orchestrator_url}/execute",
                 json={"job_id": job_id},
                 headers={"X-API-Key": self.valves.api_key},
@@ -377,7 +384,7 @@ class Pipeline:
 
         job_id, node_key = parts[2], parts[3]
         try:
-            resp = requests.post(
+            resp = _HTTP_SESSION.post(
                 f"{self.valves.orchestrator_url}/skip",
                 json={"job_id": job_id, "node_key": node_key},
                 headers={"X-API-Key": self.valves.api_key},
@@ -411,7 +418,7 @@ class Pipeline:
 
         job_id, node_key = parts[2], parts[3]
         try:
-            resp = requests.post(
+            resp = _HTTP_SESSION.post(
                 f"{self.valves.orchestrator_url}/exec/retry",
                 json={"job_id": job_id, "node_key": node_key},
                 headers={"X-API-Key": self.valves.api_key},

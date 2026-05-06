@@ -21,7 +21,7 @@ def pipe():
 class TestHandleCommand:
     """_handle_command: dispatches slash commands via HTTP."""
 
-    @patch("requests.get")
+    @patch("scaffold_router._HTTP_SESSION.get")
     def test_status_command(self, mock_get, pipe):
         """'/status' should call the orchestrator's /status endpoint."""
         mock_get.return_value = _make_response(200, {
@@ -52,7 +52,7 @@ class TestHandleCommand:
         assert "/go" in result
         assert "/status" in result
 
-    @patch("requests.post")
+    @patch("scaffold_router._HTTP_SESSION.post")
     def test_idea_command(self, mock_post, pipe):
         """'/idea <text>' should POST to the /ideate endpoint."""
         mock_post.return_value = _make_response(200, {
@@ -67,14 +67,14 @@ class TestHandleCommand:
         sent_json = call_kwargs[1].get("json") or call_kwargs.kwargs.get("json", {})
         assert "homelab" in str(sent_json).lower() or "new-job-456" in result
 
-    @patch("requests.post")
+    @patch("scaffold_router._HTTP_SESSION.post")
     def test_idea_command_missing_text(self, mock_post, pipe):
         """'/idea' with no text should return usage instructions, not crash."""
         result = pipe._handle_command("/idea")
         assert "usage" in result.lower() or "Usage" in result
         mock_post.assert_not_called()  # no HTTP call should be made
 
-    @patch("requests.post")
+    @patch("scaffold_router._HTTP_SESSION.post")
     def test_rag_command(self, mock_post, pipe):
         """'/rag <query>' should query the knowledge base."""
         mock_post.return_value = _make_response(200, {
@@ -84,7 +84,7 @@ class TestHandleCommand:
         mock_post.assert_called_once()
         assert "Proxmox" in result or "```json" in result
 
-    @patch("requests.get")
+    @patch("scaffold_router._HTTP_SESSION.get")
     def test_network_timeout(self, mock_get, pipe):
         """Network timeouts should produce a friendly error, not a crash."""
         import requests as req_lib
@@ -92,7 +92,7 @@ class TestHandleCommand:
         result = pipe._handle_command("/status")
         assert "timed out" in result.lower() or "timeout" in result.lower()
 
-    @patch("requests.get")
+    @patch("scaffold_router._HTTP_SESSION.get")
     def test_connection_error(self, mock_get, pipe):
         """Connection failures should produce a friendly error."""
         import requests as req_lib
@@ -130,7 +130,7 @@ class TestGoCommand:
         ]
         body = {}
         with patch.object(pipe, "_synthesize_idea", return_value="Build a homelab dashboard for Docker") as mock_synth, \
-             patch.object(_mod, "requests") as mock_requests:
+             patch.object(_mod, "_HTTP_SESSION") as mock_requests:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.json.return_value = {
@@ -162,7 +162,7 @@ class TestConfirmCommand:
 
 
 
-    @patch("pipelines.scaffold_router.requests.post")
+    @patch("pipelines.scaffold_router._HTTP_SESSION.post")
     def test_confirm_invokes_execute_all(self, mock_post, pipe):
         """/confirm must auto-chain into /execute/all (regression for known issue #14)."""
         from unittest.mock import MagicMock
@@ -194,7 +194,7 @@ class TestContextStripping:
         ]
         body = {}
         with patch.object(pipe, "_synthesize_idea", return_value="Test idea from context") as mock_synth, \
-             patch.object(_mod, "requests") as mock_requests:
+             patch.object(_mod, "_HTTP_SESSION") as mock_requests:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.json.return_value = {
@@ -242,7 +242,7 @@ class TestModelCommand:
                      "reranker", "router", "fallback", "cloud_alt"):
             assert role in result
 
-    @patch("requests.get")
+    @patch("scaffold_router._HTTP_SESSION.get")
     def test_model_set_valid(self, mock_get, pipe):
         """'/model set general qwen3:8b' with valid Ollama response updates the valve."""
         mock_get.return_value = MagicMock(
@@ -261,7 +261,7 @@ class TestModelCommand:
         assert "Unknown role" in result
         assert "general" in result  # valid roles listed
 
-    @patch("requests.get")
+    @patch("scaffold_router._HTTP_SESSION.get")
     def test_model_set_model_not_found(self, mock_get, pipe):
         """If model isn't on Ollama, return error without changing valve."""
         mock_get.return_value = MagicMock(
@@ -284,7 +284,7 @@ class TestModelCommand:
         assert pipe.valves.model_general == "qwen3-vl:235b-instruct-cloud"
         assert pipe.valves.model_verifier == "qwen2.5:7b"
 
-    @patch("requests.get")
+    @patch("scaffold_router._HTTP_SESSION.get")
     def test_model_available(self, mock_get, pipe):
         """'/model available' lists models from Ollama."""
         mock_get.return_value = MagicMock(
@@ -449,7 +449,7 @@ class TestResearchCommand:
             captured["url"] = url
             captured["json"] = kw.get("json", {})
             return FakeResponse()
-        monkeypatch.setattr(_mod.requests, "post", fake_post)
+        monkeypatch.setattr(_mod._HTTP_SESSION, "post", fake_post)
 
         output = "".join(
             pipe._research_reply_and_stream("sess_xyz", "Kubernetes")
@@ -503,7 +503,7 @@ class TestResultsCommand:
     """#8.1: /results <job_id> renders output/progress/error from /exec/status."""
 
     def test_completed_renders_compiled_output(self, pipe):
-        with patch("scaffold_router.requests.get") as mg:
+        with patch("scaffold_router._HTTP_SESSION.get") as mg:
             resp = MagicMock(status_code=200)
             resp.json.return_value = {
                 "status": "completed",
@@ -515,14 +515,14 @@ class TestResultsCommand:
         assert "Here is the output." in out
 
     def test_404_returns_not_found(self, pipe):
-        with patch("scaffold_router.requests.get") as mg:
+        with patch("scaffold_router._HTTP_SESSION.get") as mg:
             mg.return_value = MagicMock(status_code=404, text="")
             out = pipe._handle_results(["/results", "bogus"])
         assert "Job not found" in out
         assert "bogus" in out
 
     def test_running_shows_progress(self, pipe):
-        with patch("scaffold_router.requests.get") as mg:
+        with patch("scaffold_router._HTTP_SESSION.get") as mg:
             resp = MagicMock(status_code=200)
             # Round 6 (Apr 27 2026): /results derives progress from the
             # counts dict + nodes array (the orchestrator API contract).
@@ -548,7 +548,7 @@ class TestResultsCommand:
         assert "write_report" in out
 
     def test_failed_shows_error(self, pipe):
-        with patch("scaffold_router.requests.get") as mg:
+        with patch("scaffold_router._HTTP_SESSION.get") as mg:
             resp = MagicMock(status_code=200)
             resp.json.return_value = {
                 "status": "failed",
@@ -560,7 +560,7 @@ class TestResultsCommand:
         assert "verifier rejected" in out
 
     def test_dispatch_via_handle_command(self, pipe):
-        with patch("scaffold_router.requests.get") as mg:
+        with patch("scaffold_router._HTTP_SESSION.get") as mg:
             resp = MagicMock(status_code=200)
             resp.json.return_value = {"status": "completed", "compiled_output": "DONE"}
             mg.return_value = resp
@@ -580,7 +580,7 @@ class TestScheduleDepthFlag:
             resp.json.return_value = {"id": 1, "topic": "research foo",
                                       "cron_expression": "0 9 * * 1", "depth": "deep"}
             return resp
-        with patch("scaffold_router.requests.post", side_effect=_mp):
+        with patch("scaffold_router._HTTP_SESSION.post", side_effect=_mp):
             out = pipe._handle_schedule('/schedule add "0 9 * * 1" --depth=deep research foo')
         assert captured["json"]["depth"] == "deep"
         assert captured["json"]["topic"] == "research foo"
@@ -594,7 +594,7 @@ class TestScheduleDepthFlag:
             resp.json.return_value = {"id": 2, "topic": "my topic",
                                       "cron_expression": "* * * * *", "depth": "medium"}
             return resp
-        with patch("scaffold_router.requests.post", side_effect=_mp):
+        with patch("scaffold_router._HTTP_SESSION.post", side_effect=_mp):
             pipe._handle_schedule('/schedule add "* * * * *" --depth medium my topic')
         assert captured["json"]["depth"] == "medium"
 
@@ -612,7 +612,7 @@ class TestScheduleDepthFlag:
             resp.json.return_value = {"id": 3, "topic": "foo",
                                       "cron_expression": "0 0 * * *", "depth": "medium"}
             return resp
-        with patch("scaffold_router.requests.post", side_effect=_mp):
+        with patch("scaffold_router._HTTP_SESSION.post", side_effect=_mp):
             pipe._handle_schedule('/schedule add "0 0 * * *" foo')
         assert captured["json"]["depth"] == "medium"
 
