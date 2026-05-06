@@ -14,8 +14,6 @@ import asyncio
 import logging
 import time
 
-from pymilvus import Collection  # noqa: F401  (re-export surface kept for tests)
-
 from app.utils.milvus_utils import get_collection
 from app.config import settings, TTL_POLICY, DEFAULT_TTL_SECONDS
 

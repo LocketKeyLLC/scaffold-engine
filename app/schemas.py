@@ -523,7 +523,6 @@ class GtSearchInput(BaseModel):
 class PromptUpdateInput(BaseModel):
     """Body for POST /prompts/{job_id}/{node_key} — fix-list #14."""
     prompt: str
-    reason: str | None = None
 
 
 class ExecRetryInput(BaseModel):
