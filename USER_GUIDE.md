@@ -366,6 +366,54 @@ Shows the full command list grouped by category.
 
 ---
 
+## Python SDK (programmatic access)
+
+The orchestrator ships a typed Python client at [`sdk/`](./sdk/) for scripts and integrations. It pins to API **v1.0.0** and wraps every non-streaming endpoint with typed methods, plus async SSE helpers for `/research` and `/execute/all`. Full reference: [sdk/README.md](./sdk/README.md).
+
+### Install (dev — orchestrator repo checkout)
+
+```bash
+pip install -e ./sdk
+```
+
+Once published: `pip install scaffold-engine-client`.
+
+### Sync example
+
+```python
+from scaffold_client import Client
+
+with Client("http://localhost:8000", api_key="...") as c:
+    job = c.ideate("Build a markdown linter")
+    print(job["job_id"], job["feasibility"]["feasible"])
+
+    for row in c.jobs.list(limit=5)["jobs"]:
+        print(row["status"], row["title"])
+```
+
+### Async + streaming example
+
+```python
+import asyncio
+from scaffold_client import AsyncClient
+
+async def main():
+    async with AsyncClient("http://localhost:8000", api_key="...") as c:
+        async for event in c.aiter_research("kubernetes operators"):
+            if event["event"] == "convergence":
+                break
+
+asyncio.run(main())
+```
+
+Breaking out of the `async for` closes the stream cleanly; the orchestrator's keepalive watchdog finalizes the session as `cancelled` within ~2s.
+
+### Errors
+
+Every transport failure raises a subclass of `ScaffoldError` — catch the base class once, or branch on `AuthenticationError` / `NotFoundError` / `OrchestratorError` / etc. for specific UX. See [sdk/README.md](./sdk/README.md#errors) for the full table.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Try this |
@@ -391,6 +439,8 @@ docker logs --tail 200 -f scaffold-orchestrator
 | Health check | http://localhost:8000/health |
 | Pipeline code | `~/scaffold-engine/pipelines/scaffold_router.py` |
 | Orchestrator code | `~/scaffold-engine/app/` |
+| Python SDK | `~/scaffold-engine/sdk/` |
+| OpenAPI snapshot (contract) | `~/scaffold-engine/docs/openapi.json` |
 | Project overview (deep technical reference) | `~/scaffold-engine/scaffold-engine-overview.md` |
 
 ---

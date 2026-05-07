@@ -2,6 +2,35 @@
 
 Reverse-chronological record of dated fixes, hardening rounds, and architectural changes. Engineer's working log; preserves file paths, function names, and commit hashes.
 
+## 2026-05-07 — Sprint J.1.f: SDK README + USER_GUIDE section + v1.0.0 anchor (Sprint J.1 complete)
+
+Final commit of Sprint J.1 — public docs ship and v1.0.0 becomes the stability anchor for the orchestrator API + SDK.
+
+- **`sdk/README.md`** — full v1.0.0 quickstart. Install (pip + editable), sync example, async + streaming example, error hierarchy table, complete API surface (top-level methods + 6 resource sub-objects + 4 streaming helpers + escape hatch), schemas usage, versioning policy, and contributing notes. Replaces the J.1.b placeholder.
+- **`USER_GUIDE.md`** — new "Python SDK (programmatic access)" section between the chat-command reference and Troubleshooting. Sync + async examples, error-handling pointer, link to the SDK README. "Where things live" gains entries for `sdk/` and `docs/openapi.json`.
+- **Stability commitment** — v1.0.0 of `scaffold-engine-client` pins to FastAPI app v1.0.0. The committed `docs/openapi.json` is the canonical contract; `make openapi-check` enforces no silent drift; major bumps require a CHANGELOG entry and a deliberate version-field bump in `app/main.py`.
+
+### Sprint J.1 commit ledger
+
+| # | Commit | Subject |
+|---|---|---|
+| a | `334dba8` | OpenAPI snapshot + drift check, FastAPI v1.0.0 |
+| b | `be833f5` | scaffold-engine-client skeleton + schema parity |
+| c | `ff56583` | Sync Client typed methods + resource sub-objects |
+| d | `87de74b` | AsyncClient mirror + SSE streaming helpers |
+| e | `5e31d02` | CLI switches to scaffold-engine-client |
+| f | _this commit_ | Docs + v1.0.0 anchor |
+
+### Test counts (post-J.1)
+
+- Orchestrator: 899 passed, 14 pre-existing failed, 5 skipped (unchanged from J.1.a baseline + 2 SDK-parity tests added in J.1.b).
+- SDK: 88 passed (20 skeleton + 37 sync typed + 17 async typed + 7 SSE parser + 7 streaming integration).
+- CLI: 38 passed (unchanged through the SDK switchover).
+
+### What J.1 closes — and what it doesn't
+
+Sprint J.1 was item 10 of the 12-item roadmap. The roadmap is now: items 1–10 done, items 11 (native single-page web UI) + 12 (cost + latency telemetry) remain. Open follow-ups (research_agent migration to native `tool_call()`, the Pattern 3 helper-internal call-site sweep deferred from Sprint E.7, and the pre-existing `scaffold jobs status` 404-on-non-existent-endpoint bug) are independent of Sprint J and can interleave at user's priority.
+
 ## 2026-05-07 — Sprint J.1.e: CLI switches to scaffold-engine-client
 
 The terminal CLI no longer ships its own httpx wrapper — `cli/scaffold_cli/client.py` is now a ~120-line shim over `scaffold_client.Client` (the SDK). The shim catches the SDK's typed exceptions (`ConnectionError`, `TimeoutError`, `AuthenticationError`, etc.) and re-raises them as the existing `CLIError` with the longer CLI-specific remediation hints (`make doctor`, the `~/.scaffold/config.toml` config-source list) that don't belong in a library.
