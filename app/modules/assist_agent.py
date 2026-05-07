@@ -14,7 +14,7 @@ in the same transaction, which is what makes the existing
 `_compile_output`, `_fetch_upstream_outputs`, and downstream RAG
 grounding paths Just Work without any awareness of assist mode.
 
-See docs/ARCHITECTURE.md "Assistant Mode" + references/assist.md.
+See OVERVIEW.md §9 ("Assist Mode") for the design.
 """
 from __future__ import annotations
 

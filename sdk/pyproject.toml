@@ -5,8 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scaffold-engine-client"
 version = "1.0.0"
-description = "Typed Python client for the Scaffold Engine orchestrator HTTP API"
-readme = "README.md"
+description = "Typed Python client for the Scaffold Engine orchestrator HTTP API. See OVERVIEW.md and USER_GUIDE.md in the source repo."
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 authors = [{name = "Scaffold Engine"}]

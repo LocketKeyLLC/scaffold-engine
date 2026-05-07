@@ -5,7 +5,7 @@ All routes inherit the global `Depends(require_api_key)` via the
 FastAPI app dependencies — no per-route auth needed.
 
 See app/modules/assist_agent.py for the underlying state machine and
-docs/ARCHITECTURE.md "Assistant Mode" for the design.
+OVERVIEW.md §9 ("Assist Mode") for the design.
 """
 from __future__ import annotations
 
