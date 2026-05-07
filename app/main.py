@@ -77,6 +77,46 @@ setup_logging(
 )
 
 
+async def _pre_migration_sweep() -> dict:
+    """Idempotent pre-migration sweep of stuck 'running' research_sessions.
+
+    Returns a small status dict the lifespan caller logs:
+
+    - ``{"skipped": True, "reason": "table_not_yet_created", "cleared": 0}``
+      on fresh DBs where ``research_sessions`` hasn't been created by
+      migration 010 yet.
+    - ``{"skipped": False, "reason": None, "cleared": <int>}`` after a
+      successful UPDATE; the count is the number of stale rows cancelled.
+
+    Audit item 7. Runs on every startup so migration 020's UNIQUE-index
+    precondition is robust regardless of when 020 first applies and
+    regardless of crash-recovery state. Idempotent — running it on a
+    healthy DB matches no rows and changes nothing.
+    """
+    async with async_session() as db:
+        async with db.begin():
+            exists = await db.execute(text(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_name = 'research_sessions'"
+            ))
+            if exists.scalar() is None:
+                return {"skipped": True, "reason": "table_not_yet_created", "cleared": 0}
+            result = await db.execute(text("""
+                UPDATE research_sessions
+                   SET status = 'cancelled',
+                       error_message = COALESCE(error_message, 'reaped_at_startup'),
+                       completed_at = NOW(),
+                       updated_at = NOW()
+                 WHERE status = 'running'
+                   AND updated_at < NOW() - INTERVAL '30 minutes'
+            """))
+            return {
+                "skipped": False,
+                "reason": None,
+                "cleared": result.rowcount if result.rowcount is not None else 0,
+            }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: verify Ollama, Milvus, PostgreSQL connectivity."""
@@ -103,6 +143,29 @@ async def lifespan(app: FastAPI):
         logger.warning("milvus_connection_failed: uri=%s error=%s", settings.milvus_uri, e)
 
     # Database connectivity is verified by first request via get_db()
+
+    # Defensive pre-migration sweep (audit item 7): clear any 'running'
+    # research_sessions older than 30 min so migration 020's UNIQUE-index
+    # precondition is robust regardless of when 020 first applies and
+    # regardless of crash-recovery state. Idempotent across all DB ages.
+    # No-op on fresh DBs where research_sessions doesn't exist yet
+    # (created by migration 010); also doubles as crash-recovery on
+    # established DBs that died mid-execution with stuck 'running' rows.
+    try:
+        sweep = await _pre_migration_sweep()
+        if sweep["skipped"]:
+            logger.info("startup_sweep_skipped: reason=%s", sweep["reason"])
+        else:
+            logger.info(
+                "startup_sweep_complete: stale_running_cleared=%d",
+                sweep["cleared"],
+            )
+    except Exception as exc:
+        # Keep this defensive — sweep failure must not block startup since
+        # the migration runner has its own error handling we still want
+        # to reach.
+        logger.warning("startup_sweep_failed: error=%s", exc)
+
     # Run schema migrations before anything else touches the DB (#10).
     # Opt out with SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false (default: true).
     _run_migs = os.getenv("SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP", "true").strip().lower()

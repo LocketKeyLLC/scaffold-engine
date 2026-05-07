@@ -1921,7 +1921,7 @@ RAG ingest at `rag_pipeline.py:121-132` still accepts `source`/`source_url`, `co
 
 - ✅ `db/init.sql` baseline currency — now post-025 (top-of-file comment confirms).
 - 🟦 `db/init.sql:166-167` duplicate indexes also in migration 006 — `CREATE INDEX IF NOT EXISTS` makes this idempotent; documented as intentional.
-- 🟦 `db/migrations/020_research_sessions_single_running.sql` not fully atomic — accepted as bootstrap-only edge case. Established DBs (anything past migration 020, including all current production DBs) cannot hit it. Rewriting 020 in place violates the "never edit retroactively" invariant; writing a new migration would be a no-op for any DB past 020.
+- ✅ `db/migrations/020_research_sessions_single_running.sql` atomicity — fixed via `app/main.py::_pre_migration_sweep()`. The lifespan now runs an idempotent UPDATE that cancels any `'running'` rows older than 30 min before `run_migrations()` executes. Doubles as crash-recovery for any DB whose orchestrator died mid-execution. No-op on fresh DBs (table-existence check via `information_schema.tables` short-circuits before the UPDATE). Verified live on restart: cleared 1 stuck row from the running DB. Tests at `tests/test_pre_migration_sweep.py`.
 - 🟦 `db/migrations/011_scheduled_jobs.sql:14` dead `NULL` in IN list — cosmetic; CHECK still admits NULLs via Postgres semantics. Migration 018 later wrote the correct form.
 - 🟦 `app/schemas.py:JobStatus` Literal + `JOB_STATUSES` tuple drift risk — accepted (`JOB_STATUSES = get_args(JobStatus)` at `schemas.py:34` derives the tuple directly from the Literal, eliminating the manual-sync risk the audit flagged).
 
@@ -1937,7 +1937,7 @@ The original priority queue had 10 items. After live-code verification, 7 are fu
 | 4 | `/health _check_ollama` shared client | ✅ Fixed (delegates to `get_ollama_client()`) |
 | 5 | Pipeline placeholder checks | ✅ Fixed (both `/confirm` feedback and `/research/reply` session_id) |
 | 6 | RAG dual-alias acceptance | 🟦 Accepted — Pattern H rationale above |
-| 7 | Migration 020 atomicity | 🟦 Accepted — bootstrap-only edge case, see 16.3 |
+| 7 | Migration 020 atomicity | ✅ Fixed — `_pre_migration_sweep()` in lifespan; idempotent on every startup |
 | 8 | Idle-counter calibration | ✅ Fixed (`read_timeout = max(30, keep)`) |
 | 9 | Drift-hint surface to 4 pipelines | ✅ Fixed (`_drift_hint()` ported to all four) |
 | 10 | Auto-chain recovery state machine | 🟦 Accepted — current `/results`-based recovery surface is functional UX; formalizing into a structured state machine is a sprint-sized refactor and the existing surface meets the user-affordance bar |
