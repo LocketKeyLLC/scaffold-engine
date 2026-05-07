@@ -30,6 +30,8 @@ from app.providers.base import (
     LLMProvider,
     ModelResponse,
     ProviderUnavailableError,
+    Tool,
+    ToolCall,
 )
 
 logger = logging.getLogger("scaffold.providers.ollama")
@@ -42,7 +44,11 @@ class OllamaProvider(LLMProvider):
     supports_chat = True
     supports_embeddings = True
     supports_streaming = True
-    supports_native_tools = False
+    # Sprint I.2: Ollama 0.3+ accepts the OpenAI-shape tools field on
+    # /api/chat. Tool support is model-dependent (qwen2.5, llama3.1+, …);
+    # this flag advertises the provider's capability — mismatched models
+    # will simply ignore the tools field and respond with text.
+    supports_native_tools = True
 
     async def chat_completion(
         self,
@@ -114,6 +120,153 @@ class OllamaProvider(LLMProvider):
     async def list_models(self) -> list[str]:
         from app import model_router
         return await model_router.list_models()
+
+    # ------------------------------------------------------------------
+    # tool_call — Sprint I.2 (POST /api/chat with tools=[...])
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tools_to_ollama(tools: list[Tool]) -> list[dict[str, Any]]:
+        """Translate provider-agnostic Tool list to Ollama's wire shape.
+
+        Ollama copies OpenAI's structure verbatim::
+
+            [{"type": "function",
+              "function": {"name": ..., "description": ...,
+                           "parameters": <JSON Schema>}}]
+        """
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema,
+                },
+            }
+            for t in tools
+        ]
+
+    @staticmethod
+    def _extract_ollama_tool_calls(
+        message: dict[str, Any],
+    ) -> list[ToolCall]:
+        """Pull tool_calls out of an Ollama response message.
+
+        Ollama differs from OpenAI in two notable ways:
+
+        1. ``arguments`` is a dict directly — NOT a JSON-encoded string.
+        2. There is no ``id`` field per call; we synthesize ``tool_<index>``
+           so callers that need an id (multi-turn tool/result threads)
+           still have one to thread.
+        """
+        raw_calls = message.get("tool_calls") or []
+        out: list[ToolCall] = []
+        for i, call in enumerate(raw_calls):
+            fn = call.get("function") or {}
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                # Some Ollama builds (or compat shims) emit a string —
+                # decode for parity with OpenAI's parsed shape.
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
+            out.append(ToolCall(
+                id=call.get("id") or f"tool_{i}",
+                name=fn.get("name") or "",
+                arguments=args,
+            ))
+        return out
+
+    async def tool_call(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        tools: list[Tool],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        timeout: int = 600,
+        tool_choice: str = "auto",  # noqa: ARG002 — Ollama always negotiates choice with the model
+        **opts: Any,
+    ) -> ModelResponse:
+        """Native tool calling via Ollama 0.3+.
+
+        Tool support is model-dependent — qwen2.5, llama3.1+, mistral-nemo,
+        and a few others speak the protocol; older or smaller models
+        (qwen3:4b, qwen2.5:3b, …) often respond with text only and ignore
+        the tools field. The capability flag advertises provider support;
+        the caller picks an appropriate model for the role.
+
+        Note: Ollama doesn't expose a ``tool_choice`` parameter, so the
+        argument is accepted (for cross-provider parity) but not threaded
+        to the wire. ``"none"`` callers should pin a non-tool model
+        instead, or use ``chat_completion``.
+
+        Goes direct to the shared HTTP client (no retry/fallback) so a
+        partial response or model-side ignore surfaces immediately rather
+        than re-running the whole tool-orchestration plan.
+        """
+        from app import model_router
+        from app.config import settings
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "tools": self._tools_to_ollama(tools),
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        for k, v in opts.items():
+            if k in {"fallback"}:  # not part of the Ollama API
+                continue
+            payload[k] = v
+
+        url = f"{settings.ollama_base_url}/api/chat"
+        effective_timeout = (
+            timeout if timeout != 600 else model_router._timeout_for(model)
+        )
+        client = model_router._get_client()
+
+        import time as _time
+        start = _time.monotonic()
+        try:
+            resp = await client.post(url, json=payload, timeout=effective_timeout)
+            elapsed_ms = int((_time.monotonic() - start) * 1000)
+        except Exception as exc:
+            elapsed_ms = int((_time.monotonic() - start) * 1000)
+            return ModelResponse(
+                model=model, success=False, error=str(exc),
+                total_duration_ms=elapsed_ms, provider=self.name,
+            )
+
+        if resp.status_code != 200:
+            return ModelResponse(
+                model=model, success=False,
+                error=f"HTTP {resp.status_code}: {resp.text[:200]}",
+                total_duration_ms=elapsed_ms, provider=self.name,
+            )
+
+        data = resp.json()
+        message = data.get("message") or {}
+        text = (message.get("content") or "").strip()
+        tool_calls = self._extract_ollama_tool_calls(message)
+        tokens_prompt = data.get("prompt_eval_count")
+        tokens_completion = data.get("eval_count")
+        return ModelResponse(
+            text=text,
+            model=model,
+            success=True,
+            total_duration_ms=elapsed_ms,
+            tokens_prompt=tokens_prompt,
+            tokens_completion=tokens_completion,
+            provider=self.name,
+            raw=data,
+            tool_calls=tool_calls,
+        )
 
     # ------------------------------------------------------------------
     # stream_chat — Sprint I.1

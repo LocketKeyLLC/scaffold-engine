@@ -18,8 +18,13 @@ Implementation choices
 - Streaming is implemented as of Sprint I.1 (``stream_chat`` consumes
   the OpenAI SSE shape — ``data: {...}\\n\\n`` chunks plus ``[DONE]``
   terminator — and yields ``str`` deltas, matching OllamaProvider's
-  unified streaming contract). Native tool calls remain deferred to a
-  later sprint.
+  unified streaming contract).
+- Native tool calls (Sprint I.2): ``tool_call`` accepts the
+  provider-agnostic ``Tool`` shape and translates to OpenAI's
+  ``{type: "function", function: {...}}`` wire format. The response's
+  ``function.arguments`` is a JSON-encoded string — we decode it back
+  to a dict so callers receive structured arguments, not a string they
+  have to re-parse.
 """
 from __future__ import annotations
 
@@ -34,6 +39,8 @@ from app.providers.base import (
     LLMProvider,
     ModelResponse,
     ProviderUnavailableError,
+    Tool,
+    ToolCall,
 )
 
 logger = logging.getLogger("scaffold.providers.openai")
@@ -46,7 +53,7 @@ class OpenAIProvider(LLMProvider):
     supports_chat = True
     supports_embeddings = True
     supports_streaming = True
-    supports_native_tools = True  # advertised; concrete tool_call deferred
+    supports_native_tools = True
 
     # ------------------------------------------------------------------
     # Helpers
@@ -242,6 +249,106 @@ class OpenAIProvider(LLMProvider):
                     yield content
 
     # ------------------------------------------------------------------
+    # tool_call — Sprint I.2 (POST /chat/completions with tools=[...])
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tools_to_openai(tools: list[Tool]) -> list[dict[str, Any]]:
+        """Translate provider-agnostic Tool list to OpenAI's wire shape::
+
+            [{"type": "function",
+              "function": {"name": ..., "description": ...,
+                           "parameters": <JSON Schema>}}]
+        """
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema,
+                },
+            }
+            for t in tools
+        ]
+
+    @staticmethod
+    def _tool_choice_to_openai(choice: str) -> Any:
+        """OpenAI accepts ``"auto"``/``"none"``/``"required"`` as bare
+        strings, but a specific tool name has to be wrapped::
+
+            {"type": "function", "function": {"name": "<name>"}}
+        """
+        if choice in {"auto", "none", "required"}:
+            return choice
+        return {"type": "function", "function": {"name": choice}}
+
+    async def tool_call(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        tools: list[Tool],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        timeout: int = 600,
+        tool_choice: str = "auto",
+        **opts: Any,
+    ) -> ModelResponse:
+        from app.config import settings
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "tools": self._tools_to_openai(tools),
+            "tool_choice": self._tool_choice_to_openai(tool_choice),
+            "stream": False,
+        }
+        for k, v in opts.items():
+            if k == "fallback":
+                continue
+            payload[k] = v
+        effective_timeout = timeout if timeout != 600 else settings.openai_timeout
+
+        return await self._request(
+            "/chat/completions", payload, model, effective_timeout,
+            text_extractor=self._extract_chat_text,
+            tool_calls_extractor=self._extract_tool_calls,
+        )
+
+    @staticmethod
+    def _extract_tool_calls(data: dict[str, Any]) -> list[ToolCall]:
+        """Pull tool_calls out of the OpenAI response envelope.
+
+        OpenAI emits ``function.arguments`` as a JSON-encoded string —
+        we decode it back to a dict so callers don't have to. A malformed
+        argument blob is treated as ``{}`` rather than raising; the model
+        misbehaved, but the call itself succeeded enough that we want
+        the rest of the response visible.
+        """
+        choices = data.get("choices") or []
+        if not choices:
+            return []
+        message = choices[0].get("message") or {}
+        raw_calls = message.get("tool_calls") or []
+        out: list[ToolCall] = []
+        for call in raw_calls:
+            fn = call.get("function") or {}
+            args_str = fn.get("arguments") or "{}"
+            try:
+                args = _json.loads(args_str) if isinstance(args_str, str) else args_str
+            except _json.JSONDecodeError:
+                args = {}
+            out.append(ToolCall(
+                id=call.get("id") or "",
+                name=fn.get("name") or "",
+                arguments=args if isinstance(args, dict) else {},
+            ))
+        return out
+
+    # ------------------------------------------------------------------
     # list_models (GET /models)
     # ------------------------------------------------------------------
 
@@ -281,6 +388,7 @@ class OpenAIProvider(LLMProvider):
         timeout: int,
         *,
         text_extractor,
+        tool_calls_extractor=None,
     ) -> ModelResponse:
         try:
             headers = self._auth_headers()
@@ -311,6 +419,7 @@ class OpenAIProvider(LLMProvider):
             tps = None
             if tokens_completion and elapsed_ms > 0:
                 tps = round(tokens_completion / (elapsed_ms / 1000), 2)
+            tool_calls = tool_calls_extractor(data) if tool_calls_extractor else []
             return ModelResponse(
                 text=(text or "").strip(),
                 model=data.get("model", model),
@@ -321,6 +430,7 @@ class OpenAIProvider(LLMProvider):
                 tokens_per_sec=tps,
                 provider=self.name,
                 raw=data,
+                tool_calls=tool_calls,
             )
         except httpx.TimeoutException:
             elapsed_ms = int((time.monotonic() - start) * 1000)

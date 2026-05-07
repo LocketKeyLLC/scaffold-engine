@@ -46,6 +46,49 @@ class ProviderTimeoutError(ProviderError):
 
 
 # ---------------------------------------------------------------------------
+# Tool-call types (Sprint I.2) — provider-agnostic shapes the dispatcher
+# can hand to any backend that supports native function calling.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Tool:
+    """Provider-agnostic tool / function definition.
+
+    ``input_schema`` is a JSON Schema dict (the same shape both OpenAI and
+    Anthropic accept directly). Example::
+
+        Tool(
+            name="search_web",
+            description="Search the web for recent results",
+            input_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        )
+    """
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+
+@dataclass
+class ToolCall:
+    """A single tool invocation emitted by the model.
+
+    ``id`` is the provider's tool-call identifier — used for the multi-turn
+    pattern where the caller sends back a ``tool`` message keyed by id.
+    Ollama doesn't emit ids; the provider synthesizes ``tool_<index>``.
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
 # Unified response shape — preserved verbatim from the original
 # model_router.ModelResponse so callers don't change. Providers populate
 # whatever fields they have access to; missing fields stay None.
@@ -69,6 +112,10 @@ class ModelResponse:
     fallback_used: bool = False
     provider: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+    # Sprint I.2: populated by ``LLMProvider.tool_call()`` when the model
+    # invoked one or more tools. Empty list otherwise — chat_completion()
+    # never sets this even if the upstream response included tool_calls.
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +231,45 @@ class LLMProvider(ABC):
         # is an async generator (the abstract default still has the right
         # call signature).
         yield ""  # pragma: no cover
+
+    async def tool_call(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        tools: list[Tool],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        timeout: int = 600,
+        tool_choice: str = "auto",
+        **opts: Any,
+    ) -> ModelResponse:
+        """Chat completion with native tool/function-calling.
+
+        ``tools`` is the list the model can invoke. Each ``Tool`` carries
+        a JSON Schema that constrains the arguments the model is allowed
+        to emit — far more reliable than coaxing JSON through prompt
+        templates.
+
+        ``tool_choice`` controls model behavior:
+
+        - ``"auto"`` (default) — model decides whether to call a tool.
+        - ``"none"`` — model must respond with text only.
+        - ``"required"`` — model must invoke at least one tool.
+        - ``"<tool_name>"`` — model must invoke the specified tool.
+
+        Returns a :class:`ModelResponse` whose ``tool_calls`` is populated
+        when the model invoked tools (``text`` may be empty in that case)
+        or whose ``text`` is set when the model returned a normal reply.
+        Some providers emit both — callers should check ``tool_calls``
+        first for control-flow decisions.
+
+        Default implementation raises ``ProviderCapabilityError`` —
+        providers that support native tools override this.
+        """
+        raise ProviderCapabilityError(
+            f"{self.name} provider does not support native tool calls"
+        )
 
     @abstractmethod
     async def list_models(self) -> list[str]:

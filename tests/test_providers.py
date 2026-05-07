@@ -6,7 +6,7 @@ Sprint E. The registry is module-level state so each test snapshots
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -17,6 +17,8 @@ from app.providers.base import (
     ProviderCapabilityError,
     ProviderError,
     ProviderUnavailableError,
+    Tool,
+    ToolCall,
 )
 from app.providers.ollama import OllamaProvider
 
@@ -405,6 +407,176 @@ async def test_ollama_stream_chat_payload_sets_stream_true():
             pass
     assert captured["json"]["stream"] is True
     assert captured["json"]["model"] == "qwen3:4b"
+
+
+# ---------------------------------------------------------------------------
+# Sprint I.2 — OllamaProvider.tool_call (POST /api/chat with tools=[...])
+# ---------------------------------------------------------------------------
+_TOOL_SEARCH = Tool(
+    name="search_web",
+    description="Search the web for recent results",
+    input_schema={
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    },
+)
+
+
+def _ollama_resp(payload: dict) -> MagicMock:
+    r = MagicMock()
+    r.status_code = 200
+    r.text = ""
+    r.json = MagicMock(return_value=payload)
+    return r
+
+
+@pytest.mark.asyncio
+async def test_ollama_tool_call_translates_tools_to_wire_shape():
+    """Tools must reach Ollama in the OpenAI-compatible structure
+    ({type:function, function:{name, description, parameters}}) — that's
+    the format Ollama 0.3+ expects."""
+    from app import model_router
+    from unittest.mock import MagicMock as _MM
+    fake_client = _MM()
+    fake_client.post = AsyncMock(return_value=_ollama_resp({
+        "message": {"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"name": "search_web", "arguments": {"query": "rag"}}},
+        ]},
+    }))
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        p = OllamaProvider()
+        await p.tool_call("qwen2.5:7b", [{"role": "user", "content": "search"}],
+                          [_TOOL_SEARCH])
+
+    args, kwargs = fake_client.post.call_args
+    payload = kwargs["json"]
+    assert payload["tools"] == [{
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Search the web for recent results",
+            "parameters": _TOOL_SEARCH.input_schema,
+        },
+    }]
+    assert payload["stream"] is False
+
+
+@pytest.mark.asyncio
+async def test_ollama_tool_call_parses_dict_arguments():
+    """Ollama emits ``arguments`` as a dict directly (NOT a JSON-encoded
+    string like OpenAI). The parser must handle that shape natively."""
+    from app import model_router
+    from unittest.mock import MagicMock as _MM
+    fake_client = _MM()
+    fake_client.post = AsyncMock(return_value=_ollama_resp({
+        "message": {"content": "", "tool_calls": [
+            {"function": {"name": "search_web",
+                          "arguments": {"query": "test"}}},
+            {"function": {"name": "search_web",
+                          "arguments": {"query": "second"}}},
+        ]},
+    }))
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        p = OllamaProvider()
+        resp = await p.tool_call("qwen2.5:7b", [{"role": "user", "content": "x"}],
+                                 [_TOOL_SEARCH])
+
+    assert resp.success is True
+    assert len(resp.tool_calls) == 2
+    assert resp.tool_calls[0].name == "search_web"
+    assert resp.tool_calls[0].arguments == {"query": "test"}
+    # Ollama doesn't emit ids — provider synthesizes tool_<index>.
+    assert resp.tool_calls[0].id == "tool_0"
+    assert resp.tool_calls[1].id == "tool_1"
+
+
+@pytest.mark.asyncio
+async def test_ollama_tool_call_handles_string_encoded_arguments():
+    """Compatibility shims (or older Ollama builds) sometimes emit
+    arguments as a JSON string — the parser must decode those too."""
+    from app import model_router
+    from unittest.mock import MagicMock as _MM
+    fake_client = _MM()
+    fake_client.post = AsyncMock(return_value=_ollama_resp({
+        "message": {"content": "", "tool_calls": [
+            {"function": {"name": "search_web",
+                          "arguments": '{"query": "encoded"}'}},
+        ]},
+    }))
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        p = OllamaProvider()
+        resp = await p.tool_call("qwen2.5:7b", [{"role": "user", "content": "x"}],
+                                 [_TOOL_SEARCH])
+    assert resp.tool_calls[0].arguments == {"query": "encoded"}
+
+
+@pytest.mark.asyncio
+async def test_ollama_tool_call_text_only_response_has_empty_tool_calls():
+    """Models that don't support tools (or choose not to call any) emit a
+    plain text response. tool_calls must be an empty list, not None."""
+    from app import model_router
+    from unittest.mock import MagicMock as _MM
+    fake_client = _MM()
+    fake_client.post = AsyncMock(return_value=_ollama_resp({
+        "message": {"role": "assistant", "content": "I don't know."},
+    }))
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        p = OllamaProvider()
+        resp = await p.tool_call("qwen3:4b", [{"role": "user", "content": "x"}],
+                                 [_TOOL_SEARCH])
+    assert resp.success is True
+    assert resp.text == "I don't know."
+    assert resp.tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ollama_tool_call_returns_failure_on_non_200():
+    from app import model_router
+    from unittest.mock import MagicMock as _MM
+    fake_client = _MM()
+    bad = MagicMock()
+    bad.status_code = 500
+    bad.text = "out of memory"
+    fake_client.post = AsyncMock(return_value=bad)
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        p = OllamaProvider()
+        resp = await p.tool_call("qwen2.5:7b", [{"role": "user", "content": "x"}],
+                                 [_TOOL_SEARCH])
+    assert resp.success is False
+    assert "HTTP 500" in resp.error
+    assert resp.tool_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Sprint I.2 — base class default + capability gate
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_base_tool_call_default_raises_capability_error():
+    """A provider that doesn't override tool_call must surface a clear
+    error rather than silently returning empty tool_calls."""
+    class _Embedder(LLMProvider):
+        name = "embedonly_concrete"
+        supports_chat = False
+        supports_embeddings = True
+        supports_native_tools = False
+
+        async def chat_completion(self, model, messages, **opts):
+            raise NotImplementedError
+
+        async def list_models(self):
+            return []
+
+    p = _Embedder()
+    with pytest.raises(ProviderCapabilityError, match="tool calls"):
+        await p.tool_call("m", [{"role": "user", "content": "x"}], [_TOOL_SEARCH])
+
+
+def test_ollama_capability_flag_now_advertises_tools():
+    """OllamaProvider.supports_native_tools flipped to True in Sprint I.2.
+    Locking that in a test prevents accidental regressions."""
+    p = OllamaProvider()
+    assert p.supports_native_tools is True
 
 
 # ---------------------------------------------------------------------------

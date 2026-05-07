@@ -15,6 +15,8 @@ from app import providers as registry
 from app.providers.base import (
     ProviderCapabilityError,
     ProviderUnavailableError,
+    Tool,
+    ToolCall,
 )
 from app.providers.openai import OpenAIProvider
 
@@ -464,3 +466,200 @@ async def test_stream_chat_payload_marks_stream_true(fake_client):
         pass
     assert captured["json"]["stream"] is True
     assert captured["headers"]["Authorization"] == "Bearer sk-test-fake"
+
+
+# ---------------------------------------------------------------------------
+# Sprint I.2 — tool_call (POST /chat/completions with tools=[...])
+# ---------------------------------------------------------------------------
+_TOOL_SEARCH = Tool(
+    name="search_web",
+    description="Search the web for recent results",
+    input_schema={
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    },
+)
+
+
+@pytest.mark.asyncio
+async def test_tool_call_translates_tools_to_openai_wire_shape(fake_client):
+    """OpenAI expects tools wrapped as {type: function, function: {name,
+    description, parameters}}. The translator must produce exactly that."""
+    fake_client.post.return_value = _resp(200, {
+        "model": "gpt-4o-mini",
+        "choices": [{
+            "message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {
+                    "name": "search_web",
+                    "arguments": '{"query": "rag"}',
+                }},
+            ]},
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    })
+    p = OpenAIProvider()
+    await p.tool_call("gpt-4o-mini",
+                      [{"role": "user", "content": "search RAG"}],
+                      [_TOOL_SEARCH])
+    payload = fake_client.post.call_args.kwargs["json"]
+    assert payload["tools"] == [{
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Search the web for recent results",
+            "parameters": _TOOL_SEARCH.input_schema,
+        },
+    }]
+    assert payload["tool_choice"] == "auto"
+    assert payload["stream"] is False
+
+
+@pytest.mark.asyncio
+async def test_tool_call_decodes_arguments_json_string(fake_client):
+    """OpenAI emits function.arguments as a JSON-encoded STRING. The
+    parser must decode it so callers receive a structured dict, not a
+    string they have to json.loads themselves."""
+    fake_client.post.return_value = _resp(200, {
+        "model": "gpt-4o-mini",
+        "choices": [{
+            "message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_abc", "type": "function", "function": {
+                    "name": "search_web",
+                    "arguments": '{"query": "transformers", "limit": 5}',
+                }},
+            ]},
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    })
+    p = OpenAIProvider()
+    resp = await p.tool_call("gpt-4o-mini",
+                             [{"role": "user", "content": "x"}],
+                             [_TOOL_SEARCH])
+    assert resp.success is True
+    assert len(resp.tool_calls) == 1
+    tc = resp.tool_calls[0]
+    assert tc.id == "call_abc"
+    assert tc.name == "search_web"
+    assert tc.arguments == {"query": "transformers", "limit": 5}
+
+
+@pytest.mark.asyncio
+async def test_tool_call_malformed_arguments_become_empty_dict(fake_client):
+    """If the model emits invalid JSON in arguments (rare with constrained
+    decoding, possible with weaker fine-tunes), we shouldn't crash the
+    whole call — yield an empty dict and let the caller decide."""
+    fake_client.post.return_value = _resp(200, {
+        "model": "gpt-4o-mini",
+        "choices": [{
+            "message": {"content": None, "tool_calls": [
+                {"id": "call_x", "function": {
+                    "name": "search_web",
+                    "arguments": "this is not json {",
+                }},
+            ]},
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    })
+    p = OpenAIProvider()
+    resp = await p.tool_call("gpt-4o-mini",
+                             [{"role": "user", "content": "x"}],
+                             [_TOOL_SEARCH])
+    assert resp.success is True
+    assert resp.tool_calls[0].arguments == {}
+
+
+@pytest.mark.asyncio
+async def test_tool_call_text_only_response_has_empty_tool_calls(fake_client):
+    """Model with tool_choice=auto can decide to respond in text — the
+    response must reflect that with text populated and tool_calls empty."""
+    fake_client.post.return_value = _resp(200, {
+        "model": "gpt-4o-mini",
+        "choices": [{
+            "message": {"role": "assistant",
+                        "content": "I'll just describe instead."},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 5},
+    })
+    p = OpenAIProvider()
+    resp = await p.tool_call("gpt-4o-mini",
+                             [{"role": "user", "content": "x"}],
+                             [_TOOL_SEARCH])
+    assert resp.success is True
+    assert resp.text == "I'll just describe instead."
+    assert resp.tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_tool_choice_specific_name_wraps_in_function_object(fake_client):
+    """OpenAI accepts ``"auto"``/``"none"``/``"required"`` as bare strings
+    but a specific tool name must be wrapped as
+    {"type": "function", "function": {"name": "<tool_name>"}}."""
+    fake_client.post.return_value = _resp(200, {
+        "model": "gpt-4o-mini",
+        "choices": [{"message": {"content": ""}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    })
+    p = OpenAIProvider()
+    await p.tool_call("gpt-4o-mini",
+                      [{"role": "user", "content": "x"}],
+                      [_TOOL_SEARCH],
+                      tool_choice="search_web")
+    payload = fake_client.post.call_args.kwargs["json"]
+    assert payload["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "search_web"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_tool_choice_special_strings_pass_through(fake_client):
+    """``auto``, ``none``, and ``required`` are passed through as-is."""
+    fake_client.post.return_value = _resp(200, {
+        "model": "gpt-4o-mini",
+        "choices": [{"message": {"content": ""}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    })
+    p = OpenAIProvider()
+    for choice in ("auto", "none", "required"):
+        await p.tool_call("gpt-4o-mini",
+                          [{"role": "user", "content": "x"}],
+                          [_TOOL_SEARCH],
+                          tool_choice=choice)
+        assert fake_client.post.call_args.kwargs["json"]["tool_choice"] == choice
+
+
+@pytest.mark.asyncio
+async def test_tool_call_returns_failure_when_key_empty():
+    """Same contract as chat_completion — empty key surfaces as a
+    structured failure response, not an exception."""
+    from app.config import settings
+    from pydantic import SecretStr
+    saved = settings.openai_api_key
+    settings.openai_api_key = SecretStr("")
+    try:
+        p = OpenAIProvider()
+        resp = await p.tool_call(
+            "gpt-4o-mini", [{"role": "user", "content": "x"}], [_TOOL_SEARCH],
+        )
+        assert resp.success is False
+        assert "OPENAI_API_KEY" in resp.error
+        assert resp.tool_calls == []
+    finally:
+        settings.openai_api_key = saved
+
+
+@pytest.mark.asyncio
+async def test_tool_call_extracts_openai_error_on_non_200(fake_client):
+    fake_client.post.return_value = _resp(
+        429, {"error": {"message": "rate_limit_exceeded"}}
+    )
+    p = OpenAIProvider()
+    resp = await p.tool_call(
+        "gpt-4o-mini", [{"role": "user", "content": "x"}], [_TOOL_SEARCH],
+    )
+    assert resp.success is False
+    assert "rate_limit_exceeded" in resp.error
+    assert resp.tool_calls == []
