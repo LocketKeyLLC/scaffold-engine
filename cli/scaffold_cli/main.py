@@ -2173,6 +2173,373 @@ def assist_friction_list(
 
 
 # ---------------------------------------------------------------------------
+# U.8.E — prompts + gt groups (CLI shims over existing SDK resources)
+# ---------------------------------------------------------------------------
+
+PROMPTS_EPILOG = """
+\b
+Examples:
+  scaffold prompts list <job_id>                       all node prompts (preview)
+  scaffold prompts get <job_id> <node_key>             one node's full prompt
+  scaffold prompts history <job_id> <node_key>         revision audit trail
+  scaffold prompts update <job_id> <node_key> --file new.txt
+  cat new.txt | scaffold prompts update <id> <node> --file -
+
+Updates create a new revision; the previous prompt stays in history.
+"""
+
+
+@cli.group(help="Read and edit per-node prompts + their revision history.",
+           epilog=PROMPTS_EPILOG)
+def prompts() -> None:
+    pass
+
+
+@prompts.command("list", help="List every node's current prompt for a job.")
+@click.argument("job_id")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def prompts_list(ctx: click.Context, job_id: str, as_json: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get(f"/prompts/{job_id}")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    if not isinstance(data, dict):
+        click.echo(repr(data))
+        return
+    nodes = data.get("nodes") or []
+    total = data.get("node_count", len(nodes))
+    click.echo(f"job: {data.get('job_id', job_id)}  ({len(nodes)} of {total} nodes)")
+    if not nodes:
+        click.echo("(no nodes — job may not have a DAG yet)")
+        return
+    click.echo(f"{'key':<10} {'rev':>4}  preview")
+    click.echo("-" * 90)
+    for n in nodes:
+        key = str(n.get("node_key", ""))[:9]
+        rev = n.get("revision")
+        rev_s = f"{rev:>4}" if isinstance(rev, int) else f"{'-':>4}"
+        prompt = (n.get("prompt") or n.get("text") or "")
+        preview = prompt[:60].replace("\n", " ")
+        click.echo(f"{key:<10} {rev_s}  {preview}")
+
+
+@prompts.command("get", help="Show one node's full current prompt.")
+@click.argument("job_id")
+@click.argument("node_key")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def prompts_get(
+    ctx: click.Context, job_id: str, node_key: str, as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get(f"/prompts/{job_id}/{node_key}")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    if isinstance(data, dict):
+        click.echo(f"job: {data.get('job_id', job_id)}  node: {data.get('node_key', node_key)}")
+        if (rev := data.get("revision")) is not None:
+            click.echo(f"revision: {rev}")
+        click.echo("---")
+        click.echo(data.get("prompt") or data.get("text") or "")
+
+
+@prompts.command("history", help="Show revision history for a node's prompt.")
+@click.argument("job_id")
+@click.argument("node_key")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def prompts_history(
+    ctx: click.Context, job_id: str, node_key: str, as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get(f"/prompts/{job_id}/{node_key}/history")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    revs = (data or {}).get("revisions", []) if isinstance(data, dict) else []
+    if not revs:
+        click.echo("(no revisions)")
+        return
+    click.echo(f"{len(revs)} revision(s) for {node_key}:")
+    click.echo(f"{'rev':>4}  {'created_at':<24} preview")
+    click.echo("-" * 90)
+    for r in revs:
+        rev = r.get("revision")
+        rev_s = f"{rev:>4}" if isinstance(rev, int) else f"{'-':>4}"
+        ts = str(r.get("created_at") or "")[:23]
+        prompt = (r.get("prompt") or r.get("text") or "")[:50].replace("\n", " ")
+        click.echo(f"{rev_s}  {ts:<24} {prompt}")
+
+
+@prompts.command("update", help="Set a node's prompt (creates a new revision).")
+@click.argument("job_id")
+@click.argument("node_key")
+@click.option("--file", "file", required=True,
+              help="Read prompt from file (use '-' for stdin). Multi-line OK.")
+@click.pass_context
+def prompts_update(
+    ctx: click.Context, job_id: str, node_key: str, file: str,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    if file == "-":
+        prompt_text = sys.stdin.read()
+    else:
+        with open(file, "r", encoding="utf-8") as f:
+            prompt_text = f.read()
+    if not prompt_text.strip():
+        raise click.UsageError("prompt text is empty")
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.post(f"/prompts/{job_id}/{node_key}", json={"prompt": prompt_text})
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"updated prompt for {node_key}", fg="green")
+    if isinstance(data, dict) and (rev := data.get("revision")) is not None:
+        click.echo(f"  new revision: {rev}")
+
+
+# ---- gt group ------------------------------------------------------------
+
+GT_EPILOG = """
+\b
+Examples:
+  scaffold gt stats                              corpus summary
+  scaffold gt list --domain rag --per-page 10    paginated browse
+  scaffold gt search "hybrid retrieval"          semantic search
+  scaffold gt detail <entry_id>                  full content
+  scaffold gt extract "kubernetes pod lifecycle" --queries "lifecycle hooks"
+
+`extract` runs SearXNG → LLM distill → ingest as TOON entries (slow).
+"""
+
+
+@cli.group(help="Browse, search, and extract ground-truth corpus entries.",
+           epilog=GT_EPILOG)
+def gt() -> None:
+    pass
+
+
+@gt.command("stats", help="Domain + source-type counts across the corpus.")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def gt_stats(ctx: click.Context, as_json: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/gt/stats")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    if not isinstance(data, dict):
+        click.echo(repr(data))
+        return
+    total = data.get("total_entries", 0)
+    click.secho(f"GT corpus — {total} total entries", bold=True)
+    domains = data.get("domains") or {}
+    if domains:
+        click.echo("\ndomains:")
+        for d, n in sorted(domains.items(), key=lambda kv: -kv[1]):
+            click.echo(f"  {d:<10} {n}")
+    sources = data.get("source_types") or {}
+    if sources:
+        click.echo("\nsource types:")
+        for s, n in sorted(sources.items(), key=lambda kv: -kv[1]):
+            click.echo(f"  {s:<22} {n}")
+
+
+@gt.command("list", help="List TOON entries (paginated).")
+@click.option("--page", type=int, default=1, show_default=True)
+@click.option("--per-page", type=int, default=20, show_default=True)
+@click.option("--domain", default=None, help="Filter to one domain.")
+@click.option("--include-history", is_flag=True,
+              help="Include superseded entries from the version chain.")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def gt_list(
+    ctx: click.Context,
+    page: int,
+    per_page: int,
+    domain: str | None,
+    include_history: bool,
+    as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    params: dict = {"page": page, "per_page": per_page}
+    if domain:
+        params["domain"] = domain
+    if include_history:
+        params["include_history"] = True
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/gt/list", params=params)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    rows = (data or {}).get("entries", []) if isinstance(data, dict) else []
+    total = (data or {}).get("total", len(rows))
+    total_pages = (data or {}).get("total_pages", 1)
+    if not rows:
+        click.echo("(no entries)")
+        return
+    click.echo(f"page {page}/{total_pages}, {len(rows)} of {total}:")
+    click.echo(f"{'entry_id':<28} {'domain':<8} {'conf':>5}  title")
+    click.echo("-" * 100)
+    for r in rows:
+        eid = str(r.get("entry_id", ""))[:26]
+        dom = str(r.get("domain", ""))[:6]
+        conf = r.get("confidence")
+        conf_s = f"{conf:>5.2f}" if isinstance(conf, (int, float)) else f"{'-':>5}"
+        title = (r.get("title") or "")[:50]
+        click.echo(f"{eid:<28} {dom:<8} {conf_s}  {title}")
+
+
+@gt.command("search", help="Semantic search across GT entries.")
+@click.argument("query", nargs=-1, required=True)
+@click.option("--top-k", type=int, default=10, show_default=True)
+@click.option("--domain", default=None, help="Restrict to one domain.")
+@click.option("--include-history", is_flag=True)
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def gt_search(
+    ctx: click.Context,
+    query: tuple[str, ...],
+    top_k: int,
+    domain: str | None,
+    include_history: bool,
+    as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    q = " ".join(query).strip()
+    body: dict = {"query": q, "top_k": top_k}
+    if domain:
+        body["domain"] = domain
+    if include_history:
+        body["include_history"] = True
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.post("/gt/search", json=body)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    results = (data or {}).get("results", []) if isinstance(data, dict) else []
+    if not results:
+        click.echo("(no results)")
+        return
+    for i, r in enumerate(results, 1):
+        score = r.get("score", 0.0)
+        eid = r.get("entry_id", "")
+        title = (r.get("title") or "")[:60]
+        click.secho(f"#{i}  ", fg="cyan", nl=False)
+        click.echo(f"score={score:.3f}  entry={eid}")
+        if title:
+            click.echo(f"     {title}")
+        snippet = (r.get("snippet") or r.get("text") or "")[:200].replace("\n", " ")
+        if snippet:
+            click.echo(f"     {snippet}…")
+
+
+@gt.command("detail", help="Show full content of one GT entry.")
+@click.argument("entry_id")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def gt_detail(ctx: click.Context, entry_id: str, as_json: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get(f"/gt/detail/{entry_id}")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    if not isinstance(data, dict):
+        click.echo(repr(data))
+        return
+    click.secho(f"entry: {data.get('entry_id', entry_id)}", bold=True)
+    for k in ("title", "domain", "source_type", "confidence", "url"):
+        v = data.get(k)
+        if v is not None:
+            click.echo(f"  {k}: {v}")
+    body = data.get("content") or data.get("text") or data.get("toon") or ""
+    if body:
+        click.echo("---")
+        click.echo(body)
+
+
+@gt.command("extract", help="Extract GT entries via SearXNG + LLM (slow).")
+@click.argument("topic", nargs=-1, required=True)
+@click.option("--query", "queries", multiple=True,
+              help="Extra search query (repeatable).")
+@click.option("--push-to-github", is_flag=True,
+              help="Also push the resulting TOON to ground_truths/ via gh.")
+@click.option("--target-file", default=None,
+              help="Override the target file path under ground_truths/.")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def gt_extract(
+    ctx: click.Context,
+    topic: tuple[str, ...],
+    queries: tuple[str, ...],
+    push_to_github: bool,
+    target_file: str | None,
+    as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    topic_text = " ".join(topic).strip()
+    body: dict = {"topic": topic_text}
+    if queries:
+        body["queries"] = list(queries)
+    if push_to_github:
+        body["push_to_github"] = True
+    if target_file:
+        body["target_file"] = target_file
+    try:
+        # GT extraction loops through SearXNG + LLM distill — long-running.
+        with Client(cfg.api_url, cfg.api_key, timeout=1800.0) as c:
+            data = c.post("/gt", json=body)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    if isinstance(data, dict):
+        click.secho(f"extracted {data.get('extracted', 0)} entries", fg="green", bold=True)
+        for k in ("ingested", "rejected", "superseded", "target_file"):
+            if (v := data.get(k)) is not None:
+                click.echo(f"  {k}: {v}")
+
+
+# ---------------------------------------------------------------------------
 # U.8.B — small CLI verbs (logs, exec retry, status, dag)
 # ---------------------------------------------------------------------------
 

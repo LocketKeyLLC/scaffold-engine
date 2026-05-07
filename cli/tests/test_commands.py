@@ -890,3 +890,176 @@ def test_rag_default_invocation_backwards_compatible(runner):
     args, kwargs = post.call_args
     assert args[0] == "/rag"
     assert kwargs["json"]["query"] == "milvus index"
+
+
+# ---------------------------------------------------------------------------
+# U.8.E — prompts + gt CLI groups
+# ---------------------------------------------------------------------------
+
+
+def test_prompts_list_renders_table(runner):
+    response = {"job_id": "abc", "node_count": 2, "nodes": [
+        {"node_key": "T1", "revision": 1, "prompt": "Plan the refactor"},
+        {"node_key": "T2", "revision": 3, "prompt": "Implement it"},
+    ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = response
+        res = runner.invoke(cli, ["prompts", "list", "abc"])
+    assert res.exit_code == 0
+    assert "T1" in res.output and "T2" in res.output
+    assert "Plan the refactor" in res.output
+    args, _ = get.call_args
+    assert args[0] == "/prompts/abc"
+
+
+def test_prompts_list_handles_empty(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = {
+            "job_id": "abc", "node_count": 0, "nodes": [],
+        }
+        res = runner.invoke(cli, ["prompts", "list", "abc"])
+    assert res.exit_code == 0
+    assert "(no nodes" in res.output
+
+
+def test_prompts_get_prints_full_prompt(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = {
+            "job_id": "abc", "node_key": "T2", "revision": 3,
+            "prompt": "Multi-line\nprompt body",
+        }
+        res = runner.invoke(cli, ["prompts", "get", "abc", "T2"])
+    assert res.exit_code == 0
+    assert "Multi-line" in res.output
+    assert "prompt body" in res.output
+    assert "revision: 3" in res.output
+
+
+def test_prompts_history_renders_revisions(runner):
+    response = {"revisions": [
+        {"revision": 1, "created_at": "2026-05-01T10:00", "prompt": "v1"},
+        {"revision": 2, "created_at": "2026-05-02T10:00", "prompt": "v2"},
+    ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = response
+        res = runner.invoke(cli, ["prompts", "history", "abc", "T2"])
+    assert res.exit_code == 0
+    assert "2 revision" in res.output
+    args, _ = get.call_args
+    assert args[0] == "/prompts/abc/T2/history"
+
+
+def test_prompts_update_reads_file_and_posts(runner, tmp_path):
+    f = tmp_path / "new_prompt.txt"
+    f.write_text("Refactored prompt\nwith two lines\n")
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = {"revision": 4}
+        res = runner.invoke(cli, [
+            "prompts", "update", "abc", "T2", "--file", str(f),
+        ])
+    assert res.exit_code == 0
+    args, kwargs = post.call_args
+    assert args[0] == "/prompts/abc/T2"
+    assert kwargs["json"]["prompt"].startswith("Refactored prompt")
+    assert "new revision: 4" in res.output
+
+
+def test_prompts_update_rejects_empty_text(runner, tmp_path):
+    f = tmp_path / "empty.txt"
+    f.write_text("   \n")
+    with patch("scaffold_cli.main.Client"):
+        res = runner.invoke(cli, [
+            "prompts", "update", "abc", "T2", "--file", str(f),
+        ])
+    assert res.exit_code != 0
+    assert "empty" in res.output.lower()
+
+
+# gt group ----------------------------------------------------------------
+
+
+def test_gt_stats_renders_summary(runner):
+    response = {"total_entries": 1093, "domains": {"llm": 558, "eng": 348},
+                "source_types": {"official_docs": 253, "blog": 63}}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = response
+        res = runner.invoke(cli, ["gt", "stats"])
+    assert res.exit_code == 0
+    assert "1093 total" in res.output
+    assert "llm" in res.output and "official_docs" in res.output
+    args, _ = get.call_args
+    assert args[0] == "/gt/stats"
+
+
+def test_gt_list_renders_entries(runner):
+    response = {"page": 1, "per_page": 20, "total": 2, "total_pages": 1,
+                "entries": [
+                    {"entry_id": "scaffold-foo-abc", "domain": "rag",
+                     "confidence": 0.91, "title": "Hybrid retrieval"},
+                    {"entry_id": "scaffold-bar-def", "domain": "rag",
+                     "confidence": 0.85, "title": "Reranker"},
+                ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = response
+        res = runner.invoke(cli, ["gt", "list", "--domain", "rag", "--per-page", "20"])
+    assert res.exit_code == 0
+    assert "Hybrid retrieval" in res.output
+    args, kwargs = get.call_args
+    assert args[0] == "/gt/list"
+    assert kwargs["params"]["domain"] == "rag"
+    assert kwargs["params"]["per_page"] == 20
+
+
+def test_gt_search_posts_query_and_top_k(runner):
+    response = {"results": [
+        {"score": 0.93, "entry_id": "scaffold-xyz", "title": "TOON spec",
+         "snippet": "Token-Oriented Object Notation..."},
+    ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = response
+        res = runner.invoke(cli, ["gt", "search", "TOON", "format", "--top-k", "5"])
+    assert res.exit_code == 0
+    assert "TOON spec" in res.output
+    args, kwargs = post.call_args
+    assert args[0] == "/gt/search"
+    assert kwargs["json"]["query"] == "TOON format"
+    assert kwargs["json"]["top_k"] == 5
+
+
+def test_gt_detail_prints_full_entry(runner):
+    response = {"entry_id": "scaffold-foo", "title": "X", "domain": "rag",
+                "confidence": 0.9, "content": "Long body of content here"}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = response
+        res = runner.invoke(cli, ["gt", "detail", "scaffold-foo"])
+    assert res.exit_code == 0
+    assert "scaffold-foo" in res.output
+    assert "Long body of content" in res.output
+    args, _ = get.call_args
+    assert args[0] == "/gt/detail/scaffold-foo"
+
+
+def test_gt_extract_posts_topic_and_queries(runner):
+    response = {"extracted": 7, "ingested": 6, "rejected": 1,
+                "target_file": "ground_truths/k8s.toon"}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = response
+        res = runner.invoke(cli, [
+            "gt", "extract", "kubernetes",
+            "--query", "lifecycle hooks",
+            "--query", "init containers",
+        ])
+    assert res.exit_code == 0
+    args, kwargs = post.call_args
+    assert args[0] == "/gt"
+    assert kwargs["json"]["topic"] == "kubernetes"
+    assert kwargs["json"]["queries"] == ["lifecycle hooks", "init containers"]
+    assert "extracted 7" in res.output

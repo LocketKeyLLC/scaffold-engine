@@ -2092,6 +2092,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | U.8.B | Small CLI verbs — logs / exec retry / status / dag / cleanup / dedup / research reply+pdf, CLI → v0.3.0 (§17.13) | done 2026-05-07 |
 | U.8.C | SDK research / config / models resources, SDK → v1.3.0 (§17.14) | done 2026-05-07 |
 | U.8.D | OWUI parity — /exec /cleanup /config /logs /health (§17.15) | done 2026-05-07 |
+| U.8.E | CLI prompts + gt groups, CLI → v0.4.0 (§17.16) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2285,6 +2286,30 @@ Closes the remaining "every component reachable from every interface" gap on the
 **Test-suite delta:** orchestrator-side scaffold_router tests grew by 14 (`TestU8DCommands` class). The 5 pre-existing failures from U.7 baseline (test_scaffold_router_commands × 4, test_scaffold_router_helpers × 1 — `/dag` deliberately omitted from help) are unchanged. SDK + CLI suites unchanged.
 
 **Live-smoke verified** against the running `open-webui-pipelines` container: `/health` rendered all four subsystems up + the embedding_cache info-only check; `/config model` rendered all 19 model_* fields filtered.
+
+### 17.16 Sprint U.8.E — CLI prompts + gt groups (2026-05-07)
+
+Two new CLI groups, both pure shims over SDK resources that have existed since J.1. Closes the last terminal-side gap from the U.8 audit. No SDK or orchestrator changes.
+
+| New CLI surface | Endpoint | SDK method |
+|---|---|---|
+| `scaffold prompts list <job_id>` | `GET /prompts/{id}` | `client.prompts.list` |
+| `scaffold prompts get <id> <node>` | `GET /prompts/{id}/{node}` | `client.prompts.get` |
+| `scaffold prompts history <id> <node>` | `GET /prompts/{id}/{node}/history` | `client.prompts.history` |
+| `scaffold prompts update <id> <node> --file <path>` | `POST /prompts/{id}/{node}` | `client.prompts.update` |
+| `scaffold gt stats` | `GET /gt/stats` | `client.gt.stats` |
+| `scaffold gt list [--domain] [--page] [--per-page]` | `GET /gt/list` | `client.gt.list` |
+| `scaffold gt search <q> [--top-k] [--domain]` | `POST /gt/search` | `client.gt.search` |
+| `scaffold gt detail <entry_id>` | `GET /gt/detail/{id}` | `client.gt.detail` |
+| `scaffold gt extract <topic> [--query …]` | `POST /gt` | `client.gt.create` |
+
+`prompts update` requires `--file <path>` (or `--file -` for stdin) since prompts are typically multi-line. `gt extract` has a 1800s timeout because the SearXNG → LLM distill loop is slow.
+
+**Versioning:** CLI 0.3.0 → 0.4.0. SDK floor stays `>=1.2,<2.0` (no SDK changes). API unchanged.
+
+**Test-suite delta:** CLI 106 → 117 (+11: 6 prompts, 5 gt). SDK + orchestrator suites unchanged.
+
+**Live-smoke** confirmed against the running orchestrator: `gt stats` reported 1093 entries across 4 domains and 30+ source types; `gt list --domain rag` paginated correctly (page 1/365); `prompts list` handled the empty-DAG case gracefully.
 
 ---
 
