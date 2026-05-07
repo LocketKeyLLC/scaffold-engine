@@ -96,7 +96,9 @@ services:
       LOG_JSON_FORMAT: "true"
       LOG_FILE: /var/log/scaffold/app.jsonl
       MODEL_ROUTER: qwen3:4b
-      PYTHONPATH: /code
+      # /code/sdk on the path lets `from scaffold_client import ...` work
+      # in cli/scaffold_cli/client.py and ad-hoc python invocations.
+      PYTHONPATH: /code:/code/sdk
       MODEL_EMBEDDER_PIPELINE: qwen3-embedding:8b
       MODEL_RERANKER: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
       MODEL_CODER: qwen2.5-coder:7b

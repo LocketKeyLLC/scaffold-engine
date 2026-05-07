@@ -2,6 +2,16 @@
 
 Reverse-chronological record of dated fixes, hardening rounds, and architectural changes. Engineer's working log; preserves file paths, function names, and commit hashes.
 
+## 2026-05-07 — Sprint J.1.e: CLI switches to scaffold-engine-client
+
+The terminal CLI no longer ships its own httpx wrapper — `cli/scaffold_cli/client.py` is now a ~120-line shim over `scaffold_client.Client` (the SDK). The shim catches the SDK's typed exceptions (`ConnectionError`, `TimeoutError`, `AuthenticationError`, etc.) and re-raises them as the existing `CLIError` with the longer CLI-specific remediation hints (`make doctor`, the `~/.scaffold/config.toml` config-source list) that don't belong in a library.
+
+- **Public surface preserved** — `Client(api_url, api_key)`, `c.get(path, params=...)`, `c.post(path, json=...)`, `c.get_or_none(path)`, `CLIError`, the `_http` attribute used by tests. CLI test suite passes 38/38 unchanged.
+- **`cli/pyproject.toml`** — dropped direct `httpx` dep (transitive via SDK now); added `scaffold-engine-client>=1.0,<2.0`. CLI version bump deferred until publishing.
+- **`docker-compose.yml`** — `PYTHONPATH=/code:/code/sdk` so `from scaffold_client import ...` resolves in the CLI's runtime path without a `pip install -e /code/sdk` step. Doesn't affect orchestrator imports (still finds `app.*` from `/code`).
+- **Live verified** — `scaffold version`, `scaffold doctor`, `scaffold jobs list --limit 2` all run cleanly through the new shim, hitting the live orchestrator. Friendly errors (401 → "make doctor", connect refused → "Try 'make doctor'") render identically to the pre-shim behavior.
+- **Pre-existing CLI bug NOT fixed in this commit** — `scaffold jobs status <id>` still calls `GET /jobs/{id}` which doesn't exist (silently 404s). Documented in J.1.c CHANGELOG; staged for a follow-up commit that routes through `client.jobs.status()` (which wraps the real `GET /exec/status/{id}` endpoint).
+
 ## 2026-05-07 — Sprint J.1.d: AsyncClient mirror + SSE streaming helpers
 
 `scaffold_client.AsyncClient` is now feature-complete — full mirror of the sync `Client` plus four streaming helpers for the SSE-based endpoints.

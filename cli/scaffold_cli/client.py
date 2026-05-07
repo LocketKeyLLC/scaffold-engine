@@ -1,15 +1,29 @@
-"""Thin synchronous httpx wrapper used by every command.
+"""Thin shim over ``scaffold_client.Client`` (Sprint J.1.e).
 
-We deliberately translate raw ``httpx`` errors into actionable strings —
-the CLI surfaces these directly to the user, so "Connection refused"
-becomes "Cannot reach orchestrator at <url>; is it running?". This is the
-``friendly errors`` payoff (item 6 of the UX roadmap) on the client side.
+The CLI used to ship its own httpx wrapper. As of Sprint J.1, the
+typed-client logic lives in the ``scaffold-engine-client`` SDK; this
+module is now a click-friendly translator that catches the SDK's
+``ScaffoldError`` subclasses and re-raises them as ``CLIError`` with
+the longer, CLI-specific remediation hints (``make doctor``, the
+config-source list, etc.) that don't belong in a library.
+
+The public surface (``Client.get``, ``Client.post``, ``Client.get_or_none``,
+``CLIError``, the ``_http`` attribute used by tests) is preserved so that
+``cli/scaffold_cli/main.py`` and the existing test suite pass unchanged.
 """
 from __future__ import annotations
 
 from typing import Any
 
-import httpx
+from scaffold_client import (
+    AuthenticationError,
+    Client as _SDKClient,
+    ConnectionError as _SDKConnectionError,
+    NotFoundError,
+    PermissionError as _SDKPermissionError,
+    ScaffoldError,
+    TimeoutError as _SDKTimeoutError,
+)
 
 
 class CLIError(RuntimeError):
@@ -21,26 +35,21 @@ class CLIError(RuntimeError):
 
 
 class Client:
-    """Minimal scaffold-orchestrator client.
+    """CLI-facing wrapper around ``scaffold_client.Client``.
 
-    Pre-injects ``X-API-Key`` when a key is configured. Raises ``CLIError``
-    with a remediation hint on common failures (connection refused, 401,
-    timeouts, 5xx). 404s on existence-check endpoints (``GET /jobs/<id>``)
-    are returned as ``None`` instead of raising — the caller decides.
+    Pre-injects ``X-API-Key`` (via the SDK) and translates the SDK's
+    typed exceptions into ``CLIError`` with the remediation hints the
+    CLI users expect. 404s on ``get_or_none`` return ``None`` rather
+    than raising — used by ``scaffold jobs status`` for existence checks.
     """
 
     def __init__(self, api_url: str, api_key: str | None, *, timeout: float = 30.0):
-        self.api_url = api_url.rstrip("/")
+        self._inner = _SDKClient(api_url, api_key=api_key, timeout=timeout)
+        self.api_url = self._inner.base_url
         self.api_key = api_key
-        headers: dict[str, str] = {"User-Agent": "scaffold-cli/0.1"}
-        if api_key:
-            headers["X-API-Key"] = api_key
-        self._http = httpx.Client(
-            base_url=self.api_url,
-            headers=headers,
-            timeout=timeout,
-            follow_redirects=True,
-        )
+        # Tests in cli/tests/test_client.py patch ``c._http.request``; the
+        # SDK's underlying httpx client is the natural mock target now too.
+        self._http = self._inner._http
 
     # ------------------------------------------------------------------
     # Verb helpers — return parsed JSON or raise CLIError
@@ -53,7 +62,7 @@ class Client:
         return self._dispatch("POST", path, json=json)
 
     def get_or_none(self, path: str) -> Any | None:
-        """GET that returns ``None`` on 404 instead of raising. Useful for
+        """``GET`` that returns ``None`` on 404 instead of raising. Used by
         existence checks (``scaffold jobs status <id>``)."""
         try:
             return self._dispatch("GET", path)
@@ -63,7 +72,7 @@ class Client:
             raise
 
     # ------------------------------------------------------------------
-    # Internal: error translation
+    # Internal: SDK exception → CLIError translation
     # ------------------------------------------------------------------
 
     def _dispatch(
@@ -75,68 +84,47 @@ class Client:
         json: dict | None = None,
     ) -> Any:
         try:
-            resp = self._http.request(method, path, params=params, json=json)
-        except httpx.ConnectError:
+            return self._inner.request(method, path, params=params, json=json)
+        except _SDKConnectionError:
             raise CLIError(
                 f"Cannot reach orchestrator at {self.api_url}. "
                 "Is it running? Try 'make doctor' or check 'docker ps'."
             ) from None
-        except httpx.TimeoutException:
+        except _SDKTimeoutError:
             raise CLIError(
                 f"Request timed out talking to {self.api_url}. "
                 "The orchestrator may be busy; retry, or check container logs."
             ) from None
-        except httpx.HTTPError as exc:
-            raise CLIError(f"HTTP error talking to {self.api_url}: {exc}") from None
-
-        if resp.status_code == 401:
+        except AuthenticationError:
             raise CLIError(
                 "API key rejected (401). "
                 "Set SCAFFOLD_API_KEY in your env, .env, or ~/.scaffold/config.toml. "
                 "Run 'make doctor' to confirm the orchestrator's expected key."
-            )
-        if resp.status_code == 403:
+            ) from None
+        except _SDKPermissionError:
             raise CLIError(
                 "Access forbidden (403). "
                 "The orchestrator rejected the request — check auth config."
-            )
-        if resp.status_code >= 500:
-            detail = self._best_error_detail(resp)
-            raise CLIError(
-                f"Orchestrator error ({resp.status_code}): {detail}. "
-                "Check 'docker logs scaffold-orchestrator' for the stack trace."
-            )
-        if resp.status_code >= 400:
-            detail = self._best_error_detail(resp)
-            raise CLIError(f"Request rejected ({resp.status_code}): {detail}")
-
-        try:
-            return resp.json()
-        except ValueError:
-            # Endpoints that return non-JSON (HTML error pages, etc.) — give
-            # the raw text back so the caller can render something useful.
-            return resp.text
-
-    @staticmethod
-    def _best_error_detail(resp: httpx.Response) -> str:
-        """FastAPI emits ``{"detail": ...}``; pick that out when present."""
-        try:
-            data = resp.json()
-            if isinstance(data, dict) and "detail" in data:
-                detail = data["detail"]
-                if isinstance(detail, str):
-                    return detail
-                return str(detail)
-        except Exception:
-            pass
-        return resp.text[:200] if resp.text else f"HTTP {resp.status_code}"
+            ) from None
+        except NotFoundError as exc:
+            # Preserve the SDK detail in a 404-tagged form so ``get_or_none``
+            # can detect it via the ``(404)`` substring without a structured
+            # exception channel.
+            raise CLIError(f"Resource not found (404): {exc}") from None
+        except ScaffoldError as exc:
+            # OrchestratorError / RequestError / RateLimitError — the SDK
+            # already formats these as "Orchestrator error (500): boom.
+            # Check 'docker logs scaffold-orchestrator' ..." and "Request
+            # rejected (422): missing field 'idea'." Pass the message
+            # through; it already carries the phrases the tests assert on.
+            raise CLIError(str(exc)) from None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        self._http.close()
+        self._inner.close()
 
     def __enter__(self) -> "Client":
         return self
