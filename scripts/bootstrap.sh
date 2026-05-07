@@ -69,6 +69,45 @@ ok "$COMPOSE available"
 command -v openssl >/dev/null 2>&1 || { err "openssl required for secret generation"; exit 1; }
 ok "openssl present"
 
+# Ollama on host (required for default all-local stack; the orchestrator
+# reaches host Ollama via the bridge gateway 172.18.0.1:11434).
+# Skip the check if SCAFFOLD_BOOTSTRAP_SKIP_OLLAMA=1 — useful when every
+# MODEL_*_PROVIDER points at OpenAI (or compat) and Ollama isn't needed.
+if [[ "${SCAFFOLD_BOOTSTRAP_SKIP_OLLAMA:-0}" != "1" ]]; then
+    if command -v ollama >/dev/null 2>&1; then
+        if ollama list >/dev/null 2>&1; then
+            ok "ollama present and running"
+            # Warn about default models that aren't pulled. Hard-coded to
+            # match the README's quick-start list.
+            DEFAULT_MODELS=(qwen3:4b qwen2.5:7b qwen2.5-coder:7b qwen3-embedding:8b qwen3.5:latest)
+            installed="$(ollama list 2>/dev/null | awk 'NR>1 {print $1}')"
+            missing=()
+            for m in "${DEFAULT_MODELS[@]}"; do
+                if ! grep -qx "$m" <<<"$installed"; then
+                    missing+=("$m")
+                fi
+            done
+            if (( ${#missing[@]} > 0 )); then
+                warn "ollama running but missing default models:"
+                for m in "${missing[@]}"; do printf '       - %s\n' "$m"; done
+                printf '       Pull them with: %sollama pull %s%s\n' \
+                    "$C_DIM" "${missing[*]}" "$C_RST"
+                printf '       (You can continue bootstrap; missing models surface as 422s at request time.)\n'
+            else
+                ok "all default models pulled (qwen3:4b, qwen2.5:7b, qwen2.5-coder:7b, qwen3-embedding:8b, qwen3.5:latest)"
+            fi
+        else
+            warn "ollama installed but daemon not running. Try: 'ollama serve' (foreground) or check the systemd unit."
+            printf '       %sBootstrap will continue; the stack will boot but ideate/research will fail until Ollama is reachable.%s\n' \
+                "$C_DIM" "$C_RST"
+        fi
+    else
+        warn "ollama not found in PATH. Install from https://ollama.ai before running ideate/research."
+        printf '       %sSet SCAFFOLD_BOOTSTRAP_SKIP_OLLAMA=1 to skip this check (only safe if every MODEL_*_PROVIDER will route to OpenAI / compatible).%s\n' \
+            "$C_DIM" "$C_RST"
+    fi
+fi
+
 # Network + volumes that compose declares as external must exist.
 ensure_network() {
     if docker network inspect "$1" >/dev/null 2>&1; then
@@ -185,6 +224,19 @@ if ! curl -sf http://localhost:8000/health >/dev/null 2>&1; then
     warn "orchestrator not yet responding; check logs with: docker logs scaffold-orchestrator"
 fi
 
+# ---- final health audit ---------------------------------------------
+# Run doctor as the final bootstrap step so the user sees a complete
+# pass/fail summary rather than an "I think it's up" message. doctor
+# is read-only and exits non-zero on any failure; we capture and
+# report so bootstrap's exit code reflects overall health.
+hdr "Final health audit"
+
+if bash "$REPO_ROOT/scripts/doctor.sh"; then
+    DOCTOR_OK=1
+else
+    DOCTOR_OK=0
+fi
+
 # ---- next steps ------------------------------------------------------
 hdr "Done"
 
@@ -199,6 +251,11 @@ Next steps:
   1. Open http://localhost:3000 and create an admin account.
   2. The model selector should already show 'scaffold_router'.
   3. Type an idea or '/help' to see the command surface.
-  4. Run 'make doctor' if anything looks off.
+  4. Run 'make doctor' if anything looks off later. (Just ran above.)
 
 NEXT
+
+if [[ $DOCTOR_OK -eq 0 ]]; then
+    warn "doctor reported failures above — review them before using the system."
+    exit 1
+fi
