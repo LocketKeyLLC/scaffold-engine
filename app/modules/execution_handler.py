@@ -8,6 +8,8 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.recovery import next_actions_for
+
 logger = logging.getLogger("scaffold.execution_handler")
 
 
@@ -67,6 +69,29 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
     counts = {}
     for r in rows:
         counts[r.status] = counts.get(r.status, 0) + 1
+
+    # Audit item 10: surface the per-status next-action registry as a
+    # structured field in the response. Pick the most informative
+    # node_key for substitution — failed nodes drive retry/skip
+    # suggestions; blocked next; running last as a stuck-node hint.
+    failed_node = next(
+        (n["node_key"] for n in nodes if n["status"] == "failed"), None,
+    )
+    blocked_node = next(
+        (n["node_key"] for n in nodes
+         if n["status"] == "pending" and not n["deps_met"]), None,
+    )
+    running_node = next(
+        (n["node_key"] for n in nodes if n["status"] == "running"), None,
+    )
+    actions = next_actions_for(
+        job.status,
+        str(job_id),
+        failed_node_key=failed_node,
+        blocked_node_key=blocked_node,
+        running_node_key=running_node,
+    )
+
     return {
         "job_id": str(job_id),
         "job_title": job.title,
@@ -75,5 +100,6 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         "counts": counts,
         "total_nodes": len(nodes),
         "next_node": next_node,
+        "next_actions": actions,
         "nodes": nodes,
     }

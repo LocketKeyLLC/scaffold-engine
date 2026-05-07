@@ -89,3 +89,78 @@ async def test_status_counts_by_state():
     result = await execution_handler.execution_status(uuid4(), db)
     assert result["counts"] == {"done": 2, "pending": 2, "failed": 1, "skipped": 1}
     assert result["total_nodes"] == 6
+
+
+# ---------------------------------------------------------------------------
+# next_actions integration (audit item 10)
+# ---------------------------------------------------------------------------
+
+
+async def test_next_actions_populated_for_failed_status():
+    """When the job is 'failed' the response surfaces retry/skip/delete
+    options with the actual failed node_key substituted."""
+    job_id = uuid4()
+    job = _row(id="j1", title="t", status="failed", compiled_output=None)
+    nodes = [
+        _row(node_key="T1", title="", status="done", execution_order=1,
+             depends_on=[], assigned_model=None),
+        _row(node_key="T2", title="", status="failed", execution_order=2,
+             depends_on=["T1"], assigned_model=None),
+    ]
+    db = _mock_db(job, nodes)
+    result = await execution_handler.execution_status(job_id, db)
+    actions = result["next_actions"]
+    kinds = {a["action"] for a in actions}
+    assert {"retry_node", "skip_node", "delete"} <= kinds
+    retry = next(a for a in actions if a["action"] == "retry_node")
+    # job_id and the failed node_key are filled in.
+    assert str(job_id) in retry["command"]
+    assert " T2" in retry["command"]
+
+
+async def test_next_actions_for_awaiting_confirmation():
+    """An awaiting-confirmation job offers /confirm + delete."""
+    job_id = uuid4()
+    job = _row(id="j1", title="t", status="awaiting_confirmation",
+               compiled_output=None)
+    db = _mock_db(job, [])
+    result = await execution_handler.execution_status(job_id, db)
+    kinds = {a["action"] for a in result["next_actions"]}
+    assert {"confirm", "delete"} <= kinds
+
+
+async def test_next_actions_for_completed_renders_view_output():
+    job_id = uuid4()
+    job = _row(id="j1", title="t", status="completed", compiled_output="out")
+    nodes = [
+        _row(node_key="T1", title="", status="done", execution_order=1,
+             depends_on=[], assigned_model=None),
+    ]
+    db = _mock_db(job, nodes)
+    result = await execution_handler.execution_status(job_id, db)
+    actions = result["next_actions"]
+    assert len(actions) == 1
+    assert actions[0]["action"] == "view_output"
+
+
+async def test_next_actions_blocked_node_picks_correct_node_key():
+    """Pending node whose deps aren't met → blocked_node_key surfaces in
+    skip suggestions for in-flight jobs."""
+    job_id = uuid4()
+    job = _row(id="j1", title="t", status="running", compiled_output=None)
+    nodes = [
+        _row(node_key="T1", title="", status="failed", execution_order=1,
+             depends_on=[], assigned_model=None),
+        _row(node_key="T2", title="", status="pending", execution_order=2,
+             depends_on=["T1"], assigned_model=None),
+    ]
+    db = _mock_db(job, nodes)
+    result = await execution_handler.execution_status(job_id, db)
+    # failed_node_key wins precedence over blocked_node_key in the
+    # registry helper, so retry/skip should reference T1 (the failed one).
+    skip = next(
+        (a for a in result["next_actions"] if a["action"] == "skip_node"),
+        None,
+    )
+    assert skip is not None
+    assert " T1" in skip["command"]

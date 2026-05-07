@@ -1126,6 +1126,18 @@ Divergence detection + selective subgraph reset for Assist Mode. Implements `con
 
 Functions: `detect_divergence` (4b classifier), `reset_subgraph`, `select_replan_policy`. (Audit LOW: unknown policy logs warn + returns None instead of raising.)
 
+#### `app/modules/recovery.py`
+Per-status next-action registry — turns the existing `jobs.status` lifecycle into structured guidance for the OWUI pipeline, CLI, and SDK (audit item 10).
+
+Constants:
+- `NEXT_ACTIONS: dict[str, list[dict]]` — registry mapping every `JobStatus` value to its valid next-step descriptors. Each descriptor: `{action, command, endpoint, method, description, node_specific}`. Covers all 14 lifecycle states including `assisted_*` branches.
+
+Functions:
+- `next_actions_for(status, job_id, *, failed_node_key=None, blocked_node_key=None, running_node_key=None) -> list[dict]` — resolve the registry into concrete actions; substitutes `{job_id}` / `{node_key}` placeholders. Picks the most informative node_key (failed > blocked > running) for `node_specific` entries; leaves the placeholder literal when no context. Returns `[]` for unknown status (also logs a warning).
+- `all_known_statuses() -> tuple[str, ...]` — used by parity tests to assert the registry covers every value of `JobStatus`.
+
+Wired into `execution_handler.execution_status()` so every `/exec/status/{job_id}` response carries a `next_actions` field. Tests at `tests/test_recovery.py` enforce status-coverage parity with `JobStatus`.
+
 ### 11.3 `app/middleware/`
 
 #### `app/middleware/request_id.py` — 57 lines
@@ -1825,7 +1837,7 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 
 > Captured by the 2026-05-05 architecture audit (`review/*.md`, since absorbed here). 135 distinct findings across ~20k LOC. Each finding cites `file:line` for independent verification.
 >
-> **Re-verified against live code on 2026-05-07** (post-Sprint-J.1 / commit `20d8ba2`+). Of the original 18 HIGH items: **14 are fully fixed**, 1 is partial (HIGH #12, accepted as design tradeoff), 3 were retracted within the audit itself. Of the 10 items in the original priority queue: 7 are fully fixed, 3 are accepted as design tradeoffs with rationale (see §16.4). Each item below is marked with its verified status:
+> **Re-verified against live code on 2026-05-07** (post-Sprint-J.1 / commit `e6f318d`+). Of the original 18 HIGH items: **15 are fully fixed**, 3 were retracted within the audit itself. Of the 10 items in the original priority queue: **9 are fully fixed**, 1 is accepted as a design tradeoff with rationale (Pattern H — RAG dual-aliases as the intentional TOON↔Milvus conversion layer; see §16.4). Each item below is marked with its verified status:
 >
 > - ✅ **FIXED** — code at the cited line shows the corrected pattern; verified by grep / source read on 2026-05-07
 > - ⚠️ **PARTIAL** — addressed for the highest-blast-radius case but a related variant remains
@@ -1864,7 +1876,7 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 
 #### Tier 4 — UX / OWUI integration
 
-12. ⚠️ **PARTIAL** — `pipelines/scaffold_router.py` auto-chain recovery. There is no full recovery state machine on the `/ideate/confirm → /dag → /execute/all` chain, but `/results <job_id>` now surfaces `compile_status="partial"` plus a per-failed-node table with inline `/exec retry` and `/skip` recovery commands (L1850 region). Users can resume from a known partial-failure state without manual command knowledge. The structured state machine remains future work. (Original audit cited L893-938.)
+12. ✅ **FIXED** — auto-chain recovery is now a structured state-aware surface (audit item 10). New `app/modules/recovery.py` exposes a `NEXT_ACTIONS` registry mapping every `JobStatus` value to its set of valid next-step actions (`{action, command, endpoint, method, description, node_specific}`). `execution_handler.execution_status()` resolves the registry per-job — substituting concrete `job_id` and the most-relevant `node_key` (failed > blocked > running) — and returns the result as a `next_actions` field on `/exec/status/{job_id}`. The OWUI `_handle_results` and any SDK/CLI consumer renders the structured guidance instead of hardcoded recovery hints. (Original audit cited `pipelines/scaffold_router.py:893-938`.)
 
 13. ✅ **FIXED** — `pipelines/{execution_handler,dag_viewer,gt_browser,prompt_inspector}.py` print-only API-key drift warnings. All 4 pipelines now have `_drift_hint()` methods that surface a markdown block on user-visible 401 errors (`execution_handler.py:208`, `dag_viewer.py:204`, `gt_browser.py:158`, `prompt_inspector.py:155`).
 
@@ -1940,7 +1952,7 @@ The original priority queue had 10 items. After live-code verification, 7 are fu
 | 7 | Migration 020 atomicity | ✅ Fixed — `_pre_migration_sweep()` in lifespan; idempotent on every startup |
 | 8 | Idle-counter calibration | ✅ Fixed (`read_timeout = max(30, keep)`) |
 | 9 | Drift-hint surface to 4 pipelines | ✅ Fixed (`_drift_hint()` ported to all four) |
-| 10 | Auto-chain recovery state machine | 🟦 Accepted — current `/results`-based recovery surface is functional UX; formalizing into a structured state machine is a sprint-sized refactor and the existing surface meets the user-affordance bar |
+| 10 | Auto-chain recovery state machine | ✅ Fixed — `app/modules/recovery.py::NEXT_ACTIONS` registry resolved per-job by `execution_handler`; surfaced as `next_actions` on `/exec/status` |
 
 **Summary:** of 18 original HIGH-severity findings, 13 are fully fixed, 3 were retracted within the audit, and 2 remain as documented design tradeoffs (HIGH #12 / item 10, HIGH #13 partial / acceptable UX gap). All cross-cutting patterns A–G are resolved or formally accepted. The audit's coverage of the codebase as it stands today is **closed**.
 

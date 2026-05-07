@@ -2479,6 +2479,31 @@ class Pipeline:
     # /results handler (#8.1)
     # ------------------------------------------------------------------
 
+    def _render_next_actions(self, data: dict) -> str:
+        """Format the orchestrator-supplied `next_actions` list (audit
+        item 10) into a markdown 'Next steps' block. Returns "" when
+        the response carries no actions (e.g., older orchestrators)."""
+        actions = data.get("next_actions") or []
+        # Filter out wait-style actions for terminal states — "wait" only
+        # makes sense when something is in-flight; emitting it for completed
+        # jobs is noise.
+        renderable = [a for a in actions if a.get("action") != "wait"]
+        if not renderable:
+            return ""
+        lines = ["", "**Next steps:**"]
+        for a in renderable:
+            cmd = a.get("command")
+            desc = a.get("description", "")
+            if cmd:
+                lines.append(f"• `{cmd}` — {desc}")
+            elif a.get("endpoint"):
+                lines.append(
+                    f"• `{a.get('method','GET')} {a['endpoint']}` — {desc}"
+                )
+            else:
+                lines.append(f"• {desc}")
+        return "\n".join(lines)
+
     def _handle_results(self, parts: list) -> str:
         if len(parts) < 2:
             return "Usage: `/results <job_id>`"
@@ -2531,7 +2556,8 @@ class Pipeline:
                 if running_node else ""
             )
             fail_str = f", {failed} failed" if failed else ""
-            return f"⏳ Status: **{status}** — {done}/{total} nodes complete{fail_str}{cur_str}"
+            head = f"⏳ Status: **{status}** — {done}/{total} nodes complete{fail_str}{cur_str}"
+            return head + self._render_next_actions(data)
 
         if status in ("failed", "blocked", "cancelled"):
             err = (data.get("error_summary") or data.get("error")
@@ -2558,20 +2584,22 @@ class Pipeline:
                         f"| `{n.get('node_key','?')}` | {n.get('title','?')} "
                         f"| `{n.get('assigned_model') or 'default'}` |"
                     )
-                first = failed_nodes[0].get("node_key", "?")
-                lines.append("")
-                lines.append(
-                    f"**Recovery options:**  \n"
-                    f"• `/exec retry {job_id} {first}` — reset failed node and re-run  \n"
-                    f"• `/skip {job_id} {first}` — mark skipped and continue downstream"
-                )
+            # Audit item 10: the orchestrator now supplies a structured
+            # next_actions list with the failed node_key already filled
+            # in. Render that instead of hardcoded retry/skip lines so
+            # the source of truth lives server-side.
+            actions_block = self._render_next_actions(data)
+            if actions_block:
+                lines.append(actions_block)
             return "\n".join(lines)
 
         if status == "awaiting_confirmation":
-            return (f"⏸️ Status: **{status}** — job is waiting for your review.\n"
-                    f"Use `/confirm {job_id}` to proceed.")
+            head = f"⏸️ Status: **{status}** — job is waiting for your review."
+            return head + self._render_next_actions(data)
 
-        return f"Status: **{status}** (no further details available)"
+        head = f"Status: **{status}**"
+        actions_block = self._render_next_actions(data)
+        return head + (actions_block if actions_block else " (no further details available)")
 
     # ------------------------------------------------------------------
     # Formatter
