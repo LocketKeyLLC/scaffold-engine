@@ -2090,6 +2090,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | U.7 | UX gap audit + CLI parity sweep, API → v1.1.0 (§17.11) | done 2026-05-07 |
 | U.8.A | Assist Mode parity in SDK + CLI, SDK → v1.2.0 (§17.12) | done 2026-05-07 |
 | U.8.B | Small CLI verbs — logs / exec retry / status / dag / cleanup / dedup / research reply+pdf, CLI → v0.3.0 (§17.13) | done 2026-05-07 |
+| U.8.C | SDK research / config / models resources, SDK → v1.3.0 (§17.14) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2245,6 +2246,22 @@ Tier-1 + Tier-2 quick wins from the U.8 audit. All thin wrappers over SDK method
 **Versioning:** CLI 0.2.0 → 0.3.0. SDK floor stays `>=1.2,<2.0` (no SDK changes). Orchestrator API unchanged.
 
 **Test-suite delta:** CLI 93 → 106 (+13: 12 new verb tests + 1 regression guard for the `rag` group conversion). SDK + orchestrator unchanged.
+
+### 17.14 Sprint U.8.C — SDK research / config / models resources (2026-05-07)
+
+Closes the SDK-side gaps from the audit so future CLI / OWUI work has full SDK coverage to lean on. All additive; no orchestrator or CLI changes.
+
+| Addition | File | Notes |
+|---|---|---|
+| `client.research` resource | `_resources.py`, `_async_resources.py` | `list / find / rename / delete` over `/research/sessions`. Streaming `aiter_research*` helpers stay on `AsyncClient` (unchanged). `find` is a typed convenience for `list(q=...)`. |
+| `client.config()` (top-level) | `client.py`, `async_client.py` | Wraps `GET /config`. Returns the full `{fields, redacted, count}` envelope verbatim. |
+| `client.models` resource | `_resources.py`, `_async_resources.py` | `list()` filters `/config` fields to `model_*` settings; `available()` extracts `checks.ollama.models_loaded` from `/health`. `set / reset / probe` stay OWUI-only by U.7 design (they mutate session valves). |
+
+**Defensive parsing:** `models.list()` and `models.available()` both tolerate malformed-but-2xx responses (missing `fields`, missing `checks.ollama`, non-dict bodies) by returning empty rather than raising. Health diagnosis stays the responsibility of `client.health()`.
+
+**Versioning:** SDK 1.2.0 → 1.3.0 (additive minor bump). CLI floor stays `>=1.2,<2.0` — no CLI bump needed (no behavior changes there). Orchestrator API unchanged.
+
+**Test-suite delta:** SDK 109 → 129 (+20: 6 research, 1 config, 5 models, 8 async parity). Live-smoke verified against the running orchestrator (`c.config()` returned 102 fields / 4 redacted; `c.models.list()` 18 fields; `c.models.available()` 7 loaded Ollama models; `c.research.list()` 53 sessions).
 
 ---
 

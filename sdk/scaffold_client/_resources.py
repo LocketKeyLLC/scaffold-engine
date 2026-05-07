@@ -245,6 +245,81 @@ class ScheduleResource:
         return self._client.request("DELETE", f"/schedule/{schedule_id}")
 
 
+class ResearchResource:
+    """``client.research.*`` — manage saved research sessions.
+
+    The SSE-streamed run-/reply-/PDF-ingest helpers stay on
+    ``AsyncClient`` (``aiter_research``, ``aiter_research_reply``,
+    ``aiter_research_pdf``); this resource covers the CRUD shape.
+    """
+
+    def __init__(self, client: "Client"):
+        self._client = client
+
+    def list(
+        self,
+        *,
+        status: str | None = None,
+        q: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """``GET /research/sessions`` — paginated session list."""
+        params = _drop_none({"status": status, "q": q, "limit": limit, "offset": offset})
+        return self._client.request("GET", "/research/sessions", params=params)
+
+    def find(self, q: str, *, limit: int = 25) -> dict[str, Any]:
+        """Convenience: list filtered by topic substring."""
+        return self.list(q=q, limit=limit)
+
+    def rename(self, session_id: str, *, topic: str) -> dict[str, Any]:
+        """``PATCH /research/sessions/{session_id}`` — set the topic."""
+        return self._client.request(
+            "PATCH", f"/research/sessions/{session_id}", json={"topic": topic},
+        )
+
+    def delete(self, session_id: str) -> dict[str, Any]:
+        """``DELETE /research/sessions/{session_id}``. KB entries are NOT removed."""
+        return self._client.request("DELETE", f"/research/sessions/{session_id}")
+
+
+class ModelsResource:
+    """``client.models.*`` — read-only inspection of model role assignments
+    + Ollama availability.
+
+    `set / reset / probe` are OWUI-only by U.7 design (they mutate per-pipeline
+    valves which are session-scoped — to persist, edit MODEL_<role> in .env
+    and restart). The read paths derive from `/config` and `/health`.
+    """
+
+    def __init__(self, client: "Client"):
+        self._client = client
+
+    def list(self) -> dict[str, Any]:
+        """Return only the ``model_*`` settings from ``GET /config``.
+
+        Output shape is ``{"fields": [...], "count": <int>}`` mirroring the
+        ``/config`` envelope so callers can reuse the same renderer.
+        """
+        cfg = self._client.request("GET", "/config")
+        fields = (cfg or {}).get("fields", []) if isinstance(cfg, dict) else []
+        models = [f for f in fields if isinstance(f, dict) and str(f.get("name", "")).startswith("model_")]
+        return {"fields": models, "count": len(models)}
+
+    def available(self) -> list[str]:
+        """Models currently loaded on the configured Ollama instance.
+
+        Reads ``GET /health`` (no auth needed) and returns the
+        ``checks.ollama.models_loaded`` list. Empty list if Ollama is down
+        or the field is missing — callers should not rely on length to
+        detect failure (use ``client.health()`` for that).
+        """
+        health = self._client.request("GET", "/health")
+        ollama = (health or {}).get("checks", {}).get("ollama", {}) if isinstance(health, dict) else {}
+        loaded = ollama.get("models_loaded") if isinstance(ollama, dict) else None
+        return list(loaded) if isinstance(loaded, list) else []
+
+
 class AssistResource:
     """``client.assist.*`` — Assistant Mode (human-in-the-loop) sessions.
 

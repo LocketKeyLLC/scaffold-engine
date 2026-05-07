@@ -202,6 +202,53 @@ class AsyncScheduleResource:
         return await self._client.request("DELETE", f"/schedule/{schedule_id}")
 
 
+class AsyncResearchResource:
+    def __init__(self, client: "AsyncClient"):
+        self._client = client
+
+    async def list(
+        self,
+        *,
+        status: str | None = None,
+        q: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        params = _drop_none({"status": status, "q": q, "limit": limit, "offset": offset})
+        return await self._client.request("GET", "/research/sessions", params=params)
+
+    async def find(self, q: str, *, limit: int = 25) -> dict[str, Any]:
+        return await self.list(q=q, limit=limit)
+
+    async def rename(self, session_id: str, *, topic: str) -> dict[str, Any]:
+        return await self._client.request(
+            "PATCH", f"/research/sessions/{session_id}", json={"topic": topic},
+        )
+
+    async def delete(self, session_id: str) -> dict[str, Any]:
+        return await self._client.request("DELETE", f"/research/sessions/{session_id}")
+
+
+class AsyncModelsResource:
+    def __init__(self, client: "AsyncClient"):
+        self._client = client
+
+    async def list(self) -> dict[str, Any]:
+        cfg = await self._client.request("GET", "/config")
+        fields = (cfg or {}).get("fields", []) if isinstance(cfg, dict) else []
+        models = [
+            f for f in fields
+            if isinstance(f, dict) and str(f.get("name", "")).startswith("model_")
+        ]
+        return {"fields": models, "count": len(models)}
+
+    async def available(self) -> list[str]:
+        health = await self._client.request("GET", "/health")
+        ollama = (health or {}).get("checks", {}).get("ollama", {}) if isinstance(health, dict) else {}
+        loaded = ollama.get("models_loaded") if isinstance(ollama, dict) else None
+        return list(loaded) if isinstance(loaded, list) else []
+
+
 class AsyncAssistResource:
     """Async mirror of ``AssistResource``. SSE ``/handoff`` lives on
     ``AsyncClient.aiter_assist_handoff`` (parallels ``aiter_research`` etc.).

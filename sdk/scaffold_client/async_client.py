@@ -29,8 +29,10 @@ from ._async_resources import (
     AsyncDagResource,
     AsyncGtResource,
     AsyncJobsResource,
+    AsyncModelsResource,
     AsyncPromptsResource,
     AsyncRagResource,
+    AsyncResearchResource,
     AsyncScheduleResource,
 )
 from ._resources import _drop_none
@@ -67,6 +69,8 @@ class AsyncClient:
         self.rag = AsyncRagResource(self)
         self.schedule = AsyncScheduleResource(self)
         self.assist = AsyncAssistResource(self)
+        self.research = AsyncResearchResource(self)
+        self.models = AsyncModelsResource(self)
 
     # ------------------------------------------------------------------
     # Generic dispatch
@@ -97,6 +101,10 @@ class AsyncClient:
 
     async def status(self) -> dict[str, Any]:
         return await self.request("GET", "/status")
+
+    async def config(self) -> dict[str, Any]:
+        """``GET /config`` — see ``Client.config`` for redaction details."""
+        return await self.request("GET", "/config")
 
     async def logs(self, job_id: str, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
         return await self.request(

@@ -21,8 +21,10 @@ from ._resources import (
     DagResource,
     GtResource,
     JobsResource,
+    ModelsResource,
     PromptsResource,
     RagResource,
+    ResearchResource,
     ScheduleResource,
     _drop_none,
 )
@@ -65,6 +67,8 @@ class Client:
         self.rag = RagResource(self)
         self.schedule = ScheduleResource(self)
         self.assist = AssistResource(self)
+        self.research = ResearchResource(self)
+        self.models = ModelsResource(self)
 
     # ------------------------------------------------------------------
     # Generic dispatch — typed methods delegate to this.
@@ -100,6 +104,13 @@ class Client:
     def status(self) -> dict[str, Any]:
         """``GET /status`` — counts of jobs in each lifecycle state plus recents."""
         return self.request("GET", "/status")
+
+    def config(self) -> dict[str, Any]:
+        """``GET /config`` — every Settings field with current value, default,
+        and is_default flag. Sensitive fields (``*_key``, ``*_secret``,
+        SecretStr-typed) are redacted server-side to ``(set)`` / ``(unset)``.
+        """
+        return self.request("GET", "/config")
 
     def logs(self, job_id: str, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
         """``GET /logs/{job_id}`` — paginated execution logs for one job."""
