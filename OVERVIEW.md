@@ -1024,7 +1024,7 @@ Functions:
 - `async def ingest_entries(entries, domain, model_overrides) -> dict` — Embed → 3-tier dedup → upsert.
 - `async def list_entries(domain, limit, offset) -> dict` — Paginated TOON entries.
 
-Helpers: `_normalize_entry` (canonical field names; handles dual aliases — see Pattern H), `_domain_expr` (Milvus expression), `_build_embedding_text` (title + tags + content). (Audit HIGH: versioned entries skip `dedup_log`.)
+Helpers: `_normalize_entry` (2-line delegation to `IngestEntry.from_input` from `_rag_entry.py` — see §11.2 below; canonical-shape conversion), `_domain_expr` (Milvus expression), `_build_embedding_text` (title + tags + content).
 
 #### `app/modules/prompt_optimizer.py` — 242 lines
 Prompt optimization — filler strip, token count, clarity scoring, verification.
@@ -1125,6 +1125,22 @@ Functions: `start_session`, `get_session`, `next_step`, `submit_step` (mirror in
 Divergence detection + selective subgraph reset for Assist Mode. Implements `context_only` / `selective` / `full` / `disabled` policies.
 
 Functions: `detect_divergence` (4b classifier), `reset_subgraph`, `select_replan_policy`. (Audit LOW: unknown policy logs warn + returns None instead of raising.)
+
+#### `app/modules/_rag_entry.py`
+Canonical ingest-entry shape — typed `IngestEntry` Pydantic model that centralizes the TOON↔Milvus dual-name conversion (audit item 6).
+
+Class:
+- `class IngestEntry(BaseModel)` — fields: `title`, `content`, `domain_tags`, `source_url`, `source_type`, `confidence`. Defaults applied for missing fields. `extra="ignore"` so callers can pass richer dicts.
+
+Constructors:
+- `IngestEntry.from_input(entry: dict) -> IngestEntry` — accepts either TOON-shaped or Milvus-shaped dicts; preserves the legacy first-non-empty-alias-wins semantics that Pydantic's stock `AliasChoices` would not (the latter picks the first PRESENT alias regardless of value).
+- `IngestEntry.from_milvus(row: dict) -> IngestEntry` — documentation-named alias for from_input; used by Milvus-read paths to make their intent explicit.
+
+Serializers:
+- `to_milvus() -> dict` — Milvus storage shape (long-name keys: `canonical_text`, `topic`, `domain_tags`, `source_url`, `source_type`, `confidence_score`).
+- `to_canonical_dict() -> dict` — legacy `_normalize_entry`-compatible shape for in-process consumers.
+
+`rag_pipeline._normalize_entry()` is now a 2-line delegation here.
 
 #### `app/modules/recovery.py`
 Per-status next-action registry — turns the existing `jobs.status` lifecycle into structured guidance for the OWUI pipeline, CLI, and SDK (audit item 10).
@@ -1837,7 +1853,7 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 
 > Captured by the 2026-05-05 architecture audit (`review/*.md`, since absorbed here). 135 distinct findings across ~20k LOC. Each finding cites `file:line` for independent verification.
 >
-> **Re-verified against live code on 2026-05-07** (post-Sprint-J.1 / commit `e6f318d`+). Of the original 18 HIGH items: **15 are fully fixed**, 3 were retracted within the audit itself. Of the 10 items in the original priority queue: **9 are fully fixed**, 1 is accepted as a design tradeoff with rationale (Pattern H — RAG dual-aliases as the intentional TOON↔Milvus conversion layer; see §16.4). Each item below is marked with its verified status:
+> **Re-verified against live code on 2026-05-07** (post-Sprint-J.1, commits `e6f318d` / `a409ea3` and following). Of the original 18 HIGH items: **15 are fully fixed**, 3 were retracted within the audit itself. **All 10 items in the original priority queue are fixed in code.** All 8 cross-cutting patterns A–H are now resolved. Each item below is marked with its verified status:
 >
 > - ✅ **FIXED** — code at the cited line shows the corrected pattern; verified by grep / source read on 2026-05-07
 > - ⚠️ **PARTIAL** — addressed for the highest-blast-radius case but a related variant remains
@@ -1926,8 +1942,8 @@ The Pydantic fields are now named `metadata` directly (matching the DB column), 
 - GitHub ingest — explicit `isinstance(item, asyncio.CancelledError): raise` before the broader Exception branch.
 - Pipelines SSE — counter calibration was retracted; current `read_timeout = max(30, keep)` makes `idle_seconds += keep` count real wall-clock time.
 
-#### Pattern H — Field-name dual-aliases in ingest 🟦 ACCEPTED
-RAG ingest at `rag_pipeline.py:121-132` still accepts `source`/`source_url`, `content`/`canonical_text`, `title`/`topic`, `tags`/`domain_tags`. **Accepted as intentional API flexibility:** TOON-format inputs use the short names (`topic`, `content`, `tags`, `source`); Milvus storage uses the long names (`canonical_text`, `domain_tags`, `source_url`); the dual-accept is the conversion layer between them. Removing either side would force every caller to migrate. Maintenance debt, not a correctness issue.
+#### Pattern H — Field-name dual-aliases in ingest ✅ FIXED
+The TOON↔Milvus conversion is now centralized in the typed `IngestEntry` Pydantic model at `app/modules/_rag_entry.py`. Both short-name (TOON: `topic`/`content`/`tags`/`source`) and long-name (Milvus: `canonical_text`/`domain_tags`/`source_url`) inputs flow through `IngestEntry.from_input(...)`, which preserves the legacy first-non-empty-wins semantics. `rag_pipeline._normalize_entry()` is now a 2-line delegation. Round-trip is enforced via `from_milvus()` / `to_milvus()` constructors and a parity test. The conversion layer is preserved (TOON callers and Milvus rows still both work) but now exists in exactly one typed location instead of scattered `or`-chains. Tests at `tests/test_rag_entry.py` (17 tests).
 
 ### 16.3 Schema-side findings
 
@@ -1939,7 +1955,7 @@ RAG ingest at `rag_pipeline.py:121-132` still accepts `source`/`source_url`, `co
 
 ### 16.4 Remaining open items (post-verification, 2026-05-07)
 
-The original priority queue had 10 items. After live-code verification, 7 are fully resolved and 3 are accepted as design tradeoffs rather than fixed:
+The original priority queue had 10 items. **All 10 are now fully resolved** in code (commits below). The summary table:
 
 | # | Item | Status |
 |---|---|---|
@@ -1948,13 +1964,13 @@ The original priority queue had 10 items. After live-code verification, 7 are fu
 | 3 | Logger identity sweep | ✅ Fixed (all 4 modules use `scaffold.<sub>`) |
 | 4 | `/health _check_ollama` shared client | ✅ Fixed (delegates to `get_ollama_client()`) |
 | 5 | Pipeline placeholder checks | ✅ Fixed (both `/confirm` feedback and `/research/reply` session_id) |
-| 6 | RAG dual-alias acceptance | 🟦 Accepted — Pattern H rationale above |
+| 6 | RAG dual-alias acceptance | ✅ Fixed — `IngestEntry` Pydantic model centralizes TOON↔Milvus conversion |
 | 7 | Migration 020 atomicity | ✅ Fixed — `_pre_migration_sweep()` in lifespan; idempotent on every startup |
 | 8 | Idle-counter calibration | ✅ Fixed (`read_timeout = max(30, keep)`) |
 | 9 | Drift-hint surface to 4 pipelines | ✅ Fixed (`_drift_hint()` ported to all four) |
 | 10 | Auto-chain recovery state machine | ✅ Fixed — `app/modules/recovery.py::NEXT_ACTIONS` registry resolved per-job by `execution_handler`; surfaced as `next_actions` on `/exec/status` |
 
-**Summary:** of 18 original HIGH-severity findings, 13 are fully fixed, 3 were retracted within the audit, and 2 remain as documented design tradeoffs (HIGH #12 / item 10, HIGH #13 partial / acceptable UX gap). All cross-cutting patterns A–G are resolved or formally accepted. The audit's coverage of the codebase as it stands today is **closed**.
+**Summary:** of 18 original HIGH-severity findings, 15 are fully fixed in code, and 3 were retracted within the audit itself. All 8 cross-cutting patterns A–H are resolved. All 10 items in the original priority queue are fixed. The audit's coverage of the codebase as it stands today is **closed**.
 
 ### 16.5 Items NOT covered by the audit
 

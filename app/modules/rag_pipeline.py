@@ -108,37 +108,20 @@ def _escape_literal(s: str) -> str:
 def _normalize_entry(entry: dict) -> dict:
     """Map an entry dict's loose alias keys onto the canonical names.
 
-    LLM-produced entries arrive with one of two synonym pairs each
-    (``content`` / ``canonical_text``, ``title`` / ``topic``,
-    ``tags`` / ``domain_tags``, ``source`` / ``source_url``). Centralizing
-    the normalization here lets every caller use canonical names downstream
-    and makes a future "drop alias support" decision a one-line change.
+    Delegates to the typed ``IngestEntry`` model in ``_rag_entry.py``.
+    The model centralizes the TOON↔Milvus dual-name conversion as the
+    single source of truth — TOON LLM outputs use short keys
+    (``topic``, ``content``, ``tags``, ``source``); Milvus storage uses
+    long keys (``canonical_text``, ``domain_tags``, ``source_url``);
+    the model accepts both with first-non-empty-wins semantics matching
+    this function's prior behavior. Audit item 6.
 
     Returned shape (canonical names) — caller may treat as a typed dict:
         content (str), title (str), domain_tags (list[str]), source_url
         (str), source_type (str), confidence (float).
     """
-    content = entry.get("content") or entry.get("canonical_text") or ""
-    title = (entry.get("title") or entry.get("topic") or "unknown").strip()
-
-    tags_raw = entry.get("tags") if entry.get("tags") is not None else entry.get("domain_tags", "")
-    if isinstance(tags_raw, str):
-        domain_tags = [t.strip() for t in tags_raw.split(",") if t.strip()][:20]
-    elif isinstance(tags_raw, list):
-        domain_tags = tags_raw[:20]
-    else:
-        domain_tags = []
-
-    source_url = entry.get("source") or entry.get("source_url") or "scaffold-engine"
-
-    return {
-        "content": content,
-        "title": title,
-        "domain_tags": domain_tags,
-        "source_url": source_url,
-        "source_type": entry.get("source_type", "ai_generated"),
-        "confidence": entry.get("confidence_score", 0.60),
-    }
+    from app.modules._rag_entry import IngestEntry
+    return IngestEntry.from_input(entry).to_canonical_dict()
 
 
 def _domain_expr(domain: str | None) -> str | None:
