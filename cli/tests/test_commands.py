@@ -166,6 +166,57 @@ def test_confirm_omits_feedback_when_not_supplied(runner):
     assert kwargs.get("json") == {"job_id": "job-1"}
 
 
+def test_confirm_chain_runs_phase2_dag_then_stream(runner):
+    """`scaffold confirm <id> --chain` should:
+       1. POST /ideate/confirm
+       2. POST /dag (after Phase 2 returns)
+       3. invoke _confirm_chain_continue which streams /execute/all
+    Mirrors the OWUI auto-chain in CLI form (U.8.F).
+    """
+    chain_called: dict = {}
+
+    def _fake_chain_continue(cfg, job_id):
+        chain_called["job_id"] = job_id
+
+    with patch("scaffold_cli.main.Client") as ClientCls, \
+         patch("scaffold_cli.main._confirm_chain_continue", _fake_chain_continue):
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = {"status": "planning",
+                             "workflow_summary": "ready to execute"}
+        res = runner.invoke(cli, ["confirm", "job-1", "--chain"])
+
+    assert res.exit_code == 0, res.output
+    # Phase 2 was the only direct POST (step 2/3 happen inside the patched fn).
+    args, kwargs = post.call_args
+    assert args[0] == "/ideate/confirm"
+    assert kwargs["json"] == {"job_id": "job-1"}
+    # Chain handoff happened with the right job_id.
+    assert chain_called == {"job_id": "job-1"}
+
+
+def test_confirm_chain_rejects_with_json(runner):
+    """`--json --chain` should error since chain streams to stdout."""
+    res = runner.invoke(cli, ["confirm", "job-1", "--chain", "--json"])
+    assert res.exit_code != 0
+    assert "incompatible" in res.output.lower()
+
+
+def test_confirm_without_chain_does_not_invoke_chain(runner):
+    """Plain `scaffold confirm` must remain Phase 2 only — no chain."""
+    chain_called: dict = {}
+
+    def _fake_chain_continue(cfg, job_id):
+        chain_called["job_id"] = job_id  # should NOT happen
+
+    with patch("scaffold_cli.main.Client") as ClientCls, \
+         patch("scaffold_cli.main._confirm_chain_continue", _fake_chain_continue):
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = {"status": "planning"}
+        runner.invoke(cli, ["confirm", "job-1"])
+
+    assert chain_called == {}
+
+
 # ---------------------------------------------------------------------------
 # jobs list / status
 # ---------------------------------------------------------------------------

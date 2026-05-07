@@ -307,7 +307,8 @@ After U.8.B every job-control endpoint has a CLI verb so you never have to switc
 
 ```bash
 scaffold ideate "build a markdown linter"        # Phase 1
-scaffold confirm <job_id>                        # Phase 2 (curl-equivalent — no auto-chain)
+scaffold confirm <job_id>                        # Phase 2 only (curl-equivalent)
+scaffold confirm <job_id> --chain                 # Phase 2 → DAG → execute_all (OWUI auto-chain)
 scaffold status                                   # counts + recent + next_actions
 scaffold whatnow                                  # actionable jobs only
 scaffold dag <job_id>                             # node table
@@ -323,7 +324,7 @@ scaffold research reply <sid> "yes, proceed"      # resume a paused research ses
 scaffold research pdf ./design-spec.pdf           # ingest a local PDF
 ```
 
-`scaffold confirm` is intentionally curl-equivalent (Phase 2 only). The OWUI auto-chain (`/confirm` → `/dag` → `/execute/all`) lives in `pipelines/scaffold_router.py`; a CLI `--chain` flag is a future track.
+`scaffold confirm` defaults to curl-equivalent (Phase 2 only) for predictability. Add `--chain` to run the full OWUI auto-chain (`/ideate/confirm` → `/dag` → `/execute/all` SSE), often 30+ minutes on CPU. `--chain` and `--json` are mutually exclusive — chain streams SSE progress to stdout.
 
 ### D.7 Driving Assist Mode from the terminal or SDK
 

@@ -259,13 +259,15 @@ def ideate(
 CONFIRM_EPILOG = """
 \b
 Examples:
-  scaffold confirm <job_id>
-  scaffold confirm <job_id> use bash instead of python
-  scaffold confirm <job_id> --json | jq -r '.workflow_summary'
+  scaffold confirm <job_id>                     Phase 2 only (curl-equivalent)
+  scaffold confirm <job_id> use bash            with feedback
+  scaffold confirm <job_id> --chain             Phase 2 → DAG → execute_all
+  scaffold confirm <job_id> --json              raw JSON of Phase 2 result
 
-Confirm runs synchronously (HTTP-blocking). For long jobs (often 10–25 min
-on CPU), expect the call to take a while; check progress in another shell
-with `scaffold jobs status <job_id>`.
+Without `--chain`, this matches the orchestrator's curl behavior: Phase 2
+runs and stops. Subsequent steps require `scaffold dag` + `scaffold exec`,
+or another tool. With `--chain`, the full OWUI-style auto-chain runs
+(Phase 2 → /dag → /execute/all SSE), often 30+ minutes on CPU.
 """
 
 
@@ -276,17 +278,27 @@ with `scaffold jobs status <job_id>`.
 @click.argument("job_id")
 @click.argument("feedback", nargs=-1)
 @click.option("--json", "as_json", is_flag=True, help="Print the raw JSON response.")
+@click.option("--chain", is_flag=True,
+              help="After Phase 2, also generate the DAG and execute it (SSE-streamed). "
+                   "Mirrors the OWUI /confirm auto-chain.")
 @click.pass_context
 def confirm(
     ctx: click.Context,
     job_id: str,
     feedback: tuple[str, ...],
     as_json: bool,
+    chain: bool,
 ) -> None:
     cfg = ctx.obj["cfg"]
     payload: dict = {"job_id": job_id}
     if feedback:
         payload["feedback"] = " ".join(feedback)
+
+    if chain and as_json:
+        raise click.UsageError(
+            "--json and --chain are incompatible: chain streams progress to "
+            "stdout. Use one or the other."
+        )
 
     click.echo(f"Confirming job {job_id} (this may take a few minutes) …")
     try:
@@ -307,7 +319,92 @@ def confirm(
         click.echo("")
         click.echo(summary)
 
+    if chain:
+        _confirm_chain_continue(cfg, job_id)
+        return
+
     _hint(f"scaffold jobs status {job_id}")
+
+
+def _confirm_chain_continue(cfg, job_id: str) -> None:
+    """Continue the OWUI-style auto-chain after Phase 2 returned.
+
+    Phase 2 already left the job in `planning`. Generate the DAG, then
+    stream `/execute/all` to completion. Each step prints a banner so
+    a user watching tail-f-style knows where they are.
+    """
+    # Phase 3 — generate DAG.
+    click.echo("")
+    click.secho("→ generating DAG …", fg="cyan", bold=True)
+    try:
+        with Client(cfg.api_url, cfg.api_key, timeout=1800.0) as c:
+            dag_data = c.post("/dag", json={"job_id": job_id})
+    except CLIError as exc:
+        click.secho(f"DAG generation failed: {exc}", fg="red", err=True)
+        sys.exit(1)
+    if isinstance(dag_data, dict):
+        n_nodes = dag_data.get("node_count") or len(dag_data.get("nodes") or [])
+        if n_nodes:
+            click.echo(f"  → {n_nodes} nodes generated")
+
+    # Phase 4 — stream execute_all.
+    click.echo("")
+    click.secho("→ executing DAG …", fg="cyan", bold=True)
+    import asyncio
+    from scaffold_client import AsyncClient, ScaffoldError
+
+    final_status: str | None = None
+    last_node: str | None = None
+
+    async def _run() -> None:
+        nonlocal final_status, last_node
+        async with AsyncClient(cfg.api_url, api_key=cfg.api_key, timeout=3600.0) as ac:
+            try:
+                async for evt in ac.aiter_execute_all(job_id):
+                    name = evt.get("event", "?")
+                    data = evt.get("data") or {}
+                    if isinstance(data, dict):
+                        node_key = data.get("node_key")
+                        if node_key:
+                            last_node = node_key
+                        snippet_keys = ("node_key", "status", "reason", "error")
+                        snippet = " ".join(
+                            f"{k}={data[k]}" for k in snippet_keys if k in data
+                        )
+                    else:
+                        snippet = str(data)[:60]
+                    click.secho(f"[{name}] ", fg="cyan", nl=False)
+                    click.echo(snippet)
+                    if name in ("all_complete", "complete", "done"):
+                        final_status = "completed"
+                        break
+                    if name in ("failed", "all_failed", "blocked"):
+                        final_status = name
+                        break
+            except ScaffoldError as exc:
+                click.secho(f"execute_all failed: {exc}", fg="red", err=True)
+                raise
+
+    try:
+        asyncio.run(_run())
+    except ScaffoldError:
+        sys.exit(1)
+    except KeyboardInterrupt:
+        click.secho("\ninterrupted (orchestrator will finalize as cancelled)",
+                    fg="yellow")
+        sys.exit(130)
+
+    click.echo("")
+    if final_status == "completed":
+        click.secho(f"✓ chain complete: {job_id}", fg="green", bold=True)
+        _hint(f"scaffold jobs status {job_id}    # see compiled_output")
+    else:
+        click.secho(
+            f"chain ended with status={final_status or 'unknown'}"
+            + (f", last node={last_node}" if last_node else ""),
+            fg="yellow",
+        )
+        _hint(f"scaffold logs {job_id}    # inspect node-level state")
 
 
 # ---------------------------------------------------------------------------

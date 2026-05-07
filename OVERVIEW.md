@@ -2093,6 +2093,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | U.8.C | SDK research / config / models resources, SDK → v1.3.0 (§17.14) | done 2026-05-07 |
 | U.8.D | OWUI parity — /exec /cleanup /config /logs /health (§17.15) | done 2026-05-07 |
 | U.8.E | CLI prompts + gt groups, CLI → v0.4.0 (§17.16) | done 2026-05-07 |
+| U.8.F | scaffold confirm --chain, CLI → v0.5.0 (§17.17) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2310,6 +2311,23 @@ Two new CLI groups, both pure shims over SDK resources that have existed since J
 **Test-suite delta:** CLI 106 → 117 (+11: 6 prompts, 5 gt). SDK + orchestrator suites unchanged.
 
 **Live-smoke** confirmed against the running orchestrator: `gt stats` reported 1093 entries across 4 domains and 30+ source types; `gt list --domain rag` paginated correctly (page 1/365); `prompts list` handled the empty-DAG case gracefully.
+
+### 17.17 Sprint U.8.F — `scaffold confirm --chain` (2026-05-07)
+
+The last U.8 workflow gap. Until now `scaffold confirm` was curl-equivalent (Phase 2 only) — a terminal user wanting OWUI's full auto-chain had to follow up with `scaffold dag` + an `/execute/all` path that didn't exist in the CLI yet. `--chain` composes the existing pieces in the same order the OWUI pipeline does.
+
+**Chain behavior** when `--chain` is set after Phase 2 returns (`/ideate/confirm` → status `planning`):
+1. `POST /dag` (sync, 1800s timeout — close to the orchestrator's measured 416–504s ceiling).
+2. `aiter_execute_all` (SSE-streamed via `AsyncClient`); each event prints with relevant fields (`node_key`, `status`, `reason` / `error`).
+3. Terminal events (`all_complete`, `complete`, `done`) close the chain with a green ✓ banner; failure terminals (`failed`, `all_failed`, `blocked`) print a yellow status with a `scaffold logs <id>` hint.
+
+**`--json` is rejected with `--chain`** — the chain prints SSE progress to stdout and the JSON form would be incoherent. The check is a `click.UsageError` (exit 2).
+
+`Ctrl-C` mid-chain forwards through `KeyboardInterrupt` and exits 130; the orchestrator's keepalive watchdog finalizes the job as `cancelled` (Round 7 fix from earlier in the project).
+
+**Versioning:** CLI 0.4.0 → 0.5.0. SDK floor stays `>=1.2,<2.0`. API unchanged.
+
+**Test-suite delta:** CLI 117 → 120 (+3): chain happy path patches `_confirm_chain_continue` to verify the Phase 2 step posts the right body and hands off; `--chain --json` rejection; no-chain backwards-compat regression guard. Streaming behavior is exercised at the SDK level in `test_sse.py`. SDK + orchestrator unchanged.
 
 ---
 
