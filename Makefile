@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves reindex openapi-snapshot openapi-check sync-schemas
+.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves reindex openapi-snapshot openapi-check sync-schemas idea resume explain
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -56,6 +56,31 @@ sync-valves: ## Wipe baked-in api_key from pipelines/*/valves.json (.env becomes
 
 reindex: ## Re-embed the toon_v2 corpus (after switching MODEL_EMBEDDER_PIPELINE)
 	docker exec -it $(CONTAINER) python scripts/reindex.py $(REINDEX_ARGS)
+
+## ──────────────────────────────────────────────
+## Project convenience (Sprint U.4)
+## ──────────────────────────────────────────────
+
+idea: ## Submit an idea via scaffold project new (use: make idea TEXT="...")
+	@if [ -z "$(TEXT)" ]; then \
+		echo "Usage: make idea TEXT=\"your idea here\""; \
+		exit 2; \
+	fi
+	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main project new \"$(TEXT)\""
+
+resume: ## Resume a project via scaffold project resume (use: make resume ID=<nickname-or-uuid>)
+	@if [ -z "$(ID)" ]; then \
+		echo "Usage: make resume ID=<nickname-or-uuid>"; \
+		exit 2; \
+	fi
+	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main project resume $(ID)"
+
+explain: ## Explain a job status (use: make explain STATUS=<name>; omit for the list)
+	@if [ -z "$(STATUS)" ]; then \
+		docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main explain"; \
+	else \
+		docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main explain $(STATUS)"; \
+	fi
 
 openapi-snapshot: ## Regenerate docs/openapi.json from the live FastAPI app
 	@docker exec $(CONTAINER) python scripts/openapi_snapshot.py > docs/openapi.json.tmp && \

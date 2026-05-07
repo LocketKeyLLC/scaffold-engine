@@ -16,6 +16,7 @@ import click
 from scaffold_cli import __version__
 from scaffold_cli.client import CLIError, Client
 from scaffold_cli.config import resolve_config
+from scaffold_cli import project as _project
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +462,314 @@ def jobs_status(ctx: click.Context, job_id: str, as_json: bool) -> None:
     # pasteable bulleted block. Pulled from the response's `next_actions`
     # field (orchestrator's recovery registry, populated server-side).
     _render_next_actions(data)
+
+
+# ---------------------------------------------------------------------------
+# project — convenience wrappers (Sprint U.4)
+# Higher-level commands that combine multiple endpoint calls and resolve
+# nicknames to UUIDs. Every wrapper PRINTS the underlying raw command it's
+# running so the user learns the long form too.
+# ---------------------------------------------------------------------------
+
+PROJECT_EPILOG = """
+\b
+Examples:
+  scaffold project new "build a markdown linter"
+                                start a project; assigns a friendly nickname
+  scaffold project resume <nickname-or-uuid>
+                                read job state, dispatch to next valid action
+  scaffold project list         show projects with their nicknames
+
+Nicknames are stored locally at ~/.scaffold/nicknames.json (or
+$XDG_CONFIG_HOME/scaffold/nicknames.json). They map to job UUIDs;
+either form works wherever a job_id is accepted.
+"""
+
+
+@cli.group(help="High-level project commands (with friendly nicknames).", epilog=PROJECT_EPILOG)
+def project() -> None:
+    pass
+
+
+PROJECT_NEW_EPILOG = """
+\b
+Examples:
+  scaffold project new "build a markdown linter"
+  scaffold project new "make a script that gzips files older than 7 days"
+
+Equivalent to:
+  scaffold ideate "<text>"   (then bookkeep the nickname locally)
+"""
+
+
+@project.command("new", help="Submit an idea and assign a friendly nickname.",
+                 epilog=PROJECT_NEW_EPILOG)
+@click.argument("idea", nargs=-1, required=True)
+@click.option("--domain", default=None,
+              help="Optional domain hint (eng/llm/rag/spec/prompt).")
+@click.option("--dry-run", is_flag=True,
+              help="Print what would be sent without calling the orchestrator.")
+@click.pass_context
+def project_new(
+    ctx: click.Context,
+    idea: tuple[str, ...],
+    domain: str | None,
+    dry_run: bool,
+) -> None:
+    idea_text = " ".join(idea).strip()
+    if not idea_text:
+        raise click.UsageError("idea text is required")
+
+    cfg = ctx.obj["cfg"]
+    payload: dict[str, Any] = {"idea": idea_text}
+    if domain:
+        payload["domain"] = domain
+
+    # Print what the equivalent direct call would be — keeps the user
+    # learning the underlying surface.
+    click.secho(f"→ scaffold ideate {' '.join(['--domain', domain]) if domain else ''} \"{idea_text}\"".replace("  ", " "),
+                fg="bright_black")
+
+    if dry_run:
+        click.echo("(dry-run — no call made)")
+        return
+
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.post("/ideate", json=payload)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    job_id = data.get("job_id") if isinstance(data, dict) else None
+    status = data.get("status") if isinstance(data, dict) else None
+
+    if not job_id:
+        click.echo(_json.dumps(data, indent=2))
+        click.secho("warning: orchestrator response missing job_id; nickname not stored",
+                    fg="yellow", err=True)
+        return
+
+    nickname = _project.make_nickname(idea_text, job_id)
+    _project.add_nickname(nickname, job_id)
+
+    click.echo(f"job_id:   {job_id}")
+    click.echo(f"nickname: {nickname}")
+    click.echo(f"status:   {status}")
+
+    feasibility = data.get("feasibility") if isinstance(data, dict) else None
+    if isinstance(feasibility, dict):
+        verdict = "feasible" if feasibility.get("feasible") else "blocked"
+        confidence = feasibility.get("confidence")
+        click.echo(f"feasibility: {verdict}  (confidence={confidence})")
+        summary = feasibility.get("summary")
+        if summary:
+            click.echo(f"  {summary}")
+
+    if status == "awaiting_confirmation":
+        _hint(f"scaffold project resume {nickname}")
+
+
+PROJECT_RESUME_EPILOG = """
+\b
+Examples:
+  scaffold project resume markdown-linter-a4f2
+  scaffold project resume <uuid>
+  scaffold project resume <name> --dry-run   show what it would do, don't run
+
+Resume reads the job's current status, looks up the orchestrator's
+recommended next action (the same registry that powers `jobs status`'s
+"Next steps:" block), and dispatches it. For `awaiting_confirmation`
+that's `confirm`; for `failed`/`blocked` it's `retry`/`skip` (you'll
+be prompted to pick); for `completed` it prints the compiled output.
+"""
+
+
+@project.command("resume", help="Read a job's state and run the next valid action.",
+                 epilog=PROJECT_RESUME_EPILOG)
+@click.argument("name_or_uuid")
+@click.option("--dry-run", is_flag=True,
+              help="Print what would be done without calling the orchestrator.")
+@click.pass_context
+def project_resume(ctx: click.Context, name_or_uuid: str, dry_run: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    job_id = _project.resolve(name_or_uuid)
+    if not job_id:
+        click.secho(f"unknown nickname or UUID: {name_or_uuid}", fg="red", err=True)
+        _hint("scaffold jobs list to see available jobs.")
+        sys.exit(1)
+
+    nickname_label = (
+        name_or_uuid if not _project.looks_like_uuid(name_or_uuid)
+        else (_project.reverse_lookup(job_id) or "(no nickname)")
+    )
+
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get_or_none(f"/exec/status/{job_id}")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    if data is None or not isinstance(data, dict):
+        click.secho(f"job {job_id} not found on the orchestrator.", fg="red", err=True)
+        sys.exit(1)
+
+    status = data.get("job_status") or "unknown"
+    actions = [a for a in (data.get("next_actions") or []) if a.get("action") != "wait"]
+
+    click.echo(f"job:    {nickname_label}  ({job_id})")
+    click.echo(f"status: {status}")
+
+    if not actions:
+        click.echo("(nothing actionable from this state)")
+        if status == "completed" and (compiled := data.get("compiled_output")):
+            click.echo("\ncompiled_output:")
+            click.echo(compiled[:2000] + ("\n[… truncated]" if len(compiled) > 2000 else ""))
+        return
+
+    # Pick the first non-wait action as the default "resume" target.
+    # If there are multiple, list them and bail to the user — we don't
+    # auto-pick destructive actions like delete.
+    primary = actions[0]
+    primary_action = primary.get("action")
+    primary_command = primary.get("command")
+
+    click.echo("")
+    click.secho("would run:", fg="cyan", bold=True)
+    if primary_command:
+        click.echo(f"  {primary_command}")
+    else:
+        click.echo(f"  {primary.get('method','GET')} {primary.get('endpoint','')}")
+    click.echo(f"  ({primary.get('description','')})")
+
+    if len(actions) > 1:
+        click.echo("")
+        click.echo("other valid actions:")
+        for a in actions[1:]:
+            cmd = a.get("command") or f"{a.get('method','GET')} {a.get('endpoint','')}"
+            click.echo(f"  • {cmd}   — {a.get('description','')}")
+
+    if dry_run:
+        click.echo("\n(dry-run — no call made)")
+        return
+
+    # Translate the primary action into an actual SDK call. Today we
+    # support the common cases — confirm, retry_node, skip_node — and
+    # bail to the user for anything else (delete, view_output, assist
+    # subcommands) since those are state-altering or interactive.
+    if primary_action == "confirm":
+        click.echo(f"\nConfirming {job_id} (this may take a few minutes) …")
+        try:
+            with Client(cfg.api_url, cfg.api_key, timeout=3600.0) as c:
+                resp = c.post("/ideate/confirm", json={"job_id": job_id})
+            click.echo(f"status: {resp.get('status') if isinstance(resp, dict) else '?'}")
+            _hint(f"scaffold project resume {nickname_label}")
+        except CLIError as exc:
+            click.secho(str(exc), fg="red", err=True)
+            sys.exit(1)
+    elif primary_action == "view_output":
+        if (compiled := data.get("compiled_output")):
+            click.echo("\ncompiled_output:")
+            click.echo(compiled)
+        else:
+            click.echo("(no compiled output stored)")
+    else:
+        click.echo(
+            f"\nThis action ({primary_action}) is destructive or interactive. "
+            "Run the command above manually if you intend it."
+        )
+
+
+PROJECT_LIST_EPILOG = """
+\b
+Examples:
+  scaffold project list
+  scaffold project list --status awaiting_confirmation
+
+Same data as `scaffold jobs list`, but rows are annotated with their
+local nicknames where one is registered.
+"""
+
+
+@project.command("list", help="List jobs with their local nicknames.",
+                 epilog=PROJECT_LIST_EPILOG)
+@click.option("--limit", default=25, type=int, show_default=True)
+@click.option("--status", "status_filter", default=None)
+@click.pass_context
+def project_list(ctx: click.Context, limit: int, status_filter: str | None) -> None:
+    cfg = ctx.obj["cfg"]
+    params: dict = {"limit": limit}
+    if status_filter:
+        params["status"] = status_filter
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/jobs", params=params)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    rows = data.get("jobs", []) if isinstance(data, dict) else []
+    if not rows:
+        click.echo("(no jobs)")
+        _hint('scaffold project new "your idea here"')
+        return
+
+    click.echo(f"{'nickname':<28} {'status':<22} {'job_id':<38} title")
+    click.echo("-" * 110)
+    for r in rows:
+        jid = str(r.get("id", ""))
+        nick = _project.reverse_lookup(jid) or "—"
+        st = str(r.get("status", ""))[:20]
+        title = (r.get("title") or r.get("idea") or "")[:30]
+        click.echo(f"{nick[:26]:<28} {st:<22} {jid[:36]:<38} {title}")
+
+
+# ---------------------------------------------------------------------------
+# explain — local lookup, no network call
+# ---------------------------------------------------------------------------
+
+EXPLAIN_EPILOG = """
+\b
+Examples:
+  scaffold explain awaiting_confirmation
+  scaffold explain failed
+  scaffold explain                       list every status
+
+Plain-English description + valid next-step actions for a given job
+status. Local lookup; no orchestrator call required.
+"""
+
+
+@cli.command(help="Explain what a job status means and what you can do from it.",
+             epilog=EXPLAIN_EPILOG)
+@click.argument("status", required=False)
+def explain(status: str | None) -> None:
+    if not status:
+        click.echo("Known job statuses:")
+        for name in _project.STATUS_EXPLAIN:
+            entry = _project.STATUS_EXPLAIN[name]
+            click.secho(f"  {name:<26}", fg="cyan", nl=False)
+            click.echo(entry["headline"])
+        click.echo("")
+        click.echo("Run `scaffold explain <status>` for full details.")
+        return
+
+    info = _project.STATUS_EXPLAIN.get(status)
+    if info is None:
+        click.secho(f"unknown status: {status}", fg="red", err=True)
+        click.echo("Known statuses: " + ", ".join(_project.STATUS_EXPLAIN.keys()))
+        sys.exit(1)
+
+    click.secho(f"{status}", fg="cyan", bold=True)
+    click.echo(f"  {info['headline']}")
+    click.echo("")
+    click.echo("What happens next:")
+    click.echo(f"  {info['what_happens']}")
+    click.echo("")
+    click.echo("Valid actions from this state:")
+    for a in info["valid_actions"]:
+        click.echo(f"  • {a}")
 
 
 if __name__ == "__main__":
