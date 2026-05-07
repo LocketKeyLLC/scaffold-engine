@@ -1979,6 +1979,72 @@ The original priority queue had 10 items. **All 10 are now fully resolved** in c
 - **Observability completeness** — log-line fan-out, metric coverage, alerting hooks not audited beyond foundation middleware.
 - **Deployment surface** — Dockerfile, compose, `.env.example` not audited.
 
+### 16.6 Verification record (2026-05-07, post-`0c4cc12`)
+
+End-to-end live verification against the running orchestrator after items 6 / 7 / 10 landed. All five layers green.
+
+#### Layer 1 — system baselines
+
+| Check | Result |
+|---|---|
+| 7 containers up | ✅ |
+| `GET /health` overall | `healthy` (postgresql / ollama / milvus / redis all `up`) |
+| OpenAPI snapshot | `docs/openapi.json` matches the live spec |
+| Schema parity test | 2/2 |
+| SDK suite | 88/88 |
+| CLI suite | 38/38 |
+
+#### Layer 2 — Item 7 (`_pre_migration_sweep`)
+
+- First boot today (16:36 UTC): `startup_sweep_complete: stale_running_cleared=1` — cleared a genuine stuck `running` row from the live DB.
+- Second boot (16:48 UTC): `startup_sweep_complete: stale_running_cleared=0` — confirmed idempotent.
+- Unit tests: 4/4 pass.
+
+#### Layer 3 — Item 10 (next-action registry)
+
+Live registry probe across the statuses present in the DB at verification time:
+
+| Job status | next_actions returned |
+|---|---|
+| `awaiting_confirmation` | `[confirm, delete]` ✅ |
+| `failed` | `[retry_node, skip_node, delete]` ✅ |
+
+Concrete-substitution check on a `failed` job (`c8da8c9f-…`): the registry filled in the actual `job_id` and selected `node_key=T2` via the helper's blocked-node fallback (no `dag_node` had `status='failed'`, so the heuristic walked failed → blocked → running and picked the first `pending` node with `deps_met=False`).
+
+- Recovery tests: 25/25.
+- `execution_handler.execution_status` next_actions tests: 4/4.
+- Existing module tests still pass: 5/5.
+
+#### Layer 4 — Item 6 (`IngestEntry`)
+
+`_normalize_entry` delegation verified via live import inside the orchestrator container:
+
+| Input shape | Result |
+|---|---|
+| TOON short keys (`topic`/`content`/`tags`/`source`) | Correct canonical dict |
+| Milvus long keys (`canonical_text`/`domain_tags`/`source_url`) | Correct canonical dict |
+| `{"content": "", "canonical_text": "falls through"}` | `content` resolves to `"falls through"` ✅ (preserves legacy `or`-chain semantics that Pydantic's stock `AliasChoices` would silently break) |
+
+- IngestEntry tests: 17/17.
+- rag_pipeline tests: 25/25.
+- research_agent_ingestion tests: 4/4.
+
+#### Layer 5 — SDK end-to-end
+
+```
+sync probe | job_id=481010cd... status=awaiting_confirmation
+  next_actions field present: True
+    - confirm      | /confirm 481010cd-9542-4b27-9af3-7c80f468af89
+    - delete       | (no command)
+async probe | health=healthy total_jobs=116
+```
+
+Both `Client.jobs.status()` (sync) and `AsyncClient.health()/status()` (async) deliver the new `next_actions` field through to a v1.0.0 SDK consumer with concrete commands.
+
+#### Closure
+
+All 18 original HIGH-severity findings: 15 fixed in code + 3 retracted within the audit. All 10 priority-queue items: fixed in code. All 8 cross-cutting patterns A–H: resolved. Audit coverage of the codebase as it stands today is **closed**.
+
 ---
 
 ## 17. Sprint history + roadmap
