@@ -726,6 +726,83 @@ def project_list(ctx: click.Context, limit: int, status_filter: str | None) -> N
 
 
 # ---------------------------------------------------------------------------
+# config — fetch and render orchestrator's loaded Settings (Sprint U.5)
+# ---------------------------------------------------------------------------
+
+CONFIG_EPILOG = """
+\b
+Examples:
+  scaffold config show                       every setting (table)
+  scaffold config show --filter model        only fields matching "model"
+  scaffold config show --non-defaults        only overridden fields
+  scaffold config show --json                machine-readable
+
+Sensitive values (anything looking like a key/secret/token/password)
+are redacted to (set) / (unset). For the actual values, read .env
+directly or `docker exec scaffold-orchestrator env`.
+"""
+
+
+@cli.group(help="Inspect orchestrator configuration.", epilog=CONFIG_EPILOG)
+def config() -> None:
+    pass
+
+
+@config.command("show", help="List every setting with current value, default, and description.")
+@click.option("--filter", "filter_str", default=None,
+              help="Substring filter on field name (case-insensitive).")
+@click.option("--non-defaults", is_flag=True,
+              help="Only show fields whose runtime value differs from the default.")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON response.")
+@click.pass_context
+def config_show(
+    ctx: click.Context,
+    filter_str: str | None,
+    non_defaults: bool,
+    as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/config")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+
+    if not isinstance(data, dict) or "fields" not in data:
+        click.echo(_json.dumps(data, indent=2))
+        return
+
+    fields = data["fields"]
+    if filter_str:
+        f_lower = filter_str.lower()
+        fields = [f for f in fields if f_lower in f["name"].lower()]
+    if non_defaults:
+        fields = [f for f in fields if not f.get("is_default", False)]
+
+    if not fields:
+        click.echo("(no fields match the filter)")
+        return
+
+    click.echo(f"{'name':<38} {'value':<30} {'default':<22}")
+    click.echo("-" * 92)
+    for f in fields:
+        name = f["name"][:36]
+        value = str(f["value"])[:28]
+        default = str(f["default"])[:20]
+        marker = " " if f.get("is_default", False) else "*"
+        click.echo(f"{marker} {name:<36} {value:<30} {default:<22}")
+    click.echo("")
+    click.echo(f"Total: {len(fields)} fields  (* = overridden from default)")
+    if not non_defaults and not filter_str:
+        click.echo(f"Of the {data['count']} settings, {len(data.get('redacted', []))} are redacted (keys/secrets/tokens).")
+
+
+# ---------------------------------------------------------------------------
 # explain — local lookup, no network call
 # ---------------------------------------------------------------------------
 

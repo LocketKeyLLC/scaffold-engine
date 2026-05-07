@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves reindex openapi-snapshot openapi-check sync-schemas idea resume explain
+.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves reindex openapi-snapshot openapi-check sync-schemas idea resume explain
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -106,6 +106,23 @@ logs: ## Tail orchestrator logs (last 50 lines)
 
 logs-follow: ## Follow orchestrator logs in real time
 	docker logs $(CONTAINER) -f
+
+logs-errors: ## Show only ERROR + WARNING lines from the last 500
+	@docker logs $(CONTAINER) --tail=500 2>&1 | python3 -c "import json,sys; [print(l) for l in sys.stdin if any(t in l for t in ['\"error\"','\"warning\"','ERROR','WARNING','Traceback'])]"
+
+logs-jobs: ## Show job-lifecycle events from the last 500 lines
+	@docker logs $(CONTAINER) --tail=500 2>&1 | python3 -c "import sys; [print(l) for l in sys.stdin if any(t in l for t in ['job_created','job_failed','job_autocompleted','job_refined','dag_generated','pipeline_completed','node_execution','stale_job_cleaned'])]"
+
+logs-research: ## Show research-agent events from the last 500 lines
+	@docker logs $(CONTAINER) --tail=500 2>&1 | python3 -c "import sys; [print(l) for l in sys.stdin if any(t in l for t in ['research_started','research_complete','research_resumed','iteration_','search_complete','extraction_complete','ingestion_complete','convergence','awaiting_reply','contradictions_detected'])]"
+
+logs-since: ## Show logs since a given timestamp (use: make logs-since SINCE=1h, or SINCE='2026-05-07T16:00:00')
+	@if [ -z "$(SINCE)" ]; then \
+		echo "Usage: make logs-since SINCE=<duration-or-iso-timestamp>"; \
+		echo "Examples: make logs-since SINCE=1h    make logs-since SINCE=10m"; \
+		exit 2; \
+	fi
+	docker logs $(CONTAINER) --since=$(SINCE)
 
 restart: ## Restart the orchestrator (no rebuild)
 	$(COMPOSE) restart $(CONTAINER)

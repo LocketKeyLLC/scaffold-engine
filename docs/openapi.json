@@ -2033,6 +2033,31 @@
         ]
       }
     },
+    "/config": {
+      "get": {
+        "description": "Return the orchestrator's loaded Settings (audit item U.5).\n\nSensitive fields (SecretStr-typed or with names matching `key` /\n`secret` / `token` / `password` / `pass`) are redacted to either\n`(set)` or `(unset)` so the response can be safely shown in CLI\noutput and pasted into bug reports.\n\nEach field carries the field name, current value (or redaction),\ntype, default, whether the runtime value matches the default,\nand the field's docstring (extracted from app/config.py field\ndescriptions where available).\n\nRequires API key (inherited from global auth).",
+        "operationId": "get_config_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Config",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
     "/dag": {
       "post": {
         "description": "Step 11: Generate DAG from refined idea brief.",

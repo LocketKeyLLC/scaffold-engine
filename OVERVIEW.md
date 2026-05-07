@@ -1480,6 +1480,18 @@ Source: `app/config.py`. Pydantic Settings — env vars with bounded defaults. R
 
 `get_model(role, overrides=None)` enforces an allowlist (`ROLE_FIELDS`) preventing arbitrary attribute access via role string. Override priority: per-request override > env var > config.py default. Empty-string overrides are rejected (raise `ValueError`); `None` means "fall through."
 
+### 12.4.1 Model resolution — the priority chain
+
+Every model role (general, verifier, coder, router, …) resolves through `app.config.get_model(role, overrides=None)`. The lookup order is:
+
+1. **Per-request override** (`overrides` dict argument) — supplied by the SDK / pipeline / orchestrator endpoint when the caller wants to pin a specific model for one call. Empty-string overrides are rejected with `ValueError` (rather than silently falling through). `None` means "skip this layer."
+2. **Environment variable** `MODEL_<ROLE>` — read at orchestrator startup into `Settings`. Survives across requests; persisted in `.env`. Example: `MODEL_GENERAL=qwen2.5:7b` makes the generation role use a different default than the cloud-routed `qwen3-vl:235b-instruct-cloud`.
+3. **Hardcoded default** in `app/config.py` — the documented Ollama-based stack. Never accessed if (1) or (2) provides a value.
+
+Allowlist: only fields in `ROLE_FIELDS` can be referenced — prevents arbitrary attribute access via role string. The eight role values are: `model_general`, `model_verifier`, `model_coder`, `model_router`, `model_fallback`, `model_cloud_heavy`, `model_cloud_alt`, `model_embedder_pipeline`. Reranker is config-locked (CrossEncoder singleton) and outside `get_model`.
+
+**To inspect the resolved chain at runtime:** `scaffold config show --filter model` (lists every model role with current value + default; `*` marks fields whose runtime value differs from the default). Or `GET /config` for the full JSON. Sensitive values (anything matching key/secret/token/password keywords or a URL with embedded credentials) are redacted in the public surface.
+
 ### 12.5 Provider selection (Sprint E+)
 
 Per-role provider routing. Default `ollama` preserves pre-Sprint-E behavior.

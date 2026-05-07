@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -388,6 +389,89 @@ async def cleanup_stale_jobs(db: AsyncSession = Depends(get_db)):
     return {
         "cleaned": result,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+_CONFIG_REDACT_KEYWORDS = ("key", "secret", "token", "password", "pass")
+# URL-with-embedded-credentials: scheme://user:pass@host…
+_CONFIG_URL_CREDS_RE = re.compile(r"^[a-z][a-z0-9+\-.]*://[^/@\s]+:[^/@\s]+@")
+
+
+def _is_secret_field(name: str, value: object) -> bool:
+    """True when a Settings field's value should be redacted in /config.
+
+    Three triggers, in priority order:
+      1. The field type is ``SecretStr``.
+      2. The field NAME contains a sensitive keyword (``key`` / ``secret``
+         / ``token`` / ``password`` / ``pass``).
+      3. The field VALUE is a URL with embedded user:password credentials
+         (e.g. ``postgresql+asyncpg://scaffold:abcd@host:5432/db``) —
+         catches ``database_url`` and similar without false-positiving on
+         credential-free URLs like ``http://172.18.0.1:11434``.
+    We err on the side of over-redaction rather than leaking values
+    via the public API.
+    """
+    from pydantic import SecretStr
+    if isinstance(value, SecretStr):
+        return True
+    lname = name.lower()
+    if any(kw in lname for kw in _CONFIG_REDACT_KEYWORDS):
+        return True
+    if isinstance(value, str) and _CONFIG_URL_CREDS_RE.match(value):
+        return True
+    return False
+
+
+@app.get("/config", tags=["ops"])
+async def get_config():
+    """Return the orchestrator's loaded Settings (audit item U.5).
+
+    Sensitive fields (SecretStr-typed or with names matching `key` /
+    `secret` / `token` / `password` / `pass`) are redacted to either
+    `(set)` or `(unset)` so the response can be safely shown in CLI
+    output and pasted into bug reports.
+
+    Each field carries the field name, current value (or redaction),
+    type, default, whether the runtime value matches the default,
+    and the field's docstring (extracted from app/config.py field
+    descriptions where available).
+
+    Requires API key (inherited from global auth).
+    """
+    from app.config import Settings, settings as _live_settings
+
+    fields_meta = Settings.model_fields
+    out: list[dict] = []
+    for name, finfo in fields_meta.items():
+        live_value = getattr(_live_settings, name)
+        default = finfo.default
+        type_repr = str(finfo.annotation).replace("typing.", "")
+
+        if _is_secret_field(name, live_value):
+            display = "(set)" if live_value else "(unset)"
+            display_default = "(redacted)"
+        else:
+            # Convert dicts/lists/etc to JSON-safe primitives.
+            try:
+                display = live_value if isinstance(live_value, (str, int, float, bool)) else str(live_value)
+                display_default = default if isinstance(default, (str, int, float, bool, type(None))) else str(default)
+            except Exception:
+                display = str(live_value)
+                display_default = "?"
+
+        out.append({
+            "name": name,
+            "value": display,
+            "type": type_repr,
+            "default": display_default,
+            "is_default": live_value == default,
+            "description": finfo.description or "",
+        })
+
+    return {
+        "fields": out,
+        "redacted": [f["name"] for f in out if "(set)" in str(f["value"]) or "(unset)" in str(f["value"])],
+        "count": len(out),
     }
 
 
