@@ -2,6 +2,17 @@
 
 Reverse-chronological record of dated fixes, hardening rounds, and architectural changes. Engineer's working log; preserves file paths, function names, and commit hashes.
 
+## 2026-05-07 — Sprint J.1.b: SDK package skeleton + schema parity
+
+Pip-installable `scaffold-engine-client` package shipped at `sdk/`, mirroring the `cli/` layout. Skeleton only — typed methods land in J.1.c (sync) and J.1.d (async + SSE).
+
+- **`sdk/scaffold_client/`** — `Client` (sync httpx) + `AsyncClient` (async httpx), both with constructor + `request()` escape hatch + context-manager close. `User-Agent` header carries the SDK version.
+- **Exception hierarchy** — `ScaffoldError` base; subclasses `ConnectionError`, `TimeoutError`, `AuthenticationError` (401), `PermissionError` (403), `NotFoundError` (404), `RateLimitError` (429), `RequestError` (other 4xx), `OrchestratorError` (5xx). Transport error mapping centralized in `_transport.py` so both clients use one path.
+- **Vendored schemas** — `sdk/scaffold_client/schemas.py` is a byte-equal copy of `app/schemas.py`. Lets `pip install scaffold-engine-client` pull no orchestrator runtime deps. `tests/test_sdk_schema_parity.py` enforces byte-equality in the orchestrator suite; `make sync-schemas` regenerates after edits to `app/schemas.py`.
+- **Makefile** — `make test-sdk` (pytest in `/code/sdk`), `make sync-schemas` (cp source → vendored).
+- **`docker-compose.yml`** — added `./sdk:/code/sdk:ro` so the dev container can run SDK tests in place.
+- **Test counts** — 20 SDK skeleton tests (header injection, all 7 status-code branches, transport-error mapping, async mirror, schemas re-export); 2 parity tests in the orchestrator suite. Orchestrator baseline now 899 passed, 14 pre-existing failed, 5 skipped (was 897/14/5).
+
 ## 2026-05-07 — Sprint J.1.a: OpenAPI snapshot + v1.0.0 stability anchor
 
 Public HTTP API contract is now versioned and snapshotted. First step of Sprint J.1 (Python SDK package + stable OpenAPI).

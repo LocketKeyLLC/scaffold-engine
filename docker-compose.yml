@@ -122,6 +122,7 @@ services:
       - ./app:/code/app:ro
       - ./tests:/code/tests:ro
       - ./cli:/code/cli:ro
+      - ./sdk:/code/sdk:ro
       - ./scripts:/code/scripts:ro
       - ./ground_truths:/code/ground_truths:ro
       - ./db:/code/db:ro

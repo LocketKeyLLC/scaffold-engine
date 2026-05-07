@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test test-cli agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help bootstrap doctor init sync-valves reindex openapi-snapshot openapi-check
+.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help bootstrap doctor init sync-valves reindex openapi-snapshot openapi-check sync-schemas
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -17,6 +17,9 @@ test: ## Run all tests in Docker (~745 passing, 5 skipped)
 
 test-cli: ## Run scaffold CLI tests (cli/tests/) inside the dev container
 	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m pytest tests/ --timeout=10 -v"
+
+test-sdk: ## Run scaffold SDK tests (sdk/tests/) inside the dev container
+	docker exec $(CONTAINER) sh -c "cd /code/sdk && python -m pytest tests/ --timeout=10 -v"
 
 agent: ## Run execution agent tests only
 	docker exec $(CONTAINER) pytest tests/test_execution_agent.py -m smoke --timeout=30 -v
@@ -58,6 +61,10 @@ openapi-snapshot: ## Regenerate docs/openapi.json from the live FastAPI app
 
 openapi-check: ## Verify docs/openapi.json matches the live spec (CI gate)
 	docker exec $(CONTAINER) python scripts/openapi_snapshot.py --check
+
+sync-schemas: ## Refresh sdk/scaffold_client/schemas.py from app/schemas.py (byte-equal vendor)
+	cp app/schemas.py sdk/scaffold_client/schemas.py
+	@echo "Vendored sdk/scaffold_client/schemas.py from app/schemas.py."
 
 ## ──────────────────────────────────────────────
 ## Build & Ops
