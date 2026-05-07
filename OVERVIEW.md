@@ -2089,6 +2089,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | U-sprint track | Post-v1.0.0 UX polish, U.1–U.6 (§17.10) | done 2026-05-07 |
 | U.7 | UX gap audit + CLI parity sweep, API → v1.1.0 (§17.11) | done 2026-05-07 |
 | U.8.A | Assist Mode parity in SDK + CLI, SDK → v1.2.0 (§17.12) | done 2026-05-07 |
+| U.8.B | Small CLI verbs — logs / exec retry / status / dag / cleanup / dedup / research reply+pdf, CLI → v0.3.0 (§17.13) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2220,6 +2221,30 @@ First slice of the U.8 "every component reachable from every interface" track. A
 **Test-suite delta:** SDK 88 → 109 passing (+21 assist tests); CLI 78 → 93 passing (+15 assist subcommand tests). Orchestrator suite unchanged — no router edits in this sprint.
 
 **Stale-test fix folded in:** `sdk/tests/test_skeleton.py::test_version_is_exported` was hard-coded to `"1.0.0"` and would have failed at U.7 if anyone had re-run the SDK suite. Replaced with a semver-shape check so future minor bumps don't require a test edit.
+
+### 17.13 Sprint U.8.B — Small CLI verbs (2026-05-07)
+
+Tier-1 + Tier-2 quick wins from the U.8 audit. All thin wrappers over SDK methods that already existed at v1.2.0 — no SDK or orchestrator changes. Closes the gap where a terminal-only user could not drive a job through failure recovery without falling back to chat or curl.
+
+| New verb | Endpoint | Notes |
+|---|---|---|
+| `scaffold logs <job_id>` | `GET /logs/{id}` | Per-node DAG state + output preview. `--include-output / --include-compiled / --json`. |
+| `scaffold exec retry <job_id> <node>` | `POST /exec/retry` | New `exec` group; `retry` is the first verb. |
+| `scaffold research reply <sid> <msg>` | `POST /research/reply` (SSE) | Async-streamed via `aiter_research_reply`. |
+| `scaffold research pdf <path>` | `POST /research/pdf` (SSE, multipart) | Async-streamed via `aiter_research_pdf`. `--extractor / --domain`. |
+| `scaffold status` | `GET /status` | Counts table + recent jobs + most-actionable `next_actions` block (mirrors OWUI U.7/F2). `--filter / --limit / --json`. |
+| `scaffold dag <job_id>` | `GET /dag/{id}` | Node table by default; `--mermaid` emits a `​```mermaid` block; `--json`. |
+| `scaffold jobs cleanup` | `POST /jobs/cleanup` | `--yes` to skip the confirm prompt. |
+| `scaffold rag dedup` | `GET /rag/dedup` | Renders action/similarity/existing-entry. `rag` was promoted from a flat command to a group; the bare `scaffold rag <text>` form is preserved by a `_RagGroup.parse_args` override that auto-prepends `query`. |
+| `scaffold rag query <text>` | `POST /rag` | Explicit form alongside the legacy bare invocation. |
+
+**Documentation note:** the `/logs/{id}` endpoint name is misleading — it returns per-node DAG state with output_text preview, not a line-by-line log stream. The `execution_logs` table is internal-only (no public endpoint). The CLI epilog calls this out so users don't expect tail-style output. For container-level logs, `make logs` / `make logs-jobs` remain the right tool.
+
+**Group-collision fix folded in:** `jobs delete` lost its trailing `click.secho("deleted ...")` line during U.8.B drafting (incomplete `old_string` in an Edit) — restored on first failed test. Lesson: when adding new sub-commands after an existing one, capture the entire trailing block in the Edit `old_string` so post-handler lines aren't accidentally orphaned into the new function.
+
+**Versioning:** CLI 0.2.0 → 0.3.0. SDK floor stays `>=1.2,<2.0` (no SDK changes). Orchestrator API unchanged.
+
+**Test-suite delta:** CLI 93 → 106 (+13: 12 new verb tests + 1 regression guard for the `rag` group conversion). SDK + orchestrator unchanged.
 
 ---
 

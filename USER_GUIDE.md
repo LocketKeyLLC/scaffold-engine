@@ -301,7 +301,31 @@ Default is `context_only` — works well for most uses. Set per-session at `/ass
 
 If you usually work in Assist Mode rather than autonomous, flip the `assist_after_confirm` valve on `scaffold_router` (Open WebUI admin → pipelines → scaffold_router → valves). After that, every `/confirm` lands directly in Assist Mode without a separate `/assist <job_id>` step.
 
-### D.6 Driving Assist Mode from the terminal or SDK
+### D.6 Driving an entire job from the terminal — the U.8.B verb set
+
+After U.8.B every job-control endpoint has a CLI verb so you never have to switch to chat for execution control:
+
+```bash
+scaffold ideate "build a markdown linter"        # Phase 1
+scaffold confirm <job_id>                        # Phase 2 (curl-equivalent — no auto-chain)
+scaffold status                                   # counts + recent + next_actions
+scaffold whatnow                                  # actionable jobs only
+scaffold dag <job_id>                             # node table
+scaffold dag <job_id> --mermaid                   # paste-into-docs diagram
+scaffold logs <job_id>                            # per-node state + output preview
+scaffold logs <job_id> --include-output           # full output_text per node
+scaffold exec retry <job_id> <node_key>           # reset a failed node
+scaffold skip <job_id> <node_key>                 # mark skipped, unblock downstream
+scaffold jobs cleanup                             # sweep stale jobs (admin)
+scaffold rag "your query"                         # KB query (bare form still works)
+scaffold rag dedup                                # near-duplicate rejection log
+scaffold research reply <sid> "yes, proceed"      # resume a paused research session
+scaffold research pdf ./design-spec.pdf           # ingest a local PDF
+```
+
+`scaffold confirm` is intentionally curl-equivalent (Phase 2 only). The OWUI auto-chain (`/confirm` → `/dag` → `/execute/all`) lives in `pipelines/scaffold_router.py`; a CLI `--chain` flag is a future track.
+
+### D.7 Driving Assist Mode from the terminal or SDK
 
 Every chat verb above has a CLI and SDK equivalent (added in U.8.A). The session is stateless on every surface — paste the `<session_id>` in each call.
 

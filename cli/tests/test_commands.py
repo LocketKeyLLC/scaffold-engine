@@ -682,3 +682,211 @@ def test_assist_friction_list_empty_state(runner):
         res = runner.invoke(cli, ["assist", "friction", "list", "sess-1"])
     assert res.exit_code == 0
     assert "(no friction notes)" in res.output
+
+
+# ---------------------------------------------------------------------------
+# U.8.B verbs: logs, exec retry, status, dag, jobs cleanup, rag dedup,
+# rag query/default invocation
+# ---------------------------------------------------------------------------
+
+
+def test_logs_renders_per_node_table(runner):
+    """/logs/{id} returns per-node DAG state, not a line-by-line stream."""
+    response = {
+        "job_id": "abc-123",
+        "job_status": "completed",
+        "node_count": 2,
+        "nodes": [
+            {"node_key": "T1", "status": "done", "confidence": 0.92,
+             "tool": "LLM", "output_text": "Plan: refactor modules A, B, C"},
+            {"node_key": "T2", "status": "failed", "confidence": 0.41,
+             "tool": "LLM", "output_text": "verifier rejected — too vague"},
+        ],
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = response
+        res = runner.invoke(cli, ["logs", "abc-123"])
+    assert res.exit_code == 0
+    assert "T1" in res.output and "T2" in res.output
+    assert "Plan: refactor" in res.output
+    assert "verifier rejected" in res.output
+    args, kwargs = get.call_args
+    assert args[0] == "/logs/abc-123"
+    assert kwargs["params"] == {"limit": 50, "offset": 0}
+
+
+def test_logs_handles_empty_nodes(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = {
+            "job_id": "abc", "job_status": "awaiting_confirmation",
+            "node_count": 0, "nodes": [],
+        }
+        res = runner.invoke(cli, ["logs", "abc"])
+    assert res.exit_code == 0
+    assert "(no DAG nodes" in res.output
+
+
+def test_logs_passes_include_flags(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = {"job_id": "abc", "job_status": "completed",
+                            "node_count": 0, "nodes": []}
+        runner.invoke(cli, ["logs", "abc", "--include-output", "--include-compiled"])
+    _, kwargs = get.call_args
+    assert kwargs["params"]["include_output"] is True
+    assert kwargs["params"]["include_compiled"] is True
+
+
+def test_exec_retry_posts_payload(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = {"status": "running"}
+        res = runner.invoke(cli, ["exec", "retry", "abc-123", "T2"])
+    assert res.exit_code == 0
+    args, kwargs = post.call_args
+    assert args[0] == "/exec/retry"
+    assert kwargs["json"] == {"job_id": "abc-123", "node_key": "T2"}
+    assert "retried T2" in res.output
+    assert "scaffold jobs status abc-123" in res.output
+
+
+def test_status_renders_counts_and_jobs(runner):
+    """Mirrors the live /status response shape: `recent_jobs`, not `jobs`."""
+    response = {
+        "status_counts": {"completed": 3, "running": 1, "blocked": 2},
+        "recent_jobs": [
+            {"id": "abc-123", "status": "blocked", "title": "Stuck on T2"},
+            {"id": "def-456", "status": "completed", "title": "Markdown linter"},
+        ],
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = response
+        res = runner.invoke(cli, ["status"])
+    assert res.exit_code == 0
+    assert "completed" in res.output
+    assert "blocked" in res.output
+    assert "Stuck on T2" in res.output
+    assert "Markdown linter" in res.output
+    args, kwargs = get.call_args
+    assert args[0] == "/status"
+
+
+def test_status_filter_passes_through(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = {"status_counts": {}, "jobs": []}
+        runner.invoke(cli, ["status", "--filter", "blocked", "--limit", "10"])
+    _, kwargs = get.call_args
+    assert kwargs["params"]["status_filter"] == "blocked"
+    assert kwargs["params"]["limit"] == 10
+
+
+def test_dag_renders_table(runner):
+    response = {
+        "job_id": "abc-123",
+        "job_status": "running",
+        "nodes": [
+            {"node_key": "T1", "status": "done", "depends_on": [],
+             "assigned_model": "qwen3:7b", "title": "Plan"},
+            {"node_key": "T2", "status": "pending", "depends_on": ["T1"],
+             "assigned_model": "qwen3:7b", "title": "Build"},
+        ],
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = response
+        res = runner.invoke(cli, ["dag", "abc-123"])
+    assert res.exit_code == 0
+    assert "T1" in res.output
+    assert "T2" in res.output
+    assert "qwen3:7b" in res.output
+    args, _ = get.call_args
+    assert args[0] == "/dag/abc-123"
+
+
+def test_dag_mermaid_emits_block(runner):
+    response = {
+        "job_id": "abc-123", "job_status": "running",
+        "nodes": [
+            {"node_key": "T1", "status": "done", "depends_on": [], "title": "A"},
+            {"node_key": "T2", "status": "done", "depends_on": ["T1"], "title": "B"},
+        ],
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["dag", "abc-123", "--mermaid"])
+    assert res.exit_code == 0
+    assert "```mermaid" in res.output
+    assert "graph TD" in res.output
+    assert "T1 --> T2" in res.output
+
+
+def test_jobs_cleanup_with_yes(runner):
+    response = {"reaped_running_to_cancelled": 2, "reaped_orphans_reset": 1}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = response
+        res = runner.invoke(cli, ["jobs", "cleanup", "--yes"])
+    assert res.exit_code == 0
+    args, kwargs = post.call_args
+    assert args[0] == "/jobs/cleanup"
+    assert "reaped_running_to_cancelled: 2" in res.output
+
+
+def test_jobs_cleanup_prompts_without_yes(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        res = runner.invoke(cli, ["jobs", "cleanup"], input="n\n")
+    assert res.exit_code != 0
+    post.assert_not_called()
+
+
+def test_rag_dedup_renders_table(runner):
+    """Mirrors live response shape: action_taken / similarity_score / existing_entry_id."""
+    response = {"entries": [
+        {"id": 1, "action_taken": "rejected", "similarity_score": 0.961,
+         "existing_entry_id": "scaffold-hid-foo-abc123"},
+        {"id": 2, "action_taken": "superseded", "similarity_score": 0.923,
+         "existing_entry_id": "scaffold-hid-bar-def456"},
+    ], "total": 2}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = response
+        res = runner.invoke(cli, ["rag", "dedup"])
+    assert res.exit_code == 0
+    assert "rejected" in res.output
+    assert "superseded" in res.output
+    assert "0.961" in res.output
+    assert "scaffold-hid-foo-abc123" in res.output
+    args, kwargs = get.call_args
+    assert args[0] == "/rag/dedup"
+    assert kwargs["params"] == {"limit": 50, "offset": 0}
+
+
+def test_rag_query_explicit_subcommand_works(runner):
+    """`scaffold rag query <q>` should hit /rag with the query."""
+    response = {"results": [{"score": 0.9, "domain": "rag", "text": "Milvus index ..."}]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = response
+        res = runner.invoke(cli, ["rag", "query", "milvus", "index"])
+    assert res.exit_code == 0
+    args, kwargs = post.call_args
+    assert args[0] == "/rag"
+    assert kwargs["json"]["query"] == "milvus index"
+
+
+def test_rag_default_invocation_backwards_compatible(runner):
+    """`scaffold rag <q>` (no subcommand) must still query — regression guard
+    for the U.8.B group conversion."""
+    response = {"results": [{"score": 0.9, "domain": "rag", "text": "..."}]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = response
+        res = runner.invoke(cli, ["rag", "milvus", "index"])
+    assert res.exit_code == 0
+    args, kwargs = post.call_args
+    assert args[0] == "/rag"
+    assert kwargs["json"]["query"] == "milvus index"

@@ -1071,6 +1071,36 @@ def jobs_delete(ctx: click.Context, job_id: str, yes: bool) -> None:
     click.secho(f"deleted {job_id[:8]}", fg="green")
 
 
+@jobs.command("cleanup", help="Sweep stale jobs (calls /jobs/cleanup).")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def jobs_cleanup(ctx: click.Context, yes: bool, as_json: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    if not yes:
+        click.confirm(
+            "Run stale-job reaper now? (resets orphans, cancels long-idle jobs)",
+            abort=True,
+        )
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.post("/jobs/cleanup", json={})
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    if isinstance(data, dict):
+        counts = {k: v for k, v in data.items() if isinstance(v, int)}
+        if counts:
+            click.secho("reaped:", fg="green", bold=True)
+            for k, v in sorted(counts.items()):
+                click.echo(f"  {k}: {v}")
+        else:
+            click.echo(_json.dumps(data, indent=2))
+
+
 # ---- skip (top-level; needs both job_id and node_key per docs) ----
 
 SKIP_EPILOG = """
@@ -1213,6 +1243,98 @@ def research_openapi(ctx: click.Context, spec_url: str) -> None:
     cfg = ctx.obj["cfg"]
     click.echo(f"ingesting openapi:{spec_url}")
     _stream_research(cfg.api_url, cfg.api_key, {"topic": f"openapi:{spec_url}", "depth": "shallow"})
+
+
+@research.command("reply", help="Resume a paused autonomous research session.")
+@click.argument("session_id")
+@click.argument("message", nargs=-1, required=True)
+@click.pass_context
+def research_reply(
+    ctx: click.Context, session_id: str, message: tuple[str, ...],
+) -> None:
+    """Stream /research/reply — sends a follow-up message to a session
+    that paused for clarification."""
+    import asyncio
+    from scaffold_client import AsyncClient, ScaffoldError
+
+    cfg = ctx.obj["cfg"]
+    reply_text = " ".join(message).strip()
+    if not reply_text:
+        raise click.UsageError("reply message is required")
+    click.echo(f"replying to {session_id}: {reply_text[:80]}")
+
+    async def _run() -> None:
+        async with AsyncClient(cfg.api_url, api_key=cfg.api_key, timeout=3600.0) as c:
+            try:
+                async for evt in c.aiter_research_reply(session_id, reply_text):
+                    name = evt.get("event", "?")
+                    data = evt.get("data", {})
+                    snippet = ""
+                    if isinstance(data, dict):
+                        first_key = next(iter(data), None)
+                        if first_key:
+                            snippet = f"{first_key}={str(data[first_key])[:60]}"
+                    click.secho(f"[{name}] ", fg="cyan", nl=False)
+                    click.echo(snippet or str(data)[:80])
+                    if name in ("convergence", "complete", "done"):
+                        break
+            except ScaffoldError as exc:
+                click.secho(f"reply failed: {exc}", fg="red", err=True)
+                raise
+
+    try:
+        asyncio.run(_run())
+    except ScaffoldError:
+        sys.exit(1)
+    except KeyboardInterrupt:
+        click.secho("\ninterrupted", fg="yellow")
+        sys.exit(130)
+
+
+@research.command("pdf", help="Ingest a PDF document (multipart upload, streamed).")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, readable=True))
+@click.option("--extractor", type=click.Choice(["auto", "pypdf", "plumber"]),
+              default="auto", show_default=True)
+@click.option("--domain", default=None, help="Optional Milvus partition hint.")
+@click.pass_context
+def research_pdf(
+    ctx: click.Context, path: str, extractor: str, domain: str | None,
+) -> None:
+    """Streams /research/pdf — multipart upload + ingestion events."""
+    import asyncio
+    from scaffold_client import AsyncClient, ScaffoldError
+
+    cfg = ctx.obj["cfg"]
+    click.echo(f"ingesting pdf: {path}  (extractor={extractor})")
+
+    async def _run() -> None:
+        async with AsyncClient(cfg.api_url, api_key=cfg.api_key, timeout=3600.0) as c:
+            try:
+                async for evt in c.aiter_research_pdf(
+                    path, extractor=extractor, domain=domain,
+                ):
+                    name = evt.get("event", "?")
+                    data = evt.get("data", {})
+                    snippet = ""
+                    if isinstance(data, dict):
+                        first_key = next(iter(data), None)
+                        if first_key:
+                            snippet = f"{first_key}={str(data[first_key])[:60]}"
+                    click.secho(f"[{name}] ", fg="cyan", nl=False)
+                    click.echo(snippet or str(data)[:80])
+                    if name in ("ingested", "complete", "done"):
+                        break
+            except ScaffoldError as exc:
+                click.secho(f"pdf ingest failed: {exc}", fg="red", err=True)
+                raise
+
+    try:
+        asyncio.run(_run())
+    except ScaffoldError:
+        sys.exit(1)
+    except KeyboardInterrupt:
+        click.secho("\ninterrupted", fg="yellow")
+        sys.exit(130)
 
 
 @research.command("list", help="List recent research sessions.")
@@ -1433,13 +1555,45 @@ Examples:
 """
 
 
-@cli.command(help="Query the Milvus knowledge base.", epilog=RAG_EPILOG)
+class _RagGroup(click.Group):
+    """Routes bare ``scaffold rag <text...>`` to the ``query`` subcommand
+    so the U.7 form keeps working after we promoted ``rag`` to a group.
+
+    Heuristic: if the first non-flag argument doesn't match a known
+    subcommand, prepend ``query``. Flags (``--top-k``, ``--json``, ``-h``)
+    pass through unchanged because they belong to the subcommand.
+    """
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        first_positional = next((a for a in args if not a.startswith("-")), None)
+        if first_positional is not None and first_positional not in self.commands:
+            args = ["query"] + args
+        return super().parse_args(ctx, args)
+
+
+@cli.group(cls=_RagGroup, help="Query or audit the Milvus knowledge base.",
+           epilog=RAG_EPILOG)
+def rag() -> None:
+    pass
+
+
+@rag.command("query", help="Query the knowledge base.")
 @click.argument("query", nargs=-1, required=True)
 @click.option("--top-k", type=int, default=5, show_default=True)
 @click.option("--domain", default=None, help="Restrict to one Milvus partition.")
 @click.option("--json", "as_json", is_flag=True)
 @click.pass_context
-def rag(
+def rag_query(
+    ctx: click.Context,
+    query: tuple[str, ...],
+    top_k: int,
+    domain: str | None,
+    as_json: bool,
+) -> None:
+    _run_rag_query(ctx, query, top_k, domain, as_json)
+
+
+def _run_rag_query(
     ctx: click.Context,
     query: tuple[str, ...],
     top_k: int,
@@ -1471,6 +1625,45 @@ def rag(
         click.echo(f"score={score:.3f}  domain={r.get('domain','?')}")
         text_preview = (r.get("text") or "")[:200].replace("\n", " ")
         click.echo(f"     {text_preview}…")
+
+
+@rag.command("dedup", help="Show the near-duplicate rejection log.")
+@click.option("--limit", type=int, default=50, show_default=True)
+@click.option("--offset", type=int, default=0, show_default=True)
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def rag_dedup(
+    ctx: click.Context, limit: int, offset: int, as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/rag/dedup", params={"limit": limit, "offset": offset})
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    rows = (data or {}).get("entries", []) if isinstance(data, dict) else []
+    total = (data or {}).get("total", len(rows))
+    if not rows:
+        click.echo("(no dedup entries)")
+        return
+    click.echo(f"{len(rows)} of {total}:")
+    click.echo(f"{'action':<12} {'similarity':>10}  {'existing entry'}")
+    click.echo("-" * 90)
+    for r in rows:
+        # Live shape uses `action_taken` + `similarity_score`; older test
+        # fixtures used `action` + `similarity`. Accept both for symmetry
+        # with `/status` field fallbacks.
+        action = str(r.get("action_taken") or r.get("action", "?"))[:10]
+        sim = r.get("similarity_score")
+        if sim is None:
+            sim = r.get("similarity")
+        sim_s = f"{sim:>10.3f}" if isinstance(sim, (int, float)) else f"{'-':>10}"
+        existing = str(r.get("existing_entry_id") or r.get("url") or "")[:60]
+        click.echo(f"{action:<12} {sim_s}  {existing}")
 
 
 # ---- optimize -----------------------------------------------------------
@@ -1977,6 +2170,275 @@ def assist_friction_list(
         ts = n.get("created_at", "")
         text = n.get("note", "")
         click.echo(f"  [{node}] {ts}  {text}")
+
+
+# ---------------------------------------------------------------------------
+# U.8.B — small CLI verbs (logs, exec retry, status, dag)
+# ---------------------------------------------------------------------------
+
+LOGS_EPILOG = """
+\b
+Examples:
+  scaffold logs <job_id>                       per-node state + output preview
+  scaffold logs <job_id> --limit 200           paginate (default 50 nodes)
+  scaffold logs <job_id> --include-output      full output text, not preview
+  scaffold logs <job_id> --include-compiled    add the job's compiled_output
+  scaffold logs <job_id> --json                machine-readable
+
+The /logs/{id} endpoint returns the DAG-node history with each node's
+status, confidence, and output preview — it is NOT a line-by-line log
+stream. For container-level logs, use `make logs` / `make logs-jobs`.
+"""
+
+
+@cli.command(help="Show per-node execution state + output for a job.",
+             epilog=LOGS_EPILOG)
+@click.argument("job_id")
+@click.option("--limit", type=int, default=50, show_default=True)
+@click.option("--offset", type=int, default=0, show_default=True)
+@click.option("--include-output", is_flag=True,
+              help="Show full output_text instead of a 500-char preview.")
+@click.option("--include-compiled", is_flag=True,
+              help="Also include jobs.compiled_output in the response.")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def logs(
+    ctx: click.Context,
+    job_id: str,
+    limit: int,
+    offset: int,
+    include_output: bool,
+    include_compiled: bool,
+    as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    params: dict = {"limit": limit, "offset": offset}
+    if include_output:
+        params["include_output"] = True
+    if include_compiled:
+        params["include_compiled"] = True
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get(f"/logs/{job_id}", params=params)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    if not isinstance(data, dict):
+        click.echo(repr(data))
+        return
+
+    nodes = data.get("nodes") or []
+    total = data.get("node_count", len(nodes))
+    job_status = data.get("job_status", "?")
+    click.echo(f"job: {data.get('job_id', job_id)}  status: {job_status}  ({len(nodes)} of {total} nodes)")
+
+    if not nodes:
+        click.echo("(no DAG nodes — job may not have been planned yet)")
+        return
+
+    click.echo(f"{'key':<10} {'status':<10} {'conf':>5}  {'tool':<10} preview")
+    click.echo("-" * 100)
+    for n in nodes:
+        key = str(n.get("node_key", ""))[:9]
+        st = str(n.get("status", ""))[:9]
+        conf = n.get("confidence")
+        conf_s = f"{conf:>5.2f}" if isinstance(conf, (int, float)) else f"{'-':>5}"
+        tool = str(n.get("tool", ""))[:9]
+        out = (n.get("output_text") or "")[:60].replace("\n", " ")
+        click.echo(f"{key:<10} {st:<10} {conf_s}  {tool:<10} {out}")
+
+    compiled = data.get("compiled_output")
+    if compiled:
+        click.echo("")
+        click.secho("compiled_output:", fg="cyan", bold=True)
+        click.echo(compiled if include_compiled else (compiled[:500] + "…" if len(compiled) > 500 else compiled))
+
+
+# ---- exec group (retry) ---------------------------------------------------
+
+EXEC_EPILOG = """
+\b
+Examples:
+  scaffold exec retry <job_id> <node_key>      reset a failed node to pending
+  scaffold exec retry abc T2                   ↑ shorthand UUIDs work too
+
+Run `scaffold logs <job_id>` to see the failure context first.
+"""
+
+
+@cli.group("exec", help="Node-level execution control (retry, etc.).",
+           epilog=EXEC_EPILOG)
+def exec_() -> None:
+    """Python identifier ``exec_`` keeps us off the ``exec`` builtin;
+    Click publishes the group as ``scaffold exec`` via the ``name`` arg."""
+
+
+@exec_.command("retry", help="Retry a failed/blocked DAG node.")
+@click.argument("job_id")
+@click.argument("node_key")
+@click.pass_context
+def exec_retry(ctx: click.Context, job_id: str, node_key: str) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.post(
+                "/exec/retry", json={"job_id": job_id, "node_key": node_key},
+            )
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"retried {node_key} on {job_id[:8]}", fg="green")
+    if isinstance(data, dict) and (status := data.get("status")):
+        click.echo(f"  job status now: {status}")
+    _hint(f"scaffold jobs status {job_id}")
+
+
+# ---- status (multi-job) ---------------------------------------------------
+
+STATUS_EPILOG = """
+\b
+Examples:
+  scaffold status                          counts + recent jobs
+  scaffold status --filter blocked         only one state
+  scaffold status --limit 50               extend recent list
+  scaffold status --json                   machine-readable
+
+`scaffold whatnow` filters this to actionable jobs only.
+"""
+
+
+@cli.command(help="Multi-job state view (calls /status).",
+             epilog=STATUS_EPILOG)
+@click.option("--filter", "status_filter", default=None,
+              help="Restrict the recent-jobs list to one status.")
+@click.option("--limit", type=int, default=25, show_default=True)
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def status(
+    ctx: click.Context,
+    status_filter: str | None,
+    limit: int,
+    as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    params: dict = {"limit": limit}
+    if status_filter:
+        params["status_filter"] = status_filter
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/status", params=params)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+
+    if not isinstance(data, dict):
+        click.echo(repr(data))
+        return
+
+    counts = data.get("status_counts") or data.get("counts") or {}
+    if counts:
+        click.secho("status counts:", fg="cyan", bold=True)
+        for k in sorted(counts.keys()):
+            click.echo(f"  {k:<24} {counts[k]}")
+        click.echo("")
+
+    rows = (
+        data.get("recent_jobs")
+        or data.get("jobs")
+        or data.get("recent")
+        or []
+    )
+    if not rows:
+        click.echo("(no recent jobs)")
+        return
+    click.secho(f"recent jobs ({len(rows)}):", fg="cyan", bold=True)
+    click.echo(f"{'job_id':<10} {'status':<22} title")
+    click.echo("-" * 90)
+    for r in rows:
+        jid = str(r.get("id") or r.get("job_id", ""))[:8]
+        st = str(r.get("status", ""))[:20]
+        title = (r.get("title") or "")[:58]
+        click.echo(f"{jid:<10} {st:<22} {title}")
+
+    # Surface the most-actionable recent job's next_actions block — same
+    # pattern OWUI's /status renderer uses since U.7 (F2).
+    most_actionable = next(
+        (r for r in rows if r.get("status") not in ("completed", "cancelled")),
+        None,
+    )
+    if most_actionable and most_actionable.get("next_actions"):
+        _render_next_actions(most_actionable)
+
+
+# ---- dag (read DAG structure) --------------------------------------------
+
+DAG_EPILOG = """
+\b
+Examples:
+  scaffold dag <job_id>                    table view (default)
+  scaffold dag <job_id> --mermaid          markdown ```mermaid block
+  scaffold dag <job_id> --json             raw response
+
+Read-only; the autonomous chain regenerates DAGs through `/confirm`.
+"""
+
+
+@cli.command(help="Show a job's DAG structure.", epilog=DAG_EPILOG)
+@click.argument("job_id")
+@click.option("--mermaid", is_flag=True,
+              help="Emit a fenced ```mermaid block for paste-into-docs use.")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def dag(
+    ctx: click.Context, job_id: str, mermaid: bool, as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get(f"/dag/{job_id}")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    if not isinstance(data, dict):
+        click.echo(repr(data))
+        return
+
+    nodes = data.get("nodes") or data.get("dag_nodes") or []
+    if mermaid:
+        click.echo("```mermaid")
+        click.echo("graph TD")
+        for n in nodes:
+            key = n.get("node_key") or n.get("key") or "?"
+            title = (n.get("title") or "")[:30]
+            click.echo(f"  {key}[{key}: {title}]")
+        for n in nodes:
+            key = n.get("node_key") or n.get("key") or "?"
+            for dep in (n.get("depends_on") or []):
+                click.echo(f"  {dep} --> {key}")
+        click.echo("```")
+        return
+
+    if not nodes:
+        click.echo("(no DAG nodes — job may not be in planning yet)")
+        return
+    click.echo(f"job: {data.get('job_id', job_id)}  status: {data.get('job_status', '?')}")
+    click.echo(f"{'key':<10} {'status':<10} {'depends_on':<22} model")
+    click.echo("-" * 90)
+    for n in nodes:
+        key = str(n.get("node_key") or n.get("key", ""))[:9]
+        st = str(n.get("status", ""))[:9]
+        deps = ",".join(n.get("depends_on") or [])[:20]
+        model = str(n.get("assigned_model") or n.get("model", ""))[:30]
+        click.echo(f"{key:<10} {st:<10} {deps:<22} {model}")
 
 
 if __name__ == "__main__":
