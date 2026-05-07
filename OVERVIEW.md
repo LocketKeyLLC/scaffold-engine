@@ -2091,6 +2091,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | U.8.A | Assist Mode parity in SDK + CLI, SDK → v1.2.0 (§17.12) | done 2026-05-07 |
 | U.8.B | Small CLI verbs — logs / exec retry / status / dag / cleanup / dedup / research reply+pdf, CLI → v0.3.0 (§17.13) | done 2026-05-07 |
 | U.8.C | SDK research / config / models resources, SDK → v1.3.0 (§17.14) | done 2026-05-07 |
+| U.8.D | OWUI parity — /exec /cleanup /config /logs /health (§17.15) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2262,6 +2263,28 @@ Closes the SDK-side gaps from the audit so future CLI / OWUI work has full SDK c
 **Versioning:** SDK 1.2.0 → 1.3.0 (additive minor bump). CLI floor stays `>=1.2,<2.0` — no CLI bump needed (no behavior changes there). Orchestrator API unchanged.
 
 **Test-suite delta:** SDK 109 → 129 (+20: 6 research, 1 config, 5 models, 8 async parity). Live-smoke verified against the running orchestrator (`c.config()` returned 102 fields / 4 redacted; `c.models.list()` 18 fields; `c.models.available()` 7 loaded Ollama models; `c.research.list()` 53 sessions).
+
+### 17.15 Sprint U.8.D — OWUI chat parity (2026-05-07)
+
+Closes the remaining "every component reachable from every interface" gap on the chat side. Five new chat commands added to `pipelines/scaffold_router.py` so OWUI users have the same diagnostic + admin reach the CLI gained in U.8.B/U.8.C. No orchestrator endpoint changes.
+
+| Chat command | Endpoint | Purpose |
+|---|---|---|
+| `/exec retry <job_id> <node_key>` | `POST /exec/retry` | Retry a failed/blocked node. New `/exec` group with `retry` + `help` subcommands. |
+| `/cleanup` | `POST /jobs/cleanup` | Sweep stale jobs; renders reaped counts. |
+| `/config [substring] [--non-defaults]` | `GET /config` | Settings table with redaction; substring filter; `--non-defaults` flag. Caps at 60 rows. |
+| `/logs <job_id>` | `GET /logs/{id}` | Per-node DAG state + 60-char output preview (matches the CLI shape). |
+| `/health` | `GET /health` | Per-subsystem status table with up/down icons + latency. |
+
+`KNOWN_COMMANDS` and `KNOWN_SUBCOMMANDS` updated so the parser autocompletion + suggest-close-match logic picks up the new verbs. `/help` gained a new "Diagnostics & admin" section.
+
+**Vapor-verb cleanup:** `KNOWN_SUBCOMMANDS["/schedule"]` previously advertised `run-now` — there was no orchestrator endpoint and no chat handler backing it. Removed; tracked as an audit follow-up if a real implementation is wanted (would need `POST /schedule/{id}/run` plus CLI/SDK shims).
+
+**Dispatcher quirk worth knowing:** `_handle_command` uses `msg.split(None, 2)` (maxsplit=2), so any handler that takes more than two positional tokens has to re-split `parts[2]`. `_handle_exec` does this for `retry <job_id> <node_key>`. Confirmed via the failing-then-passing `test_exec_retry` regression.
+
+**Test-suite delta:** orchestrator-side scaffold_router tests grew by 14 (`TestU8DCommands` class). The 5 pre-existing failures from U.7 baseline (test_scaffold_router_commands × 4, test_scaffold_router_helpers × 1 — `/dag` deliberately omitted from help) are unchanged. SDK + CLI suites unchanged.
+
+**Live-smoke verified** against the running `open-webui-pipelines` container: `/health` rendered all four subsystems up + the embedding_cache info-only check; `/config model` rendered all 19 model_* fields filtered.
 
 ---
 

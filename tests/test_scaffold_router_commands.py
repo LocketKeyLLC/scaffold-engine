@@ -620,3 +620,142 @@ class TestScheduleDepthFlag:
         out = pipe._handle_schedule('/schedule add "* * * * *" --depth=insane topic')
         assert "Invalid" in out or "insane" in out
 
+
+# STEP 9: U.8.D — diagnostics + admin parity (/exec, /cleanup, /config, /logs, /health)
+# ===================================================================
+
+
+@pytest.mark.smoke
+class TestU8DCommands:
+    """Chat parity for components that previously only had CLI/SDK reach."""
+
+    @patch("scaffold_router._HTTP_SESSION.post")
+    def test_exec_retry(self, mock_post, pipe):
+        mock_post.return_value = _make_response(200, {"status": "running"})
+        out = pipe._handle_command("/exec retry abc-123 T2")
+        mock_post.assert_called_once()
+        # Endpoint + body
+        url = mock_post.call_args[0][0]
+        sent = mock_post.call_args[1].get("json", {})
+        assert "/exec/retry" in url
+        assert sent == {"job_id": "abc-123", "node_key": "T2"}
+
+    def test_exec_help_when_no_subcommand(self, pipe):
+        out = pipe._handle_command("/exec")
+        assert "Usage" in out
+        assert "/exec retry" in out
+
+    def test_exec_retry_missing_args(self, pipe):
+        out = pipe._handle_command("/exec retry abc-123")
+        assert "Usage" in out
+
+    @patch("scaffold_router._HTTP_SESSION.post")
+    def test_exec_retry_rejects_placeholder(self, mock_post, pipe):
+        out = pipe._handle_command("/exec retry <job_id> <node_key>")
+        assert "placeholder" in out.lower()
+        mock_post.assert_not_called()
+
+    @patch("scaffold_router._HTTP_SESSION.post")
+    def test_cleanup_renders_counts(self, mock_post, pipe):
+        mock_post.return_value = _make_response(200, {
+            "reaped_running_to_cancelled": 2,
+            "reaped_orphans_reset": 1,
+            "timestamp": "2026-05-07T18:00:00",  # non-int — should be filtered out
+        })
+        out = pipe._handle_command("/cleanup")
+        url = mock_post.call_args[0][0]
+        assert "/jobs/cleanup" in url
+        assert "reaped_running_to_cancelled" in out
+        assert "| 2 |" in out
+        # The non-int timestamp should not appear as a count row
+        assert "| 2026" not in out
+
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_config_renders_table(self, mock_get, pipe):
+        mock_get.return_value = _make_response(200, {"fields": [
+            {"name": "log_level", "value": "INFO", "is_default": True},
+            {"name": "model_general", "value": "qwen3:7b", "is_default": False},
+        ], "count": 2})
+        out = pipe._handle_command("/config")
+        url = mock_get.call_args[0][0]
+        assert "/config" in url
+        assert "log_level" in out
+        assert "model_general" in out
+
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_config_substring_filter(self, mock_get, pipe):
+        mock_get.return_value = _make_response(200, {"fields": [
+            {"name": "log_level", "value": "INFO", "is_default": True},
+            {"name": "model_general", "value": "qwen3:7b", "is_default": False},
+            {"name": "model_coder", "value": "qwen2.5-coder", "is_default": False},
+        ], "count": 3})
+        out = pipe._handle_command("/config model")
+        assert "model_general" in out and "model_coder" in out
+        assert "log_level" not in out
+
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_config_non_defaults_flag(self, mock_get, pipe):
+        mock_get.return_value = _make_response(200, {"fields": [
+            {"name": "log_level", "value": "INFO", "is_default": True},
+            {"name": "model_general", "value": "qwen3:7b", "is_default": False},
+        ], "count": 2})
+        out = pipe._handle_command("/config --non-defaults")
+        assert "model_general" in out
+        assert "log_level" not in out
+
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_logs_renders_node_table(self, mock_get, pipe):
+        mock_get.return_value = _make_response(200, {
+            "job_id": "abc-123",
+            "job_status": "completed",
+            "node_count": 2,
+            "nodes": [
+                {"node_key": "T1", "status": "done", "confidence": 0.92,
+                 "tool": "LLM", "output_text": "Plan first"},
+                {"node_key": "T2", "status": "done", "confidence": 0.85,
+                 "tool": "LLM", "output_text": "Then build"},
+            ],
+        })
+        out = pipe._handle_command("/logs abc-123")
+        url = mock_get.call_args[0][0]
+        assert "/logs/abc-123" in url
+        assert "T1" in out and "T2" in out
+        assert "Plan first" in out
+
+    def test_logs_missing_job_id(self, pipe):
+        out = pipe._handle_command("/logs")
+        assert "Usage" in out
+
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_logs_rejects_placeholder(self, mock_get, pipe):
+        out = pipe._handle_command("/logs <job_id>")
+        assert "placeholder" in out.lower()
+        mock_get.assert_not_called()
+
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_health_renders_subsystem_table(self, mock_get, pipe):
+        mock_get.return_value = _make_response(200, {"checks": {
+            "postgresql": {"status": "up", "latency_ms": 4},
+            "ollama": {"status": "up", "latency_ms": 12},
+            "milvus": {"status": "down", "latency_ms": 5000},
+        }})
+        out = pipe._handle_command("/health")
+        url = mock_get.call_args[0][0]
+        assert "/health" in url
+        for name in ("postgresql", "ollama", "milvus"):
+            assert name in out
+        # Up icon + down icon should both render
+        assert "✅" in out and "❌" in out
+
+    def test_help_lists_new_commands(self, pipe):
+        """The help text should advertise the new U.8.D commands."""
+        out = pipe._handle_command("/help")
+        for cmd in ("/health", "/logs", "/exec retry", "/cleanup", "/config"):
+            assert cmd in out, f"expected `{cmd}` in /help output"
+
+    def test_schedule_help_no_longer_advertises_run_now(self, pipe):
+        """`run-now` was a vapor verb (no endpoint, no handler); removed in U.8.D."""
+        # Subcommand catalog is the source of truth surfaced to autocompletion.
+        from scaffold_router import KNOWN_SUBCOMMANDS  # type: ignore
+        assert "run-now" not in KNOWN_SUBCOMMANDS["/schedule"]
+

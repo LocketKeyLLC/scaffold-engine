@@ -52,14 +52,19 @@ KNOWN_COMMANDS: tuple = (
     "/assist", "/assist/next", "/assist/submit", "/assist/skip",
     "/assist/handoff", "/assist/pause", "/assist/resume", "/assist/done",
     "/assist/friction", "/assist/help",
+    # U.8.D — chat parity for components reachable via CLI/SDK only.
+    "/exec", "/cleanup", "/config", "/logs", "/health",
 )
 
 KNOWN_SUBCOMMANDS: dict = {
     "/model": ("list", "available", "set", "reset", "probe", "test", "help"),
     "/jobs": ("list", "find", "rename", "delete", "help"),
-    "/schedule": ("list", "add", "delete", "run-now", "help"),
+    # U.8.D — `run-now` was advertised here but never had an orchestrator
+    # endpoint or a chat handler. Removed; see audit follow-ups.
+    "/schedule": ("list", "add", "delete", "help"),
     "/assist": ("next", "submit", "skip", "handoff", "pause", "resume",
                 "done", "friction", "help"),
+    "/exec": ("retry", "help"),
 }
 
 _PLACEHOLDER_RE = re.compile(r"^[<\[(].+[>\])]$")
@@ -2082,6 +2087,18 @@ class Pipeline:
                     return self._fmt(r)
                 return self._render_status(r.json())
 
+            # ----- U.8.D — diagnostics + admin parity -------------------
+            if cmd == "/exec":
+                return self._handle_exec(parts)
+            if cmd == "/cleanup":
+                return self._handle_cleanup()
+            if cmd == "/config":
+                return self._handle_config(parts)
+            if cmd == "/logs":
+                return self._handle_logs(parts)
+            if cmd == "/health":
+                return self._handle_health()
+
             close = _suggest_command(cmd)
             if close:
                 hint = "\n".join(f"  - `{c}`" for c in close)
@@ -2863,6 +2880,167 @@ class Pipeline:
             return f"❌ Failed to delete: {exc}"
 
     # ------------------------------------------------------------------
+    # U.8.D — chat parity for /exec, /cleanup, /config, /logs, /health
+    # ------------------------------------------------------------------
+
+    def _handle_exec(self, parts: list) -> str:
+        # _handle_command splits with maxsplit=2 so parts[2] (if present) is
+        # the post-subcommand tail as one string. Re-split it here.
+        if len(parts) < 2 or parts[1] == "help":
+            return ("Usage: `/exec retry <job_id> <node_key>`\n\n"
+                    "Resets a failed/blocked node to `pending` so it can run again.\n"
+                    "Run `/results <job_id>` for a failure report with prefilled args.")
+        sub = parts[1].lower()
+        tail = parts[2].split() if len(parts) > 2 else []
+        if sub == "retry":
+            if len(tail) < 2:
+                return "Usage: `/exec retry <job_id> <node_key>`"
+            job_id, node_key = tail[0], tail[1]
+            if _is_placeholder(job_id) or _is_placeholder(node_key):
+                return ("It looks like job_id or node_key is a placeholder. "
+                        "Try `/exec retry 01ab243e T2`.")
+            r = _HTTP_SESSION.post(
+                f"{self.valves.orchestrator_url}/exec/retry",
+                json={"job_id": job_id, "node_key": node_key},
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+            return self._fmt(r)
+        return f"Unknown `/exec` subcommand: `{sub}`. Try `/exec help`."
+
+    def _handle_cleanup(self) -> str:
+        r = _HTTP_SESSION.post(
+            f"{self.valves.orchestrator_url}/jobs/cleanup",
+            json={},
+            headers=self._auth_headers(),
+            timeout=self.valves.request_timeout,
+        )
+        if r.status_code >= 400:
+            return self._fmt(r)
+        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        if not isinstance(data, dict):
+            return self._fmt(r)
+        counts = {k: v for k, v in data.items() if isinstance(v, int)}
+        if not counts:
+            return f"```json\n{json.dumps(data, indent=2)}\n```"
+        lines = ["**🧹 Stale-job reaper run**", "", "| Action | Count |", "|---|---:|"]
+        for k, v in sorted(counts.items()):
+            lines.append(f"| {k} | {v} |")
+        return "\n".join(lines)
+
+    def _handle_config(self, parts: list) -> str:
+        """`/config [substring] [--non-defaults]` — render Settings table.
+
+        Without args, lists every field. Substring filters by name. Flag
+        `--non-defaults` shows only fields whose live value differs from
+        the default. Values for sensitive fields are server-redacted.
+        """
+        non_defaults_only = False
+        substr = None
+        for arg in parts[1:]:
+            if arg == "--non-defaults":
+                non_defaults_only = True
+            elif arg.startswith("--"):
+                return f"Unknown flag: `{arg}`. Supported: `--non-defaults`."
+            else:
+                substr = arg.lower()
+        r = _HTTP_SESSION.get(
+            f"{self.valves.orchestrator_url}/config",
+            headers=self._auth_headers(),
+            timeout=self.valves.request_timeout,
+        )
+        if r.status_code >= 400:
+            return self._fmt(r)
+        data = r.json()
+        fields = data.get("fields", []) if isinstance(data, dict) else []
+        if substr:
+            fields = [f for f in fields if substr in str(f.get("name", "")).lower()]
+        if non_defaults_only:
+            fields = [f for f in fields if not f.get("is_default")]
+        if not fields:
+            return "(no settings match those filters)"
+        lines = [
+            f"## ⚙️ Config — {len(fields)} field(s)"
+            + (f", filter=`{substr}`" if substr else "")
+            + (", non-default only" if non_defaults_only else ""),
+            "",
+            "| Setting | Value | Default? |",
+            "|---|---|---|",
+        ]
+        # Cap at 60 rows so chat doesn't choke on /config with no filter.
+        for f in fields[:60]:
+            name = str(f.get("name", ""))[:40]
+            value = str(f.get("value", ""))[:60]
+            is_default = "✓" if f.get("is_default") else "—"
+            lines.append(f"| `{name}` | `{value}` | {is_default} |")
+        if len(fields) > 60:
+            lines.append("")
+            lines.append(f"_…{len(fields) - 60} more (filter to narrow)._")
+        return "\n".join(lines)
+
+    def _handle_logs(self, parts: list) -> str:
+        if len(parts) < 2:
+            return "Usage: `/logs <job_id>`"
+        if _is_placeholder(parts[1]):
+            return "It looks like job_id is missing or a placeholder. Try `/logs 01ab243e`."
+        job_id = parts[1]
+        r = _HTTP_SESSION.get(
+            f"{self.valves.orchestrator_url}/logs/{job_id}",
+            params={"limit": 50, "offset": 0},
+            headers=self._auth_headers(),
+            timeout=self.valves.request_timeout,
+        )
+        if r.status_code >= 400:
+            return self._fmt(r)
+        data = r.json() if isinstance(r.json(), dict) else {}
+        nodes = data.get("nodes") or []
+        total = data.get("node_count", len(nodes))
+        job_status = data.get("job_status", "?")
+        header = (f"## 🪵 Logs — `{job_id[:8]}`  status: `{job_status}`  "
+                  f"({len(nodes)}/{total} nodes)")
+        if not nodes:
+            return header + "\n\n_(no DAG nodes — job may not have been planned yet)_"
+        lines = [header, "", "| Key | Status | Conf | Tool | Output preview |",
+                 "|---|---|---:|---|---|"]
+        for n in nodes:
+            key = str(n.get("node_key", ""))[:10]
+            st = str(n.get("status", ""))[:10]
+            conf = n.get("confidence")
+            conf_s = f"{conf:.2f}" if isinstance(conf, (int, float)) else "—"
+            tool = str(n.get("tool", ""))[:10]
+            preview = (n.get("output_text") or "").replace("\n", " ").replace("|", "\\|")[:60]
+            lines.append(f"| `{key}` | {st} | {conf_s} | {tool} | {preview} |")
+        return "\n".join(lines)
+
+    def _handle_health(self) -> str:
+        r = _HTTP_SESSION.get(
+            f"{self.valves.orchestrator_url}/health",
+            headers=self._auth_headers(),
+            timeout=self.valves.request_timeout,
+        )
+        if r.status_code >= 400:
+            return self._fmt(r)
+        data = r.json() if isinstance(r.json(), dict) else {}
+        checks = data.get("checks", {})
+        if not checks:
+            return f"```json\n{json.dumps(data, indent=2)}\n```"
+        UP = {"up", "ok", "healthy", "true"}
+        DOWN = {"down", "fail", "error", "unhealthy"}
+        lines = ["## 🩺 Health", "", "| Subsystem | Status | Latency |",
+                 "|---|---|---:|"]
+        for name, info in checks.items():
+            if isinstance(info, dict):
+                status = str(info.get("status", "?"))
+                latency = info.get("latency_ms")
+            else:
+                status = str(info)
+                latency = None
+            icon = "✅" if status.lower() in UP else ("❌" if status.lower() in DOWN else "ℹ️")
+            lat = f"{latency} ms" if latency is not None else "—"
+            lines.append(f"| {name} | {icon} {status} | {lat} |")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
     # Help
     # ------------------------------------------------------------------
 
@@ -2910,4 +3088,13 @@ class Pipeline:
 |---|---|
 | `/model <sub>` | Models per role — list/available/set/reset/probe. |
 | `/optimize <prompt>` | Tighten and improve a prompt. |
-| `/help` | Show this message."""
+| `/config [substring] [--non-defaults]` | List Settings with values + redaction. |
+| `/help` | Show this message.
+
+**🩺 Diagnostics & admin**
+| Command | Description |
+|---|---|
+| `/health` | Per-subsystem probe (Postgres + Ollama + Milvus + Redis). |
+| `/logs <job_id>` | Per-node DAG state with output preview. |
+| `/exec retry <job_id> <node_key>` | Retry a failed/blocked node. |
+| `/cleanup` | Sweep stale jobs (resets orphans, cancels long-idle)."""
