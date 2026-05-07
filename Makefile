@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves reindex openapi-snapshot openapi-check sync-schemas idea resume explain
+.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -81,6 +81,9 @@ explain: ## Explain a job status (use: make explain STATUS=<name>; omit for the 
 	else \
 		docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main explain $(STATUS)"; \
 	fi
+
+whatnow: ## Show every job that needs attention + its recommended next step
+	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main whatnow"
 
 openapi-snapshot: ## Regenerate docs/openapi.json from the live FastAPI app
 	@docker exec $(CONTAINER) python scripts/openapi_snapshot.py > docs/openapi.json.tmp && \

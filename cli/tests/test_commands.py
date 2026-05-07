@@ -236,6 +236,75 @@ def test_jobs_status_prints_key_fields(runner):
 # ---------------------------------------------------------------------------
 # Global flag plumbing
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# whatnow (Sprint U.6)
+# ---------------------------------------------------------------------------
+
+
+def test_whatnow_renders_actionable_jobs(runner):
+    """whatnow filters out terminal statuses and shows recommended actions."""
+    response = {"jobs": [
+        {"id": "11111111-1111-1111-1111-111111111111", "status": "awaiting_confirmation",
+         "title": "Markdown linter"},
+        {"id": "22222222-2222-2222-2222-222222222222", "status": "completed",
+         "title": "Old finished job"},
+        {"id": "33333333-3333-3333-3333-333333333333", "status": "blocked",
+         "title": "Stuck on T2"},
+    ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["whatnow"])
+    assert res.exit_code == 0
+    # Awaiting + blocked should appear
+    assert "Markdown linter" in res.output
+    assert "awaiting_confirmation" in res.output
+    assert "Stuck on T2" in res.output
+    assert "blocked" in res.output
+    # Completed should be filtered out
+    assert "Old finished job" not in res.output
+
+
+def test_whatnow_empty_when_no_actionable(runner):
+    """When everything is terminal, whatnow says so explicitly."""
+    response = {"jobs": [
+        {"id": "1", "status": "completed", "title": "Done"},
+        {"id": "2", "status": "cancelled", "title": "Abandoned"},
+    ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["whatnow"])
+    assert res.exit_code == 0
+    assert "Nothing needs your attention" in res.output
+
+
+def test_whatnow_json_returns_structured_list(runner):
+    response = {"jobs": [
+        {"id": "11111111-1111-1111-1111-111111111111", "status": "awaiting_confirmation",
+         "title": "Test"},
+    ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["whatnow", "--json"])
+    assert res.exit_code == 0
+    parsed = json.loads(res.output)
+    assert isinstance(parsed, list)
+    assert len(parsed) == 1
+    assert parsed[0]["status"] == "awaiting_confirmation"
+    assert "confirm" in parsed[0]["valid_actions"]
+
+
+def test_whatnow_respects_limit(runner):
+    response = {"jobs": [
+        {"id": str(i) * 36, "status": "awaiting_confirmation", "title": f"job {i}"}
+        for i in range(10)
+    ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["whatnow", "--limit", "3"])
+    assert res.exit_code == 0
+    assert "3 job(s) need attention" in res.output
+
+
 def test_global_flags_pass_through_to_client(runner):
     with patch("scaffold_cli.main.Client") as ClientCls:
         ClientCls.return_value.__enter__.return_value.get.return_value = {}

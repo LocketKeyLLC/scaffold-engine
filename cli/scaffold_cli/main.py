@@ -803,6 +803,115 @@ def config_show(
 
 
 # ---------------------------------------------------------------------------
+# whatnow — global "what should I do next" view (Sprint U.6)
+# ---------------------------------------------------------------------------
+
+WHATNOW_EPILOG = """
+\b
+Examples:
+  scaffold whatnow                       every job that needs attention
+  scaffold whatnow --limit 5             cap at 5 most-recent
+  scaffold whatnow --json                machine-readable
+
+Lists every job in a non-terminal status (anything that's not
+completed/cancelled) and prints each with its recommended next action
+from the local STATUS_EXPLAIN registry. Run `scaffold project resume
+<nickname-or-uuid>` for the actual server-rendered next-step (with
+concrete job_id and node_key already substituted).
+"""
+
+# Statuses where the user has nothing useful to do — filtered out of whatnow.
+_TERMINAL_STATUSES = frozenset({"completed", "cancelled"})
+
+
+@cli.command(help="Show every job that needs attention plus its recommended next step.",
+             epilog=WHATNOW_EPILOG)
+@click.option("--limit", default=10, type=int, show_default=True,
+              help="Cap on the number of non-terminal jobs to show.")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw structured response.")
+@click.pass_context
+def whatnow(ctx: click.Context, limit: int, as_json: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/jobs", params={"limit": 50})
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    rows = data.get("jobs", []) if isinstance(data, dict) else []
+    actionable = [r for r in rows if r.get("status") not in _TERMINAL_STATUSES][:limit]
+
+    if as_json:
+        # Enrich each row with the local recommended action lookup.
+        out = []
+        for r in actionable:
+            status = r.get("status", "")
+            info = _project.STATUS_EXPLAIN.get(status, {})
+            out.append({
+                "job_id": r.get("id"),
+                "title": r.get("title"),
+                "status": status,
+                "headline": info.get("headline", ""),
+                "valid_actions": info.get("valid_actions", []),
+                "nickname": _project.reverse_lookup(r.get("id") or ""),
+            })
+        click.echo(_json.dumps(out, indent=2))
+        return
+
+    if not actionable:
+        click.echo("Nothing needs your attention right now.")
+        click.echo("")
+        click.echo("All jobs are either completed or cancelled.")
+        _hint('scaffold project new "your idea here"  to start something.')
+        return
+
+    click.secho(f"{len(actionable)} job(s) need attention:", bold=True)
+    click.echo("")
+
+    for r in actionable:
+        jid = r.get("id", "")
+        nick = _project.reverse_lookup(jid) or "—"
+        title = (r.get("title") or "")[:50]
+        status = r.get("status", "?")
+        info = _project.STATUS_EXPLAIN.get(status, {})
+        headline = info.get("headline", "(unknown status)")
+        actions = info.get("valid_actions", [])
+
+        # Pick the most "actionable" valid action — skip wait/view_output
+        # which are passive — to prioritize ones the user actually needs.
+        action_priority = ["confirm", "next_step", "submit", "retry_node",
+                           "skip_node", "resume", "delete", "abandon"]
+        primary = next(
+            (a for a in action_priority if a in actions),
+            actions[0] if actions else None,
+        )
+
+        click.secho(f"  {nick}", fg="cyan", nl=False)
+        if nick == "—":
+            click.echo(f" ({jid[:8]}…)", nl=True)
+        else:
+            click.echo(f"  ({jid[:8]}…)")
+        click.echo(f"    title:   {title}")
+        click.secho(f"    status:  {status}", fg="yellow")
+        click.echo(f"    why:     {headline}")
+        if primary:
+            target = nick if nick != "—" else jid
+            cmd_map = {
+                "confirm": f"scaffold project resume {target}",
+                "retry_node": f"scaffold project resume {target}  (registry will pick the failed node)",
+                "skip_node":  f"scaffold project resume {target}  (registry will pick the blocked node)",
+                "next_step":  f"scaffold project resume {target}",
+                "submit":     f"scaffold project resume {target}",
+                "resume":     f"scaffold project resume {target}",
+                "delete":     f"# (manual) scaffold-engine has no DELETE-via-CLI yet; use the chat surface or DELETE /jobs/{jid}",
+                "abandon":    f"# (manual) /assist done {jid}",
+            }
+            click.secho(f"    next:    {cmd_map.get(primary, primary)}", fg="green")
+        click.echo("")
+
+
+# ---------------------------------------------------------------------------
 # explain — local lookup, no network call
 # ---------------------------------------------------------------------------
 
