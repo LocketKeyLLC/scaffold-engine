@@ -2,6 +2,16 @@
 
 Reverse-chronological record of dated fixes, hardening rounds, and architectural changes. Engineer's working log; preserves file paths, function names, and commit hashes.
 
+## 2026-05-07 — Sprint J.1.d: AsyncClient mirror + SSE streaming helpers
+
+`scaffold_client.AsyncClient` is now feature-complete — full mirror of the sync `Client` plus four streaming helpers for the SSE-based endpoints.
+
+- **Async parity** — every sync method has an awaitable twin: `await c.health()`, `await c.jobs.list()`, `await c.gt.search()`, etc. `_async_resources.py` carries the resource sub-objects so the dispatch verb (`await`) is the only difference from `_resources.py`. Method signatures are kept identical so callers can swap clients without rewriting argument lists.
+- **SSE streaming helpers** — `c.aiter_research(topic, depth=...)`, `c.aiter_research_reply(session_id, reply)`, `c.aiter_research_pdf(pdf_bytes_or_path, ...)`, `c.aiter_execute_all(job_id, ...)`. Each yields `{"event": str, "data": Any}` dicts. `data` is JSON-decoded when possible, raw string otherwise. Heartbeat comments (`: keepalive`) are filtered by default; `include_heartbeats=True` surfaces them as `{"event": "heartbeat", "data": None}`.
+- **`_sse.py`** — standalone parser. Handles multi-line `data:` accumulation, missing trailing blank line (some streams terminate abruptly), and tolerates non-JSON payloads. Tested in isolation across 7 edge cases.
+- **Disconnect semantics** — breaking out of the `async for` exits the `httpx.stream()` context, which closes the socket. The orchestrator's `_sse_with_disconnect_watch` keepalive watchdog detects the dead socket within ~2s and finalizes any in-flight session as `cancelled`. No explicit cancel call needed.
+- **Test count** — SDK suite now 88 passing: 20 skeleton + 37 sync typed + 17 async typed + 7 SSE parser unit + 7 streaming-endpoint integration (via `httpx.MockTransport` fed canned SSE bytes). Live smoke confirmed against running orchestrator.
+
 ## 2026-05-07 — Sprint J.1.c: Sync Client typed methods + resource sub-objects
 
 `scaffold_client.Client` now wraps every non-streaming endpoint with typed Python methods, organized as resource sub-objects (`anthropic`/`openai` SDK style).
