@@ -397,16 +397,50 @@ Breaking out of the `async for` loop closes the SSE stream cleanly; the orchestr
 
 ### `scaffold` CLI
 
-Wraps the SDK with a `click`-based command-line surface. Same authentication; same operations.
+Wraps the SDK with a `click`-based command-line surface. Same authentication; same operations. As of Sprint U.7 the CLI reaches full parity with the OWUI surface.
 
 ```bash
-scaffold version                    # print version + config source
-scaffold doctor                     # /health probe with formatted output
-scaffold ideate "build a markdown linter"
-scaffold confirm <job_id>
-scaffold jobs list                  # paginated job listing
-scaffold jobs status <job_id>       # full status + next_actions list
+# Basics
+scaffold version                            # CLI version + config source
+scaffold doctor                             # /health probe
+scaffold whatnow                            # every job needing attention
+
+# Idea → run
+scaffold ideate "build a markdown linter"   # Phase 1
+scaffold confirm <job_id>                   # auto-chains research/plan/exec
+scaffold project new "..."                  # idea + friendly nickname
+scaffold project resume <nickname-or-uuid>  # dispatch the next valid action
+
+# Jobs
+scaffold jobs list [--status running]
+scaffold jobs status <job_id>
+scaffold jobs find "linter"                 # title substring search
+scaffold jobs rename <job_id> "new title"
+scaffold jobs delete <job_id> [--yes]
+scaffold skip <job_id> <node_key>           # unblock a stuck DAG node
+
+# Research + knowledge base
+scaffold research topic "kubernetes pods" --depth medium
+scaffold research url https://example.com/page
+scaffold research github anthropics/anthropic-sdk-python
+scaffold research openapi https://petstore3.swagger.io/api/v3/openapi.json
+scaffold research list / find / rename / delete
+scaffold rag "milvus index"                 # query the KB
+
+# Schedules
+scaffold schedule list
+scaffold schedule add "0 9 * * 1" "topic" --depth medium --tz America/New_York
+scaffold schedule delete <id> [--yes]
+
+# Misc
+scaffold optimize "Please could you maybe write a function that..."
+scaffold model list                          # current per-role assignments
+scaffold model available                     # what Ollama has loaded
+scaffold config show [--filter model] [--non-defaults]
+scaffold explain <status>                    # local plain-English status lookup
 ```
+
+Streaming endpoints (`research topic/url/github/openapi`) print one event per line and exit on convergence; Ctrl-C cleanly cancels the orchestrator session.
 
 Config resolution priority: `--api-key` flag > `SCAFFOLD_API_KEY` env > `~/.scaffold/config.toml` > walked-up `.env` > default.
 

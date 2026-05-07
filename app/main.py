@@ -259,7 +259,7 @@ app = FastAPI(
     dependencies=[Depends(require_api_key)],
     title="Scaffold Engine",
     description="Self-hosted RAG-powered workflow orchestrator",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -971,46 +971,6 @@ async def research_pdf_upload_page(request: Request):
 
 
 
-@app.get("/research/history", tags=["Research"])
-async def research_history():
-    """List recent research sessions (last 50)."""
-    async with async_session() as db:
-        rows = await db.execute(
-            text("""
-                SELECT id, topic, depth, domain, iterations_completed,
-                       total_entries_extracted, total_entries_ingested,
-                       total_entries_rejected, total_urls_searched,
-                       total_queries, duration_ms, coverage_pct,
-                       status, created_at, completed_at
-                FROM research_sessions
-                ORDER BY created_at DESC
-                LIMIT 50
-            """)
-        )
-        sessions = [dict(r) for r in rows.mappings().all()]
-        for s in sessions:
-            s["id"] = str(s["id"])
-        return {"sessions": sessions, "count": len(sessions)}
-
-
-@app.get("/research/history/{session_id}", tags=["Research"])
-async def research_history_detail(session_id: str):
-    """Get a single research session by ID. Returns 404 if not found."""
-    try:
-        parsed = UUID(session_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid session ID format")
-    async with async_session() as db:
-        row = await db.execute(
-            text("SELECT * FROM research_sessions WHERE id = :sid"),
-            {"sid": str(parsed)},
-        )
-        session = row.mappings().first()
-        if not session:
-            raise HTTPException(status_code=404, detail=f"Research session {session_id} not found")
-        result = dict(session)
-        result["id"] = str(result["id"])
-        return result
 @app.post("/skip", response_model=ExecutionResult, tags=["Step 15"])
 async def skip_node_endpoint(body: SkipNodeInput, db: AsyncSession = Depends(get_db)):
     """Step 15: Skip a specific DAG node."""

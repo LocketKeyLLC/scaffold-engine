@@ -193,6 +193,14 @@ NEXT_ACTIONS: dict[str, list[dict[str, Any]]] = {
     ],
     "cancelled": [
         {
+            "action": "rerun",
+            "command": "/idea <re-state the original idea>",
+            "endpoint": "/ideate",
+            "method": "POST",
+            "description": "Resubmit the idea — there's no in-place restart, but a fresh /ideate is ~30s and reuses any KB entries from the prior run.",
+            "node_specific": False,
+        },
+        {
             "action": "delete",
             "command": None,
             "endpoint": "/jobs/{job_id}",

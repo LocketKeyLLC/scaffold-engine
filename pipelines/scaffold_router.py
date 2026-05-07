@@ -2132,15 +2132,34 @@ class Pipeline:
             lines.append("")
             lines.append(f"**Recent jobs (last {len(recent)}):**")
             lines.append("")
-            lines.append("| Status | Job ID | Nodes | Updated |")
-            lines.append("|---|---|---:|---|")
+            lines.append("| Status | ID | Title | Nodes | Updated |")
+            lines.append("|---|---|---|---:|---|")
             for j in recent:
                 st = j.get("status", "?")
                 jid = j.get("id", "?")
                 short = jid[:8] if isinstance(jid, str) else "?"
+                title = (j.get("title") or "")[:60]
                 nc = j.get("node_count", 0)
                 upd = (j.get("updated_at") or "")[:16].replace("T", " ")
-                lines.append(f"| {icon.get(st, '')} {st} | `{short}` | {nc} | {upd} |")
+                lines.append(f"| {icon.get(st, '')} {st} | `{short}` | {title} | {nc} | {upd} |")
+
+            actionable = next(
+                (j for j in recent if j.get("next_actions")
+                 and j.get("status") not in ("completed", "cancelled")),
+                None,
+            )
+            if actionable:
+                lines.append("")
+                lines.append("**Next steps:**")
+                for a in (actionable.get("next_actions") or [])[:2]:
+                    if a.get("action") == "wait":
+                        continue
+                    cmd = a.get("command")
+                    desc = a.get("description", "")
+                    if cmd:
+                        lines.append(f"• `{cmd}` — {desc}")
+                    elif a.get("endpoint"):
+                        lines.append(f"• `{a.get('method','GET')} {a['endpoint']}` — {desc}")
         return "\n".join(lines)
 
 
@@ -2785,20 +2804,25 @@ class Pipeline:
                 "--depth", choices=["shallow", "medium", "deep"], default="medium",
                 help="Research iteration count",
             )
+            parser.add_argument(
+                "--tz", default="UTC",
+                help="IANA timezone for the cron schedule (default UTC)",
+            )
             parser.add_example('/schedule add "0 9 * * 1" --depth=medium kubernetes news')
+            parser.add_example('/schedule add "0 9 * * 1" --tz=America/New_York kubernetes news')
 
             raw_args = parts[2] if len(parts) >= 3 else ""
             if raw_args.strip() in ("--help", "-h", "help"):
-                return parser.help_text() + "\n\nCron: `minute hour day month weekday` (UTC)."
+                return parser.help_text() + "\n\nCron: `minute hour day month weekday`."
             if not raw_args.strip():
-                return "Usage: `/schedule add <cron> [--depth=<level>] <topic>`"
+                return "Usage: `/schedule add <cron> [--depth=<level>] [--tz=<IANA>] <topic>`"
 
             try:
                 args, _, positional = parser.parse(raw_args)
             except _ChatArgError as exc:
                 return str(exc)
             if len(positional) < 2:
-                return "Usage: `/schedule add \"<cron>\" [--depth=<level>] <topic>`"
+                return "Usage: `/schedule add \"<cron>\" [--depth=<level>] [--tz=<IANA>] <topic>`"
 
             cron_expr = positional[0]
             topic = " ".join(positional[1:])
@@ -2812,6 +2836,7 @@ class Pipeline:
                     timeout=self.valves.request_timeout,
                     json={"topic": topic, "cron_expression": cron_expr,
                           "depth": depth,
+                          "timezone": args.tz,
                           "model_overrides": self._model_overrides()},
                 )
                 if r.status_code == 422:
@@ -2819,7 +2844,7 @@ class Pipeline:
                 r.raise_for_status()
                 s = r.json()
                 return (f"✅ Scheduled **#{s['id']}**: {s['topic']}\n"
-                        f"Cron: `{s['cron_expression']}` — depth: {s['depth']}")
+                        f"Cron: `{s['cron_expression']}` ({s.get('timezone','UTC')}) — depth: {s['depth']}")
             except Exception as exc:
                 return f"❌ Failed to create schedule: {exc}"
 

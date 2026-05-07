@@ -94,6 +94,53 @@ class TestScheduleAdd:
             out = pipe._handle_schedule('/schedule add "xx" kubernetes')
         assert "invalid cron" in out
 
+    def test_add_passes_tz_to_endpoint(self, pipe):
+        """Sprint U.7 / F4: --tz parsed and forwarded as `timezone` in body.
+        Previously the parser only knew --depth, so users passing --tz hit
+        a parse error or had it silently absorbed as a positional."""
+        captured = {}
+
+        def _capture_post(url, headers=None, timeout=None, json=None):
+            captured["json"] = json
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = {
+                "id": 7, "topic": "ny news",
+                "cron_expression": "0 9 * * 1", "depth": "medium",
+                "timezone": "America/New_York",
+            }
+            resp.raise_for_status = MagicMock()
+            return resp
+
+        with patch.object(sr._HTTP_SESSION, "post", side_effect=_capture_post):
+            out = pipe._handle_schedule(
+                '/schedule add "0 9 * * 1" --tz=America/New_York ny news'
+            )
+
+        assert captured["json"]["timezone"] == "America/New_York"
+        assert captured["json"]["cron_expression"] == "0 9 * * 1"
+        assert captured["json"]["topic"] == "ny news"
+        assert "America/New_York" in out
+
+    def test_add_default_tz_is_utc(self, pipe):
+        """When --tz is omitted, schedule still ships timezone=UTC so the
+        server doesn't have to default-handle a missing field."""
+        captured = {}
+
+        def _capture_post(url, headers=None, timeout=None, json=None):
+            captured["json"] = json
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = {
+                "id": 8, "topic": "k", "cron_expression": "0 9 * * 1",
+                "depth": "medium", "timezone": "UTC",
+            }
+            resp.raise_for_status = MagicMock()
+            return resp
+
+        with patch.object(sr._HTTP_SESSION, "post", side_effect=_capture_post):
+            pipe._handle_schedule('/schedule add "0 9 * * 1" k')
+
+        assert captured["json"]["timezone"] == "UTC"
+
 
 class TestScheduleDelete:
     def test_delete_missing_id(self, pipe):

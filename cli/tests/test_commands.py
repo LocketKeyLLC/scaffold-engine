@@ -316,3 +316,179 @@ def test_global_flags_pass_through_to_client(runner):
     args, kwargs = ClientCls.call_args
     assert args[0] == "http://manual:7000"
     assert args[1] == "k-flag"
+
+
+# ---------------------------------------------------------------------------
+# Sprint U.7 — CLI parity sweep (jobs find/rename/delete, schedule, rag,
+# optimize, skip, model). Covers the new commands at the verb-level so the
+# Click wiring can't silently break.
+# ---------------------------------------------------------------------------
+
+def test_jobs_find_passes_q_param_and_renders_results(runner):
+    response = {"jobs": [
+        {"id": "abc-1234-5678", "status": "completed", "title": "linter project"},
+    ], "total": 1}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["jobs", "find", "linter"])
+    args, kwargs = ClientCls.return_value.__enter__.return_value.get.call_args
+    assert args[0] == "/jobs"
+    assert kwargs["params"]["q"] == "linter"
+    assert res.exit_code == 0
+    assert "linter project" in res.output
+
+
+def test_jobs_rename_uses_patch_with_title_body(runner):
+    response = {"id": "abc-1234", "title": "renamed!", "status": "completed",
+                "node_count": 0, "created_at": "2026-05-07T00:00:00+00:00",
+                "updated_at": "2026-05-07T00:00:00+00:00"}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.patch.return_value = response
+        res = runner.invoke(cli, ["jobs", "rename", "abc-1234", "renamed!"])
+    args, kwargs = ClientCls.return_value.__enter__.return_value.patch.call_args
+    assert args[0] == "/jobs/abc-1234"
+    assert kwargs["json"]["title"] == "renamed!"
+    assert res.exit_code == 0
+    assert "renamed" in res.output
+
+
+def test_jobs_delete_with_yes_skips_confirmation(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.delete.return_value = {"deleted": True}
+        res = runner.invoke(cli, ["jobs", "delete", "abc-1234", "--yes"])
+    args, _ = ClientCls.return_value.__enter__.return_value.delete.call_args
+    assert args[0] == "/jobs/abc-1234"
+    assert res.exit_code == 0
+    assert "deleted" in res.output
+
+
+def test_skip_posts_with_both_ids(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.post.return_value = {"status": "running"}
+        res = runner.invoke(cli, ["skip", "abc-1234", "T2"])
+    args, kwargs = ClientCls.return_value.__enter__.return_value.post.call_args
+    assert args[0] == "/skip"
+    assert kwargs["json"] == {"job_id": "abc-1234", "node_key": "T2"}
+    assert res.exit_code == 0
+
+
+def test_schedule_list_renders_table(runner):
+    response = {"schedules": [
+        {"id": 1, "topic": "k8s news", "depth": "medium",
+         "cron_expression": "0 9 * * 1", "timezone": "UTC",
+         "next_run_at": "2026-05-12T09:00:00+00:00",
+         "run_count": 4, "failure_count": 0},
+    ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["schedule", "list"])
+    assert res.exit_code == 0
+    assert "k8s news" in res.output
+    assert "0 9 * * 1" in res.output
+
+
+def test_schedule_add_forwards_tz_to_endpoint(runner):
+    response = {"id": 9, "topic": "ny news", "cron_expression": "0 9 * * 1",
+                "depth": "medium", "timezone": "America/New_York"}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.post.return_value = response
+        res = runner.invoke(cli, [
+            "schedule", "add", "0 9 * * 1", "ny news",
+            "--tz", "America/New_York",
+        ])
+    args, kwargs = ClientCls.return_value.__enter__.return_value.post.call_args
+    assert args[0] == "/schedule"
+    assert kwargs["json"]["timezone"] == "America/New_York"
+    assert kwargs["json"]["topic"] == "ny news"
+    assert res.exit_code == 0
+
+
+def test_schedule_delete_with_yes_skips_confirmation(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.delete.return_value = {"deleted": 5}
+        res = runner.invoke(cli, ["schedule", "delete", "5", "--yes"])
+    args, _ = ClientCls.return_value.__enter__.return_value.delete.call_args
+    assert args[0] == "/schedule/5"
+    assert res.exit_code == 0
+
+
+def test_rag_posts_query_with_top_k(runner):
+    response = {"results": [
+        {"score": 0.91, "domain": "rag", "text": "Milvus uses HNSW_SQ8 by default..."},
+    ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.post.return_value = response
+        res = runner.invoke(cli, ["rag", "milvus index", "--top-k", "10"])
+    args, kwargs = ClientCls.return_value.__enter__.return_value.post.call_args
+    assert args[0] == "/rag"
+    assert kwargs["json"]["query"] == "milvus index"
+    assert kwargs["json"]["top_k"] == 10
+    assert res.exit_code == 0
+    assert "0.910" in res.output or "0.91" in res.output
+
+
+def test_optimize_posts_prompt_and_renders_result(runner):
+    response = {
+        "optimized_prompt": "Write a function that gzips files older than 7 days.",
+        "clarity_score": 0.87,
+        "intent_verified": True,
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.post.return_value = response
+        res = runner.invoke(cli, ["optimize", "Please could you maybe write a function"])
+    args, kwargs = ClientCls.return_value.__enter__.return_value.post.call_args
+    assert args[0] == "/optimize"
+    assert kwargs["json"]["prompt"].startswith("Please could you")
+    assert res.exit_code == 0
+    assert "gzips" in res.output
+
+
+def test_research_list_calls_sessions_endpoint(runner):
+    response = {"sessions": [
+        {"id": "sess-abcd-1234", "status": "completed", "topic": "k8s pods",
+         "depth": "medium", "total_entries_ingested": 14},
+    ], "total": 1}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["research", "list"])
+    args, _ = ClientCls.return_value.__enter__.return_value.get.call_args
+    assert args[0] == "/research/sessions"
+    assert res.exit_code == 0
+    assert "k8s pods" in res.output
+
+
+def test_research_rename_sends_topic_patch(runner):
+    response = {"id": "sess-abcd", "topic": "new topic"}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.patch.return_value = response
+        res = runner.invoke(cli, ["research", "rename", "sess-abcd", "new", "topic"])
+    args, kwargs = ClientCls.return_value.__enter__.return_value.patch.call_args
+    assert args[0] == "/research/sessions/sess-abcd"
+    assert kwargs["json"]["topic"] == "new topic"
+    assert res.exit_code == 0
+
+
+def test_model_list_filters_config_to_model_fields(runner):
+    response = {"fields": [
+        {"name": "model_general", "value": "qwen3-vl:235b", "is_default": True},
+        {"name": "model_coder", "value": "qwen2.5-coder:7b", "is_default": True},
+        {"name": "ollama_url", "value": "http://172.18.0.1:11434", "is_default": True},
+    ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["model", "list"])
+    assert res.exit_code == 0
+    assert "model_general" in res.output
+    assert "model_coder" in res.output
+    assert "ollama_url" not in res.output  # filtered out
+
+
+def test_model_available_reads_health_models_loaded(runner):
+    response = {"checks": {"ollama": {"status": "up",
+                "models_loaded": ["qwen3:4b", "qwen2.5:7b", "qwen3-embedding:8b"]}}}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["model", "available"])
+    assert res.exit_code == 0
+    for m in ("qwen3:4b", "qwen2.5:7b", "qwen3-embedding:8b"):
+        assert m in res.output

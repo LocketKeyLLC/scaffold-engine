@@ -61,6 +61,12 @@ class Client:
     def post(self, path: str, *, json: dict | None = None) -> Any:
         return self._dispatch("POST", path, json=json)
 
+    def patch(self, path: str, *, json: dict | None = None) -> Any:
+        return self._dispatch("PATCH", path, json=json)
+
+    def delete(self, path: str) -> Any:
+        return self._dispatch("DELETE", path)
+
     def get_or_none(self, path: str) -> Any | None:
         """``GET`` that returns ``None`` on 404 instead of raising. Used by
         existence checks (``scaffold jobs status <id>``)."""

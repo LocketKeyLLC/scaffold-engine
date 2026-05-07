@@ -15,7 +15,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
-# ── Bootstrap: stub out app.database before loading the router ─────────
+# ── Bootstrap: stub out app.database + app.modules.recovery before
+# loading the router ───────────────────────────────────────────────────
 
 # Create fake app.database module so the router can import from it
 _app_pkg = types.ModuleType("app")
@@ -25,6 +26,29 @@ sys.modules.setdefault("app", _app_pkg)
 _db_mod = types.ModuleType("app.database")
 _db_mod.get_db = lambda: None  # placeholder
 sys.modules.setdefault("app.database", _db_mod)
+
+# Stub app.modules.recovery only when the real module isn't importable.
+# Tests run from the project root in the docker dev image have `app` as a
+# real package, so the real recovery module loads cleanly. Standalone runs
+# (no app on sys.path) get a stub. Either way: don't shadow the real
+# module with a half-stub or you'll break test_recovery.py via a half-
+# populated `app.modules.recovery` in sys.modules.
+try:
+    from app.modules.recovery import next_actions_for as _real_next_actions_for  # noqa: F401
+except ImportError:
+    _modules_pkg = types.ModuleType("app.modules")
+    _modules_pkg.__path__ = []
+    sys.modules["app.modules"] = _modules_pkg
+
+    _recovery_mod = types.ModuleType("app.modules.recovery")
+    _recovery_mod.NEXT_ACTIONS = {}
+    _recovery_mod.next_actions_for = lambda status, job_id, **kw: [
+        {"action": "stub", "command": f"/test {job_id}",
+         "endpoint": None, "method": None, "description": "stubbed",
+         "node_specific": False},
+    ]
+    _recovery_mod.all_known_statuses = lambda: ()
+    sys.modules["app.modules.recovery"] = _recovery_mod
 
 # Also stub structlog if not installed in test env
 try:
@@ -107,6 +131,7 @@ class TestGetStatus:
         jobs_rows = [
             _make_row(
                 id="abc-123",
+                title="A completed job",
                 status="completed",
                 node_count=4,
                 created_at=datetime(2026, 4, 4, tzinfo=timezone.utc),
@@ -132,6 +157,7 @@ class TestGetStatus:
         jobs_rows = [
             _make_row(
                 id="job-1",
+                title="First job",
                 status="completed",
                 node_count=3,
                 created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
@@ -139,6 +165,7 @@ class TestGetStatus:
             ),
             _make_row(
                 id="job-2",
+                title="Second job",
                 status="failed",
                 node_count=5,
                 created_at=datetime(2026, 4, 2, tzinfo=timezone.utc),
@@ -152,8 +179,55 @@ class TestGetStatus:
 
         assert len(resp.recent_jobs) == 2
         assert resp.recent_jobs[0].id == "job-1"
+        assert resp.recent_jobs[0].title == "First job"
         assert resp.recent_jobs[0].node_count == 3
         assert resp.recent_jobs[1].id == "job-2"
+        assert resp.recent_jobs[1].title == "Second job"
+
+    @pytest.mark.asyncio
+    async def test_recent_jobs_carry_title_and_next_actions(self):
+        """Sprint U.7: every recent job exposes its human title and a populated
+        next_actions list. The endpoint used to return bare UUIDs; this asserts
+        the regression fix for the visible UX gap."""
+        count_rows = [_make_row(status="awaiting_confirmation", cnt=1)]
+        jobs_rows = [
+            _make_row(
+                id="job-with-title",
+                title="Build a markdown linter",
+                status="awaiting_confirmation",
+                node_count=0,
+                created_at=datetime(2026, 5, 7, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 5, 7, tzinfo=timezone.utc),
+            ),
+        ]
+        db = _make_db([_make_result(count_rows), _make_result(jobs_rows)])
+
+        resp = await get_status(limit=20, status_filter=None, db=db)
+
+        assert resp.recent_jobs[0].title == "Build a markdown linter"
+        assert resp.recent_jobs[0].next_actions, \
+            "next_actions must be populated; the recovery registry stub returns at least one"
+        first = resp.recent_jobs[0].next_actions[0]
+        assert "command" in first or "endpoint" in first
+
+    @pytest.mark.asyncio
+    async def test_null_title_renders_empty_string(self):
+        """A job with NULL title (legacy data) returns '' rather than crashing."""
+        count_rows = [_make_row(status="completed", cnt=1)]
+        jobs_rows = [
+            _make_row(
+                id="legacy",
+                title=None,
+                status="completed",
+                node_count=0,
+                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        db = _make_db([_make_result(count_rows), _make_result(jobs_rows)])
+
+        resp = await get_status(limit=20, status_filter=None, db=db)
+        assert resp.recent_jobs[0].title == ""
 
     @pytest.mark.asyncio
     async def test_empty_jobs_table(self):
@@ -196,6 +270,7 @@ class TestGetStatus:
         jobs_rows = [
             _make_row(
                 id="55555555-5555-4555-8555-555555555555",
+                title="planning-job",
                 status="planning",
                 node_count=0,
                 created_at=None,

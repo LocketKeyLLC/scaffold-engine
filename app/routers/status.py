@@ -6,7 +6,7 @@ GET /logs/{job_id}     — per-node execution history for a single job
 
 import structlog
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.database import get_db
+from app.modules.recovery import next_actions_for
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -59,10 +60,12 @@ class StatusCounts(BaseModel):
 
 class JobSummary(BaseModel):
     id: str
+    title: str = ""
     status: str
     node_count: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    next_actions: list[dict[str, Any]] = []
 
 
 class StatusResponse(BaseModel):
@@ -118,9 +121,12 @@ async def get_status(
     valid_keys = set(StatusCounts.model_fields.keys())
     status_counts = StatusCounts(**{k: counts.get(k, 0) for k in valid_keys})
 
-    # 2. Recent jobs with node counts
+    # 2. Recent jobs with node counts + per-row next_actions.
+    # j.title is the human-readable label shown in every list surface
+    # (OWUI /status, `make status`, CLI tables); historically omitted
+    # here so the renderers showed bare UUIDs.
     query = """
-        SELECT j.id, j.status, j.created_at, j.updated_at,
+        SELECT j.id, j.title, j.status, j.created_at, j.updated_at,
                COALESCE(n.node_count, 0) AS node_count
         FROM jobs j
         LEFT JOIN (
@@ -138,10 +144,12 @@ async def get_status(
     recent_jobs = [
         JobSummary(
             id=str(row.id),
+            title=row.title or "",
             status=row.status,
             node_count=row.node_count,
             created_at=row.created_at.isoformat() if row.created_at else None,
             updated_at=row.updated_at.isoformat() if row.updated_at else None,
+            next_actions=next_actions_for(row.status, str(row.id)),
         )
         for row in jobs_result
     ]

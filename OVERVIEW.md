@@ -1763,17 +1763,21 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (post-U-sprint, 2026-05-07)
+### 14.1 Test counts (post-U.7, 2026-05-07)
 
-- **Orchestrator (`make test`)**: ~942 passed, 14 pre-existing failed, 5 skipped. Net additions since v1.0.0:
+- **Orchestrator (`make test`)**: 961 passed, 14 pre-existing failed, 5 skipped. Net additions since v1.0.0:
   - +4 `test_pre_migration_sweep.py` (audit item 7 / lifespan sweep)
   - +25 `test_recovery.py` (audit item 10 / next-actions registry)
   - +4 in `test_execution_handler_module.py` for the `next_actions` field
   - +10 `test_config_endpoint.py` (Sprint U.5 / `/config`)
-- **SDK (`make test-sdk`)**: 88 passed (20 skeleton + 37 sync typed + 17 async typed + 7 SSE parser + 7 streaming integration). Unchanged across U-sprints.
-- **CLI (`make test-cli`)**: 65 passed (was 38 at v1.0.0). Net additions:
+  - +1 `test_recovery.py::test_cancelled_offers_rerun_alongside_delete` (Sprint U.7 / F7)
+  - +2 `test_status_logs.py` (Sprint U.7 / F1+F3 — title and next_actions parity)
+  - +2 `test_schedule_command.py` (Sprint U.7 / F4 — `--tz` parsed and forwarded)
+- **SDK (`make test-sdk`)**: 88 passed. Unchanged across U-sprints.
+- **CLI (`make test-cli`)**: 78 passed (was 38 at v1.0.0; 65 post-U.6). Net additions:
   - +23 `test_project.py` (Sprint U.4 / nicknames + status explainer)
   - +4 in `test_commands.py` for `scaffold whatnow` (Sprint U.6)
+  - +13 in `test_commands.py` for the U.7 parity sweep (jobs find/rename/delete, schedule, rag, optimize, skip, research list/rename, model list/available)
 
 The 14 orchestrator failures span: `test_cleanup.py` (6 — `reap_stale_jobs` mock side_effect drift after 4→5+ statement expansion), `test_execution_handler.py::test_status_connection_error_rendered`, `test_retrieval_golden.py` (1 TDD case), `test_scaffold_router_commands.py` (4 — status/research commands), `test_scaffold_router_helpers.py::test_contains_key_commands`, `test_schedule_command.py::test_unknown_sub_returns_help`. Pre-existing on clean main; not regressions from any U-sprint commit.
 
@@ -2071,7 +2075,7 @@ All 18 original HIGH-severity findings: 15 fixed in code + 3 retracted within th
 
 12-item roadmap. Items 1–10 done. Items 11 + 12 remain.
 
-A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 outside the original 12-item roadmap. All 6 U-sprints landed; see §17.10.
+A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 outside the original 12-item roadmap. U.1–U.6 landed first (§17.10); a follow-up audit produced U.7 (§17.11), a coherent gap-fix that bumped the API contract to v1.1.0.
 
 | # | Item | Status |
 |---|---|---|
@@ -2082,7 +2086,8 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | 10 | Python SDK + stable OpenAPI (Sprint J.1, 6 commits) | done 2026-05-07, tagged `v1.0.0` |
 | 11 | Native single-page web UI | pending |
 | 12 | Cost + latency telemetry | pending |
-| U-sprint track | Post-v1.0.0 UX polish (6 commits, §17.10) | done 2026-05-07 |
+| U-sprint track | Post-v1.0.0 UX polish, U.1–U.6 (§17.10) | done 2026-05-07 |
+| U.7 | UX gap audit + CLI parity sweep, API → v1.1.0 (§17.11) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2165,6 +2170,34 @@ A separate track from the 12-item roadmap, scoped after the user clarified the a
 - 8 new Makefile targets: `make doctor-explain`, `make idea/resume/explain`, `make logs-errors/jobs/research/since`, `make status-raw`, `make whatnow`
 - OVERVIEW gains §12.4.1 (model resolution priority) and §19 (Glossary).
 - OpenAPI snapshot regenerated to capture the `/config` addition.
+
+### 17.11 Sprint U.7 — UX gap audit + CLI parity sweep (2026-05-07)
+
+User-driven audit after surfacing the visible "`/status` shows bare UUIDs, no titles" problem in chat. Found seven gaps; fixed all in one coherent commit. **API version bumped 1.0.0 → 1.1.0** (additive `/status` fields + removal of orphan `/research/history*` endpoints).
+
+| Gap | File | Fix |
+|---|---|---|
+| F1 — `/status` omits `title` | `app/routers/status.py` | Local duplicate `JobSummary` shadowed `app.schemas.JobSummary`. SQL didn't `SELECT j.title`. Added `title` + `next_actions` fields to the response model and SELECT. |
+| F2 — OWUI `_render_status` had no Title column | `pipelines/scaffold_router.py:_render_status` | Added a Title column + an inline "Next steps:" block from the most-actionable recent job's `next_actions`. |
+| F3 — `/status` returned no `next_actions` | `app/routers/status.py` | Per-row `next_actions_for(...)` populates each `JobSummary.next_actions` so callers (OWUI, `make status`, SDK, curl) all see structured guidance. |
+| F4 — `/schedule add --tz=...` documented but unparsed in OWUI | `pipelines/scaffold_router.py:_handle_schedule` | Parser learned `--tz`; defaults to UTC; forwarded as `timezone` in the POST body. |
+| F5 — orphan `/research/history` + `/research/history/{id}` | `app/main.py` | Removed (no consumer). Superseded by `/research/sessions` (paginated, typed). 2 paths gone from OpenAPI. |
+| F6 — CLI parity gaps with OWUI | `cli/scaffold_cli/main.py` | Added 16 new subcommands across 4 groups (see below). |
+| F7 — `cancelled` next_action lacked rerun hint | `app/modules/recovery.py` | Added `rerun` action (suggests re-`/ideate`) ahead of the existing `delete`. |
+
+**New CLI subcommands (Sprint U.7):**
+- `scaffold jobs find <text>` · `scaffold jobs rename <id> <title>` · `scaffold jobs delete <id> [--yes]`
+- `scaffold research topic/url/github/openapi` (autonomous + direct ingest, SSE-streamed)
+- `scaffold research list/find/rename/delete`
+- `scaffold schedule list/add/delete` (with `--depth` and `--tz`)
+- `scaffold rag <query>` · `scaffold optimize <prompt>` · `scaffold skip <id> <node>`
+- `scaffold model list/available` (read paths only — set/reset/probe stay OWUI-debug-only)
+
+`cli/scaffold_cli/client.py` gained `patch()` + `delete()` verb helpers. SDK schemas mirror unchanged. CLI test suite grew by 13 new command tests.
+
+**Test-suite delta:** 899 → 961 passing on the orchestrator; CLI 38 → 51 passing. Pre-existing 14 failures (test_cleanup × 6, test_execution_handler × 1, test_retrieval_golden × 1 TDD case, test_scaffold_router_commands × 4, test_scaffold_router_helpers × 1, test_schedule_command × 1) are unchanged — none are regressions from this sprint.
+
+**Versioning note:** F5 removes two paths from a v1.0.0 contract that was already pushed to origin. We bumped to v1.1.0 and treat `/research/history*` as removed-without-deprecation; no external SDK consumers existed (the SDK never wrapped them). Future contract-affecting changes should run a deprecation cycle.
 
 ---
 

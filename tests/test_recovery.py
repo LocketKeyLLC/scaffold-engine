@@ -114,3 +114,15 @@ def test_every_status_returns_at_least_one_action(status):
     `cancelled` should at least suggest delete."""
     actions = next_actions_for(status, "abc-123")
     assert len(actions) >= 1, f"status={status} has no actions"
+
+
+def test_cancelled_offers_rerun_alongside_delete():
+    """Sprint U.7 / F7: docs (references/commands.md) say `cancelled`
+    should match `failed`'s shape with restart guidance. Registry must
+    expose at least a `rerun` hint, not just `delete`."""
+    actions = next_actions_for("cancelled", "abc-123")
+    action_names = [a["action"] for a in actions]
+    assert "rerun" in action_names, \
+        f"cancelled lacks rerun hint; got {action_names}"
+    assert "delete" in action_names, \
+        f"cancelled lost delete fallback; got {action_names}"

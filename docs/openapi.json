@@ -1476,6 +1476,14 @@
             "title": "Id",
             "type": "string"
           },
+          "next_actions": {
+            "default": [],
+            "items": {
+              "type": "object"
+            },
+            "title": "Next Actions",
+            "type": "array"
+          },
           "node_count": {
             "default": 0,
             "title": "Node Count",
@@ -1483,6 +1491,11 @@
           },
           "status": {
             "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
             "type": "string"
           },
           "updated_at": {
@@ -1554,7 +1567,7 @@
   "info": {
     "description": "Self-hosted RAG-powered workflow orchestrator",
     "title": "Scaffold Engine",
-    "version": "1.0.0"
+    "version": "1.1.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -3397,77 +3410,6 @@
           }
         ],
         "summary": "Research Endpoint",
-        "tags": [
-          "Research"
-        ]
-      }
-    },
-    "/research/history": {
-      "get": {
-        "description": "List recent research sessions (last 50).",
-        "operationId": "research_history_research_history_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Research History",
-        "tags": [
-          "Research"
-        ]
-      }
-    },
-    "/research/history/{session_id}": {
-      "get": {
-        "description": "Get a single research session by ID. Returns 404 if not found.",
-        "operationId": "research_history_detail_research_history__session_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "session_id",
-            "required": true,
-            "schema": {
-              "title": "Session Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Research History Detail",
         "tags": [
           "Research"
         ]

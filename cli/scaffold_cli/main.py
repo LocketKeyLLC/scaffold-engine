@@ -904,7 +904,7 @@ def whatnow(ctx: click.Context, limit: int, as_json: bool) -> None:
                 "next_step":  f"scaffold project resume {target}",
                 "submit":     f"scaffold project resume {target}",
                 "resume":     f"scaffold project resume {target}",
-                "delete":     f"# (manual) scaffold-engine has no DELETE-via-CLI yet; use the chat surface or DELETE /jobs/{jid}",
+                "delete":     f"scaffold jobs delete {jid}",
                 "abandon":    f"# (manual) /assist done {jid}",
             }
             click.secho(f"    next:    {cmd_map.get(primary, primary)}", fg="green")
@@ -956,6 +956,642 @@ def explain(status: str | None) -> None:
     click.echo("Valid actions from this state:")
     for a in info["valid_actions"]:
         click.echo(f"  • {a}")
+
+
+# ---------------------------------------------------------------------------
+# Sprint U.7 — CLI parity sweep: extend `jobs`, add `research`, `schedule`,
+# `rag`, `optimize`, `skip`, `model`. Closes the gap with the OWUI surface
+# so anything reachable in chat is also reachable from the terminal.
+# ---------------------------------------------------------------------------
+
+# ---- jobs find / rename / delete (extending the existing `jobs` group) ----
+
+JOBS_FIND_EPILOG = """
+\b
+Examples:
+  scaffold jobs find linter              jobs whose title contains "linter"
+  scaffold jobs find "build a"           multi-word search (use quotes)
+  scaffold jobs find --json kube         machine-readable
+"""
+
+
+@jobs.command("find", help="Search jobs by title substring.", epilog=JOBS_FIND_EPILOG)
+@click.argument("query", nargs=-1, required=True)
+@click.option("--limit", default=25, type=int, show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON response.")
+@click.pass_context
+def jobs_find(
+    ctx: click.Context,
+    query: tuple[str, ...],
+    limit: int,
+    as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    q = " ".join(query).strip()
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/jobs", params={"q": q, "limit": limit})
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+
+    rows = data.get("jobs", []) if isinstance(data, dict) else []
+    total = data.get("total", 0)
+    if not rows:
+        click.echo(f"(no jobs match '{q}')")
+        return
+
+    click.echo(f"{len(rows)} of {total} matching '{q}':")
+    click.echo(f"{'job_id':<38} {'status':<24} title")
+    click.echo("-" * 80)
+    for r in rows:
+        jid = str(r.get("id", ""))[:36]
+        st = str(r.get("status", ""))[:22]
+        title = (r.get("title") or "")[:60]
+        click.echo(f"{jid:<38} {st:<24} {title}")
+
+
+JOBS_RENAME_EPILOG = """
+\b
+Examples:
+  scaffold jobs rename <job_id> "markdown linter — final"
+  scaffold jobs rename <job_id> renamed via CLI
+"""
+
+
+@jobs.command("rename", help="Rename a job (set its title).", epilog=JOBS_RENAME_EPILOG)
+@click.argument("job_id")
+@click.argument("title", nargs=-1, required=True)
+@click.pass_context
+def jobs_rename(ctx: click.Context, job_id: str, title: tuple[str, ...]) -> None:
+    cfg = ctx.obj["cfg"]
+    new_title = " ".join(title).strip()
+    if not new_title:
+        raise click.UsageError("title is required")
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.patch(f"/jobs/{job_id}", json={"title": new_title})
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"renamed {data.get('id', job_id)[:8]}: ", nl=False, fg="green")
+    click.echo(data.get("title", new_title))
+
+
+JOBS_DELETE_EPILOG = """
+\b
+Examples:
+  scaffold jobs delete <job_id>          confirmation prompt first
+  scaffold jobs delete <job_id> --yes    skip confirmation (scripts/CI)
+
+Hard-delete is final — cascades to dag_nodes, execution_logs, artifacts,
+error_logs. Knowledge-base entries are NOT removed.
+"""
+
+
+@jobs.command("delete", help="Hard-delete a job (cascades to its DAG + logs).",
+              epilog=JOBS_DELETE_EPILOG)
+@click.argument("job_id")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def jobs_delete(ctx: click.Context, job_id: str, yes: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    if not yes:
+        click.confirm(f"Delete job {job_id}? (cascades to DAG + logs)", abort=True)
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            c.delete(f"/jobs/{job_id}")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"deleted {job_id[:8]}", fg="green")
+
+
+# ---- skip (top-level; needs both job_id and node_key per docs) ----
+
+SKIP_EPILOG = """
+\b
+Examples:
+  scaffold skip <job_id> <node_key>      mark a stuck node as skipped
+  scaffold skip <job_id> verify_design   downstream nodes proceed
+
+`/results <job_id>` for a failed/blocked job pre-fills both arguments.
+"""
+
+
+@cli.command(help="Mark a DAG node as skipped to unblock downstream execution.",
+             epilog=SKIP_EPILOG)
+@click.argument("job_id")
+@click.argument("node_key")
+@click.pass_context
+def skip(ctx: click.Context, job_id: str, node_key: str) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.post("/skip", json={"job_id": job_id, "node_key": node_key})
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"skipped {node_key} on {job_id[:8]}", fg="green")
+    if isinstance(data, dict) and (status := data.get("status")):
+        click.echo(f"  job status now: {status}")
+    _hint(f"scaffold jobs status {job_id}")
+
+
+# ---- research group ------------------------------------------------------
+
+RESEARCH_EPILOG = """
+\b
+Examples:
+  scaffold research topic "kubernetes pod lifecycle" --depth medium
+  scaffold research url https://en.wikipedia.org/wiki/Embedding
+  scaffold research github anthropics/anthropic-sdk-python
+  scaffold research openapi https://petstore3.swagger.io/api/v3/openapi.json
+  scaffold research list
+  scaffold research find "kubernetes"
+
+Subcommands:
+  topic / url / github / openapi   start an ingest run (streams progress)
+  list / find / rename / delete    manage saved sessions
+"""
+
+
+@cli.group(help="Run autonomous research or manage saved sessions.",
+           epilog=RESEARCH_EPILOG)
+def research() -> None:
+    pass
+
+
+def _stream_research(api_url: str, api_key: str | None, payload: dict, path: str = "/research") -> None:
+    """POST to a streaming research endpoint and print event names + brief data."""
+    import asyncio
+    from scaffold_client import AsyncClient
+
+    async def _run() -> None:
+        async with AsyncClient(api_url, api_key=api_key, timeout=3600.0) as c:
+            try:
+                if path == "/research":
+                    stream = c.aiter_research(**payload)
+                else:
+                    stream = c._aiter_sse(path, json=payload)  # generic fallback
+                async for evt in stream:
+                    name = evt.get("event", "?")
+                    data = evt.get("data", {})
+                    if isinstance(data, dict):
+                        first_key = next(iter(data), None)
+                        snippet = ""
+                        if first_key:
+                            v = data[first_key]
+                            snippet = f"{first_key}={str(v)[:60]}"
+                        click.secho(f"[{name}] ", fg="cyan", nl=False)
+                        click.echo(snippet)
+                    else:
+                        click.secho(f"[{name}] ", fg="cyan", nl=False)
+                        click.echo(str(data)[:80])
+                    if name in ("convergence", "complete", "done"):
+                        break
+            except Exception as exc:
+                click.secho(f"stream error: {exc}", fg="red", err=True)
+                raise
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        click.secho("\ninterrupted (orchestrator will finalize as cancelled)", fg="yellow")
+        sys.exit(130)
+
+
+@research.command("topic", help="Autonomous research on a topic — search → distill → ingest.")
+@click.argument("topic_text", nargs=-1, required=True)
+@click.option("--depth", type=click.Choice(["shallow", "medium", "deep"]),
+              default="medium", show_default=True)
+@click.option("--domain", default=None, help="Optional Milvus partition hint.")
+@click.pass_context
+def research_topic(
+    ctx: click.Context,
+    topic_text: tuple[str, ...],
+    depth: str,
+    domain: str | None,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    topic = " ".join(topic_text).strip()
+    if not topic:
+        raise click.UsageError("topic is required")
+    payload = {"topic": topic, "depth": depth}
+    if domain:
+        payload["domain"] = domain
+    click.echo(f"researching: {topic}  (depth={depth})")
+    _stream_research(cfg.api_url, cfg.api_key, payload)
+
+
+@research.command("url", help="Ingest a single web page (no search step).")
+@click.argument("url")
+@click.pass_context
+def research_url(ctx: click.Context, url: str) -> None:
+    cfg = ctx.obj["cfg"]
+    click.echo(f"ingesting: {url}")
+    _stream_research(cfg.api_url, cfg.api_key, {"topic": url, "depth": "shallow"})
+
+
+@research.command("github", help="Ingest a GitHub repo's docs (README + docs/**).")
+@click.argument("owner_repo")
+@click.pass_context
+def research_github(ctx: click.Context, owner_repo: str) -> None:
+    cfg = ctx.obj["cfg"]
+    click.echo(f"ingesting github:{owner_repo}")
+    _stream_research(cfg.api_url, cfg.api_key, {"topic": f"github:{owner_repo}", "depth": "shallow"})
+
+
+@research.command("openapi", help="Ingest an OpenAPI/Swagger spec (one entry per endpoint).")
+@click.argument("spec_url")
+@click.pass_context
+def research_openapi(ctx: click.Context, spec_url: str) -> None:
+    cfg = ctx.obj["cfg"]
+    click.echo(f"ingesting openapi:{spec_url}")
+    _stream_research(cfg.api_url, cfg.api_key, {"topic": f"openapi:{spec_url}", "depth": "shallow"})
+
+
+@research.command("list", help="List recent research sessions.")
+@click.option("--limit", default=25, type=int, show_default=True)
+@click.option("--status", "status_filter", default=None,
+              help="Filter by session status (running, completed, failed, ...).")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def research_list(
+    ctx: click.Context,
+    limit: int,
+    status_filter: str | None,
+    as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    params: dict = {"limit": limit}
+    if status_filter:
+        params["status"] = status_filter
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/research/sessions", params=params)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+
+    rows = data.get("sessions", []) if isinstance(data, dict) else []
+    total = data.get("total", 0)
+    if not rows:
+        click.echo("(no sessions)")
+        return
+    click.echo(f"{len(rows)} of {total}:")
+    click.echo(f"{'session_id':<38} {'status':<14} {'depth':<8} {'entries':>8}  topic")
+    click.echo("-" * 100)
+    for r in rows:
+        sid = str(r.get("id", ""))[:36]
+        st = str(r.get("status", ""))[:12]
+        dp = str(r.get("depth", ""))[:6]
+        ent = r.get("total_entries_ingested", 0)
+        topic = (r.get("topic") or "")[:50]
+        click.echo(f"{sid:<38} {st:<14} {dp:<8} {ent:>8}  {topic}")
+
+
+@research.command("find", help="Search research sessions by topic substring.")
+@click.argument("query", nargs=-1, required=True)
+@click.option("--limit", default=25, type=int, show_default=True)
+@click.pass_context
+def research_find(ctx: click.Context, query: tuple[str, ...], limit: int) -> None:
+    cfg = ctx.obj["cfg"]
+    q = " ".join(query).strip()
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/research/sessions", params={"q": q, "limit": limit})
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    rows = data.get("sessions", []) if isinstance(data, dict) else []
+    total = data.get("total", 0)
+    if not rows:
+        click.echo(f"(no sessions match '{q}')")
+        return
+    click.echo(f"{len(rows)} of {total} matching '{q}':")
+    for r in rows:
+        click.echo(f"  {str(r.get('id',''))[:8]}  {r.get('status',''):<14}  {(r.get('topic') or '')[:60]}")
+
+
+@research.command("rename", help="Rename a research session (set its topic).")
+@click.argument("session_id")
+@click.argument("topic", nargs=-1, required=True)
+@click.pass_context
+def research_rename(ctx: click.Context, session_id: str, topic: tuple[str, ...]) -> None:
+    cfg = ctx.obj["cfg"]
+    new_topic = " ".join(topic).strip()
+    if not new_topic:
+        raise click.UsageError("topic is required")
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.patch(f"/research/sessions/{session_id}", json={"topic": new_topic})
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"renamed {data.get('id', session_id)[:8]}: ", nl=False, fg="green")
+    click.echo(data.get("topic", new_topic))
+
+
+@research.command("delete", help="Hard-delete a research session (KB entries are kept).")
+@click.argument("session_id")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def research_delete(ctx: click.Context, session_id: str, yes: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    if not yes:
+        click.confirm(f"Delete research session {session_id}? "
+                      "(KB entries already in Milvus stay.)", abort=True)
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            c.delete(f"/research/sessions/{session_id}")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"deleted research session {session_id[:8]}", fg="green")
+
+
+# ---- schedule group ------------------------------------------------------
+
+SCHEDULE_EPILOG = """
+\b
+Examples:
+  scaffold schedule list
+  scaffold schedule add "0 9 * * 1" "kubernetes news" --depth medium
+  scaffold schedule add "0 9 * * 1" "ny news" --tz America/New_York
+  scaffold schedule delete 3
+
+Cron format: minute hour day-of-month month day-of-week.
+"""
+
+
+@cli.group(help="Manage recurring research schedules.", epilog=SCHEDULE_EPILOG)
+def schedule() -> None:
+    pass
+
+
+@schedule.command("list", help="List every saved schedule.")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def schedule_list(ctx: click.Context, as_json: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/schedule")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    rows = data.get("schedules", []) if isinstance(data, dict) else []
+    if not rows:
+        click.echo("(no schedules)")
+        _hint('scaffold schedule add "0 9 * * 1" "your topic"')
+        return
+    click.echo(f"{'id':<5} {'cron':<16} {'depth':<8} {'tz':<22} {'runs':>5}  topic")
+    click.echo("-" * 90)
+    for r in rows:
+        click.echo(f"{r.get('id',''):<5} "
+                   f"{r.get('cron_expression',''):<16} "
+                   f"{r.get('depth',''):<8} "
+                   f"{r.get('timezone',''):<22} "
+                   f"{r.get('run_count',0):>5}  {(r.get('topic') or '')[:40]}")
+
+
+@schedule.command("add", help="Create a new recurring research schedule.")
+@click.argument("cron_expression")
+@click.argument("topic", nargs=-1, required=True)
+@click.option("--depth", type=click.Choice(["shallow", "medium", "deep"]),
+              default="medium", show_default=True)
+@click.option("--tz", "timezone", default="UTC", show_default=True,
+              help="IANA timezone (e.g. America/New_York).")
+@click.pass_context
+def schedule_add(
+    ctx: click.Context,
+    cron_expression: str,
+    topic: tuple[str, ...],
+    depth: str,
+    timezone: str,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    topic_text = " ".join(topic).strip()
+    if not topic_text:
+        raise click.UsageError("topic is required")
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.post("/schedule", json={
+                "topic": topic_text,
+                "cron_expression": cron_expression,
+                "depth": depth,
+                "timezone": timezone,
+            })
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"scheduled #{data.get('id')}: ", fg="green", nl=False)
+    click.echo(data.get("topic", topic_text))
+    click.echo(f"  cron: {data.get('cron_expression')} ({data.get('timezone','UTC')})  depth: {data.get('depth')}")
+    if (next_run := data.get("next_run_at")):
+        click.echo(f"  next run: {next_run}")
+
+
+@schedule.command("delete", help="Remove a saved schedule.")
+@click.argument("schedule_id", type=int)
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def schedule_delete(ctx: click.Context, schedule_id: int, yes: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    if not yes:
+        click.confirm(f"Delete schedule #{schedule_id}?", abort=True)
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            c.delete(f"/schedule/{schedule_id}")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"deleted schedule #{schedule_id}", fg="green")
+
+
+# ---- rag (knowledge-base query) -----------------------------------------
+
+RAG_EPILOG = """
+\b
+Examples:
+  scaffold rag "kubernetes pod lifecycle"
+  scaffold rag --top-k 10 "embedding similarity"
+  scaffold rag --json "milvus index" | jq '.results[0]'
+"""
+
+
+@cli.command(help="Query the Milvus knowledge base.", epilog=RAG_EPILOG)
+@click.argument("query", nargs=-1, required=True)
+@click.option("--top-k", type=int, default=5, show_default=True)
+@click.option("--domain", default=None, help="Restrict to one Milvus partition.")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def rag(
+    ctx: click.Context,
+    query: tuple[str, ...],
+    top_k: int,
+    domain: str | None,
+    as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    q = " ".join(query).strip()
+    payload: dict = {"query": q, "top_k": top_k}
+    if domain:
+        payload["domain"] = domain
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.post("/rag", json=payload)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    results = data.get("results", []) if isinstance(data, dict) else []
+    if not results:
+        click.echo("(no results)")
+        return
+    for i, r in enumerate(results, 1):
+        score = r.get("score", 0.0)
+        click.secho(f"#{i}  ", fg="cyan", nl=False)
+        click.echo(f"score={score:.3f}  domain={r.get('domain','?')}")
+        text_preview = (r.get("text") or "")[:200].replace("\n", " ")
+        click.echo(f"     {text_preview}…")
+
+
+# ---- optimize -----------------------------------------------------------
+
+OPTIMIZE_EPILOG = """
+\b
+Examples:
+  scaffold optimize "Please could you maybe write a function that..."
+  scaffold optimize --skip-verify "rewrite this prompt to be terse"
+"""
+
+
+@cli.command(help="Optimize a prompt — strip filler, rewrite, verify.",
+             epilog=OPTIMIZE_EPILOG)
+@click.argument("prompt", nargs=-1, required=True)
+@click.option("--skip-verify", is_flag=True,
+              help="Skip the LLM verification step (faster, looser).")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def optimize(
+    ctx: click.Context,
+    prompt: tuple[str, ...],
+    skip_verify: bool,
+    as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    p = " ".join(prompt).strip()
+    if not p:
+        raise click.UsageError("prompt is required")
+    try:
+        with Client(cfg.api_url, cfg.api_key, timeout=120.0) as c:
+            data = c.post("/optimize", json={"prompt": p, "skip_verify": skip_verify})
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    if isinstance(data, dict):
+        click.secho("optimized:", fg="green", bold=True)
+        click.echo(data.get("optimized_prompt", ""))
+        if (score := data.get("clarity_score")) is not None:
+            click.echo("")
+            click.echo(f"clarity score: {score}")
+        if (verified := data.get("intent_verified")) is not None:
+            click.echo(f"intent verified: {verified}")
+
+
+# ---- model group --------------------------------------------------------
+
+MODEL_EPILOG = """
+\b
+Examples:
+  scaffold model list                    current per-role model assignments
+  scaffold model available               models loaded on Ollama
+
+Per-role overrides are session-only when set in OWUI valves. To persist,
+edit MODEL_<ROLE> in .env and restart. (`make init` for the wizard.)
+"""
+
+
+@cli.group(help="Inspect model role assignments and Ollama availability.",
+           epilog=MODEL_EPILOG)
+def model() -> None:
+    pass
+
+
+@model.command("list", help="Show current per-role model assignments (from /config).")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def model_list(ctx: click.Context, as_json: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/config")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    fields = data.get("fields", []) if isinstance(data, dict) else []
+    rows = [f for f in fields if f["name"].startswith("model_")]
+
+    if as_json:
+        click.echo(_json.dumps(rows, indent=2))
+        return
+    if not rows:
+        click.echo("(no model_* settings exposed by /config)")
+        return
+    click.echo(f"{'role':<32} {'value':<48} {'default?':<8}")
+    click.echo("-" * 92)
+    for r in rows:
+        name = r["name"][:30]
+        val = str(r["value"])[:46]
+        is_default = "yes" if r.get("is_default") else "no"
+        click.echo(f"{name:<32} {val:<48} {is_default:<8}")
+
+
+@model.command("available", help="List models currently loaded on Ollama (via /health).")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def model_available(ctx: click.Context, as_json: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/health")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    ollama = (data or {}).get("checks", {}).get("ollama", {})
+    models = ollama.get("models_loaded", [])
+    if as_json:
+        click.echo(_json.dumps(models, indent=2))
+        return
+    if not models:
+        click.echo("(no models loaded — Ollama may be down)")
+        return
+    click.echo(f"{len(models)} models loaded on Ollama:")
+    for m in sorted(models):
+        click.echo(f"  {m}")
 
 
 if __name__ == "__main__":
