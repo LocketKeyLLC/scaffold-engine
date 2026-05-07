@@ -16,3 +16,7 @@ services:
       - ./pipelines:/code/pipelines:ro
       - ./Dockerfile:/code/Dockerfile:ro
       - ./.github:/code/.github:ro
+      # Read mount so `make openapi-check` can compare the live spec against
+      # the committed docs/openapi.json. The write path goes through stdout
+      # in `make openapi-snapshot`, so no rw mount is needed.
+      - ./docs:/code/docs:ro

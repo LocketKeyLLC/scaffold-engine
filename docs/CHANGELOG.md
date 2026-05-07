@@ -2,6 +2,18 @@
 
 Reverse-chronological record of dated fixes, hardening rounds, and architectural changes. Engineer's working log; preserves file paths, function names, and commit hashes.
 
+## 2026-05-07 — Sprint J.1.a: OpenAPI snapshot + v1.0.0 stability anchor
+
+Public HTTP API contract is now versioned and snapshotted. First step of Sprint J.1 (Python SDK package + stable OpenAPI).
+
+- **FastAPI `version="1.0.0"`** in `app/main.py` — was `0.1.0`. This becomes the stability anchor that `scaffold-engine-client` (forthcoming) will pin against. Breaking changes to the contract require a major bump and a release-note entry.
+- **`scripts/openapi_snapshot.py`** — imports `app.main:app`, calls `app.openapi()`, emits sorted-keys JSON to stdout. `--check` mode compares against the committed `docs/openapi.json` and exits non-zero on drift; CI gate.
+- **`docs/openapi.json`** — first committed snapshot. 44 paths, ~100 KB. Sorted keys + 2-space indent + trailing newline make it `git diff`-friendly.
+- **Makefile targets** — `make openapi-snapshot` (regenerate, captures container stdout into the host file so bind-mount perms stay clean) and `make openapi-check` (verify-only).
+- **`docker-compose.dev.yml`** — added `./docs:/code/docs:ro` so `--check` can read the committed snapshot through the bind mount. Dev-only; prod compose untouched.
+
+Verified: `make openapi-snapshot` produces a deterministic byte-for-byte file, `make openapi-check` exits 0 in sync and 1 on a single-newline tamper.
+
 ## 2026-05-03 — Command UX restructure
 
 - **`/help` regrouped** — flat 19-row table replaced with 5 grouped sections (Scope & kickoff, Workflow control, Knowledge base, Manage saved work, Configuration & utilities). Workflow line now sits at the top of the help output.

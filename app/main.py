@@ -195,7 +195,7 @@ app = FastAPI(
     dependencies=[Depends(require_api_key)],
     title="Scaffold Engine",
     description="Self-hosted RAG-powered workflow orchestrator",
-    version="0.1.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 

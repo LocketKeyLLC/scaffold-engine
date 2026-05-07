@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test test-cli agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help bootstrap doctor init sync-valves reindex
+.PHONY: test test-cli agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help bootstrap doctor init sync-valves reindex openapi-snapshot openapi-check
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -50,6 +50,14 @@ sync-valves: ## Wipe baked-in api_key from pipelines/*/valves.json (.env becomes
 
 reindex: ## Re-embed the toon_v2 corpus (after switching MODEL_EMBEDDER_PIPELINE)
 	docker exec -it $(CONTAINER) python scripts/reindex.py $(REINDEX_ARGS)
+
+openapi-snapshot: ## Regenerate docs/openapi.json from the live FastAPI app
+	@docker exec $(CONTAINER) python scripts/openapi_snapshot.py > docs/openapi.json.tmp && \
+		mv docs/openapi.json.tmp docs/openapi.json && \
+		echo "Wrote docs/openapi.json ($$(wc -c < docs/openapi.json) bytes)."
+
+openapi-check: ## Verify docs/openapi.json matches the live spec (CI gate)
+	docker exec $(CONTAINER) python scripts/openapi_snapshot.py --check
 
 ## ──────────────────────────────────────────────
 ## Build & Ops
