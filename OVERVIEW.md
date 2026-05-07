@@ -2095,6 +2095,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | U.8.E | CLI prompts + gt groups, CLI → v0.4.0 (§17.16) | done 2026-05-07 |
 | U.8.F | scaffold confirm --chain, CLI → v0.5.0 (§17.17) | done 2026-05-07 |
 | U.8.G | Audit cleanup — Make wrappers + stale help-test fix (§17.18) | done 2026-05-07 |
+| W.1 | Workflow audit — verifier-feedback loop on retry (§17.19) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2349,6 +2350,27 @@ Closes the U.8 audit cleanly. Two small items.
 `make node-logs` was named explicitly to avoid collision with the existing container-tailing `make logs`. Each target's usage hint mirrors the long-form scaffold invocation so users learn the CLI underneath.
 
 **No version bump** (Make additions don't ship in any package; pure dev convenience). Test-suite delta: orchestrator-side scaffold_router suite **gained** one test (the help test rejoined green) — net pre-existing failures 14 → 13.
+
+### 17.19 Sprint W.1 — verifier-feedback loop on retry (2026-05-07)
+
+First entry under a new "W" (workflow-quality) track, distinct from the U.8 interface-coverage track. Tier 1, item 1 from the workflow audit: until W.1, a node that failed verifier 3× and was retried via `/exec/retry` saw the **identical** prompt on each attempt — the verifier's rejection reason was logged but never surfaced back to the LLM. The fix closes that loop.
+
+**Migration 026** — `dag_nodes.last_verification_reason TEXT` (idempotent, no backfill). Persists across retries by design — `retry_failed_node` does NOT null it on reset.
+
+**Code changes** in `app/modules/execution_agent.py`:
+- `_set_node_status` grew a `verification_reason` kwarg that COALESCEs into the new column. None on pass/skipped (preserves prior reasons for audit; the read path is gated by `retry_count`, not column presence).
+- `_get_next_node` `RETURNING` adds `retry_count, last_verification_reason`; `node_snapshot` carries them through.
+- New `_format_reviewer_feedback(node)` returns a `## Reviewer feedback (attempt N)` block, gated on `retry_count > 0` AND a non-empty reason.
+- `_build_prompt` prepends the block before the template body so the model sees it as a top-level instruction.
+- `execute_node` persists the reason on three failure paths: verifier-fail (the original target), node-timeout (`"Node timed out after N s"`), and uncaught execution exception (`"execution error: <msg>"`). Symmetric — every failure mode that produces a `failed` status now surfaces a reason on retry.
+
+**Why retry_count gating?** A first attempt has `retry_count == 0` and must never inject a stale reason from (e.g.) a manual cleanup or an earlier-shape data row. The block also no-ops on whitespace-only reasons.
+
+**Test-suite delta** — orchestrator suite gained 11 (`tests/test_execution_agent_feedback.py`): 5 cover `_format_reviewer_feedback` edge cases, 4 cover `_build_prompt` integration (first-attempt no-block, retry-prepends, no-template fallback, defensive zero-with-reason), 2 cover `_set_node_status` writing/coalescing the column. SDK + CLI + pipeline suites unchanged.
+
+**Open follow-ups from the same Tier 1 audit row:**
+- Surface `last_verification_reason` in `/logs/{job_id}` and `scaffold logs` output (Tier 4 observability item).
+- Consider an automatic same-attempt re-prompt loop (vs. requiring `/exec/retry`) for the cheap cases where the verifier reason is mechanical ("missing required field X").
 
 ---
 

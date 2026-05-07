@@ -95,7 +95,8 @@ async def _get_next_node(db: AsyncSession, job_id: str) -> dict | None:
             SET status = 'running', started_at = NOW()
             WHERE id = :id AND status = 'pending'
             RETURNING id, node_key, title, node_type, depends_on,
-                      assigned_model, prompt_template, execution_order, tool, domain
+                      assigned_model, prompt_template, execution_order, tool, domain,
+                      retry_count, last_verification_reason
         """),
         {"id": str(target["id"])},
     )
@@ -110,19 +111,38 @@ async def _set_node_status(
     status: str,
     output: str | None = None,
     optimized_prompt: str | None = None,
+    verification_reason: str | None = None,
 ) -> None:
-    """Update node status. COALESCE preserves prior values when caller passes None."""
+    """Update node status. COALESCE preserves prior values when caller passes None.
+
+    ``verification_reason`` writes to ``last_verification_reason``. When the
+    caller passes ``None`` we COALESCE so a successful pass after a prior
+    failure preserves the historical reason — useful for audit; not
+    re-injected because the read path on the next retry is gated by status
+    + retry_count, not by the column itself.
+
+    Migration 026 added the column; pre-026 deployments of this code path
+    raise ``UndefinedColumn`` on the first call. Run migrations on startup
+    (default) or via `make migrate` after deploy.
+    """
     await db.execute(
         text("""
             UPDATE dag_nodes
             SET status = :status,
                 output_text = COALESCE(:output, output_text),
                 optimized_prompt = COALESCE(:optimized_prompt, optimized_prompt),
+                last_verification_reason = COALESCE(:verification_reason, last_verification_reason),
                 completed_at = CASE WHEN :status IN ('done','failed','skipped')
                                THEN NOW() ELSE completed_at END
             WHERE id = :id
         """),
-        {"id": str(node_id), "status": status, "output": output, "optimized_prompt": optimized_prompt},
+        {
+            "id": str(node_id),
+            "status": status,
+            "output": output,
+            "optimized_prompt": optimized_prompt,
+            "verification_reason": verification_reason,
+        },
     )
     await db.commit()
 
@@ -261,7 +281,13 @@ def _system_for_tool(tool: str) -> str:
 
 
 def _build_prompt(node: dict, brief: dict) -> str:
-    """Build execution prompt from node template + brief context."""
+    """Build execution prompt from node template + brief context.
+
+    Sprint W.1 — when ``retry_count > 0`` AND ``last_verification_reason``
+    is non-empty, a "Reviewer feedback" block is prepended so the LLM sees
+    the prior rejection before re-attempting. Without this loop a retry
+    sees the identical prompt and produces the identical rejected output.
+    """
     template = node.get("prompt_template") or ""
     title = node["title"]
     goal = brief.get("description", "") if brief else ""
@@ -270,12 +296,36 @@ def _build_prompt(node: dict, brief: dict) -> str:
         goal = goals[0] if goals else ""
 
     if template:
-        return f"{template}\n\nContext: {goal}"
+        body = f"{template}\n\nContext: {goal}"
+    else:
+        body = (
+            f"Execute this task: {title}\n\n"
+            f"Project goal: {goal}\n\n"
+            f"Produce a complete, actionable output for this task. "
+            f"Base your response on the ground truth provided above where relevant."
+        )
+
+    feedback = _format_reviewer_feedback(node)
+    return f"{feedback}{body}" if feedback else body
+
+
+def _format_reviewer_feedback(node: dict) -> str:
+    """Return a Reviewer-feedback block to prepend on retry, or '' if N/A.
+
+    Gated on ``retry_count > 0`` so a first attempt never sees the block,
+    even if a stale reason somehow made it onto the row.
+    """
+    retry_count = node.get("retry_count") or 0
+    reason = (node.get("last_verification_reason") or "").strip()
+    if retry_count <= 0 or not reason:
+        return ""
     return (
-        f"Execute this task: {title}\n\n"
-        f"Project goal: {goal}\n\n"
-        f"Produce a complete, actionable output for this task. "
-        f"Base your response on the ground truth provided above where relevant."
+        f"## Reviewer feedback (attempt {retry_count + 1})\n"
+        f"The previous attempt was rejected by the verifier. Reason:\n"
+        f"  {reason}\n\n"
+        f"Address that specifically in your next output. Do not repeat the\n"
+        f"prior failure mode.\n\n"
+        f"---\n\n"
     )
 
 
@@ -532,6 +582,10 @@ async def execute_next_node(
             "title": title,
             "prompt_template": node.get("prompt_template"),
             "domain": node.get("domain"),
+            # Sprint W.1 — _build_prompt prepends a Reviewer feedback block
+            # when retry_count > 0 AND a prior rejection reason is on the row.
+            "retry_count": node.get("retry_count") or 0,
+            "last_verification_reason": node.get("last_verification_reason"),
         }
     # ---- Session closed. LLM phase begins. ----
 
@@ -635,7 +689,13 @@ async def execute_next_node(
             ),
         )
         async with async_session() as db:
-            await _set_node_status(db, node_id, "failed", output=timeout_msg, optimized_prompt=exec_prompt)
+            # Sprint W.1: surface the timeout as the rejection reason so a
+            # retry's prompt explains "the previous attempt timed out".
+            await _set_node_status(
+                db, node_id, "failed",
+                output=timeout_msg, optimized_prompt=exec_prompt,
+                verification_reason=timeout_msg,
+            )
             await _log_execution(db, job_id, node_id, "error", timeout_msg)
         return {
             "status": "failed",
@@ -648,7 +708,11 @@ async def execute_next_node(
     except Exception as e:
         logger.error("node_execution_failed: node='%s' error=%s", title, e)
         async with async_session() as db:
-            await _set_node_status(db, node_id, "failed", optimized_prompt=exec_prompt)
+            await _set_node_status(
+                db, node_id, "failed",
+                optimized_prompt=exec_prompt,
+                verification_reason=f"execution error: {e}",
+            )
             await _log_execution(db, job_id, node_id, "error", str(e))
         return {
             "status": "failed",
@@ -674,7 +738,17 @@ async def execute_next_node(
     job_complete = False
     async with async_session() as db:
         final_status = "done" if verify_status in ("pass", "skipped") else "failed"
-        await _set_node_status(db, node_id, final_status, output=output, optimized_prompt=exec_prompt)
+        # Sprint W.1: persist verifier rejection reason on fail so retry can
+        # surface it. On pass/skipped we pass None — _set_node_status COALESCEs
+        # so historical reasons stay readable in audits but aren't re-injected
+        # (the retry-time read path is gated by retry_count).
+        verify_reason_for_db = reason if final_status == "failed" else None
+        await _set_node_status(
+            db, node_id, final_status,
+            output=output,
+            optimized_prompt=exec_prompt,
+            verification_reason=verify_reason_for_db,
+        )
         await db.execute(
             text("UPDATE dag_nodes SET confidence = :conf WHERE id = :nid"),
             {"conf": db_confidence, "nid": str(node_id)},
