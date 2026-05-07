@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test test-cli agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help bootstrap doctor init sync-valves
+.PHONY: test test-cli agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help bootstrap doctor init sync-valves reindex
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -47,6 +47,9 @@ init: ## Provider/model wizard: pick per-role provider + collect API keys, updat
 
 sync-valves: ## Wipe baked-in api_key from pipelines/*/valves.json (.env becomes single source)
 	@bash scripts/sync_valves.sh
+
+reindex: ## Re-embed the toon_v2 corpus (after switching MODEL_EMBEDDER_PIPELINE)
+	docker exec -it $(CONTAINER) python scripts/reindex.py $(REINDEX_ARGS)
 
 ## ──────────────────────────────────────────────
 ## Build & Ops

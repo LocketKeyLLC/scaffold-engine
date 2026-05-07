@@ -45,6 +45,51 @@ Everything Scaffold Engine reads at runtime — secrets, API keys, per-role prov
 
 ---
 
+## Embedder portability — when (and how) to reindex
+
+The Milvus collection (`toon_v2`) is built around a **512-dim vector geometry**. That dimension is locked at the schema level — it's part of the collection's HNSW_SQ8 index, the orchestrator's `embedding_dim` setting, and the `truncate_and_normalize` helper that every ingest path runs through. You do **not** want to change it.
+
+What you CAN change is which embedder produces the 512 numbers. `MODEL_EMBEDDER_PIPELINE` (and its provider, `MODEL_EMBEDDER_PIPELINE_PROVIDER`) names the model. Any embedder whose native output is ≥ 512 dimensions works — the orchestrator slices to the first 512 and L2-normalizes.
+
+**The catch:** different embedders produce different geometries. If you swap `MODEL_EMBEDDER_PIPELINE` from `qwen3-embedding:8b` to `text-embedding-3-small` and don't reindex, every cosine similarity in your existing corpus is now **meaningless** — the old vectors and new query vectors live in different vector spaces. Searches will silently return garbage.
+
+**To switch embedders safely:**
+
+```bash
+# 1. See how much data would be re-embedded.
+make reindex REINDEX_ARGS="--dry-run --new-embedder text-embedding-3-small --new-provider openai"
+
+# 2. Quiesce ingest (optional but recommended): stop any /research / /ingest jobs.
+
+# 3. Run the live reindex.
+make reindex REINDEX_ARGS="--new-embedder text-embedding-3-small --new-provider openai"
+
+# 4. Update .env:
+#    MODEL_EMBEDDER_PIPELINE=text-embedding-3-small
+#    MODEL_EMBEDDER_PIPELINE_PROVIDER=openai
+
+# 5. Pick up the new env in the live stack.
+make restart
+make doctor
+```
+
+**Flags `scripts/reindex.py` accepts** (pass via `REINDEX_ARGS`):
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--new-embedder <model>` | current `MODEL_EMBEDDER_PIPELINE` | The embedder tag to re-embed with |
+| `--new-provider ollama|openai` | current setting | Provider for the embedder role |
+| `--domain eng|llm|rag|spec|prompt` | all five | Restrict to one Milvus partition (incremental migration) |
+| `--batch-size <n>` | 32 | Embeddings per provider call |
+| `--dry-run` | off | Count entries; make no changes |
+| `--yes` | off | Skip the destructive-operation prompt |
+
+The script preserves every entry field except `dense_vector`, `model_id`, and `updated_at`. Concurrent ingests during reindex are safe — each entry is upserted by primary key, so whichever write lands last wins, and reindex revisits any entry it sees on a later page.
+
+**The reranker is also locked.** `MODEL_RERANKER` is a CrossEncoder singleton outside the provider system. Changing it requires a process restart but does **not** require reindexing — reranking happens at query time, not ingest time.
+
+---
+
 ## How a typical session flows
 You describe an idea
 → Triage assistant asks scoping questions
