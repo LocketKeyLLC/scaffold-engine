@@ -122,9 +122,15 @@ class TestHelp:
         assert isinstance(result, str)
 
     def test_contains_key_commands(self, pipe):
-        """Help text should mention all important commands."""
+        """Help text should mention every user-facing command.
+
+        ``/dag`` is intentionally omitted as of 2026-05-03 — see
+        ``references/commands.md`` ("internal/scripted-callers-only").
+        It used to be asserted here and accounted for one of the
+        pre-existing baseline failures until U.8.G dropped it.
+        """
         result = pipe._help()
-        for cmd in ["/go", "/idea", "/dag", "/execute", "/confirm",
+        for cmd in ["/go", "/idea", "/execute", "/confirm",
                      "/status", "/help", "/rag", "/optimize", "/skip"]:
             assert cmd in result, f"Help text missing {cmd}"
 

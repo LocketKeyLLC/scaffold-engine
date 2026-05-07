@@ -2094,6 +2094,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | U.8.D | OWUI parity — /exec /cleanup /config /logs /health (§17.15) | done 2026-05-07 |
 | U.8.E | CLI prompts + gt groups, CLI → v0.4.0 (§17.16) | done 2026-05-07 |
 | U.8.F | scaffold confirm --chain, CLI → v0.5.0 (§17.17) | done 2026-05-07 |
+| U.8.G | Audit cleanup — Make wrappers + stale help-test fix (§17.18) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2328,6 +2329,26 @@ The last U.8 workflow gap. Until now `scaffold confirm` was curl-equivalent (Pha
 **Versioning:** CLI 0.4.0 → 0.5.0. SDK floor stays `>=1.2,<2.0`. API unchanged.
 
 **Test-suite delta:** CLI 117 → 120 (+3): chain happy path patches `_confirm_chain_continue` to verify the Phase 2 step posts the right body and hands off; `--chain --json` rejection; no-chain backwards-compat regression guard. Streaming behavior is exercised at the SDK level in `test_sse.py`. SDK + orchestrator unchanged.
+
+### 17.18 Sprint U.8.G — Audit cleanup (2026-05-07)
+
+Closes the U.8 audit cleanly. Two small items.
+
+**Stale help-test fix.** `tests/test_scaffold_router_helpers.py::TestHelp::test_contains_key_commands` was asserting `/dag` in the `/help` output, but `/dag` was deliberately hidden as internal-only on 2026-05-03 (per `references/commands.md`: "internal/scripted-callers-only"). The test had been one of the 14 pre-existing baseline failures since then. Removed `/dag` from the expected-commands list with an inline comment pointing to the rationale. Pipeline test suite: 98/5 → 99/4.
+
+**Make wrappers** (extending the U.4 nickname-aware pattern):
+
+| Target | Maps to |
+|---|---|
+| `make confirm ID=<nickname-or-uuid> [CHAIN=1]` | `scaffold confirm <id> [--chain]` |
+| `make retry ID=<id> NODE=<key>` | `scaffold exec retry <id> <key>` |
+| `make skip ID=<id> NODE=<key>` | `scaffold skip <id> <key>` |
+| `make node-logs ID=<id>` | `scaffold logs <id>` (per-node DAG state — different from `make logs` which tails the container) |
+| `make config [FILTER=<substr>]` | `scaffold config show [--filter <substr>]` |
+
+`make node-logs` was named explicitly to avoid collision with the existing container-tailing `make logs`. Each target's usage hint mirrors the long-form scaffold invocation so users learn the CLI underneath.
+
+**No version bump** (Make additions don't ship in any package; pure dev convenience). Test-suite delta: orchestrator-side scaffold_router suite **gained** one test (the help test rejoined green) — net pre-existing failures 14 → 13.
 
 ---
 

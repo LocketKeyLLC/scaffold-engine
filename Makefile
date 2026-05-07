@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow
+.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -84,6 +84,42 @@ explain: ## Explain a job status (use: make explain STATUS=<name>; omit for the 
 
 whatnow: ## Show every job that needs attention + its recommended next step
 	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main whatnow"
+
+confirm: ## Confirm a job (use: make confirm ID=<nickname-or-uuid> [CHAIN=1])
+	@if [ -z "$(ID)" ]; then \
+		echo "Usage: make confirm ID=<nickname-or-uuid> [CHAIN=1]"; \
+		exit 2; \
+	fi
+	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main confirm $(ID) $(if $(CHAIN),--chain,)"
+
+retry: ## Retry a failed/blocked node (use: make retry ID=<id> NODE=<key>)
+	@if [ -z "$(ID)" ] || [ -z "$(NODE)" ]; then \
+		echo "Usage: make retry ID=<job_id> NODE=<node_key>"; \
+		exit 2; \
+	fi
+	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main exec retry $(ID) $(NODE)"
+
+skip: ## Mark a node as skipped (use: make skip ID=<id> NODE=<key>)
+	@if [ -z "$(ID)" ] || [ -z "$(NODE)" ]; then \
+		echo "Usage: make skip ID=<job_id> NODE=<node_key>"; \
+		exit 2; \
+	fi
+	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main skip $(ID) $(NODE)"
+
+node-logs: ## Show per-node DAG state for a job (vs `make logs` which tails the container)
+	@if [ -z "$(ID)" ]; then \
+		echo "Usage: make node-logs ID=<job_id>"; \
+		echo "(For container-wide logs use 'make logs' / 'make logs-jobs'.)"; \
+		exit 2; \
+	fi
+	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main logs $(ID)"
+
+config: ## Show orchestrator config (use: make config; or make config FILTER=model)
+	@if [ -z "$(FILTER)" ]; then \
+		docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main config show"; \
+	else \
+		docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main config show --filter $(FILTER)"; \
+	fi
 
 openapi-snapshot: ## Regenerate docs/openapi.json from the live FastAPI app
 	@docker exec $(CONTAINER) python scripts/openapi_snapshot.py > docs/openapi.json.tmp && \
