@@ -8,6 +8,16 @@ Isolation: each test records the job IDs it touches via the ``track_job`` /
 ``insert_job`` fixtures. A teardown fixture deletes those rows (and cascades
 to ``dag_nodes`` via ``ON DELETE CASCADE``). No savepoint magic — production
 code opens its own sessions, so we let it commit and clean up afterward.
+
+asyncpg pool isolation (#flake-2026-05-06): even with the session-scoped
+event loop set in pyproject.toml, the engine.dispose() autouse below
+catches a residual cross-loop case where SQLAlchemy's pool tries to
+``_close_connection`` on a connection whose original asyncio loop has
+moved on, raising ``RuntimeError: Event loop is closed`` from
+``asyncpg/connection.py:_cancel_current_command``. Disposing the pool
+before each test forces a fresh asyncpg connection bound to the current
+loop. Cost is one TCP handshake per test (~5 ms against scaffold-postgres);
+the integration suite is small (~18 tests) so the overhead is negligible.
 """
 from __future__ import annotations
 
@@ -18,9 +28,21 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import async_session
+from app.database import async_session, engine
 
 
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_db_pool():
+    """Dispose the SQLAlchemy engine's connection pool before every test.
+
+    See module docstring — without this, asyncpg connections from a
+    previous test's loop linger in the pool and crash on teardown.
+    Disposing yields a fresh pool for the current test's loop.
+    """
+    await engine.dispose()
+    yield
 
 
 @pytest_asyncio.fixture
