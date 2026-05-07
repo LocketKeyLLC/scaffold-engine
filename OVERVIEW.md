@@ -1763,13 +1763,19 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (post-Sprint J.1)
+### 14.1 Test counts (post-U-sprint, 2026-05-07)
 
-- **Orchestrator (`make test`)**: 899 passed, 14 pre-existing failed, 5 skipped
-- **SDK (`make test-sdk`)**: 88 passed (20 skeleton + 37 sync typed + 17 async typed + 7 SSE parser + 7 streaming integration)
-- **CLI (`make test-cli`)**: 38 passed
+- **Orchestrator (`make test`)**: ~942 passed, 14 pre-existing failed, 5 skipped. Net additions since v1.0.0:
+  - +4 `test_pre_migration_sweep.py` (audit item 7 / lifespan sweep)
+  - +25 `test_recovery.py` (audit item 10 / next-actions registry)
+  - +4 in `test_execution_handler_module.py` for the `next_actions` field
+  - +10 `test_config_endpoint.py` (Sprint U.5 / `/config`)
+- **SDK (`make test-sdk`)**: 88 passed (20 skeleton + 37 sync typed + 17 async typed + 7 SSE parser + 7 streaming integration). Unchanged across U-sprints.
+- **CLI (`make test-cli`)**: 65 passed (was 38 at v1.0.0). Net additions:
+  - +23 `test_project.py` (Sprint U.4 / nicknames + status explainer)
+  - +4 in `test_commands.py` for `scaffold whatnow` (Sprint U.6)
 
-The 14 orchestrator failures span: `test_cleanup.py` (6 — `reap_stale_jobs` mock side_effect drift after 4→5+ statement expansion), `test_execution_handler.py::test_status_connection_error_rendered`, `test_retrieval_golden.py` (1 TDD case), `test_scaffold_router_commands.py` (4 — status/research commands), `test_scaffold_router_helpers.py::test_contains_key_commands`, `test_schedule_command.py::test_unknown_sub_returns_help`. Pre-existing on clean main; not regressions.
+The 14 orchestrator failures span: `test_cleanup.py` (6 — `reap_stale_jobs` mock side_effect drift after 4→5+ statement expansion), `test_execution_handler.py::test_status_connection_error_rendered`, `test_retrieval_golden.py` (1 TDD case), `test_scaffold_router_commands.py` (4 — status/research commands), `test_scaffold_router_helpers.py::test_contains_key_commands`, `test_schedule_command.py::test_unknown_sub_returns_help`. Pre-existing on clean main; not regressions from any U-sprint commit.
 
 ### 14.2 Markers
 
@@ -2065,6 +2071,8 @@ All 18 original HIGH-severity findings: 15 fixed in code + 3 retracted within th
 
 12-item roadmap. Items 1–10 done. Items 11 + 12 remain.
 
+A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 outside the original 12-item roadmap. All 6 U-sprints landed; see §17.10.
+
 | # | Item | Status |
 |---|---|---|
 | 1–6 | Pre-Sprint-E foundation, hardening rounds, RAG pipeline, research agent, OWUI pipelines, assist mode | done (pre-2026-05-06) |
@@ -2074,6 +2082,7 @@ All 18 original HIGH-severity findings: 15 fixed in code + 3 retracted within th
 | 10 | Python SDK + stable OpenAPI (Sprint J.1, 6 commits) | done 2026-05-07, tagged `v1.0.0` |
 | 11 | Native single-page web UI | pending |
 | 12 | Cost + latency telemetry | pending |
+| U-sprint track | Post-v1.0.0 UX polish (6 commits, §17.10) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2128,7 +2137,34 @@ Pip-installable `scaffold-engine-cli` at `cli/`. `scaffold version | doctor | id
 
 - `research_agent` / `execution_agent` migration to native `tool_call()` (away from JSON-prompt coaxing)
 - Pattern 3 helper-internal call-site migration deferred from Sprint E.7
-- Pre-existing CLI bug: `scaffold jobs status <id>` calls non-existent `GET /jobs/{id}` (silently 404s)
+- ~~Pre-existing CLI bug: `scaffold jobs status <id>` calls non-existent `GET /jobs/{id}`~~ → fixed in `bbd3a1c` (J.1 close-out); `jobs status` now calls `GET /exec/status/{id}` and renders the new shape.
+
+### 17.10 U-sprint track — UX polish (2026-05-07, 6 commits)
+
+A separate track from the 12-item roadmap, scoped after the user clarified the audience as GitHub-comfortable terminal users who want **smoothness, clear instructions, and full control** — not visual polish. No new GUI surface; no new dependencies; every helper command prints the underlying invocation it's running.
+
+| # | Commit | Subject |
+|---|---|---|
+| U.1 | `838d6dd` | Walkthrough README + scenario USER_GUIDE + OVERVIEW glossary (§19) |
+| U.2 | `3fa1f0e` | Bootstrap detects Ollama + models; `make doctor-explain` |
+| U.3 | `cbbcf23` | CLI Examples: epilogs + Next-step hints; table-form `make status` |
+| U.4 | `9373d90` | `scaffold project new/resume/list`, friendly nicknames, `scaffold explain` |
+| U.5 | `50d2807` | `/config` endpoint + `scaffold config show` + `make logs-*` presets + model-priority docs (§12.4.1) |
+| U.6 | `2fae7cb` | `scaffold whatnow` — global "what should I do next" view |
+
+- **U.1** — README rewritten as a from-zero walkthrough with what-can-go-wrong per step. USER_GUIDE rewritten as five scenario-driven sections (idea-to-built, research a topic, ingest URL/GitHub/PDF, walk through with assist, scheduled research). New §19 glossary covers every project-specific term cross-referenced from §3-§14.
+- **U.2** — `bootstrap.sh` gains an Ollama-on-host detection step (binary, daemon, default-models pulled — each missing piece gets a concrete remediation line). Bootstrap auto-runs `make doctor` at the end so the user sees a complete pass/fail summary. `doctor.sh --explain` (also `make doctor-explain`) prints a one-liner per section explaining what's verified and why a failure matters.
+- **U.3** — Every `scaffold <subcommand> --help` gets a Click `epilog=` block with realistic copy-pasteable invocations, status reference where helpful, and pointers to follow-up commands. `_render_next_actions(data)` helper in the CLI surfaces the orchestrator's `next_actions` registry as a markdown bulleted block with concrete commands. `make status` switches from raw JSON dump to a sorted counts table + recent-job list (rendered by new `scripts/render_status.py`); `make status-raw` preserves the JSON form.
+- **U.4** — New `cli/scaffold_cli/project.py` introduces a local nickname store at `~/.scaffold/nicknames.json` (or `$XDG_CONFIG_HOME/scaffold/nicknames.json`). `slugify(idea)` + 4-char hash from UUID makes collision-resistant nicknames. New subcommands: `scaffold project new/resume/list` resolve nicknames to UUIDs and dispatch the next valid action via the recovery registry. `scaffold explain <status>` does local plain-English lookup of every JobStatus value (with valid actions) — no orchestrator call required. Every project subcommand prints the equivalent raw `scaffold` invocation so users learn the long form too.
+- **U.5** — New `GET /config` endpoint returns every `Settings` field with current value, default, is-default flag, and description. Three-tier redaction protects sensitive fields (SecretStr-typed, name-keyword match for `key/secret/token/password/pass`, URL-with-embedded-credentials regex catching `database_url` without false-positiving on `milvus_uri`/`redis_url`/`searxng_url`/etc). `scaffold config show` renders as a table with `--filter`, `--non-defaults`, `--json` flags. `make logs-errors / logs-jobs / logs-research / logs-since` are filter presets over `docker logs`. New §12.4.1 documents the model-resolution priority chain (per-request override > env var > config.py default).
+- **U.6** — `scaffold whatnow` (and `make whatnow`) lists every actionable job (any non-terminal status), shows status + plain-English headline + the most-actionable next-step command. Action priority: `confirm > next_step > submit > retry_node > skip_node > resume > delete > abandon`. `--json` mode for scripting; empty result hints at `scaffold project new "..."` instead of a confusing blank screen.
+
+**Net public-surface changes from the U-sprint track:**
+- 1 new orchestrator endpoint: `GET /config` (auth-required, redaction-protected)
+- 7 new CLI subcommands: `scaffold project new/resume/list`, `scaffold explain`, `scaffold config show`, `scaffold whatnow`
+- 8 new Makefile targets: `make doctor-explain`, `make idea/resume/explain`, `make logs-errors/jobs/research/since`, `make status-raw`, `make whatnow`
+- OVERVIEW gains §12.4.1 (model resolution priority) and §19 (Glossary).
+- OpenAPI snapshot regenerated to capture the `/config` addition.
 
 ---
 
