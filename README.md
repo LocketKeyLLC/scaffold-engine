@@ -1,88 +1,231 @@
 # Scaffold Engine
 
-A self-hosted DAG orchestration engine for multi-step LLM workflows. Submit an idea, get a structured execution plan that is researched, ingested into a vector store, decomposed into a dependency graph, and executed node-by-node — all on local hardware.
+A self-hosted DAG orchestration engine for multi-step LLM workflows. You give it an idea; it researches the topic, plans an execution graph, runs each step with verification, and hands back a compiled output. Everything runs locally on your hardware (Ollama for inference, Milvus for vector search, Postgres for state, SearXNG for web search) — no cloud calls unless you opt in.
 
-Runs entirely on CPU-only inference (Ollama + Milvus + Postgres + Redis + SearXNG). Cloud models opt-in for heavy roles. Pinned to **API v1.0.0**.
+This README is a **complete from-zero walkthrough**: every command, what it does, what you'll see, and what to do if it goes wrong. If you finish reading this end-to-end you should be able to clone the repo on a fresh machine and have your first compiled output ~45 minutes later.
 
-## What it does
+For details beyond setup-and-first-run, read:
 
-The pipeline:
+- **[USER_GUIDE.md](./USER_GUIDE.md)** — every command, organized by what you're trying to do (start a project, do research, run a manual walkthrough, schedule something recurring, …).
+- **[OVERVIEW.md](./OVERVIEW.md)** — comprehensive technical reference. Architecture, every module, every public function, the full database schema, configuration, the TOON data format, the logging catalog, known issues, sprint history, and a glossary.
 
-```
-User idea
-  → Triage (qwen3:4b conversational refinement)
-  → Refine (structured brief)
-  → Feasibility (confidence + recommended research queries)
-  → HALT at awaiting_confirmation (user reviews)
-  → /confirm
-  → Research (SearXNG + LLM distill → Milvus ingest)
-  → DAG (generated execution graph, Kahn cycle check)
-  → Execute (dependency order, SSE streamed, verifier-gated, auto-retry)
-  → Compile (final output assembled from leaf nodes)
-```
+---
 
-## Quick start
+## What scaffold-engine actually does
 
-Prerequisites: Docker + Docker Compose, Ollama installed on host, ~30 GB disk for models + the vector store.
+You type an idea. The system:
+
+1. **Refines** the idea into a structured brief (problem statement, success criteria, constraints).
+2. **Assesses feasibility** and **halts**. You read the plan and approve it. This is the only deliberate pause point.
+3. **Researches** the topic — runs SearXNG searches, fetches pages, distills facts into a knowledge base.
+4. **Generates a DAG** of execution nodes (research / decision / action / validation / output). Each node has a tool assigned (LLM, code generation, web search, RAG retrieval).
+5. **Executes** each node in dependency order. Output of upstream nodes becomes context for downstream ones. A verifier checks each result; failed nodes auto-retry up to three times.
+6. **Compiles** the final output from the leaf nodes and stores it.
+
+A typical run on CPU-only hardware takes 30–60 minutes for a non-trivial topic. Most of that time is the LLM thinking; you can watch progress stream in real time.
+
+---
+
+## Before you start — what you need
+
+Before running the install steps below, make sure you have:
+
+| Requirement | Why | How to verify |
+|---|---|---|
+| Docker + Docker Compose | The orchestrator, database, vector store, search engine, and chat UI all run as containers. | `docker --version` and `docker compose version` should both work. |
+| Ollama installed on your **host** (not in a container) | Runs the local LLMs. The orchestrator reaches it through the docker bridge gateway. | `ollama list` should respond. Install from <https://ollama.ai>. |
+| ~30 GB free disk | Models alone are ~25 GB; the vector store and Postgres add a few more. | `df -h .` |
+| ~16 GB RAM | Milvus needs ~8 GB to load comfortably; Ollama loads models on demand. | `free -h` (Linux) / Activity Monitor (mac) |
+| `git` and a UTF-8 terminal | For cloning and running commands. | `git --version` |
+
+If you're on Pop!_OS / Ubuntu and Docker is fresh, also run `sudo usermod -aG docker $USER` and log out + back in so you can run `docker` without `sudo`.
+
+---
+
+## First-time install
+
+These steps go from a fresh `git clone` to a running stack ready to take ideas. Run them in order.
+
+### 1. Clone the repo
 
 ```bash
 git clone https://github.com/LocketKeyLLC/scaffold-engine.git
 cd scaffold-engine
+```
 
-# 1. Fill in the 4 REQUIRED values at the top of .env
+You should see `app/`, `sdk/`, `cli/`, `pipelines/`, `db/`, `docker-compose.yml`, and a few other directories.
+
+### 2. Create your `.env`
+
+```bash
 cp .env.example .env
+```
 
-# 2. Pull the local model stack (CPU-only)
+Now open `.env` in your editor and set the four **required** values at the top — the file walks you through each one. The most important is `SCAFFOLD_API_KEY`, which gates every authenticated request to the orchestrator. Generate one with `openssl rand -hex 32` if you don't have a preferred secret-generation flow.
+
+> **What can go wrong:** if you skip this step and start the stack, `docker compose` will refuse to bring up the orchestrator (the compose file has `${SCAFFOLD_API_KEY:?...}` as a hard requirement). The error message tells you which variable is missing.
+
+### 3. Pull the local models
+
+```bash
 ollama pull qwen3:4b qwen2.5:7b qwen2.5-coder:7b qwen3-embedding:8b qwen3.5:latest
+```
 
-# 3. Bring the stack up
+This downloads the five default models. Each is 1–8 GB; on a typical home connection plan for ~10 minutes total. Ollama caches them in `~/.ollama/models`.
+
+> **What can go wrong:**
+> - "model not found" → Ollama isn't running. Start it: `ollama serve` (foreground) or check the systemd unit on Linux.
+> - Slow download → Ollama shows download progress; if it stalls, Ctrl-C and retry. Resume is automatic.
+> - You don't have to use all five. The system will tell you at request time which roles are missing models — see `make doctor` below.
+
+### 4. Bring up the stack
+
+```bash
 docker compose up -d
+```
 
-# 4. Sanity check
+This starts seven containers: orchestrator, Postgres, Milvus, Redis, SearXNG, Open WebUI, and the OWUI pipelines. First time takes ~3 minutes (image downloads + initial DB migration). Subsequent starts are ~15 seconds.
+
+> **What you'll see:** `docker compose` prints a green checkmark per container as each becomes healthy. If any go red, check `docker compose logs <name>` for that container.
+
+### 5. Verify everything is healthy
+
+```bash
+make doctor
+```
+
+This runs an end-to-end audit. Expected output is a short list of subsystem checks, all `OK`. The script also confirms your `.env` API key matches what the running containers are using and warns if they've drifted.
+
+```bash
 curl -H "X-API-Key: $SCAFFOLD_API_KEY" http://localhost:8000/health
+```
 
-# 5. Open the chat UI
+Returns a JSON object with `status: "healthy"` and per-dependency latency numbers. Postgres, Milvus, Redis, and Ollama should all show `up`.
+
+> **What can go wrong:**
+> - `Cannot reach orchestrator` → run `docker ps` to confirm all containers are up. Check `docker logs scaffold-orchestrator` for startup errors.
+> - `ollama: down` → host Ollama isn't running, or the bridge gateway isn't reaching it. Confirm `ollama list` works on the host. If yes, check that `OLLAMA_BASE_URL` in `.env` points at the bridge gateway (default `http://172.18.0.1:11434` for Pop!_OS / native Docker).
+
+### 6. Open the chat UI
+
+```bash
 open http://localhost:3000
 ```
 
-A complete pipeline run on CPU takes 30–60 minutes for a non-trivial topic.
+(Or just paste the URL into your browser.) Open WebUI loads. Create the local admin account (it's not federated; the credentials only exist on your machine). At the top of the chat window, the model selector should show **scaffold_router** (or any name containing "scaffold") — that's the OWUI pipeline that talks to the orchestrator.
 
-## Common operations
+If `scaffold_router` doesn't appear in the model dropdown, the OWUI pipelines container hasn't picked up the pipeline files yet. Run `docker restart open-webui-pipelines` and refresh the page.
+
+---
+
+## Your first project — end to end
+
+Now type your first idea into the chat. For your first run, pick something small that the system can complete in 20–30 minutes:
+
+> Build a Python script that lists files in a directory sorted by size, with human-readable file sizes.
+
+Press Enter. The system replies with refined-brief output and a job ID. Copy the job ID (a UUID like `481010cd-9542-4b27-9af3-7c80f468af89`).
+
+Then approve and execute:
+
+```
+/confirm 481010cd-9542-4b27-9af3-7c80f468af89
+```
+
+The system runs research → DAG generation → node execution, streaming progress events to your chat. When it's done you'll see the final compiled script.
+
+Check progress at any time with:
+
+```
+/results 481010cd-9542-4b27-9af3-7c80f468af89
+```
+
+That command knows the job's current status and shows what to do next — including pre-filled commands if a node failed and needs a retry.
+
+> **What can go wrong on your first run:**
+> - Phase 2 (research) can take 10–25 minutes. There's no progress bar; check the orchestrator logs (`docker logs -f scaffold-orchestrator`) to confirm it's working.
+> - If the system says `awaiting_confirmation` and won't move forward, you skipped step 6 (the `/confirm` command).
+> - If a DAG node fails after three auto-retries, it goes to `blocked`. Run `/results <job_id>` for a copy-pasteable retry or skip command.
+
+---
+
+## Day-to-day operations
+
+Once the stack is running, these are the commands you'll use most often:
+
+| What you want | Command | What it does |
+|---|---|---|
+| See live system health | `make health` | Hits `/health`, prints subsystem latencies. |
+| Tail logs in real time | `make logs-follow` | `docker logs -f scaffold-orchestrator`, scroll-back included. |
+| List active jobs | `make status` | Hits `/status`, prints a counts table + recent jobs. |
+| Reap stale jobs | `make clean` | Triggers the cleanup endpoint; safe to run anytime. |
+| Apply DB migrations | `make migrate` | The lifespan auto-applies migrations on startup; this is for force-runs. |
+| Re-run health audit | `make doctor` | Full pre-flight, with explanations. |
+| Show all targets | `make help` | Self-documenting Makefile; every target has a one-line description. |
+
+Open WebUI is for chat-driven workflows. The Python SDK and `scaffold` CLI exist for programmatic access — see [USER_GUIDE.md](./USER_GUIDE.md) for examples of both.
+
+---
+
+## Updating
+
+Pull the latest code and rebuild:
 
 ```bash
-make health         # /health round-trip
-make logs-follow    # tail orchestrator logs
-make test           # run the full test suite (in dev container)
-make status         # /status round-trip
-make clean          # reap stale jobs
-make migrate        # apply DB migrations
-make doctor         # full health audit (probes every dep + key sync)
-make help           # show all targets
+git pull
+docker compose up -d --build
 ```
+
+Migrations run automatically at startup. If a migration fails (rare), the orchestrator container will report it in its logs and refuse to start; review the error and check OVERVIEW.md §15 for migration policy.
+
+For embedder model changes (rarely needed), see USER_GUIDE.md "Embedder portability" — switching embedders requires re-embedding the corpus, and the docs walk through that with `make reindex`.
+
+---
+
+## Tearing it down
+
+```bash
+docker compose down
+```
+
+Stops all containers but preserves volumes (Postgres data, Milvus collections, model caches).
+
+```bash
+docker compose down -v
+```
+
+Stops containers AND deletes volumes. **This loses every job, knowledge base entry, and schedule** — use with care.
+
+```bash
+git clean -fdx
+```
+
+Removes everything not tracked by git (your `.env`, build caches, etc.). Pair with the `-v` step above for a true clean slate.
+
+---
 
 ## Project layout
 
 ```
 scaffold-engine/
-├── app/                # orchestrator (FastAPI)
-├── sdk/                # Python client (scaffold-engine-client)
-├── cli/                # terminal client (scaffold-engine-cli)
-├── pipelines/          # 5 Open WebUI pipelines (chat-side commands)
-├── db/                 # init.sql + migrations 002–025
-├── scripts/            # reindex.py, score_retrieval.py, doctor.sh, …
-├── tests/              # ~900 tests covering orchestrator + SDK + CLI
-└── docs/openapi.json   # v1.0.0 contract snapshot (sole survivor under docs/)
+├── app/             FastAPI orchestrator. Endpoints, modules, schemas.
+├── sdk/             Python client (scaffold-engine-client). Sync + async.
+├── cli/             Terminal client (scaffold-engine-cli). Wraps the SDK.
+├── pipelines/       5 Open WebUI pipelines. Slash-command surface.
+├── db/              init.sql + 24 forward-only migrations.
+├── scripts/         bootstrap, doctor, init, sync-valves, reindex, …
+├── tests/           ~930 tests covering orchestrator + SDK + CLI.
+├── docker-compose.yml      production runtime (no tests, no Makefile in image)
+├── docker-compose.dev.yml  dev override (mounts tests, Makefile, docs)
+├── Dockerfile              multi-stage: builder → runtime → dev
+└── docs/openapi.json       v1.0.0 API contract (machine-readable)
 ```
 
-## Where to learn more
-
-- **[USER_GUIDE.md](./USER_GUIDE.md)** — operator guide. Every chat command, programmatic SDK access, troubleshooting. The right read if you're driving the system.
-- **[OVERVIEW.md](./OVERVIEW.md)** — comprehensive technical reference. Architecture, every module, every public function, the full database schema, configuration, the TOON data format, the logging catalog, known issues, and sprint history. The right read if you're modifying the system.
-- **[docs/openapi.json](./docs/openapi.json)** — the v1.0.0 HTTP contract.
+---
 
 ## Status
 
-Active solo development. v1.0.0 tagged 2026-05-07. Roadmap items 1–10 of 12 done; items 11 (single-page web UI) and 12 (cost + latency telemetry) remain. Test baseline: orchestrator 899/14 pre-existing/5 skipped; SDK 88; CLI 38.
+Active solo development. v1.0.0 tagged 2026-05-07. The audit-flagged work queue (10 items) is closed in code; see OVERVIEW §16. Tests passing: orchestrator ~932, SDK 88, CLI 38. The 14 pre-existing test failures documented in OVERVIEW §14.1 are mock-side drift, not regressions.
 
 ## License
 

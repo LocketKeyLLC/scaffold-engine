@@ -2148,4 +2148,138 @@ CPU-only on the project's reference T480 (8-core / 16GB). Cloud-routed models (`
 
 ---
 
+## 19. Glossary
+
+Every project-specific term you'll see in chat, in CLI output, in the SDK, in container logs, or in the source code. Cross-referenced where helpful.
+
+### Workflow concepts
+
+**Job** — a top-level project, one row in the `jobs` table, identified by a UUID. Carries a title, status, refined brief, optional compiled output, and audit timestamps. A job's lifecycle is a 14-state state machine; see §3 and the `JobStatus` table in §6.1.
+
+**DAG** — directed acyclic graph. The execution plan for a job, generated in `planning` phase. Each node has a tool (LLM / CodeGen / SearXNG / Milvus), a domain, and a `depends_on` array.
+
+**DAG node** — single execution step in a job's DAG. One row in `dag_nodes`. Has its own status (`pending → running → done | failed | skipped`), an `assigned_model`, and `output_text` once executed.
+
+**Phase 1** — idea refinement + feasibility assessment. Driven by `app/modules/ideation_workflow.refine_and_assess`. Runs synchronously when you `POST /ideate`; halts the job at `awaiting_confirmation`.
+
+**Phase 2** — research + ingest + compile. Driven by `app/modules/ideation_workflow.research_and_compile`. Runs when you `POST /ideate/confirm`; advances the job through `researching → planning`.
+
+**Awaiting confirmation** — job status meaning "Phase 1 produced a brief; the system is waiting for the human to approve it." This is the only deliberate halt point in the lifecycle.
+
+**Triage** — the chat-side conversational phase before `/go`. Lightweight model (qwen3:4b by default) asks scoping questions until the goal, scope, and constraints are clear.
+
+**Synthesis** — when `/go` fires, the chat transcript is condensed into a single canonical brief. Done by the same model as triage.
+
+**Compile / compiled output** — the final deliverable assembled from leaf DAG nodes. `_compile_output()` in `execution_agent` uses a 4-strategy fallback: explicit `is_output_node=TRUE` markers → title-heuristic → last CodeGen → concatenation.
+
+**Output node / `is_output_node`** — a column on `dag_nodes` (added in migration 017) that the DAG generator flags `TRUE` for leaves. `_compile_output` prefers explicit markers (Strategy 0) before falling back to heuristics.
+
+### Knowledge base
+
+**Knowledge base** — informal name for the Milvus `toon_v2` collection that the system uses for RAG retrieval. Populated by `/research` and ingest paths.
+
+**TOON** — Token-Oriented Object Notation. The data format used at the LLM ↔ structured-data boundary. ~60% fewer tokens than JSON; +4.2% RAG retrieval accuracy. See §10.
+
+**Domain** — high-level topic partition. One of `prompt`, `rag`, `eng`, `llm`, `spec`. Used as Milvus's partition key for tenant isolation.
+
+**Partition key** — Milvus feature for isolating subsets of a collection. Each domain gets its own partition; queries can target one or fan out across all five.
+
+**Embedding** — the 512-dim float vector produced by the embedder model. Locked at 512 dimensions at the schema level; switching embedders requires reindexing the corpus (see USER_GUIDE "Embedder portability").
+
+**Cosine similarity** — distance metric used by Milvus for vector search. Range −1..+1; higher is more similar.
+
+**HNSW_SQ8** — the index Milvus uses on the dense_vector field. Hierarchical Navigable Small World graph + 8-bit scalar quantization. Refines candidates with float16 for accuracy.
+
+**RRF (Reciprocal Rank Fusion)** — the algorithm that merges vector-search and keyword-search results. Formula: `score = 1 / (k + rank)`, default `k=60`. See §7.1.
+
+**Reranker** — a CrossEncoder model (`Qwen3-Reranker-0.6B-seq-cls`) that scores query-document pairs more accurately than the initial retrieval. Runs in a thread executor (PyMilvus blocks; CrossEncoder blocks).
+
+**3-tier ingest** — RAG ingest's dedup policy. Cosine > 0.95 → reject. 0.90–0.95 → version chain (new entry supersedes the matched one). < 0.90 → new entry.
+
+**Version chain / supersede** — when a new entry is "almost" a duplicate of an existing one (cosine 0.90–0.95), the new entry is inserted with `supersedes_id = matched.entry_id`. Retrieval filters superseded entries by default; `include_history=True` opts into the full chain.
+
+**Dedup log** — audit table (`dedup_log`) recording every rejection AND every version-chain supersede. Each row carries the cosine score and the matched existing entry_id.
+
+**Source type / TTL** — knowledge base entries carry a `source_type` (`real_time`, `news`, `community`, `tech_docs`, `curated`, `official_docs`, `ai_generated`); the staleness sweeper uses `config.TTL_POLICY` to expire entries past their TTL.
+
+### Model roles + providers
+
+**Role** — abstract job for a model. Eight roles: `general`, `verifier`, `coder`, `router`, `embedder_pipeline`, `reranker`, `cloud_heavy`, `cloud_alt`, `fallback`. Each maps to a model name via `MODEL_<ROLE>` env vars.
+
+**Provider** — backend that serves a role. Default `ollama` (local). Other registered providers: `openai` (covers OpenAI + any compatible endpoint via `OPENAI_BASE_URL`).
+
+**`get_model(role, overrides=None)`** — the central function for resolving "what model to use." Override > env > default; allowlist-protected.
+
+**Verifier** — the model that reads a node's output and decides whether it satisfies the node's success criteria. Failures trigger retries up to `max_retries` (default 3). After 3 failures the node moves to `blocked`.
+
+### Assist Mode
+
+**Assist Mode** — human-driven walk through a job's DAG. The system acts as co-pilot: shows you each step's prompt + upstream context; you supply the output as evidence. See §9 + USER_GUIDE scenario D.
+
+**Assist session** — one row in `assist_sessions` per active assist walk. UNIQUE per job (only one active session at a time per job).
+
+**Assist step** — one row in `assist_steps` per `(session, node_key)` pair. Has its own state machine: `pending → presented → awaiting_input → received → committed`.
+
+**Mirror invariant** — on assist step commit, the human's evidence is mirrored to `dag_nodes.output_text` in the same DB transaction. Lets the existing `_compile_output`, `_fetch_upstream_outputs`, and RAG-grounding paths consume human output indistinguishably from autonomous output.
+
+**Re-plan policy** — per-session setting controlling whether the system regenerates downstream nodes when an assist step diverges from expectations. `context_only` (default), `selective`, `full`, `disabled`.
+
+**Friction note** — free-text annotation on an assist step (`/assist friction <session_id> <node_key> <note>`) for post-mortem review.
+
+**Handoff** — switching one or more assist steps back to autonomous execution mid-walk. `/assist handoff <session_id> <node_key> single|all`.
+
+### Streaming + lifecycle
+
+**SSE (Server-Sent Events)** — the protocol the orchestrator uses for streaming endpoints (`/research`, `/execute/all`, `/research/reply`, `/research/pdf`). Plain HTTP with `text/event-stream` content type. The SDK's `aiter_*` methods parse the wire format and yield typed event dicts.
+
+**Keepalive** — SSE comment lines (`: keepalive\n\n`) emitted every ~2s when the underlying generator is idle. Forces the socket to be probed so client disconnects propagate as `CancelledError` within ~1s.
+
+**Lifespan** — FastAPI's startup + shutdown hook (`@asynccontextmanager`). The orchestrator's lifespan verifies dependencies, runs migrations, pre-warms the reranker, starts the scheduler, and starts the cleanup task.
+
+**Migration runner** — `app/migrations.py`. Auto-applies SQL files in `db/migrations/` at lifespan startup. Holds an outer transaction with a Postgres advisory lock; each migration runs in a SAVEPOINT.
+
+**Reaper / cleanup** — `app/modules/cleanup.py::reap_stale_jobs`. Runs every 15 min (`cleanup_interval_seconds`). Cancels jobs stuck in long-phase statuses past their thresholds. Skips `assisted_*` statuses on the normal cadence (separate idle sweep handles those).
+
+**Orphan node** — a `dag_nodes` row stuck in `running` past `node_orphan_threshold_minutes` (default 60). Reset to `pending` for automatic re-execution.
+
+**Idempotency guard** — atomic UPDATE pattern that prevents double-execution under concurrent calls. Used by `research_and_compile` (Phase 2 claim), `generate_dag` (DAG count check), and migration 020's UNIQUE partial index.
+
+### Infrastructure
+
+**Ollama** — local LLM runtime, runs on the host (not in a container). Reached from the orchestrator via the bridge gateway `172.18.0.1:11434`. Lazy-loads models on demand from `~/.ollama/models`.
+
+**Milvus** — vector database. Standalone deployment with embedded ETCD. Listens on `:19530`. Hosts the `toon_v2` collection.
+
+**SearXNG** — privacy-respecting metasearch engine. Powers `/research`'s search step. Listens on `:8888`.
+
+**Open WebUI (OWUI)** — the chat frontend. Listens on `:3000`. Talks to `open-webui-pipelines` (`:9099`) which hosts the slash-command logic.
+
+**Pipeline (in the OWUI sense)** — a Python module under `pipelines/` that OWUI loads at runtime to handle chat interactions. Five pipelines ship with scaffold-engine: `scaffold_router` (primary), `execution_handler`, `dag_viewer`, `gt_browser`, `prompt_inspector`.
+
+**Valve (in the OWUI sense)** — a runtime-configurable parameter on a pipeline. Stored in `valves.json` per pipeline; editable via the OWUI admin panel without a restart. Examples: `api_key`, `orchestrator_url`, `stream_timeout`.
+
+**Bridge gateway** — Docker's `ai-network` bridge; `172.18.0.1` is the host's address from inside any container on the network. Used by the orchestrator and pipelines to reach host Ollama. `host.docker.internal` is NOT available on Pop!_OS native Docker.
+
+**Bind mount** — Docker volume that maps a host directory into a container. The dev compose mounts `./app:/code/app:ro`, `./tests:/code/tests:ro`, etc., so source edits show up live in the running container.
+
+### Configuration
+
+**`.env`** — the single source of runtime configuration. Containers inherit it via `env_file`. Pipelines read it through env-fallback when `SCAFFOLD_VALVES_ENV_OVERRIDE=true`.
+
+**Valve bootstrap** — pattern used by all 5 pipelines: template → live `valves.json` → env fallback → persist. Implemented inline per-pipeline (NOT extracted to a shared module — OWUI auto-discovers any `.py` under `/app/pipelines/` as a candidate pipeline).
+
+**API key sync (5 places)** — `.env`, `pipelines/<each>/valves.json`, `~/.bashrc`, `scaffold-orchestrator` container env, `open-webui-pipelines` container env. Must stay aligned after rotation. `make doctor` checks this; `make sync-valves` wipes baked-in `api_key` from `valves.json` so they fall through to `$SCAFFOLD_API_KEY`.
+
+**OpenAPI snapshot** — `docs/openapi.json`. The v1.0.0 contract anchor. `make openapi-check` enforces no silent drift between the live spec and this file.
+
+### CLI / SDK
+
+**`scaffold-engine-client`** — the Python SDK. Pip-installable. Exports `Client`, `AsyncClient`, the typed exception hierarchy (`ScaffoldError` + 8 subclasses), and `schemas` (vendored byte-equal copy of `app/schemas.py`).
+
+**`scaffold-engine-cli`** — the terminal CLI (binary name: `scaffold`). Click-based. As of Sprint J.1.e, is a thin shim over the SDK that translates SDK exceptions into CLI-friendly error strings.
+
+**`next_actions`** — structured "what to do next" field added to `/exec/status` responses. From `app/modules/recovery.py::NEXT_ACTIONS`. Surfaced to chat (`/results`), CLI (`scaffold jobs status`), and SDK (`client.jobs.status()`).
+
+---
+
 *End of OVERVIEW. Day-to-day operator commands live in `USER_GUIDE.md`. First-touch onboarding in `README.md`.*
