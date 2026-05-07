@@ -2,6 +2,16 @@
 
 Reverse-chronological record of dated fixes, hardening rounds, and architectural changes. Engineer's working log; preserves file paths, function names, and commit hashes.
 
+## 2026-05-07 — Sprint J.1.c: Sync Client typed methods + resource sub-objects
+
+`scaffold_client.Client` now wraps every non-streaming endpoint with typed Python methods, organized as resource sub-objects (`anthropic`/`openai` SDK style).
+
+- **Top-level workflow** — `client.health()`, `client.status()`, `client.logs()`, `client.ideate()`, `client.confirm()`, `client.optimize()`, `client.execute()`, `client.skip()`. Body shapes match the orchestrator's Pydantic input models in `app/schemas.py`. Optional `None` kwargs are dropped from request bodies/params before serialization (no `null` keys leak through).
+- **Resource sub-objects** — `client.jobs.{list,status,delete,update,cleanup,retry}`, `client.dag.{get,create}`, `client.prompts.{list,get,history,update}`, `client.gt.{create,list,search,detail,stats}`, `client.rag.{search,dedup}`, `client.schedule.{list,create,delete}`. Each resource is instantiated once per `Client` so identity is stable (`c.jobs is c.jobs`).
+- **`client.jobs.status(job_id)`** — wraps `GET /exec/status/{job_id}`, the orchestrator's "fetch one job's execution state" endpoint. The CLI's `jobs status` calls a non-existent `GET /jobs/{id}` (pre-existing bug, not fixed in this commit); J.1.e will route the CLI through `client.jobs.status` as part of the SDK switchover.
+- **Streaming endpoints deliberately excluded** — `/research`, `/research/reply`, `/research/pdf`, `/execute/all` are SSE-streamed and land on `AsyncClient` only in J.1.d.
+- **Test count** — 57 SDK tests passing (20 skeleton from J.1.b + 37 typed-method tests added here). Live smoke test confirmed `client.health()`, `client.status()`, `client.jobs.list()` return the expected shapes against the running orchestrator.
+
 ## 2026-05-07 — Sprint J.1.b: SDK package skeleton + schema parity
 
 Pip-installable `scaffold-engine-client` package shipped at `sdk/`, mirroring the `cli/` layout. Skeleton only — typed methods land in J.1.c (sync) and J.1.d (async + SSE).

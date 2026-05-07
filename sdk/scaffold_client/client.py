@@ -1,8 +1,13 @@
 """Synchronous client for the Scaffold Engine orchestrator.
 
-J.1.b ships the constructor + context-manager + a generic ``request()``
-escape hatch. Typed wrapper methods (``health``, ``ideate``, ``confirm``,
-``jobs.*`` …) land in J.1.c — they will reuse the same dispatch path.
+The top-level workflow methods (``ideate``, ``confirm``, ``execute``,
+``optimize``, ``skip``, ``health``, ``status``) live directly on
+``Client``. Larger groupings live on resource sub-objects:
+``client.jobs``, ``client.dag``, ``client.prompts``, ``client.gt``,
+``client.rag``, ``client.schedule``.
+
+SSE-streamed endpoints (``/research``, ``/execute/all``, ``/research/reply``,
+``/research/pdf``) are served by ``AsyncClient`` only — see ``async_client``.
 """
 from __future__ import annotations
 
@@ -11,6 +16,15 @@ from typing import Any
 import httpx
 
 from . import _transport
+from ._resources import (
+    DagResource,
+    GtResource,
+    JobsResource,
+    PromptsResource,
+    RagResource,
+    ScheduleResource,
+    _drop_none,
+)
 from ._version import __version__
 
 
@@ -41,6 +55,19 @@ class Client:
             follow_redirects=True,
         )
 
+        # Resource sub-objects — instantiated once per Client so callers can
+        # rely on identity (``c.jobs is c.jobs``) when stashing references.
+        self.jobs = JobsResource(self)
+        self.dag = DagResource(self)
+        self.prompts = PromptsResource(self)
+        self.gt = GtResource(self)
+        self.rag = RagResource(self)
+        self.schedule = ScheduleResource(self)
+
+    # ------------------------------------------------------------------
+    # Generic dispatch — typed methods delegate to this.
+    # ------------------------------------------------------------------
+
     def request(
         self,
         method: str,
@@ -49,20 +76,113 @@ class Client:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> Any:
-        """Generic dispatch — caller-friendly form of ``httpx.Client.request``.
-
-        Raises a ``ScaffoldError`` subclass on transport failure or
-        non-2xx response. Returns parsed JSON on success.
-
-        Typed wrapper methods (``health``, ``ideate``, …) added in J.1.c
-        delegate here.
-        """
+        """Generic dispatch. Raises ``ScaffoldError`` subclass on failure."""
         try:
             resp = self._http.request(method, path, params=params, json=json)
         except Exception as exc:
             raise _transport.translate_request_error(exc, url=self.base_url) from None
         _transport.raise_for_status(resp)
         return _transport.parse_body(resp)
+
+    # ------------------------------------------------------------------
+    # Top-level workflow methods.
+    # ------------------------------------------------------------------
+
+    def health(self) -> dict[str, Any]:
+        """``GET /health`` — concurrent dep probe (Postgres, Milvus, Redis, Ollama).
+
+        No auth required; safe to call without an API key.
+        """
+        return self.request("GET", "/health")
+
+    def status(self) -> dict[str, Any]:
+        """``GET /status`` — counts of jobs in each lifecycle state plus recents."""
+        return self.request("GET", "/status")
+
+    def logs(self, job_id: str, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """``GET /logs/{job_id}`` — paginated execution logs for one job."""
+        return self.request(
+            "GET", f"/logs/{job_id}", params={"limit": limit, "offset": offset}
+        )
+
+    def ideate(
+        self,
+        idea: str,
+        *,
+        domain: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """``POST /ideate`` — Phase 1: refine + assess feasibility, halt for confirmation."""
+        body = _drop_none({"idea": idea, "domain": domain, "model": model})
+        return self.request("POST", "/ideate", json=body)
+
+    def confirm(
+        self,
+        job_id: str,
+        *,
+        feedback: str | None = None,
+        push_to_github: bool = False,
+    ) -> dict[str, Any]:
+        """``POST /ideate/confirm`` — Phase 2: research → ingest → compile workflow.
+
+        Long-running. Tune ``timeout`` on the ``Client`` constructor before
+        calling — the orchestrator can take minutes against a cold corpus.
+        """
+        body = _drop_none({
+            "job_id": job_id,
+            "feedback": feedback,
+            "push_to_github": push_to_github,
+        })
+        return self.request("POST", "/ideate/confirm", json=body)
+
+    def optimize(
+        self,
+        prompt: str,
+        *,
+        model_optimizer: str | None = None,
+        model_verifier: str | None = None,
+        skip_verify: bool = False,
+    ) -> dict[str, Any]:
+        """``POST /optimize`` — strip → optimize → verify pipeline for a prompt."""
+        body = _drop_none({
+            "prompt": prompt,
+            "model_optimizer": model_optimizer,
+            "model_verifier": model_verifier,
+            "skip_verify": skip_verify,
+        })
+        return self.request("POST", "/optimize", json=body)
+
+    def execute(
+        self,
+        job_id: str,
+        *,
+        skip_optimize: bool = False,
+        skip_verify: bool = False,
+    ) -> dict[str, Any]:
+        """``POST /execute`` — execute the next ready DAG node for a job.
+
+        Single-step. For full topological execution use ``AsyncClient.aiter_execute_all``
+        (J.1.d) which streams SSE progress events.
+        """
+        return self.request(
+            "POST",
+            "/execute",
+            json={
+                "job_id": job_id,
+                "skip_optimize": skip_optimize,
+                "skip_verify": skip_verify,
+            },
+        )
+
+    def skip(self, job_id: str, node_key: str) -> dict[str, Any]:
+        """``POST /skip`` — mark a node as ``skipped`` and unblock downstream work."""
+        return self.request(
+            "POST", "/skip", json={"job_id": job_id, "node_key": node_key}
+        )
+
+    # ------------------------------------------------------------------
+    # Lifecycle.
+    # ------------------------------------------------------------------
 
     def close(self) -> None:
         self._http.close()
