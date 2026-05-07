@@ -301,6 +301,47 @@ Default is `context_only` — works well for most uses. Set per-session at `/ass
 
 If you usually work in Assist Mode rather than autonomous, flip the `assist_after_confirm` valve on `scaffold_router` (Open WebUI admin → pipelines → scaffold_router → valves). After that, every `/confirm` lands directly in Assist Mode without a separate `/assist <job_id>` step.
 
+### D.6 Driving Assist Mode from the terminal or SDK
+
+Every chat verb above has a CLI and SDK equivalent (added in U.8.A). The session is stateless on every surface — paste the `<session_id>` in each call.
+
+```bash
+# CLI walkthrough (parallels /assist in chat)
+scaffold assist start <job_id>
+scaffold assist next  <session_id>
+scaffold assist submit <session_id> <node_key> --output "ran ok"
+scaffold assist submit <session_id> <node_key> --file diff.patch --evidence-kind file_diff
+scaffold assist skip   <session_id> <node_key>
+scaffold assist handoff <session_id> <node_key> --mode single        # streams SSE
+scaffold assist pause   <session_id>
+scaffold assist resume  <session_id>
+scaffold assist abandon <session_id> --yes
+scaffold assist friction add  <session_id> <node_key> "took 3 tries"
+scaffold assist friction list <session_id>
+scaffold assist status <session_id>
+```
+
+```python
+# SDK — sync
+from scaffold_client import Client
+
+with Client("http://localhost:8000", api_key="...") as c:
+    sess = c.assist.start(job_id, replan_policy="disabled")
+    step = c.assist.next(sess["session_id"])
+    c.assist.submit(sess["session_id"], step["node_key"],
+                    output="ran make test, all green",
+                    evidence_kind="command_output")
+
+# SDK — async, with streaming handoff
+from scaffold_client import AsyncClient
+
+async with AsyncClient("http://localhost:8000", api_key="...") as ac:
+    async for evt in ac.aiter_assist_handoff(session_id, "T2", mode="all_remaining"):
+        print(evt["event"], evt["data"])
+```
+
+The streaming `/handoff` endpoint is async-only (mirrors `aiter_research` and `aiter_execute_all`). The CLI `assist handoff` runs an asyncio loop internally and prints events as they arrive — Ctrl-C is safe; the orchestrator finalizes any in-flight node.
+
 ---
 
 ## Scenario E — I want a research job to run on a schedule

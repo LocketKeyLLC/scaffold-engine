@@ -40,7 +40,11 @@ def _resp(status: int, payload=None, text: str = "") -> MagicMock:
 
 
 def test_version_is_exported():
-    assert __version__ == "1.0.0"
+    # Track the package's declared version rather than pinning a literal —
+    # bumping in `_version.py` + `pyproject.toml` should not require a test
+    # edit. Format check ensures we don't accidentally export a non-semver.
+    parts = __version__.split(".")
+    assert len(parts) >= 2 and all(p.isdigit() for p in parts[:2])
 
 
 def test_x_api_key_header_set_when_key_given():

@@ -1594,5 +1594,390 @@ def model_available(ctx: click.Context, as_json: bool) -> None:
         click.echo(f"  {m}")
 
 
+# ---------------------------------------------------------------------------
+# assist group — Assistant Mode (human-in-the-loop) parity with OWUI
+# ---------------------------------------------------------------------------
+
+ASSIST_EPILOG = """
+\b
+Examples:
+  scaffold assist start <job_id>                            open a session
+  scaffold assist next <session_id>                         claim next step
+  scaffold assist submit <sid> <node> --output "ran ok"     record evidence
+  scaffold assist submit <sid> <node> --file diff.patch     evidence from file
+  scaffold assist submit <sid> <node> -                     read evidence from stdin
+  scaffold assist skip <sid> <node>                         skip a step
+  scaffold assist handoff <sid> <node> --mode single        let executor take it
+  scaffold assist pause <sid>                               pause a session
+  scaffold assist resume <sid>                              resume a session
+  scaffold assist abandon <sid>                             abandon (--yes to skip prompt)
+  scaffold assist friction add <sid> <node> "took 3 tries"  log a note
+  scaffold assist friction list <sid>                       show all notes
+  scaffold assist status <sid>                              session + step rollup
+
+The OWUI ``/assist`` chat surface is stateless — paste the session_id in every
+subcommand. CLI mirrors that contract for parity.
+"""
+
+
+@cli.group(help="Assistant Mode — drive a human-in-the-loop session.",
+           epilog=ASSIST_EPILOG)
+def assist() -> None:
+    pass
+
+
+@assist.command("start", help="Open an assist session for a planned job.")
+@click.argument("job_id")
+@click.option("--handoff-policy",
+              type=click.Choice(["manual", "auto_on_skip", "auto_all_remaining"]),
+              default=None,
+              help="Default: manual (server-side default).")
+@click.option("--replan-policy",
+              type=click.Choice(["context_only", "selective", "full", "disabled"]),
+              default=None,
+              help="Default: context_only. Use 'disabled' for tests.")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def assist_start(
+    ctx: click.Context,
+    job_id: str,
+    handoff_policy: str | None,
+    replan_policy: str | None,
+    as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    body: dict = {"job_id": job_id}
+    if handoff_policy:
+        body["handoff_policy"] = handoff_policy
+    if replan_policy:
+        body["replan_policy"] = replan_policy
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.post("/assist/start", json=body)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+
+    sid = data.get("session_id") if isinstance(data, dict) else None
+    click.secho(f"session: {sid}", fg="green")
+    if isinstance(data, dict):
+        if (status := data.get("status")):
+            click.echo(f"  status: {status}")
+        if (counts := data.get("step_counts")):
+            click.echo(f"  steps: {counts}")
+    if sid:
+        _hint(f"scaffold assist next {sid}")
+
+
+@assist.command("status", help="Session + step rollup (alias of `assist get`).")
+@click.argument("session_id")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def assist_status(ctx: click.Context, session_id: str, as_json: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get(f"/assist/{session_id}")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    if not isinstance(data, dict):
+        click.echo(repr(data))
+        return
+    click.echo(f"session: {data.get('id') or session_id}")
+    click.echo(f"  job:    {data.get('job_id', '?')}")
+    click.echo(f"  status: {data.get('status', '?')}")
+    counts = data.get("step_counts") or {}
+    if counts:
+        click.echo(f"  steps:  {counts}")
+
+
+@assist.command("next", help="Claim the next pending step + assembled prompt.")
+@click.argument("session_id")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def assist_next(ctx: click.Context, session_id: str, as_json: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get(f"/assist/{session_id}/next")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    if not isinstance(data, dict):
+        click.echo(repr(data))
+        return
+    node_key = data.get("node_key")
+    if node_key is None:
+        click.echo(f"(no claimable step — session status: {data.get('status', '?')})")
+        if (counts := data.get("step_counts")):
+            click.echo(f"  steps: {counts}")
+        return
+    click.secho(f"node: {node_key}", fg="green")
+    if (prompt := data.get("prompt")):
+        click.echo("---")
+        click.echo(prompt)
+        click.echo("---")
+    _hint(
+        f'scaffold assist submit {session_id} {node_key} --output "<your evidence>"'
+    )
+
+
+def _read_evidence(output: str | None, file: str | None) -> str:
+    """Resolve evidence text from --output / --file / stdin (`-`)."""
+    if file:
+        if file == "-":
+            return sys.stdin.read()
+        with open(file, "r", encoding="utf-8") as f:
+            return f.read()
+    if output is not None:
+        return output
+    return ""
+
+
+@assist.command("submit", help="Record evidence for a step.")
+@click.argument("session_id")
+@click.argument("node_key")
+@click.option("--output", default=None, help="Inline evidence string.")
+@click.option("--file", default=None,
+              help="Read evidence from file (use '-' for stdin).")
+@click.option("--evidence-kind",
+              type=click.Choice([
+                  "text", "command_output", "file_diff",
+                  "screenshot_ref", "url", "none",
+              ]),
+              default="text", show_default=True)
+@click.option("--friction", "friction_note", default=None,
+              help="Optional friction note recorded with the submit.")
+@click.pass_context
+def assist_submit(
+    ctx: click.Context,
+    session_id: str,
+    node_key: str,
+    output: str | None,
+    file: str | None,
+    evidence_kind: str,
+    friction_note: str | None,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    evidence = _read_evidence(output, file)
+    if not evidence and evidence_kind != "none":
+        raise click.UsageError(
+            "evidence is required — pass --output / --file / `--file -` (stdin)"
+        )
+    body: dict = {
+        "node_key": node_key,
+        "output": evidence,
+        "evidence_kind": evidence_kind,
+        "action": "submit",
+    }
+    if friction_note:
+        body["friction_note"] = friction_note
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.post(f"/assist/{session_id}/submit", json=body)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"submitted {node_key}", fg="green")
+    if isinstance(data, dict):
+        if (st := data.get("status")):
+            click.echo(f"  step status: {st}")
+        if data.get("divergence"):
+            click.secho("  divergence detected", fg="yellow")
+    _hint(f"scaffold assist next {session_id}")
+
+
+@assist.command("skip", help="Skip a step (records action='skip').")
+@click.argument("session_id")
+@click.argument("node_key")
+@click.pass_context
+def assist_skip(ctx: click.Context, session_id: str, node_key: str) -> None:
+    cfg = ctx.obj["cfg"]
+    body = {
+        "node_key": node_key,
+        "evidence_kind": "none",
+        "action": "skip",
+    }
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            c.post(f"/assist/{session_id}/submit", json=body)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"skipped {node_key}", fg="green")
+    _hint(f"scaffold assist next {session_id}")
+
+
+@assist.command("handoff", help="Hand a step (or rest of DAG) to the autonomous executor.")
+@click.argument("session_id")
+@click.argument("node_key")
+@click.option("--mode", type=click.Choice(["single", "all_remaining"]),
+              default="single", show_default=True)
+@click.pass_context
+def assist_handoff(
+    ctx: click.Context,
+    session_id: str,
+    node_key: str,
+    mode: str,
+) -> None:
+    """Streams SSE node events from /assist/{sid}/handoff."""
+    import asyncio
+    from scaffold_client import AsyncClient, ScaffoldError
+
+    cfg = ctx.obj["cfg"]
+    click.echo(f"handoff: {node_key} (mode={mode})")
+
+    async def _run() -> None:
+        async with AsyncClient(cfg.api_url, api_key=cfg.api_key, timeout=3600.0) as c:
+            try:
+                async for evt in c.aiter_assist_handoff(
+                    session_id, node_key, mode=mode,
+                ):
+                    name = evt.get("event", "?")
+                    data = evt.get("data", {})
+                    if isinstance(data, dict):
+                        first_key = next(iter(data), None)
+                        snippet = ""
+                        if first_key:
+                            v = data[first_key]
+                            snippet = f"{first_key}={str(v)[:60]}"
+                        click.secho(f"[{name}] ", fg="cyan", nl=False)
+                        click.echo(snippet)
+                    else:
+                        click.secho(f"[{name}] ", fg="cyan", nl=False)
+                        click.echo(str(data)[:80])
+                    if name in ("complete", "done", "node_completed", "all_complete"):
+                        break
+            except ScaffoldError as exc:
+                click.secho(f"handoff failed: {exc}", fg="red", err=True)
+                raise
+
+    try:
+        asyncio.run(_run())
+    except ScaffoldError:
+        sys.exit(1)
+    except KeyboardInterrupt:
+        click.secho("\ninterrupted", fg="yellow")
+        sys.exit(130)
+    _hint(f"scaffold assist status {session_id}")
+
+
+@assist.command("pause", help="Pause an active session.")
+@click.argument("session_id")
+@click.pass_context
+def assist_pause(ctx: click.Context, session_id: str) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            c.post(f"/assist/{session_id}/pause")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"paused {session_id}", fg="green")
+    _hint(f"scaffold assist resume {session_id}")
+
+
+@assist.command("resume", help="Resume a paused session.")
+@click.argument("session_id")
+@click.pass_context
+def assist_resume(ctx: click.Context, session_id: str) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            c.post(f"/assist/{session_id}/resume")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"resumed {session_id}", fg="green")
+    _hint(f"scaffold assist next {session_id}")
+
+
+@assist.command("abandon", help="Abandon a session (DELETE).")
+@click.argument("session_id")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def assist_abandon(ctx: click.Context, session_id: str, yes: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    if not yes:
+        click.confirm(f"Abandon assist session {session_id}?", abort=True)
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            c.delete(f"/assist/{session_id}")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"abandoned {session_id[:8]}", fg="green")
+
+
+@assist.group("friction", help="Append or list friction notes for a session.")
+def assist_friction_group() -> None:
+    pass
+
+
+@assist_friction_group.command("add", help="Record a friction note on a step.")
+@click.argument("session_id")
+@click.argument("node_key")
+@click.argument("note", nargs=-1, required=True)
+@click.pass_context
+def assist_friction_add(
+    ctx: click.Context,
+    session_id: str,
+    node_key: str,
+    note: tuple[str, ...],
+) -> None:
+    cfg = ctx.obj["cfg"]
+    note_text = " ".join(note).strip()
+    if not note_text:
+        raise click.UsageError("note text is required")
+    body = {"node_key": node_key, "note": note_text}
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            c.post(f"/assist/{session_id}/friction", json=body)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.secho("friction recorded", fg="green")
+
+
+@assist_friction_group.command("list", help="List every friction note for a session.")
+@click.argument("session_id")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def assist_friction_list(
+    ctx: click.Context, session_id: str, as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get(f"/assist/{session_id}/friction")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    notes = (data or {}).get("friction", []) if isinstance(data, dict) else []
+    if not notes:
+        click.echo("(no friction notes)")
+        return
+    click.echo(f"{len(notes)} note(s):")
+    for n in notes:
+        node = n.get("node_key", "?")
+        ts = n.get("created_at", "")
+        text = n.get("note", "")
+        click.echo(f"  [{node}] {ts}  {text}")
+
+
 if __name__ == "__main__":
     cli()

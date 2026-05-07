@@ -243,3 +243,87 @@ class ScheduleResource:
     def delete(self, schedule_id: int) -> dict[str, Any]:
         """``DELETE /schedule/{schedule_id}`` — remove a schedule."""
         return self._client.request("DELETE", f"/schedule/{schedule_id}")
+
+
+class AssistResource:
+    """``client.assist.*`` — Assistant Mode (human-in-the-loop) sessions.
+
+    Mirrors ``app/routers/assist.py``. The streaming ``/handoff`` endpoint
+    is intentionally not exposed on the sync client — use
+    ``AsyncClient.aiter_assist_handoff`` for that one.
+    """
+
+    def __init__(self, client: "Client"):
+        self._client = client
+
+    def start(
+        self,
+        job_id: str,
+        *,
+        handoff_policy: str | None = None,
+        replan_policy: str | None = None,
+    ) -> dict[str, Any]:
+        """``POST /assist/start`` — open an assist session for a job."""
+        body = _drop_none({
+            "job_id": job_id,
+            "handoff_policy": handoff_policy,
+            "replan_policy": replan_policy,
+        })
+        return self._client.request("POST", "/assist/start", json=body)
+
+    def get(self, session_id: str) -> dict[str, Any]:
+        """``GET /assist/{session_id}`` — session + step rollup."""
+        return self._client.request("GET", f"/assist/{session_id}")
+
+    def next(self, session_id: str) -> dict[str, Any]:
+        """``GET /assist/{session_id}/next`` — claim next pending step."""
+        return self._client.request("GET", f"/assist/{session_id}/next")
+
+    def submit(
+        self,
+        session_id: str,
+        node_key: str,
+        *,
+        output: str = "",
+        evidence_kind: str = "text",
+        evidence_meta: dict[str, Any] | None = None,
+        action: str = "submit",
+        friction_note: str | None = None,
+    ) -> dict[str, Any]:
+        """``POST /assist/{session_id}/submit`` — record evidence for a step."""
+        body = _drop_none({
+            "node_key": node_key,
+            "output": output,
+            "evidence_kind": evidence_kind,
+            "evidence_meta": evidence_meta or {},
+            "action": action,
+            "friction_note": friction_note,
+        })
+        return self._client.request("POST", f"/assist/{session_id}/submit", json=body)
+
+    def skip(self, session_id: str, node_key: str) -> dict[str, Any]:
+        """Submit with ``action='skip'`` — shorthand for the OWUI ``/assist/skip`` verb."""
+        return self.submit(session_id, node_key, action="skip", evidence_kind="none")
+
+    def pause(self, session_id: str) -> dict[str, Any]:
+        """``POST /assist/{session_id}/pause``."""
+        return self._client.request("POST", f"/assist/{session_id}/pause")
+
+    def resume(self, session_id: str) -> dict[str, Any]:
+        """``POST /assist/{session_id}/resume``."""
+        return self._client.request("POST", f"/assist/{session_id}/resume")
+
+    def abandon(self, session_id: str) -> dict[str, Any]:
+        """``DELETE /assist/{session_id}`` — abandon the session."""
+        return self._client.request("DELETE", f"/assist/{session_id}")
+
+    def add_friction(self, session_id: str, node_key: str, note: str) -> dict[str, Any]:
+        """``POST /assist/{session_id}/friction`` — append a friction note."""
+        return self._client.request(
+            "POST", f"/assist/{session_id}/friction",
+            json={"node_key": node_key, "note": note},
+        )
+
+    def list_friction(self, session_id: str) -> dict[str, Any]:
+        """``GET /assist/{session_id}/friction`` — every recorded note."""
+        return self._client.request("GET", f"/assist/{session_id}/friction")

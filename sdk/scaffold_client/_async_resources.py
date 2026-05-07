@@ -200,3 +200,76 @@ class AsyncScheduleResource:
 
     async def delete(self, schedule_id: int) -> dict[str, Any]:
         return await self._client.request("DELETE", f"/schedule/{schedule_id}")
+
+
+class AsyncAssistResource:
+    """Async mirror of ``AssistResource``. SSE ``/handoff`` lives on
+    ``AsyncClient.aiter_assist_handoff`` (parallels ``aiter_research`` etc.).
+    """
+
+    def __init__(self, client: "AsyncClient"):
+        self._client = client
+
+    async def start(
+        self,
+        job_id: str,
+        *,
+        handoff_policy: str | None = None,
+        replan_policy: str | None = None,
+    ) -> dict[str, Any]:
+        body = _drop_none({
+            "job_id": job_id,
+            "handoff_policy": handoff_policy,
+            "replan_policy": replan_policy,
+        })
+        return await self._client.request("POST", "/assist/start", json=body)
+
+    async def get(self, session_id: str) -> dict[str, Any]:
+        return await self._client.request("GET", f"/assist/{session_id}")
+
+    async def next(self, session_id: str) -> dict[str, Any]:
+        return await self._client.request("GET", f"/assist/{session_id}/next")
+
+    async def submit(
+        self,
+        session_id: str,
+        node_key: str,
+        *,
+        output: str = "",
+        evidence_kind: str = "text",
+        evidence_meta: dict[str, Any] | None = None,
+        action: str = "submit",
+        friction_note: str | None = None,
+    ) -> dict[str, Any]:
+        body = _drop_none({
+            "node_key": node_key,
+            "output": output,
+            "evidence_kind": evidence_kind,
+            "evidence_meta": evidence_meta or {},
+            "action": action,
+            "friction_note": friction_note,
+        })
+        return await self._client.request(
+            "POST", f"/assist/{session_id}/submit", json=body,
+        )
+
+    async def skip(self, session_id: str, node_key: str) -> dict[str, Any]:
+        return await self.submit(session_id, node_key, action="skip", evidence_kind="none")
+
+    async def pause(self, session_id: str) -> dict[str, Any]:
+        return await self._client.request("POST", f"/assist/{session_id}/pause")
+
+    async def resume(self, session_id: str) -> dict[str, Any]:
+        return await self._client.request("POST", f"/assist/{session_id}/resume")
+
+    async def abandon(self, session_id: str) -> dict[str, Any]:
+        return await self._client.request("DELETE", f"/assist/{session_id}")
+
+    async def add_friction(self, session_id: str, node_key: str, note: str) -> dict[str, Any]:
+        return await self._client.request(
+            "POST", f"/assist/{session_id}/friction",
+            json={"node_key": node_key, "note": note},
+        )
+
+    async def list_friction(self, session_id: str) -> dict[str, Any]:
+        return await self._client.request("GET", f"/assist/{session_id}/friction")

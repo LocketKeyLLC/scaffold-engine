@@ -17,6 +17,7 @@ import httpx
 
 from . import _transport
 from ._resources import (
+    AssistResource,
     DagResource,
     GtResource,
     JobsResource,
@@ -63,6 +64,7 @@ class Client:
         self.gt = GtResource(self)
         self.rag = RagResource(self)
         self.schedule = ScheduleResource(self)
+        self.assist = AssistResource(self)
 
     # ------------------------------------------------------------------
     # Generic dispatch — typed methods delegate to this.

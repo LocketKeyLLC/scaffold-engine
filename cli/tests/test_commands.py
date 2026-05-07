@@ -492,3 +492,193 @@ def test_model_available_reads_health_models_loaded(runner):
     assert res.exit_code == 0
     for m in ("qwen3:4b", "qwen2.5:7b", "qwen3-embedding:8b"):
         assert m in res.output
+
+
+# ---------------------------------------------------------------------------
+# assist group (Sprint U.8.A)
+# ---------------------------------------------------------------------------
+
+
+def test_assist_start_posts_job_and_hints_next(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = {"session_id": "sess-1", "status": "active"}
+        res = runner.invoke(cli, ["assist", "start", "job-1"])
+    assert res.exit_code == 0
+    args, kwargs = post.call_args
+    assert args[0] == "/assist/start"
+    assert kwargs["json"] == {"job_id": "job-1"}
+    assert "sess-1" in res.output
+    assert "scaffold assist next sess-1" in res.output
+
+
+def test_assist_start_forwards_policies(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = {"session_id": "s"}
+        runner.invoke(cli, [
+            "assist", "start", "job-1",
+            "--handoff-policy", "auto_on_skip",
+            "--replan-policy", "disabled",
+        ])
+    _, kwargs = post.call_args
+    assert kwargs["json"]["handoff_policy"] == "auto_on_skip"
+    assert kwargs["json"]["replan_policy"] == "disabled"
+
+
+def test_assist_status_renders_rollup(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = {
+            "id": "sess-1", "job_id": "job-1", "status": "active",
+            "step_counts": {"pending": 2, "applied": 1},
+        }
+        res = runner.invoke(cli, ["assist", "status", "sess-1"])
+    assert res.exit_code == 0
+    assert "sess-1" in res.output
+    assert "job-1" in res.output
+    assert "active" in res.output
+    assert "pending" in res.output
+
+
+def test_assist_next_prints_node_and_prompt(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = {
+            "session_id": "sess-1",
+            "node_key": "T2",
+            "prompt": "Do the thing.",
+        }
+        res = runner.invoke(cli, ["assist", "next", "sess-1"])
+    assert res.exit_code == 0
+    assert "node: T2" in res.output
+    assert "Do the thing." in res.output
+    assert "scaffold assist submit sess-1 T2" in res.output
+
+
+def test_assist_next_handles_no_claimable_step(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = {
+            "status": "active", "session_id": "sess-1",
+            "node_key": None, "step_counts": {"applied": 5},
+        }
+        res = runner.invoke(cli, ["assist", "next", "sess-1"])
+    assert res.exit_code == 0
+    assert "no claimable step" in res.output
+
+
+def test_assist_submit_inline_output(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = {"status": "applied"}
+        res = runner.invoke(cli, [
+            "assist", "submit", "sess-1", "T2", "--output", "did the thing",
+        ])
+    assert res.exit_code == 0
+    args, kwargs = post.call_args
+    assert args[0] == "/assist/sess-1/submit"
+    assert kwargs["json"] == {
+        "node_key": "T2",
+        "output": "did the thing",
+        "evidence_kind": "text",
+        "action": "submit",
+    }
+    assert "submitted T2" in res.output
+
+
+def test_assist_submit_reads_file_evidence(runner, tmp_path):
+    f = tmp_path / "diff.patch"
+    f.write_text("--- a\n+++ b\n")
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = {"status": "applied"}
+        runner.invoke(cli, [
+            "assist", "submit", "sess-1", "T2",
+            "--file", str(f), "--evidence-kind", "file_diff",
+        ])
+    _, kwargs = post.call_args
+    assert kwargs["json"]["output"] == "--- a\n+++ b\n"
+    assert kwargs["json"]["evidence_kind"] == "file_diff"
+
+
+def test_assist_submit_requires_evidence_unless_kind_none(runner):
+    with patch("scaffold_cli.main.Client"):
+        res = runner.invoke(cli, ["assist", "submit", "sess-1", "T2"])
+    assert res.exit_code != 0
+    assert "evidence is required" in res.output
+
+
+def test_assist_skip_posts_skip_action(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = {"status": "skipped"}
+        res = runner.invoke(cli, ["assist", "skip", "sess-1", "T2"])
+    assert res.exit_code == 0
+    args, kwargs = post.call_args
+    assert args[0] == "/assist/sess-1/submit"
+    assert kwargs["json"]["action"] == "skip"
+    assert kwargs["json"]["evidence_kind"] == "none"
+
+
+def test_assist_pause_and_resume(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = {}
+        runner.invoke(cli, ["assist", "pause", "sess-1"])
+        assert post.call_args.args[0] == "/assist/sess-1/pause"
+        runner.invoke(cli, ["assist", "resume", "sess-1"])
+        assert post.call_args.args[0] == "/assist/sess-1/resume"
+
+
+def test_assist_abandon_requires_confirmation_without_yes(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        delete = ClientCls.return_value.__enter__.return_value.delete
+        # User declines the prompt — input='n\n'
+        res = runner.invoke(cli, ["assist", "abandon", "sess-1"], input="n\n")
+    assert res.exit_code != 0
+    delete.assert_not_called()
+
+
+def test_assist_abandon_with_yes_skips_prompt(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        delete = ClientCls.return_value.__enter__.return_value.delete
+        delete.return_value = {"abandoned": True}
+        res = runner.invoke(cli, ["assist", "abandon", "sess-1", "--yes"])
+    assert res.exit_code == 0
+    assert delete.call_args.args[0] == "/assist/sess-1"
+
+
+def test_assist_friction_add_records_note(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        post = ClientCls.return_value.__enter__.return_value.post
+        post.return_value = {"recorded": True}
+        res = runner.invoke(cli, [
+            "assist", "friction", "add", "sess-1", "T2", "took", "3", "tries",
+        ])
+    assert res.exit_code == 0
+    args, kwargs = post.call_args
+    assert args[0] == "/assist/sess-1/friction"
+    assert kwargs["json"] == {"node_key": "T2", "note": "took 3 tries"}
+
+
+def test_assist_friction_list_renders_notes(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = {
+            "session_id": "sess-1",
+            "friction": [
+                {"node_key": "T1", "created_at": "2026-05-07", "note": "docs lied"},
+                {"node_key": "T2", "created_at": "2026-05-07", "note": "took 3 tries"},
+            ],
+        }
+        res = runner.invoke(cli, ["assist", "friction", "list", "sess-1"])
+    assert res.exit_code == 0
+    assert "docs lied" in res.output
+    assert "took 3 tries" in res.output
+
+
+def test_assist_friction_list_empty_state(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = {
+            "session_id": "sess-1", "friction": [],
+        }
+        res = runner.invoke(cli, ["assist", "friction", "list", "sess-1"])
+    assert res.exit_code == 0
+    assert "(no friction notes)" in res.output

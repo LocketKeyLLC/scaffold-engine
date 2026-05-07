@@ -2088,6 +2088,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | 12 | Cost + latency telemetry | pending |
 | U-sprint track | Post-v1.0.0 UX polish, U.1–U.6 (§17.10) | done 2026-05-07 |
 | U.7 | UX gap audit + CLI parity sweep, API → v1.1.0 (§17.11) | done 2026-05-07 |
+| U.8.A | Assist Mode parity in SDK + CLI, SDK → v1.2.0 (§17.12) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2198,6 +2199,27 @@ User-driven audit after surfacing the visible "`/status` shows bare UUIDs, no ti
 **Test-suite delta:** 899 → 961 passing on the orchestrator; CLI 38 → 51 passing. Pre-existing 14 failures (test_cleanup × 6, test_execution_handler × 1, test_retrieval_golden × 1 TDD case, test_scaffold_router_commands × 4, test_scaffold_router_helpers × 1, test_schedule_command × 1) are unchanged — none are regressions from this sprint.
 
 **Versioning note:** F5 removes two paths from a v1.0.0 contract that was already pushed to origin. We bumped to v1.1.0 and treat `/research/history*` as removed-without-deprecation; no external SDK consumers existed (the SDK never wrapped them). Future contract-affecting changes should run a deprecation cycle.
+
+### 17.12 Sprint U.8.A — Assist Mode parity in SDK + CLI (2026-05-07)
+
+First slice of the U.8 "every component reachable from every interface" track. Audit found Assistant Mode was OWUI-chat-only outside curl — no SDK resource, no CLI subcommands. U.8.A closes that gap with no orchestrator-side changes (the contract was already complete at v1.1.0); the work is purely additive on the client side.
+
+| Layer | Addition | File |
+|---|---|---|
+| SDK sync | `client.assist` resource: `start`, `get`, `next`, `submit`, `skip`, `pause`, `resume`, `abandon`, `add_friction`, `list_friction` | `sdk/scaffold_client/_resources.py` |
+| SDK async | `aclient.assist` mirror + `aclient.aiter_assist_handoff` SSE helper | `sdk/scaffold_client/_async_resources.py`, `sdk/scaffold_client/async_client.py` |
+| CLI | `scaffold assist` group: `start / status / next / submit / skip / handoff / pause / resume / abandon / friction add|list` | `cli/scaffold_cli/main.py` |
+
+`assist.skip` is a documented shorthand for `submit(action='skip', evidence_kind='none')`. The SSE `/handoff` endpoint stays AsyncClient-only (matches `aiter_research` etc.). The CLI's `assist handoff` runs an asyncio loop internally and prints node-level events as they arrive.
+
+**Versioning:**
+- SDK 1.1.0 → 1.2.0 (additive resource — minor bump).
+- CLI 0.1.0 → 0.2.0 (its own minor track) and SDK floor pinned `>=1.2,<2.0`.
+- Orchestrator API stays at v1.1.0 (no contract change).
+
+**Test-suite delta:** SDK 88 → 109 passing (+21 assist tests); CLI 78 → 93 passing (+15 assist subcommand tests). Orchestrator suite unchanged — no router edits in this sprint.
+
+**Stale-test fix folded in:** `sdk/tests/test_skeleton.py::test_version_is_exported` was hard-coded to `"1.0.0"` and would have failed at U.7 if anyone had re-run the SDK suite. Replaced with a semver-shape check so future minor bumps don't require a test edit.
 
 ---
 

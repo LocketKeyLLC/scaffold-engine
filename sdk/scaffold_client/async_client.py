@@ -25,6 +25,7 @@ import httpx
 
 from . import _transport
 from ._async_resources import (
+    AsyncAssistResource,
     AsyncDagResource,
     AsyncGtResource,
     AsyncJobsResource,
@@ -65,6 +66,7 @@ class AsyncClient:
         self.gt = AsyncGtResource(self)
         self.rag = AsyncRagResource(self)
         self.schedule = AsyncScheduleResource(self)
+        self.assist = AsyncAssistResource(self)
 
     # ------------------------------------------------------------------
     # Generic dispatch
@@ -281,6 +283,27 @@ class AsyncClient:
         }
         async for event in self._stream(
             "POST", "/execute/all", json=body, include_heartbeats=include_heartbeats,
+        ):
+            yield event
+
+    async def aiter_assist_handoff(
+        self,
+        session_id: str,
+        node_key: str,
+        *,
+        mode: Literal["single", "all_remaining"] = "single",
+        include_heartbeats: bool = False,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream ``POST /assist/{session_id}/handoff`` — autonomous step takeover.
+
+        ``mode='single'`` runs one node and returns control to the operator;
+        ``mode='all_remaining'`` runs the rest of the DAG. Yields the same
+        node-level SSE events as ``aiter_execute_all``.
+        """
+        body = {"node_key": node_key, "mode": mode}
+        async for event in self._stream(
+            "POST", f"/assist/{session_id}/handoff",
+            json=body, include_heartbeats=include_heartbeats,
         ):
             yield event
 
