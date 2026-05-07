@@ -16,6 +16,7 @@ from app.providers.base import (
     ModelResponse,
     ProviderCapabilityError,
     ProviderError,
+    ProviderUnavailableError,
 )
 from app.providers.ollama import OllamaProvider
 
@@ -259,6 +260,151 @@ async def test_ollama_provider_list_models_delegates():
     with patch.object(model_router, "list_models", side_effect=fake):
         result = await p.list_models()
     assert result == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# Sprint I.1 — OllamaProvider.stream_chat (line-delimited JSON)
+# ---------------------------------------------------------------------------
+class _FakeOllamaStreamResp:
+    def __init__(self, status_code=200, lines=None, body=b""):
+        self.status_code = status_code
+        self._lines = lines or []
+        self._body = body
+
+    async def aread(self):
+        return self._body
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+
+class _FakeOllamaStreamCtx:
+    def __init__(self, resp):
+        self._resp = resp
+
+    async def __aenter__(self):
+        return self._resp
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _fake_ollama_stream(status_code=200, lines=None, body=b""):
+    def _factory(*args, **kwargs):
+        return _FakeOllamaStreamCtx(
+            _FakeOllamaStreamResp(status_code, lines, body),
+        )
+    return _factory
+
+
+@pytest.mark.asyncio
+async def test_ollama_stream_chat_yields_message_content():
+    """Line-delimited JSON: each frame is a complete JSON object whose
+    ``message.content`` is the next text delta."""
+    from app import model_router
+    from unittest.mock import MagicMock as _MM
+    fake_client = _MM()
+    fake_client.stream = _fake_ollama_stream(lines=[
+        '{"model":"qwen3:4b","message":{"role":"assistant","content":"Hi "}}',
+        '{"model":"qwen3:4b","message":{"role":"assistant","content":"there"}}',
+        '{"model":"qwen3:4b","message":{"role":"assistant","content":""},'
+        '"done":true,"total_duration":12345}',
+    ])
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        p = OllamaProvider()
+        chunks = [c async for c in p.stream_chat(
+            "qwen3:4b", [{"role": "user", "content": "hi"}],
+        )]
+    assert chunks == ["Hi ", "there"]
+
+
+@pytest.mark.asyncio
+async def test_ollama_stream_chat_stops_when_done_true():
+    """``done: true`` is the terminator — anything after it must NOT be
+    yielded, even if more frames arrive on the wire."""
+    from app import model_router
+    from unittest.mock import MagicMock as _MM
+    fake_client = _MM()
+    fake_client.stream = _fake_ollama_stream(lines=[
+        '{"message":{"content":"first"}}',
+        '{"message":{"content":""},"done":true}',
+        '{"message":{"content":"should-not-appear"}}',
+    ])
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        p = OllamaProvider()
+        chunks = [c async for c in p.stream_chat(
+            "qwen3:4b", [{"role": "user", "content": "x"}],
+        )]
+    assert chunks == ["first"]
+
+
+@pytest.mark.asyncio
+async def test_ollama_stream_chat_skips_malformed_and_blank_lines():
+    """A single malformed JSON frame must not crash the stream — Ollama
+    sometimes interleaves heartbeat output that isn't valid JSON. Blank
+    lines are also no-ops."""
+    from app import model_router
+    from unittest.mock import MagicMock as _MM
+    fake_client = _MM()
+    fake_client.stream = _fake_ollama_stream(lines=[
+        '{"message":{"content":"ok-1"}}',
+        "",
+        "NOT JSON",
+        '{"message":{"content":"ok-2"}}',
+        '{"message":{"content":""},"done":true}',
+    ])
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        p = OllamaProvider()
+        chunks = [c async for c in p.stream_chat(
+            "qwen3:4b", [{"role": "user", "content": "x"}],
+        )]
+    assert chunks == ["ok-1", "ok-2"]
+
+
+@pytest.mark.asyncio
+async def test_ollama_stream_chat_raises_on_non_200():
+    """Upstream errors must surface as ProviderUnavailableError so the
+    enrichment in model_router._format_provider_error can catch them on
+    the role= path. Status + body snippet are included in the message."""
+    from app import model_router
+    from unittest.mock import MagicMock as _MM
+    fake_client = _MM()
+    fake_client.stream = _fake_ollama_stream(
+        status_code=500,
+        body=b'{"error":"out of memory"}',
+    )
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        p = OllamaProvider()
+        with pytest.raises(ProviderUnavailableError, match="ollama HTTP 500"):
+            agen = p.stream_chat("qwen3:4b", [{"role": "user", "content": "x"}])
+            await agen.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_ollama_stream_chat_payload_sets_stream_true():
+    """The payload must include stream=True or Ollama returns a single
+    non-streaming JSON instead of the line-delimited shape we parse."""
+    from app import model_router
+    from unittest.mock import MagicMock as _MM
+    captured: dict = {}
+
+    def _capture(*args, **kwargs):
+        captured.update(kwargs)
+        return _FakeOllamaStreamCtx(_FakeOllamaStreamResp(
+            200, lines=['{"message":{"content":""},"done":true}']
+        ))
+
+    fake_client = _MM()
+    fake_client.stream = _capture
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        p = OllamaProvider()
+        async for _ in p.stream_chat(
+            "qwen3:4b", [{"role": "user", "content": "x"}],
+        ):
+            pass
+    assert captured["json"]["stream"] is True
+    assert captured["json"]["model"] == "qwen3:4b"
 
 
 # ---------------------------------------------------------------------------

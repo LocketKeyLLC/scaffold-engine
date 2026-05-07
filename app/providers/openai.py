@@ -15,16 +15,18 @@ Implementation choices
   matches the orchestrator's locked 512-dim shape. Models that ignore this
   parameter (e.g. ``text-embedding-ada-002``) will return their native
   dim — the orchestrator's downstream truncate_and_normalize handles that.
-- Streaming and native tool calls are advertised as supported but the
-  concrete impls are deferred to later sprints (uniformity + tool-call
-  abstraction). Calling ``stream_chat`` today raises ProviderCapabilityError
-  via the base class default.
+- Streaming is implemented as of Sprint I.1 (``stream_chat`` consumes
+  the OpenAI SSE shape — ``data: {...}\\n\\n`` chunks plus ``[DONE]``
+  terminator — and yields ``str`` deltas, matching OllamaProvider's
+  unified streaming contract). Native tool calls remain deferred to a
+  later sprint.
 """
 from __future__ import annotations
 
+import json as _json
 import logging
 import time
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -43,7 +45,7 @@ class OpenAIProvider(LLMProvider):
     name = "openai"
     supports_chat = True
     supports_embeddings = True
-    supports_streaming = True   # advertised; concrete stream_chat deferred
+    supports_streaming = True
     supports_native_tools = True  # advertised; concrete tool_call deferred
 
     # ------------------------------------------------------------------
@@ -162,6 +164,82 @@ class OpenAIProvider(LLMProvider):
         # spec guarantees only that the index field marks the original slot.
         items.sort(key=lambda x: x.get("index", 0))
         return [item.get("embedding", []) for item in items]
+
+    # ------------------------------------------------------------------
+    # stream_chat — Sprint I.1
+    # ------------------------------------------------------------------
+
+    async def stream_chat(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        timeout: int = 600,
+        **opts: Any,
+    ) -> AsyncIterator[str]:
+        """Stream content deltas from /chat/completions (stream=True).
+
+        Parses OpenAI's Server-Sent-Events (``data: {...}\\n\\n`` lines plus
+        a ``data: [DONE]\\n\\n`` terminator), yielding the
+        ``choices[0].delta.content`` of each chunk as a ``str`` — the
+        unified provider streaming shape (matches OllamaProvider).
+
+        ``ProviderUnavailableError`` is raised on missing API key (via
+        ``_auth_headers``) or non-200 upstream — surfacing the OpenAI error
+        message verbatim so users can act. Same retry-policy stance as
+        OllamaProvider: streaming does NOT retry on mid-stream failure
+        (caller can re-issue the call if they want to).
+        """
+        from app.config import settings
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        for k, v in opts.items():
+            if k == "fallback":  # Ollama-specific; not part of OpenAI's API
+                continue
+            payload[k] = v
+
+        headers = self._auth_headers()  # may raise ProviderUnavailableError
+        effective_timeout = timeout if timeout != 600 else settings.openai_timeout
+
+        async with self._client().stream(
+            "POST", "/chat/completions",
+            json=payload, headers=headers, timeout=effective_timeout,
+        ) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                snippet = body[:200].decode("utf-8", errors="replace")
+                raise ProviderUnavailableError(
+                    f"openai HTTP {resp.status_code}: {snippet}"
+                )
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    # OpenAI also emits ``event: ...`` and blank lines. Skip
+                    # anything that isn't a data frame.
+                    continue
+                data_str = line[len("data:"):].strip()
+                if data_str == "[DONE]":
+                    return
+                try:
+                    chunk = _json.loads(data_str)
+                except ValueError:
+                    # Partial frame — should never happen with aiter_lines
+                    # but defensive: skip and keep streaming.
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content")
+                if content:
+                    yield content
 
     # ------------------------------------------------------------------
     # list_models (GET /models)

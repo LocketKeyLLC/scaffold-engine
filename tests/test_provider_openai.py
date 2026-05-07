@@ -321,15 +321,146 @@ async def test_list_models_returns_empty_when_key_empty():
 
 
 # ---------------------------------------------------------------------------
-# Streaming + tool-calls — advertised but impl deferred (Sprints I+)
+# Streaming — Sprint I.1 — SSE parsing + terminator + error paths
 # ---------------------------------------------------------------------------
+class _FakeStreamResp:
+    def __init__(self, status_code=200, lines=None, body=b""):
+        self.status_code = status_code
+        self._lines = lines or []
+        self._body = body
+
+    async def aread(self):
+        return self._body
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+
+class _FakeStreamCtx:
+    def __init__(self, resp):
+        self._resp = resp
+
+    async def __aenter__(self):
+        return self._resp
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _fake_stream(status_code=200, lines=None, body=b""):
+    """Build a function-mock for ``client.stream`` that returns a context
+    manager yielding our fake response."""
+    def _factory(*args, **kwargs):
+        return _FakeStreamCtx(_FakeStreamResp(status_code, lines, body))
+    return _factory
+
+
 @pytest.mark.asyncio
-async def test_stream_chat_raises_capability_error_until_implemented():
-    """The base-class default raises ProviderCapabilityError on stream_chat.
-    OpenAIProvider doesn't override it yet (deferred to streaming-uniformity
-    sprint). When implementation lands, this test should be replaced with a
-    real streaming test."""
+async def test_stream_chat_yields_content_deltas(fake_client):
+    fake_client.stream = _fake_stream(lines=[
+        'data: {"choices": [{"delta": {"role": "assistant"}}]}',
+        'data: {"choices": [{"delta": {"content": "hello"}}]}',
+        'data: {"choices": [{"delta": {"content": " world"}}]}',
+        'data: [DONE]',
+    ])
     p = OpenAIProvider()
-    with pytest.raises(ProviderCapabilityError, match="streaming"):
-        agen = p.stream_chat("gpt-4o-mini", [{"role": "user", "content": "x"}])
+    chunks: list[str] = []
+    async for chunk in p.stream_chat("gpt-4o-mini", [{"role": "user", "content": "hi"}]):
+        chunks.append(chunk)
+    assert chunks == ["hello", " world"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_stops_at_done_terminator(fake_client):
+    """Anything after `data: [DONE]` must NOT be yielded — the stream
+    is over the moment the terminator arrives."""
+    fake_client.stream = _fake_stream(lines=[
+        'data: {"choices": [{"delta": {"content": "yes"}}]}',
+        'data: [DONE]',
+        'data: {"choices": [{"delta": {"content": "should-not-appear"}}]}',
+    ])
+    p = OpenAIProvider()
+    chunks = [c async for c in p.stream_chat("m", [{"role": "user", "content": "x"}])]
+    assert chunks == ["yes"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_skips_non_data_lines(fake_client):
+    """OpenAI sometimes emits ``event:`` headers and blank lines in SSE.
+    The stream parser must ignore anything that isn't a data frame."""
+    fake_client.stream = _fake_stream(lines=[
+        "",
+        "event: ping",
+        "",
+        'data: {"choices": [{"delta": {"content": "ok"}}]}',
+        "",
+        'data: [DONE]',
+    ])
+    p = OpenAIProvider()
+    chunks = [c async for c in p.stream_chat("m", [{"role": "user", "content": "x"}])]
+    assert chunks == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_skips_chunks_with_empty_or_missing_content(fake_client):
+    """Some SSE chunks carry only role/finish_reason metadata with no
+    delta.content — those must not produce empty string yields."""
+    fake_client.stream = _fake_stream(lines=[
+        'data: {"choices": [{"delta": {"role": "assistant"}}]}',
+        'data: {"choices": [{"delta": {"content": ""}}]}',
+        'data: {"choices": []}',
+        'data: {"choices": [{"delta": {"content": "real"}}]}',
+        'data: [DONE]',
+    ])
+    p = OpenAIProvider()
+    chunks = [c async for c in p.stream_chat("m", [{"role": "user", "content": "x"}])]
+    assert chunks == ["real"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_raises_provider_unavailable_on_non_200(fake_client):
+    fake_client.stream = _fake_stream(
+        status_code=401,
+        body=b'{"error":{"message":"invalid api key"}}',
+    )
+    p = OpenAIProvider()
+    with pytest.raises(ProviderUnavailableError, match="openai HTTP 401"):
+        agen = p.stream_chat("m", [{"role": "user", "content": "x"}])
         await agen.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_raises_when_key_empty():
+    """Missing OPENAI_API_KEY must surface as ProviderUnavailableError on
+    the first await — same contract as chat_completion."""
+    from app.config import settings
+    from pydantic import SecretStr
+    saved = settings.openai_api_key
+    settings.openai_api_key = SecretStr("")
+    try:
+        p = OpenAIProvider()
+        with pytest.raises(ProviderUnavailableError, match="OPENAI_API_KEY"):
+            agen = p.stream_chat("m", [{"role": "user", "content": "x"}])
+            await agen.__anext__()
+    finally:
+        settings.openai_api_key = saved
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_payload_marks_stream_true(fake_client):
+    """The wire payload must set stream=True so the OpenAI server emits
+    the SSE shape (a missing flag silently downgrades to a single JSON
+    response)."""
+    captured: dict = {}
+
+    def _capture(*args, **kwargs):
+        captured.update(kwargs)
+        return _FakeStreamCtx(_FakeStreamResp(200, lines=['data: [DONE]']))
+
+    fake_client.stream = _capture
+    p = OpenAIProvider()
+    async for _ in p.stream_chat("m", [{"role": "user", "content": "x"}]):
+        pass
+    assert captured["json"]["stream"] is True
+    assert captured["headers"]["Authorization"] == "Bearer sk-test-fake"

@@ -10,16 +10,27 @@ class delegates to those functions instead of re-implementing them so that:
   2. Behavior stays bit-identical for existing callers; the provider
      abstraction only adds a routing seam, not a second implementation.
 
+The exception is ``stream_chat`` (Sprint I.1): streaming has different
+retry semantics — a mid-stream failure can't cleanly fall back without
+restarting from the first token — so it goes direct to the shared HTTP
+client and handles its own timeout/error path. ``chat_completion`` keeps
+the retry+fallback path for the non-streaming case.
+
 Adding non-Ollama providers later (OpenAI, Anthropic, …) means writing a
 self-contained module — those backends do not share Ollama's HTTP shape so
 they get their own dispatch.
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any
+from typing import Any, AsyncIterator
 
-from app.providers.base import LLMProvider, ModelResponse
+from app.providers.base import (
+    LLMProvider,
+    ModelResponse,
+    ProviderUnavailableError,
+)
 
 logger = logging.getLogger("scaffold.providers.ollama")
 
@@ -103,6 +114,72 @@ class OllamaProvider(LLMProvider):
     async def list_models(self) -> list[str]:
         from app import model_router
         return await model_router.list_models()
+
+    # ------------------------------------------------------------------
+    # stream_chat — Sprint I.1
+    # ------------------------------------------------------------------
+
+    async def stream_chat(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        timeout: int = 600,
+        **opts: Any,
+    ) -> AsyncIterator[str]:
+        """Stream message-content deltas from /api/chat.
+
+        Yields plain ``str`` chunks — the unified provider streaming shape.
+        Non-200 responses raise :class:`ProviderUnavailableError` (with the
+        upstream snippet so users can see what Ollama said). Malformed
+        JSON lines are skipped silently — Ollama occasionally interleaves
+        non-JSON heartbeat output and a single bad line shouldn't kill
+        the stream.
+
+        Retry + fallback are intentionally NOT applied here: a mid-stream
+        failure would force a full re-run from the start, which is rarely
+        what the caller wants. ``chat_completion`` keeps the retry path.
+        """
+        from app import model_router
+        from app.config import settings
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        url = f"{settings.ollama_base_url}/api/chat"
+        effective_timeout = (
+            timeout if timeout != 600 else model_router._timeout_for(model)
+        )
+        client = model_router._get_client()
+
+        async with client.stream(
+            "POST", url, json=payload, timeout=effective_timeout,
+        ) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                snippet = body[:200].decode("utf-8", errors="replace")
+                raise ProviderUnavailableError(
+                    f"ollama HTTP {resp.status_code}: {snippet}"
+                )
+            async for line in resp.aiter_lines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except ValueError:
+                    # Heartbeat or partial frame — skip and keep streaming.
+                    continue
+                content = (chunk.get("message") or {}).get("content", "") or ""
+                if content:
+                    yield content
+                if chunk.get("done"):
+                    return
 
 
 # Register the singleton at import time. ``app/providers/__init__.py``
