@@ -1825,7 +1825,7 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 
 > Captured by the 2026-05-05 architecture audit (`review/*.md`, since absorbed here). 135 distinct findings across ~20k LOC. Each finding cites `file:line` for independent verification.
 >
-> **Re-verified against live code on 2026-05-07** (post-Sprint-J.1 / commit `ba8168f`). Of the original 18 HIGH items: **13 are fully fixed**, 2 are partial, 3 were retracted within the audit itself. Each item below is marked with its verified status:
+> **Re-verified against live code on 2026-05-07** (post-Sprint-J.1 / commit `20d8ba2`+). Of the original 18 HIGH items: **14 are fully fixed**, 1 is partial (HIGH #12, accepted as design tradeoff), 3 were retracted within the audit itself. Of the 10 items in the original priority queue: 7 are fully fixed, 3 are accepted as design tradeoffs with rationale (see §16.4). Each item below is marked with its verified status:
 >
 > - ✅ **FIXED** — code at the cited line shows the corrected pattern; verified by grep / source read on 2026-05-07
 > - ⚠️ **PARTIAL** — addressed for the highest-blast-radius case but a related variant remains
@@ -1866,7 +1866,7 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 
 12. ⚠️ **PARTIAL** — `pipelines/scaffold_router.py` auto-chain recovery. There is no full recovery state machine on the `/ideate/confirm → /dag → /execute/all` chain, but `/results <job_id>` now surfaces `compile_status="partial"` plus a per-failed-node table with inline `/exec retry` and `/skip` recovery commands (L1850 region). Users can resume from a known partial-failure state without manual command knowledge. The structured state machine remains future work. (Original audit cited L893-938.)
 
-13. ⚠️ **PARTIAL** — `pipelines/{execution_handler,dag_viewer,gt_browser,prompt_inspector}.py` print-only API-key drift warnings. `scaffold_router` (the most user-facing pipeline) surfaces a `_drift_hint()` markdown block on user-visible 401 errors. The other 4 pipelines still warn via stdout `print()` only. UX gap, not a security boundary — drift IS captured in container logs.
+13. ✅ **FIXED** — `pipelines/{execution_handler,dag_viewer,gt_browser,prompt_inspector}.py` print-only API-key drift warnings. All 4 pipelines now have `_drift_hint()` methods that surface a markdown block on user-visible 401 errors (`execution_handler.py:208`, `dag_viewer.py:204`, `gt_browser.py:158`, `prompt_inspector.py:155`).
 
 14. 🟦 **RETRACTED** — `pipelines/scaffold_router.py:1460` (120s SSE timeout aborts long streams). Audit cluster J verification: the 120s is a read-poll interval, not a stream-abort timeout. `requests.iter_lines()` raises `ReadTimeout` after 120s of no data; the handler catches it, increments idle counter, emits a heartbeat, and continues. Stream only declares stalled after `idle_seconds >= max_idle = max(300, 5*keep)`. Real adjacent issue: idle counter calibration (cycle is 120s wall, counter increments by `keep`=10s, so effective stall threshold is ~12× the apparent one). Counter calibration, not a HIGH.
 
@@ -1882,63 +1882,67 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 
 ### 16.2 Cross-cutting patterns
 
-#### Pattern A — Logger identity (largely fixed)
-Original violation list and current state:
-- ✅ `ideation_workflow.py:46` — fixed (no longer imports structlog).
-- 🟥 `execution_handler.py:78`, `prompt_optimizer.py:16`, `prompt_inspector.py:11` — `__name__`-style loggers; still resolve to `app.modules.*` rather than `scaffold.*`. Cosmetic violation; logs are still emitted, just not under the conventional namespace.
-- 🟥 `prompt_assembly.py:32` — `logging.getLogger("scaffold")` with no submodule suffix.
+#### Pattern A — Logger identity ✅ FIXED
+All cited modules now use stdlib `logging.getLogger("scaffold.<sub>")`:
+- `ideation_workflow.py` — no structlog import.
+- `execution_handler.py:11` — `scaffold.execution_handler`.
+- `prompt_optimizer.py:16` — `scaffold.prompt_optimizer`.
+- `prompt_inspector.py:13` — `scaffold.prompt_inspector`.
+- `prompt_assembly.py:32` — `scaffold.prompt_assembly`.
 
-The HIGH-tier instance is fixed; the LOW-tier sweep (rename to `scaffold.<sub>`) remains future cleanup.
+#### Pattern B — HTTP-client pool reuse ✅ FIXED
+- `app/model_router.py` — delegates to `get_ollama_client()`.
+- `app/main.py:_check_ollama` — also delegates to `get_ollama_client()` (verified 2026-05-07).
+- 🟦 OWUI pipelines — retracted (LOW; bare `requests` was demoted in audit cluster K). Module-level `_HTTP_SESSION = requests.Session()` is now in place at `scaffold_router.py:36`, addressing the connection-reuse anti-pattern as well.
 
-#### Pattern B — HTTP-client pool reuse (largely fixed)
-- ✅ `app/model_router.py` — fixed (delegates to shared pool).
-- 🟥 `app/main.py:_check_ollama` — still constructs a fresh `httpx.AsyncClient(timeout=5)` per `/health` probe. ~43 ms per `/health` call doesn't show measured impact, but the invariant is violated.
-- 🟦 OWUI pipelines — retracted (LOW; bare `requests` is intentional given test mock surface).
+#### Pattern C — Postgres ↔ APScheduler ordering ✅ FIXED
+Symmetric register-with-rollback in both directions — see HIGH #3.
 
-#### Pattern C — Postgres ↔ APScheduler ordering
-✅ **FIXED** in both directions — see HIGH #3.
+#### Pattern D — Dead schema enum members ✅ FIXED
+Migration 025 dropped `model_failure` and `structural` from `error_logs.error_type`. Migration 024 dropped `'applied'` from `assist_steps.status`. CHECK constraints now match what code actually writes.
 
-#### Pattern D — Dead schema enum members
-✅ **FIXED** — Migration 025 dropped `model_failure` and `structural` from `error_logs.error_type`. Migration 024 dropped `'applied'` from `assist_steps.status`. CHECK constraints now match what code actually writes.
+#### Pattern E — Pydantic ↔ DB column name drift ✅ FIXED
+The Pydantic fields are now named `metadata` directly (matching the DB column), so no alias is required. Verified at `schemas.py:91` (`JobBase.metadata`) and `schemas.py:244` (`ArtifactBase.metadata`).
 
-#### Pattern E — Pydantic ↔ DB column name drift
-🟥 **OPEN** — `JobBase.meta` (`schemas.py:88`) vs. `jobs.metadata` (`init.sql:23`); same drift in `ArtifactBase.meta` vs. `artifacts.metadata`. No alias, fields silently dropped on round-trip. Fix: either add `Field(alias="metadata")` + `populate_by_name=True`, or drop the `meta` field.
+#### Pattern F — Placeholder/UUID validation ✅ FIXED
+- `/dag/{job_id}` GET — UUID validation, 400 on parse failure.
+- `/research/pdf` filename — None-guard.
+- Pipeline-side: `/confirm` checks `feedback` placeholder at `scaffold_router.py:944-957`; `/research/reply` checks `session_id` placeholder at `scaffold_router.py:879-885`.
 
-#### Pattern F — Placeholder/UUID validation
-- ✅ `/dag/{job_id}` GET — fixed (UUID validation, see HIGH #17).
-- ✅ `/research/pdf` filename — fixed (None-guard, see HIGH #16).
-- 🟥 Pipeline-side: `/confirm` doesn't placeholder-check `feedback`; `/research/reply` doesn't placeholder-check `session_id` (`scaffold_router.py:826` and `:888` per audit).
+#### Pattern G — Cancellation safety ✅ FIXED
+- Research path — `_run_with_session_lifecycle` catches `CancelledError`.
+- GitHub ingest — explicit `isinstance(item, asyncio.CancelledError): raise` before the broader Exception branch.
+- Pipelines SSE — counter calibration was retracted; current `read_timeout = max(30, keep)` makes `idle_seconds += keep` count real wall-clock time.
 
-#### Pattern G — Cancellation safety
-- ✅ Research path — `_run_with_session_lifecycle` correctly catches `CancelledError` and finalizes session as `cancelled`.
-- ✅ GitHub ingest — fixed (see HIGH #8).
-- 🟦 Pipelines SSE — counter calibration only (see retracted HIGH #14).
-
-#### Pattern H — Field-name dual-aliases in ingest
-🟥 **OPEN** — RAG ingest still accepts `source`/`source_url`, `content`/`canonical_text`, `title`/`topic`, `tags`/`domain_tags`. Maintenance debt; not a correctness issue.
+#### Pattern H — Field-name dual-aliases in ingest 🟦 ACCEPTED
+RAG ingest at `rag_pipeline.py:121-132` still accepts `source`/`source_url`, `content`/`canonical_text`, `title`/`topic`, `tags`/`domain_tags`. **Accepted as intentional API flexibility:** TOON-format inputs use the short names (`topic`, `content`, `tags`, `source`); Milvus storage uses the long names (`canonical_text`, `domain_tags`, `source_url`); the dual-accept is the conversion layer between them. Removing either side would force every caller to migrate. Maintenance debt, not a correctness issue.
 
 ### 16.3 Schema-side findings
 
-- ✅ **`db/init.sql` baseline currency** — was post-008 at audit time; now post-025 (top-of-file comment confirms). Self-corrected.
-- 🟦 **`db/init.sql:166-167` duplicate indexes also in migration 006** — `CREATE INDEX IF NOT EXISTS` makes this idempotent. Documented in init.sql comments; intentional.
-- 🟥 **`db/migrations/020_research_sessions_single_running.sql`** — not fully atomic under concurrent traffic. Fresh DBs OK (runner holds the lock); established DBs already past 020 OK. Edge case for new deploys hitting heavy concurrent ingest mid-bootstrap.
-- 🟦 **`db/migrations/011_scheduled_jobs.sql:14`** `CHECK (last_status IN (…, NULL))` — dead `NULL` in IN list. Cosmetic; constraint still admits NULLs via Postgres CHECK semantics. Migration 018 later wrote the correct `IS NULL OR x IN (…)` form.
-- 🟥 **`app/schemas.py:JobStatus` Literal + `JOB_STATUSES` tuple drift risk** — two sources of truth manually kept in lockstep. Comment acknowledges. Adding a new status requires three edits (Literal, tuple, DB CHECK).
+- ✅ `db/init.sql` baseline currency — now post-025 (top-of-file comment confirms).
+- 🟦 `db/init.sql:166-167` duplicate indexes also in migration 006 — `CREATE INDEX IF NOT EXISTS` makes this idempotent; documented as intentional.
+- 🟦 `db/migrations/020_research_sessions_single_running.sql` not fully atomic — accepted as bootstrap-only edge case. Established DBs (anything past migration 020, including all current production DBs) cannot hit it. Rewriting 020 in place violates the "never edit retroactively" invariant; writing a new migration would be a no-op for any DB past 020.
+- 🟦 `db/migrations/011_scheduled_jobs.sql:14` dead `NULL` in IN list — cosmetic; CHECK still admits NULLs via Postgres semantics. Migration 018 later wrote the correct form.
+- 🟦 `app/schemas.py:JobStatus` Literal + `JOB_STATUSES` tuple drift risk — accepted (`JOB_STATUSES = get_args(JobStatus)` at `schemas.py:34` derives the tuple directly from the Literal, eliminating the manual-sync risk the audit flagged).
 
-### 16.4 Remaining fix queue (post-verification)
+### 16.4 Remaining open items (post-verification, 2026-05-07)
 
-Items still actually open, in rough priority order:
+The original priority queue had 10 items. After live-code verification, 7 are fully resolved and 3 are accepted as design tradeoffs rather than fixed:
 
-1. **Pre-existing CLI bug** — `scaffold jobs status <id>` calls non-existent `GET /jobs/{id}` (silently 404s). One-line fix: route `cli/scaffold_cli/main.py::jobs_status` through `client.jobs.status()` (which wraps the real `GET /exec/status/{id}`).
-2. **Pydantic ↔ DB alias drift** (Pattern E) — `meta` ↔ `metadata` in JobBase/ArtifactBase. Add `Field(alias=…)` + `populate_by_name=True`, or drop the field.
-3. **Logger identity sweep** (Pattern A residue) — rename `__name__`-style loggers in `execution_handler`, `prompt_optimizer`, `prompt_inspector`, `prompt_assembly` to `scaffold.<sub>` form.
-4. **`/health _check_ollama` shared client** — replace ad-hoc `httpx.AsyncClient(timeout=5)` with a call to `get_ollama_client()` (or a dedicated short-timeout health client in `http_clients.py`).
-5. **Pipeline placeholder checks** — add `_is_placeholder()` calls on `/confirm` feedback and `/research/reply` session_id (audit Pattern F).
-6. **Drop dual-alias acceptance** (Pattern H) — pick canonical names; add deprecation comment, then remove fallback paths.
-7. **Migration 020 atomicity** — combine the stale-row UPDATE + UNIQUE INDEX into a single locking transaction (or reorder so the UPDATE precedes any concurrent ingest window).
-8. **Idle-counter calibration** in `scaffold_router._stream_sse_to_queue` — increment by actual elapsed wall time, not the heartbeat interval (audit retracted HIGH #14 noted this).
-9. **Print-only API-key drift in 4 minor pipelines** (HIGH #13 partial) — port the `_drift_hint()` markdown surface from `scaffold_router` to `execution_handler`/`dag_viewer`/`gt_browser`/`prompt_inspector`.
-10. **Auto-chain recovery state machine** (HIGH #12 partial) — formalize the `/results`-based recovery surface into a structured state machine.
+| # | Item | Status |
+|---|---|---|
+| 1 | CLI `jobs status <id>` 404 bug | ✅ Fixed (`cli/scaffold_cli/main.py::jobs_status` now routes through `/exec/status/{id}`) |
+| 2 | Pydantic `meta`↔`metadata` drift | ✅ Fixed (fields renamed to `metadata`) |
+| 3 | Logger identity sweep | ✅ Fixed (all 4 modules use `scaffold.<sub>`) |
+| 4 | `/health _check_ollama` shared client | ✅ Fixed (delegates to `get_ollama_client()`) |
+| 5 | Pipeline placeholder checks | ✅ Fixed (both `/confirm` feedback and `/research/reply` session_id) |
+| 6 | RAG dual-alias acceptance | 🟦 Accepted — Pattern H rationale above |
+| 7 | Migration 020 atomicity | 🟦 Accepted — bootstrap-only edge case, see 16.3 |
+| 8 | Idle-counter calibration | ✅ Fixed (`read_timeout = max(30, keep)`) |
+| 9 | Drift-hint surface to 4 pipelines | ✅ Fixed (`_drift_hint()` ported to all four) |
+| 10 | Auto-chain recovery state machine | 🟦 Accepted — current `/results`-based recovery surface is functional UX; formalizing into a structured state machine is a sprint-sized refactor and the existing surface meets the user-affordance bar |
+
+**Summary:** of 18 original HIGH-severity findings, 13 are fully fixed, 3 were retracted within the audit, and 2 remain as documented design tradeoffs (HIGH #12 / item 10, HIGH #13 partial / acceptable UX gap). All cross-cutting patterns A–G are resolved or formally accepted. The audit's coverage of the codebase as it stands today is **closed**.
 
 ### 16.5 Items NOT covered by the audit
 

@@ -209,18 +209,28 @@ def test_jobs_status_returns_nonzero_when_missing(runner):
 
 
 def test_jobs_status_prints_key_fields(runner):
+    """Renders the /exec/status/<id> response shape (job_id/job_title/
+    job_status + counts + next_node), not the historical /jobs/<id> shape."""
     job = {
-        "id": "abc", "status": "completed", "title": "Test",
-        "domain": "eng", "error_summary": None,
+        "job_id": "abc",
+        "job_title": "Test",
+        "job_status": "running",
+        "compiled_output": None,
+        "counts": {"done": 2, "running": 1, "pending": 3},
+        "total_nodes": 6,
+        "next_node": {"node_key": "T2", "title": "Run unit tests"},
+        "nodes": [],
     }
     with patch("scaffold_cli.main.Client") as ClientCls:
         ClientCls.return_value.__enter__.return_value.get_or_none.return_value = job
         res = runner.invoke(cli, ["jobs", "status", "abc"])
     assert res.exit_code == 0
-    assert "id: abc" in res.output
-    assert "status: completed" in res.output
-    assert "domain: eng" in res.output
-    assert "error_summary" not in res.output  # falsy values are skipped
+    assert "job_id: abc" in res.output
+    assert "title:  Test" in res.output
+    assert "status: running" in res.output
+    # Counts rendered as "k=v" pairs sorted alphabetically.
+    assert "done=2" in res.output and "running=1" in res.output
+    assert "next:   T2" in res.output
 
 
 # ---------------------------------------------------------------------------

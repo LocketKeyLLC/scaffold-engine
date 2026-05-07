@@ -256,7 +256,11 @@ def jobs_status(ctx: click.Context, job_id: str, as_json: bool) -> None:
     cfg = ctx.obj["cfg"]
     try:
         with Client(cfg.api_url, cfg.api_key) as c:
-            data = c.get_or_none(f"/jobs/{job_id}")
+            # /exec/status/<id> is the orchestrator's "single job's execution
+            # state" endpoint; it returns job metadata + DAG node summary.
+            # The earlier CLI shipped GET /jobs/<id> which never existed and
+            # silently 404'd into get_or_none() — fixed here.
+            data = c.get_or_none(f"/exec/status/{job_id}")
     except CLIError as exc:
         click.secho(str(exc), fg="red", err=True)
         sys.exit(1)
@@ -269,13 +273,29 @@ def jobs_status(ctx: click.Context, job_id: str, as_json: bool) -> None:
         click.echo(_json.dumps(data, indent=2))
         return
 
-    if isinstance(data, dict):
-        for key in ("id", "status", "title", "idea", "domain", "error_summary"):
-            val = data.get(key)
-            if val:
-                click.echo(f"{key}: {val}")
-    else:
+    if not isinstance(data, dict):
         click.echo(_json.dumps(data, indent=2))
+        return
+
+    click.echo(f"job_id: {data.get('job_id', job_id)}")
+    if (title := data.get("job_title")):
+        click.echo(f"title:  {title}")
+    if (status := data.get("job_status")):
+        click.echo(f"status: {status}")
+
+    counts = data.get("counts") or {}
+    if counts:
+        rendered = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+        click.echo(f"nodes:  {data.get('total_nodes', sum(counts.values()))} ({rendered})")
+
+    if (nxt := data.get("next_node")):
+        click.echo(
+            f"next:   {nxt.get('node_key')} — {nxt.get('title', '')[:60]}"
+        )
+
+    if (compiled := data.get("compiled_output")):
+        click.echo("\ncompiled_output:")
+        click.echo(compiled[:2000] + ("\n[… truncated]" if len(compiled) > 2000 else ""))
 
 
 if __name__ == "__main__":
