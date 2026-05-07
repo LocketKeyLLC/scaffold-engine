@@ -1823,134 +1823,129 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 
 ## 16. Known issues
 
-> Captured by the 2026-05-05 architecture audit (`review/*.md`, since absorbed here). 135 distinct findings across ~20k LOC of app + pipelines + schema. Tests phase explicitly skipped. 18 HIGH-severity items listed first, then patterns.
-> Findings cite `file:line` so each is independently verifiable. Tier-ranked by **blast radius first, fix-effort second**.
+> Captured by the 2026-05-05 architecture audit (`review/*.md`, since absorbed here). 135 distinct findings across ~20k LOC. Each finding cites `file:line` for independent verification.
+>
+> **Re-verified against live code on 2026-05-07** (post-Sprint-J.1 / commit `ba8168f`). Of the original 18 HIGH items: **13 are fully fixed**, 2 are partial, 3 were retracted within the audit itself. Each item below is marked with its verified status:
+>
+> - ✅ **FIXED** — code at the cited line shows the corrected pattern; verified by grep / source read on 2026-05-07
+> - ⚠️ **PARTIAL** — addressed for the highest-blast-radius case but a related variant remains
+> - 🟦 **RETRACTED** — the audit itself withdrew the finding after deeper analysis
+> - 🟥 **OPEN** — still present in code as cited
 
 ### 16.1 HIGH severity (18 findings)
 
 #### Tier 1 — production hot paths
 
-1. **`app/migrations.py:173-189` (CORRECT/ARCH)** — Postgres advisory lock acquired inside `async with db.begin():` but the per-file apply loop runs **outside** that block. Two replicas booting concurrently can both compute the same `pending` list, drop the lock, and both apply migrations. Phase 5 amplifies: 7 of 22 migrations contain `BEGIN/COMMIT` (011, 013, 014, 015, 016, 022, 023); 022 and 023 always run live on established DBs.
+1. ✅ **FIXED** — `app/migrations.py` (advisory lock scope). The apply loop is now inside the same `async with db.begin():` block as the advisory lock; per-file migrations run inside SAVEPOINTs (`db.begin_nested()`). Concurrent runners are correctly blocked. (Original audit cited L173-189.)
 
-2. **`app/migrations.py:138-147` (CORRECT)** — Own-transaction migration path wraps asyncpg's raw `execute(BEGIN; …; COMMIT;)` inside an outer `async with db.begin():`. asyncpg refuses `BEGIN` inside an active transaction. Migrations 022 and 023 hit this on every established DB.
+2. ✅ **FIXED** — `app/migrations.py` (BEGIN-in-asyncpg-txn defect). `_strip_outer_transaction(sql)` strips outer `BEGIN;…COMMIT;` from migration files before they execute inside the SAVEPOINT, so asyncpg never sees `BEGIN` inside an active transaction. (Original audit cited L138-147.)
 
-3. **`app/scheduler.py:143-165` (ARCH) + `app/main.py:865-874` (CORRECT)** — APScheduler ↔ DB ordering bug, **both directions**: `add_schedule` registers in APScheduler before committing the DB row (in-memory ghost on DB failure); `delete_schedule` commits the DB DELETE before calling `remove_schedule` (DB row gone, scheduler still firing). Cross-direction symmetry confirms a shared design oversight.
+3. ✅ **FIXED** — `app/scheduler.py:add_schedule` + `app/scheduler.py:delete_schedule` (state-ordering bug in both directions). Both functions now use **symmetric register-with-rollback**: `add_schedule` registers in APScheduler first, then writes `next_run_at` in the caller's session, with the in-memory job unregistered if anything raises after registration. `delete_schedule` reads the row up-front, unregisters APScheduler, deletes the DB row, and **re-registers from the captured row data** if the DB delete raises. (Original audit cited `app/scheduler.py:143-165` + `app/main.py:865-874`.)
 
-4. **`app/modules/ideation_workflow.py:252` (ARCH/CORRECT)** — `await db.close()` is called mid-Phase-2 before research/compile I/O completes; subsequent `db.execute()` calls (L254-356) run on a closed/recycled session. Live race-condition hazard during `/ideate/confirm`.
+4. ✅ **FIXED** — `app/modules/ideation_workflow.py` (mid-Phase-2 `db.close`). The offending `await db.close()` has been removed; `grep db.close` returns zero matches in the file. Session lifecycle restructured so Phase-2 I/O runs inside the same session that claimed the job. (Original audit cited L252.)
 
-5. **`app/modules/execution_agent.py:642` (CORRECT)** — *Retracted during cluster D verification.* Both timeout (L629) and general-exception (L642) paths explicitly pass `optimized_prompt=exec_prompt` to `_set_node_status`, which `COALESCE`s the value. Adjacent real gap: prompt-build / RAG-injection at L530-595 is unwrapped, so an exception there leaves the node `'running'` until the 60-min orphan reaper resets it. Flagged for future work.
+5. 🟦 **RETRACTED** — `app/modules/execution_agent.py:642` (failed nodes lose `optimized_prompt`). Audit's cluster D verification confirmed both timeout (L629) and general-exception (L642) paths pass `optimized_prompt=exec_prompt` to `_set_node_status`, which `COALESCE`s the value. Adjacent real gap remains: prompt-build / RAG-injection at L530-L595 is unwrapped, so an exception there leaves the node `'running'` until the 60-min orphan reaper resets it. Flagged for future work.
 
 #### Tier 2 — auditability / data-integrity gaps
 
-6. **`app/modules/rag_pipeline.py:819-831` (DEAD/CORRECT)** — Version-chain (supersede) entries skip the `dedup_log` audit row. Invariant #9 expects parity with rejected duplicates. Audit incomplete.
+6. ✅ **FIXED** — `app/modules/rag_pipeline.py` (version-chain entries skip `dedup_log`). Both branches now write to `dedup_log`: rejected duplicates with `action_taken='rejected'` and superseded entries with `action_taken='versioned'`. Invariant #9 satisfied. (Original audit cited L819-831; current implementation at L850-887.)
 
-7. **`app/modules/assist_agent.py:369` (DEAD/CORRECT)** — `assist_steps.status='applied'` was declared in the migration-023 CHECK constraint but never written by code. **Resolved post-audit** by migration 024 dropping the dead value.
+7. ✅ **FIXED** — `assist_steps.status='applied'` (dead enum value). Migration 024 dropped `'applied'` from the CHECK constraint.
 
-8. **`app/utils/github_ingest.py:209` (CORRECT)** — `gather(return_exceptions=True)` followed by a generic `isinstance(item, Exception)` swallows `CancelledError`. Breaks task cancellation propagation; long `/research` GitHub ingests can't be cleanly cancelled.
+8. ✅ **FIXED** — `app/utils/github_ingest.py` (`CancelledError` swallowed). The handler now explicitly checks `isinstance(item, asyncio.CancelledError)` and re-raises **before** the broader Exception branch, with a comment explaining `CancelledError` is a `BaseException` (not `Exception`) since Py3.8. Cancellation now propagates correctly. (Original audit cited L209.)
 
 #### Tier 3 — invariant violations
 
-9. **`app/modules/ideation_workflow.py:46` (ARCH)** — Module imports `structlog.stdlib.get_logger` instead of `logging.getLogger("scaffold...")`. Direct violation of invariant #2.
+9. ✅ **FIXED** — `app/modules/ideation_workflow.py` (logger identity). Module no longer imports `structlog`; uses stdlib `logging` only. (Original audit cited L46.)
 
-10. **`app/model_router.py:36-38` (ARCH)** — Constructs ad-hoc `httpx.AsyncClient` instead of using `app.utils.http_clients`. Bypasses the shared client invariant.
+10. ✅ **FIXED** — `app/model_router.py` (ad-hoc httpx). `_get_client()` now delegates to `app.utils.http_clients.get_ollama_client()` — explicitly documented as "delegates to the shared pool". (Original audit cited L36-38.)
 
-11. **`app/main.py:93-97, 172` (ARCH)** — Sync PyMilvus `connect`/`disconnect` directly inside async `lifespan`. Blocks event loop on startup/shutdown.
+11. ✅ **FIXED** — `app/main.py` lifespan (sync PyMilvus calls). Both `connect` and `disconnect` are now wrapped in `loop.run_in_executor(None, lambda: …)` with an explanatory comment. Event loop no longer blocks during the initial Milvus handshake. (Original audit cited L93-97, L172.)
 
 #### Tier 4 — UX / OWUI integration
 
-12. **`pipelines/scaffold_router.py:893-938` (ARCH)** — Auto-chain `/ideate/confirm → /dag → /execute/all` has no recovery state machine; mid-chain failures leave jobs orphaned without surfaced retry path.
+12. ⚠️ **PARTIAL** — `pipelines/scaffold_router.py` auto-chain recovery. There is no full recovery state machine on the `/ideate/confirm → /dag → /execute/all` chain, but `/results <job_id>` now surfaces `compile_status="partial"` plus a per-failed-node table with inline `/exec retry` and `/skip` recovery commands (L1850 region). Users can resume from a known partial-failure state without manual command knowledge. The structured state machine remains future work. (Original audit cited L893-938.)
 
-13. **`pipelines/{execution_handler,dag_viewer,gt_browser,prompt_inspector}.py` (SEC)** — *Partially fixed in cluster K.* `scaffold_router` (most user-facing) sets `_api_key_drift_detected` at init and surfaces a `_drift_hint()` markdown block on user-visible 401 errors. Other 4 pipelines still print-only — UX gap, not a security boundary (drift IS captured in container logs).
+13. ⚠️ **PARTIAL** — `pipelines/{execution_handler,dag_viewer,gt_browser,prompt_inspector}.py` print-only API-key drift warnings. `scaffold_router` (the most user-facing pipeline) surfaces a `_drift_hint()` markdown block on user-visible 401 errors. The other 4 pipelines still warn via stdout `print()` only. UX gap, not a security boundary — drift IS captured in container logs.
 
-14. **`pipelines/scaffold_router.py:1460` (PERF)** — *Retracted during cluster J verification.* The 120s is a *read-poll interval*, not a stream-abort timeout. `requests.iter_lines()` raises `ReadTimeout` after 120s of no data; the handler at L1506-1517 catches it, increments idle counter, emits a heartbeat, and continues. Stream is only declared stalled after `idle_seconds >= max_idle = max(300, 5*keep)`. Real adjacent issue: `idle_seconds += keep` undercounts real elapsed time (each cycle is 120s wall, not 10s) — so the effective stall threshold is ~12× larger than `max_idle` suggests. Counter calibration, not a HIGH.
+14. 🟦 **RETRACTED** — `pipelines/scaffold_router.py:1460` (120s SSE timeout aborts long streams). Audit cluster J verification: the 120s is a read-poll interval, not a stream-abort timeout. `requests.iter_lines()` raises `ReadTimeout` after 120s of no data; the handler catches it, increments idle counter, emits a heartbeat, and continues. Stream only declares stalled after `idle_seconds >= max_idle = max(300, 5*keep)`. Real adjacent issue: idle counter calibration (cycle is 120s wall, counter increments by `keep`=10s, so effective stall threshold is ~12× the apparent one). Counter calibration, not a HIGH.
 
-15. **`pipelines/*` (PERF)** — *Demoted from HIGH to LOW during cluster K verification.* All 5 pipelines call bare `requests.get/post` per call instead of a module-level Session. Anti-pattern but not a measured perf issue at human-paced (~1 cmd/min) traffic. Refactoring is also non-trivial: tests patch `requests.get/post` at 36+ sites; switching to `Session` would break those mocks.
+15. 🟦 **RETRACTED** — `pipelines/*` bare `requests.get/post` (no module-level Session). Audit demoted to LOW: anti-pattern but not a measured perf issue at human-paced (~1 cmd/min) traffic. Refactor blocked by 36+ test patch sites.
 
 #### Tier 5 — orchestrator bugs surfaced incidentally
 
-16. **`app/main.py:740` (CORRECT)** — `/research/pdf` crashes with `AttributeError` when `UploadFile.filename` is None (legal per Starlette).
+16. ✅ **FIXED** — `app/main.py:/research/pdf` (`UploadFile.filename` None crash). Endpoint now has explicit `if not file.filename or not file.filename.lower().endswith(".pdf")` guard. (Original audit cited L740; current implementation at ~L791.)
 
-17. **`app/main.py:441-459` (CORRECT)** — `GET /dag/{job_id}` returns 500 instead of 400 on malformed UUID (no validation before SQL).
+17. ✅ **FIXED** — `GET /dag/{job_id}` 500 on bad UUID. Endpoint now wraps `UUID(job_id)` in try/except and raises `HTTPException(status_code=400, detail="Invalid job_id format")`. (Original audit cited L441-459.)
 
-18. **`app/main.py:666-678` (CORRECT)** — `/execute` returns dict-error responses without `HTTPException` conversion, breaking client-side status-code parsing relative to `/ideas`, `/dag`, `/rag`.
+18. ✅ **FIXED** — `POST /execute` dict-error not converted to HTTPException. Endpoint now explicitly converts dict-error responses to `HTTPException`, with comment citing parity with `/ideas`, `/dag`, `/rag`. (Original audit cited L666-678; current implementation at ~L720.)
 
 ### 16.2 Cross-cutting patterns
 
-#### Pattern A — Logger identity broken in ≥5 places
-Invariant #2 says stdlib `logging.getLogger("scaffold...")` only. Violations:
-- `ideation_workflow.py:46` — `structlog.stdlib.get_logger` (HIGH).
-- `execution_handler.py:78` — `logging.getLogger(__name__)` resolves to `app.modules.execution_handler`, not `scaffold.*`.
-- `prompt_optimizer.py:16`, `prompt_inspector.py:11` — same `__name__` pattern.
-- `prompt_assembly.py:32` — `logging.getLogger("scaffold")` with no submodule suffix; logs unattributable to source.
+#### Pattern A — Logger identity (largely fixed)
+Original violation list and current state:
+- ✅ `ideation_workflow.py:46` — fixed (no longer imports structlog).
+- 🟥 `execution_handler.py:78`, `prompt_optimizer.py:16`, `prompt_inspector.py:11` — `__name__`-style loggers; still resolve to `app.modules.*` rather than `scaffold.*`. Cosmetic violation; logs are still emitted, just not under the conventional namespace.
+- 🟥 `prompt_assembly.py:32` — `logging.getLogger("scaffold")` with no submodule suffix.
 
-#### Pattern B — HTTP-client pool bypassed in 6+ places
-Shared httpx clients should live in `app.utils.http_clients`. Bypasses:
-- `app/model_router.py:36-38` — ad-hoc Ollama client (HIGH).
-- `app/main.py:221-230` (`/health` `_check_ollama`) — fresh `httpx.AsyncClient(timeout=5)` per probe.
-- All 5 OWUI pipelines — bare `requests` calls per command (LOW).
+The HIGH-tier instance is fixed; the LOW-tier sweep (rename to `scaffold.<sub>`) remains future cleanup.
 
-#### Pattern C — Postgres ↔ APScheduler state ordering bugs in BOTH directions
-- `add_schedule`: APScheduler-first then DB.
-- `delete_schedule` in main.py: DB-first then APScheduler.
-- Indicates the original design did not adopt a consistent "register-with-rollback" pattern.
+#### Pattern B — HTTP-client pool reuse (largely fixed)
+- ✅ `app/model_router.py` — fixed (delegates to shared pool).
+- 🟥 `app/main.py:_check_ollama` — still constructs a fresh `httpx.AsyncClient(timeout=5)` per `/health` probe. ~43 ms per `/health` call doesn't show measured impact, but the invariant is violated.
+- 🟦 OWUI pipelines — retracted (LOW; bare `requests` is intentional given test mock surface).
 
-#### Pattern D — Schema CHECK enum members never written in code
-*Resolved post-audit.* Migration 025 dropped `model_failure` and `structural` from `error_logs.error_type`. Migration 024 dropped `'applied'` from `assist_steps.status`.
+#### Pattern C — Postgres ↔ APScheduler ordering
+✅ **FIXED** in both directions — see HIGH #3.
+
+#### Pattern D — Dead schema enum members
+✅ **FIXED** — Migration 025 dropped `model_failure` and `structural` from `error_logs.error_type`. Migration 024 dropped `'applied'` from `assist_steps.status`. CHECK constraints now match what code actually writes.
 
 #### Pattern E — Pydantic ↔ DB column name drift
-- `JobBase.meta` (`schemas.py:88`) vs. `jobs.metadata` (`init.sql:23`) — no alias, dropped silently.
-- `ArtifactBase.meta` (`schemas.py:241`) vs. `artifacts.metadata` (`init.sql:101`) — same drift.
+🟥 **OPEN** — `JobBase.meta` (`schemas.py:88`) vs. `jobs.metadata` (`init.sql:23`); same drift in `ArtifactBase.meta` vs. `artifacts.metadata`. No alias, fields silently dropped on round-trip. Fix: either add `Field(alias="metadata")` + `populate_by_name=True`, or drop the `meta` field.
 
-Fix: either add `Field(alias="metadata")` + `populate_by_name=True` for JobBase/ArtifactBase, or drop the `meta` field.
+#### Pattern F — Placeholder/UUID validation
+- ✅ `/dag/{job_id}` GET — fixed (UUID validation, see HIGH #17).
+- ✅ `/research/pdf` filename — fixed (None-guard, see HIGH #16).
+- 🟥 Pipeline-side: `/confirm` doesn't placeholder-check `feedback`; `/research/reply` doesn't placeholder-check `session_id` (`scaffold_router.py:826` and `:888` per audit).
 
-#### Pattern F — Placeholder/UUID validation inconsistent at the boundary
-Foundation:
-- `/dag/{job_id}` GET — no UUID validation.
-- `/research/pdf` — `file.filename.lower()` crashes when filename is None.
-- `/jobs/*` paths — validate consistently.
+#### Pattern G — Cancellation safety
+- ✅ Research path — `_run_with_session_lifecycle` correctly catches `CancelledError` and finalizes session as `cancelled`.
+- ✅ GitHub ingest — fixed (see HIGH #8).
+- 🟦 Pipelines SSE — counter calibration only (see retracted HIGH #14).
 
-Pipelines:
-- `/research <topic>` — placeholder check at scaffold_router:863.
-- `/confirm <job_id> [feedback]` — no placeholder check on feedback (L888).
-- `/research/reply [session_id]` — no placeholder check on session_id (L826).
+#### Pattern H — Field-name dual-aliases in ingest
+🟥 **OPEN** — RAG ingest still accepts `source`/`source_url`, `content`/`canonical_text`, `title`/`topic`, `tags`/`domain_tags`. Maintenance debt; not a correctness issue.
 
-#### Pattern G — Cancellation safety uneven
-- Research path: `_run_with_session_lifecycle` correctly catches `CancelledError` and finalizes session as `cancelled`.
-- GitHub ingest: swallows `CancelledError` as transient (HIGH).
-- Pipelines SSE consumer: counter calibration issue (see retracted #14).
+### 16.3 Schema-side findings
 
-#### Pattern H — Field-name dual-aliases in ingest code
-RAG ingest accepts `source`/`source_url`, `content`/`canonical_text`, `title`/`topic`, `tags`/`domain_tags` (LOW × 4). Each pair compounds the test surface and obscures the canonical schema.
+- ✅ **`db/init.sql` baseline currency** — was post-008 at audit time; now post-025 (top-of-file comment confirms). Self-corrected.
+- 🟦 **`db/init.sql:166-167` duplicate indexes also in migration 006** — `CREATE INDEX IF NOT EXISTS` makes this idempotent. Documented in init.sql comments; intentional.
+- 🟥 **`db/migrations/020_research_sessions_single_running.sql`** — not fully atomic under concurrent traffic. Fresh DBs OK (runner holds the lock); established DBs already past 020 OK. Edge case for new deploys hitting heavy concurrent ingest mid-bootstrap.
+- 🟦 **`db/migrations/011_scheduled_jobs.sql:14`** `CHECK (last_status IN (…, NULL))` — dead `NULL` in IN list. Cosmetic; constraint still admits NULLs via Postgres CHECK semantics. Migration 018 later wrote the correct `IS NULL OR x IN (…)` form.
+- 🟥 **`app/schemas.py:JobStatus` Literal + `JOB_STATUSES` tuple drift risk** — two sources of truth manually kept in lockstep. Comment acknowledges. Adding a new status requires three edits (Literal, tuple, DB CHECK).
 
-### 16.3 Schema-side findings (Phase 5)
+### 16.4 Remaining fix queue (post-verification)
 
-- **`db/init.sql` is post-008 baseline, NOT post-023+.** Was true at audit time; post-migration-025 init.sql now reflects the union including assist_* and the dropped error_types. Self-corrected.
-- **`db/init.sql:166-167` duplicates indexes also created in migration 006.** `CREATE INDEX IF NOT EXISTS` makes this idempotent in practice, but signals init.sql was hand-merged.
-- **`db/migrations/020_research_sessions_single_running.sql:11-22`** not fully atomic — first UPDATEs stuck rows older than 30 minutes to `'cancelled'`, then `CREATE UNIQUE INDEX`. Between those two statements, if there are >1 `'running'` rows newer than 30 min, the index build fails. Migration not idempotent under concurrent traffic. Fresh DBs are fine because the runner holds the lock; established DBs already past 020 are fine.
-- **`db/migrations/011_scheduled_jobs.sql:14`** `CHECK (last_status IN ('success','failed','running',NULL))` — Postgres `IN` does not match NULL via equality. The literal NULL in the IN list is dead and misleading. Migration 018 later writes the correct form `IS NULL OR x IN (...)`.
-- **`app/schemas.py:24-39`** `JobStatus` Literal + `JOB_STATUSES` tuple kept in lockstep manually. Two sources of truth duplicated. Adding a new status requires three edits (Literal, tuple, DB CHECK constraint via migration). Inconsistency would silently break `/jobs` status filtering or DB inserts.
+Items still actually open, in rough priority order:
 
-### 16.4 Prioritized fix queue (review-only — no patches yet)
-
-Order = "what to fix first if I had to pick a sprint":
-
-1. **Migration runner (`app/migrations.py:138-189`)** — both the lock-release-before-apply race AND the BEGIN-inside-asyncpg-txn defect. Migrations 022 and 023 hit this on every fresh production DB.
-2. **APScheduler/DB ordering** (both `app/scheduler.py:143-165` and `app/main.py:865-874`) — adopt one register-with-rollback pattern in both directions.
-3. **`app/modules/ideation_workflow.py:252`** — remove the mid-Phase-2 `await db.close()`; restructure session lifecycle.
-4. **`app/utils/github_ingest.py:209`** — narrow the `Exception` catch to exclude `CancelledError`.
-5. **`app/modules/rag_pipeline.py:819-831`** — write a `dedup_log` row for `action_taken='versioned'` to satisfy invariant #9.
-6. **OWUI auto-chain (`pipelines/scaffold_router.py:893-938`)** — add a recovery surface for partial failures.
-7. **Logger identity sweep** — `ideation_workflow`, `execution_handler`, `prompt_optimizer`, `prompt_inspector`, `prompt_assembly` all need `logging.getLogger("scaffold.<sub>")`.
-8. **Foundation MED list** — `/research/pdf` filename guard, `/dag/{id}` UUID validation, `/execute` HTTPException conversion, `/rag/dedup` + `/gt/list` limit caps, `list_research_sessions` status whitelist, X-Request-ID sanitization.
-9. **Pydantic ↔ DB alias drift** — `meta` ↔ `metadata` in JobBase/ArtifactBase.
-10. **Pre-existing CLI bug** — `scaffold jobs status <id>` calls non-existent `GET /jobs/{id}` (silently 404s). Fix: route through `client.jobs.status()` which wraps the real `GET /exec/status/{id}`.
+1. **Pre-existing CLI bug** — `scaffold jobs status <id>` calls non-existent `GET /jobs/{id}` (silently 404s). One-line fix: route `cli/scaffold_cli/main.py::jobs_status` through `client.jobs.status()` (which wraps the real `GET /exec/status/{id}`).
+2. **Pydantic ↔ DB alias drift** (Pattern E) — `meta` ↔ `metadata` in JobBase/ArtifactBase. Add `Field(alias=…)` + `populate_by_name=True`, or drop the field.
+3. **Logger identity sweep** (Pattern A residue) — rename `__name__`-style loggers in `execution_handler`, `prompt_optimizer`, `prompt_inspector`, `prompt_assembly` to `scaffold.<sub>` form.
+4. **`/health _check_ollama` shared client** — replace ad-hoc `httpx.AsyncClient(timeout=5)` with a call to `get_ollama_client()` (or a dedicated short-timeout health client in `http_clients.py`).
+5. **Pipeline placeholder checks** — add `_is_placeholder()` calls on `/confirm` feedback and `/research/reply` session_id (audit Pattern F).
+6. **Drop dual-alias acceptance** (Pattern H) — pick canonical names; add deprecation comment, then remove fallback paths.
+7. **Migration 020 atomicity** — combine the stale-row UPDATE + UNIQUE INDEX into a single locking transaction (or reorder so the UPDATE precedes any concurrent ingest window).
+8. **Idle-counter calibration** in `scaffold_router._stream_sse_to_queue` — increment by actual elapsed wall time, not the heartbeat interval (audit retracted HIGH #14 noted this).
+9. **Print-only API-key drift in 4 minor pipelines** (HIGH #13 partial) — port the `_drift_hint()` markdown surface from `scaffold_router` to `execution_handler`/`dag_viewer`/`gt_browser`/`prompt_inspector`.
+10. **Auto-chain recovery state machine** (HIGH #12 partial) — formalize the `/results`-based recovery surface into a structured state machine.
 
 ### 16.5 Items NOT covered by the audit
 
-- **Tests phase skipped** — no coverage matrix produced. Untested code paths in `execution_agent`'s retry loop, `ideation_workflow`'s session-lifecycle, and `scheduler`'s misfire handling are not enumerated.
-- **Performance benchmarking** — review identifies likely PERF issues but does not measure them.
-- **Observability completeness** — log-line fan-out, metric coverage, alerting hooks not audited beyond foundation-level middleware.
-- **Deployment surface** — Dockerfile, docker-compose.yml, .env.example not audited.
+- **Tests phase skipped** — no coverage matrix for `execution_agent`'s retry loop, `ideation_workflow`'s session-lifecycle, or `scheduler`'s misfire handling. The 14 pre-existing test failures in §14.1 are mock-side drift, not coverage gaps.
+- **Performance benchmarking** — likely PERF issues identified but not measured.
+- **Observability completeness** — log-line fan-out, metric coverage, alerting hooks not audited beyond foundation middleware.
+- **Deployment surface** — Dockerfile, compose, `.env.example` not audited.
 
 ---
 
