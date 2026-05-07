@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help bootstrap doctor init sync-valves
+.PHONY: test test-cli agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help bootstrap doctor init sync-valves
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -14,6 +14,9 @@ API_URL   ?= http://localhost:8000
 
 test: ## Run all tests in Docker (~745 passing, 5 skipped)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v
+
+test-cli: ## Run scaffold CLI tests (cli/tests/) inside the dev container
+	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m pytest tests/ --timeout=10 -v"
 
 agent: ## Run execution agent tests only
 	docker exec $(CONTAINER) pytest tests/test_execution_agent.py -m smoke --timeout=30 -v

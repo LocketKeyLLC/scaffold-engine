@@ -121,6 +121,7 @@ services:
     volumes:
       - ./app:/code/app:ro
       - ./tests:/code/tests:ro
+      - ./cli:/code/cli:ro
       - ./ground_truths:/code/ground_truths:ro
       - ./db:/code/db:ro
       - hf-cache:/code/.cache/huggingface
