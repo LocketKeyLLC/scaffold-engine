@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status health ci help bootstrap doctor doctor-explain init sync-valves reindex openapi-snapshot openapi-check sync-schemas
+.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves reindex openapi-snapshot openapi-check sync-schemas
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -109,13 +109,19 @@ clean: ## Cleanup stale jobs via API
 	curl -s -X POST $(API_URL)/jobs/cleanup \
 		-H "X-API-Key: $(API_KEY)" | python3 -m json.tool
 
-status: ## Query /status endpoint
+status: ## Query /status: status counts table + recent jobs + next-step hint
 	@if [ -z "$(API_KEY)" ]; then \
 		echo "ERROR: Set SCAFFOLD_API_KEY env var first"; \
 		exit 1; \
 	fi
-	curl -s $(API_URL)/status \
-		-H "X-API-Key: $(API_KEY)" | python3 -m json.tool
+	@curl -s $(API_URL)/status -H "X-API-Key: $(API_KEY)" | python3 scripts/render_status.py
+
+status-raw: ## Query /status and dump raw JSON (machine-readable form of `make status`)
+	@if [ -z "$(API_KEY)" ]; then \
+		echo "ERROR: Set SCAFFOLD_API_KEY env var first"; \
+		exit 1; \
+	fi
+	@curl -s $(API_URL)/status -H "X-API-Key: $(API_KEY)" | python3 -m json.tool
 
 health: ## Query /health endpoint (no auth required)
 	curl -s $(API_URL)/health | python3 -m json.tool

@@ -1,14 +1,15 @@
 """Click entry point for ``scaffold``.
 
-Sprint H ships the read-mostly + ideate/confirm flows. SSE-streamed
-endpoints (``/research``, ``/execute/all``) are deferred to Sprint I
-once the streaming-uniformity work lands; for now the CLI prints a
-hint pointing users at the OWUI surface for those.
+Sprint H ships the read-mostly + ideate/confirm flows. Sprint U.3 adds
+output legibility: every command's --help has an Examples: block, every
+output ends with a "Next:" line where it makes sense, and `jobs status`
+renders the orchestrator's `next_actions` field as a copy-pasteable list.
 """
 from __future__ import annotations
 
 import json as _json
 import sys
+from typing import Any
 
 import click
 
@@ -18,9 +19,70 @@ from scaffold_cli.config import resolve_config
 
 
 # ---------------------------------------------------------------------------
-# Root group — global flags propagate to subcommands via the click context.
+# Shared rendering helpers
 # ---------------------------------------------------------------------------
-@click.group(help="Terminal client for Scaffold Engine.")
+
+def _render_next_actions(data: dict) -> None:
+    """Render the orchestrator's ``next_actions`` field (audit item 10)
+    as a markdown-flavored bulleted block, written to stdout.
+
+    Filters out wait-style actions (which are noise on a CLI surface)
+    and pretty-prints commands so a user can copy-paste the next step.
+    No-op when the response carries no actions.
+    """
+    actions = data.get("next_actions") or []
+    renderable = [a for a in actions if a.get("action") != "wait"]
+    if not renderable:
+        return
+    click.echo("")
+    click.secho("Next steps:", fg="cyan", bold=True)
+    for a in renderable:
+        cmd = a.get("command")
+        endpoint = a.get("endpoint")
+        method = a.get("method", "GET")
+        desc = a.get("description", "")
+        if cmd:
+            click.echo(f"  • ", nl=False)
+            click.secho(cmd, fg="cyan", nl=False)
+            click.echo(f"   — {desc}")
+        elif endpoint:
+            click.echo(f"  • ", nl=False)
+            click.secho(f"{method} {endpoint}", fg="cyan", nl=False)
+            click.echo(f"   — {desc}")
+        else:
+            click.echo(f"  • {desc}")
+
+
+def _hint(text: str) -> None:
+    """Print a single 'Next:' hint line in the conventional cyan."""
+    click.echo("")
+    click.secho(f"Next: {text}", fg="cyan")
+
+
+# ---------------------------------------------------------------------------
+# Root group
+# ---------------------------------------------------------------------------
+
+ROOT_EPILOG = """
+\b
+Examples:
+  scaffold version                          show CLI version + config source
+  scaffold doctor                           probe orchestrator /health
+  scaffold ideate "build a markdown linter" submit an idea (Phase 1)
+  scaffold confirm <job_id>                 approve and run Phase 2 + execute
+  scaffold jobs list --limit 10             recent jobs
+  scaffold jobs status <job_id>             one job's full state + next steps
+
+Configuration priority:
+  --api-url / --api-key flags  >  $SCAFFOLD_API_URL / $SCAFFOLD_API_KEY env  >
+  ~/.scaffold/config.toml  >  walked-up .env  >  default http://localhost:8000
+"""
+
+
+@click.group(
+    help="Terminal client for Scaffold Engine.",
+    epilog=ROOT_EPILOG,
+)
 @click.option(
     "--api-url", envvar="SCAFFOLD_API_URL_FLAG", default=None,
     help="Orchestrator base URL (overrides env / config / .env).",
@@ -37,10 +99,20 @@ def cli(ctx: click.Context, api_url: str | None, api_key: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# version — never touches the network. Useful for `scaffold version` in
-# scripts that want to gate on the installed CLI version.
+# version
 # ---------------------------------------------------------------------------
-@cli.command(help="Print the CLI version and where its config came from.")
+
+VERSION_EPILOG = """
+\b
+Examples:
+  scaffold version                  show version + where config came from
+"""
+
+
+@cli.command(
+    help="Print the CLI version and where its config came from.",
+    epilog=VERSION_EPILOG,
+)
 @click.pass_context
 def version(ctx: click.Context) -> None:
     cfg = ctx.obj["cfg"]
@@ -50,10 +122,21 @@ def version(ctx: click.Context) -> None:
 
 
 # ---------------------------------------------------------------------------
-# doctor — calls /health (no auth required) and renders the per-subsystem
-# status. Mirrors `make doctor` for the parts the orchestrator can self-report.
+# doctor
 # ---------------------------------------------------------------------------
-@cli.command(help="Probe orchestrator /health and print a summary.")
+
+DOCTOR_EPILOG = """
+\b
+Examples:
+  scaffold doctor                       probe orchestrator at default URL
+  scaffold --api-url http://h:8000 doctor   probe a remote orchestrator
+"""
+
+
+@cli.command(
+    help="Probe orchestrator /health and print a per-subsystem summary.",
+    epilog=DOCTOR_EPILOG,
+)
 @click.pass_context
 def doctor(ctx: click.Context) -> None:
     cfg = ctx.obj["cfg"]
@@ -63,6 +146,7 @@ def doctor(ctx: click.Context) -> None:
             data = c.get("/health")
     except CLIError as exc:
         click.secho(f"FAIL  {exc}", fg="red", err=True)
+        _hint("scaffold doctor again once the orchestrator is up; or `make doctor` for the full host-side audit.")
         sys.exit(1)
 
     if not isinstance(data, dict):
@@ -86,22 +170,37 @@ def doctor(ctx: click.Context) -> None:
             color = "red"
             any_down = True
         else:
-            # Subsystems that report state without a clear up/down keyword
-            # (e.g. cache stats) get rendered neutrally — they're informational,
-            # not pass/fail.
             color = "yellow"
         latency_str = f"  {latency} ms" if latency is not None else ""
         click.secho(f"  {status:<10}", fg=color, nl=False)
         click.echo(f"{name}{latency_str}")
 
     if any_down:
+        _hint("`make doctor --explain` for what each subsystem does and why it might be down.")
         sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
-# ideate — POST /ideate. Halts at awaiting_confirmation; user runs `confirm`.
+# ideate
 # ---------------------------------------------------------------------------
-@cli.command(help="Submit an idea: orchestrator refines + assesses feasibility.")
+
+IDEATE_EPILOG = """
+\b
+Examples:
+  scaffold ideate "build a markdown linter"
+  scaffold ideate "build me a CLI tool that gzips files older than 7 days"
+  scaffold ideate --domain eng "optimize my python build pipeline"
+  scaffold ideate --json "build X" | jq -r '.job_id'
+
+After this returns, the job is in `awaiting_confirmation`. Approve it with
+`scaffold confirm <job_id>` to start research + execution.
+"""
+
+
+@cli.command(
+    help="Submit an idea: orchestrator refines + assesses feasibility.",
+    epilog=IDEATE_EPILOG,
+)
 @click.argument("idea", nargs=-1, required=True)
 @click.option(
     "--domain", default=None,
@@ -149,18 +248,30 @@ def ideate(
             click.echo(f"  {summary}")
 
     if status == "awaiting_confirmation" and job_id:
-        click.echo("")
-        click.secho(
-            f"Next: scaffold confirm {job_id}", fg="cyan",
-        )
+        _hint(f"scaffold confirm {job_id}")
 
 
 # ---------------------------------------------------------------------------
-# confirm — POST /ideate/confirm. Triggers the long-running research+plan
-# pipeline. Today we return as soon as the call returns; once the streaming
-# work in Sprint I lands, this should switch to SSE.
+# confirm
 # ---------------------------------------------------------------------------
-@cli.command(help="Confirm an ideated job to start research + planning.")
+
+CONFIRM_EPILOG = """
+\b
+Examples:
+  scaffold confirm <job_id>
+  scaffold confirm <job_id> use bash instead of python
+  scaffold confirm <job_id> --json | jq -r '.workflow_summary'
+
+Confirm runs synchronously (HTTP-blocking). For long jobs (often 10–25 min
+on CPU), expect the call to take a while; check progress in another shell
+with `scaffold jobs status <job_id>`.
+"""
+
+
+@cli.command(
+    help="Confirm an ideated job to start research + planning.",
+    epilog=CONFIRM_EPILOG,
+)
 @click.argument("job_id")
 @click.argument("feedback", nargs=-1)
 @click.option("--json", "as_json", is_flag=True, help="Print the raw JSON response.")
@@ -195,18 +306,43 @@ def confirm(
         click.echo("")
         click.echo(summary)
 
+    _hint(f"scaffold jobs status {job_id}")
+
 
 # ---------------------------------------------------------------------------
-# jobs — list + status. The orchestrator endpoints are GET /jobs and
-# GET /jobs/<id>. We render a compact table for list and a JSON block for
-# status (since jobs carry a wide payload).
+# jobs group
 # ---------------------------------------------------------------------------
-@cli.group(help="List, inspect, and manage orchestrator jobs.")
+
+JOBS_EPILOG = """
+\b
+Examples:
+  scaffold jobs list                         most recent 25
+  scaffold jobs list --limit 50              50 most recent
+  scaffold jobs list --status failed         filter by status
+  scaffold jobs status <job_id>              full state + next steps
+
+Job status reference:
+  pending → refining → awaiting_confirmation → researching → planning →
+  executing → running → completed | failed | cancelled | blocked
+"""
+
+
+@cli.group(help="List, inspect, and manage orchestrator jobs.", epilog=JOBS_EPILOG)
 def jobs() -> None:
     pass
 
 
-@jobs.command("list", help="List recent jobs (default limit 25).")
+JOBS_LIST_EPILOG = """
+\b
+Examples:
+  scaffold jobs list
+  scaffold jobs list --limit 10
+  scaffold jobs list --status running
+  scaffold jobs list --json | jq '.total'
+"""
+
+
+@jobs.command("list", help="List recent jobs (default limit 25).", epilog=JOBS_LIST_EPILOG)
 @click.option("--limit", default=25, type=int, show_default=True)
 @click.option("--status", "status_filter", default=None,
               help="Filter by job status (e.g. completed, awaiting_confirmation).")
@@ -236,9 +372,9 @@ def jobs_list(
     rows = data.get("jobs", []) if isinstance(data, dict) else []
     if not rows:
         click.echo("(no jobs)")
+        _hint('scaffold ideate "your idea here" to start one.')
         return
 
-    # Compact table: id (truncated) | status | title.
     click.echo(f"{'job_id':<38} {'status':<24} title")
     click.echo("-" * 80)
     for r in rows:
@@ -247,8 +383,35 @@ def jobs_list(
         title = (r.get("title") or r.get("idea") or "")[:60]
         click.echo(f"{jid:<38} {st:<24} {title}")
 
+    # Highlight a likely "next thing to do" — first job in awaiting_confirmation
+    # is the most actionable; otherwise the first non-terminal one.
+    NON_TERMINAL = {
+        "pending", "refining", "awaiting_confirmation", "researching",
+        "planning", "executing", "running", "blocked",
+        "assisted_executing", "assisted_running", "assisted_paused",
+    }
+    awaiting = next((r for r in rows if r.get("status") == "awaiting_confirmation"), None)
+    actionable = awaiting or next(
+        (r for r in rows if r.get("status") in NON_TERMINAL), None,
+    )
+    if actionable:
+        _hint(f"scaffold jobs status {actionable.get('id')}")
 
-@jobs.command("status", help="Show full status for a single job.")
+
+JOBS_STATUS_EPILOG = """
+\b
+Examples:
+  scaffold jobs status <job_id>
+  scaffold jobs status <job_id> --json
+  scaffold jobs status <job_id> --json | jq '.next_actions'
+
+The `Next steps:` block at the bottom is generated by the orchestrator's
+recovery registry — every status maps to a list of valid next-step
+commands with concrete job_id and node_key already filled in.
+"""
+
+
+@jobs.command("status", help="Show full status for a single job.", epilog=JOBS_STATUS_EPILOG)
 @click.argument("job_id")
 @click.option("--json", "as_json", is_flag=True, help="Print the raw JSON response.")
 @click.pass_context
@@ -256,10 +419,6 @@ def jobs_status(ctx: click.Context, job_id: str, as_json: bool) -> None:
     cfg = ctx.obj["cfg"]
     try:
         with Client(cfg.api_url, cfg.api_key) as c:
-            # /exec/status/<id> is the orchestrator's "single job's execution
-            # state" endpoint; it returns job metadata + DAG node summary.
-            # The earlier CLI shipped GET /jobs/<id> which never existed and
-            # silently 404'd into get_or_none() — fixed here.
             data = c.get_or_none(f"/exec/status/{job_id}")
     except CLIError as exc:
         click.secho(str(exc), fg="red", err=True)
@@ -267,6 +426,7 @@ def jobs_status(ctx: click.Context, job_id: str, as_json: bool) -> None:
 
     if data is None:
         click.secho(f"job {job_id} not found", fg="yellow", err=True)
+        _hint("scaffold jobs list to see what's available.")
         sys.exit(1)
 
     if as_json:
@@ -296,6 +456,11 @@ def jobs_status(ctx: click.Context, job_id: str, as_json: bool) -> None:
     if (compiled := data.get("compiled_output")):
         click.echo("\ncompiled_output:")
         click.echo(compiled[:2000] + ("\n[… truncated]" if len(compiled) > 2000 else ""))
+
+    # Audit item 10's structured next-step guidance, rendered as a copy-
+    # pasteable bulleted block. Pulled from the response's `next_actions`
+    # field (orchestrator's recovery registry, populated server-side).
+    _render_next_actions(data)
 
 
 if __name__ == "__main__":
