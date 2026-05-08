@@ -1132,11 +1132,19 @@ async def delete_schedule(schedule_id: int, db: AsyncSession = Depends(get_db)):
 async def list_jobs(
     status: str | None = None,
     q: str | None = None,
+    synthesized: bool | None = None,
     limit: int = 25,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
-    """Paginated job list with optional status filter and title search."""
+    """Paginated job list with optional status filter and title search.
+
+    Sprint X.9 — ``synthesized`` filter complements the X.6 per-job opt-in:
+    ``?synthesized=true`` lists only jobs whose ``compiled_output`` was
+    LLM-synthesized (W.7 narrative pass); ``?synthesized=false`` lists
+    everything else (heuristic compile, unsynthesized, or not-yet-compiled).
+    Omit the param to see all jobs.
+    """
     if limit < 1 or limit > 100:
         raise HTTPException(status_code=422, detail="limit must be 1..100")
     if offset < 0:
@@ -1152,10 +1160,14 @@ async def list_jobs(
     if q:
         where_clauses.append("j.title ILIKE :q")
         params["q"] = f"%{q.strip()}%"
+    if synthesized is not None:
+        where_clauses.append("j.compiled_output_synthesized = :synthesized")
+        params["synthesized"] = synthesized
 
-    # SAFE: where_clauses contain only bind-parameter placeholders (:status, :q);
-    # all user values flow through `params` dict. Do not interpolate user input
-    # into where_clauses directly without enum/whitelist validation first.
+    # SAFE: where_clauses contain only bind-parameter placeholders (:status, :q,
+    # :synthesized); all user values flow through `params` dict. Do not
+    # interpolate user input into where_clauses directly without enum/whitelist
+    # validation first.
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
     total_row = await db.execute(text(f"SELECT COUNT(*) FROM jobs j {where_sql}"), params)

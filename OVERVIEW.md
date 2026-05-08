@@ -2111,6 +2111,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.6 | Tier 2 audit — per-job synthesis opt-in column + endpoint (§17.33) | done 2026-05-08 |
 | X.7 | Tier 2 audit — OWUI scaffold_router routing-decision diagnostic (§17.34) | done 2026-05-08 |
 | X.8 | Tier 2 audit — `make sync-api-key` 5-place propagation (§17.35) | done 2026-05-08 |
+| X.9 | Tier 2 audit — `synthesized` filter on `GET /jobs` (§17.36) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2725,7 +2726,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 6 | Per-job synthesis opt-in column | **DONE in X.6** | Migration 029 + `_resolve_synthesis_enabled` + `PATCH /jobs/{id}/synthesis` + `synthesis_override` on `/exec/status`. 9 new tests. |
 | 7 | OWUI file-routing diagnostic capture | **DONE in X.7** | New `valves.log_routing_decisions` (off by default) + `_classify_dispatch` + `_log_routing_decision`. Single structured line per pipe() call: decision/command/wrapper_stripped/files_count/normalize_rewrites. 13 new tests. |
 | 8 | 5-place API-key sync target | **DONE in X.8** | `make sync-api-key [KEY=sk-...]` strict-syncs across `.env` + 5x `valves.json` + `~/.bashrc`. Idempotent; verifies + propagates from `.env` when no arg. 9 sandboxed tests. |
-| 9 | `synthesized` filter on `GET /jobs` | API addition | List endpoint gains `?synthesized=true|false` query param. Tier-2 audit-tail. |
+| 9 | `synthesized` filter on `GET /jobs` | **DONE in X.9** | New `synthesized: bool \| None` query param. None = no filter; true/false = WHERE `compiled_output_synthesized = :synthesized`. 5 new tests. OpenAPI 44 paths unchanged (existing path gained a param). |
 | 10 | prompt_optimizer JSON-coaxing → tool-call migration | Pattern follow-on to W.6 | 2 sites in `prompt_optimizer.py` still use coaxing. Mechanical with W.6 wrapper. |
 | 11 | idea_refinement tool-call migration | Same shape as #10 | 1 site. |
 | 12 | gt_extractor tool-call migration | Same shape as #10 | 1 site. |
@@ -2880,6 +2881,20 @@ Behavior:
 **Project pattern (memory-worthy):** when scripting changes that touch user files (dotfiles, `.env`), expose env-var overrides for the target paths so tests can sandbox the script in a tmp dir. Direct `bash` invocation through `subprocess.run` with `env={..., SCAFFOLD_*_PATH: tmp_path}` then exercises the real script end-to-end without a "test mode" branch in the script's main path. Same trick applies to any future operator scripts that mutate paths outside the repo.
 
 **Test-suite delta:** `tests/test_sync_api_key.py` (new): 9 cases across three classes — KEY-arg mode (5: env create/replace, all-valves write, bashrc append, bashrc replace), verify mode (3: env→other places, missing-env exit, comment-only-env exit), idempotency (1: re-run produces 0 changes). Tests subprocess.run the actual `bash` script, so any future change to the script's behavior (or its arg parsing) surfaces immediately.
+
+### 17.36 Sprint X.9 — `synthesized` filter on `GET /jobs` (2026-05-08)
+
+Tier 2 audit row #9. Tiny API addition complementing X.6 (per-job synthesis opt-in) and X.2 (synthesized flag persisted on `jobs.compiled_output_synthesized`). Lets consumers list "jobs whose deliverable is the LLM-synthesized narrative" vs. "jobs whose deliverable is the raw heuristic" with a single query param.
+
+The change in `app/main.py::list_jobs`:
+
+- New query param `synthesized: bool | None = None`. None = no filter (existing behavior, fully backward-compatible). True/False adds `j.compiled_output_synthesized = :synthesized` to the existing `where_clauses` list, joined with the same `AND` pattern as `status` and `q`. Bind-param-safe: the value flows through the params dict, never interpolated into the SQL string.
+- The change touches a 4-line block + a docstring update; the rest of the handler is untouched. OpenAPI snapshot grew by ~700 bytes (the new param's `anyOf: [boolean, null]` schema), path count unchanged at 44.
+- **No `JobSummary` shape change.** The audit-tail row scoped to "list endpoint gains a query param" — adding a per-row `synthesized` field to the response would be a separate API change. Consumers who want per-row synthesis state still hit `/exec/status` per job (X.2's surface).
+
+**Project pattern (validated, memory-worthy):** when extending an existing list endpoint with a new filter, the where-clause-list + params-dict idiom (already used for `status` and `q`) composes cleanly with `AND`. Add the new filter as one more `if param is not None: where_clauses.append(...); params[k] = v` block. Don't refactor the join logic for "cleanness" — the linear pattern is what makes it easy to audit for SQL-injection safety. The "SAFE:" comment block at the top of the where-clause assembly stays as the single audit anchor; just add the new bind-name to the comment.
+
+**Test-suite delta:** `tests/test_jobs_synthesized_filter.py` (new): 5 cases — `synthesized=True` and `=False` both add the WHERE clause + bind correct value, `None` (omitted) emits no clause + no bind (regression guard against accidental always-on filtering), composes with `status`, composes with `q`. Tests invoke `list_jobs` directly with a mocked `AsyncSession` capturing every `execute()` call's SQL + params — fast, DB-independent, exercises the actual filter-assembly logic. OpenAPI snapshot regenerated; param visible in spec at `paths./jobs.get.parameters[].name='synthesized'`.
 
 ---
 
