@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     scaffold_api_key: SecretStr = SecretStr("")
     scaffold_auth_disabled: bool = False
 
+    # Sprint J.2 — native web UI loopback (HTTP-loopback so the SDK gets
+    # dogfooded as the second consumer after CLI). Override via env when
+    # running the orchestrator on a non-default port or behind a proxy.
+    web_loopback_url: str = "http://localhost:8000"
+    web_loopback_timeout: int = 30
+
     # Database
     database_url: str = "postgresql+asyncpg://scaffold:scaffold_dev_pw@scaffold-postgres:5432/scaffold_engine"
 

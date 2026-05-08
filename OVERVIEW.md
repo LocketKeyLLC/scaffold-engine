@@ -2120,6 +2120,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.15 | Tier 2 test-debt — `test_execution_handler_module.py` SimpleNamespace fixture drift (§17.42) | done 2026-05-08 |
 | X.16 | Tier 2 test-debt — `test_execution_agent_compile.py` synthesis-override bypass (§17.43) | done 2026-05-08 |
 | X.17 | Tier 2 test-debt — `test_health_cleanup.py` un-skip + scope down (§17.44) | done 2026-05-08 |
+| J.2.a | Native single-page web UI — read-only browse (§17.45) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -3058,6 +3059,29 @@ The change:
 **Test-suite delta:** `tests/test_health_cleanup.py`: 0/9 (skipped) → **10/10** (9 original `TestHealth*` cases + 1 new redis/reranker presence guard; `TestReapStaleJobs` deleted). Cross-file regression `-k "health or cleanup"` (this file + `test_x1_thresholds_and_health.py` + `test_cleanup.py`): **28/28**.
 
 **All Tier 2 test-debt rows (#16, #17, #18) closed.** Remaining audit-tail items are all features/calibration/cadence — no fixture-drift or skipped-test debt remains.
+
+### 17.45 Sprint J.2.a — native single-page web UI: read-only browse (2026-05-08)
+
+Phase 1 of roadmap item J.2 (the post-v1.0.0 ambition). Ships a server-rendered HTML UI for browsing jobs without Open WebUI, so the stack is usable from "just open localhost in a browser." Scoped to read-only browse this sprint; submit/confirm/execute flows land in J.2.b / J.2.c.
+
+The shape:
+
+- **Two pages**: `GET /web/jobs` (paginated list with status + title-search filters) and `GET /web/jobs/{job_id}` (status, node table, compiled output, synthesis flags). Plus `GET /` redirecting to `/web/jobs` so a bare browser hit lands on the UI.
+- **Templates** live under `app/templates/web/` (`_layout.html`, `jobs_list.html`, `job_detail.html`, `error.html`). HTMX is loaded from CDN (one `<script>` tag in `_layout.html`); used here only for future-readiness — the J.2.a routes are full-page renders. Static CSS at `app/static/web.css` (status badges, monospace output blocks, tabular numerals).
+- **SDK over HTTP loopback**: web routes call `scaffold_client.Client.jobs.list(...)` and `.jobs.status(...)`, which then HTTPs back into the same orchestrator. Dogfoods the SDK as the second consumer after CLI (the OVERVIEW intent). Cost: one extra hop per page render (~10 ms loopback). Benefit: the web layer can't sneakily depend on internals — any change to the orchestrator's HTTP surface flows through the SDK contract first.
+- **Auth**: web routes are auth-bypassed via a new `_AUTH_EXEMPT_PREFIXES = ("/web/", "/static/")` in `app/auth.py` (sibling to the existing `_AUTH_EXEMPT_PATHS` exact-match set). Browser visits don't carry headers; the embedded SDK Client carries `settings.scaffold_api_key` for the loopback call. End-to-end auth is preserved — only the browser-facing layer is exempt.
+- **DI hook**: `app.web.routes.get_sdk_client` is a FastAPI dependency that yields a memoized Client. Tests substitute via `app.dependency_overrides[get_sdk_client] = lambda: mock`. Module-level singleton avoids re-instantiating httpx connections per request.
+- **OpenAPI**: `APIRouter(..., include_in_schema=False)` excludes web routes from the snapshot — they're HTML, not API contract surface. `GET /` is also `include_in_schema=False`. Path count unchanged at 44.
+
+**Why not direct in-process calls?** The OVERVIEW called out SDK-dogfooding as the J.2 intent. In-process calls would shave the loopback hop but would silently couple the web layer to the orchestrator's internal handler signatures — a refactor like X.13 (`_tool_args` consolidation) could break the UI. The HTTP boundary is exactly the contract we want the UI to depend on.
+
+**Why not browser-side key entry?** Single-tenant local-deploy posture: `localhost:8000` is the operator's box, the API key is already in their `.env` and `~/.bashrc`, and the demo path is "just open localhost." Multi-user-safe key entry can be added in a future sprint without breaking the J.2.a contract.
+
+**Two settings added** to `app/config.py`: `web_loopback_url` (default `http://localhost:8000`) and `web_loopback_timeout` (default `30`). Override via env when running on a non-default port or behind a proxy.
+
+**Project pattern (memory-worthy):** when adding a sub-app to a FastAPI app whose root has `dependencies=[Depends(require_api_key)]`, **per-route `dependencies=[]` does NOT override the global app-level dep** — it only adds to the parent. The way to actually exempt a route is to bake the exempt-path/prefix logic into the dependency itself (`request.url.path` check inside `require_api_key`). This is the existing `/health` precedent; X.18 extends it to support prefix matching for whole sub-apps.
+
+**Test-suite delta:** `tests/test_web_ui.py` (new): 13 cases — root redirect, list-page rendering / filter pass-through / empty state / 422 bounds / SDK failure / detail-page rendering / compiled-output / 404 / SDK failure / static CSS served / auth bypass without header. TestClient with `dependency_overrides[get_sdk_client]` injects canned payloads. **All 13 pass**, plus the auth/middleware/main suites unchanged at 47/47. OpenAPI snapshot regenerated (path count 44, `/web/*` and `/` excluded as intended).
 
 ---
 

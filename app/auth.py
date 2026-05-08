@@ -26,7 +26,15 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 # without credentials so external orchestrators (compose healthchecks,
 # uptime pingers, etc.) can read the dependency status. Adding a future
 # /healthz alias is a one-line set extension here.
-_AUTH_EXEMPT_PATHS = frozenset({"/health"})
+_AUTH_EXEMPT_PATHS = frozenset({"/health", "/"})
+
+# Sprint J.2.a — prefix-based auth exemption. The native web UI lives at
+# ``/web/*`` and serves a browsable page (operators don't pass headers in
+# a browser); the /static mount serves the UI's CSS. The embedded SDK
+# Client carries the API key for the loopback HTTP call to the actual
+# orchestrator endpoints, so end-to-end auth is preserved — only the
+# browser-facing layer is exempt.
+_AUTH_EXEMPT_PREFIXES = ("/web/", "/static/")
 
 
 async def require_api_key(
@@ -34,7 +42,10 @@ async def require_api_key(
     key: str | None = Security(api_key_header),
 ) -> str:
     """Validate X-API-Key header. Returns the key on success, raises 401 on failure."""
-    if request.url.path in _AUTH_EXEMPT_PATHS:
+    path = request.url.path
+    if path in _AUTH_EXEMPT_PATHS:
+        return ""
+    if any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
         return ""
 
     # Explicit opt-out only — empty key with no opt-out would have raised at import

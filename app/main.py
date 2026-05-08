@@ -11,6 +11,8 @@ from uuid import UUID
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, Query
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pymilvus import connections as milvus_connections, utility, Collection
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -332,6 +334,24 @@ app.add_middleware(PerformanceMiddleware)
 app.add_middleware(RequestIdMiddleware)
 app.include_router(status_router)
 app.include_router(assist_router)
+
+# Sprint J.2.a — native single-page web UI. Auth-bypassed so a browser
+# hitting localhost:8000/web/jobs works without sending headers; the
+# embedded SDK Client carries settings.scaffold_api_key for the loopback
+# request to the same orchestrator's API surface.
+from app.web.routes import router as web_router  # noqa: E402
+app.include_router(web_router, dependencies=[])
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+
+@app.get("/", dependencies=[], include_in_schema=False)
+async def web_root_redirect():
+    """Sprint J.2.a — redirect ``GET /`` to the web UI's jobs list.
+
+    Excluded from OpenAPI (``include_in_schema=False``) because it's a
+    convenience landing for browsers, not a stable API contract.
+    """
+    return RedirectResponse(url="/web/jobs", status_code=302)
 
 
 # Note: request-id binding + X-Request-ID header are handled by RequestIdMiddleware

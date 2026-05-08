@@ -1,0 +1,93 @@
+{% extends "web/_layout.html" %}
+{% block title %}{{ job.job_title or "Job" }} · Scaffold Engine{% endblock %}
+{% block content %}
+<section class="job-detail">
+  <header class="page-header">
+    <p class="breadcrumb"><a href="/web/jobs">← All jobs</a></p>
+    <h1>{{ job.job_title or "(untitled)" }}</h1>
+    <p class="meta">
+      <span class="status-badge status-{{ job.job_status }}">{{ job.job_status }}</span>
+      <code class="job-id">{{ job_id }}</code>
+    </p>
+  </header>
+
+  {% if job.synthesis_override is not none or job.synthesized %}
+  <section class="synthesis-flags">
+    {% if job.synthesis_override is true %}
+      <span class="flag-pill flag-on">Synthesis: forced on</span>
+    {% elif job.synthesis_override is false %}
+      <span class="flag-pill flag-off">Synthesis: forced off</span>
+    {% else %}
+      <span class="flag-pill flag-auto">Synthesis: auto (inherits global)</span>
+    {% endif %}
+    {% if job.synthesized %}
+      <span class="flag-pill flag-on">Last compile: synthesized</span>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if job.next_actions %}
+  <section class="next-actions">
+    <h2>Next steps</h2>
+    <ul>
+      {% for action in job.next_actions %}
+      <li><strong>{{ action.action }}</strong>
+        {% if action.command %}<code>{{ action.command }}</code>{% endif %}
+        {% if action.label %}— {{ action.label }}{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  <section class="counts">
+    <h2>Node counts</h2>
+    <ul class="counts-list">
+      <li>Total: <strong>{{ job.total_nodes }}</strong></li>
+      {% for state, n in (job.counts or {}).items() %}
+      <li>{{ state }}: <strong>{{ n }}</strong></li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  {% if job.nodes %}
+  <section class="nodes">
+    <h2>Nodes</h2>
+    <table class="nodes-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Key</th>
+          <th>Title</th>
+          <th>Status</th>
+          <th>Actionable</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for node in job.nodes %}
+        <tr {% if node.node_key == (job.next_node or {}).get("node_key") %}class="next-node"{% endif %}>
+          <td class="num">{{ node.execution_order }}</td>
+          <td><code>{{ node.node_key }}</code></td>
+          <td>{{ node.title or "(untitled)" }}</td>
+          <td><span class="status-badge status-{{ node.status }}">{{ node.status }}</span></td>
+          <td>{% if node.actionable %}✓{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+
+  {% if job.compiled_output %}
+  <section class="compiled-output">
+    <h2>Compiled output</h2>
+    <pre class="output-body">{{ job.compiled_output }}</pre>
+  </section>
+  {% else %}
+  <section class="compiled-output empty">
+    <h2>Compiled output</h2>
+    <p class="empty-state">Not yet compiled. Output appears here once the job reaches a terminal state.</p>
+  </section>
+  {% endif %}
+</section>
+{% endblock %}

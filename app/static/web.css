@@ -1,0 +1,151 @@
+/* Sprint J.2.a — minimal styling for the native web UI.
+   Goal: legible, no JS framework, no CSS preprocessor. */
+
+:root {
+  --fg: #1a1a1a;
+  --fg-muted: #5a5a5a;
+  --bg: #fafafa;
+  --bg-panel: #ffffff;
+  --border: #e0e0e0;
+  --link: #0058d1;
+  --status-pending: #6b7280;
+  --status-running: #2563eb;
+  --status-completed: #16a34a;
+  --status-failed: #dc2626;
+  --status-cancelled: #92400e;
+  --status-blocked: #b45309;
+  --status-skipped: #71717a;
+  --status-done: #16a34a;
+  --status-awaiting: #d97706;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+main { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+
+.top-nav {
+  display: flex; align-items: center; gap: 24px;
+  padding: 12px 16px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+.top-nav .brand { font-weight: 600; text-decoration: none; color: var(--fg); }
+.top-nav nav a { color: var(--link); text-decoration: none; margin-right: 12px; }
+
+.page-header h1 { margin: 12px 0 4px; font-size: 22px; }
+.page-header .meta { color: var(--fg-muted); margin-top: 0; }
+
+.filter-bar {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  margin: 12px 0;
+}
+.filter-bar input, .filter-bar select, .filter-bar button {
+  padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 4px;
+  font: inherit;
+}
+
+table.jobs-table, table.nodes-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  margin: 12px 0;
+}
+.jobs-table th, .jobs-table td,
+.nodes-table th, .nodes-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.jobs-table th, .nodes-table th { background: var(--bg); font-weight: 600; }
+.jobs-table td a { color: var(--link); text-decoration: none; }
+.jobs-table td a:hover { text-decoration: underline; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ts { color: var(--fg-muted); font-size: 12px; }
+
+.status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  background: #eee;
+  color: var(--fg);
+}
+.status-badge.status-pending { background: #f3f4f6; color: var(--status-pending); }
+.status-badge.status-running,
+.status-badge.status-executing { background: #dbeafe; color: var(--status-running); }
+.status-badge.status-completed,
+.status-badge.status-done { background: #dcfce7; color: var(--status-completed); }
+.status-badge.status-failed { background: #fee2e2; color: var(--status-failed); }
+.status-badge.status-cancelled { background: #fed7aa; color: var(--status-cancelled); }
+.status-badge.status-blocked { background: #fef3c7; color: var(--status-blocked); }
+.status-badge.status-skipped { background: #e4e4e7; color: var(--status-skipped); }
+.status-badge.status-awaiting_confirmation { background: #fef3c7; color: var(--status-awaiting); }
+
+.synthesis-flags { margin: 12px 0; display: flex; gap: 8px; flex-wrap: wrap; }
+.flag-pill {
+  padding: 2px 10px; border-radius: 12px; font-size: 12px;
+  background: #f3f4f6; color: var(--fg-muted);
+}
+.flag-pill.flag-on { background: #dcfce7; color: var(--status-completed); }
+.flag-pill.flag-off { background: #fee2e2; color: var(--status-failed); }
+.flag-pill.flag-auto { background: #dbeafe; color: var(--status-running); }
+
+.next-actions ul { padding-left: 20px; }
+.counts-list { list-style: none; padding: 0; display: flex; gap: 16px; flex-wrap: wrap; }
+.counts-list li { padding: 4px 12px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 4px; }
+
+tr.next-node { background: #eff6ff; }
+
+.compiled-output pre.output-body {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 16px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, monospace;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.compiled-output.empty .empty-state, .empty-state {
+  color: var(--fg-muted);
+  font-style: italic;
+  padding: 20px;
+}
+
+.pagination { display: flex; gap: 12px; margin-top: 16px; }
+.pagination a {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  text-decoration: none;
+  color: var(--link);
+  background: var(--bg-panel);
+}
+
+.breadcrumb { margin: 0 0 8px; }
+.breadcrumb a { color: var(--link); text-decoration: none; font-size: 13px; }
+.job-id {
+  font-family: ui-monospace, monospace;
+  color: var(--fg-muted);
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.error-page pre.error-body {
+  background: #fee2e2;
+  color: var(--status-failed);
+  padding: 12px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+}
