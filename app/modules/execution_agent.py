@@ -584,7 +584,43 @@ async def execute_next_node(
 
         brief = job.get("refined_brief") or {}
         depends_on = node.get("depends_on") or []
-        upstream_outputs = await _fetch_upstream_outputs(db, job_id, depends_on) if depends_on else {}
+        # Sprint X.4 — upstream-fetch try/except wrap. Same rationale as W.4:
+        # without this, a DB-layer failure inside _fetch_upstream_outputs
+        # (connection drop, asyncpg interface error, etc.) bubbles up to
+        # execute_all_nodes' generic exception handler, which forces the
+        # node 'failed' but leaves last_verification_reason NULL — defeating
+        # W.1's retry-feedback loop on the next /exec/retry. A fresh session
+        # is used for the error-persist path because the outer Phase 1
+        # session may be poisoned by the failure.
+        try:
+            upstream_outputs = (
+                await _fetch_upstream_outputs(db, job_id, depends_on)
+                if depends_on else {}
+            )
+        except Exception as fetch_exc:
+            err_msg = f"upstream fetch error: {fetch_exc}"
+            logger.exception(
+                "node_upstream_fetch_failed: node='%s' job=%s error=%s",
+                title, job_id, fetch_exc,
+            )
+            async with async_session() as _err_db:
+                await _set_node_status(
+                    _err_db, node_id, "failed",
+                    verification_reason=err_msg,
+                )
+                await _log_execution(_err_db, job_id, node_id, "error", err_msg)
+            return {
+                "status": "failed",
+                "node_key": node_key,
+                "title": title,
+                "error": err_msg,
+                "verification_reason": err_msg,
+                "reason": "upstream_fetch_error",
+                "message": (
+                    "Upstream output fetch failed. Check parent node states; "
+                    "retry once the DAG is healthy."
+                ),
+            }
 
         node_snapshot = {
             "node_key": node_key,

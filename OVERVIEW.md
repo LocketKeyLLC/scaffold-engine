@@ -2106,6 +2106,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.1 | Tier 2 audit — threshold cluster + reranker /health (§17.27) | done 2026-05-07 |
 | X.2 | Tier 2 audit — synthesized flag + skipped-verify banner (§17.28) | done 2026-05-07 |
 | X.3 | Tier 2 audit — cleanup test 8-reaper drift fix (§17.30) | done 2026-05-08 |
+| X.4 | Tier 2 audit — W.4-style wrap on _fetch_upstream_outputs (§17.31) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2713,7 +2714,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | # | Item | Shape | Notes |
 |---|---|---|---|
 | 1 | `tests/test_cleanup.py` 8-reaper drift fix | **DONE in X.3** | 9/9 green. Picked up `test_pre_migration_sweep.py`'s "30 minutes" → "5 minutes" drift along the way (same X.1 root). |
-| 2 | W.4-style wrap on `_fetch_upstream_outputs` | Single-concern refactor | Audit-tail item directly tied to W.4. Wrap the upstream-fetch in try/except so DB-layer failures persist a `verification_reason`. Matches W.4 shape. |
+| 2 | W.4-style wrap on `_fetch_upstream_outputs` | **DONE in X.4** | New reason tag `upstream_fetch_error`. Same dict contract as W.4 / timeout / exec-error paths. 4 new tests. |
 | 3 | `_compile_output` skipped-verify banner | **DONE in X.2** | Already shipped — leave row only as a record. |
 | 4 | synthesized=true|false on /exec/status | **DONE in X.2** | Already shipped. |
 | 5 | research-session idle-tracking column | Migration + small code | New `research_sessions.last_activity_at` column for finer reaper logic. |
@@ -2727,6 +2728,9 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 13 | CI smoke for retrieval regressions | CI config | Tiny fixture (3 queries) run on PRs touching `app/modules/rag_pipeline.py`. Catches regressions cheaply without needing live Milvus. |
 | 14 | Quarterly RAG re-baseline cadence | Scheduling | `make rebaseline` cron / runbook. Surfaces drift early. |
 | 15 | `tests/ground_truth.json` regen at KB=1093 | Calibration, multi-hour | Re-curate expected_doc_ids against the current `scaffold-<title>-<hash>` naming. Defer until a quarterly rebaseline shows a need. |
+| 16 | `test_execution_handler_module.py` SimpleNamespace fixture drift | Test debt, ~30 min | 8/20 broken since X.2 added `compiled_output_synthesized` to the row that `execution_status` SELECTs. Fixtures need the new attr. Same drift class as X.3 (frozen test fixture vs. live schema). |
+| 17 | `test_execution_agent_compile.py` 5 stale W.7/X.2 cases | Test debt, ~30 min | 5 pre-existing failures across `TestCompileOutputW2Strategy3`, `TestCompileOutputSynthesis`, `TestCompileOutputSynthesizedFlag`, `TestSkippedVerifyBanner`. Need to inspect and rebuild fixtures. |
+| 18 | `test_health_cleanup.py` un-skip | Test debt, ~30 min | Module-level skip currently dead-codes TestHealth* (useful, distinct from `test_x1_thresholds_and_health.py`) along with TestReapStaleJobs (obsolete). Decide: salvage TestHealth* or delete the file. |
 
 **Roadmap items still pending** (post-v1.0.0 ambition):
 - **J.2** — native single-page web UI (`app/web/` HTML+HTMX, served by FastAPI). Dogfoods the SDK as the second consumer after CLI.
@@ -2761,6 +2765,25 @@ Folded in along the way: `test_pre_migration_sweep.py::test_sweep_runs_update_wh
 **Test-suite delta:** `test_cleanup.py` 3/9 → 9/9 (+6). `test_pre_migration_sweep.py` 3/4 → 4/4 (+1). Combined cleanup-adjacent suite (`-k "cleanup or reaper or orphan or staleness"`): 22/22.
 
 Pre-existing broader-suite failures unchanged at 23 (W/X audit-tail items in `test_execution_agent_compile.py`, `test_execution_handler_module.py`, `test_dag_generator.py`'s validator-loop case, integration env-dependent, etc.). None are reaper-related.
+
+### 17.31 Sprint X.4 — W.4-style wrap on `_fetch_upstream_outputs` (2026-05-08)
+
+Tier 2 audit row #2. Closes the symmetry gap W.4 left behind: the prompt-build phase was already wrapped in try/except (W.4, `ebe95b2`), but the upstream-output fetch immediately upstream of it — running inside Phase 1's session at `execution_agent.py:587` — was not. A DB-layer failure there (asyncpg connection drop, deadlock, transient `OperationalError`) propagated up to `execute_all_nodes`'s generic exception handler, which forced the node `failed` via raw SQL but never set `last_verification_reason`. That defeated W.1's retry-feedback loop on the next `/exec/retry` — the retry saw an unchanged prompt and was likely to fail the same way.
+
+The wrap matches W.4 exactly in shape:
+
+- **Failure path opens a fresh session.** The outer Phase 1 session may be poisoned by the failure (asyncpg's transaction state after a connection drop), so error persistence runs through `async with async_session() as _err_db:` rather than reusing `db`. Same pattern as W.4's prompt-build wrap and the timeout / exec-error paths further down.
+- **`_set_node_status` is called with `verification_reason=err_msg`.** The reason string is `f"upstream fetch error: {fetch_exc}"` — distinct prefix per W.4's "prompt build error: ..." convention so an operator scanning `last_verification_reason` can tell which phase failed.
+- **`_log_execution` writes a structured exec log** at level `error` so the failure is visible in `make logs` even if the SSE stream is gone.
+- **Returned dict contract matches** the timeout, exec-error, and W.4 paths: `{status: "failed", node_key, title, error, verification_reason, reason: "upstream_fetch_error", message}`. New `reason` tag `upstream_fetch_error` slots alongside `prompt_build_error`, `timeout`, `execution_error`.
+
+The wrap is narrowly scoped — only `_fetch_upstream_outputs` itself, not the surrounding `node_snapshot` build. Snapshot construction is dict-literal work that doesn't raise; widening the wrap would have invited stale-attribute issues in the failure path (the snapshot wouldn't exist yet).
+
+**Project pattern (memory-worthy):** when a single in-process pipeline has multiple distinct error-recovery domains (Phase 1 DB → upstream fetch → prompt assembly → LLM dispatch → verify), each one should have its own narrow try/except with a distinct `reason` tag, NOT one giant outer wrap. Distinct tags let the next retry's prompt explain "the previous attempt failed during X" rather than the generic "execution error". W.4 + X.4 are two adjacent steps in this pattern; future audit-tail rows may add wraps to other phases.
+
+**Test-suite delta:** `tests/test_execution_agent_upstream_fetch.py` (new): 4 cases mirroring `test_execution_agent_prompt_build.py`. Combined `-k "execution_agent"` suite: 73/73 (was 69/69; +4). Broader `-k "execution_agent or execute_next_node or execute_all"`: 77/77 (was 73/73).
+
+The 8 pre-existing failures in `test_execution_handler_module.py` are X.2 column-drift in `SimpleNamespace` fixtures — same drift class as X.3's cleanup-test fix, NOT caused by X.4. Logged as a separate Tier 2 audit-tail row (test fixtures missing `compiled_output_synthesized`); deferred so this commit stays scoped.
 
 ---
 
