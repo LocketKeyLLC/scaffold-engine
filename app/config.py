@@ -203,7 +203,13 @@ class Settings(BaseSettings):
     stale_threshold_minutes: int = Field(default=30, ge=1, le=1440)
     planning_stale_minutes: int = Field(default=60, ge=1, le=1440)
     long_phase_stale_minutes: int = Field(default=45, ge=1, le=1440)
-    awaiting_confirmation_stale_minutes: int = Field(default=10080, ge=60, le=43200)  # 7d default, max 30d
+    # Sprint X.1 — tightened from 7d to 72h (4320 min). 7d was generous
+    # but in practice a 3-day stall on a pending confirmation almost
+    # always means the operator forgot, and the stuck job is more
+    # painful (cluttering /jobs list) than the rare case of a user
+    # legitimately waiting longer. Range floor stays at 60 min so
+    # operators with shorter SLAs can tighten further.
+    awaiting_confirmation_stale_minutes: int = Field(default=4320, ge=60, le=43200)  # 72h default, max 30d
     # Assist Mode: an assist_session with last_activity_at older than this
     # is treated as abandoned and the owning job moves to 'cancelled'.
     # Long default (7d) because manual implementation legitimately spans
@@ -220,9 +226,13 @@ class Settings(BaseSettings):
     assist_replan_regen_max_tokens: int = Field(default=2048, ge=512, le=8192)
     # #2 — orphan detection: dag_nodes stuck in 'running' past this threshold
     # are treated as orphaned (executor died) and reset to 'pending' for
-    # automatic re-execution. Default 60min > worst observed single-node
-    # duration (~30min) but well under stream_timeout (24h).
-    node_orphan_threshold_minutes: int = Field(default=60, ge=5, le=1440)
+    # automatic re-execution. Sprint X.1 tightened 60→30 min: the audit
+    # flagged that a dead executor could leave a node stuck for nearly
+    # an hour before recovery. 30 min still > worst observed single-node
+    # duration (~30min) — the orphan reset puts the node back to
+    # 'pending' (not 'failed'), so a legitimately-running node would
+    # simply re-execute on the next /execute/all tick.
+    node_orphan_threshold_minutes: int = Field(default=30, ge=5, le=1440)
     cleanup_interval_seconds: int = Field(default=900, ge=10, le=86400)
 
     # Execution agent tuning

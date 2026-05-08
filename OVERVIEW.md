@@ -2103,6 +2103,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | W.6 | Workflow audit — native tool-call migration (research/verify) (§17.24) | done 2026-05-07 |
 | W.7 | Workflow audit — opt-in LLM synthesis pass on compiled output (§17.25) | done 2026-05-07 |
 | W.8 | Workflow audit — RAG quality re-baseline at KB=1093 (§17.26) | done 2026-05-07 |
+| X.1 | Tier 2 audit — threshold cluster + reranker /health (§17.27) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2627,6 +2628,42 @@ Tier 1 / item 8 (the last) from the workflow-quality audit. Calibration, not cod
 - Move ground_truth.json's expected_doc_ids forward by re-resolving them against the current KB. Likely a script: for each (query, old_doc_id), find the closest live entry by content hash + title and propose a replacement.
 
 **Workflow-quality audit closed.** Eight sprints (W.1–W.8) shipped between 2026-05-07 morning and evening. Tier 1 audit list is exhausted.
+
+### 17.27 Sprint X.1 — Tier 2 audit threshold cluster + reranker /health (2026-05-07)
+
+First Tier 2 sprint. The W track closed Tier 1 (output-quality limiters); Tier 2 is "reliability fragilities" — small thresholds, observability gaps, defensive sweeps that have outlived their original justification. Sprint X.1 bundles four audit-listed items into one commit because each is a 1–3 line change with clear rationale.
+
+**Threshold retunes** (`app/config.py`):
+
+| Setting | Pre-X.1 | X.1 | Why |
+|---|---|---|---|
+| `node_orphan_threshold_minutes` | 60 | **30** | Audit flagged the 60-min lag for orphan recovery as too generous now that legitimate single-node runs rarely exceed 30 min. Reset puts the node back to `pending` (not `failed`), so a still-running node simply re-executes on the next `/execute/all` tick — no work lost. |
+| `awaiting_confirmation_stale_minutes` | 10080 (7d) | **4320 (72h)** | A 3-day stall on `awaiting_confirmation` is much more often "the operator forgot" than "the operator legitimately wants to come back next week." Stuck jobs cluttering `/jobs` is a worse failure mode than the rare premature cancel. Range floor unchanged at 60 min; max unchanged at 30d. |
+
+**Pre-migration sweep cutoff** (`app/main.py::_pre_migration_sweep`): tightened `INTERVAL '30 minutes'` → `INTERVAL '5 minutes'`. The wide cutoff was a legacy artifact from before `_sse_with_disconnect_watch` reliably finalized client-disconnected sessions live; with that handler in place, any `research_sessions` row in `'running'` state at lifespan startup is by definition a crash-orphan. The 5-minute buffer remains so a session that started in the seconds before lifespan completed isn't pre-emptively cancelled.
+
+**Reranker prewarm assertion** (`app/main.py`): the lifespan now records prewarm outcome on `app.state` and `/health` exposes it as a new `reranker` check entry. Status decoded as:
+
+| Status | Meaning |
+|---|---|
+| `up` | prewarm completed; payload includes `prewarmed_at` (ISO timestamp) + `elapsed_s` |
+| `down` | prewarm errored; payload includes `error` string |
+| `skipped` | `SCAFFOLD_PREWARM_RERANKER=false` at boot |
+| `unknown` | neither flag present (build pre-X.1 or app.state not yet wired) — treated as non-fatal |
+
+A silent prewarm failure previously only logged a single `WARNING` line, which `/health` consumers wouldn't see. With X.1, `curl /health` shows the prewarm state on every check. Verified live after restart: reranker status `up`, prewarmed in 17.39 s.
+
+**Implementation note** (project-applicable): `_check_reranker_state` was pulled out of `health()` as a module-level function so it's directly unit-testable. The `health()` view passes `getattr(app, "state", None)` so the test can drive it with any `SimpleNamespace` carrying the right attributes — no FastAPI TestClient needed.
+
+**Test-suite delta**: 9 new in `tests/test_x1_thresholds_and_health.py` — 2 settings-default checks, 1 SQL-cutoff inspection, 6 cases covering `_check_reranker_state` branches (up / down / skipped / unknown / state=None / error-takes-precedence-over-skipped). **Combined regression baseline (W track + X.1): 268/268.**
+
+**Note on pre-existing `tests/test_cleanup.py` failures (6/9):** these were already broken before X.1, not caused by it. Tests target the old 6-reaper / 6-key-return shape; live code has 8 reapers and returns 8 keys (drift from `awaiting_confirmation` + `assist_abandoned` reaper additions in earlier sprints). Audit-tail item, not X.1's job. The `tests/test_health_cleanup.py` skip note already flags this.
+
+**What this does NOT do** (deferred):
+- Fix `tests/test_cleanup.py`'s drift. The 6 failures need the test fixtures rebuilt to match the 8-reaper shape; doable in 30 min but unrelated to X.1's threshold scope.
+- Add a /health overall-status downgrade for `reranker.status="down"`. Current behavior: `reranker` is informational; the response's top-level `status` field still ignores it. A future change could promote rerank-failed to `degraded`, but operators may legitimately run with the cross-encoder disabled (e.g., RRF-only mode in CI), so promoting silently could surprise.
+
+**Open Tier 2 follow-ups** (per the audit memo): research-session idle-tracking column; OWUI file-routing diagnostic capture; `_compile_output` skipped-verify banner; 5-place API-key sync target; W.4-style wrap on `_fetch_upstream_outputs`; prompt_optimizer / idea_refinement / gt_extractor tool-call migrations; per-job synthesis opt-in column; `synthesized=true|false` flag on `/exec/status`; ground_truth.json regen; quarterly re-baseline cadence; CI smoke for retrieval; `tests/test_cleanup.py` drift fix.
 
 ---
 

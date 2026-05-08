@@ -78,6 +78,38 @@ setup_logging(
 )
 
 
+def _check_reranker_state(state) -> dict:
+    """Sprint X.1: surface lifespan prewarm outcome to /health.
+
+    Status:
+      - "up"       — prewarm completed (state.reranker_prewarmed_at set)
+      - "down"     — prewarm errored (state.reranker_prewarm_error set)
+      - "skipped"  — SCAFFOLD_PREWARM_RERANKER=false at boot
+      - "unknown"  — neither flag present (build pre-X.1, or app.state
+                     not yet wired). Treated as non-fatal.
+
+    Pulled out of health() to keep it directly unit-testable. ``state``
+    is the FastAPI app's state object (or any object with the same
+    attribute names).
+    """
+    if state is None:
+        return {"status": "unknown", "prewarmed": False}
+    prewarmed_at = getattr(state, "reranker_prewarmed_at", None)
+    elapsed = getattr(state, "reranker_prewarm_elapsed_s", None)
+    error = getattr(state, "reranker_prewarm_error", None)
+    skipped = getattr(state, "reranker_prewarm_skipped", False)
+    if error:
+        return {"status": "down", "prewarmed": False, "error": error}
+    if skipped:
+        return {"status": "skipped", "prewarmed": False}
+    if prewarmed_at:
+        return {
+            "status": "up", "prewarmed": True,
+            "prewarmed_at": prewarmed_at, "elapsed_s": elapsed,
+        }
+    return {"status": "unknown", "prewarmed": False}
+
+
 async def _pre_migration_sweep() -> dict:
     """Idempotent pre-migration sweep of stuck 'running' research_sessions.
 
@@ -93,6 +125,14 @@ async def _pre_migration_sweep() -> dict:
     precondition is robust regardless of when 020 first applies and
     regardless of crash-recovery state. Idempotent — running it on a
     healthy DB matches no rows and changes nothing.
+
+    Sprint X.1: cutoff tightened 30min → 5min. The wide cutoff was a
+    legacy artifact from before runtime client-disconnect handling
+    (``_sse_with_disconnect_watch``) reliably finalized rows live; with
+    that handler in place, any 'running' row at startup is by definition
+    a crash-orphan (the orchestrator wasn't around to update it). The 5-
+    minute buffer remains so a session that started in the seconds
+    before lifespan completed isn't pre-emptively cancelled.
     """
     async with async_session() as db:
         async with db.begin():
@@ -109,7 +149,7 @@ async def _pre_migration_sweep() -> dict:
                        completed_at = NOW(),
                        updated_at = NOW()
                  WHERE status = 'running'
-                   AND updated_at < NOW() - INTERVAL '30 minutes'
+                   AND updated_at < NOW() - INTERVAL '5 minutes'
             """))
             return {
                 "skipped": False,
@@ -193,15 +233,31 @@ async def lifespan(app: FastAPI):
 
     # Pre-warm reranker (Apr 26 2026): avoid ~13s cold-load on first user request.
     # Opt out: SCAFFOLD_PREWARM_RERANKER=false
+    # Sprint X.1: surface prewarm outcome on app.state so /health can
+    # report it. This makes a silent prewarm failure (which previously
+    # only logged a WARNING) operator-visible.
+    app.state.reranker_prewarmed_at = None
+    app.state.reranker_prewarm_elapsed_s = None
+    app.state.reranker_prewarm_error = None
+    app.state.reranker_prewarm_skipped = False
     if os.getenv("SCAFFOLD_PREWARM_RERANKER", "true").strip().lower() not in ("0", "false", "no", "off"):
         try:
             import asyncio
+            import time as _time
+            from datetime import datetime, timezone
             from app.rerankers import _get_cross_encoder
             loop = asyncio.get_running_loop()
+            _t0 = _time.monotonic()
             await loop.run_in_executor(None, _get_cross_encoder)
+            elapsed = round(_time.monotonic() - _t0, 2)
+            app.state.reranker_prewarmed_at = datetime.now(timezone.utc).isoformat()
+            app.state.reranker_prewarm_elapsed_s = elapsed
             logger.info("reranker_prewarmed")
         except Exception as exc:
+            app.state.reranker_prewarm_error = str(exc)
             logger.warning("reranker_prewarm_failed: %s", exc)
+    else:
+        app.state.reranker_prewarm_skipped = True
 
     # Optional startup cleanup
     if os.getenv("CLEANUP_ON_STARTUP", "").lower() == "true":
@@ -361,7 +417,12 @@ async def health():
         return_exceptions=True,
     )
     redis_info, cache_stats = redis_pair
-    checks = {"postgresql": pg, "ollama": ollama, "milvus": milvus, "redis": redis_info, "embedding_cache": cache_stats}
+    reranker = _check_reranker_state(getattr(app, "state", None))
+    checks = {
+        "postgresql": pg, "ollama": ollama, "milvus": milvus,
+        "redis": redis_info, "embedding_cache": cache_stats,
+        "reranker": reranker,
+    }
     pg_up = pg["status"] == "up"
     ollama_up = ollama["status"] == "up"
     milvus_up = milvus["status"] == "up"
