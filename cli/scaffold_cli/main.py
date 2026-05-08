@@ -512,12 +512,15 @@ commands with concrete job_id and node_key already filled in.
 @jobs.command("status", help="Show full status for a single job.", epilog=JOBS_STATUS_EPILOG)
 @click.argument("job_id")
 @click.option("--json", "as_json", is_flag=True, help="Print the raw JSON response.")
+@click.option("--costs", "show_costs", is_flag=True,
+              help="Append cost + latency rollup (totals + per-(provider, model) breakdown).")
 @click.pass_context
-def jobs_status(ctx: click.Context, job_id: str, as_json: bool) -> None:
+def jobs_status(ctx: click.Context, job_id: str, as_json: bool, show_costs: bool) -> None:
     cfg = ctx.obj["cfg"]
     try:
         with Client(cfg.api_url, cfg.api_key) as c:
             data = c.get_or_none(f"/exec/status/{job_id}")
+            costs_data = c.get_or_none(f"/jobs/{job_id}/costs") if show_costs else None
     except CLIError as exc:
         click.secho(str(exc), fg="red", err=True)
         sys.exit(1)
@@ -528,6 +531,14 @@ def jobs_status(ctx: click.Context, job_id: str, as_json: bool) -> None:
         sys.exit(1)
 
     if as_json:
+        # J.3.c — when --costs is set, embed the costs payload alongside
+        # the status under a top-level `costs` key. Existing /exec/status
+        # already returns a `costs` totals block (J.3.b); --costs adds
+        # the breakdown. Keep both keys when present so consumers that
+        # care about the breakdown see it without a separate request.
+        if show_costs and costs_data is not None:
+            data = dict(data)
+            data["costs_breakdown"] = costs_data
         click.echo(_json.dumps(data, indent=2))
         return
 
@@ -559,6 +570,62 @@ def jobs_status(ctx: click.Context, job_id: str, as_json: bool) -> None:
     # pasteable bulleted block. Pulled from the response's `next_actions`
     # field (orchestrator's recovery registry, populated server-side).
     _render_next_actions(data)
+
+    # J.3.c — cost rollup when --costs is set. Falls back to the totals
+    # block that /exec/status already includes if the breakdown call
+    # failed (e.g. transient orchestrator issue) so the operator still
+    # sees something useful.
+    if show_costs:
+        _render_cost_rollup(data, costs_data)
+
+
+def _render_cost_rollup(status_data: dict, costs_data: dict | None) -> None:
+    """J.3.c — print cost totals + per-(provider, model) breakdown.
+
+    Reads totals from the costs endpoint when available; falls back to
+    the lightweight totals block on /exec/status (always present
+    post-J.3.b) so the operator still gets numbers when the breakdown
+    request failed.
+    """
+    totals = (
+        costs_data
+        if isinstance(costs_data, dict) and "total_cost_usd" in costs_data
+        else (status_data.get("costs") or {})
+    )
+    if not totals:
+        return
+
+    click.echo()
+    click.echo("costs:")
+    cost = float(totals.get("total_cost_usd") or 0.0)
+    click.echo(f"  total:    ${cost:.4f}")
+    click.echo(f"  calls:    {totals.get('call_count', 0)}")
+    click.echo(
+        f"  tokens:   prompt={totals.get('total_prompt_tokens', 0)} "
+        f"completion={totals.get('total_completion_tokens', 0)}"
+    )
+    latency_ms = int(totals.get("total_latency_ms") or 0)
+    click.echo(f"  latency:  {latency_ms} ms ({latency_ms/1000:.1f}s)")
+
+    breakdown = (costs_data or {}).get("by_provider") or []
+    if breakdown:
+        click.echo()
+        click.echo("  by provider/model:")
+        # Column widths: provider 12, model 24, calls 5, cost 10
+        click.echo(
+            f"    {'provider':<12} {'model':<24} "
+            f"{'calls':>5}  {'cost':>10}  {'latency':>10}"
+        )
+        for row in breakdown:
+            provider = (row.get("provider") or "")[:12]
+            model = (row.get("model") or "")[:24]
+            calls = row.get("calls", 0)
+            row_cost = float(row.get("cost_usd") or 0.0)
+            row_latency = int(row.get("latency_ms") or 0)
+            click.echo(
+                f"    {provider:<12} {model:<24} "
+                f"{calls:>5}  ${row_cost:>9.4f}  {row_latency:>7} ms"
+            )
 
 
 # ---------------------------------------------------------------------------

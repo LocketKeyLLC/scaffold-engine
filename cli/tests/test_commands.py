@@ -285,6 +285,159 @@ def test_jobs_status_prints_key_fields(runner):
 
 
 # ---------------------------------------------------------------------------
+# J.3.c — `--costs` flag on `scaffold jobs status`
+# ---------------------------------------------------------------------------
+
+
+def _status_with_costs_mock(status_payload, costs_payload):
+    """Build a Client mock whose two get_or_none calls return:
+      1. /exec/status/<id> → status_payload
+      2. /jobs/<id>/costs → costs_payload
+    (in that order, matching jobs_status's call sequence)."""
+    cm = patch("scaffold_cli.main.Client")
+    return cm, [status_payload, costs_payload]
+
+
+def test_jobs_status_costs_flag_renders_breakdown(runner):
+    """`--costs` calls /jobs/<id>/costs after the status call and
+    appends a totals header + per-(provider, model) breakdown table."""
+    status = {
+        "job_id": "abc",
+        "job_title": "Test",
+        "job_status": "completed",
+        "counts": {"done": 3},
+        "total_nodes": 3,
+        "compiled_output": None,
+        "nodes": [],
+        # /exec/status's lightweight cost block (J.3.b) — falls through
+        # to it if the breakdown call fails. Set zero here so the
+        # assertion below is on the breakdown payload.
+        "costs": {
+            "total_cost_usd": 0.0, "call_count": 0,
+            "total_prompt_tokens": 0, "total_completion_tokens": 0,
+            "total_latency_ms": 0,
+        },
+    }
+    costs = {
+        "job_id": "abc",
+        "total_cost_usd": 0.012345,
+        "total_prompt_tokens": 5000,
+        "total_completion_tokens": 2000,
+        "total_latency_ms": 30000,
+        "call_count": 12,
+        "by_provider": [
+            {"provider": "openai", "model": "gpt-4o-mini", "calls": 8,
+             "cost_usd": 0.012, "prompt_tokens": 4000,
+             "completion_tokens": 1500, "latency_ms": 22000},
+            {"provider": "ollama", "model": "qwen3:4b", "calls": 4,
+             "cost_usd": 0.000345, "prompt_tokens": 1000,
+             "completion_tokens": 500, "latency_ms": 8000},
+        ],
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get_or_none.side_effect = [
+            status, costs,
+        ]
+        res = runner.invoke(cli, ["jobs", "status", "abc", "--costs"])
+    assert res.exit_code == 0, res.output
+    # Existing status fields still rendered.
+    assert "job_id: abc" in res.output
+    # Costs section header + totals.
+    assert "costs:" in res.output
+    assert "$0.0123" in res.output  # total formatted
+    assert "calls:    12" in res.output
+    assert "prompt=5000" in res.output and "completion=2000" in res.output
+    assert "30000 ms" in res.output
+    # Breakdown table — columns + per-row content.
+    assert "by provider/model:" in res.output
+    assert "openai" in res.output and "gpt-4o-mini" in res.output
+    assert "ollama" in res.output and "qwen3:4b" in res.output
+
+
+def test_jobs_status_costs_falls_back_to_status_totals_when_breakdown_unavailable(runner):
+    """If /jobs/<id>/costs returns None (e.g. SDK error), the renderer
+    still surfaces the lightweight totals from /exec/status's `costs`
+    block. Operator-friendly: get *something*, not nothing."""
+    status = {
+        "job_id": "abc", "job_title": "T", "job_status": "running",
+        "counts": {"done": 1}, "total_nodes": 1, "compiled_output": None,
+        "nodes": [],
+        "costs": {
+            "total_cost_usd": 0.005, "call_count": 3,
+            "total_prompt_tokens": 1500, "total_completion_tokens": 500,
+            "total_latency_ms": 8000,
+        },
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        # Second call returns None (breakdown endpoint unavailable).
+        ClientCls.return_value.__enter__.return_value.get_or_none.side_effect = [
+            status, None,
+        ]
+        res = runner.invoke(cli, ["jobs", "status", "abc", "--costs"])
+    assert res.exit_code == 0
+    assert "costs:" in res.output
+    assert "$0.0050" in res.output  # total from /exec/status fallback
+    assert "calls:    3" in res.output
+    # No breakdown section since costs payload was unavailable.
+    assert "by provider/model:" not in res.output
+
+
+def test_jobs_status_costs_json_includes_breakdown_under_costs_breakdown_key(runner):
+    """`--costs --json` embeds the breakdown payload alongside the status
+    under a top-level `costs_breakdown` key. Existing /exec/status `costs`
+    totals stay where they are; the breakdown is additive."""
+    status = {
+        "job_id": "abc", "job_title": "T", "job_status": "completed",
+        "counts": {"done": 1}, "total_nodes": 1, "compiled_output": None,
+        "nodes": [],
+        "costs": {"total_cost_usd": 0.0, "call_count": 0,
+                  "total_prompt_tokens": 0, "total_completion_tokens": 0,
+                  "total_latency_ms": 0},
+    }
+    costs = {
+        "job_id": "abc", "total_cost_usd": 0.001,
+        "total_prompt_tokens": 100, "total_completion_tokens": 50,
+        "total_latency_ms": 200, "call_count": 1,
+        "by_provider": [{"provider": "openai", "model": "x", "calls": 1,
+                         "cost_usd": 0.001, "prompt_tokens": 100,
+                         "completion_tokens": 50, "latency_ms": 200}],
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get_or_none.side_effect = [
+            status, costs,
+        ]
+        res = runner.invoke(cli, ["jobs", "status", "abc", "--costs", "--json"])
+    assert res.exit_code == 0
+    import json as _json
+    body = _json.loads(res.output)
+    assert "costs_breakdown" in body
+    assert body["costs_breakdown"]["total_cost_usd"] == 0.001
+    assert body["costs_breakdown"]["by_provider"][0]["model"] == "x"
+    # Original status fields untouched.
+    assert body["job_id"] == "abc"
+    assert "costs" in body  # /exec/status's lightweight block preserved
+
+
+def test_jobs_status_without_costs_flag_skips_costs_call(runner):
+    """No --costs → only /exec/status is called; no /costs request."""
+    status = {
+        "job_id": "abc", "job_title": "T", "job_status": "running",
+        "counts": {}, "total_nodes": 0, "compiled_output": None,
+        "nodes": [],
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get_or_none = ClientCls.return_value.__enter__.return_value.get_or_none
+        get_or_none.return_value = status
+        res = runner.invoke(cli, ["jobs", "status", "abc"])
+    assert res.exit_code == 0
+    # Exactly one call: /exec/status. No /costs follow-up.
+    assert get_or_none.call_count == 1
+    paths_called = [c.args[0] for c in get_or_none.call_args_list]
+    assert any("/exec/status" in p for p in paths_called)
+    assert not any("/costs" in p for p in paths_called)
+
+
+# ---------------------------------------------------------------------------
 # Global flag plumbing
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------

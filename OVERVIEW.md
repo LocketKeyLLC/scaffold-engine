@@ -2125,6 +2125,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | J.2.c | Native single-page web UI — execute SSE (HTMX hx-sse) (§17.47) | done 2026-05-08 |
 | J.3.a | Cost + latency telemetry foundation — schema + logging hook (§17.48) | done 2026-05-08 |
 | J.3.b | Cost rollup endpoint + /exec/status extension + SDK costs() (§17.49) | done 2026-05-08 |
+| J.3.c | Cost telemetry consumer surfaces — CLI + OWUI + make rollup (§17.50) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -3211,6 +3212,31 @@ Phase 2 of roadmap item J.3 — the API surface that lets clients consume J.3.a'
 **Project pattern (memory-worthy):** when a hot read path (here: `/exec/status`) gains an aggregate field, run the rollup query as part of the same request rather than caching it on the row. The DB SUM is cheap (~ms) and always-correct; cached aggregates drift the moment a new log row lands. Cache only when measurement proves the SUM is hot enough to matter — premature optimization here costs you correctness.
 
 **Test-suite delta:** `tests/test_cost_rollup.py` (new): 11 cases — `TestGetJobCostTotals` (3: summed totals, no-calls zero-shape, DB-error fail-open), `TestGetJobCosts` (2: breakdown-with-rows, breakdown-empty-list), `TestCostsEndpoint` (3: 200 with payload, 422 on bad UUID, zero-shape for unknown job), `TestExecStatusCostsBlock` (2: status includes costs totals, zero-shape when no calls logged), `TestSdkCostsMethod` (1: sync `costs()` calls correct endpoint). Cross-suite `-k "execution_handler or cost_rollup or cost_tracking or sdk_schema_parity or test_main"`: 64 passed + 1 pre-existing flake (`test_status_connection_error_rendered`, env-dependent string match on `requests.ConnectionError`, documented since W.2 as not caused by current sprint). OpenAPI snapshot regenerated; new path visible at `paths./jobs/{job_id}/costs.get`.
+
+### 17.50 Sprint J.3.c — cost telemetry consumer surfaces (2026-05-08)
+
+Phase 3 (final) of roadmap item J.3 — closes the cost-telemetry track. Three small consumer surfaces over J.3.b's API; nothing on the orchestrator side.
+
+**1. CLI: `scaffold jobs status <id> --costs`.** Adds a flag to `cli/scaffold_cli/main.py::jobs_status`. When set, after the existing `/exec/status/<id>` call, also hits `/jobs/<id>/costs` for the breakdown. Renders a `costs:` section with totals (cost, calls, tokens, latency in ms+s) followed by an aligned per-(provider, model) table sorted desc by cost. Falls back to the lightweight `costs` block on `/exec/status` (always present post-J.3.b) when the breakdown call fails so the operator still gets numbers. `--json` form embeds the breakdown payload under a top-level `costs_breakdown` key alongside the existing `/exec/status` JSON — the existing `costs` totals key stays where J.3.b put it; `costs_breakdown` is additive.
+
+**2. OWUI: `/cost <job_id>` chat command.** New command in `pipelines/scaffold_router.py`. Hits `GET /jobs/{id}/costs`, renders a Markdown header `## 💰 Cost — short-id  $X.XXXX  (N calls)` followed by a tokens line, latency line, and a per-(provider, model) Markdown table. Zero-shape responses (`call_count == 0`) render a friendly "no LLM calls logged for this job yet" hint instead of an empty table. Wired into `_handle_command` next to the existing U.8.D admin commands; registered in `KNOWN_COMMANDS` so autocomplete + the unknown-command suggestion logic surface it. Help text updated.
+
+**3. `make costs`.** New target wrapping `scripts/costs_rollup.sh`. Runs a top-N (default 10, override `N=20`) GROUP-BY-job_id rollup against `llm_call_logs`, ordered by total cost desc. Output is whatever `psql` renders (plain table). Accepts `(off-job)` for ungrouped calls (validate_models, standalone /optimize, etc.) so they're visible to operators without polluting per-job rows. Live-smoked: produced one `(off-job)` row with 9 calls accumulated from the J.3.a/J.3.b test runs.
+
+**Why a dedicated `/cost` command rather than embedding cost in `/status`?** Lowest blast radius. Extending `/status` would require teaching the orchestrator's `/status` endpoint to return per-job cost data (an N+1 query against `llm_call_logs`) and threading it through the existing `_render_status` table. Operators who want the multi-job rollup view have `make costs`; operators who want per-job detail have `/cost <id>`. Each surface is sized to its purpose.
+
+**Why `costs_breakdown` rather than mutating the existing `costs` key in the CLI's `--json` output?** Backwards compatibility. `/exec/status` ships a `costs` totals block that JSON consumers may already be reading; mutating that field would break those consumers. Adding a parallel `costs_breakdown` key when `--costs` is set keeps the contract additive.
+
+**Project pattern (memory-worthy):** when a feature spans CLI / OWUI / Make surfaces, **prefer dedicated commands over flag-overloading existing commands** unless the existing command is the natural query path. `/cost` as a new command is cleaner than wedging cost data into `/status`'s already-busy table; `make costs` as a new target is cleaner than turning `make status` into a multi-mode tool. The CLI's `scaffold jobs status --costs` is the exception because the cost data is the per-job detail that pairs naturally with the per-job status.
+
+**Test-suite delta:**
+- `cli/tests/test_commands.py`: 4 new cases on the `--costs` flag (renders breakdown; falls back to /exec/status totals when breakdown unavailable; --json embeds `costs_breakdown`; flag-off skips the costs call). CLI suite: 124 passed (was 120, +4).
+- `tests/test_scaffold_router_commands.py`: 7 new cases in `TestCostCommand` (usage when no arg; rejects placeholder; renders breakdown table; zero-calls friendly empty state; HTTP-error propagates; `/cost` in `KNOWN_COMMANDS`; help advertises `/cost`). Pipeline suite: 93 passed + 4 pre-existing env-dependent failures (live `/research` state drift, documented since X.7) unchanged.
+- Total J.3 test count: 32 (J.3.a 10 + J.3.b 11 + J.3.c 11). Live `make costs` smoke produced expected rollup output.
+
+**Roadmap item J.3 is complete** across phases a + b + c. Cost + latency telemetry now flows: every model_router LLM call → llm_call_logs row → per-job rollup via API + CLI flag + OWUI command + Make target. Operators have visibility into spend without writing raw SQL. Pricing for cloud models (openai, anthropic) is seeded; local Ollama is automatically zero-cost. The migration-seeded rates are editable (operator-bumpable); historical `cost_usd` values are immutable.
+
+**🎉 All J-track roadmap items closed** (J.1 SDK + OpenAPI snapshot v1.0.0, J.2 native web UI a/b/c, J.3 cost telemetry a/b/c). The post-v1.0.0 ambition list is empty.
 
 ---
 

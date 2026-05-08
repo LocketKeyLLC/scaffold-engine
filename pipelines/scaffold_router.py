@@ -54,6 +54,8 @@ KNOWN_COMMANDS: tuple = (
     "/assist/friction", "/assist/help",
     # U.8.D — chat parity for components reachable via CLI/SDK only.
     "/exec", "/cleanup", "/config", "/logs", "/health",
+    # J.3.c — cost rollup for a job.
+    "/cost",
 )
 
 KNOWN_SUBCOMMANDS: dict = {
@@ -2210,6 +2212,10 @@ class Pipeline:
             if cmd == "/health":
                 return self._handle_health()
 
+            # ----- J.3.c — cost rollup for a job ------------------------
+            if cmd == "/cost":
+                return self._handle_cost(parts)
+
             close = _suggest_command(cmd)
             if close:
                 hint = "\n".join(f"  - `{c}`" for c in close)
@@ -3151,6 +3157,68 @@ class Pipeline:
             lines.append(f"| {name} | {icon} {status} | {lat} |")
         return "\n".join(lines)
 
+    def _handle_cost(self, parts: list) -> str:
+        """J.3.c — render the per-job cost rollup from /jobs/{id}/costs.
+
+        Shows totals + a per-(provider, model) breakdown table. Falls
+        through to a friendly "no calls logged yet" message when the
+        job has no telemetry (call_count == 0), which is also the
+        zero-shape J.3.b returns for jobs that ran before the
+        migration was applied.
+        """
+        if len(parts) < 2:
+            return "Usage: `/cost <job_id>`"
+        if _is_placeholder(parts[1]):
+            return "It looks like job_id is missing or a placeholder. Try `/cost 01ab243e`."
+        job_id = parts[1]
+        r = _HTTP_SESSION.get(
+            f"{self.valves.orchestrator_url}/jobs/{job_id}/costs",
+            headers=self._auth_headers(),
+            timeout=self.valves.request_timeout,
+        )
+        if r.status_code >= 400:
+            return self._fmt(r)
+        data = r.json() if isinstance(r.json(), dict) else {}
+        cost = float(data.get("total_cost_usd") or 0.0)
+        calls = int(data.get("call_count") or 0)
+        prompt_tokens = int(data.get("total_prompt_tokens") or 0)
+        completion_tokens = int(data.get("total_completion_tokens") or 0)
+        latency_ms = int(data.get("total_latency_ms") or 0)
+        breakdown = data.get("by_provider") or []
+
+        header = (
+            f"## 💰 Cost — `{job_id[:8]}`  "
+            f"${cost:.4f}  ({calls} call{'s' if calls != 1 else ''})"
+        )
+        if calls == 0:
+            return (
+                header + "\n\n_(no LLM calls logged for this job yet — "
+                "either it hasn't run, or it was created before "
+                "telemetry was enabled)_"
+            )
+
+        latency_s = latency_ms / 1000.0
+        lines = [
+            header, "",
+            f"**Tokens:** prompt={prompt_tokens:,} · completion={completion_tokens:,}",
+            f"**Latency:** {latency_ms:,} ms ({latency_s:.1f} s total LLM time)",
+        ]
+        if breakdown:
+            lines.append("")
+            lines.append("| Provider | Model | Calls | Cost | Latency |")
+            lines.append("|---|---|---:|---:|---:|")
+            for row in breakdown:
+                provider = str(row.get("provider", ""))[:20]
+                model = str(row.get("model", ""))[:30]
+                row_calls = int(row.get("calls") or 0)
+                row_cost = float(row.get("cost_usd") or 0.0)
+                row_latency = int(row.get("latency_ms") or 0)
+                lines.append(
+                    f"| {provider} | `{model}` | {row_calls} | "
+                    f"${row_cost:.4f} | {row_latency:,} ms |"
+                )
+        return "\n".join(lines)
+
     # ------------------------------------------------------------------
     # Help
     # ------------------------------------------------------------------
@@ -3208,4 +3276,5 @@ class Pipeline:
 | `/health` | Per-subsystem probe (Postgres + Ollama + Milvus + Redis). |
 | `/logs <job_id>` | Per-node DAG state with output preview. |
 | `/exec retry <job_id> <node_key>` | Retry a failed/blocked node. |
-| `/cleanup` | Sweep stale jobs (resets orphans, cancels long-idle)."""
+| `/cleanup` | Sweep stale jobs (resets orphans, cancels long-idle). |
+| `/cost <job_id>` | Cost + latency rollup (J.3) — totals + per-(provider, model) breakdown."""

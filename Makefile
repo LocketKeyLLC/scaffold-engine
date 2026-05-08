@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves sync-api-key reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config
+.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -56,6 +56,9 @@ sync-valves: ## Wipe baked-in api_key from pipelines/*/valves.json (.env becomes
 
 sync-api-key: ## Strict-sync SCAFFOLD_API_KEY across .env + valves.json + ~/.bashrc (use: make sync-api-key [KEY=sk-...])
 	@bash scripts/sync_api_key.sh $(KEY)
+
+costs: ## Top-N most-expensive jobs from llm_call_logs (J.3) — defaults to 10 (use: make costs [N=20])
+	@bash scripts/costs_rollup.sh
 
 reindex: ## Re-embed the toon_v2 corpus (after switching MODEL_EMBEDDER_PIPELINE)
 	docker exec -it $(CONTAINER) python scripts/reindex.py $(REINDEX_ARGS)

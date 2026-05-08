@@ -759,3 +759,94 @@ class TestU8DCommands:
         from scaffold_router import KNOWN_SUBCOMMANDS  # type: ignore
         assert "run-now" not in KNOWN_SUBCOMMANDS["/schedule"]
 
+
+# ===================================================================
+# J.3.c — /cost <job_id> chat command
+# ===================================================================
+
+
+@pytest.mark.smoke
+class TestCostCommand:
+    """`/cost <job_id>` hits GET /jobs/{id}/costs and renders a totals
+    header + per-(provider, model) breakdown table."""
+
+    def test_usage_when_no_arg(self, pipe):
+        out = pipe._handle_command("/cost")
+        assert "Usage" in out
+        assert "/cost" in out
+
+    def test_rejects_placeholder(self, pipe):
+        out = pipe._handle_command("/cost <job_id>")
+        assert "placeholder" in out.lower()
+
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_renders_breakdown_table(self, mock_get, pipe):
+        mock_get.return_value = _make_response(200, {
+            "job_id": "abc-123",
+            "total_cost_usd": 0.0123,
+            "total_prompt_tokens": 5000,
+            "total_completion_tokens": 2000,
+            "total_latency_ms": 30000,
+            "call_count": 12,
+            "by_provider": [
+                {"provider": "openai", "model": "gpt-4o", "calls": 8,
+                 "cost_usd": 0.012, "prompt_tokens": 4000,
+                 "completion_tokens": 1500, "latency_ms": 22000},
+                {"provider": "ollama", "model": "qwen3:4b", "calls": 4,
+                 "cost_usd": 0.0003, "prompt_tokens": 1000,
+                 "completion_tokens": 500, "latency_ms": 8000},
+            ],
+        })
+        out = pipe._handle_command("/cost abc-123")
+        url = mock_get.call_args[0][0]
+        assert "/jobs/abc-123/costs" in url
+        # Header + totals.
+        assert "💰 Cost" in out
+        assert "$0.0123" in out
+        assert "12 calls" in out
+        # Token + latency lines.
+        assert "5,000" in out and "2,000" in out
+        assert "30,000 ms" in out
+        # Breakdown rows surface each (provider, model).
+        assert "openai" in out and "gpt-4o" in out
+        assert "ollama" in out and "qwen3:4b" in out
+
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_zero_calls_renders_friendly_empty_state(self, mock_get, pipe):
+        """A job with no logged LLM calls (or one that ran before the
+        J.3.a migration) returns the zero shape from /jobs/{id}/costs.
+        The OWUI render shows a friendly hint rather than an empty table."""
+        mock_get.return_value = _make_response(200, {
+            "job_id": "abc-123",
+            "total_cost_usd": 0.0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_latency_ms": 0,
+            "call_count": 0,
+            "by_provider": [],
+        })
+        out = pipe._handle_command("/cost abc-123")
+        assert "💰 Cost" in out
+        assert "0 calls" in out
+        # Friendly empty-state message.
+        assert "no LLM calls logged" in out
+
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_http_error_propagates(self, mock_get, pipe):
+        """4xx/5xx from the costs endpoint returns the standard _fmt
+        error rendering rather than a half-built table."""
+        mock_get.return_value = _make_response(500, {"detail": "boom"})
+        out = pipe._handle_command("/cost abc-123")
+        # _fmt's standard error envelope wraps the response.
+        assert "500" in out or "boom" in out
+
+    def test_cost_in_known_commands(self):
+        """`/cost` is registered in KNOWN_COMMANDS so autocomplete + the
+        unknown-command suggestion logic surface it."""
+        from scaffold_router import KNOWN_COMMANDS  # type: ignore
+        assert "/cost" in KNOWN_COMMANDS
+
+    def test_help_advertises_cost(self, pipe):
+        out = pipe._handle_command("/help")
+        assert "/cost" in out
+
