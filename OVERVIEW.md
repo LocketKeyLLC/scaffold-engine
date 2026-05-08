@@ -2696,6 +2696,48 @@ Second Tier 2 sprint. Bundles two small observability adds that surface existing
 - Per-job synthesis opt-in column.
 - Cost-telemetry tie-in: when J.3 lands, log per-call synthesis tokens against the `synthesized=true` jobs so the cost is attributable.
 
+### 17.29 Audit state + resume pointer (last updated 2026-05-08)
+
+Snapshot of the W + X audit state so a future session can pick up cleanly.
+
+**Closed:**
+- **W track (Tier 1, output-quality limiters)** — 8 sprints, all green. W.1 verifier-feedback loop (`6c27c05`); W.2 compile-heuristics polish (`8fa7e72`); W.3 DAG validator+retry loop (`3e435bc`); W.4 prompt-build try/except (`ebe95b2`); W.5 assist_replan LLM regen (`23c8c82`); W.6 native tool-call migration for research+verify (`a481456`); W.7 opt-in LLM synthesis on compile (`19f9a15`); W.8 RAG re-baseline at KB=1093, quality held flat (`a959f30`).
+- **Tier 2 — X.1** threshold cluster + reranker /health (`071eed1`).
+- **Tier 2 — X.2** synthesized flag on /exec/status + skipped-verify banner, migration 027 (`9ae79ec`).
+
+**Combined regression baseline (W track + X.1 + X.2): 278/278.**
+
+**Tier 2 remaining** (priority order — lower-numbered = higher impact-to-effort):
+
+| # | Item | Shape | Notes |
+|---|---|---|---|
+| 1 | `tests/test_cleanup.py` 8-reaper drift fix | Test debt, ~30 min | 6/9 tests broken by drift since `awaiting_confirmation` + `assist_abandoned` reapers were added pre-W. Mechanical fixture rebuild. Quick win to clear the baseline noise from X.1's notes. |
+| 2 | W.4-style wrap on `_fetch_upstream_outputs` | Single-concern refactor | Audit-tail item directly tied to W.4. Wrap the upstream-fetch in try/except so DB-layer failures persist a `verification_reason`. Matches W.4 shape. |
+| 3 | `_compile_output` skipped-verify banner | **DONE in X.2** | Already shipped — leave row only as a record. |
+| 4 | synthesized=true|false on /exec/status | **DONE in X.2** | Already shipped. |
+| 5 | research-session idle-tracking column | Migration + small code | New `research_sessions.last_activity_at` column for finer reaper logic. |
+| 6 | Per-job synthesis opt-in column | Migration + API | `jobs.compile_synthesis_override BOOLEAN NULL`; falls through to global setting when null. |
+| 7 | OWUI file-routing diagnostic capture | Observability | Surface routing decisions in OWUI logs so triage paths are debuggable. |
+| 8 | 5-place API-key sync target | Make/script | Single `make sync-api-key` that updates `.env`, valves.json files, container env, and `~/.bashrc` in one shot. |
+| 9 | `synthesized` filter on `GET /jobs` | API addition | List endpoint gains `?synthesized=true|false` query param. Tier-2 audit-tail. |
+| 10 | prompt_optimizer JSON-coaxing → tool-call migration | Pattern follow-on to W.6 | 2 sites in `prompt_optimizer.py` still use coaxing. Mechanical with W.6 wrapper. |
+| 11 | idea_refinement tool-call migration | Same shape as #10 | 1 site. |
+| 12 | gt_extractor tool-call migration | Same shape as #10 | 1 site. |
+| 13 | CI smoke for retrieval regressions | CI config | Tiny fixture (3 queries) run on PRs touching `app/modules/rag_pipeline.py`. Catches regressions cheaply without needing live Milvus. |
+| 14 | Quarterly RAG re-baseline cadence | Scheduling | `make rebaseline` cron / runbook. Surfaces drift early. |
+| 15 | `tests/ground_truth.json` regen at KB=1093 | Calibration, multi-hour | Re-curate expected_doc_ids against the current `scaffold-<title>-<hash>` naming. Defer until a quarterly rebaseline shows a need. |
+
+**Roadmap items still pending** (post-v1.0.0 ambition):
+- **J.2** — native single-page web UI (`app/web/` HTML+HTMX, served by FastAPI). Dogfoods the SDK as the second consumer after CLI.
+- **J.3** — cost + latency telemetry. Adds `model_costs` table + per-call token logging; surfaces in `scaffold jobs status <id> --costs`, an OWUI response header, `make costs` rollup.
+
+**Tiers 3-5 audit notes** (not memory-canonical until/unless we sprint them) — performance benchmarks calibration, dependency hygiene, doc-staleness sweeps. Documented in §17 audit notes throughout.
+
+**How to resume:**
+1. Read `~/.claude/projects/-home-aedefruscio-scaffold-engine/memory/project_sprint_e.md` for the sprint history + project-applicable patterns captured along the way.
+2. Pick a Tier 2 item from the table above.
+3. The skill at `~/.claude/skills/scaffold-engine/` has the routing table; use `references/conventions.md` for migration/logger/test patterns.
+
 ---
 
 ## 18. Performance benchmarks
