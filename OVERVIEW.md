@@ -2096,6 +2096,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | U.8.F | scaffold confirm --chain, CLI → v0.5.0 (§17.17) | done 2026-05-07 |
 | U.8.G | Audit cleanup — Make wrappers + stale help-test fix (§17.18) | done 2026-05-07 |
 | W.1 | Workflow audit — verifier-feedback loop on retry (§17.19) | done 2026-05-07 |
+| W.2 | Workflow audit — _compile_output heuristics polish (§17.20) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2371,6 +2372,25 @@ First entry under a new "W" (workflow-quality) track, distinct from the U.8 inte
 **Open follow-ups from the same Tier 1 audit row:**
 - Surface `last_verification_reason` in `/logs/{job_id}` and `scaffold logs` output (Tier 4 observability item).
 - Consider an automatic same-attempt re-prompt loop (vs. requiring `/exec/retry`) for the cheap cases where the verifier reason is mechanical ("missing required field X").
+
+### 17.20 Sprint W.2 — `_compile_output` heuristics polish (2026-05-07)
+
+Tier 1 / item 2 from the workflow audit. The audit flagged Strategy 3 (concat-all-done-nodes) as producing "a long, redundant, sectioned dump rather than a coherent deliverable." Per scope confirmation, this sprint is **heuristics-only** — no LLM synthesis pass. That bigger lever is deferred behind an explicit decision.
+
+**Changes** in `app/modules/execution_compile.py`:
+- **Empty result returns `None`** rather than `""`. Callers store `compiled_output=NULL` — the semantically correct state for "we never produced output." Existing call-sites already guarded with `if compiled:` for the partial paths; one auto-completion log line was patched to handle the new `None` shape.
+- **Strategy 3 preamble** prepends `_Partial deliverable — N of M node(s) contributed. No terminal output node was reached…_` so consumers can tell the result is a fallback rather than a clean Strategy-0 deliverable.
+- **Storage cap** via new `settings.compile_output_max_chars` (default 100k, range 1k–2M). When the stitched body exceeds the cap, each section is truncated proportionally with `[...truncated N chars...]` markers — the same first/last-20% pattern execution_agent uses for upstream context. Distinct from `compile_output_gate_chars` which gates the SSE-transport payload at runtime.
+- **Diagnostic warning** at `WARNING` level when Strategy 3 fires with done nodes — that combination means the dag_generator's leaf-set logic missed this DAG shape (or the true leaves failed). Logged so the team can spot patterns over time without grepping individual jobs.
+
+**What this does NOT do** (deferred): the LLM-synthesis pass that would actually merge stitched sections into a coherent narrative. Heuristics-only is the correct first step — it ships immediate wins (length cap, partial-marker, diagnostic) without adding LLM cost / latency to job completion.
+
+**Test-suite delta:** 1 contract update + 3 new in `tests/test_execution_agent_compile.py`. Total: 12 → 15 in that file. Other suites unchanged.
+
+**Open follow-ups (audit-tail):**
+- LLM synthesis pass (opt-in via per-job flag or settings) — the actual "coherent deliverable" lever.
+- Surface the Strategy-3 fallback marker in `/exec/status/{job_id}` so consumers can short-circuit display.
+- De-duplicate repeated upstream context across sections (impactful for fan-in DAGs where multiple downstream nodes quote the same upstream output verbatim).
 
 ---
 

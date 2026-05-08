@@ -70,7 +70,10 @@ class TestCompileOutputStrategy3:
         assert "T2" not in result
         assert "T3" not in result
 
-    async def test_no_done_nodes_returns_empty(self):
+    async def test_no_done_nodes_returns_none(self):
+        """W.2: returns None (not "") so caller stores NULL — semantically
+        cleaner than an empty string ("we never produced output" vs. "we
+        produced an empty string")."""
         db = make_mock_db([
             {"node_key": "T1", "title": "Task A", "tool": "LLM",
              "status": "failed", "output_text": None},
@@ -79,7 +82,76 @@ class TestCompileOutputStrategy3:
         ])
         from app.modules.execution_agent import _compile_output
         result = await _compile_output("job-1", db)
-        assert result == ""
+        assert result is None
+
+
+@pytest.mark.smoke
+class TestCompileOutputW2Strategy3:
+    """W.2 additions: preamble + truncation + diagnostic warning."""
+
+    async def test_strategy3_prepends_partial_deliverable_preamble(self):
+        """When Strategy 3 fires (no leaf done, last not CodeGen), the
+        output starts with a 'Partial deliverable' banner so consumers
+        can tell this is a fallback rather than a clean Strategy-0 result."""
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Research", "tool": "LLM",
+             "status": "done", "output_text": "research data"},
+            {"node_key": "T2", "title": "Analyze", "tool": "LLM",
+             "status": "done", "output_text": "analysis"},
+            # T3 is the leaf but it's still pending → no Strategy 0 hit
+            {"node_key": "T3", "title": "Synthesize", "tool": "LLM",
+             "status": "pending", "output_text": None,
+             "is_output_node": True},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result = await _compile_output("job-1", db)
+        assert result is not None
+        assert "Partial deliverable" in result
+        assert "2 of 3" in result
+        # And the actual section content still appears below the preamble
+        assert "## T1: Research" in result
+
+    async def test_strategy3_truncates_when_total_exceeds_cap(self, monkeypatch):
+        """Pathological case: many verbose nodes blow past the storage cap.
+        Each section is truncated proportionally so the artifact stays
+        readable rather than ballooning into a multi-MB blob."""
+        from app.config import settings
+        monkeypatch.setattr(settings, "compile_output_max_chars", 2_000)
+
+        big = "x" * 5_000
+        db = make_mock_db([
+            {"node_key": f"T{i}", "title": f"Node {i}", "tool": "LLM",
+             "status": "done", "output_text": big}
+            for i in range(1, 5)
+        ])
+        from app.modules.execution_agent import _compile_output
+        result = await _compile_output("job-1", db)
+        assert result is not None
+        # Truncation marker should appear in each section.
+        assert result.count("[...truncated") >= 1
+        # Result still includes a section per node.
+        for i in range(1, 5):
+            assert f"## T{i}: Node {i}" in result
+
+    async def test_strategy3_logs_warning_with_done_nodes(self, caplog):
+        """Diagnostic: Strategy 3 firing with done output is a hint that
+        the dag_generator's leaf-set logic missed this DAG shape (or the
+        true leaves failed). Warning is the trail teams follow."""
+        import logging
+        caplog.set_level(logging.WARNING, logger="scaffold.execution_compile")
+
+        db = make_mock_db([
+            {"node_key": "T1", "title": "A", "tool": "LLM",
+             "status": "done", "output_text": "a"},
+            {"node_key": "T2", "title": "B", "tool": "LLM",
+             "status": "done", "output_text": "b"},
+        ])
+        from app.modules.execution_agent import _compile_output
+        await _compile_output("job-1", db)
+        assert any(
+            "compile_strategy3_fallback" in r.message
+            for r in caplog.records
+        ), "expected a strategy-3 fallback warning"
 
 
 @pytest.mark.smoke
@@ -103,7 +175,9 @@ class TestCompileOutputPartial:
         partial = "[PARTIAL — some nodes failed or blocked]\n\n" + result
         assert partial.startswith("[PARTIAL")
 
-    async def test_all_failed_returns_empty_not_none(self):
+    async def test_all_failed_returns_none(self):
+        """W.2 contract change: no done nodes → return None (was "" pre-W.2).
+        Caller stores NULL, which is the semantically correct state."""
         db = make_mock_db([
             {"node_key": "T1", "title": "Task A", "tool": "LLM",
              "status": "failed", "output_text": None},
@@ -112,9 +186,7 @@ class TestCompileOutputPartial:
         ])
         from app.modules.execution_agent import _compile_output
         result = await _compile_output("job-1", db)
-        assert result is not None
-        assert isinstance(result, str)
-        assert result == ""
+        assert result is None
 
 
 @pytest.mark.smoke

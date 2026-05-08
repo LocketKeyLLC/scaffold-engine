@@ -223,6 +223,13 @@ class Settings(BaseSettings):
     verifier_top_k: int = Field(default=5, ge=1, le=50)
     compile_output_gate_chars: int = Field(default=50_000, ge=1_000, le=1_000_000)
     compile_output_min_chunk: int = Field(default=200, ge=1, le=10_000)
+    # Sprint W.2 — content cap for the stored compiled_output. Distinct from
+    # compile_output_gate_chars (which gates the SSE-transport payload).
+    # Strategy 3 (concat-all-done-nodes fallback) truncates per-node
+    # proportionally to fit; Strategies 0 + 2 produce a single deliverable
+    # so the cap rarely binds for them. Default 100k chars handles typical
+    # multi-node outputs; pathological cases (50+ verbose nodes) get clipped.
+    compile_output_max_chars: int = Field(default=100_000, ge=1_000, le=2_000_000)
     execution_global_retry_cap: int = Field(default=20, ge=0, le=1000)
     sse_keepalive_seconds: float = Field(default=15.0, ge=1.0, le=300.0)
 

@@ -788,12 +788,17 @@ async def execute_next_node(
                 job_complete = True
                 logger.info("job_autocompleted: job=%s", job_id)
                 compiled = await _compile_output(job_id, db)
+                # _compile_output returns None when no done node contributed
+                # (e.g., every node was skipped). Store NULL in that case.
                 await db.execute(
                     text("UPDATE jobs SET compiled_output = :out WHERE id = :jid"),
                     {"out": compiled, "jid": job_id},
                 )
                 await db.commit()
-                logger.info("compiled_output_stored: chars=%s job=%s", len(compiled), job_id)
+                logger.info(
+                    "compiled_output_stored: chars=%s job=%s",
+                    len(compiled) if compiled else 0, job_id,
+                )
 
     return {
         "status": final_status,
