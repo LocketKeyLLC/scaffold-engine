@@ -2109,6 +2109,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.4 | Tier 2 audit — W.4-style wrap on _fetch_upstream_outputs (§17.31) | done 2026-05-08 |
 | X.5 | Tier 2 audit — research_sessions.last_activity_at + activity-aware reaper (§17.32) | done 2026-05-08 |
 | X.6 | Tier 2 audit — per-job synthesis opt-in column + endpoint (§17.33) | done 2026-05-08 |
+| X.7 | Tier 2 audit — OWUI scaffold_router routing-decision diagnostic (§17.34) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2721,7 +2722,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 4 | synthesized=true|false on /exec/status | **DONE in X.2** | Already shipped. |
 | 5 | research-session idle-tracking column | **DONE in X.5** | Migration 028 + 3 activity sites updated + reaper switched. 6 new tests. Listing endpoint still ORDERs by `updated_at` (different semantic, kept). |
 | 6 | Per-job synthesis opt-in column | **DONE in X.6** | Migration 029 + `_resolve_synthesis_enabled` + `PATCH /jobs/{id}/synthesis` + `synthesis_override` on `/exec/status`. 9 new tests. |
-| 7 | OWUI file-routing diagnostic capture | Observability | Surface routing decisions in OWUI logs so triage paths are debuggable. |
+| 7 | OWUI file-routing diagnostic capture | **DONE in X.7** | New `valves.log_routing_decisions` (off by default) + `_classify_dispatch` + `_log_routing_decision`. Single structured line per pipe() call: decision/command/wrapper_stripped/files_count/normalize_rewrites. 13 new tests. |
 | 8 | 5-place API-key sync target | Make/script | Single `make sync-api-key` that updates `.env`, valves.json files, container env, and `~/.bashrc` in one shot. |
 | 9 | `synthesized` filter on `GET /jobs` | API addition | List endpoint gains `?synthesized=true|false` query param. Tier-2 audit-tail. |
 | 10 | prompt_optimizer JSON-coaxing → tool-call migration | Pattern follow-on to W.6 | 2 sites in `prompt_optimizer.py` still use coaxing. Mechanical with W.6 wrapper. |
@@ -2834,6 +2835,29 @@ API surface:
 **Project pattern (memory-worthy):** when adding a per-row override knob that should fall through to a global setting, default the column to NULL (not False) so "never set" and "explicitly off" are distinguishable. NULL → inherit global is the only safe interpretation that lets future global-default flips propagate to never-touched rows. This also keeps the migration trivial (no DEFAULT, no backfill, no opinionated initial state).
 
 **Test-suite delta:** `tests/test_compile_synthesis_override.py` (new): 9 cases — 4 resolution semantics (True force-on, False force-off, NULL inherits-on, NULL inherits-off), 1 fail-open on DB error, 2 end-to-end `_maybe_synthesize` paths (LLM called when override-True, LLM never called when override-False), 2 `execution_status` surface checks (override field present + null-renders-null). SDK schema parity test passes — the vendored schema is byte-equal with `app/schemas.py`. Live-applied migration 029 against the dev container; same restart caveats as any prod-deploy code change.
+
+### 17.34 Sprint X.7 — OWUI scaffold_router routing-decision diagnostic (2026-05-08)
+
+Tier 2 audit row #7. The existing `_log_pipe_inputs` (gated on `valves.log_pipe_inputs`) captures *what came in* on each `pipe()` call — body shape, file_ids, message head/tail. But the routing decision itself — *what the router did with it* — was opaque. An operator reading logs could see "pipe was called", maybe see a triage HTTP call, but couldn't answer "why didn't my `/research` command run" without re-reading the dispatch code by hand. X.7 closes that gap.
+
+New diagnostic, sibling to `_log_pipe_inputs`:
+
+- New valve `log_routing_decisions: bool = False`. Off by default — `pipe()` runs hot on chat traffic, so an always-on diagnostic burns log volume. Operators flip on when triaging a specific case.
+- New helper `_log_routing_decision(decision, msg_len, *, command, wrapper_stripped, files_count, normalize_rewrites, body)` emits a single structured `print()` line. `print()` not stdlib logging because the OWUI Pipelines container's logger isn't always wired up (same pattern `_log_pipe_inputs` already uses).
+- New helper `_classify_dispatch(msg) -> tuple[str, str | None]` mirrors the dispatch chain in `pipe()` and returns the decision string. Decision strings: `command:/go`, `command:/research`, `command:/research/reply`, `command:/research/mgmt`, `command:/assist`, `command:/execute`, `command:/confirm`, `command:unrecognized` (slash-prefixed, no handler), `triage` (fallthrough).
+
+Wire-up in `pipe()`:
+
+- Captured `wrapper_stripped` along the existing `</context>` / `</documents>` / `</source>` strip loop (was unrecorded; the existing only-on-unrecognized warning didn't surface the *successful* strip target).
+- Single log call between the wrapper-strip + dispatch chain. The dispatch chain itself is **untouched** — the X.7 helpers are a pure side-channel, intentional duplication of the predicates so a logging change can never alter routing behavior.
+
+The decision-classifier is now the canonical place to add diagnostic mirrors when the dispatch chain grows. `_classify_dispatch`'s docstring spells out the contract: when `pipe()` gains a new command branch, add the matching predicate here.
+
+**Project pattern (memory-worthy):** for diagnostic capture in hot paths, prefer (a) a new dedicated valve that defaults False so operators opt in explicitly, (b) a single structured log line per call with all the relevant context (operator-friendly grep target), and (c) intentional predicate duplication via a side-channel classifier function rather than threading the decision through the dispatch flow. This keeps logging behavior incapable of altering routing behavior — the failure mode of a logging refactor regressing dispatch is real and ugly.
+
+**Test-suite delta:** `tests/test_scaffold_router_routing_log.py` (new): 13 cases — 9 dispatch classifier cases (all command branches + unrecognized + triage + empty), 4 helper gate / output / robustness cases. Combined scaffold_router suite: 117/121 (4 pre-existing env-dependent failures in `test_scaffold_router_commands.py` unchanged — those tests hit a live `/research` endpoint and fail when the dev orchestrator has lingering "research in progress" state; tracked as a separate test-debt audit-tail item).
+
+Pipeline tests must run with `--noconftest` because `tests/conftest.py` eager-loads the `app` package, which isn't available in the pipelines container's runtime path. Pre-existing constraint, called out here so future X-track work knows the test command shape.
 
 ---
 

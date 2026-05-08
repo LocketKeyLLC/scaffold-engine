@@ -356,6 +356,12 @@ class Pipeline:
         triage_model: str = "qwen3:4b"
         triage_history_window: int = 8  # last N turns sent to triage; first user msg always pinned
         log_pipe_inputs: bool = False  # diagnostic: log body keys + message shape on every pipe() call
+        # Sprint X.7 — diagnostic: one structured line per pipe() call with the
+        # routing decision (which command branch / triage / unrecognized), the
+        # wrapper-strip outcome, and content-type counts. Off by default to
+        # avoid log volume on prod chats; flip on when debugging "why didn't
+        # my command run / why did my file content disappear".
+        log_routing_decisions: bool = False
         ollama_url: str = "http://172.18.0.1:11434"
 
         # ── Assistant Mode ─────────────────────────────────────────────
@@ -769,6 +775,86 @@ class Pipeline:
         except Exception as e:
             print(f"[scaffold_router] PIPE_INPUTS log failed: {e}")  # noqa: T201
 
+    def _classify_dispatch(self, msg: str) -> tuple[str, str | None]:
+        """Sprint X.7 — mirror the dispatch chain in pipe() to compute a
+        decision string + matched command for diagnostic logging.
+
+        Returns ``(decision, matched_command)``:
+          - ``("command:<name>", "<name>")`` when a command branch will match
+          - ``("command:unrecognized", "<first-token>")`` when slash-prefixed
+            but no handler matches
+          - ``("triage", None)`` when the message falls through to triage
+
+        The dispatch chain in ``pipe()`` is the canonical source of truth;
+        this function intentionally duplicates its predicates so the
+        logging path is a pure side-channel that can't accidentally change
+        routing behavior. If you add a new command branch in ``pipe()``,
+        add the matching predicate here too.
+        """
+        if self._is_cmd(msg, "/go", "/run"):
+            return ("command:/go", "/go")
+        if self._is_cmd(msg, "/research/reply"):
+            return ("command:/research/reply", "/research/reply")
+        if self._is_cmd(msg, "/research/list", "/research/find",
+                        "/research/rename", "/research/delete", "/research/help"):
+            return ("command:/research/mgmt", self._first_token(msg))
+        if self._is_cmd(msg, "/research"):
+            return ("command:/research", "/research")
+        if self._is_cmd(
+            msg,
+            "/assist", "/assist/next", "/assist/submit", "/assist/skip",
+            "/assist/handoff", "/assist/pause", "/assist/resume",
+            "/assist/done", "/assist/friction", "/assist/help",
+        ):
+            return ("command:/assist", self._first_token(msg))
+        if self._is_cmd(msg, "/execute"):
+            return ("command:/execute", "/execute")
+        if self._is_cmd(msg, "/confirm"):
+            return ("command:/confirm", "/confirm")
+        if msg.startswith("/"):
+            return ("command:unrecognized", self._first_token(msg) or "/")
+        return ("triage", None)
+
+    def _log_routing_decision(
+        self,
+        decision: str,
+        msg_len: int,
+        *,
+        command: str | None = None,
+        wrapper_stripped: str | None = None,
+        files_count: int = 0,
+        normalize_rewrites: int = 0,
+        body: dict | None = None,
+    ) -> None:
+        """Sprint X.7 — one structured line per pipe() call with the routing
+        decision and the context that drove it.
+
+        Gated on ``valves.log_routing_decisions``. Distinct from
+        ``_log_pipe_inputs`` (which dumps raw input shape) — this one
+        captures *what the router did with it* so an operator can answer
+        "why didn't my /research command run" or "why did my uploaded PDF
+        content not appear in triage" by reading a single line.
+
+        ``decision`` is one of:
+          - ``command:<name>`` — dispatched to a specific command handler
+          - ``command:unrecognized`` — slash-prefixed but no handler
+          - ``triage`` — fell through to the LLM triage path
+        """
+        try:
+            files_field = body.get("files") if isinstance(body, dict) else None
+            file_ids = body.get("file_ids") if isinstance(body, dict) else None
+            file_ids_count = len(file_ids) if isinstance(file_ids, list) else 0
+            print(  # noqa: T201
+                f"[scaffold_router] ROUTING_DECISION decision={decision!r} "
+                f"command={command!r} wrapper_stripped={wrapper_stripped!r} "
+                f"msg_len={msg_len} files_count={files_count} "
+                f"file_ids_count={file_ids_count} "
+                f"normalize_rewrites={normalize_rewrites} "
+                f"has_files_field={files_field is not None}"
+            )
+        except Exception as e:
+            print(f"[scaffold_router] ROUTING_DECISION log failed: {e}")  # noqa: T201
+
     def pipe(
         self,
         user_message: str,
@@ -783,9 +869,11 @@ class Pipeline:
         # single-tag regex (only matched </context>) to a multi-wrapper sweep
         # plus a heuristic warning when a long message looks like it carries
         # an unrecognized wrapper. Closes overview "Known Open Issues" #9.
+        wrapper_stripped: str | None = None  # X.7: surface which tag matched
         for closing_tag in ("</context>", "</documents>", "</source>"):
             if closing_tag in msg:
                 msg = msg.rsplit(closing_tag, 1)[-1].strip()
+                wrapper_stripped = closing_tag
                 break
         else:
             # No known wrapper matched. If the message looks like it might
@@ -809,6 +897,29 @@ class Pipeline:
         msg, _rewrites = _normalize_input(msg)
         if _rewrites:
             yield f"_Note: interpreted {', '.join(_rewrites)}._\n\n"
+
+        # X.7 — emit a single routing-decision log line just before dispatch.
+        # The decision string mirrors the dispatch chain below; intentional
+        # duplication so the logging stays a pure side-channel and the
+        # dispatch flow itself is untouched.
+        if self.valves.log_routing_decisions:
+            decision, matched_cmd = self._classify_dispatch(msg)
+            files_field = body.get("files") if isinstance(body, dict) else None
+            meta = body.get("metadata") if isinstance(body, dict) else None
+            meta_files = meta.get("files") if isinstance(meta, dict) else None
+            files_count = (
+                len(files_field) if isinstance(files_field, list)
+                else len(meta_files) if isinstance(meta_files, list)
+                else 0
+            )
+            self._log_routing_decision(
+                decision, len(msg),
+                command=matched_cmd,
+                wrapper_stripped=wrapper_stripped,
+                files_count=files_count,
+                normalize_rewrites=len(_rewrites or []),
+                body=body,
+            )
 
         # Word-boundary command dispatch (#8.6)
         if self._is_cmd(msg, "/go", "/run"):
