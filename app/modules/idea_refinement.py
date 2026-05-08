@@ -16,31 +16,18 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
+from app.providers.base import Tool
 from app.utils.job_utils import fail_job as _fail_job
-from app.utils.llm_parsing import parse_json_object
 
 logger = logging.getLogger("scaffold.refine")
 
 ALLOWED_DOMAINS = {"prompt", "rag", "llm", "spec", "eng"}
 
 # ---------------------------------------------------------------------------
-# Refinement prompt
+# Refinement prompt + tool schema (Sprint X.11)
 # ---------------------------------------------------------------------------
 
 REFINE_SYSTEM = """You are a workflow planning assistant. Given a raw idea, produce a structured brief.
-
-OUTPUT FORMAT (strict JSON, no markdown fences):
-{
-  "title": "concise title (max 8 words)",
-  "description": "one paragraph describing the goal",
-  "domain": "one of: prompt, rag, llm, spec, eng",
-  "goals": ["specific measurable outcome 1", "outcome 2"],
-  "constraints": ["constraint 1", "constraint 2"],
-  "inputs_available": ["what the user already has"],
-  "outputs_expected": ["what the user wants produced"],
-  "complexity": "low | medium | high",
-  "ambiguities": ["anything unclear that may need clarification"]
-}
 
 Rules:
 - Extract implicit requirements from the idea
@@ -52,9 +39,82 @@ REFINE_PROMPT = """Analyze this idea and produce a structured brief:
 
 ---
 {idea}
----
+---"""
 
-Return ONLY the JSON object. No preamble, no markdown."""
+# Sprint X.11 — native tool-call schema. The wrapper (model_router.tool_call)
+# parses structured args on native-tool providers and falls back to JSON-
+# coaxing internally on non-native providers, so callers always read via
+# resp.tool_calls[0].arguments. Replaces the legacy "OUTPUT FORMAT (strict
+# JSON, no markdown fences):..." prose block in REFINE_SYSTEM.
+REFINE_BRIEF_TOOL = Tool(
+    name="emit_refined_brief",
+    description=(
+        "Emit a structured planning brief extracted from the raw idea text."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "Concise title (max 8 words)",
+            },
+            "description": {
+                "type": "string",
+                "description": "One paragraph describing the goal",
+            },
+            "domain": {
+                "type": "string",
+                "enum": sorted(ALLOWED_DOMAINS),
+            },
+            "goals": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Specific measurable outcomes",
+            },
+            "constraints": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "inputs_available": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "What the user already has",
+            },
+            "outputs_expected": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "What the user wants produced",
+            },
+            "complexity": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+            },
+            "ambiguities": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Anything unclear that may need clarification",
+            },
+        },
+        "required": ["title", "description", "domain", "goals", "complexity"],
+    },
+)
+
+
+def _tool_args(resp) -> dict | None:
+    """Read the first tool call's arguments dict from a ModelResponse,
+    or None if no tool was called or arguments aren't a dict.
+
+    Sprint W.6 / X.10 / X.11 — same shape as research_agent._tool_args
+    and prompt_optimizer._tool_args. Intentional duplication: the
+    helper is 5 lines and keeps each module's dependency arrow simple.
+    """
+    if not getattr(resp, "success", False):
+        return None
+    calls = getattr(resp, "tool_calls", None) or []
+    if not calls:
+        return None
+    args = calls[0].arguments
+    return args if isinstance(args, dict) else None
 
 
 # ---------------------------------------------------------------------------
@@ -111,16 +171,19 @@ async def refine_idea(
     await db.commit()
     logger.info("job_created: job=%s status=refining", job_id)
 
-    # 2. Call LLM for structured brief (guarded)
+    # 2. Call LLM for structured brief via native tool-call (Sprint X.11)
     prompt = REFINE_PROMPT.format(idea=idea_text)
     route_kwargs = (
         {"model": model} if model
         else {"role": "model_general", "overrides": model_overrides}
     )
     try:
-        resp = await model_router.generate(
-            prompt,
-            system=REFINE_SYSTEM,
+        resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": REFINE_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            tools=[REFINE_BRIEF_TOOL],
             temperature=0.3,
             max_tokens=2048,
             **route_kwargs,
@@ -137,15 +200,18 @@ async def refine_idea(
             "error": resp.error,
         }
 
-    # 3. Parse LLM output
-    brief = parse_json_object(resp.text)
+    # 3. Read structured args (Sprint X.11). The wrapper handles both native
+    # tool-call providers (args parsed by the SDK) and coaxing fallbacks
+    # (args parsed from JSON-text by model_router._tool_call_via_coaxing),
+    # so this read path is provider-agnostic.
+    brief = _tool_args(resp)
     if brief is None:
-        await _fail_job(db, job_id, f"Failed to parse LLM output as JSON")
+        await _fail_job(db, job_id, "Failed to parse refined brief from tool_call")
         return {
             "job_id": str(job_id),
             "status": "failed",
-            "error": "LLM output was not valid JSON",
-            "raw_output": resp.text[:500],
+            "error": "LLM did not produce a valid refined brief",
+            "raw_output": (resp.text or "")[:500],
         }
 
     # 3b. Override domain if user supplied one

@@ -1,13 +1,13 @@
 """
 tests/test_idea_refinement.py - Behavioral tests for idea refinement module
 
-Tests refine_idea() by mocking model_router.generate and the DB session,
-then verifying output structure, error handling, and domain override.
+Sprint X.11 — refine_idea now uses model_router.tool_call (was .generate
+with JSON-coaxing). Tests mock tool_call and feed structured args via
+resp.tool_calls[0].arguments instead of resp.text JSON.
 
 Run:  docker exec scaffold-orchestrator pytest tests/test_idea_refinement.py -m smoke --timeout=30 -v
 """
 
-import json
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -45,22 +45,38 @@ def _make_db():
     return db
 
 
-def _make_llm_response(success=True, text_body=None, error=None):
-    """Build a mock LLM response object matching model_router.generate return."""
+def _make_llm_response(success=True, args=None, no_calls=False, error=None):
+    """Build a mock LLM response matching model_router.tool_call return shape.
+
+    Sprint X.11:
+      - success=True + args={...} → response carries one ToolCall with those args.
+      - success=True + no_calls=True → response succeeded but tool_calls is empty
+        (the X.11 fail-closed path).
+      - success=False → dispatch failure (LLM error / retry exhausted).
+    """
     resp = MagicMock()
     resp.success = success
     resp.error = error
     resp.model = "qwen3:4b"
     resp.total_duration_ms = 1234
-    if text_body is None and success:
-        text_body = json.dumps({
+    resp.text = ""
+
+    if not success or no_calls:
+        resp.tool_calls = []
+        return resp
+
+    if args is None:
+        args = {
             "title": "Test Project",
             "description": "A test project description",
             "goals": ["Goal 1", "Goal 2"],
             "constraints": ["Constraint 1"],
             "domain": "eng",
-        })
-    resp.text = text_body or ""
+            "complexity": "medium",
+        }
+    call = MagicMock()
+    call.arguments = args
+    resp.tool_calls = [call]
     return resp
 
 
@@ -76,7 +92,7 @@ class TestRefineIdeaHappyPath:
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             result = _run(refine_idea("Build a CLI tool", db))
         assert isinstance(result, dict)
@@ -87,7 +103,7 @@ class TestRefineIdeaHappyPath:
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             result = _run(refine_idea("Build a CLI tool", db))
         assert result["status"] == "awaiting_confirmation"
@@ -96,7 +112,7 @@ class TestRefineIdeaHappyPath:
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             result = _run(refine_idea("Build a CLI tool", db))
         assert "refined_brief" in result
@@ -107,22 +123,27 @@ class TestRefineIdeaHappyPath:
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             result = _run(refine_idea("Build a CLI tool", db))
         assert result["model_used"] == "qwen3:4b"
         assert result["duration_ms"] == 1234
 
-    def test_calls_generate_with_idea_text(self):
+    def test_calls_tool_call_with_idea_text(self):
+        """Sprint X.11 — idea text must appear in the user message of the
+        tool_call payload. Replaces the pre-X.11 check on the first positional
+        arg of model_router.generate."""
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             _run(refine_idea("Build a weather app", db))
-        call_args = mock_mr.generate.call_args
-        # The idea text should appear in the prompt (first positional arg)
-        assert "Build a weather app" in call_args[0][0]
+        kwargs = mock_mr.tool_call.call_args.kwargs
+        messages = kwargs["messages"]
+        # The user message (last in the list) carries the idea text.
+        user_msgs = [m for m in messages if m["role"] == "user"]
+        assert any("Build a weather app" in m["content"] for m in user_msgs)
 
 
 # ===========================================================================
@@ -137,17 +158,21 @@ class TestRefineIdeaLLMFailure:
         db = _make_db()
         resp = _make_llm_response(success=False, error="Ollama timeout")
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             result = _run(refine_idea("Build something", db))
         assert result["status"] == "failed"
         assert "error" in result
 
-    def test_unparseable_json_returns_failed(self):
+    def test_no_tool_calls_returns_failed(self):
+        """Sprint X.11 — the equivalent of the pre-X.11 'unparseable JSON'
+        failure mode is now 'tool_call returned no tool_calls'. The
+        wrapper handles JSON-coaxing internally; if even that fails, the
+        response carries success=True but tool_calls=[] — fail closed."""
         db = _make_db()
-        resp = _make_llm_response(text_body="This is not JSON at all")
+        resp = _make_llm_response(no_calls=True)
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             result = _run(refine_idea("Build something", db))
         assert result["status"] == "failed"
@@ -166,7 +191,7 @@ class TestRefineIdeaDomainOverride:
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             result = _run(refine_idea("Build a tool", db, domain="rag"))
         assert result["refined_brief"]["domain"] == "rag"
@@ -175,7 +200,7 @@ class TestRefineIdeaDomainOverride:
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             result = _run(refine_idea("Build a tool", db))
         # LLM response has domain="eng" by default in our mock
@@ -195,7 +220,7 @@ class TestRefineIdeaTargetStatus:
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             result = _run(refine_idea(
                 "Build a tool", db, target_status="awaiting_confirmation"
@@ -212,7 +237,7 @@ class TestRefineIdeaTargetStatus:
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             result = _run(refine_idea("Build a tool", db))
         assert result["status"] == "awaiting_confirmation"
@@ -233,13 +258,13 @@ class TestRefineIdeaModelOverrides:
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             _run(refine_idea(
                 "Build a tool", db,
                 model_overrides={"model_general": "custom-model:7b"},
             ))
-        call_kwargs = mock_mr.generate.call_args.kwargs
+        call_kwargs = mock_mr.tool_call.call_args.kwargs
         assert call_kwargs.get("role") == "model_general"
         assert call_kwargs.get("overrides") == {"model_general": "custom-model:7b"}
         assert "model" not in call_kwargs
@@ -257,7 +282,7 @@ class TestRefineIdeaDBInteractions:
         db = _make_db()
         resp = _make_llm_response()
         with patch("app.modules.idea_refinement.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=resp)
+            mock_mr.tool_call = AsyncMock(return_value=resp)
             from app.modules.idea_refinement import refine_idea
             _run(refine_idea("Build a CLI tool", db))
         # Should have called execute (single INSERT refining + final UPDATE) and commit

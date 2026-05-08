@@ -2113,6 +2113,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.8 | Tier 2 audit — `make sync-api-key` 5-place propagation (§17.35) | done 2026-05-08 |
 | X.9 | Tier 2 audit — `synthesized` filter on `GET /jobs` (§17.36) | done 2026-05-08 |
 | X.10 | Tier 2 audit — prompt_optimizer `_llm_verify` → `tool_call` migration (§17.37) | done 2026-05-08 |
+| X.11 | Tier 2 audit — idea_refinement `refine_idea` → `tool_call` migration (§17.38) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2729,7 +2730,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 8 | 5-place API-key sync target | **DONE in X.8** | `make sync-api-key [KEY=sk-...]` strict-syncs across `.env` + 5x `valves.json` + `~/.bashrc`. Idempotent; verifies + propagates from `.env` when no arg. 9 sandboxed tests. |
 | 9 | `synthesized` filter on `GET /jobs` | **DONE in X.9** | New `synthesized: bool \| None` query param. None = no filter; true/false = WHERE `compiled_output_synthesized = :synthesized`. 5 new tests. OpenAPI 44 paths unchanged (existing path gained a param). |
 | 10 | prompt_optimizer JSON-coaxing → tool-call migration | **DONE in X.10** | `_llm_verify` migrated to `tool_call` + `RECORD_VERIFICATION_TOOL`. `_llm_optimize` *not* a target — returns free-form text (the rewritten prompt), not structured output. 10 new tests; 3 obsolete JSON-parse-chain tests retired. |
-| 11 | idea_refinement tool-call migration | Same shape as #10 | 1 site. |
+| 11 | idea_refinement tool-call migration | **DONE in X.11** | `refine_idea` migrated; `REFINE_BRIEF_TOOL` schema (9 fields, 5 required); REFINE_SYSTEM simplified by ~15 lines. 13 tests updated. |
 | 12 | gt_extractor tool-call migration | Same shape as #10 | 1 site. |
 | 13 | CI smoke for retrieval regressions | CI config | Tiny fixture (3 queries) run on PRs touching `app/modules/rag_pipeline.py`. Catches regressions cheaply without needing live Milvus. |
 | 14 | Quarterly RAG re-baseline cadence | Scheduling | `make rebaseline` cron / runbook. Surfaces drift early. |
@@ -2916,6 +2917,23 @@ The change in `app/modules/prompt_optimizer.py`:
 **Test-suite delta:** `tests/test_prompt_optimizer_verify.py` rewritten — 10 cases (4 happy paths: preserved=true with reason, =false with reason, true with no reason field, reason truncated at 200 chars; 4 fail-closed: no tool_calls, missing preserved key, dispatch failure, args not a dict; 2 contract: uses tool_call not chat, passes RECORD_VERIFICATION_TOOL). Three obsolete JSON-parse-chain tests in `test_prompt_optimizer.py` (`test_llm_verify_accepts_structured_true`, `_handles_markdown_fenced_json`, etc.) deleted with a pointer comment to the new file. The orchestrator-level `optimize_prompt` tests in `test_prompt_optimizer.py` are unchanged — they mock `_llm_verify` directly, so they're insulated from the X.10 internal refactor.
 
 Combined `-k "prompt_optimizer or model_router_tool_call"` regression: 35/35.
+
+### 17.38 Sprint X.11 — `idea_refinement.refine_idea` → `tool_call` migration (2026-05-08)
+
+Tier 2 audit row #11. W.6 follow-on, mechanical with the X.10 pattern. Closes the second of three remaining JSON-coaxing sites identified during the workflow-quality audit (third is gt_extractor at #12).
+
+The change in `app/modules/idea_refinement.py`:
+
+- New `REFINE_BRIEF_TOOL` (Tool dataclass) with the full 9-field schema previously embedded as JSON-prose in `REFINE_SYSTEM`: `title`, `description`, `domain` (enum: prompt/rag/llm/spec/eng — sourced from `ALLOWED_DOMAINS`), `goals`, `constraints`, `inputs_available`, `outputs_expected`, `complexity` (enum: low/medium/high), `ambiguities`. Required: `title`, `description`, `domain`, `goals`, `complexity` (the fields the downstream pipeline can't proceed without).
+- `REFINE_SYSTEM` shrunk by ~15 lines: dropped the `OUTPUT FORMAT (strict JSON, no markdown fences):` block and the inline schema. `REFINE_PROMPT` shrunk by 2 lines (dropped `Return ONLY the JSON object. No preamble, no markdown.`). The prose now carries only the role + four behavior rules.
+- `model_router.generate(prompt, system=REFINE_SYSTEM, ...)` → `model_router.tool_call(messages=[...], tools=[REFINE_BRIEF_TOOL], ...)`. The `route_kwargs` (model= or role=+overrides=) thread through unchanged — `tool_call`'s signature accepts both.
+- `parse_json_object(resp.text)` → `_tool_args(resp)`. The legacy parse-failure path (`"LLM output was not valid JSON"`) becomes the `_tool_args is None` path (`"LLM did not produce a valid refined brief"`). Same fail-job-and-return contract; `raw_output` still surfaces `resp.text[:500]` (the wrapper passes through any text the model emitted alongside the tool call, useful for debugging coaxing-fallback failures).
+- Imports cleaned: `from app.utils.llm_parsing import parse_json_object` removed; `from app.providers.base import Tool` added. `import json` retained — still used to serialize the brief into the `refined_brief` JSONB column.
+- New module-private `_tool_args(resp)` helper, byte-equal with `prompt_optimizer._tool_args` and `research_agent._tool_args`. **Three modules now duplicate this 5-line helper.** X.12 (gt_extractor) will make four. Consolidation into a shared utility is queued as a post-X.12 cleanup — not done now because the duplication still keeps each module's dependency arrow simple, and a shared helper would need a sensible home (`app/utils/tool_call_args.py`?). Documenting the queued cleanup so a future audit-sweep picks it up.
+
+**Project pattern (validated, memory-worthy from X.10 + X.11):** when migrating a `generate()`+`parse_json_object()` site to `tool_call()`, the failure-mode names shift but the contract is identical. Pre-migration: `parse_json_object returned None` → fail. Post-migration: `_tool_args returned None` (no tool_calls, success=False, args not dict) → fail. The error-string change (`"output was not valid JSON"` → `"did not produce a valid refined brief"`) is operator-facing and worth keeping precise — the new wording matches what an operator now sees in logs and chat messages, where there's no JSON for them to debug directly.
+
+**Test-suite delta:** `tests/test_idea_refinement.py` updated — 13 tests pass (was 13). The shared `_make_llm_response` helper rebuilt to produce `tool_call`-shaped responses (`success=True`, `tool_calls=[ToolCall(arguments=...)]`); `args=`, `no_calls=`, and `error=` parameters cover happy / fail-closed / dispatch-error scenarios. Bulk-replace `mock_mr.generate = AsyncMock(...)` → `mock_mr.tool_call = AsyncMock(...)`. Two tests rewritten in detail: `test_calls_generate_with_idea_text` → `test_calls_tool_call_with_idea_text` (now inspects `kwargs["messages"]` for the user-message content); `test_unparseable_json_returns_failed` → `test_no_tool_calls_returns_failed` (passes `no_calls=True` to trigger the X.11 fail-closed path). The `test_model_overrides_used` assertion on `call_kwargs.get("role")` works unchanged because `tool_call` accepts the same `role=`/`overrides=` kwargs as `generate`. Combined `-k "idea_refinement or ideation_workflow or model_router_tool_call"`: 21 passed, 4 skipped (4 pre-existing skips in `test_ideation_workflow_phase1.py` due to environment loadability — unrelated to X.11).
 
 ---
 
