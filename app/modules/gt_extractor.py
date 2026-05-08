@@ -26,6 +26,7 @@ from app.utils.github_ingest import (
 )
 from app.providers.base import Tool
 from app.utils.http_clients import get_github_client, get_searxng_client
+from app.utils.tool_call_args import read_tool_args
 from app.utils.topic_detection import detect_topic_id as _topic_detect_impl
 
 logger = logging.getLogger("scaffold.gt")
@@ -118,25 +119,6 @@ RECORD_DISTILLED_ENTRIES_TOOL = Tool(
         "required": ["entries"],
     },
 )
-
-
-def _tool_args(resp) -> dict | None:
-    """Read the first tool call's arguments dict from a ModelResponse,
-    or None if no tool was called or arguments aren't a dict.
-
-    Sprint W.6 / X.10 / X.11 / X.12 — same shape as research_agent,
-    prompt_optimizer, idea_refinement copies. Four modules now duplicate
-    this 5-line helper; consolidation into a shared utility is queued
-    as the next Tier 2 audit-tail item now that the 4-way duplication
-    is settled.
-    """
-    if not getattr(resp, "success", False):
-        return None
-    calls = getattr(resp, "tool_calls", None) or []
-    if not calls:
-        return None
-    args = calls[0].arguments
-    return args if isinstance(args, dict) else None
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +450,7 @@ async def extract_ground_truths(
     # native and coaxing providers. Failure path (no tool_calls, missing
     # 'entries' key, wrong type) maps to status='parse_failed' to preserve
     # the pre-X.12 caller contract.
-    args = _tool_args(resp)
+    args = read_tool_args(resp)
     if args is None or not isinstance(args.get("entries"), list):
         return {
             "status": "parse_failed",
@@ -520,7 +502,7 @@ async def extract_ground_truths(
 # Sprint X.12 — `_parse_entries` and `_ParseFailed` removed. The
 # `model_router.tool_call` wrapper handles JSON-array parsing on both
 # native-tool and coaxing-fallback providers; failures surface via
-# `_tool_args` returning None (or args["entries"] not being a list).
+# `read_tool_args` returning None (or args["entries"] not being a list).
 
 
 # --- backward-compat aliases ---

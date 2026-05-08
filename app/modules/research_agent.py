@@ -35,6 +35,7 @@ from app.modules.rag_pipeline import ingest_entries
 from app.providers.base import Tool
 from app.utils.http_clients import get_generic_http_client
 from app.utils.llm_parsing import parse_json_array, parse_json_object  # noqa: F401 — kept for back-compat re-exports
+from app.utils.tool_call_args import read_tool_args
 
 # Re-exports for test patches and existing call sites — keeps
 # `app.modules.research_agent.X` working after the 2026-05-05 split.
@@ -338,22 +339,6 @@ ASSESS_COVERAGE_TOOL = Tool(
 )
 
 
-def _tool_args(resp) -> dict | None:
-    """Read the first tool call's arguments dict from a ModelResponse,
-    or None if no tool was called or arguments aren't a dict.
-
-    Sprint W.6 — single helper used by every research_agent caller so
-    the read pattern stays consistent across native + coaxing paths.
-    """
-    if not getattr(resp, "success", False):
-        return None
-    calls = getattr(resp, "tool_calls", None) or []
-    if not calls:
-        return None
-    args = calls[0].arguments
-    return args if isinstance(args, dict) else None
-
-
 # =============================================================================
 # Decomposition, search, extraction, gap analysis, summary
 # =============================================================================
@@ -379,7 +364,7 @@ async def _decompose_topic(
         tools=[PLAN_RESEARCH_TOOL],
         model=model, temperature=0.4, max_tokens=2048,
     )
-    parsed = _tool_args(resp)
+    parsed = read_tool_args(resp)
     if parsed and "queries" in parsed:
         facets = parsed.get("facets", [])
         if len(facets) >= 2:
@@ -400,7 +385,7 @@ async def _decompose_topic(
             tools=[PLAN_RESEARCH_TOOL],
             model=model, temperature=0.5, max_tokens=2048,
         )
-        retry_parsed = _tool_args(retry_resp)
+        retry_parsed = read_tool_args(retry_resp)
         if retry_parsed and "queries" in retry_parsed:
             return retry_parsed
 
@@ -537,7 +522,7 @@ async def _extract_entries(
         )
 
         entries: list[dict] = []
-        parsed_args = _tool_args(resp)
+        parsed_args = read_tool_args(resp)
         if parsed_args and isinstance(parsed_args.get("entries"), list):
             entries = [e for e in parsed_args["entries"] if isinstance(e, dict)]
             if entries:
@@ -618,7 +603,7 @@ async def _analyze_gaps(
             tools=[ASSESS_COVERAGE_TOOL],
             model=model, temperature=0.3, max_tokens=2048,
         )
-        parsed = _tool_args(resp)
+        parsed = read_tool_args(resp)
         if parsed:
             return parsed
         if attempt == 0:
@@ -1184,7 +1169,7 @@ async def _run_research_url_mode(
         resp = task.result()
 
         batch_entries: list[dict] = []
-        parsed_args = _tool_args(resp)
+        parsed_args = read_tool_args(resp)
         if parsed_args and isinstance(parsed_args.get("entries"), list):
             batch_entries = [e for e in parsed_args["entries"] if isinstance(e, dict)]
             for entry in batch_entries:
@@ -1325,7 +1310,7 @@ async def _run_research_pdf_mode(
         resp = task.result()
 
         batch_entries: list[dict] = []
-        parsed_args = _tool_args(resp)
+        parsed_args = read_tool_args(resp)
         if parsed_args and isinstance(parsed_args.get("entries"), list):
             batch_entries = [e for e in parsed_args["entries"] if isinstance(e, dict)]
             for entry in batch_entries:

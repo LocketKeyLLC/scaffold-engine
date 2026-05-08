@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import model_router
 from app.providers.base import Tool
 from app.utils.job_utils import fail_job as _fail_job
+from app.utils.tool_call_args import read_tool_args
 
 logger = logging.getLogger("scaffold.refine")
 
@@ -98,23 +99,6 @@ REFINE_BRIEF_TOOL = Tool(
         "required": ["title", "description", "domain", "goals", "complexity"],
     },
 )
-
-
-def _tool_args(resp) -> dict | None:
-    """Read the first tool call's arguments dict from a ModelResponse,
-    or None if no tool was called or arguments aren't a dict.
-
-    Sprint W.6 / X.10 / X.11 — same shape as research_agent._tool_args
-    and prompt_optimizer._tool_args. Intentional duplication: the
-    helper is 5 lines and keeps each module's dependency arrow simple.
-    """
-    if not getattr(resp, "success", False):
-        return None
-    calls = getattr(resp, "tool_calls", None) or []
-    if not calls:
-        return None
-    args = calls[0].arguments
-    return args if isinstance(args, dict) else None
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +188,7 @@ async def refine_idea(
     # tool-call providers (args parsed by the SDK) and coaxing fallbacks
     # (args parsed from JSON-text by model_router._tool_call_via_coaxing),
     # so this read path is provider-agnostic.
-    brief = _tool_args(resp)
+    brief = read_tool_args(resp)
     if brief is None:
         await _fail_job(db, job_id, "Failed to parse refined brief from tool_call")
         return {

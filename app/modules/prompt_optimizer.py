@@ -13,6 +13,7 @@ from typing import Optional
 from app import model_router
 from app.config import get_model
 from app.providers.base import Tool
+from app.utils.tool_call_args import read_tool_args
 
 logger = logging.getLogger("scaffold.prompt_optimizer")
 
@@ -191,23 +192,6 @@ RECORD_VERIFICATION_TOOL = Tool(
 )
 
 
-def _tool_args(resp) -> dict | None:
-    """Read the first tool call's arguments dict from a ModelResponse,
-    or None if no tool was called or arguments aren't a dict.
-
-    Sprint W.6 / X.10 — same shape as research_agent._tool_args.
-    Intentional duplication: keeps the dependency arrow simple and the
-    helper trivially small.
-    """
-    if not getattr(resp, "success", False):
-        return None
-    calls = getattr(resp, "tool_calls", None) or []
-    if not calls:
-        return None
-    args = calls[0].arguments
-    return args if isinstance(args, dict) else None
-
-
 async def _llm_optimize(pre_cleaned: str, model: str) -> str:
     from app.utils.llm_parsing import strip_think_tags
     messages = [{"role": "user", "content": f"Rewrite this prompt following all rules:\n\n{pre_cleaned}"}]
@@ -242,7 +226,7 @@ async def _llm_verify(original: str, optimized: str, model: str) -> tuple[bool, 
         tools=[RECORD_VERIFICATION_TOOL],
         model=model,
     )
-    args = _tool_args(resp)
+    args = read_tool_args(resp)
     if not args or "preserved" not in args:
         logger.warning(
             "Verifier tool_call returned no preserved verdict; failing closed"

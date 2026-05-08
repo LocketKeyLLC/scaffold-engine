@@ -2115,6 +2115,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.10 | Tier 2 audit — prompt_optimizer `_llm_verify` → `tool_call` migration (§17.37) | done 2026-05-08 |
 | X.11 | Tier 2 audit — idea_refinement `refine_idea` → `tool_call` migration (§17.38) | done 2026-05-08 |
 | X.12 | Tier 2 audit — gt_extractor `extract_ground_truths` → `tool_call` migration (§17.39) | done 2026-05-08 |
+| X.13 | Tier 2 cleanup — `_tool_args` consolidation → `app/utils/tool_call_args.py` (§17.40) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2954,6 +2955,21 @@ The change in `app/modules/gt_extractor.py`:
 **Side fix (X.11 leftover):** two integration tests in `tests/integration/test_idea_refinement_db.py` patched `model_router.generate` and supplied JSON text via `_FakeResp.text` — pre-X.11 fixture shape. The X.11 sprint scope ran the unit tests but not the integration tests, so these regressions slipped through. Folded into X.12: rewrote the helper as `_fake_tool_call_resp(args=...)` returning a `SimpleNamespace` with `tool_calls=[SimpleNamespace(arguments=args)]`. 3/3 integration tests pass.
 
 **Test-suite delta:** `tests/test_gt_extractor.py` updated — `TestDistillationUsesRouterModel.test_extract_uses_model_router` swapped to mock `tool_call`; `TestTitleFieldConsistency.test_distill_system_emits_title` renamed to `test_distill_tool_schema_uses_title_not_topic` and now reads the schema dict on `RECORD_DISTILLED_ENTRIES_TOOL` (post-X.12 the JSON schema lives in code, not in the system-prompt prose). `tests/test_gt_extractor_module.py` `test_extract_ground_truths_dedupes_by_url` swapped to mock `tool_call` with empty entries. `tests/test_gt_extractor_model.py` is AST-walk only — needed no change because the `route_kwargs = {"role": "model_router"}` literal is unchanged. Combined `-k "gt_extractor or model_router_tool_call or prompt_optimizer or idea_refinement"`: **82/82** across all four migrated modules + their orchestrator-level callers.
+
+### 17.40 Sprint X.13 — `_tool_args` consolidation → `app/utils/tool_call_args.py` (2026-05-08)
+
+Cleanup sprint that closes the duplication flag raised across X.10 / X.11 / X.12 sprint notes. After X.12, four modules (`research_agent`, `prompt_optimizer`, `idea_refinement`, `gt_extractor`) carried byte-equal copies of a 5-line `_tool_args` helper. Two copies tolerate "intentional duplication"; four crosses the line.
+
+The change:
+
+- New `app/utils/tool_call_args.py` exporting `read_tool_args(resp) -> dict | None`. Single canonical docstring covering the W.6-pattern caller contract: returns the first tool call's `arguments` dict, or None on every failure mode (success=False, no tool_calls, args not a dict). Public name (no leading underscore) since it's now an intentional cross-module utility.
+- All four modules: deleted local `_tool_args` def, added `from app.utils.tool_call_args import read_tool_args` at the top, renamed every call site from `_tool_args(...)` to `read_tool_args(...)`. Total call-site renames: 6 in `research_agent`, 1 each in `prompt_optimizer` / `idea_refinement` / `gt_extractor` (= 9). Plus a stray docstring/comment ref each.
+- Comments and docstrings referencing `_tool_args` updated to `read_tool_args` (the historical-context lines like "same shape as research_agent._tool_args" deleted — the canonical utility is now the only home).
+- One test docstring (`tests/test_prompt_optimizer_verify.py::test_args_not_dict_returns_false`) updated to mention `read_tool_args` instead of `_tool_args`. No test imports the local helpers directly; they all go through the public functions (`_llm_verify`, `_decompose_topic`, `refine_idea`, `extract_ground_truths`), so the rename is invisible to test suites.
+
+**Project pattern (memory-worthy):** the "intentional duplication is fine when small" rule has a clean breakpoint — **2 copies tolerable, 3 borderline, 4 always consolidate**. By 4 copies the cost of keeping them in sync (docstring drift, missing improvements like the `args not dict` defense, accidental signature divergence) outweighs the benefit of a flat dependency graph. When you find yourself adding a 4th copy of anything, that's the signal — sweep into a shared utility in the same commit, not a follow-up. (X.13 was a follow-up because the duplication was only flagged after each migration sprint; the rule going forward is to consolidate at-the-moment-of-the-4th-copy.)
+
+**Test-suite delta:** `tests/test_tool_call_args.py` (new): 8 cases on `read_tool_args` directly — happy path, multi-call returns first, success=False, empty list, missing attr, attr=None, args not dict (list and string variants), missing success attr. The four existing test files for the migrated modules continue to pass unchanged because they all mock through the public function surface, not through the helper. Combined regression after consolidation (`-k "gt_extractor or model_router_tool_call or prompt_optimizer or idea_refinement or research_agent or tool_call_args"`): **129/129** (was 121/121 + 8 new helper tests).
 
 ---
 

@@ -135,7 +135,7 @@ class TestLLMVerifyFailClosed:
 
     def test_args_not_dict_returns_false(self):
         """Pathological provider return shape (args was a list/string) —
-        _tool_args defends; verifier fails closed."""
+        read_tool_args defends; verifier fails closed."""
         from app.modules.prompt_optimizer import _llm_verify
         with patch("app.modules.prompt_optimizer.model_router") as mr:
             r = MagicMock()
