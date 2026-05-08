@@ -2110,6 +2110,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.5 | Tier 2 audit — research_sessions.last_activity_at + activity-aware reaper (§17.32) | done 2026-05-08 |
 | X.6 | Tier 2 audit — per-job synthesis opt-in column + endpoint (§17.33) | done 2026-05-08 |
 | X.7 | Tier 2 audit — OWUI scaffold_router routing-decision diagnostic (§17.34) | done 2026-05-08 |
+| X.8 | Tier 2 audit — `make sync-api-key` 5-place propagation (§17.35) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2723,7 +2724,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 5 | research-session idle-tracking column | **DONE in X.5** | Migration 028 + 3 activity sites updated + reaper switched. 6 new tests. Listing endpoint still ORDERs by `updated_at` (different semantic, kept). |
 | 6 | Per-job synthesis opt-in column | **DONE in X.6** | Migration 029 + `_resolve_synthesis_enabled` + `PATCH /jobs/{id}/synthesis` + `synthesis_override` on `/exec/status`. 9 new tests. |
 | 7 | OWUI file-routing diagnostic capture | **DONE in X.7** | New `valves.log_routing_decisions` (off by default) + `_classify_dispatch` + `_log_routing_decision`. Single structured line per pipe() call: decision/command/wrapper_stripped/files_count/normalize_rewrites. 13 new tests. |
-| 8 | 5-place API-key sync target | Make/script | Single `make sync-api-key` that updates `.env`, valves.json files, container env, and `~/.bashrc` in one shot. |
+| 8 | 5-place API-key sync target | **DONE in X.8** | `make sync-api-key [KEY=sk-...]` strict-syncs across `.env` + 5x `valves.json` + `~/.bashrc`. Idempotent; verifies + propagates from `.env` when no arg. 9 sandboxed tests. |
 | 9 | `synthesized` filter on `GET /jobs` | API addition | List endpoint gains `?synthesized=true|false` query param. Tier-2 audit-tail. |
 | 10 | prompt_optimizer JSON-coaxing → tool-call migration | Pattern follow-on to W.6 | 2 sites in `prompt_optimizer.py` still use coaxing. Mechanical with W.6 wrapper. |
 | 11 | idea_refinement tool-call migration | Same shape as #10 | 1 site. |
@@ -2858,6 +2859,27 @@ The decision-classifier is now the canonical place to add diagnostic mirrors whe
 **Test-suite delta:** `tests/test_scaffold_router_routing_log.py` (new): 13 cases — 9 dispatch classifier cases (all command branches + unrecognized + triage + empty), 4 helper gate / output / robustness cases. Combined scaffold_router suite: 117/121 (4 pre-existing env-dependent failures in `test_scaffold_router_commands.py` unchanged — those tests hit a live `/research` endpoint and fail when the dev orchestrator has lingering "research in progress" state; tracked as a separate test-debt audit-tail item).
 
 Pipeline tests must run with `--noconftest` because `tests/conftest.py` eager-loads the `app` package, which isn't available in the pipelines container's runtime path. Pre-existing constraint, called out here so future X-track work knows the test command shape.
+
+### 17.35 Sprint X.8 — `make sync-api-key` 5-place propagation (2026-05-08)
+
+Tier 2 audit row #8. The OVERVIEW conventions section calls out an "API key sync" invariant: the key lives in 5 places that must stay aligned (`.env`, `pipelines/*/valves.json` ×5, `~/.bashrc`, `scaffold-orchestrator` container env, `open-webui-pipelines` container env). After rotation, all five must be checked. Until X.8 there was no scripted way to do this — operators were on the hook for manual coordination, and the hybrid state in this repo (4 of 5 valves populated, `scaffold_router` empty) confirms the invariant drifts in practice.
+
+New tooling:
+
+- `scripts/sync_api_key.sh` (executable, 130-ish lines). Distinct intent from `sync_valves.sh`: that one *wipes* `api_key` so pipelines fall through to `$SCAFFOLD_API_KEY` (G.3 design); X.8's script *populates* the same key everywhere (use when env-fallback isn't enabled, or when rotating a leaked key and you want the new value baked in to surface the rotation in `git diff`).
+- `make sync-api-key [KEY=sk-scaffold-...]` wraps it. With `KEY=`, sets the key in all 5 places; without, reads `.env` and propagates to the others (verify-and-align mode).
+- Container env (`scaffold-orchestrator`, `open-webui-pipelines`) inherits from `.env` automatically on the next `docker compose restart` — the script prints a "Next steps" reminder rather than auto-restarting (destructive, affects the live stack, requires explicit user intent).
+
+Behavior:
+
+- **Idempotent.** Each target file is hashed against the new value before writing; matched files emit a dim "already up to date" line, mismatches get a green "updated" line. Re-running on an aligned repo produces `changed=0` and no "Next steps" reminder.
+- **Bashrc handling.** When an `export SCAFFOLD_API_KEY=` line exists, it's replaced in-place (preserves user's other lines, no duplicate). When absent, appended with a marker comment (`# scaffold-engine: SCAFFOLD_API_KEY (managed by sync_api_key.sh)`) so future updates can find/replace cleanly.
+- **Safety nets.** Sanity-checks key shape against `^sk-scaffold-[A-Za-z0-9]{8,}$`, warns but proceeds if it doesn't match (catches typos without blocking unconventional formats). Distinguishes "no `.env`" from "`.env` exists but key is commented out" — both exit 2 with explanatory messages.
+- **Testability.** `SCAFFOLD_REPO_ROOT` and `SCAFFOLD_BASHRC_PATH` env-var overrides let pytest run the script against a tmp scratch directory. The live repo + the user's actual `~/.bashrc` are never touched during tests.
+
+**Project pattern (memory-worthy):** when scripting changes that touch user files (dotfiles, `.env`), expose env-var overrides for the target paths so tests can sandbox the script in a tmp dir. Direct `bash` invocation through `subprocess.run` with `env={..., SCAFFOLD_*_PATH: tmp_path}` then exercises the real script end-to-end without a "test mode" branch in the script's main path. Same trick applies to any future operator scripts that mutate paths outside the repo.
+
+**Test-suite delta:** `tests/test_sync_api_key.py` (new): 9 cases across three classes — KEY-arg mode (5: env create/replace, all-valves write, bashrc append, bashrc replace), verify mode (3: env→other places, missing-env exit, comment-only-env exit), idempotency (1: re-run produces 0 changes). Tests subprocess.run the actual `bash` script, so any future change to the script's behavior (or its arg parsing) surfaces immediately.
 
 ---
 
