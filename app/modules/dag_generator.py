@@ -22,6 +22,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
+from app.modules.dag_validator import (
+    issue_set_signature,
+    render_corrections_block,
+    validate_tool_picks,
+)
 from app.utils.job_utils import fail_job as _fail_job
 from app.utils.llm_parsing import parse_json_object
 
@@ -36,6 +41,7 @@ from app.config import (
     VALID_STRATEGIES,
     VALID_TOOLS,
     VALID_DOMAINS,
+    settings,
 )
 
 # ---------------------------------------------------------------------------
@@ -125,6 +131,166 @@ Return ONLY the JSON object. No preamble, no markdown."""
 
 
 # ---------------------------------------------------------------------------
+# Sprint W.3 — Validator-driven retry loop
+# ---------------------------------------------------------------------------
+
+async def _generate_dag_with_validator(
+    brief_data: dict,
+    route_kwargs: dict,
+) -> dict:
+    """Run LLM → validator → strict-retry loop, returning the chosen DAG.
+
+    Returns a dict with keys:
+        dag_data:        parsed DAG JSON (None on hard failure of attempt 1)
+        raw_text:        last LLM raw text (for error surfacing)
+        model:           model name returned by the last LLM call
+        duration_ms:     summed total_duration_ms across all calls
+        warnings:        list of validator-related diagnostic strings
+        error:           populated only when attempt 1 fails outright
+        attempts:        how many generator calls happened (1..max_attempts)
+        validator_calls: how many validator calls happened (0..max_attempts)
+
+    Validator behavior:
+        - Runs after each parse, before the next retry.
+        - "fail-open": if the validator LLM errors or returns malformed JSON,
+          we ship the current DAG (rather than failing the job).
+        - Circuit-breaker: if two consecutive validator passes return the
+          identical issue set, the regenerator clearly isn't taking the hint —
+          break out and ship the current DAG with a warning.
+        - On the last allowed attempt with issues still present, ship the
+          DAG and surface the remaining issues as a warning.
+    """
+    warnings: list[str] = []
+    total_duration_ms = 0
+    last_text = ""
+    last_model: str | None = None
+    corrections_block: str | None = None
+    last_issue_signature: tuple | None = None
+
+    if settings.dag_validator_enabled:
+        max_attempts = 1 + settings.dag_validator_max_retries
+    else:
+        max_attempts = 1
+
+    dag_data: dict | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        prompt_body = DAG_PROMPT.format(brief=json.dumps(brief_data, indent=2))
+        prompt = (corrections_block + "\n\n" + prompt_body) if corrections_block else prompt_body
+
+        resp = await model_router.generate(
+            prompt,
+            system=DAG_SYSTEM,
+            temperature=0.3,
+            max_tokens=4096,
+            **route_kwargs,
+        )
+        last_text = resp.text or ""
+        last_model = resp.model
+        total_duration_ms += getattr(resp, "total_duration_ms", 0) or 0
+
+        if not resp.success:
+            if attempt == 1:
+                return {
+                    "dag_data": None, "raw_text": last_text, "model": last_model,
+                    "duration_ms": total_duration_ms, "warnings": warnings,
+                    "error": resp.error, "attempts": attempt, "validator_calls": 0,
+                }
+            warnings.append(f"validator_retry_call_failed_attempt_{attempt}: {resp.error}")
+            break
+
+        parsed = parse_json_object(resp.text)
+        if parsed is None:
+            if attempt == 1:
+                return {
+                    "dag_data": None, "raw_text": last_text, "model": last_model,
+                    "duration_ms": total_duration_ms, "warnings": warnings,
+                    "error": "LLM output was not valid JSON",
+                    "attempts": attempt, "validator_calls": 0,
+                }
+            warnings.append(f"validator_retry_parse_failed_attempt_{attempt}")
+            break
+
+        dag_data = parsed
+
+        if not settings.dag_validator_enabled:
+            return {
+                "dag_data": dag_data, "raw_text": last_text, "model": last_model,
+                "duration_ms": total_duration_ms, "warnings": warnings,
+                "error": None, "attempts": attempt, "validator_calls": 0,
+            }
+
+        # Validator pass.
+        outcome = await validate_tool_picks(
+            dag_data.get("tasks", []),
+            model_overrides=route_kwargs.get("overrides"),
+            max_tokens=settings.dag_validator_max_tokens,
+        )
+
+        if outcome.error:
+            warnings.append(f"validator_failed_open_attempt_{attempt}: {outcome.error}")
+            return {
+                "dag_data": dag_data, "raw_text": last_text, "model": last_model,
+                "duration_ms": total_duration_ms, "warnings": warnings,
+                "error": None, "attempts": attempt, "validator_calls": attempt,
+            }
+
+        if not outcome.issues:
+            if attempt > 1:
+                warnings.append(f"validator_clean_after_retry_attempt_{attempt}")
+            return {
+                "dag_data": dag_data, "raw_text": last_text, "model": last_model,
+                "duration_ms": total_duration_ms, "warnings": warnings,
+                "error": None, "attempts": attempt, "validator_calls": attempt,
+            }
+
+        # Issues present.
+        if attempt == max_attempts:
+            warnings.append(
+                f"validator_retries_exhausted: {len(outcome.issues)} issue(s) "
+                f"remain after {attempt} attempts: " + "; ".join(
+                    f"{i.node_id}:{i.current_tool}->{i.proposed_tool}"
+                    for i in outcome.issues
+                )
+            )
+            return {
+                "dag_data": dag_data, "raw_text": last_text, "model": last_model,
+                "duration_ms": total_duration_ms, "warnings": warnings,
+                "error": None, "attempts": attempt, "validator_calls": attempt,
+            }
+
+        sig = issue_set_signature(outcome.issues)
+        if sig == last_issue_signature:
+            warnings.append(
+                f"validator_circuit_break_attempt_{attempt}: identical "
+                f"{len(outcome.issues)} issue(s) — regenerator not converging"
+            )
+            return {
+                "dag_data": dag_data, "raw_text": last_text, "model": last_model,
+                "duration_ms": total_duration_ms, "warnings": warnings,
+                "error": None, "attempts": attempt, "validator_calls": attempt,
+            }
+        last_issue_signature = sig
+
+        warnings.append(
+            f"validator_found_{len(outcome.issues)}_issues_attempt_{attempt}: "
+            + "; ".join(
+                f"{i.node_id}:{i.current_tool}->{i.proposed_tool}"
+                for i in outcome.issues
+            )
+        )
+        corrections_block = render_corrections_block(outcome.issues, attempt + 1)
+
+    # Reached only when the loop broke mid-flight after attempt 1 (e.g., a
+    # retry call/parse failed). dag_data here is the most recent successful parse.
+    return {
+        "dag_data": dag_data, "raw_text": last_text, "model": last_model,
+        "duration_ms": total_duration_ms, "warnings": warnings,
+        "error": None, "attempts": attempt, "validator_calls": min(attempt, max_attempts),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Core DAG generation
 # ---------------------------------------------------------------------------
 
@@ -188,35 +354,28 @@ async def generate_dag(
 
     brief_data = brief if isinstance(brief, dict) else json.loads(brief)
 
-    # 2. Call LLM for decomposition
-    prompt = DAG_PROMPT.format(brief=json.dumps(brief_data, indent=2))
+    # 2-3. Call LLM (with W.3 validator-driven retry loop) and parse output.
     route_kwargs = (
         {"model": model} if model
         else {"role": "model_general", "overrides": model_overrides}
     )
-    resp = await model_router.generate(
-        prompt,
-        system=DAG_SYSTEM,
-        temperature=0.3,
-        max_tokens=4096,
-        **route_kwargs,
-    )
+    gen_result = await _generate_dag_with_validator(brief_data, route_kwargs)
+    validator_warnings = gen_result["warnings"]
 
-    if not resp.success:
-        await _fail_job(db, uid, f"LLM DAG generation failed: {resp.error}")
-        return {"job_id": job_id, "status": "failed", "error": resp.error}
+    if gen_result["dag_data"] is None:
+        # Hard failure on the first attempt — propagate the original error.
+        if gen_result["error"] == "LLM output was not valid JSON":
+            await _fail_job(db, uid, "Failed to parse DAG JSON from LLM output")
+            return {
+                "job_id": job_id,
+                "status": "failed",
+                "error": "LLM output was not valid JSON",
+                "raw_output": gen_result["raw_text"][:500],
+            }
+        await _fail_job(db, uid, f"LLM DAG generation failed: {gen_result['error']}")
+        return {"job_id": job_id, "status": "failed", "error": gen_result["error"]}
 
-    # 3. Parse LLM output
-    dag_data = parse_json_object(resp.text)
-    if dag_data is None:
-        await _fail_job(db, uid, "Failed to parse DAG JSON from LLM output")
-        return {
-            "job_id": job_id,
-            "status": "failed",
-            "error": "LLM output was not valid JSON",
-            "raw_output": resp.text[:500],
-        }
-
+    dag_data = gen_result["dag_data"]
     tasks = dag_data.get("tasks", [])
     if len(tasks) < 2:
         await _fail_job(db, uid, "DAG must have at least 2 tasks")
@@ -240,6 +399,7 @@ async def generate_dag(
     graph_errors, warnings = _validate_graph(normalized, edges)
     warnings.extend(dag_warnings)
     warnings.extend(normalize_warnings)  # #26 #25
+    warnings.extend(validator_warnings)  # W.3
     if graph_errors:
         await _fail_job(db, uid, f"Graph validation errors: {'; '.join(graph_errors)}")
         return {"job_id": job_id, "status": "failed", "errors": graph_errors}
@@ -310,8 +470,10 @@ async def generate_dag(
         "edges": edges,
         "warnings": warnings,
         "mermaid_dag": mermaid,
-        "model_used": resp.model,
-        "duration_ms": resp.total_duration_ms,
+        "model_used": gen_result["model"],
+        "duration_ms": gen_result["duration_ms"],
+        "validator_attempts": gen_result["attempts"],
+        "validator_calls": gen_result["validator_calls"],
     }
 
 

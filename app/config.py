@@ -230,6 +230,15 @@ class Settings(BaseSettings):
     # so the cap rarely binds for them. Default 100k chars handles typical
     # multi-node outputs; pathological cases (50+ verbose nodes) get clipped.
     compile_output_max_chars: int = Field(default=100_000, ge=1_000, le=2_000_000)
+    # Sprint W.3 — DAG generator tool-pick validator. After the LLM emits a DAG,
+    # a second-pass validator LLM checks each task's tool selection against the
+    # documented rules and returns issues; if any are found, the generator is
+    # re-prompted with strict corrections, up to dag_validator_max_retries times.
+    # Disable the entire loop with dag_validator_enabled=false (falls back to
+    # the legacy single-shot DAG generation).
+    dag_validator_enabled: bool = True
+    dag_validator_max_retries: int = Field(default=2, ge=0, le=5)
+    dag_validator_max_tokens: int = Field(default=1024, ge=256, le=8192)
     execution_global_retry_cap: int = Field(default=20, ge=0, le=1000)
     sse_keepalive_seconds: float = Field(default=15.0, ge=1.0, le=300.0)
 

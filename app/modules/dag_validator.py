@@ -1,0 +1,197 @@
+"""DAG tool-pick validator.
+
+Sprint W.3 — Tier 1 / item 3 of the workflow-quality audit.
+
+Given a freshly-generated DAG, runs a second-pass LLM call that audits each
+task's ``tool`` selection against the documented rules (the same rules baked
+into ``dag_generator.DAG_SYSTEM``) and returns a list of issues. The DAG
+generator uses the issue list to drive a strict-prompt retry loop.
+
+Fail-open: if the validator LLM call errors, the response is malformed JSON,
+or the return shape is unexpected, this function returns an empty list. That
+preserves the legacy single-shot behavior on validator failure rather than
+crashing DAG generation.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+
+from app import model_router
+from app.utils.llm_parsing import parse_json_object
+
+logger = logging.getLogger("scaffold.dag_validator")
+
+
+@dataclass
+class ToolIssue:
+    """One wrong-tool finding from the validator."""
+    node_id: str
+    current_tool: str
+    proposed_tool: str
+    reason: str
+
+    def render(self) -> str:
+        return (
+            f"- {self.node_id}: tool='{self.current_tool}' should be "
+            f"'{self.proposed_tool}'. {self.reason}"
+        )
+
+
+@dataclass
+class ValidatorOutcome:
+    """Result of one validator pass."""
+    issues: list[ToolIssue] = field(default_factory=list)
+    error: str | None = None  # populated only when validator failed open
+
+
+VALIDATOR_SYSTEM = """You are a DAG quality auditor. Given a list of decomposed tasks, identify any tool selections that violate the rules.
+
+TOOL RULES (must match dag_generator):
+- Milvus = ALWAYS use when the task involves the knowledge base, KB, internal docs, TOON files, or domain-specific lookup. Any mention of "knowledge base", "KB", "look up from", "retrieve from", or stored/internal knowledge MUST use Milvus, NEVER SearXNG.
+- SearXNG = web search for EXTERNAL, current, or live information NOT in the knowledge base.
+- CodeGen = the deliverable IS executable code. The node produces a working script, function, module, or class as its primary output. Do NOT use CodeGen for: listing file extensions, naming variables, designing schemas, choosing libraries, writing documentation, listing requirements, or describing what code should do. If the deliverable is a list, plan, decision, design doc, or explanation — even one ABOUT code — use LLM, not CodeGen.
+- LLM = general reasoning, summarization, analysis, planning, listing, decision-making, design, explanation, and documentation. This is the DEFAULT.
+
+OUTPUT FORMAT (strict JSON, no markdown fences):
+{
+  "issues": [
+    {"node_id": "T3", "current_tool": "CodeGen", "proposed_tool": "LLM", "reason": "Task is documentation, not executable code."}
+  ]
+}
+
+Rules for your audit:
+- Only flag clear violations grounded in the rules above. If a tool pick is defensible, do NOT flag it.
+- "proposed_tool" must be one of: LLM, SearXNG, Milvus, CodeGen.
+- Return an empty issues list if every tool pick is correct.
+- Return ONLY the JSON object. No preamble, no markdown."""
+
+
+VALIDATOR_PROMPT = """Audit the tool picks in this DAG:
+
+{dag_json}
+
+Return ONLY the JSON object."""
+
+
+async def validate_tool_picks(
+    tasks: list[dict],
+    *,
+    model_role: str = "model_general",
+    model_overrides: dict | None = None,
+    max_tokens: int = 1024,
+) -> ValidatorOutcome:
+    """Run the validator LLM and return findings.
+
+    Args:
+        tasks: parsed DAG tasks (each must have ``id`` and ``tool``).
+        model_role: model_router role to dispatch under. Defaults to
+            model_general so the validator shares the DAG generator's
+            session-valve choice.
+        model_overrides: optional per-call model override dict.
+        max_tokens: response cap. Validator output is short JSON; 1024 is
+            generous.
+
+    Returns:
+        ValidatorOutcome with ``issues`` populated and ``error`` None on
+        success; or empty ``issues`` and a non-None ``error`` on any
+        failure (LLM call, JSON parse, schema mismatch).
+    """
+    if not tasks:
+        return ValidatorOutcome()
+
+    # Build a stripped-down view of the DAG for the validator. We send only
+    # the fields it needs to judge: id, name, tool, notes (intent hints).
+    audit_view = [
+        {
+            "id": t.get("id"),
+            "name": t.get("name"),
+            "tool": t.get("tool"),
+            "notes": t.get("notes", ""),
+        }
+        for t in tasks
+    ]
+
+    import json
+    prompt = VALIDATOR_PROMPT.format(dag_json=json.dumps(audit_view, indent=2))
+
+    route_kwargs = {"role": model_role}
+    if model_overrides:
+        route_kwargs["overrides"] = model_overrides
+
+    try:
+        resp = await model_router.generate(
+            prompt,
+            system=VALIDATOR_SYSTEM,
+            temperature=0.1,
+            max_tokens=max_tokens,
+            **route_kwargs,
+        )
+    except Exception as exc:
+        logger.warning("dag_validator_call_failed: %s", exc)
+        return ValidatorOutcome(error=f"call_failed: {exc}")
+
+    if not resp.success:
+        logger.warning("dag_validator_response_unsuccessful: %s", resp.error)
+        return ValidatorOutcome(error=f"response_unsuccessful: {resp.error}")
+
+    parsed = parse_json_object(resp.text)
+    if parsed is None:
+        logger.warning(
+            "dag_validator_json_parse_failed: raw=%r", resp.text[:200],
+        )
+        return ValidatorOutcome(error="json_parse_failed")
+
+    raw_issues = parsed.get("issues")
+    if not isinstance(raw_issues, list):
+        logger.warning(
+            "dag_validator_schema_mismatch: parsed=%r", parsed,
+        )
+        return ValidatorOutcome(error="schema_mismatch")
+
+    valid_tools = {"LLM", "SearXNG", "Milvus", "CodeGen"}
+    issues: list[ToolIssue] = []
+    for raw in raw_issues:
+        if not isinstance(raw, dict):
+            continue
+        node_id = str(raw.get("node_id", "")).strip()
+        current = str(raw.get("current_tool", "")).strip()
+        proposed = str(raw.get("proposed_tool", "")).strip()
+        reason = str(raw.get("reason", "")).strip()
+        if not node_id or proposed not in valid_tools:
+            # Skip ill-formed entries rather than failing the whole batch.
+            continue
+        if current == proposed:
+            # No-op suggestion; ignore.
+            continue
+        issues.append(ToolIssue(
+            node_id=node_id,
+            current_tool=current,
+            proposed_tool=proposed,
+            reason=reason,
+        ))
+
+    return ValidatorOutcome(issues=issues)
+
+
+def issue_set_signature(issues: list[ToolIssue]) -> tuple:
+    """Stable signature of an issue set for circuit-breaker comparison.
+
+    Two validator passes that find the *same* set of node_id+proposed_tool
+    pairs mean the regenerator isn't taking the hint — break the loop.
+    """
+    return tuple(sorted((i.node_id, i.proposed_tool) for i in issues))
+
+
+def render_corrections_block(issues: list[ToolIssue], attempt: int) -> str:
+    """Build the strict-retry correction block prepended to DAG_PROMPT."""
+    lines = [
+        f"## Tool corrections needed (attempt {attempt})",
+        "",
+        "Your previous DAG had these tool-pick errors. Fix them in the next attempt:",
+        "",
+    ]
+    lines.extend(i.render() for i in issues)
+    lines.append("")
+    lines.append("Re-decompose the same brief, applying the corrections above.")
+    return "\n".join(lines)

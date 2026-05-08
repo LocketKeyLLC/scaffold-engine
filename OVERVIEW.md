@@ -2097,6 +2097,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | U.8.G | Audit cleanup — Make wrappers + stale help-test fix (§17.18) | done 2026-05-07 |
 | W.1 | Workflow audit — verifier-feedback loop on retry (§17.19) | done 2026-05-07 |
 | W.2 | Workflow audit — _compile_output heuristics polish (§17.20) | done 2026-05-07 |
+| W.3 | Workflow audit — DAG generator validator-driven retry loop (§17.21) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2391,6 +2392,45 @@ Tier 1 / item 2 from the workflow audit. The audit flagged Strategy 3 (concat-al
 - LLM synthesis pass (opt-in via per-job flag or settings) — the actual "coherent deliverable" lever.
 - Surface the Strategy-3 fallback marker in `/exec/status/{job_id}` so consumers can short-circuit display.
 - De-duplicate repeated upstream context across sections (impactful for fan-in DAGs where multiple downstream nodes quote the same upstream output verbatim).
+
+### 17.21 Sprint W.3 — DAG generator validator-driven retry loop (2026-05-07)
+
+Tier 1 / item 3 from the workflow audit. Until W.3, when `dag_generator` produced a DAG with a wrong tool pick (e.g., `CodeGen` for a documentation node, or `SearXNG` for a knowledge-base lookup), the only enforcement was schema-level: `_normalize_tasks` silently coerced unknown tool *strings* to `LLM` (#26). A bad pick from the *valid* set shipped as-is, degrading the deliverable. The DAG_SYSTEM prompt documents anti-patterns clearly, but nothing checked the LLM had actually followed them.
+
+**Design** (decided via explicit user scope):
+- **Trigger**: a second-pass LLM validator (not heuristics, not schema-only) audits each task's `tool` against the rules baked into `DAG_SYSTEM`. Most accurate, doubles LLM cost.
+- **Retry budget**: up to 2 strict-prompt retries (3 generator calls + 3 validator calls max).
+- **Validator placement**: *before* normalization, so the LLM sees feedback on what it actually emitted (including unknown tool strings) before coercion happens.
+- **Failure mode**: accept coerced + surface remaining issues as job-level warnings — no hard fail. Preserves backwards-compat for callers who already work with the post-coercion shape.
+
+**Files**:
+- `app/modules/dag_validator.py` (new, ~190 lines): `validate_tool_picks()`, `ToolIssue` dataclass, `issue_set_signature()` for circuit-breaker, `render_corrections_block()` for the strict-retry prompt prefix. Validator system prompt mirrors the DAG_SYSTEM tool rules verbatim so they don't drift. Fail-open on any error (call exception, malformed JSON, schema mismatch) — returns empty issue list rather than failing DAG generation.
+- `app/modules/dag_generator.py`: extracted `_generate_dag_with_validator()` helper that owns the loop. `generate_dag()` now delegates the LLM call + parse + retry to this helper, then continues with the pre-existing normalize/validate/persist path. Validator warnings are appended to the warnings list returned in the response. New response keys: `validator_attempts`, `validator_calls`.
+- `app/config.py`: `dag_validator_enabled: bool = True` (kill switch), `dag_validator_max_retries: int = 2`, `dag_validator_max_tokens: int = 1024`.
+
+**Loop behavior**:
+- Clean DAG on attempt 1 → 1 generator + 1 validator call, return.
+- Issue found → render corrections block → retry. Validator clean on retry → return with diagnostic warning.
+- Issues persist for all 3 attempts → return final DAG with `validator_retries_exhausted` warning carrying remaining issues.
+- **Circuit-breaker**: if attempt N+1's validator returns the *identical* issue signature (same node_id + proposed_tool pairs) as attempt N, break early — the regenerator isn't taking the hint, no point spending another retry.
+- **Fail-open**: validator call fails or returns malformed JSON → ship current DAG with `validator_failed_open` warning.
+- Kill-switch off → loop is bypassed entirely; legacy single-shot behavior preserved.
+
+**Cost**: ~10–20 s p99 latency increase per DAG (2× LLM call, plus validator). Disable per-environment via `dag_validator_enabled=false` if cost-sensitive.
+
+**Test-suite delta**: 14 new in `tests/test_dag_validator.py` (validator unit tests + signature/render helpers); 8 new in `tests/test_dag_generator.py::TestValidatorLoop` (loop integration via `_generate_dag_with_validator` with scripted `model_router.generate` side_effect lists). Total: existing dag suite ~28 → 50 in `test_dag_generator.py`, plus 14 in the new validator file. **Combined W.1+W.2+W.3 baseline: 82/82.**
+
+**One stub-list hygiene change**: the loader-pattern in `tests/test_dag_generator.py` (importlib + `patch.dict(sys.modules, …)`) needed `app.modules.dag_validator` added to its mock list so collection works regardless of pytest test ordering.
+
+**What this does NOT do** (deferred):
+- Heuristic anti-pattern matching (substring-based detection of "knowledge base" + tool!=Milvus, etc.) — by design rejected in favor of LLM-only audit, on quality-over-cost grounds.
+- Validation of non-tool fields (depends_on shape, output type, ordering) — purely tool-pick scope. Other fields are still handled by the existing `_normalize_tasks` + `validate_dag` path.
+- UI surfacing of validator warnings to OWUI/CLI — orchestrator response carries the strings; render in client surfaces is a follow-up.
+
+**Open follow-ups (audit-tail)**:
+- Surface validator warnings in `scaffold dag <id>` and OWUI's `_render_dag` output (currently only consumers parsing the raw `/dag` response see them).
+- Consider per-domain validator strictness (e.g., research-heavy DAGs may legitimately use CodeGen for "Generate scraping script" — current rules don't capture that).
+- Track validator-call ROI: if telemetry shows a high rate of `validator_clean_after_retry_attempt_N`, the loop is paying for itself; if `validator_circuit_break_attempt_N` dominates, it's noise.
 
 ---
 

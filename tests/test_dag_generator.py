@@ -29,6 +29,8 @@ def _load_dag_generator():
     stubs = {}
     for mod_name in [
         "app", "app.database", "app.modules", "app.config",
+        "app.modules.dag_validator",  # W.3 — added so loader-based collection
+                                       # works regardless of test ordering.
         "sqlalchemy", "sqlalchemy.ext", "sqlalchemy.ext.asyncio",
         "sqlalchemy.orm", "sqlalchemy.sql", "sqlalchemy.sql.expression",
         "sqlalchemy", "sqlalchemy.text",
@@ -319,4 +321,241 @@ class TestToolSelectionGuide:
         from app.modules.dag_generator import DAG_SYSTEM
         # The key principle: discussing/listing/explaining code is LLM territory
         assert "even one ABOUT code" in DAG_SYSTEM
+
+
+# ===========================================================================
+# Sprint W.3 — validator-driven retry loop
+# ===========================================================================
+
+
+def _llm_response(text: str, success: bool = True, error: str | None = None):
+    """Build a fake ModelResponse-shaped object for mocking."""
+    resp = MagicMock()
+    resp.success = success
+    resp.text = text
+    resp.error = error
+    resp.model = "fake-model"
+    resp.total_duration_ms = 0
+    return resp
+
+
+def _dag_json(*, mark_doc_as_codegen: bool = False):
+    """Helper: emit a valid 3-task DAG JSON string for the LLM mock."""
+    import json
+    tasks = [
+        {"id": "T1", "name": "Write parser", "type": "action",
+         "inputs": [], "outputs": ["parser"], "depends_on": [],
+         "tool": "CodeGen", "domain": None, "assigned_model": None,
+         "notes": "code"},
+        {"id": "T2", "name": "Document usage", "type": "action",
+         "inputs": ["parser"], "outputs": ["docs"], "depends_on": ["T1"],
+         "tool": "CodeGen" if mark_doc_as_codegen else "LLM",
+         "domain": None, "assigned_model": None, "notes": "documentation"},
+        {"id": "T3", "name": "Validate", "type": "validation",
+         "inputs": ["docs"], "outputs": ["report"], "depends_on": ["T2"],
+         "tool": "LLM", "domain": None, "assigned_model": None,
+         "notes": "validation"},
+    ]
+    return json.dumps({"strategy": "sequential", "tasks": tasks})
+
+
+def _issues(payload: list[dict]) -> str:
+    import json
+    return json.dumps({"issues": payload})
+
+
+@pytest.mark.smoke
+class TestValidatorLoop:
+    """Tests for _generate_dag_with_validator — the W.3 retry loop.
+
+    Mocks app.model_router.generate with scripted side_effect lists.
+    Both the generator and the validator call this same attribute, so
+    we can drive both legs of each iteration from one queue.
+    """
+
+    async def test_clean_on_first_attempt_one_validator_call(self):
+        """Generator emits clean DAG → validator returns no issues → return."""
+        from app.modules import dag_generator
+        from app import model_router as _mr
+
+        mock = AsyncMock(side_effect=[
+            _llm_response(_dag_json()),       # generator attempt 1
+            _llm_response(_issues([])),       # validator pass 1 — clean
+        ])
+        with patch.object(_mr, "generate", new=mock):
+            result = await dag_generator._generate_dag_with_validator(
+                {"brief": "test"}, {"role": "model_general"},
+            )
+
+        assert result["dag_data"] is not None
+        assert result["error"] is None
+        assert result["attempts"] == 1
+        assert result["validator_calls"] == 1
+        assert mock.call_count == 2  # 1 gen + 1 validator
+        assert result["warnings"] == []
+
+    async def test_issue_then_retry_succeeds(self):
+        """Generator emits dirty DAG → validator flags → retry → clean."""
+        from app.modules import dag_generator
+        from app import model_router as _mr
+
+        mock = AsyncMock(side_effect=[
+            _llm_response(_dag_json(mark_doc_as_codegen=True)),  # gen 1 (dirty)
+            _llm_response(_issues([{                              # val 1 (issue)
+                "node_id": "T2", "current_tool": "CodeGen",
+                "proposed_tool": "LLM",
+                "reason": "Documentation is not code.",
+            }])),
+            _llm_response(_dag_json()),                           # gen 2 (clean)
+            _llm_response(_issues([])),                           # val 2 (clean)
+        ])
+        with patch.object(_mr, "generate", new=mock):
+            result = await dag_generator._generate_dag_with_validator(
+                {"brief": "test"}, {"role": "model_general"},
+            )
+
+        assert result["dag_data"] is not None
+        assert result["error"] is None
+        assert result["attempts"] == 2
+        assert result["validator_calls"] == 2
+        assert mock.call_count == 4  # 2 gen + 2 validator
+        # First-pass issue surfaced as warning + clean-after-retry note
+        assert any("validator_found_1_issues_attempt_1" in w for w in result["warnings"])
+        assert any("validator_clean_after_retry_attempt_2" in w for w in result["warnings"])
+
+    async def test_retries_exhaust_with_remaining_issues(self):
+        """Validator keeps finding distinct issues; loop ships final DAG with warning."""
+        from app.modules import dag_generator
+        from app import model_router as _mr
+
+        # Distinct issue sets each attempt so circuit-breaker doesn't fire.
+        mock = AsyncMock(side_effect=[
+            _llm_response(_dag_json(mark_doc_as_codegen=True)),  # gen 1
+            _llm_response(_issues([{
+                "node_id": "T2", "current_tool": "CodeGen",
+                "proposed_tool": "LLM", "reason": "doc",
+            }])),
+            _llm_response(_dag_json(mark_doc_as_codegen=True)),  # gen 2
+            _llm_response(_issues([{
+                "node_id": "T3", "current_tool": "LLM",
+                "proposed_tool": "Milvus", "reason": "kb",
+            }])),
+            _llm_response(_dag_json(mark_doc_as_codegen=True)),  # gen 3
+            _llm_response(_issues([{
+                "node_id": "T1", "current_tool": "CodeGen",
+                "proposed_tool": "LLM", "reason": "still wrong",
+            }])),
+        ])
+        with patch.object(_mr, "generate", new=mock):
+            result = await dag_generator._generate_dag_with_validator(
+                {"brief": "test"}, {"role": "model_general"},
+            )
+
+        # Default max_retries=2 → 3 attempts total
+        assert result["dag_data"] is not None
+        assert result["attempts"] == 3
+        assert result["validator_calls"] == 3
+        assert mock.call_count == 6
+        assert any("validator_retries_exhausted" in w for w in result["warnings"])
+
+    async def test_circuit_breaker_on_identical_issues(self):
+        """Same issue set twice → break early without third generator call."""
+        from app.modules import dag_generator
+        from app import model_router as _mr
+
+        same_issue = [{
+            "node_id": "T2", "current_tool": "CodeGen",
+            "proposed_tool": "LLM", "reason": "doc",
+        }]
+        mock = AsyncMock(side_effect=[
+            _llm_response(_dag_json(mark_doc_as_codegen=True)),  # gen 1
+            _llm_response(_issues(same_issue)),                   # val 1
+            _llm_response(_dag_json(mark_doc_as_codegen=True)),  # gen 2
+            _llm_response(_issues(same_issue)),                   # val 2 — identical!
+        ])
+        with patch.object(_mr, "generate", new=mock):
+            result = await dag_generator._generate_dag_with_validator(
+                {"brief": "test"}, {"role": "model_general"},
+            )
+
+        assert result["dag_data"] is not None
+        assert result["attempts"] == 2  # broke before attempt 3
+        assert mock.call_count == 4     # 2 gen + 2 validator, no third gen
+        assert any("validator_circuit_break_attempt_2" in w for w in result["warnings"])
+
+    async def test_kill_switch_disabled_skips_validator(self):
+        """settings.dag_validator_enabled=False → 1 generator call, 0 validator calls."""
+        from app.modules import dag_generator
+        from app import model_router as _mr
+        from app.config import settings
+
+        mock = AsyncMock(side_effect=[
+            _llm_response(_dag_json()),  # gen 1 only
+        ])
+        with patch.object(settings, "dag_validator_enabled", False), \
+             patch.object(_mr, "generate", new=mock):
+            result = await dag_generator._generate_dag_with_validator(
+                {"brief": "test"}, {"role": "model_general"},
+            )
+
+        assert result["dag_data"] is not None
+        assert result["attempts"] == 1
+        assert result["validator_calls"] == 0
+        assert mock.call_count == 1
+        assert result["warnings"] == []
+
+    async def test_first_attempt_call_failure_returns_error(self):
+        """LLM call fails on attempt 1 → caller can fail the job."""
+        from app.modules import dag_generator
+        from app import model_router as _mr
+
+        mock = AsyncMock(side_effect=[
+            _llm_response("", success=False, error="ollama down"),
+        ])
+        with patch.object(_mr, "generate", new=mock):
+            result = await dag_generator._generate_dag_with_validator(
+                {"brief": "test"}, {"role": "model_general"},
+            )
+
+        assert result["dag_data"] is None
+        assert result["error"] == "ollama down"
+        assert result["attempts"] == 1
+        assert result["validator_calls"] == 0
+
+    async def test_first_attempt_parse_failure_returns_error(self):
+        """LLM emits non-JSON on attempt 1 → caller can fail the job."""
+        from app.modules import dag_generator
+        from app import model_router as _mr
+
+        mock = AsyncMock(side_effect=[
+            _llm_response("not actually JSON {{{"),
+        ])
+        with patch.object(_mr, "generate", new=mock):
+            result = await dag_generator._generate_dag_with_validator(
+                {"brief": "test"}, {"role": "model_general"},
+            )
+
+        assert result["dag_data"] is None
+        assert result["error"] == "LLM output was not valid JSON"
+        assert result["attempts"] == 1
+
+    async def test_validator_failed_open_ships_current_dag(self):
+        """Validator JSON parse fails → ship current DAG with a warning."""
+        from app.modules import dag_generator
+        from app import model_router as _mr
+
+        mock = AsyncMock(side_effect=[
+            _llm_response(_dag_json()),                   # gen 1 OK
+            _llm_response("validator output is broken"),  # val 1 unparseable
+        ])
+        with patch.object(_mr, "generate", new=mock):
+            result = await dag_generator._generate_dag_with_validator(
+                {"brief": "test"}, {"role": "model_general"},
+            )
+
+        assert result["dag_data"] is not None
+        assert result["error"] is None
+        assert result["attempts"] == 1
+        assert result["validator_calls"] == 1
+        assert any("validator_failed_open" in w for w in result["warnings"])
 
