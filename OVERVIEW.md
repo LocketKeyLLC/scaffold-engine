@@ -2118,6 +2118,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.13 | Tier 2 cleanup — `_tool_args` consolidation → `app/utils/tool_call_args.py` (§17.40) | done 2026-05-08 |
 | X.14 | Tier 2 audit — CI smoke for retrieval regressions (§17.41) | done 2026-05-08 |
 | X.15 | Tier 2 test-debt — `test_execution_handler_module.py` SimpleNamespace fixture drift (§17.42) | done 2026-05-08 |
+| X.16 | Tier 2 test-debt — `test_execution_agent_compile.py` synthesis-override bypass (§17.43) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2740,7 +2741,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 14 | Quarterly RAG re-baseline cadence | Scheduling | `make rebaseline` cron / runbook. Surfaces drift early. |
 | 15 | `tests/ground_truth.json` regen at KB=1093 | Calibration, multi-hour | Re-curate expected_doc_ids against the current `scaffold-<title>-<hash>` naming. Defer until a quarterly rebaseline shows a need. |
 | 16 | `test_execution_handler_module.py` SimpleNamespace fixture drift | **DONE in X.15** | New `_job_row` helper defaults the X.2 `compiled_output_synthesized` + X.6 `compile_synthesis_override` columns. 8 fixture sites converted; 9/9 green. |
-| 17 | `test_execution_agent_compile.py` 5 stale W.7/X.2 cases | Test debt, ~30 min | 5 pre-existing failures across `TestCompileOutputW2Strategy3`, `TestCompileOutputSynthesis`, `TestCompileOutputSynthesizedFlag`, `TestSkippedVerifyBanner`. Need to inspect and rebuild fixtures. |
+| 17 | `test_execution_agent_compile.py` stale W.7/X.2 cases | **DONE in X.16** | Actually 16 failures (audit row was outdated). Single autouse fixture bypassing `_resolve_synthesis_enabled`'s DB-read fixed all of them — no per-test changes needed. 32/32. |
 | 18 | `test_health_cleanup.py` un-skip | Test debt, ~30 min | Module-level skip currently dead-codes TestHealth* (useful, distinct from `test_x1_thresholds_and_health.py`) along with TestReapStaleJobs (obsolete). Decide: salvage TestHealth* or delete the file. |
 
 **Roadmap items still pending** (post-v1.0.0 ambition):
@@ -3004,6 +3005,35 @@ The fix:
 **Project pattern (memory-worthy):** when a SELECT-driven function gains columns over multiple sprints (X.2 added one, X.6 added another), tests using `SimpleNamespace` fixtures for the row break with `AttributeError` rather than a meaningful assertion failure. Two long-term mitigations: (a) prefer `MagicMock` over `SimpleNamespace` for row fixtures — `MagicMock`'s default `attr` access returns another mock, never raises (but loses the strict-attribute discipline), or (b) add a typed helper like `_job_row(**kw)` per row-shape that enforces all current columns at construction time. Option (b) is what X.15 does; the cost is one more helper to maintain when columns drift, the benefit is fixture failures show up as "I forgot to add the new column to `_job_row`" rather than as silent attribute access through a permissive mock.
 
 **Test-suite delta:** `tests/test_execution_handler_module.py`: 1/9 → **9/9** (fixed 8 broken cases + the previously-passing case stays passing). Combined `-k "execution_handler or execution_agent"` run: 109 passed, 5 pre-existing failures remain in `test_execution_agent_compile.py` (Tier 2 audit row #17 — a separate test-debt sprint).
+
+### 17.43 Sprint X.16 — `test_execution_agent_compile.py` synthesis-override bypass (2026-05-08)
+
+Tier 2 test-debt row #17. The audit row called out "5 stale W.7/X.2 cases" but a fresh run showed **16 failures** — the row was outdated. Root-cause analysis turned up a single underlying mechanism, fixable with one autouse fixture rather than per-test fixture rebuilds.
+
+The mechanism:
+
+- X.6 introduced `_resolve_synthesis_enabled(job_id, db)` in `execution_compile.py`. It does `db.execute("SELECT compile_synthesis_override ...").scalar()` and falls through to `settings.compile_synthesis_enabled` only when the column is NULL.
+- Pre-X.16 tests use `make_mock_db([{...row dicts...}])`. The `make_mock_db` helper's `scalar()` inference (in `tests/conftest.py`) returns the first row dict as a "scalar" when the dict has multiple keys (single-column rows return the column value; multi-column rows return the whole dict for "easier consumption" of `RETURNING *` queries).
+- For pre-W.7 tests, the first row is a multi-key dag-node dict (truthy). `_resolve_synthesis_enabled` reads it, returns `bool(non_None_truthy_value) = True`. **Synthesis fires unconditionally**, regardless of the `settings.compile_synthesis_enabled=False` default the tests rely on.
+- For synthesis-aware tests using `_make_db_with_brief` (which uses `side_effect=[nodes, brief]`), the new override-SELECT consumes the `brief` slot — so the actual brief read inside `_synthesize_compiled_output` then hits a `StopIteration`. Most synthesis tests broke too.
+
+The fix is a single module-level autouse fixture in this file:
+
+```python
+@pytest.fixture(autouse=True)
+def _bypass_synthesis_override_db_read(monkeypatch):
+    async def _bypass(job_id, db):
+        return settings.compile_synthesis_enabled
+    monkeypatch.setattr(execution_compile, "_resolve_synthesis_enabled", _bypass)
+```
+
+This reverts to pre-X.6 semantics for this file — synthesis fires iff the global setting says so. Tests that explicitly want override-resolution semantics belong in `tests/test_compile_synthesis_override.py`, where the fixture isn't applied.
+
+Why no per-test edits were needed: the synthesis-aware tests already use `patch.object(settings, "compile_synthesis_enabled", True)` to enable synthesis. The bypass observes that patch (it reads `settings.compile_synthesis_enabled` at call-time, not import-time), so synthesis fires correctly on those tests. `_make_db_with_brief`'s 2-result side_effect chain works as-is because the override-SELECT is bypassed and never lands in the chain.
+
+**Project pattern (memory-worthy):** when a function gains a DB-read it didn't have before, *every test that exercised the function with a generic mock-DB* potentially breaks because the new read returns whatever the mock-DB serves up — usually the wrong thing. The fix isn't to update every test's mock-DB chain; it's a single autouse fixture in the affected file that bypasses the new DB-read in favor of the underlying setting. Tests that explicitly want to verify the new DB-read live in their own dedicated test file. **Rule: when adding a DB-read to a function, search for existing tests of the function and decide whether to (a) write per-test mocks, or (b) provide an autouse bypass for the existing-test-file's "I don't care about this read" tests + a dedicated test file for the new read's semantics**. X.6 + X.16 demonstrate why (b) is usually right.
+
+**Test-suite delta:** `tests/test_execution_agent_compile.py`: 16/32 → **32/32**. Cross-file regression confirms the bypass stays scoped via `monkeypatch` (doesn't leak to `test_compile_synthesis_override.py`): 41/41 across both files. Combined `-k "execution_agent_compile or compile_synthesis_override"` run unchanged at green.
 
 ---
 

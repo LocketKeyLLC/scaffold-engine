@@ -5,6 +5,42 @@ and helpers live in _execution_agent_shared.
 """
 from tests._execution_agent_shared import *  # noqa: F401, F403
 
+
+@pytest.fixture(autouse=True)
+def _bypass_synthesis_override_db_read(monkeypatch):
+    """Sprint X.16 — bypass `_resolve_synthesis_enabled`'s DB-read in
+    every test in this file.
+
+    Background: X.6 introduced ``_resolve_synthesis_enabled(job_id, db)``
+    which SELECTs ``jobs.compile_synthesis_override`` and falls through
+    to ``settings.compile_synthesis_enabled`` when the column is NULL.
+    Pre-X.16 tests in this file use ``make_mock_db([{...row dicts...}])``,
+    whose ``scalar()`` inference returns the first row dict as a "scalar"
+    when the dict has multiple keys — that dict is truthy, so
+    ``_resolve_synthesis_enabled`` returns True, forcing synthesis ON
+    even when the test set ``settings.compile_synthesis_enabled=False``.
+
+    The bypass replaces the resolver with one that reads
+    ``settings.compile_synthesis_enabled`` directly. Synthesis-enabled
+    tests still work because they patch the setting via
+    ``patch.object(settings, "compile_synthesis_enabled", True)`` —
+    that patch is observed by the bypass.
+
+    Tests that need to exercise the override-resolution semantics
+    explicitly belong in ``tests/test_compile_synthesis_override.py``,
+    where this fixture isn't applied.
+    """
+    from app.config import settings
+    from app.modules import execution_compile
+
+    async def _bypass(job_id, db):
+        return settings.compile_synthesis_enabled
+
+    monkeypatch.setattr(
+        execution_compile, "_resolve_synthesis_enabled", _bypass,
+    )
+
+
 @pytest.mark.smoke
 class TestCompileOutputStrategy2:
     """Strategy 2: last CodeGen terminal node is the deliverable."""
