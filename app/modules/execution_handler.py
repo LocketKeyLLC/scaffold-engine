@@ -20,10 +20,16 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
     # stored compiled_output is the LLM-synthesized narrative (W.7) or
     # the raw heuristic body. Lets clients render a "synthesized by LLM"
     # badge when appropriate.
+    # Sprint X.6 — `compile_synthesis_override` surfaces the current per-
+    # job opt-in knob (NULL = inherit settings.compile_synthesis_enabled).
+    # Distinct semantic from `synthesized` above: the override describes
+    # the decision *for the next compile*, while `synthesized` records
+    # what *the last compile actually did*.
     job_result = await db.execute(
         text(
             "SELECT id, title, status, compiled_output, "
-            "       compiled_output_synthesized "
+            "       compiled_output_synthesized, "
+            "       compile_synthesis_override "
             "FROM jobs WHERE id = :job_id"
         ),
         {"job_id": str(job_id)}
@@ -106,6 +112,7 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         "job_status": job.status,
         "compiled_output": job.compiled_output,
         "synthesized": bool(job.compiled_output_synthesized),
+        "synthesis_override": job.compile_synthesis_override,
         "counts": counts,
         "total_nodes": len(nodes),
         "next_node": next_node,

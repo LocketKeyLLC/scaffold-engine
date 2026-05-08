@@ -60,6 +60,8 @@ from app.schemas import (
     ScheduleResponse,
     SkipNodeInput,
     JobRenameInput,
+    JobSynthesisOverrideInput,
+    JobSynthesisOverrideResponse,
     JobSummary,
     JobListResponse,
     ResearchSessionRenameInput,
@@ -1224,6 +1226,48 @@ async def rename_job(job_id: str, body: JobRenameInput, db: AsyncSession = Depen
         node_count=row.node_count or 0,
         created_at=row.created_at.isoformat(),
         updated_at=row.updated_at.isoformat(),
+    )
+
+
+@app.patch(
+    "/jobs/{job_id}/synthesis",
+    response_model=JobSynthesisOverrideResponse,
+    tags=["Management"],
+)
+async def set_job_synthesis_override(
+    job_id: str,
+    body: JobSynthesisOverrideInput,
+    db: AsyncSession = Depends(get_db),
+):
+    """Sprint X.6 — set the per-job opt-in for the W.7 LLM synthesis pass.
+
+    Body ``{"override": true}`` forces synthesis on for this job;
+    ``{"override": false}`` forces it off; ``{"override": null}`` clears
+    the override so the job inherits ``settings.compile_synthesis_enabled``.
+
+    The override is read by ``execution_compile._resolve_synthesis_enabled``
+    on the next compile pass — set it before ``/execute/all`` (or before
+    a final-node retry) for it to take effect on the resulting deliverable.
+    """
+    try:
+        UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+
+    r = await db.execute(text("""
+        UPDATE jobs
+           SET compile_synthesis_override = :override,
+               updated_at = NOW()
+         WHERE id = :id
+        RETURNING id, compile_synthesis_override
+    """), {"id": job_id, "override": body.override})
+    row = r.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+    await db.commit()
+    return JobSynthesisOverrideResponse(
+        job_id=str(row.id),
+        override=row.compile_synthesis_override,
     )
 
 

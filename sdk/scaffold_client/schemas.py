@@ -570,6 +570,23 @@ class JobRenameInput(BaseModel):
         return v
 
 
+class JobSynthesisOverrideInput(BaseModel):
+    """Sprint X.6 — per-job opt-in for the W.7 LLM synthesis pass.
+
+    None inherits ``settings.compile_synthesis_enabled``; True forces
+    synthesis on for this job; False forces it off. The field is
+    explicitly Optional[bool] (not ``bool | None`` with a default) so
+    consumers MUST declare intent — sending an absent body would be
+    indistinguishable from "set to null".
+    """
+    override: bool | None
+
+
+class JobSynthesisOverrideResponse(BaseModel):
+    job_id: str
+    override: bool | None
+
+
 class JobSummary(BaseModel):
     id: str
     title: str

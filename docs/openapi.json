@@ -660,6 +660,52 @@
         "title": "JobRenameInput",
         "type": "object"
       },
+      "JobSynthesisOverrideInput": {
+        "description": "Sprint X.6 — per-job opt-in for the W.7 LLM synthesis pass.\n\nNone inherits ``settings.compile_synthesis_enabled``; True forces\nsynthesis on for this job; False forces it off. The field is\nexplicitly Optional[bool] (not ``bool | None`` with a default) so\nconsumers MUST declare intent — sending an absent body would be\nindistinguishable from \"set to null\".",
+        "properties": {
+          "override": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Override"
+          }
+        },
+        "required": [
+          "override"
+        ],
+        "title": "JobSynthesisOverrideInput",
+        "type": "object"
+      },
+      "JobSynthesisOverrideResponse": {
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "override": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Override"
+          }
+        },
+        "required": [
+          "job_id",
+          "override"
+        ],
+        "title": "JobSynthesisOverrideResponse",
+        "type": "object"
+      },
       "LogsResponse": {
         "properties": {
           "compiled_output": {
@@ -2925,6 +2971,64 @@
           }
         ],
         "summary": "Rename Job",
+        "tags": [
+          "Management"
+        ]
+      }
+    },
+    "/jobs/{job_id}/synthesis": {
+      "patch": {
+        "description": "Sprint X.6 — set the per-job opt-in for the W.7 LLM synthesis pass.\n\nBody ``{\"override\": true}`` forces synthesis on for this job;\n``{\"override\": false}`` forces it off; ``{\"override\": null}`` clears\nthe override so the job inherits ``settings.compile_synthesis_enabled``.\n\nThe override is read by ``execution_compile._resolve_synthesis_enabled``\non the next compile pass — set it before ``/execute/all`` (or before\na final-node retry) for it to take effect on the resulting deliverable.",
+        "operationId": "set_job_synthesis_override_jobs__job_id__synthesis_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobSynthesisOverrideInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobSynthesisOverrideResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Set Job Synthesis Override",
         "tags": [
           "Management"
         ]

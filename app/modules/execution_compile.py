@@ -230,6 +230,37 @@ def _join_sections(sections: list[str]) -> str:
     return "\n\n---\n\n".join(sections)
 
 
+async def _resolve_synthesis_enabled(job_id: str, db) -> bool:
+    """Sprint X.6 — per-job override takes precedence over the global
+    setting. Returns True iff synthesis should run for this job.
+
+    Resolution:
+      - jobs.compile_synthesis_override = TRUE  → True (force on)
+      - jobs.compile_synthesis_override = FALSE → False (force off)
+      - jobs.compile_synthesis_override IS NULL → settings.compile_synthesis_enabled
+
+    The SELECT is a single round-trip; on any DB error (job missing,
+    connection drop) we fail open to the global setting, matching the
+    fail-open pattern that already governs synthesis itself.
+    """
+    try:
+        row = await db.execute(
+            text("SELECT compile_synthesis_override FROM jobs WHERE id = :jid"),
+            {"jid": job_id},
+        )
+        override = row.scalar()
+    except Exception as exc:
+        logger.debug(
+            "synthesis_override_read_failed: job=%s error=%s "
+            "(falling through to global setting)",
+            job_id, exc,
+        )
+        return settings.compile_synthesis_enabled
+    if override is None:
+        return settings.compile_synthesis_enabled
+    return bool(override)
+
+
 async def _maybe_synthesize(
     *, job_id: str, heuristic: str | None,
     strategy: str, source_tool: str | None, db,
@@ -243,8 +274,14 @@ async def _maybe_synthesize(
     disabled, CodeGen-guarded, fail-open, and empty-heuristic paths all
     return (text_or_None, False). Lets callers persist the synthesized
     flag on jobs.compiled_output_synthesized.
+
+    Sprint X.6 — synthesis-enabled is now resolved per-job via
+    `_resolve_synthesis_enabled`, so a job can opt in/out independently
+    of the global `settings.compile_synthesis_enabled` knob.
     """
-    if heuristic is None or not settings.compile_synthesis_enabled:
+    if heuristic is None:
+        return heuristic, False
+    if not await _resolve_synthesis_enabled(job_id, db):
         return heuristic, False
     synthesized = await _synthesize_compiled_output(
         job_id=job_id, heuristic=heuristic,

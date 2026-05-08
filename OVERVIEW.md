@@ -2108,6 +2108,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.3 | Tier 2 audit — cleanup test 8-reaper drift fix (§17.30) | done 2026-05-08 |
 | X.4 | Tier 2 audit — W.4-style wrap on _fetch_upstream_outputs (§17.31) | done 2026-05-08 |
 | X.5 | Tier 2 audit — research_sessions.last_activity_at + activity-aware reaper (§17.32) | done 2026-05-08 |
+| X.6 | Tier 2 audit — per-job synthesis opt-in column + endpoint (§17.33) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2719,7 +2720,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 3 | `_compile_output` skipped-verify banner | **DONE in X.2** | Already shipped — leave row only as a record. |
 | 4 | synthesized=true|false on /exec/status | **DONE in X.2** | Already shipped. |
 | 5 | research-session idle-tracking column | **DONE in X.5** | Migration 028 + 3 activity sites updated + reaper switched. 6 new tests. Listing endpoint still ORDERs by `updated_at` (different semantic, kept). |
-| 6 | Per-job synthesis opt-in column | Migration + API | `jobs.compile_synthesis_override BOOLEAN NULL`; falls through to global setting when null. |
+| 6 | Per-job synthesis opt-in column | **DONE in X.6** | Migration 029 + `_resolve_synthesis_enabled` + `PATCH /jobs/{id}/synthesis` + `synthesis_override` on `/exec/status`. 9 new tests. |
 | 7 | OWUI file-routing diagnostic capture | Observability | Surface routing decisions in OWUI logs so triage paths are debuggable. |
 | 8 | 5-place API-key sync target | Make/script | Single `make sync-api-key` that updates `.env`, valves.json files, container env, and `~/.bashrc` in one shot. |
 | 9 | `synthesized` filter on `GET /jobs` | API addition | List endpoint gains `?synthesized=true|false` query param. Tier-2 audit-tail. |
@@ -2810,6 +2811,29 @@ Sites that **deliberately don't bump** `last_activity_at`: the rename endpoint (
 **Project pattern (memory-worthy):** when an asyncpg-backed migration needs ALTER + UPDATE + CREATE INDEX in one file, wrap the body in a single `DO $$ BEGIN ... END $$;` block. Inside the DO block, use PL/pgSQL `IF NOT EXISTS` checks against `information_schema.columns` / `pg_indexes` for idempotency, and use `EXECUTE 'CREATE INDEX ...'` for index DDL (PL/pgSQL requires `EXECUTE` for utility statements). Don't try wrapping in `BEGIN; ... COMMIT;` — the runner strips them and the multi-statement body still fails asyncpg's prepared-statement protocol.
 
 **Test-suite delta:** `tests/test_research_sessions_activity_tracking.py` (new): 6 cases — reaper SQL substring assertion (positive + negative for the paused reaper), 3 activity-site write-content checks, 1 negative case on `_finalize_session`. Combined session-related suite (`-k "cleanup or research_pause"` plus the new file): 27/27. Live-applied migration 028; second apply confirmed idempotent (empty `applied` list).
+
+### 17.33 Sprint X.6 — per-job synthesis opt-in column + endpoint (2026-05-08)
+
+Tier 2 audit row #6. Lets individual jobs override the W.7 global synthesis flag without flipping it for the whole deployment. Useful when a single high-value deliverable wants the LLM polish (or wants to skip it) while the rest of the system stays at default.
+
+Migration 029 (`db/migrations/029_jobs_compile_synthesis_override.sql`):
+
+- Single-statement `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS compile_synthesis_override BOOLEAN`. Explicitly nullable, **no DEFAULT** — NULL is the inherits-global state, so existing + new rows start at NULL until an operator opts in/out per-job. (X.5's lesson about multi-statement DO blocks doesn't apply here — single ALTER is fine through the asyncpg prepared-statement path.)
+
+Resolution logic in `execution_compile.py`:
+
+- New `_resolve_synthesis_enabled(job_id, db) -> bool`. Single SELECT round-trip; returns `bool(override)` when non-NULL, else `settings.compile_synthesis_enabled`. Fail-open on any DB error (transient connection drop, missing row) — same fail-open contract that already governs synthesis itself, so a flaky read on the override doesn't strip a deliverable's polish.
+- `_maybe_synthesize` now consults `_resolve_synthesis_enabled` instead of reading `settings.compile_synthesis_enabled` directly. The global setting is still the canonical default — only the per-job override flips the precedence.
+
+API surface:
+
+- New `PATCH /jobs/{job_id}/synthesis` (Management tag) accepts `JobSynthesisOverrideInput {override: bool | None}`. Returns `JobSynthesisOverrideResponse {job_id, override}`. UUID validation + 404 if missing. The endpoint is intentionally separate from `PATCH /jobs/{job_id}` (rename) — different concerns, different audit trails, and not overloading a name (`rename_job`) that the SDK + CLI already key on. New input/response schemas in `app/schemas.py`; SDK vendor refreshed via `make sync-schemas`.
+- `GET /exec/status` (`execution_handler.execution_status`) gains `synthesis_override: bool | null` alongside the existing `synthesized: bool` — distinct semantic: *override* describes the decision *for the next compile*, *synthesized* records what *the last compile actually did*. Renderers can show "synthesis: forced on (last run synthesized)" / "synthesis: forced off (last run heuristic)" / "synthesis: auto (inherits global)".
+- OpenAPI snapshot regenerated to 44 paths (was 43) — the new endpoint registered as expected.
+
+**Project pattern (memory-worthy):** when adding a per-row override knob that should fall through to a global setting, default the column to NULL (not False) so "never set" and "explicitly off" are distinguishable. NULL → inherit global is the only safe interpretation that lets future global-default flips propagate to never-touched rows. This also keeps the migration trivial (no DEFAULT, no backfill, no opinionated initial state).
+
+**Test-suite delta:** `tests/test_compile_synthesis_override.py` (new): 9 cases — 4 resolution semantics (True force-on, False force-off, NULL inherits-on, NULL inherits-off), 1 fail-open on DB error, 2 end-to-end `_maybe_synthesize` paths (LLM called when override-True, LLM never called when override-False), 2 `execution_status` surface checks (override field present + null-renders-null). SDK schema parity test passes — the vendored schema is byte-equal with `app/schemas.py`. Live-applied migration 029 against the dev container; same restart caveats as any prod-deploy code change.
 
 ---
 
