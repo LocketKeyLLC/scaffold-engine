@@ -2126,6 +2126,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | J.3.a | Cost + latency telemetry foundation — schema + logging hook (§17.48) | done 2026-05-08 |
 | J.3.b | Cost rollup endpoint + /exec/status extension + SDK costs() (§17.49) | done 2026-05-08 |
 | J.3.c | Cost telemetry consumer surfaces — CLI + OWUI + make rollup (§17.50) | done 2026-05-08 |
+| X.18 | Small-batch followup sweep — synthesis/synthesized client shims + 4 stale-test fixes (§17.51) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -3237,6 +3238,37 @@ Phase 3 (final) of roadmap item J.3 — closes the cost-telemetry track. Three s
 **Roadmap item J.3 is complete** across phases a + b + c. Cost + latency telemetry now flows: every model_router LLM call → llm_call_logs row → per-job rollup via API + CLI flag + OWUI command + Make target. Operators have visibility into spend without writing raw SQL. Pricing for cloud models (openai, anthropic) is seeded; local Ollama is automatically zero-cost. The migration-seeded rates are editable (operator-bumpable); historical `cost_usd` values are immutable.
 
 **🎉 All J-track roadmap items closed** (J.1 SDK + OpenAPI snapshot v1.0.0, J.2 native web UI a/b/c, J.3 cost telemetry a/b/c). The post-v1.0.0 ambition list is empty.
+
+### 17.51 Sprint X.18 — small-batch followup sweep (2026-05-08)
+
+Three small followups bundled into one commit. Each item was deferred from a prior sprint with an explicit "client-side shim" or "test-debt" note; X.18 closes the bookkeeping.
+
+**1. SDK + CLI shims for `PATCH /jobs/{id}/synthesis`** (deferred from X.6).
+
+- SDK `JobsResource.set_synthesis_override(job_id, override)` (sync) + `AsyncJobsResource.set_synthesis_override(...)` (async). Body shape: `{override: bool | None}`. None clears the override (job inherits `settings.compile_synthesis_enabled`).
+- CLI `scaffold jobs synthesis <job_id> [--on | --off | --auto]`. Exactly one decision flag is required (raises `UsageError` otherwise). `--auto` maps to `override=None` and is operator-friendlier than `--null` or `--clear`. Renders `synthesis override for <short-id>: on | off | auto (inherits global)` on success.
+
+**2. SDK + CLI shims for `?synthesized` filter on `GET /jobs`** (deferred from X.9).
+
+- SDK `JobsResource.list(...)` and `AsyncJobsResource.list(...)` gain a `synthesized: bool | None` kwarg. Threaded through the existing `_drop_none` so `None` (default) leaves the param off the URL entirely.
+- CLI `scaffold jobs list --synthesized / --no-synthesized` flag pair via Click's standard `--flag/--no-flag` syntax; default is off-the-flag (no filter, returns all jobs). Sends `?synthesized=true` or `=false` accordingly. Omitting the flag sends no `synthesized` param.
+
+**3. Four stale `test_scaffold_router_commands.py` tests** (noted in X.7 as live-state-drift flakes).
+
+The X.7 sprint note flagged these as "env-dependent" because they were hitting the live `/research` endpoint. Investigation showed they were never hitting it intentionally — three distinct mismatches:
+
+- `test_status_command`: pre-X.18 fixture used the legacy `active_jobs` shape; the live response carries `recent_jobs` + `status_counts` + per-row `title`/`next_actions` since U.7's UX-gap audit. Updated the canned payload to match what `_render_status` consumes.
+- `test_research_usage_error`: pre-X.18 expected a literal "Usage" string, but the live `_handle_research` shows a placeholder-rejection hint + a bullet list of example invocations (no "Usage:" prefix). Updated assertions to match the real shape.
+- `test_research_complete_suggests_go` + `test_awaiting_reply_renders_paused_block`: pre-X.18 patched `_mod.requests.post` but `_research_and_stream_raw` actually fires through `_HTTP_SESSION.post` (a `requests.Session`, not the module-level function). The patch never intercepted the real call, so the tests hit the live orchestrator and failed against whatever stale state it had. Patched the right target now.
+
+**Project pattern (memory-worthy):** when a test "flakes" or "depends on env state" but its mock is set up correctly *in shape*, check the **patch target** before chalking it up to live-service fragility. A `Session.post` and a module-level `requests.post` are different attribute paths; the wrong target is silently a no-op patch. Symptom: tests fail against whatever stale state the live target has, randomly correlating with environment cleanliness rather than with code correctness.
+
+**Test-suite delta:**
+- SDK `tests/test_typed_methods.py`: +2 cases (`test_jobs_list_synthesized_filter`, `test_jobs_set_synthesis_override`). Suite 129 → 131.
+- CLI `cli/tests/test_commands.py`: +7 cases (4 for `jobs synthesis` subcommand: `--on`, `--off`, `--auto`, missing-flag UsageError; 3 for `jobs list --synthesized`: `--synthesized`, `--no-synthesized`, omitted). Suite 124 → 131.
+- Pipeline `tests/test_scaffold_router_commands.py`: 4 previously-broken tests now pass; full pipeline-router regression 128/128.
+
+Total Tier-2 audit-tail rows now closed (post-X.18): #1, #2, #3, #4, #5, #6, #7, #8, #9, #10, #11, #12, #13, #16, #17, #18 plus the X.18 small-batch sweep. Only #14 (quarterly RAG re-baseline cadence) and #15 (ground_truth.json regen) remain — both multi-hour calibration items, deferred to a quarterly sweep.
 
 ---
 

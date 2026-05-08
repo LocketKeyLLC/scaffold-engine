@@ -36,11 +36,21 @@ class JobsResource:
         *,
         status: str | None = None,
         q: str | None = None,
+        synthesized: bool | None = None,
         limit: int = 25,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """``GET /jobs`` — paginated job list with optional status / title filter."""
-        params = _drop_none({"status": status, "q": q, "limit": limit, "offset": offset})
+        """``GET /jobs`` — paginated job list with optional filters.
+
+        ``synthesized=True`` returns only jobs whose compiled output was
+        LLM-synthesized (W.7); ``=False`` returns only heuristic /
+        not-yet-compiled jobs; ``None`` (default) returns all. X.9.
+        """
+        params = _drop_none({
+            "status": status, "q": q,
+            "synthesized": synthesized,
+            "limit": limit, "offset": offset,
+        })
         return self._client.request("GET", "/jobs", params=params)
 
     def status(self, job_id: str) -> dict[str, Any]:
@@ -56,6 +66,20 @@ class JobsResource:
         telemetry yet return the zero shape with an empty breakdown.
         """
         return self._client.request("GET", f"/jobs/{job_id}/costs")
+
+    def set_synthesis_override(
+        self, job_id: str, override: bool | None,
+    ) -> dict[str, Any]:
+        """``PATCH /jobs/{job_id}/synthesis`` — per-job W.7 synthesis opt-in.
+
+        ``True`` forces synthesis on for this job; ``False`` forces it off;
+        ``None`` clears the override (job inherits ``settings.compile_
+        synthesis_enabled``). X.6. Returns ``{job_id, override}``.
+        """
+        return self._client.request(
+            "PATCH", f"/jobs/{job_id}/synthesis",
+            json={"override": override},
+        )
 
     def delete(self, job_id: str) -> dict[str, Any]:
         """``DELETE /jobs/{job_id}`` — hard delete; cascades to dag_nodes / logs."""

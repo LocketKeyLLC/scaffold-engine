@@ -23,22 +23,34 @@ class TestHandleCommand:
 
     @patch("scaffold_router._HTTP_SESSION.get")
     def test_status_command(self, mock_get, pipe):
-        """'/status' should call the orchestrator's /status endpoint."""
+        """'/status' should call the orchestrator's /status endpoint.
+
+        X.18 — pre-X.18 fixture used the legacy ``active_jobs`` shape;
+        the live response carries ``recent_jobs`` + ``status_counts``
+        + per-row title/next_actions since U.7's UX-gap audit. Updated
+        the canned payload to match what _render_status now expects.
+        """
         mock_get.return_value = _make_response(200, {
-            "active_jobs": [{"job_id": "abc-123", "status": "executing"}],
+            "total_jobs": 1,
+            "status_counts": {"executing": 1},
+            "recent_jobs": [
+                {"id": "abc-123", "status": "executing",
+                 "title": "demo job", "node_count": 3,
+                 "updated_at": "2026-05-08T00:00:00",
+                 "next_actions": []},
+            ],
         })
         result = pipe._handle_command("/status")
 
         # Verify the right endpoint was called
         mock_get.assert_called_once()
-        call_url = mock_get.call_args[0][0] if mock_get.call_args[0] else mock_get.call_args[1].get("url", "")
-        if not call_url:
-            # positional or keyword
-            call_url = str(mock_get.call_args)
-        assert "/status" in call_url or "/status" in str(mock_get.call_args)
+        assert "/status" in str(mock_get.call_args)
 
-        # Verify the response was formatted
-        assert "abc-123" in result
+        # Verify the response was formatted — short-id (first 8 chars) is
+        # what _render_status renders for each recent_jobs row.
+        assert "abc-123"[:8] in result
+        # Title also surfaces in the recent-jobs table.
+        assert "demo job" in result
 
     def test_unknown_command(self, pipe):
         """An unrecognized command should return a helpful error (no HTTP call)."""
@@ -311,7 +323,15 @@ class TestResearchCommand:
     """Tests for /research command parsing and dispatch."""
 
     def test_research_usage_error(self, pipe):
-        """'/research' with no topic yields usage message."""
+        """'/research' with no topic yields the placeholder hint + parser
+        examples.
+
+        X.18 — pre-X.18 the test expected a literal "Usage" string, but
+        the live parser shows a placeholder-rejection message + a bullet
+        list of example invocations. The assertion now matches the
+        real shape: the operator-facing hint identifies the missing
+        topic and surfaces example invocations.
+        """
         output = list(pipe.pipe(
             user_message="/research",
             model_id="test",
@@ -319,8 +339,10 @@ class TestResearchCommand:
             body={"messages": [{"role": "user", "content": "/research"}]},
         ))
         combined = "".join(output)
-        assert "Usage" in combined
-        assert "/research <topic>" in combined
+        # Operator-facing message identifies the missing/placeholder topic.
+        assert "topic is missing or a placeholder" in combined
+        # Examples section surfaces at least the basic shape.
+        assert "/research" in combined
 
     def test_research_depth_flag_parsed(self, pipe):
         """'--depth deep' is extracted and topic is cleaned."""
@@ -381,7 +403,15 @@ class TestResearchCommand:
         assert "Redis caching" in combined
 
     def test_research_complete_suggests_go(self, pipe, monkeypatch):
-        """After research_complete, output should prompt the user to type /go."""
+        """After research_complete, output should prompt the user to type /go.
+
+        X.18 — pre-X.18 patched ``_mod.requests.post`` but
+        ``_research_and_stream_raw`` actually fires through
+        ``_HTTP_SESSION.post`` (a Session, not the module-level
+        ``requests.post``). The patch never intercepted the real call,
+        so the test hit the live orchestrator and failed against
+        whatever stale state that had. Patch the right target now.
+        """
         class FakeResponse:
             status_code = 200
             def iter_lines(self, decode_unicode=True):
@@ -396,7 +426,7 @@ class TestResearchCommand:
                 pass
 
         monkeypatch.setattr(
-            _mod.requests, "post", lambda *a, **kw: FakeResponse()
+            _mod._HTTP_SESSION, "post", lambda *a, **kw: FakeResponse()
         )
 
         output = "".join(pipe._research_and_stream("Docker networking", "medium"))
@@ -405,7 +435,10 @@ class TestResearchCommand:
         assert "Research Complete" in output
 
     def test_awaiting_reply_renders_paused_block(self, pipe, monkeypatch):
-        """awaiting_reply SSE event renders the pause block with session id + hints."""
+        """awaiting_reply SSE event renders the pause block with session id + hints.
+
+        X.18 — same patch-target fix as test_research_complete_suggests_go.
+        """
         class FakeResponse:
             status_code = 200
             def iter_lines(self, decode_unicode=True):
@@ -420,7 +453,7 @@ class TestResearchCommand:
             def close(self):
                 pass
         monkeypatch.setattr(
-            _mod.requests, "post", lambda *a, **kw: FakeResponse()
+            _mod._HTTP_SESSION, "post", lambda *a, **kw: FakeResponse()
         )
         output = "".join(pipe._research_and_stream("container orchestration", "medium"))
         # Pause header rendered

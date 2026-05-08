@@ -153,6 +153,26 @@ def test_jobs_list_with_filters(client):
     }
 
 
+def test_jobs_list_synthesized_filter(client):
+    """X.18 — ``synthesized=True`` adds ?synthesized=true; ``False`` adds
+    =false; omit (None) leaves it out entirely. (X.9 endpoint, X.18 SDK shim.)"""
+    with patch.object(client._http, "request", return_value=_resp(200, {"jobs": []})) as m:
+        client.jobs.list(synthesized=True)
+    _, kwargs = _last_call(m)
+    assert kwargs["params"].get("synthesized") is True
+
+    with patch.object(client._http, "request", return_value=_resp(200, {"jobs": []})) as m:
+        client.jobs.list(synthesized=False)
+    _, kwargs = _last_call(m)
+    assert kwargs["params"].get("synthesized") is False
+
+    # None → kwarg dropped (covered by _drop_none).
+    with patch.object(client._http, "request", return_value=_resp(200, {"jobs": []})) as m:
+        client.jobs.list()
+    _, kwargs = _last_call(m)
+    assert "synthesized" not in kwargs["params"]
+
+
 def test_jobs_status(client):
     with patch.object(client._http, "request", return_value=_resp(200, {"job_status": "running"})) as m:
         client.jobs.status("abc")
@@ -173,6 +193,24 @@ def test_jobs_update_renames(client):
     args, kwargs = _last_call(m)
     assert args == ("PATCH", "/jobs/abc")
     assert kwargs["json"] == {"title": "new title"}
+
+
+def test_jobs_set_synthesis_override(client):
+    """X.18 — PATCH /jobs/{id}/synthesis with body {override: bool|None}.
+    X.6 endpoint, X.18 SDK shim."""
+    with patch.object(client._http, "request",
+                      return_value=_resp(200, {"job_id": "abc", "override": True})) as m:
+        client.jobs.set_synthesis_override("abc", True)
+    args, kwargs = _last_call(m)
+    assert args == ("PATCH", "/jobs/abc/synthesis")
+    assert kwargs["json"] == {"override": True}
+
+    # None clears the override (job inherits global).
+    with patch.object(client._http, "request",
+                      return_value=_resp(200, {"job_id": "abc", "override": None})) as m:
+        client.jobs.set_synthesis_override("abc", None)
+    _, kwargs = _last_call(m)
+    assert kwargs["json"] == {"override": None}
 
 
 def test_jobs_cleanup(client):

@@ -25,10 +25,15 @@ class AsyncJobsResource:
         *,
         status: str | None = None,
         q: str | None = None,
+        synthesized: bool | None = None,
         limit: int = 25,
         offset: int = 0,
     ) -> dict[str, Any]:
-        params = _drop_none({"status": status, "q": q, "limit": limit, "offset": offset})
+        params = _drop_none({
+            "status": status, "q": q,
+            "synthesized": synthesized,
+            "limit": limit, "offset": offset,
+        })
         return await self._client.request("GET", "/jobs", params=params)
 
     async def status(self, job_id: str) -> dict[str, Any]:
@@ -37,6 +42,15 @@ class AsyncJobsResource:
     async def costs(self, job_id: str) -> dict[str, Any]:
         """``GET /jobs/{job_id}/costs`` — cost + latency rollup. J.3.b."""
         return await self._client.request("GET", f"/jobs/{job_id}/costs")
+
+    async def set_synthesis_override(
+        self, job_id: str, override: bool | None,
+    ) -> dict[str, Any]:
+        """``PATCH /jobs/{job_id}/synthesis`` — per-job W.7 synthesis opt-in. X.6."""
+        return await self._client.request(
+            "PATCH", f"/jobs/{job_id}/synthesis",
+            json={"override": override},
+        )
 
     async def delete(self, job_id: str) -> dict[str, Any]:
         return await self._client.request("DELETE", f"/jobs/{job_id}")

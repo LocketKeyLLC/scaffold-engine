@@ -444,18 +444,27 @@ Examples:
 @click.option("--limit", default=25, type=int, show_default=True)
 @click.option("--status", "status_filter", default=None,
               help="Filter by job status (e.g. completed, awaiting_confirmation).")
+@click.option("--synthesized/--no-synthesized", "synthesized_filter",
+              default=None,
+              help="Filter to jobs whose compiled output was (or was not) "
+                   "LLM-synthesized via the W.7 pass. Omit to see all. (X.9)")
 @click.option("--json", "as_json", is_flag=True, help="Print the raw JSON response.")
 @click.pass_context
 def jobs_list(
     ctx: click.Context,
     limit: int,
     status_filter: str | None,
+    synthesized_filter: bool | None,
     as_json: bool,
 ) -> None:
     cfg = ctx.obj["cfg"]
     params: dict = {"limit": limit}
     if status_filter:
         params["status"] = status_filter
+    if synthesized_filter is not None:
+        # X.9 — orchestrator accepts ?synthesized=true|false; pass the
+        # bool directly (httpx serializes to lowercase JSON-style true/false).
+        params["synthesized"] = "true" if synthesized_filter else "false"
     try:
         with Client(cfg.api_url, cfg.api_key) as c:
             data = c.get("/jobs", params=params)
@@ -1204,6 +1213,55 @@ def jobs_rename(ctx: click.Context, job_id: str, title: tuple[str, ...]) -> None
         sys.exit(1)
     click.secho(f"renamed {data.get('id', job_id)[:8]}: ", nl=False, fg="green")
     click.echo(data.get("title", new_title))
+
+
+@jobs.command(
+    "synthesis",
+    help="Set the per-job W.7 synthesis override (--on / --off / --auto).",
+)
+@click.argument("job_id")
+@click.option("--on", "decision", flag_value="on",
+              help="Force synthesis ON for this job.")
+@click.option("--off", "decision", flag_value="off",
+              help="Force synthesis OFF for this job.")
+@click.option("--auto", "decision", flag_value="auto",
+              help="Clear the override (job inherits the global setting).")
+@click.pass_context
+def jobs_synthesis(ctx: click.Context, job_id: str, decision: str | None) -> None:
+    """X.6 — flip a job's per-call synthesis override.
+
+    Maps to ``PATCH /jobs/{id}/synthesis``. The orchestrator stores the
+    bool/null on ``jobs.compile_synthesis_override``; the next compile
+    pass for this job consults it before falling back to the global
+    ``settings.compile_synthesis_enabled`` flag.
+    """
+    if decision is None:
+        raise click.UsageError(
+            "exactly one of --on, --off, or --auto is required"
+        )
+    override: bool | None
+    if decision == "on":
+        override = True
+    elif decision == "off":
+        override = False
+    else:  # "auto"
+        override = None
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.patch(f"/jobs/{job_id}/synthesis", json={"override": override})
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    rendered = (
+        "auto (inherits global)" if data.get("override") is None
+        else ("on" if data.get("override") else "off")
+    )
+    click.secho(
+        f"synthesis override for {data.get('job_id', job_id)[:8]}: ",
+        nl=False, fg="green",
+    )
+    click.echo(rendered)
 
 
 JOBS_DELETE_EPILOG = """

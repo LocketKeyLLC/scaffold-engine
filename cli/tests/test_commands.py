@@ -438,6 +438,85 @@ def test_jobs_status_without_costs_flag_skips_costs_call(runner):
 
 
 # ---------------------------------------------------------------------------
+# X.18 — `scaffold jobs synthesis` + `scaffold jobs list --synthesized`
+# ---------------------------------------------------------------------------
+
+
+def test_jobs_synthesis_on_sets_override_true(runner):
+    """`--on` PATCHes /jobs/{id}/synthesis with override=True."""
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        patch_mock = ClientCls.return_value.__enter__.return_value.patch
+        patch_mock.return_value = {"job_id": "abc", "override": True}
+        res = runner.invoke(cli, ["jobs", "synthesis", "abc", "--on"])
+    assert res.exit_code == 0
+    patch_mock.assert_called_once()
+    args, kwargs = patch_mock.call_args
+    assert args[0] == "/jobs/abc/synthesis"
+    assert kwargs["json"] == {"override": True}
+    assert "on" in res.output
+
+
+def test_jobs_synthesis_off_sets_override_false(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        patch_mock = ClientCls.return_value.__enter__.return_value.patch
+        patch_mock.return_value = {"job_id": "abc", "override": False}
+        res = runner.invoke(cli, ["jobs", "synthesis", "abc", "--off"])
+    assert res.exit_code == 0
+    _, kwargs = patch_mock.call_args
+    assert kwargs["json"] == {"override": False}
+    assert "off" in res.output
+
+
+def test_jobs_synthesis_auto_clears_override(runner):
+    """`--auto` sets override to null so the job inherits the global flag."""
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        patch_mock = ClientCls.return_value.__enter__.return_value.patch
+        patch_mock.return_value = {"job_id": "abc", "override": None}
+        res = runner.invoke(cli, ["jobs", "synthesis", "abc", "--auto"])
+    assert res.exit_code == 0
+    _, kwargs = patch_mock.call_args
+    assert kwargs["json"] == {"override": None}
+    assert "auto" in res.output
+
+
+def test_jobs_synthesis_requires_decision_flag(runner):
+    """No --on / --off / --auto → UsageError exit."""
+    res = runner.invoke(cli, ["jobs", "synthesis", "abc"])
+    assert res.exit_code != 0
+    assert "exactly one of --on, --off, or --auto is required" in res.output
+
+
+def test_jobs_list_synthesized_true_sends_filter(runner):
+    """`--synthesized` adds ?synthesized=true to the GET params."""
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get_mock = ClientCls.return_value.__enter__.return_value.get
+        get_mock.return_value = {"jobs": [], "total": 0}
+        runner.invoke(cli, ["jobs", "list", "--synthesized"])
+    _, kwargs = get_mock.call_args
+    assert kwargs["params"].get("synthesized") == "true"
+
+
+def test_jobs_list_no_synthesized_sends_false_filter(runner):
+    """`--no-synthesized` adds ?synthesized=false."""
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get_mock = ClientCls.return_value.__enter__.return_value.get
+        get_mock.return_value = {"jobs": [], "total": 0}
+        runner.invoke(cli, ["jobs", "list", "--no-synthesized"])
+    _, kwargs = get_mock.call_args
+    assert kwargs["params"].get("synthesized") == "false"
+
+
+def test_jobs_list_no_flag_omits_synthesized_param(runner):
+    """No flag → param NOT sent (orchestrator returns all jobs)."""
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get_mock = ClientCls.return_value.__enter__.return_value.get
+        get_mock.return_value = {"jobs": [], "total": 0}
+        runner.invoke(cli, ["jobs", "list"])
+    _, kwargs = get_mock.call_args
+    assert "synthesized" not in kwargs["params"]
+
+
+# ---------------------------------------------------------------------------
 # Global flag plumbing
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
