@@ -7,14 +7,18 @@ per-session on `assist_sessions.replan_policy`:
   context_only (DEFAULT) — no regeneration. Human evidence lands in
     `dag_nodes.output_text`; the existing upstream-last assembly forces
     downstream nodes to "build on" the actual upstream output. Handles
-    most divergence implicitly; zero LLM cost.
+    most divergence implicitly; the verifier runs in the **background**
+    so submit returns immediately. The `divergence` flag on
+    `assist_steps` is observability data; tests should call
+    `await drain_background_tasks()` to wait for it deterministically.
 
   selective                — regenerate only nodes that transitively depend
     on the changed node. Reuses the BFS in retry_failed_node.
-    One LLM call, scoped to the affected subgraph.
+    One LLM call, scoped to the affected subgraph. Synchronous because
+    the result mutates state the user immediately depends on.
 
   full                     — regenerate all pending nodes. Discouraged;
-    invalidates trust mid-session.
+    invalidates trust mid-session. Synchronous, same reason as selective.
 
   disabled                 — skip detection entirely.
 
@@ -23,6 +27,7 @@ executor uses post-LLM, preserving the model-stack invariant.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -32,6 +37,12 @@ from sqlalchemy import text
 from app.utils.llm_parsing import parse_json_object
 
 logger = logging.getLogger("scaffold.assist.replan")
+
+# W.10 — Track in-flight context_only divergence tasks so:
+#   - tests can await completion deterministically via drain_background_tasks()
+#   - tasks aren't garbage-collected mid-flight (asyncio.create_task only holds
+#     a weak ref; a strong ref must live somewhere or the task can vanish).
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
 _DIVERGENCE_PROMPT = """You are checking whether a human-supplied step output \
@@ -223,6 +234,67 @@ async def apply_selective_replan(
 # ── Top-level dispatcher ───────────────────────────────────────────────────
 
 
+async def _detect_and_mark_in_background(
+    *,
+    session_id: str,
+    node_key: str,
+    title: str,
+    prompt: str,
+    evidence: str,
+    model_overrides: dict | None,
+) -> None:
+    """Background worker for context_only: run divergence detection and
+    write the `divergence=TRUE` flag on assist_steps if applicable.
+
+    Uses its own AsyncSession because the request-scoped session that
+    spawned this task may have been closed by the time we run. Catches
+    every exception so an Ollama outage / parse failure surfaces only
+    in logs — never as an unhandled-task warning.
+    """
+    try:
+        div = await detect_divergence(
+            title=title, prompt=prompt, evidence=evidence,
+            model_overrides=model_overrides,
+        )
+        if not div["diverges"] or div["severity"] != "major":
+            return
+        # Major divergence — mark the row. Open a fresh session because
+        # the request session is gone.
+        from app.database import async_session
+        async with async_session() as bg_db:
+            await bg_db.execute(
+                text("""
+                    UPDATE assist_steps SET divergence = TRUE, updated_at = NOW()
+                     WHERE session_id = :sid AND node_key = :nk
+                """),
+                {"sid": session_id, "nk": node_key},
+            )
+            await bg_db.commit()
+        logger.info(
+            "assist_divergence_marked_async session_id=%s node=%s reason=%r",
+            session_id, node_key, div.get("reason"),
+        )
+    except Exception as e:
+        logger.warning(
+            "assist_divergence_background_failed session_id=%s node=%s err=%r",
+            session_id, node_key, e,
+        )
+
+
+async def drain_background_tasks() -> None:
+    """Await all in-flight context_only divergence tasks.
+
+    Tests should call this between submit and any assertion that reads
+    `assist_steps.divergence`. In production, no caller waits — the
+    task completes whenever the verifier returns and the flag lands
+    asynchronously.
+    """
+    if not _BACKGROUND_TASKS:
+        return
+    pending = list(_BACKGROUND_TASKS)
+    await asyncio.gather(*pending, return_exceptions=True)
+
+
 async def maybe_replan(
     *,
     db,
@@ -240,31 +312,36 @@ async def maybe_replan(
     Returns None when no replan was triggered (policy='disabled', or
     divergence not detected, or context_only). Returns a dict when an
     actual reset happened (policy='selective' / 'full').
+
+    W.10: context_only's verifier call moved off the request path — it
+    spawns a fire-and-forget asyncio task and returns None immediately.
+    The `divergence` flag still lands on assist_steps, just ~3s later.
+    selective/full stay synchronous because the result drives the BFS
+    reset that the user immediately reads via /assist next.
     """
     if policy == "disabled":
         return None
+    if policy == "context_only":
+        # Fire-and-forget. Submit returns within milliseconds; the
+        # verifier runs in the background. Strong ref via _BACKGROUND_TASKS
+        # so the task isn't GC'd before completion.
+        task = asyncio.create_task(
+            _detect_and_mark_in_background(
+                session_id=session_id, node_key=node_key,
+                title=title, prompt=prompt, evidence=evidence,
+                model_overrides=model_overrides,
+            )
+        )
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
+        return None
+    # selective / full: synchronous detection because the result drives
+    # the BFS reset that the next /assist next call reads.
     div = await detect_divergence(
         title=title, prompt=prompt, evidence=evidence,
         model_overrides=model_overrides,
     )
     if not div["diverges"] or div["severity"] != "major":
-        return None
-    if policy == "context_only":
-        # No structural change — log the divergence but rely on
-        # downstream nodes' upstream-last assembly to absorb it.
-        logger.info(
-            "assist_divergence_logged session_id=%s node=%s reason=%r",
-            session_id, node_key, div.get("reason"),
-        )
-        # Mark on the row.
-        await db.execute(
-            text("""
-                UPDATE assist_steps SET divergence = TRUE, updated_at = NOW()
-                 WHERE session_id = :sid AND node_key = :nk
-            """),
-            {"sid": session_id, "nk": node_key},
-        )
-        await db.commit()
         return None
     if policy == "selective":
         return await apply_selective_replan(
@@ -280,18 +357,6 @@ async def maybe_replan(
             root_node_key=node_key, root_evidence=evidence, divergence=div,
             model_overrides=model_overrides,
         )
-    if policy == "disabled":
-        # Operator opted out of replan-on-divergence entirely — no-op
-        # but mark the divergence so it's still observable in audit.
-        await db.execute(
-            text("""
-                UPDATE assist_steps SET divergence = TRUE, updated_at = NOW()
-                 WHERE session_id = :sid AND node_key = :nk
-            """),
-            {"sid": session_id, "nk": node_key},
-        )
-        await db.commit()
-        return None
     # The replan_policy column has a CHECK constraint (migration 023)
     # restricting values to context_only/selective/full/disabled. Reaching
     # here means the constraint was bypassed or the row pre-dates the

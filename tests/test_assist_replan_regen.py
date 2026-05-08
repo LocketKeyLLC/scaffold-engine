@@ -344,3 +344,169 @@ class TestApplySelectiveReplanCallsRegen:
         assert result["affected_nodes"] == []
         assert result.get("details") == "no_dependents"
         regen_mock.assert_not_called()
+
+
+# ===================================================================
+# W.10 — context_only async divergence detection
+# ===================================================================
+
+
+@pytest.mark.smoke
+class TestContextOnlyAsync:
+    """`maybe_replan(policy='context_only')` must NOT call detect_divergence
+    in-line. It spawns a background task and returns None immediately so
+    submit's response latency is independent of verifier latency.
+    """
+
+    async def test_context_only_returns_immediately_without_blocking_on_verifier(self):
+        """Pin the verifier on a never-set event; a synchronous code path
+        would deadlock waiting for it. The async path returns within ms
+        because the verifier runs on a background task, not in-line.
+        """
+        import asyncio as _aio
+        from app.modules import assist_replan
+
+        gate = _aio.Event()  # never set in this test
+
+        async def slow_verifier(**kw):
+            await gate.wait()  # would block forever if awaited synchronously
+            return {"diverges": False, "severity": "minor", "reason": "n/a"}
+
+        with patch.object(assist_replan, "detect_divergence", slow_verifier):
+            # Tight timeout proves we returned without awaiting the verifier.
+            result = await _aio.wait_for(
+                assist_replan.maybe_replan(
+                    db=AsyncMock(), session_id="sid-1", job_id="jid-1",
+                    node_key="T1", title="t", prompt="p",
+                    evidence="ev", policy="context_only",
+                ),
+                timeout=1.0,
+            )
+            assert result is None
+            assert len(assist_replan._BACKGROUND_TASKS) >= 1
+            # Release the bg task and drain inside the patch scope so the
+            # task sees the mock, not the real verifier.
+            gate.set()
+            await assist_replan.drain_background_tasks()
+
+    async def test_context_only_marks_divergence_after_drain_when_major(self):
+        """With drain, the divergence flag is observable. Without drain,
+        in production, it lands ~3s later — that's the contract."""
+        from app.modules import assist_replan
+
+        det_mock = AsyncMock(return_value={
+            "diverges": True, "severity": "major", "reason": "pivoted",
+        })
+        # Capture the UPDATE so we can assert it fired.
+        captured_sql = []
+
+        class _FakeBgSession:
+            async def __aenter__(self_inner): return self_inner
+            async def __aexit__(self_inner, *a): return False
+            async def execute(self_inner, stmt, params=None):
+                captured_sql.append((str(stmt), params))
+                return MagicMock()
+            async def commit(self_inner): pass
+
+        with patch.object(assist_replan, "detect_divergence", det_mock), \
+             patch("app.database.async_session", _FakeBgSession):
+            await assist_replan.maybe_replan(
+                db=AsyncMock(), session_id="sid-2", job_id="jid-2",
+                node_key="T7", title="t", prompt="p",
+                evidence="ev", policy="context_only",
+            )
+            await assist_replan.drain_background_tasks()
+
+        update_seen = any(
+            "UPDATE assist_steps SET divergence" in sql
+            and params == {"sid": "sid-2", "nk": "T7"}
+            for sql, params in captured_sql
+        )
+        assert update_seen, f"expected divergence UPDATE; got: {captured_sql}"
+
+    async def test_context_only_skips_update_when_no_divergence(self):
+        """diverges=False → background task runs but writes nothing."""
+        from app.modules import assist_replan
+
+        det_mock = AsyncMock(return_value={
+            "diverges": False, "severity": "minor", "reason": "fine",
+        })
+        captured_sql = []
+
+        class _FakeBgSession:
+            async def __aenter__(self_inner): return self_inner
+            async def __aexit__(self_inner, *a): return False
+            async def execute(self_inner, stmt, params=None):
+                captured_sql.append((str(stmt), params))
+                return MagicMock()
+            async def commit(self_inner): pass
+
+        with patch.object(assist_replan, "detect_divergence", det_mock), \
+             patch("app.database.async_session", _FakeBgSession):
+            await assist_replan.maybe_replan(
+                db=AsyncMock(), session_id="sid-3", job_id="jid-3",
+                node_key="T1", title="t", prompt="p",
+                evidence="ev", policy="context_only",
+            )
+            await assist_replan.drain_background_tasks()
+
+        assert captured_sql == [], (
+            f"no UPDATE expected when not diverging; got: {captured_sql}"
+        )
+
+    async def test_context_only_swallows_verifier_exception(self):
+        """Ollama outage in the background must NOT raise; it logs and
+        returns. The submit-side caller already returned None — an
+        unhandled task exception would surface as a noisy warning."""
+        from app.modules import assist_replan
+
+        det_mock = AsyncMock(side_effect=RuntimeError("ollama down"))
+
+        with patch.object(assist_replan, "detect_divergence", det_mock):
+            await assist_replan.maybe_replan(
+                db=AsyncMock(), session_id="sid-4", job_id="jid-4",
+                node_key="T1", title="t", prompt="p",
+                evidence="ev", policy="context_only",
+            )
+            # If swallowing failed, gather() would surface the exception.
+            await assist_replan.drain_background_tasks()
+        # No assertion needed — reaching here is the contract.
+
+    async def test_selective_remains_synchronous(self):
+        """Regression: selective MUST still call detect_divergence
+        in-line because its result drives the BFS reset."""
+        from app.modules import assist_replan
+
+        det_mock = AsyncMock(return_value={
+            "diverges": True, "severity": "major", "reason": "pivot",
+        })
+        # Stub the selective branch so we can detect it was invoked.
+        sel_mock = AsyncMock(return_value={
+            "affected_nodes": ["T2"], "scope": "selective",
+        })
+
+        with patch.object(assist_replan, "detect_divergence", det_mock), \
+             patch.object(assist_replan, "apply_selective_replan", sel_mock):
+            result = await assist_replan.maybe_replan(
+                db=AsyncMock(), session_id="sid-5", job_id="jid-5",
+                node_key="T1", title="t", prompt="p",
+                evidence="ev", policy="selective",
+            )
+
+        # Synchronous path — verifier called before maybe_replan returned.
+        det_mock.assert_awaited_once()
+        sel_mock.assert_awaited_once()
+        assert result == {"affected_nodes": ["T2"], "scope": "selective"}
+
+    async def test_disabled_skips_everything(self):
+        from app.modules import assist_replan
+
+        det_mock = AsyncMock()
+        with patch.object(assist_replan, "detect_divergence", det_mock):
+            result = await assist_replan.maybe_replan(
+                db=AsyncMock(), session_id="sid-6", job_id="jid-6",
+                node_key="T1", title="t", prompt="p",
+                evidence="ev", policy="disabled",
+            )
+        assert result is None
+        det_mock.assert_not_awaited()

@@ -3293,8 +3293,26 @@ Toggle: valve `assist_session_memory_enabled` (default `true`). When chat_id is 
 - Full suite: 1215 passed, 4 skipped, 9 pre-existing failures (verified by stashing W.9 changes — failures reproduce on `main`; none touch `app/modules/assist_*`, `app/routers/assist`, or `pipelines/scaffold_router`).
 
 **What's still on the table for assist UX/perf (not in scope here):**
-- Verifier perf: `replan_policy='context_only'` (default) calls a 7b LLM on every submit. Moving that off the request path (background queue or batch-on-commit) is the next win.
+- Verifier perf: `replan_policy='context_only'` (default) calls a 7b LLM on every submit. Moving that off the request path (background queue or batch-on-commit) is the next win. **→ Closed in W.10.**
 - `/confirm`-driven `_assist_start` path doesn't pass `chat_id` through, so the auto-confirm-into-assist flow doesn't get session memory. Plumbing `body` to `_handle_confirm`'s call site is a one-line follow-up.
+
+### 17.53 Sprint W.10 — context_only verifier off the request path (2026-05-08)
+
+W.9's noted follow-up. The default replan policy (`context_only`) used to call the qwen2.5:7b verifier in-line on every `/assist submit`, adding 2-5s per step on CPU-only inference. Since the only effect of context_only is to mark `assist_steps.divergence=TRUE` for audit (no state mutation the user reads back), the call has no business in the request path.
+
+**Change.** `app/modules/assist_replan.py:maybe_replan` now branches on policy *before* the verifier call. For `context_only`, it spawns a fire-and-forget asyncio task and returns `None` immediately. The background task opens its own `AsyncSession` (via `app.database.async_session`) — the request session is gone by then — runs `detect_divergence`, and writes the flag if `severity == 'major'`. Strong refs are held in a module-level `_BACKGROUND_TASKS: set[asyncio.Task]` so tasks aren't GC'd mid-flight (asyncio.create_task only holds a weak ref).
+
+**Failure isolation.** The background helper wraps `detect_divergence` in a try/except — an Ollama outage logs `assist_divergence_background_failed` and returns. Without that, the unhandled task exception would surface as a "Task exception was never retrieved" warning at GC time, polluting logs and (worse) tying up no-longer-meaningful resources.
+
+**`selective` and `full` are unchanged.** Their result drives the BFS reset on dependent nodes, which the user immediately reads via the next `/assist next`. Going async there would let the user pull a step that's about to be invalidated. Synchronous is correct.
+
+**Test ergonomics.** New `await assist_replan.drain_background_tasks()` lets tests deterministically wait for in-flight verifiers without polling DB rows. The existing pytest-timeout pitfall noted in `references/assist.md` flips: `context_only` is now fast in tests too, but assertions on `divergence` need the drain.
+
+**Test-suite delta:**
+- `tests/test_assist_replan_regen.py`: new `TestContextOnlyAsync` class. 6 cases — tight-timeout wait_for proves submit returns without awaiting verifier; divergence flag lands after drain; non-major divergence → no UPDATE; verifier exception is swallowed; selective stays synchronous (regression); disabled never calls verifier.
+- All assist files (4 modules + integration): 36 passed in 4.57s.
+
+**Carryover.** The `/confirm`→assist chat-id plumbing remains the last sub-one-line follow-up from W-track. Not a perf or UX issue, just a nice-to-have for users on `assist_after_confirm=true`.
 
 ---
 
