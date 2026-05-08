@@ -1,10 +1,11 @@
 """Tests for app/modules/cleanup.py — state-aware reaper + settings-backed.
 
-Shape: reap_stale_jobs() runs Stage 0 orphan-node reset, then 5 UPDATE ...
-RETURNING statements, returning a 6-key dict. When the orphan reaper finds
-rows, an additional refresh-parent-jobs UPDATE fires between Stage 0 and the
-running-job reaper. Row counts come from len(fetchall()) rather than the
-driver-dependent `rowcount` attribute.
+Shape: reap_stale_jobs() runs Stage 0 orphan-node reset, then 7 UPDATE ...
+RETURNING statements (running, long_phase, planning, awaiting_confirmation,
+research_sessions, paused_research, assist_abandoned), returning an 8-key
+dict. When the orphan reaper finds rows, an additional refresh-parent-jobs
+UPDATE fires between Stage 0 and the running-job reaper. Row counts come
+from len(fetchall()) rather than the driver-dependent `rowcount` attribute.
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,11 +27,16 @@ def _db_with_counts(*counts, orphan_rows=None):
     """Build an AsyncMock db whose sequential execute() calls return results
     with the given len(fetchall()) values.
 
-    The first count is the orphan-node reset (Stage 0). If that count is
-    nonzero, callers must pass orphan_rows= so Stage 0 can read row.job_id /
-    row.node_key. A refresh-parent-jobs call is then injected between
-    Stage 0 and the running-job reaper.
+    Expects exactly 8 counts: (orphan, running, long_phase, planning,
+    awaiting_confirmation, research_sessions, paused_research,
+    assist_abandoned). If the orphan count is nonzero, callers must pass
+    orphan_rows= so Stage 0 can read row.job_id / row.node_key. A
+    refresh-parent-jobs call is then injected between Stage 0 and the
+    running-job reaper.
     """
+    assert len(counts) == 8, (
+        f"_db_with_counts expects 8 counts (orphan + 7 reapers), got {len(counts)}"
+    )
     db = AsyncMock()
     results = []
     orphan_count = counts[0]
@@ -61,63 +67,67 @@ def _db_with_counts(*counts, orphan_rows=None):
     return db
 
 
-async def test_reap_stale_jobs_returns_all_six_counts():
-    """The function always returns a dict with 6 category keys (5 + orphan)."""
-    db = _db_with_counts(0, 2, 4, 1, 3, 0)
+async def test_reap_stale_jobs_returns_all_eight_counts():
+    """The function always returns a dict with 8 category keys (7 + orphan)."""
+    db = _db_with_counts(0, 2, 4, 1, 5, 3, 0, 6)
     result = await cleanup.reap_stale_jobs(db)
     assert set(result.keys()) == {
         "orphan_nodes_reset",
         "running_to_failed",
         "long_phase_to_failed",
         "planning_to_cancelled",
+        "awaiting_to_cancelled",
         "research_to_failed",
         "paused_to_cancelled",
+        "assist_abandoned",
     }
     assert result["orphan_nodes_reset"] == 0
     assert result["running_to_failed"] == 2
     assert result["long_phase_to_failed"] == 4
     assert result["planning_to_cancelled"] == 1
+    assert result["awaiting_to_cancelled"] == 5
     assert result["research_to_failed"] == 3
     assert result["paused_to_cancelled"] == 0
+    assert result["assist_abandoned"] == 6
     db.commit.assert_awaited()
 
 
 async def test_reap_stale_jobs_orphan_reset_count_propagates():
     """When Stage 0 finds orphans, count surfaces in the return dict."""
     db = _db_with_counts(
-        2, 0, 0, 0, 0, 0,
+        2, 0, 0, 0, 0, 0, 0, 0,
         orphan_rows=[_orphan_row(node_key="T1"), _orphan_row(node_key="T2")],
     )
     result = await cleanup.reap_stale_jobs(db)
     assert result["orphan_nodes_reset"] == 2
 
 
-async def test_reap_stale_jobs_runs_six_sql_statements():
-    """Stage 0 orphan reaper + 5 category statements = 6 statements when no orphans."""
-    db = _db_with_counts(0, 0, 0, 0, 0, 0)
+async def test_reap_stale_jobs_runs_eight_sql_statements():
+    """Stage 0 orphan reaper + 7 category statements = 8 statements when no orphans."""
+    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0)
     await cleanup.reap_stale_jobs(db)
-    assert db.execute.await_count == 6
+    assert db.execute.await_count == 8
 
 
-async def test_reap_stale_jobs_runs_seven_sql_statements_when_orphans_found():
-    """With orphans, the refresh-parent-jobs UPDATE fires too: 7 statements total."""
+async def test_reap_stale_jobs_runs_nine_sql_statements_when_orphans_found():
+    """With orphans, the refresh-parent-jobs UPDATE fires too: 9 statements total."""
     db = _db_with_counts(
-        1, 0, 0, 0, 0, 0,
+        1, 0, 0, 0, 0, 0, 0, 0,
         orphan_rows=[_orphan_row()],
     )
     await cleanup.reap_stale_jobs(db)
-    assert db.execute.await_count == 7
+    assert db.execute.await_count == 9
 
 
 async def test_reap_stale_jobs_no_reaping_returns_zero_counts():
-    db = _db_with_counts(0, 0, 0, 0, 0, 0)
+    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0)
     result = await cleanup.reap_stale_jobs(db)
     assert all(v == 0 for v in result.values())
 
 
 async def test_reap_stale_jobs_passes_threshold_params_from_settings():
     """Thresholds in bind params must come from settings, not module constants."""
-    db = _db_with_counts(0, 0, 0, 0, 0, 0)
+    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0)
     await cleanup.reap_stale_jobs(db)
     calls = db.execute.await_args_list
     # Stage 0 — orphan-node threshold
@@ -128,10 +138,15 @@ async def test_reap_stale_jobs_passes_threshold_params_from_settings():
     assert calls[2].args[1]["threshold_min"] == settings.long_phase_stale_minutes
     # Planning sweep (call 4) — planning threshold
     assert calls[3].args[1]["threshold_min"] == settings.planning_stale_minutes
-    # Research sessions (call 5) — base threshold
-    assert calls[4].args[1]["threshold_min"] == settings.stale_threshold_minutes
-    # Paused research (call 6) — no threshold_min param (expires_at driven)
-    assert "threshold_min" not in calls[5].args[1]
+    # Awaiting-confirmation sweep (call 5) — gate-timeout threshold
+    assert calls[4].args[1]["threshold_min"] == settings.awaiting_confirmation_stale_minutes
+    # Research sessions (call 6) — base threshold
+    assert calls[5].args[1]["threshold_min"] == settings.stale_threshold_minutes
+    # Paused research (call 7) — no threshold_min param (expires_at driven)
+    assert "threshold_min" not in calls[6].args[1]
+    # Assist abandoned (call 8) — days-based threshold, distinct param name
+    assert "threshold_min" not in calls[7].args[1]
+    assert calls[7].args[1]["threshold_days"] == settings.assist_idle_threshold_days
 
 
 async def test_start_cleanup_task_registers_strong_reference():

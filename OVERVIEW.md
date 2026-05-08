@@ -2105,6 +2105,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | W.8 | Workflow audit — RAG quality re-baseline at KB=1093 (§17.26) | done 2026-05-07 |
 | X.1 | Tier 2 audit — threshold cluster + reranker /health (§17.27) | done 2026-05-07 |
 | X.2 | Tier 2 audit — synthesized flag + skipped-verify banner (§17.28) | done 2026-05-07 |
+| X.3 | Tier 2 audit — cleanup test 8-reaper drift fix (§17.30) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2711,7 +2712,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 
 | # | Item | Shape | Notes |
 |---|---|---|---|
-| 1 | `tests/test_cleanup.py` 8-reaper drift fix | Test debt, ~30 min | 6/9 tests broken by drift since `awaiting_confirmation` + `assist_abandoned` reapers were added pre-W. Mechanical fixture rebuild. Quick win to clear the baseline noise from X.1's notes. |
+| 1 | `tests/test_cleanup.py` 8-reaper drift fix | **DONE in X.3** | 9/9 green. Picked up `test_pre_migration_sweep.py`'s "30 minutes" → "5 minutes" drift along the way (same X.1 root). |
 | 2 | W.4-style wrap on `_fetch_upstream_outputs` | Single-concern refactor | Audit-tail item directly tied to W.4. Wrap the upstream-fetch in try/except so DB-layer failures persist a `verification_reason`. Matches W.4 shape. |
 | 3 | `_compile_output` skipped-verify banner | **DONE in X.2** | Already shipped — leave row only as a record. |
 | 4 | synthesized=true|false on /exec/status | **DONE in X.2** | Already shipped. |
@@ -2737,6 +2738,29 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 1. Read `~/.claude/projects/-home-aedefruscio-scaffold-engine/memory/project_sprint_e.md` for the sprint history + project-applicable patterns captured along the way.
 2. Pick a Tier 2 item from the table above.
 3. The skill at `~/.claude/skills/scaffold-engine/` has the routing table; use `references/conventions.md` for migration/logger/test patterns.
+
+### 17.30 Sprint X.3 — cleanup test 8-reaper drift fix (2026-05-08)
+
+`tests/test_cleanup.py` was frozen at the 6-reaper shape (orphan + 5 categories). Live `cleanup.reap_stale_jobs` now runs 7 reapers and returns an 8-key dict — the `awaiting_confirmation` and `assist_abandoned` reapers were added pre-W track but the test wasn't updated, leaving 6/9 cases broken. Tier 2 audit row #1 (the resume-pointer quick win flagged in §17.27 / §17.29).
+
+Rewrite, not patch:
+
+- `_db_with_counts` helper now requires exactly 8 positional counts (`orphan, running, long_phase, planning, awaiting_confirmation, research_sessions, paused_research, assist_abandoned`). Asserts on length so future drift surfaces at fixture-build time, not deep in `StopAsyncIteration`.
+- `test_reap_stale_jobs_returns_all_six_counts` → `..._eight_counts`: the dict contract is now {`orphan_nodes_reset`, `running_to_failed`, `long_phase_to_failed`, `planning_to_cancelled`, `awaiting_to_cancelled`, `research_to_failed`, `paused_to_cancelled`, `assist_abandoned`}.
+- Statement-count tests bumped: 8 SQL statements when no orphans (was 6), 9 when orphans found (was 7) — the extra two are the awaiting-confirmation and assist-abandoned reapers.
+- `test_reap_stale_jobs_passes_threshold_params_from_settings` extended:
+  - call 5 (awaiting) checks `threshold_min == settings.awaiting_confirmation_stale_minutes`
+  - call 8 (assist) checks `threshold_days == settings.assist_idle_threshold_days` AND verifies `threshold_min` is **not** in the bind params (the assist reaper is days-based, not minutes — the only days-based reaper in the loop).
+
+Folded in along the way: `test_pre_migration_sweep.py::test_sweep_runs_update_when_table_exists_with_stuck_rows` was asserting the literal `"30 minutes"` in the sweep SQL, but X.1 shrank the interval to `"5 minutes"` (since `_sse_with_disconnect_watch` now finalizes mid-flight disconnects live; 5 min crash-recovery buffer suffices). One-line update with an inline comment naming X.1 as the cause. Same drift class — picking it up here keeps the audit-tail tidy.
+
+**Project pattern (memory-worthy):** when a fixture helper's positional argcount maps 1:1 to live SQL statements, add `assert len(counts) == N` at the top of the helper. The current asyncpg-mock `StopAsyncIteration` at runtime is much harder to read than a fixture-construction assertion error, and it's the kind of drift that hides until someone runs `pytest -x` rather than the targeted file.
+
+`test_health_cleanup.py` is still skipped at module-level (`allow_module_level=True`). Its TestReapStaleJobs class is fully obsolete (covered by the rewritten `test_cleanup.py`); the TestHealth* classes are useful but currently dead. Out of scope for X.3 — a separate Tier 2 audit-tail row to track if/when the `/health` direct-call coverage is worth restoring.
+
+**Test-suite delta:** `test_cleanup.py` 3/9 → 9/9 (+6). `test_pre_migration_sweep.py` 3/4 → 4/4 (+1). Combined cleanup-adjacent suite (`-k "cleanup or reaper or orphan or staleness"`): 22/22.
+
+Pre-existing broader-suite failures unchanged at 23 (W/X audit-tail items in `test_execution_agent_compile.py`, `test_execution_handler_module.py`, `test_dag_generator.py`'s validator-loop case, integration env-dependent, etc.). None are reaper-related.
 
 ---
 

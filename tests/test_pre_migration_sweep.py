@@ -58,7 +58,10 @@ async def test_sweep_runs_update_when_table_exists_with_stuck_rows():
     update_sql = db.execute.await_args_list[1].args[0].text
     assert "UPDATE research_sessions" in update_sql
     assert "status = 'cancelled'" in update_sql
-    assert "30 minutes" in update_sql
+    # Updated by Sprint X.1 (071eed1): 30 → 5 min, since `_sse_with_disconnect_watch`
+    # now finalizes mid-flight disconnects live. The 5-min crash-recovery buffer
+    # is sufficient at startup.
+    assert "5 minutes" in update_sql
 
 
 async def test_sweep_idempotent_when_no_stuck_rows():
