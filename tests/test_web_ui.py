@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import require_api_key
 from app.main import app
-from app.web.routes import get_sdk_client
+from app.web.routes import get_sdk_client, get_sdk_long_client
 
 
 @pytest.fixture
@@ -33,18 +33,27 @@ def fake_client():
 
 
 @pytest.fixture
-def client(fake_client):
-    """TestClient with auth bypassed (covers any non-web routes hit
-    incidentally) AND get_sdk_client overridden so the routes never
-    instantiate a real Client at module-load time."""
+def fake_long_client():
+    """Build a MagicMock SDK Client for the long-call routes (ideate /
+    confirm). Distinct singleton from the read-path client so tests can
+    assert calls against each independently."""
+    return MagicMock()
+
+
+@pytest.fixture
+def client(fake_client, fake_long_client):
+    """TestClient with auth bypassed AND both SDK Client deps overridden
+    so the routes never instantiate a real Client at module-load time."""
     app.dependency_overrides[require_api_key] = lambda: "test"
     app.dependency_overrides[get_sdk_client] = lambda: fake_client
+    app.dependency_overrides[get_sdk_long_client] = lambda: fake_long_client
     try:
         with TestClient(app, follow_redirects=False) as tc:
             yield tc
     finally:
         app.dependency_overrides.pop(require_api_key, None)
         app.dependency_overrides.pop(get_sdk_client, None)
+        app.dependency_overrides.pop(get_sdk_long_client, None)
 
 
 @pytest.mark.smoke
@@ -227,3 +236,160 @@ class TestAuthBypass:
             assert resp.status_code == 200
         finally:
             app.dependency_overrides.pop(get_sdk_client, None)
+
+
+# ---------------------------------------------------------------------------
+# J.2.b — submit flow
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+class TestNewIdeaForm:
+    """GET /web/new renders the idea-submission form."""
+
+    def test_renders_form_with_domain_options(self, client):
+        resp = client.get("/web/new")
+        assert resp.status_code == 200
+        body = resp.text
+        # Form posts to /web/ideate.
+        assert 'action="/web/ideate"' in body
+        # Textarea + domain select rendered.
+        assert 'name="idea"' in body
+        assert 'name="domain"' in body
+        # Domain options match _ALLOWED_DOMAINS.
+        for d in ("prompt", "rag", "llm", "spec", "eng"):
+            assert f'value="{d}"' in body
+
+
+@pytest.mark.smoke
+class TestPostIdeate:
+    """POST /web/ideate kicks off Phase 1 in a BackgroundTask + redirects."""
+
+    def test_redirects_to_refining_filter(self, client, fake_long_client):
+        resp = client.post(
+            "/web/ideate",
+            data={"idea": "Build a homelab dashboard", "domain": ""},
+        )
+        # 302 to the refining-filter view.
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/web/jobs?status=refining"
+
+    def test_calls_long_client_ideate_after_response(self, client, fake_long_client):
+        """BackgroundTasks fire after the response is sent. With
+        TestClient's blocking semantics they fire before .post()
+        returns control, so we can assert immediately."""
+        client.post(
+            "/web/ideate",
+            data={"idea": "Some idea", "domain": "rag"},
+        )
+        # ideate was called with the form values.
+        fake_long_client.ideate.assert_called_once()
+        kwargs = fake_long_client.ideate.call_args.kwargs
+        assert kwargs.get("idea") == "Some idea"
+        assert kwargs.get("domain") == "rag"
+
+    def test_empty_idea_re_renders_form_with_422(self, client, fake_long_client):
+        resp = client.post(
+            "/web/ideate", data={"idea": "   ", "domain": ""},
+        )
+        assert resp.status_code == 422
+        assert "Idea is required" in resp.text
+        # SDK was NOT called.
+        fake_long_client.ideate.assert_not_called()
+
+    def test_invalid_domain_re_renders_form_with_422(self, client, fake_long_client):
+        resp = client.post(
+            "/web/ideate",
+            data={"idea": "Valid idea", "domain": "not-a-domain"},
+        )
+        assert resp.status_code == 422
+        assert "Invalid domain" in resp.text
+        fake_long_client.ideate.assert_not_called()
+
+    def test_blank_domain_passes_none_to_sdk(self, client, fake_long_client):
+        """The form's auto-detect option (value="") should resolve to
+        domain=None at the SDK call site so the orchestrator infers."""
+        client.post(
+            "/web/ideate",
+            data={"idea": "Auto-detect this", "domain": ""},
+        )
+        kwargs = fake_long_client.ideate.call_args.kwargs
+        assert kwargs.get("domain") is None
+
+
+@pytest.mark.smoke
+class TestPostConfirm:
+    """POST /web/jobs/{id}/confirm kicks off Phase 2 in a BackgroundTask."""
+
+    def test_redirects_to_job_detail(self, client, fake_long_client):
+        resp = client.post(
+            "/web/jobs/job-abc/confirm", data={"feedback": ""},
+        )
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/web/jobs/job-abc"
+
+    def test_calls_long_client_confirm_with_feedback(self, client, fake_long_client):
+        client.post(
+            "/web/jobs/job-abc/confirm",
+            data={"feedback": "Focus on Python only."},
+        )
+        fake_long_client.confirm.assert_called_once()
+        # confirm signature: (job_id, *, feedback, ...). Extract from args.
+        call = fake_long_client.confirm.call_args
+        assert call.args[0] == "job-abc" or call.kwargs.get("job_id") == "job-abc"
+        assert call.kwargs.get("feedback") == "Focus on Python only."
+
+    def test_blank_feedback_passes_none(self, client, fake_long_client):
+        """Whitespace-only feedback should normalize to None so the
+        SDK / orchestrator skip the no-op refinement path."""
+        client.post(
+            "/web/jobs/job-xyz/confirm",
+            data={"feedback": "   "},
+        )
+        call = fake_long_client.confirm.call_args
+        assert call.kwargs.get("feedback") is None
+
+
+@pytest.mark.smoke
+class TestConfirmFormVisibility:
+    """The job-detail page shows the confirm form ONLY when status is
+    awaiting_confirmation. Other statuses must not render it."""
+
+    def test_form_shown_when_awaiting_confirmation(self, client, fake_client):
+        fake_client.jobs.status.return_value = {
+            "job_id": "j1", "job_title": "x",
+            "job_status": "awaiting_confirmation",
+            "compiled_output": None, "synthesized": False,
+            "synthesis_override": None,
+            "counts": {}, "total_nodes": 0,
+            "next_node": None, "next_actions": [], "nodes": [],
+        }
+        resp = client.get("/web/jobs/j1")
+        assert resp.status_code == 200
+        assert 'action="/web/jobs/j1/confirm"' in resp.text
+        assert "Confirm and run" in resp.text
+
+    def test_form_hidden_when_running(self, client, fake_client):
+        fake_client.jobs.status.return_value = {
+            "job_id": "j2", "job_title": "x",
+            "job_status": "running",
+            "compiled_output": None, "synthesized": False,
+            "synthesis_override": None,
+            "counts": {}, "total_nodes": 0,
+            "next_node": None, "next_actions": [], "nodes": [],
+        }
+        resp = client.get("/web/jobs/j2")
+        assert resp.status_code == 200
+        assert 'action="/web/jobs/j2/confirm"' not in resp.text
+
+    def test_form_hidden_when_completed(self, client, fake_client):
+        fake_client.jobs.status.return_value = {
+            "job_id": "j3", "job_title": "x",
+            "job_status": "completed",
+            "compiled_output": "done", "synthesized": False,
+            "synthesis_override": None,
+            "counts": {}, "total_nodes": 0,
+            "next_node": None, "next_actions": [], "nodes": [],
+        }
+        resp = client.get("/web/jobs/j3")
+        assert 'action="/web/jobs/j3/confirm"' not in resp.text

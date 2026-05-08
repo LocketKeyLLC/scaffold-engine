@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # running the orchestrator on a non-default port or behind a proxy.
     web_loopback_url: str = "http://localhost:8000"
     web_loopback_timeout: int = 30
+    # J.2.b — separate timeout for long-running calls (ideate Phase 1 100-
+    # 547s; ideate/confirm Phase 2 512-1450s). The web routes that fire
+    # these in BackgroundTasks instantiate a second Client with this
+    # timeout so the read path's 30s ceiling stays in place.
+    web_loopback_long_timeout: int = 1800
 
     # Database
     database_url: str = "postgresql+asyncpg://scaffold:scaffold_dev_pw@scaffold-postgres:5432/scaffold_engine"

@@ -26,6 +26,23 @@
   </section>
   {% endif %}
 
+  {% if job.job_status == "awaiting_confirmation" %}
+  <section class="confirm-flow">
+    <h2>Confirm to proceed</h2>
+    <p class="meta">
+      Phase 2 runs research → ingest → compile (512-1450 s). Submitting
+      kicks it off in the background; this page will refresh to show
+      progress as the status transitions.
+    </p>
+    <form method="post" action="/web/jobs/{{ job_id }}/confirm" class="confirm-form">
+      <label for="feedback">Feedback (optional — refinements before Phase 2)</label>
+      <textarea id="feedback" name="feedback" rows="3"
+                placeholder="e.g. Focus on Python implementations only."></textarea>
+      <button type="submit" class="btn btn-primary">Confirm and run</button>
+    </form>
+  </section>
+  {% endif %}
+
   {% if job.next_actions %}
   <section class="next-actions">
     <h2>Next steps</h2>

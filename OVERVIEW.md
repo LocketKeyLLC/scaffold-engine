@@ -2121,6 +2121,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.16 | Tier 2 test-debt — `test_execution_agent_compile.py` synthesis-override bypass (§17.43) | done 2026-05-08 |
 | X.17 | Tier 2 test-debt — `test_health_cleanup.py` un-skip + scope down (§17.44) | done 2026-05-08 |
 | J.2.a | Native single-page web UI — read-only browse (§17.45) | done 2026-05-08 |
+| J.2.b | Native single-page web UI — submit flow (ideate + confirm) (§17.46) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -3082,6 +3083,29 @@ The shape:
 **Project pattern (memory-worthy):** when adding a sub-app to a FastAPI app whose root has `dependencies=[Depends(require_api_key)]`, **per-route `dependencies=[]` does NOT override the global app-level dep** — it only adds to the parent. The way to actually exempt a route is to bake the exempt-path/prefix logic into the dependency itself (`request.url.path` check inside `require_api_key`). This is the existing `/health` precedent; X.18 extends it to support prefix matching for whole sub-apps.
 
 **Test-suite delta:** `tests/test_web_ui.py` (new): 13 cases — root redirect, list-page rendering / filter pass-through / empty state / 422 bounds / SDK failure / detail-page rendering / compiled-output / 404 / SDK failure / static CSS served / auth bypass without header. TestClient with `dependency_overrides[get_sdk_client]` injects canned payloads. **All 13 pass**, plus the auth/middleware/main suites unchanged at 47/47. OpenAPI snapshot regenerated (path count 44, `/web/*` and `/` excluded as intended).
+
+### 17.46 Sprint J.2.b — native single-page web UI: submit flow (2026-05-08)
+
+Phase 2 of roadmap item J.2. Adds the ideate + confirm forms so a browser user can kick off jobs without CLI/OWUI. Streaming execute progress (SSE) is J.2.c's scope.
+
+**The latency problem.** `client.ideate(...)` takes 100-547 s (Phase 1: refine + feasibility); `client.confirm(...)` takes 512-1450 s (Phase 2: research → ingest → compile). A foreground `await client.ideate()` would block the browser request that long — far past most browsers' idle timeouts (~5 min) and any proxy. Solution: **FastAPI `BackgroundTasks` pattern**. The web route returns a 302 immediately; the SDK call runs after the response is sent. The user watches the orchestrator's job-status transitions (`refining` → `awaiting_confirmation` → `researching` → `planning` → `executing` → `completed`) by refreshing the detail page.
+
+**Two SDK Clients now.** The read-path Client (`get_sdk_client`, 30 s timeout) stays as J.2.a built it. A new long-timeout Client (`get_sdk_long_client`, default 1800 s = 30 min) handles the slow background calls. Distinct singletons so a 25-minute `confirm` can't tie up the read path's connection pool. Two new settings: `web_loopback_timeout` (already existed, 30 s) and `web_loopback_long_timeout` (new, 1800 s).
+
+**Three new routes:**
+- `GET /web/new` renders an idea-submission form (textarea + domain dropdown sourced from `_ALLOWED_DOMAINS = ("prompt", "rag", "llm", "spec", "eng")` — duplicated literal so the web package doesn't import the orchestrator module, preserving the loopback discipline).
+- `POST /web/ideate` validates form input, queues `long_client.ideate(idea=..., domain=...)` as a `BackgroundTask`, returns `RedirectResponse("/web/jobs?status=refining", 302)`. The job_id isn't known at redirect time (the orchestrator's `/ideate` endpoint creates the row mid-call), so the user lands on a filtered list and clicks into the new job once it appears.
+- `POST /web/jobs/{job_id}/confirm` reads optional `feedback` form field, queues `long_client.confirm(job_id, feedback=...)`, redirects back to `/web/jobs/{job_id}`. The user watches the status transition via page refresh.
+
+**Validation contract:** empty `idea` re-renders the form with a 422 + error message + the input value preserved (operator doesn't lose their typing). Invalid `domain` (not in the allow-list) does the same. Whitespace-only fields normalize to `None` before reaching the SDK so the orchestrator's auto-detect/no-op paths fire as expected.
+
+**Confirm form visibility:** `job_detail.html` only renders the confirm form when `job.job_status == "awaiting_confirmation"`. Other statuses skip it entirely. This matches the orchestrator's gate (`/ideate/confirm` requires the awaiting-confirmation status; submitting from elsewhere would 422).
+
+**Project pattern (memory-worthy):** when wrapping a long-running SDK call from a request handler that needs to return fast, `BackgroundTasks.add_task(_kick_off)` + `RedirectResponse` is the right primitive — the alternative (full async-task queueing infrastructure with status persistence) is overkill for the single-tenant local-deploy posture. The "job_id not known until call returns" complication means redirecting to a *filter* (here: `?status=refining`) rather than a specific row; let the orchestrator's lifecycle generate the row and the user's first refresh surfaces it.
+
+**Test-suite delta:** `tests/test_web_ui.py` extended from 13 → **25 cases**. New: `TestNewIdeaForm` (1: form renders with domain options), `TestPostIdeate` (5: refining-redirect, ideate-called-with-form-values, empty-idea 422, invalid-domain 422, blank-domain → None), `TestPostConfirm` (3: detail-redirect, confirm-called-with-feedback, blank-feedback → None), `TestConfirmFormVisibility` (3: shown for `awaiting_confirmation`, hidden for `running`, hidden for `completed`). All 25 pass. Auth/middleware/main suites unchanged.
+
+**Routes still excluded from OpenAPI** (the router is `include_in_schema=False`); path count unchanged at 44.
 
 ---
 
