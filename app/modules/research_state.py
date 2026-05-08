@@ -206,7 +206,8 @@ async def _update_session_iteration(
                     total_queries = :queries,
                     coverage_pct = COALESCE(:coverage, coverage_pct),
                     state_snapshot = CAST(:snapshot AS JSONB),
-                    updated_at = NOW()
+                    updated_at = NOW(),
+                    last_activity_at = NOW()
                 WHERE id = :sid
             """),
             {
@@ -239,7 +240,8 @@ async def _pause_session(
                     pause_question = :question,
                     pause_expires_at = NOW() + make_interval(secs => :ttl),
                     state_snapshot = CAST(:snapshot AS JSONB),
-                    updated_at = NOW()
+                    updated_at = NOW(),
+                    last_activity_at = NOW()
                 WHERE id = :sid
             """),
             {
@@ -275,7 +277,8 @@ async def _atomic_claim_for_resume(session_id: str, reply: str) -> bool:
                 UPDATE research_sessions
                 SET status = 'running',
                     pause_reply = :reply,
-                    updated_at = NOW()
+                    updated_at = NOW(),
+                    last_activity_at = NOW()
                 WHERE id = :sid
                   AND status = 'paused_awaiting_reply'
             """),

@@ -2107,6 +2107,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.2 | Tier 2 audit — synthesized flag + skipped-verify banner (§17.28) | done 2026-05-07 |
 | X.3 | Tier 2 audit — cleanup test 8-reaper drift fix (§17.30) | done 2026-05-08 |
 | X.4 | Tier 2 audit — W.4-style wrap on _fetch_upstream_outputs (§17.31) | done 2026-05-08 |
+| X.5 | Tier 2 audit — research_sessions.last_activity_at + activity-aware reaper (§17.32) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2717,7 +2718,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 2 | W.4-style wrap on `_fetch_upstream_outputs` | **DONE in X.4** | New reason tag `upstream_fetch_error`. Same dict contract as W.4 / timeout / exec-error paths. 4 new tests. |
 | 3 | `_compile_output` skipped-verify banner | **DONE in X.2** | Already shipped — leave row only as a record. |
 | 4 | synthesized=true|false on /exec/status | **DONE in X.2** | Already shipped. |
-| 5 | research-session idle-tracking column | Migration + small code | New `research_sessions.last_activity_at` column for finer reaper logic. |
+| 5 | research-session idle-tracking column | **DONE in X.5** | Migration 028 + 3 activity sites updated + reaper switched. 6 new tests. Listing endpoint still ORDERs by `updated_at` (different semantic, kept). |
 | 6 | Per-job synthesis opt-in column | Migration + API | `jobs.compile_synthesis_override BOOLEAN NULL`; falls through to global setting when null. |
 | 7 | OWUI file-routing diagnostic capture | Observability | Surface routing decisions in OWUI logs so triage paths are debuggable. |
 | 8 | 5-place API-key sync target | Make/script | Single `make sync-api-key` that updates `.env`, valves.json files, container env, and `~/.bashrc` in one shot. |
@@ -2784,6 +2785,31 @@ The wrap is narrowly scoped — only `_fetch_upstream_outputs` itself, not the s
 **Test-suite delta:** `tests/test_execution_agent_upstream_fetch.py` (new): 4 cases mirroring `test_execution_agent_prompt_build.py`. Combined `-k "execution_agent"` suite: 73/73 (was 69/69; +4). Broader `-k "execution_agent or execute_next_node or execute_all"`: 77/77 (was 73/73).
 
 The 8 pre-existing failures in `test_execution_handler_module.py` are X.2 column-drift in `SimpleNamespace` fixtures — same drift class as X.3's cleanup-test fix, NOT caused by X.4. Logged as a separate Tier 2 audit-tail row (test fixtures missing `compiled_output_synthesized`); deferred so this commit stays scoped.
+
+### 17.32 Sprint X.5 — `research_sessions.last_activity_at` + activity-aware reaper (2026-05-08)
+
+Tier 2 audit row #5. Closes a soft fragility introduced when migration 021 wired an auto-update trigger on `research_sessions.updated_at`: any DB write — rename, pre-migration sweep, internal lifecycle bump — refreshed `updated_at`, leaving the cleanup reaper unable to distinguish a genuinely-idle session from one that was merely touched. Mirrors the `assist_sessions.last_activity_at` pattern shipped in migration 023.
+
+Migration 028 (`db/migrations/028_research_sessions_last_activity_at.sql`):
+
+- Single-statement `DO $$ ... END $$;` block. The migration runner uses asyncpg's prepared-statement protocol, which rejects multi-statement bodies (even after `_strip_outer_transaction` removes outer `BEGIN;`/`COMMIT;`). Wrapping ALTER + UPDATE + CREATE INDEX in one DO block keeps the file as a single top-level statement.
+- `ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`. The backfill (`SET last_activity_at = COALESCE(updated_at, created_at)`) is gated by the column-existence check so re-runs don't clobber values written by application code.
+- New partial index `idx_research_sessions_active_activity ON (status, last_activity_at DESC) WHERE status IN ('pending', 'running')`. The pre-existing `idx_research_sessions_active_updated` is **kept** because the listing endpoint at `app/main.py:1269` still ORDERs by `updated_at DESC` — a deliberately different semantic ("last touched" for the UI) from the reaper's "last meaningful activity".
+
+Code-side changes:
+
+- `cleanup.py::_REAP_RESEARCH_SESSIONS_SQL` — WHERE clause keys on `last_activity_at < NOW() - threshold_min`. Bind-param name unchanged (`:threshold_min`), so the X.3 cleanup-test threshold-params assertion continues to pass without modification.
+- `cleanup.py::_REAP_PAUSED_RESEARCH_SQL` — **unchanged.** It uses `pause_expires_at` as a TTL signal (orthogonal to idleness); X.5 must not touch it. Negative-test guards this.
+- `research_state.py` — three real-activity UPDATE sites set `last_activity_at = NOW()` alongside the existing `updated_at = NOW()`:
+  - `_update_session_iteration` — iteration progress (search/extract/ingest)
+  - `_pause_session` — entering `paused_awaiting_reply`
+  - `_atomic_claim_for_resume` — user reply received
+
+Sites that **deliberately don't bump** `last_activity_at`: the rename endpoint (metadata-only), `_pre_migration_sweep` (startup safety net, not real activity), `_finalize_session` (terminal — out of reaper scope), and the scheduler timeout finalize (terminal). Negative regression test on `_finalize_session` guards the boundary.
+
+**Project pattern (memory-worthy):** when an asyncpg-backed migration needs ALTER + UPDATE + CREATE INDEX in one file, wrap the body in a single `DO $$ BEGIN ... END $$;` block. Inside the DO block, use PL/pgSQL `IF NOT EXISTS` checks against `information_schema.columns` / `pg_indexes` for idempotency, and use `EXECUTE 'CREATE INDEX ...'` for index DDL (PL/pgSQL requires `EXECUTE` for utility statements). Don't try wrapping in `BEGIN; ... COMMIT;` — the runner strips them and the multi-statement body still fails asyncpg's prepared-statement protocol.
+
+**Test-suite delta:** `tests/test_research_sessions_activity_tracking.py` (new): 6 cases — reaper SQL substring assertion (positive + negative for the paused reaper), 3 activity-site write-content checks, 1 negative case on `_finalize_session`. Combined session-related suite (`-k "cleanup or research_pause"` plus the new file): 27/27. Live-applied migration 028; second apply confirmed idempotent (empty `applied` list).
 
 ---
 

@@ -129,9 +129,16 @@ _REAP_RESEARCH_SESSIONS_SQL = """
         updated_at = NOW(),
         completed_at = NOW()
     WHERE status IN ('pending', 'running')
-      AND updated_at < NOW() - make_interval(mins => :threshold_min)
+      AND last_activity_at < NOW() - make_interval(mins => :threshold_min)
     RETURNING id
 """
+# Sprint X.5 — switched from `updated_at` to `last_activity_at` so a metadata
+# touch (rename, reaper-bump, pre-migration-sweep) doesn't mask a genuinely
+# idle research session. Migration 028 added the column + a partial index
+# (status, last_activity_at DESC) WHERE status IN ('pending','running').
+# The listing endpoint still ORDERs by `updated_at DESC` (different
+# semantic: "last touched" for the UI vs. "last meaningful activity" for
+# the reaper) — both indexes are kept.
 
 _REAP_PAUSED_RESEARCH_SQL = """
     UPDATE research_sessions
