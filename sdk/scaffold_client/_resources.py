@@ -47,6 +47,16 @@ class JobsResource:
         """``GET /exec/status/{job_id}`` — full execution state for a single job."""
         return self._client.request("GET", f"/exec/status/{job_id}")
 
+    def costs(self, job_id: str) -> dict[str, Any]:
+        """``GET /jobs/{job_id}/costs`` — cost + latency rollup for a job.
+
+        Returns total USD, total tokens, total LLM-call latency, the
+        count of logged calls, and a per-(provider, model) breakdown
+        sorted descending by cost. Sprint J.3.b. Job_ids with no
+        telemetry yet return the zero shape with an empty breakdown.
+        """
+        return self._client.request("GET", f"/jobs/{job_id}/costs")
+
     def delete(self, job_id: str) -> dict[str, Any]:
         """``DELETE /jobs/{job_id}`` — hard delete; cascades to dag_nodes / logs."""
         return self._client.request("DELETE", f"/jobs/{job_id}")

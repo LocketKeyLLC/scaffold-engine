@@ -106,6 +106,15 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         running_node_key=running_node,
     )
 
+    # Sprint J.3.b — surface a lightweight cost/latency totals block.
+    # Single SUM query against llm_call_logs; zero shape if telemetry
+    # hasn't recorded anything for this job yet (fail-open). The
+    # detailed per-(provider, model) breakdown lives at the dedicated
+    # /jobs/{id}/costs endpoint; /exec/status keeps it summary-only so
+    # the hot status path stays cheap.
+    from app.modules.cost_rollup import get_job_cost_totals
+    cost_totals = await get_job_cost_totals(str(job_id), db)
+
     return {
         "job_id": str(job_id),
         "job_title": job.title,
@@ -118,4 +127,5 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         "next_node": next_node,
         "next_actions": actions,
         "nodes": nodes,
+        "costs": cost_totals,
     }

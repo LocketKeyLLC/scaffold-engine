@@ -570,6 +570,33 @@ class JobRenameInput(BaseModel):
         return v
 
 
+class JobCostsBreakdownItem(BaseModel):
+    """Sprint J.3.b — one row of the per-(provider, model) cost breakdown."""
+    provider: str
+    model: str
+    calls: int
+    cost_usd: float
+    prompt_tokens: int
+    completion_tokens: int
+    latency_ms: int
+
+
+class JobCostsResponse(BaseModel):
+    """Sprint J.3.b — aggregate cost + latency for one job, with breakdown.
+
+    ``by_provider`` is sorted descending by cost_usd then calls so the
+    biggest spend lines surface first. ``call_count``/``total_*`` are
+    job-wide totals across all (provider, model) combinations.
+    """
+    job_id: str
+    total_cost_usd: float
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_latency_ms: int
+    call_count: int
+    by_provider: list[JobCostsBreakdownItem]
+
+
 class JobSynthesisOverrideInput(BaseModel):
     """Sprint X.6 — per-job opt-in for the W.7 LLM synthesis pass.
 

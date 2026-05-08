@@ -34,6 +34,10 @@ class AsyncJobsResource:
     async def status(self, job_id: str) -> dict[str, Any]:
         return await self._client.request("GET", f"/exec/status/{job_id}")
 
+    async def costs(self, job_id: str) -> dict[str, Any]:
+        """``GET /jobs/{job_id}/costs`` — cost + latency rollup. J.3.b."""
+        return await self._client.request("GET", f"/jobs/{job_id}/costs")
+
     async def delete(self, job_id: str) -> dict[str, Any]:
         return await self._client.request("DELETE", f"/jobs/{job_id}")
 

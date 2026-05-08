@@ -2124,6 +2124,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | J.2.b | Native single-page web UI — submit flow (ideate + confirm) (§17.46) | done 2026-05-08 |
 | J.2.c | Native single-page web UI — execute SSE (HTMX hx-sse) (§17.47) | done 2026-05-08 |
 | J.3.a | Cost + latency telemetry foundation — schema + logging hook (§17.48) | done 2026-05-08 |
+| J.3.b | Cost rollup endpoint + /exec/status extension + SDK costs() (§17.49) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -3184,6 +3185,32 @@ Migration 030 (`db/migrations/030_cost_telemetry.sql`):
 **Test-suite delta:** `tests/test_cost_tracking.py` (new): 10 cases — `TestComputeCostUsd` (5: priced call returns USD; unknown provider → 0; zero tokens → 0; negative tokens clamped; blank provider/model → 0), `TestRecordLlmCall` (3: writes row with ContextVars; DB failure swallowed; no ContextVars writes NULL job_id), `TestContextVarDefaults` (2: defaults to None; copy_context isolation). Cross-suite regression `-k "model_router or execution_agent_compile or execution_agent_feedback or execution_agent_prompt or execution_agent_upstream"`: **107/107**, no breakage from the wiring.
 
 Live-applied migration 030; second apply confirmed idempotent (empty `applied` list). 6 seed rates inserted, 0 log rows yet (logs accumulate from the next live LLM call onward).
+
+### 17.49 Sprint J.3.b — cost rollup endpoint + /exec/status extension + SDK costs() (2026-05-08)
+
+Phase 2 of roadmap item J.3 — the API surface that lets clients consume J.3.a's logged data without writing raw SQL. J.3.c (CLI / OWUI / Make rollup) follows.
+
+**New helper module `app/modules/cost_rollup.py`** with two reads, both fail-open (zero shape on missing table or DB error):
+- `get_job_cost_totals(job_id, db)` — single SUM query: total cost_usd, total prompt/completion tokens, total latency_ms, call_count. Cheap to add to a hot path.
+- `get_job_costs(job_id, db)` — totals + per-(provider, model) breakdown sorted descending by cost. Two SUM queries; called only by the dedicated detail endpoint.
+
+**New endpoint `GET /jobs/{job_id}/costs`** at `app/main.py`:
+- Returns `JobCostsResponse` with `total_*`, `call_count`, and `by_provider: list[JobCostsBreakdownItem]`. Sort order is "biggest spend lines first" so an operator scanning the breakdown sees the cost drivers immediately.
+- 422 on bad UUID. **No 404 for a job with zero logged calls** — returns the zero shape with empty breakdown, matching the fail-open posture from J.3.a. Operators can hit a freshly-created job and get a valid response back.
+- Path count: 44 → 45 in OpenAPI snapshot.
+
+**`/exec/status` extension**: `execution_handler.execution_status` runs `get_job_cost_totals` after the existing job + nodes queries, surfaces the result as a `costs: {...}` block in the response. Lightweight summary only (no breakdown) to keep the hot status path cheap. **Always present** — even for jobs with zero LLM calls, callers can render unconditionally without an `if "costs" in result:` check.
+
+**SDK additions**:
+- `client.jobs.costs(job_id)` — sync method, hits `GET /jobs/{job_id}/costs`.
+- `async_client.jobs.costs(job_id)` — async parity.
+- `JobCostsBreakdownItem` + `JobCostsResponse` pydantic models in `app/schemas.py`; vendored to `sdk/scaffold_client/schemas.py` via `make sync-schemas` (byte-equal copy maintained by the SDK schema parity test).
+
+**Why no 404 for unknown job_ids?** Because telemetry is opt-in — a job created before the J.3.a migration ran, or one whose only LLM calls ran before the foundation was deployed, will legitimately have zero logged calls. Returning 404 in that case would require operators to special-case "old job" everywhere they want to query costs. The zero shape is operator-friendlier and trivially distinguishable from a real spend (`call_count > 0` test).
+
+**Project pattern (memory-worthy):** when a hot read path (here: `/exec/status`) gains an aggregate field, run the rollup query as part of the same request rather than caching it on the row. The DB SUM is cheap (~ms) and always-correct; cached aggregates drift the moment a new log row lands. Cache only when measurement proves the SUM is hot enough to matter — premature optimization here costs you correctness.
+
+**Test-suite delta:** `tests/test_cost_rollup.py` (new): 11 cases — `TestGetJobCostTotals` (3: summed totals, no-calls zero-shape, DB-error fail-open), `TestGetJobCosts` (2: breakdown-with-rows, breakdown-empty-list), `TestCostsEndpoint` (3: 200 with payload, 422 on bad UUID, zero-shape for unknown job), `TestExecStatusCostsBlock` (2: status includes costs totals, zero-shape when no calls logged), `TestSdkCostsMethod` (1: sync `costs()` calls correct endpoint). Cross-suite `-k "execution_handler or cost_rollup or cost_tracking or sdk_schema_parity or test_main"`: 64 passed + 1 pre-existing flake (`test_status_connection_error_rendered`, env-dependent string match on `requests.ConnectionError`, documented since W.2 as not caused by current sprint). OpenAPI snapshot regenerated; new path visible at `paths./jobs/{job_id}/costs.get`.
 
 ---
 

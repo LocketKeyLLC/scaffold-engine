@@ -616,6 +616,97 @@
         "title": "IdeaInput",
         "type": "object"
       },
+      "JobCostsBreakdownItem": {
+        "description": "Sprint J.3.b — one row of the per-(provider, model) cost breakdown.",
+        "properties": {
+          "calls": {
+            "title": "Calls",
+            "type": "integer"
+          },
+          "completion_tokens": {
+            "title": "Completion Tokens",
+            "type": "integer"
+          },
+          "cost_usd": {
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "latency_ms": {
+            "title": "Latency Ms",
+            "type": "integer"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "prompt_tokens": {
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "model",
+          "calls",
+          "cost_usd",
+          "prompt_tokens",
+          "completion_tokens",
+          "latency_ms"
+        ],
+        "title": "JobCostsBreakdownItem",
+        "type": "object"
+      },
+      "JobCostsResponse": {
+        "description": "Sprint J.3.b — aggregate cost + latency for one job, with breakdown.\n\n``by_provider`` is sorted descending by cost_usd then calls so the\nbiggest spend lines surface first. ``call_count``/``total_*`` are\njob-wide totals across all (provider, model) combinations.",
+        "properties": {
+          "by_provider": {
+            "items": {
+              "$ref": "#/components/schemas/JobCostsBreakdownItem"
+            },
+            "title": "By Provider",
+            "type": "array"
+          },
+          "call_count": {
+            "title": "Call Count",
+            "type": "integer"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "total_completion_tokens": {
+            "title": "Total Completion Tokens",
+            "type": "integer"
+          },
+          "total_cost_usd": {
+            "title": "Total Cost Usd",
+            "type": "number"
+          },
+          "total_latency_ms": {
+            "title": "Total Latency Ms",
+            "type": "integer"
+          },
+          "total_prompt_tokens": {
+            "title": "Total Prompt Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "total_cost_usd",
+          "total_prompt_tokens",
+          "total_completion_tokens",
+          "total_latency_ms",
+          "call_count",
+          "by_provider"
+        ],
+        "title": "JobCostsResponse",
+        "type": "object"
+      },
       "JobListResponse": {
         "properties": {
           "jobs": {
@@ -2987,6 +3078,54 @@
           }
         ],
         "summary": "Rename Job",
+        "tags": [
+          "Management"
+        ]
+      }
+    },
+    "/jobs/{job_id}/costs": {
+      "get": {
+        "description": "Sprint J.3.b — aggregate cost + latency for a job.\n\nReturns total USD spent (computed at insert time, immutable),\ntotal prompt/completion tokens, total LLM latency, the count of\nLLM calls logged for this job, and a per-(provider, model)\nbreakdown sorted by descending cost. Job_ids with no logged\ncalls return the zero shape with an empty breakdown — fail-open\nmatches the rest of the cost-tracking surface.",
+        "operationId": "get_job_costs_endpoint_jobs__job_id__costs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobCostsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Job Costs Endpoint",
         "tags": [
           "Management"
         ]

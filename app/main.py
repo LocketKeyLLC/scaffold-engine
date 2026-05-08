@@ -61,6 +61,8 @@ from app.schemas import (
     ScheduleCreate,
     ScheduleResponse,
     SkipNodeInput,
+    JobCostsBreakdownItem,
+    JobCostsResponse,
     JobRenameInput,
     JobSynthesisOverrideInput,
     JobSynthesisOverrideResponse,
@@ -1258,6 +1260,42 @@ async def rename_job(job_id: str, body: JobRenameInput, db: AsyncSession = Depen
         node_count=row.node_count or 0,
         created_at=row.created_at.isoformat(),
         updated_at=row.updated_at.isoformat(),
+    )
+
+
+@app.get(
+    "/jobs/{job_id}/costs",
+    response_model=JobCostsResponse,
+    tags=["Management"],
+)
+async def get_job_costs_endpoint(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Sprint J.3.b — aggregate cost + latency for a job.
+
+    Returns total USD spent (computed at insert time, immutable),
+    total prompt/completion tokens, total LLM latency, the count of
+    LLM calls logged for this job, and a per-(provider, model)
+    breakdown sorted by descending cost. Job_ids with no logged
+    calls return the zero shape with an empty breakdown — fail-open
+    matches the rest of the cost-tracking surface.
+    """
+    try:
+        UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+
+    from app.modules.cost_rollup import get_job_costs
+    payload = await get_job_costs(job_id, db)
+    return JobCostsResponse(
+        job_id=payload["job_id"],
+        total_cost_usd=payload["total_cost_usd"],
+        total_prompt_tokens=payload["total_prompt_tokens"],
+        total_completion_tokens=payload["total_completion_tokens"],
+        total_latency_ms=payload["total_latency_ms"],
+        call_count=payload["call_count"],
+        by_provider=[JobCostsBreakdownItem(**row) for row in payload["by_provider"]],
     )
 
 
