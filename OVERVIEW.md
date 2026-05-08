@@ -2119,6 +2119,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.14 | Tier 2 audit — CI smoke for retrieval regressions (§17.41) | done 2026-05-08 |
 | X.15 | Tier 2 test-debt — `test_execution_handler_module.py` SimpleNamespace fixture drift (§17.42) | done 2026-05-08 |
 | X.16 | Tier 2 test-debt — `test_execution_agent_compile.py` synthesis-override bypass (§17.43) | done 2026-05-08 |
+| X.17 | Tier 2 test-debt — `test_health_cleanup.py` un-skip + scope down (§17.44) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2742,7 +2743,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 15 | `tests/ground_truth.json` regen at KB=1093 | Calibration, multi-hour | Re-curate expected_doc_ids against the current `scaffold-<title>-<hash>` naming. Defer until a quarterly rebaseline shows a need. |
 | 16 | `test_execution_handler_module.py` SimpleNamespace fixture drift | **DONE in X.15** | New `_job_row` helper defaults the X.2 `compiled_output_synthesized` + X.6 `compile_synthesis_override` columns. 8 fixture sites converted; 9/9 green. |
 | 17 | `test_execution_agent_compile.py` stale W.7/X.2 cases | **DONE in X.16** | Actually 16 failures (audit row was outdated). Single autouse fixture bypassing `_resolve_synthesis_enabled`'s DB-read fixed all of them — no per-test changes needed. 32/32. |
-| 18 | `test_health_cleanup.py` un-skip | Test debt, ~30 min | Module-level skip currently dead-codes TestHealth* (useful, distinct from `test_x1_thresholds_and_health.py`) along with TestReapStaleJobs (obsolete). Decide: salvage TestHealth* or delete the file. |
+| 18 | `test_health_cleanup.py` un-skip | **DONE in X.17** | Salvaged TestHealth*: 10 cases now active (status envelope, healthy/degraded/unhealthy logic, redis + reranker presence). Deleted obsolete TestReapStaleJobs (covered by `test_cleanup.py`). |
 
 **Roadmap items still pending** (post-v1.0.0 ambition):
 - **J.2** — native single-page web UI (`app/web/` HTML+HTMX, served by FastAPI). Dogfoods the SDK as the second consumer after CLI.
@@ -3034,6 +3035,29 @@ Why no per-test edits were needed: the synthesis-aware tests already use `patch.
 **Project pattern (memory-worthy):** when a function gains a DB-read it didn't have before, *every test that exercised the function with a generic mock-DB* potentially breaks because the new read returns whatever the mock-DB serves up — usually the wrong thing. The fix isn't to update every test's mock-DB chain; it's a single autouse fixture in the affected file that bypasses the new DB-read in favor of the underlying setting. Tests that explicitly want to verify the new DB-read live in their own dedicated test file. **Rule: when adding a DB-read to a function, search for existing tests of the function and decide whether to (a) write per-test mocks, or (b) provide an autouse bypass for the existing-test-file's "I don't care about this read" tests + a dedicated test file for the new read's semantics**. X.6 + X.16 demonstrate why (b) is usually right.
 
 **Test-suite delta:** `tests/test_execution_agent_compile.py`: 16/32 → **32/32**. Cross-file regression confirms the bypass stays scoped via `monkeypatch` (doesn't leak to `test_compile_synthesis_override.py`): 41/41 across both files. Combined `-k "execution_agent_compile or compile_synthesis_override"` run unchanged at green.
+
+### 17.44 Sprint X.17 — `test_health_cleanup.py` un-skip + scope down (2026-05-08)
+
+Tier 2 test-debt row #18 — the **last test-debt row**. Pre-X.17 the file was module-level skipped because half its tests (`TestReapStaleJobs`) targeted the old 4-statement / `rowcount`-based reaper shape; the live reaper has been on 7-statements / `len(fetchall())` since the W-track. Decision: salvage the still-useful `TestHealth*` half, delete the obsolete reaper half (already fully covered by `test_cleanup.py` since X.3 / X.15).
+
+The change:
+
+- Module-level `pytest.skip(allow_module_level=True)` block deleted.
+- `TestReapStaleJobs` class + `_make_reap_db` helper deleted (47 lines, fully obsolete).
+- Docstring rewritten to scope the file to `/health` only and call out the distinction from `tests/test_x1_thresholds_and_health.py` (that file covers X.1's reranker-prewarm-state check; this one covers the broader status assembly).
+- Three drift fixes in `_call_health` to match the live `app.main.health()`:
+  1. **Ollama check now uses `app.utils.http_clients.get_ollama_client()`** — was `app.main.httpx.AsyncClient` pre-drift. Mock target updated.
+  2. **`_check_redis` now returns a `(redis_info, cache_stats)` tuple** unpacked by the gather — already cleanly handled by the existing cache-mock shape; no test edit needed.
+  3. **Reranker check (X.1) reads `getattr(app, "state", None)`** — added a `SimpleNamespace` with `reranker_prewarmed_at` set + the test stashes/restores `app.state` around the call so the response renders with `reranker.status='up'`.
+- New regression-guard test: `test_checks_include_redis_and_reranker` enforces that both keys are present in every response (locks the X.1 + tuple-redis additions in place).
+
+**Why this isn't a "rebuild from scratch."** Of the 9 original `TestHealth*` cases, 6 still describe the right behavior verbatim (envelope shape, status enum, healthy/degraded/unhealthy logic). Only the helper's mock targets needed updating — a small surgical fix rather than a wholesale rewrite. The file's value is its direct-call coverage of the status-derivation logic; `test_x1_thresholds_and_health.py` doesn't touch that.
+
+**Project pattern (memory-worthy):** when a test file is module-level skipped with a TODO, the salvage decision is rarely binary (un-skip-everything vs delete-everything). The right shape is usually: **delete the obsolete half, fix the drift on the still-useful half, and add a regression-guard test for any new fields the live function now returns** so future drift is caught instead of paved over with another skip. The `pytest.skip(... TODO: ...)` pattern is a code smell — it's strictly worse than an actual skip-marker on the obsolete tests because it nukes the salvageable ones too.
+
+**Test-suite delta:** `tests/test_health_cleanup.py`: 0/9 (skipped) → **10/10** (9 original `TestHealth*` cases + 1 new redis/reranker presence guard; `TestReapStaleJobs` deleted). Cross-file regression `-k "health or cleanup"` (this file + `test_x1_thresholds_and_health.py` + `test_cleanup.py`): **28/28**.
+
+**All Tier 2 test-debt rows (#16, #17, #18) closed.** Remaining audit-tail items are all features/calibration/cadence — no fixture-drift or skipped-test debt remains.
 
 ---
 
