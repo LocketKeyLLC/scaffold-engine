@@ -805,4 +805,210 @@ def _map_node_type(task_type: str) -> str:
     return mapping.get(task_type, "task")
 
 
+# ---------------------------------------------------------------------------
+# Sprint W.5 — Subgraph prompt-template regeneration
+# ---------------------------------------------------------------------------
+
+REGEN_SYSTEM = """You are updating short execution hints for downstream tasks after an upstream task changed.
+
+You will be given:
+  - the project goal
+  - the changed root node + its NEW output (what the human just submitted)
+  - a list of downstream nodes that depend on the root, each with current
+    title, depends_on, and current execution hint (prompt_template)
+
+For each downstream node, decide if its hint still aligns with the new
+root output. Rewrite hints that no longer fit; leave aligned hints alone.
+
+Rules:
+  - Hints are short — one sentence, max 20 words.
+  - Do NOT invent new tasks or change the title field; only rewrite the hint.
+  - If a hint is fine as-is, return it unchanged in the output (or omit).
+  - Only return updates for node_keys that appeared in the input.
+
+OUTPUT FORMAT (strict JSON, no markdown fences):
+{
+  "updates": [
+    {"node_key": "T2", "new_template": "Implement Rust parser using nom"},
+    {"node_key": "T3", "new_template": "Write README documenting the Rust API"}
+  ]
+}
+
+Return ONLY the JSON object."""
+
+
+REGEN_PROMPT = """PROJECT GOAL:
+{goal}
+
+CHANGED ROOT NODE:
+- node_key: {root_key}
+- title: {root_title}
+- new_output:
+{root_output}
+
+DOWNSTREAM NODES (depend transitively on the root):
+{subgraph_yaml}
+
+Rewrite hints that no longer align. Return ONLY the JSON."""
+
+
+async def regenerate_subgraph(
+    *,
+    job_id: str,
+    root_node_key: str,
+    root_evidence: str,
+    affected_keys: list[str],
+    db: AsyncSession,
+    model_overrides: dict | None = None,
+) -> dict:
+    """Rewrite ``prompt_template`` for nodes whose upstream just changed.
+
+    Called by ``assist_replan.apply_selective_replan`` (or any future caller
+    that wants a fresh hint for an affected subgraph). Fail-open: if the LLM
+    call errors, returns malformed JSON, or the schema is wrong, returns
+    {"regenerated": 0, "errors": [...]} and persists no template changes.
+
+    Args:
+        job_id: parent job UUID.
+        root_node_key: the node whose output triggered the replan
+            (its new ``output_text`` is in ``root_evidence``).
+        root_evidence: the human-supplied output that diverged.
+        affected_keys: the BFS-computed list of nodes that depend on
+            ``root_node_key``. Empty list short-circuits.
+        db: an open AsyncSession.
+        model_overrides: optional per-call model-router overrides.
+
+    Returns:
+        dict with keys ``regenerated`` (int — count of UPDATE statements
+        committed) and ``errors`` (list of strings — diagnostics).
+    """
+    if not affected_keys:
+        return {"regenerated": 0, "errors": []}
+
+    if not settings.assist_replan_regen_enabled:
+        return {"regenerated": 0, "errors": ["regen_disabled"]}
+
+    rows = (await db.execute(
+        text("""
+            SELECT j.refined_brief, n.node_key, n.title, n.prompt_template,
+                   n.depends_on
+              FROM dag_nodes n
+              JOIN jobs j ON j.id = n.job_id
+             WHERE n.job_id = :jid
+               AND n.node_key = ANY(:keys)
+        """),
+        {"jid": job_id, "keys": affected_keys},
+    )).mappings().all()
+
+    if not rows:
+        return {"regenerated": 0, "errors": ["subgraph_not_found"]}
+
+    brief = rows[0]["refined_brief"] or {}
+    if isinstance(brief, str):
+        try:
+            brief = json.loads(brief)
+        except (ValueError, TypeError):
+            brief = {}
+    goal = (brief.get("description") or "").strip() if isinstance(brief, dict) else ""
+    if not goal and isinstance(brief, dict):
+        goals = brief.get("goals") or []
+        if isinstance(goals, list) and goals:
+            goal = str(goals[0])
+
+    # Fetch root title for context.
+    root_row = (await db.execute(
+        text("SELECT title FROM dag_nodes WHERE job_id = :jid AND node_key = :nk"),
+        {"jid": job_id, "nk": root_node_key},
+    )).mappings().first()
+    root_title = (root_row or {}).get("title") or "(unknown)"
+
+    subgraph_lines = []
+    for r in rows:
+        deps = r.get("depends_on") or []
+        deps_str = ", ".join(deps) if isinstance(deps, list) else str(deps)
+        subgraph_lines.append(
+            f"- node_key: {r['node_key']}\n"
+            f"  title: {r['title']}\n"
+            f"  depends_on: [{deps_str}]\n"
+            f"  current_hint: {r.get('prompt_template') or '(none)'}"
+        )
+    subgraph_yaml = "\n".join(subgraph_lines)
+
+    prompt = REGEN_PROMPT.format(
+        goal=goal or "(unspecified)",
+        root_key=root_node_key,
+        root_title=root_title,
+        root_output=(root_evidence or "")[:4000],
+        subgraph_yaml=subgraph_yaml,
+    )
+
+    route_kwargs = {"role": "model_general"}
+    if model_overrides:
+        route_kwargs["overrides"] = model_overrides
+
+    try:
+        resp = await model_router.generate(
+            prompt,
+            system=REGEN_SYSTEM,
+            temperature=0.2,
+            max_tokens=settings.assist_replan_regen_max_tokens,
+            **route_kwargs,
+        )
+    except Exception as exc:
+        logger.warning("regen_subgraph_call_failed: job=%s error=%s", job_id, exc)
+        return {"regenerated": 0, "errors": [f"call_failed: {exc}"]}
+
+    if not resp.success:
+        logger.warning(
+            "regen_subgraph_response_unsuccessful: job=%s error=%s",
+            job_id, resp.error,
+        )
+        return {"regenerated": 0, "errors": [f"response_unsuccessful: {resp.error}"]}
+
+    parsed = parse_json_object(resp.text)
+    if not isinstance(parsed, dict):
+        logger.warning("regen_subgraph_parse_failed: raw=%r", (resp.text or "")[:200])
+        return {"regenerated": 0, "errors": ["json_parse_failed"]}
+
+    raw_updates = parsed.get("updates")
+    if not isinstance(raw_updates, list):
+        logger.warning("regen_subgraph_schema_mismatch: parsed=%r", parsed)
+        return {"regenerated": 0, "errors": ["schema_mismatch"]}
+
+    affected_set = set(affected_keys)
+    regenerated = 0
+    skipped: list[str] = []
+    for raw in raw_updates:
+        if not isinstance(raw, dict):
+            continue
+        nk = str(raw.get("node_key", "")).strip()
+        new_template = str(raw.get("new_template", "")).strip()
+        if not nk or not new_template:
+            continue
+        if nk not in affected_set:
+            skipped.append(nk)
+            continue
+        await db.execute(
+            text("""
+                UPDATE dag_nodes
+                   SET prompt_template = :tpl, updated_at = NOW()
+                 WHERE job_id = :jid AND node_key = :nk
+            """),
+            {"tpl": new_template, "jid": job_id, "nk": nk},
+        )
+        regenerated += 1
+
+    if regenerated:
+        await db.commit()
+
+    errors: list[str] = []
+    if skipped:
+        errors.append(f"ignored_unaffected_nodes: {','.join(sorted(set(skipped)))}")
+    logger.info(
+        "regen_subgraph_complete: job=%s root=%s affected=%d regenerated=%d skipped=%d",
+        job_id, root_node_key, len(affected_keys), regenerated, len(skipped),
+    )
+    return {"regenerated": regenerated, "errors": errors}
+
+
 

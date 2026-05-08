@@ -131,28 +131,48 @@ async def apply_selective_replan(
     session_id: str,
     job_id: str,
     root_node_key: str,
+    root_evidence: str,
     divergence: dict,
+    model_overrides: dict | None = None,
 ) -> dict:
     """For policy='selective': identify the subgraph that depends on the
-    changed node and reset its assist_steps + dag_nodes to pending so
+    changed node, regenerate prompt_template for those nodes via LLM
+    (Sprint W.5), and reset their assist_steps + dag_nodes to pending so
     the user (or autonomous handoff) can re-walk them.
 
     The DAG topology stays the same — what changed is the *upstream
-    context*, not the *task list*. The next time those nodes are
-    presented, their `assemble_step_context` call will pick up the
-    new upstream output via the standard upstream-last assembly.
+    context*. Two layers of compensation now apply:
 
-    Returns: {affected_nodes: [...], scope: 'selective'}.
+      1. Sprint W.5 — `dag_generator.regenerate_subgraph` rewrites each
+         affected node's short execution hint (``prompt_template``) so
+         it aligns with the new root output. Fail-open: any LLM/parse
+         failure logs a warning and falls back to legacy behavior.
+      2. Existing — at execution time, ``_build_prompt`` injects the
+         fresh upstream output into the assembled prompt regardless of
+         the hint. So even if regen returns nothing, the next walk
+         still sees the new upstream.
 
-    Note: this does NOT regenerate node prompts via the LLM. That is a
-    follow-up: `dag_generator.regenerate_subgraph(job_id, root, db)` would
-    rewrite prompt_template for the affected subgraph. For now, "selective"
-    just resets the subgraph so the user redoes those steps with the new
-    upstream context — the cheapest correct behavior. Marked TODO.
+    Returns: {affected_nodes, scope, regenerated_count, regen_errors,
+              severity, reason}.
     """
     affected = await downstream_node_keys(db=db, job_id=job_id, root_node_key=root_node_key)
     if not affected:
         return {"affected_nodes": [], "scope": "selective", "details": "no_dependents"}
+
+    # Sprint W.5 — regenerate prompt templates BEFORE the reset so that if
+    # regen fails (fail-open), we still preserve the legacy reset-only
+    # behavior. The reset clears status/output_text/timestamps but keeps
+    # whatever prompt_template the regen produced (or the original, on
+    # fail-open).
+    from app.modules.dag_generator import regenerate_subgraph
+    regen_result = await regenerate_subgraph(
+        job_id=job_id,
+        root_node_key=root_node_key,
+        root_evidence=root_evidence,
+        affected_keys=affected,
+        db=db,
+        model_overrides=model_overrides,
+    )
 
     # Reset only nodes that are NOT already terminal-by-skip.
     await db.execute(
@@ -195,6 +215,8 @@ async def apply_selective_replan(
         "scope": "selective",
         "severity": divergence.get("severity"),
         "reason": divergence.get("reason"),
+        "regenerated_count": regen_result.get("regenerated", 0),
+        "regen_errors": regen_result.get("errors", []),
     }
 
 
@@ -247,14 +269,16 @@ async def maybe_replan(
     if policy == "selective":
         return await apply_selective_replan(
             db=db, session_id=session_id, job_id=job_id,
-            root_node_key=node_key, divergence=div,
+            root_node_key=node_key, root_evidence=evidence, divergence=div,
+            model_overrides=model_overrides,
         )
     if policy == "full":
         # Treat as "select all pending" — implemented via the same
         # selective machinery with the entire pending set.
         return await apply_selective_replan(
             db=db, session_id=session_id, job_id=job_id,
-            root_node_key=node_key, divergence=div,
+            root_node_key=node_key, root_evidence=evidence, divergence=div,
+            model_overrides=model_overrides,
         )
     if policy == "disabled":
         # Operator opted out of replan-on-divergence entirely — no-op

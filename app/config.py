@@ -209,6 +209,15 @@ class Settings(BaseSettings):
     # Long default (7d) because manual implementation legitimately spans
     # multiple working days.
     assist_idle_threshold_days: int = Field(default=7, ge=1, le=90)
+    # Sprint W.5 — when policy='selective' fires (or 'full'), call the LLM
+    # to rewrite prompt_template for affected downstream nodes so their
+    # short execution hint reflects the new upstream output. Fail-open:
+    # any LLM/parse failure falls back to the legacy reset-only behavior.
+    # Disable via assist_replan_regen_enabled=false to skip the LLM call
+    # entirely (cost-sensitive deployments, or when legacy behavior is
+    # known to be sufficient).
+    assist_replan_regen_enabled: bool = True
+    assist_replan_regen_max_tokens: int = Field(default=2048, ge=512, le=8192)
     # #2 — orphan detection: dag_nodes stuck in 'running' past this threshold
     # are treated as orphaned (executor died) and reset to 'pending' for
     # automatic re-execution. Default 60min > worst observed single-node

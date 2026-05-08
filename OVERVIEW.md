@@ -2099,6 +2099,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | W.2 | Workflow audit — _compile_output heuristics polish (§17.20) | done 2026-05-07 |
 | W.3 | Workflow audit — DAG generator validator-driven retry loop (§17.21) | done 2026-05-07 |
 | W.4 | Workflow audit — prompt-build try/except wrap (§17.22) | done 2026-05-07 |
+| W.5 | Workflow audit — assist_replan.selective LLM regen (§17.23) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2453,6 +2454,37 @@ Tier 1 / item 4 from the workflow audit. Until W.4, the prompt-assembly phase in
 **Open follow-ups (audit-tail)**:
 - Same observability point as W.3: surface the prompt-build-error reason in OWUI's node-failed render.
 - Consider extending the wrap to `_fetch_upstream_outputs` (currently inside the first session block, before the W.4 wrap starts). Failures there bubble out of the `async with` and currently go to `execute_all_nodes`'s generic handler — same gap, but for a narrower set of exceptions (DB layer, async-session lifecycle).
+
+### 17.23 Sprint W.5 — `assist_replan.selective` LLM-driven prompt regeneration (2026-05-07)
+
+Tier 1 / item 5 from the workflow audit. The TODO comment at `assist_replan.apply_selective_replan` (line 147 pre-W.5) read: *"this does NOT regenerate node prompts via the LLM. That is a follow-up: `dag_generator.regenerate_subgraph(job_id, root, db)` would rewrite prompt_template for the affected subgraph. For now, 'selective' just resets the subgraph so the user redoes those steps with the new upstream context — the cheapest correct behavior."* W.5 actually implements that follow-up.
+
+**Why it mattered.** When the human supplies output that diverges (pivots from Python to Rust, replaces an algorithm, etc.), `selective` correctly resets the dependent subgraph so those nodes re-run. But the affected nodes' `prompt_template` field — the short execution hint set during initial DAG generation — could still reference the old direction. Two compensations applied:
+1. The hint is short (one sentence) and runtime upstream-output injection (in `_build_prompt`) already brought fresh context. Net staleness was bounded.
+2. But the LLM occasionally hedged or double-rendered when its hint contradicted upstream content.
+
+**Change**:
+- New `regenerate_subgraph()` in `app/modules/dag_generator.py` (~140 lines + prompts). Inputs: job_id, root_node_key, root_evidence (the human submission), affected_keys (BFS-computed downstream list), open db session, optional model overrides. Builds a context with project goal + root title + new evidence + each affected node's (key, title, current hint, depends_on). One LLM call (role `model_general`, temperature 0.2, default 2048 max-tokens) returns `{updates: [{node_key, new_template}]}`. Each update is validated (node_key in affected set, non-empty template) and persisted via `UPDATE dag_nodes SET prompt_template = :tpl`. Returns `{regenerated: int, errors: list[str]}`.
+- **Fail-open**: any of LLM call exception, `success=False`, JSON parse error, schema mismatch returns `{regenerated: 0, errors: [<reason>]}` with no DB writes — preserves the legacy reset-only behavior so divergence handling never breaks.
+- **Hallucination guard**: updates referencing unaffected node_keys are dropped with an `ignored_unaffected_nodes: ...` diagnostic in `errors`.
+- `apply_selective_replan` now takes `root_evidence` + `model_overrides` (threaded down from `maybe_replan`), calls `regenerate_subgraph` *before* the reset (so failed regen doesn't block reset), and surfaces `regenerated_count` + `regen_errors` in its return dict. The `'full'` policy reuses the same path with its (currently identical) BFS scope.
+- New settings (`app/config.py`): `assist_replan_regen_enabled: bool = True` (kill switch), `assist_replan_regen_max_tokens: int = 2048`.
+
+**Order rationale (regen before reset)**: regen UPDATEs `prompt_template` while the old `output_text`/`status` are still in place. The subsequent reset clears `output_text`/`status` but preserves the new `prompt_template`. If regen fails open, reset still runs — the legacy behavior is preserved, no DB inconsistency.
+
+**Cost**: one LLM call (~3–7s) per `selective`/`full` replan trigger. Replan triggers are rare (only when `divergence.severity == 'major'`) so the amortized cost is small. Disable via `assist_replan_regen_enabled=false` if cost-sensitive.
+
+**Test-suite delta**: 10 new in `tests/test_assist_replan_regen.py` — 8 cases covering `regenerate_subgraph` directly (empty affected; kill switch; happy path with 2 UPDATEs persisted; LLM call failure; malformed JSON; unsuccessful response; schema mismatch; LLM-hallucinated unaffected node_keys ignored), 2 cases covering `apply_selective_replan` integration (regen called with the right affected_keys + root_evidence; empty subgraph skips regen). **Combined W.1+W.2+W.3+W.4+W.5 + assist_agent regression: 103/103.**
+
+**What this does NOT do** (deferred):
+- Regen for the `context_only` policy. By design — `context_only` is the default exactly because it does *no* structural change. Adding regen to it would silently rewrite the operator's templates on every divergence, violating user expectations.
+- Regen with an opt-in "show me what would change" preview. Future enhancement: emit the proposed updates as a session event before applying them, letting the user veto. Out-of-scope here.
+- Per-node regen budget (skip nodes where the hint is already minimal — e.g., `(none)` — since regen has nothing to fix).
+
+**Open follow-ups (audit-tail)**:
+- Surface `regenerated_count` + `regen_errors` in OWUI assist UI / SSE so operators see when the engine rewrote hints behind their backs.
+- Consider sharing the `downstream_node_keys` BFS helper between `assist_replan` and `dag_generator` rather than potentially recomputing it. Currently the BFS is only run in `apply_selective_replan` and the result is passed to `regen` — fine, but worth flagging if a third caller appears.
+- Cost telemetry once J.3 lands — track regen LLM tokens per session under "assist replan" budget.
 
 ---
 
