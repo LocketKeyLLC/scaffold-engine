@@ -31,7 +31,21 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Baselines (from smokieRAGs eval — 2026-03-29)
+# Baselines (from smokieRAGs eval — 2026-03-29, KB=83 entries)
+#
+# NOTE (Sprint W.8, 2026-05-07): tests/ground_truth.json's expected_doc_ids
+# use a legacy naming scheme ("eng-testing-methodologies", etc.) that pre-
+# dates the current 'scaffold-<title>-<hash8>' format used by the live KB
+# at 1093 entries. Running this eval at KB=1093 produces uniform MISS/0%
+# hit rates because the expected IDs no longer exist — the scoring is
+# measuring orphan IDs, not retrieval quality. Results below the tolerance
+# threshold here mean ground_truth has drifted, NOT that retrieval
+# regressed.
+#
+# Live retrieval-quality measurement at KB=1093 lives in
+# scripts/score_retrieval.py against tests/fixtures/golden_set.json
+# (which uses current scaffold-style entry_ids) — see OVERVIEW §17.26 +
+# §18.
 # ---------------------------------------------------------------------------
 BASELINES = {
     "mrr": 0.986,
@@ -115,8 +129,17 @@ def compute_domain_purity(domain_results: list[dict]) -> float:
 # HTTP helper (stdlib only — no external deps)
 # ---------------------------------------------------------------------------
 
-def _post_json(url: str, payload: dict, api_key: str = "", timeout: int = 60) -> dict:
-    """POST JSON to a URL and return parsed response."""
+def _post_json(url: str, payload: dict, api_key: str = "", timeout: int | None = None) -> dict:
+    """POST JSON to a URL and return parsed response.
+
+    Sprint W.8: per-query timeout default raised from 60s → 600s. CPU
+    cross-encoder cold-start (first /rag call after a fresh container)
+    routinely takes 60-180s on the reference T480, well past the prior
+    default. Override via ``EVAL_QUERY_TIMEOUT`` env var when running
+    against a faster setup.
+    """
+    if timeout is None:
+        timeout = int(os.environ.get("EVAL_QUERY_TIMEOUT", "600"))
     data = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if api_key:

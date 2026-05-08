@@ -1,4 +1,10 @@
-"""Retrieval quality scoring — runs golden queries through query_rag(), reports metrics."""
+"""Retrieval quality scoring — runs golden queries through query_rag(), reports metrics.
+
+Sprint W.8: standalone scripts don't run the app's lifespan startup, so the
+http clients (Ollama, SearXNG, …) aren't initialized. Calling
+``init_clients()`` at startup makes the script self-sufficient — no need to
+go through the FastAPI lifespan.
+"""
 from __future__ import annotations
 
 import argparse
@@ -12,6 +18,7 @@ from statistics import mean
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.modules.rag_pipeline import query_rag
+from app.utils.http_clients import init_clients
 
 
 @dataclass
@@ -59,6 +66,7 @@ async def score_query(item: dict, top_k: int = 10) -> QueryResult:
 
 
 async def run(golden_path: Path, output_path: Path) -> dict:
+    init_clients()
     golden = json.loads(golden_path.read_text())["pairs"]
     results = [await score_query(item) for item in golden]
 

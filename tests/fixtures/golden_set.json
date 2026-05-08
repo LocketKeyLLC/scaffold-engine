@@ -1,8 +1,21 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "created_at": "2026-04-18",
+  "updated_at": "2026-05-07",
   "kb_snapshot_entries": 501,
   "kb_snapshot_note": "Post batch ingestion push (191 -> 501 across 31 runs)",
+  "rebaseline": {
+    "kb_size": 1093,
+    "ts": "2026-05-08T02:55:11Z",
+    "harness": "HTTP /rag (W.8 ad-hoc; equivalent metric semantics to scripts/score_retrieval.py)",
+    "metrics": {
+      "coverage": 0.950,
+      "mean_recall_at_5": 0.933,
+      "mean_recall_at_10": 0.933,
+      "mean_mrr": 0.860
+    },
+    "note": "Sprint W.8 — quality held flat under 2x corpus growth (501 → 1093). MRR identical to KB=501 baseline; Recall@5 -1.7pt on a single multi-doc query (g016, 2-of-3 expected docs in top-5). One MISS (g011) consistent with prior runs. See OVERVIEW §17.26 + §18."
+  },
   "pairs": [
     {
       "id": "g001",

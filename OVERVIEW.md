@@ -2102,6 +2102,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | W.5 | Workflow audit — assist_replan.selective LLM regen (§17.23) | done 2026-05-07 |
 | W.6 | Workflow audit — native tool-call migration (research/verify) (§17.24) | done 2026-05-07 |
 | W.7 | Workflow audit — opt-in LLM synthesis pass on compiled output (§17.25) | done 2026-05-07 |
+| W.8 | Workflow audit — RAG quality re-baseline at KB=1093 (§17.26) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2583,6 +2584,50 @@ Tier 1 / item 7 from the workflow audit. The lever W.2 explicitly deferred. Unti
 - Consider lower temperatures on the synthesis call for code-heavy deliverables — though the explicit "preserve verbatim" instruction should already handle this.
 - W.7 + J.3: when cost telemetry lands, log per-call synthesis tokens; if the synthesized output is barely longer than the heuristic, the synthesis is likely just paraphrasing — not adding value. Use that as a signal to recommend turning synthesis off for that workload.
 
+### 17.26 Sprint W.8 — RAG quality re-baseline at KB=1093 (2026-05-07)
+
+Tier 1 / item 8 (the last) from the workflow-quality audit. Calibration, not code: re-measure retrieval metrics now that the KB has grown 2x from the 2026-04-18 baseline (501 → 1093 entries) and confirm whether quality held.
+
+**Headline finding: quality held flat.** With KB at 1093 entries, the live measurement against `tests/fixtures/golden_set.json` (20 queries) returned:
+
+| Metric | KB=501 (Apr 18) | KB=1093 (May 7) | Δ |
+|---|---|---|---|
+| Coverage | 95.0% | **95.0%** | flat |
+| Mean Recall@5 | 0.950 | **0.933** | -1.7pt |
+| Mean Recall@10 | (n/a) | **0.933** | — |
+| Mean MRR | 0.860 | **0.860** | flat |
+
+19 of 20 queries hit. One MISS (g011, consistent across runs) and one Recall@5 dip (g016 — multi-doc query that returned 2 of 3 expected docs in top-5). MRR identical to baseline. The pipeline scales cleanly under corpus growth.
+
+**Sprint deliverables (calibration + harness fixes):**
+
+1. **`tests/ground_truth.json` marked stale.** When the eval harness `tests/eval_retrieval.py` was first run at KB=1093, it returned uniform MISS / 0% hit rates. Investigation found the ground_truth's `expected_doc_ids` use a legacy `eng-testing-methodologies` style — the live KB uses the current `scaffold-<title>-<hash8>` naming format. The 0% hit rate was orphaned-ID drift, not a quality regression. Updates:
+   - `metadata.version`: 1.1 → 1.2
+   - `metadata.updated`: 2026-03-29 → 2026-05-07
+   - `metadata.live_kb_size_at_review`: 1093, `metadata.stale: true`, `metadata.stale_reason: ...` documenting the entry_id naming drift + the embedding/metric changes since corpus creation (4096 dims/L2 → 512 MRL/COSINE)
+   - `BASELINES` block in `tests/eval_retrieval.py` annotated with a deprecation note pointing readers at `score_retrieval.py` + `golden_set.json` as the live harness.
+   - This eval is kept (rather than deleted) as a historical reference; future re-baseline work should target the golden_set.json harness instead.
+
+2. **`tests/fixtures/golden_set.json` re-baselined.** Bumped `version` to 1.1 and added a `rebaseline` block carrying the KB=1093 metrics + timestamp + harness note. Future re-baselines append rather than overwrite — historical numbers stay readable.
+
+3. **`scripts/score_retrieval.py` self-sufficient at startup.** Standalone scripts don't run the FastAPI lifespan, so `app.utils.http_clients.init_clients()` was never called and Ollama embeds errored with "client not initialized." Added `from app.utils.http_clients import init_clients` + a single `init_clients()` call at the top of `run()`. Now the script works under `docker exec` without going through the orchestrator's HTTP layer. Pattern note (project-applicable): any standalone script that imports modules expecting init_clients() must call it itself.
+
+4. **`tests/eval_retrieval.py` per-query timeout 60s → 600s** (env-overridable via `EVAL_QUERY_TIMEOUT`). The 60s default was tight against CPU-only cross-encoder cold-start (40-200s observed in production); the bump prevents cold-start TimeoutError from masking valid eval runs. Note: this didn't fix the eval's underlying staleness problem (see #1 above) but is now no longer a confounder.
+
+**Operational pattern observed (project-applicable for any future eval work):** running `scripts/score_retrieval.py` in-process inside the orchestrator container loads a SECOND cross-encoder (separate Python process). With both running, CPU contention slowed reranks 5x (~100s observed → ~500s under contention). For W.8 the live numbers came from a small ad-hoc HTTP-based harness (`/tmp/rag_eval_http.py`) hitting the orchestrator's prewarmed cross-encoder. Future re-baselines should either go through HTTP /rag OR stop the orchestrator process before running score_retrieval.py — never both at once.
+
+**What this does NOT do** (deferred):
+- Regenerating `tests/ground_truth.json` against the current KB. The 40-query corpus is structurally larger than `golden_set.json`'s 20 queries and would be valuable, but rebuilding it requires hand-curating expected entry_ids against the current 1093-entry KB — a multi-hour calibration exercise that didn't fit this sprint's scope. Marked stale, not deleted, so a future sprint can mine it for query templates if useful.
+- Threshold tuning. The audit is closed at "we measured and quality held"; no `dedup_cosine_threshold` / `version_chain_threshold` / `rag_cosine_floor` changes were warranted at these numbers. Those settings stay at their defaults.
+- Recall@5/10 split investigation. The 1.7pt dip on g016 was a single multi-doc query; not a systematic issue.
+
+**Open follow-ups (audit-tail):**
+- Schedule a recurring re-baseline cadence (quarterly?) so the next 2x growth doesn't surprise us.
+- Add a CI smoke that runs `score_retrieval.py` against a tiny 3-query fixture on PRs touching `app/modules/rag_pipeline.py` — catches regressions cheaply.
+- Move ground_truth.json's expected_doc_ids forward by re-resolving them against the current KB. Likely a script: for each (query, old_doc_id), find the closest live entry by content hash + title and propose a replacement.
+
+**Workflow-quality audit closed.** Eight sprints (W.1–W.8) shipped between 2026-05-07 morning and evening. Tier 1 audit list is exhausted.
+
 ---
 
 ## 18. Performance benchmarks
@@ -2603,11 +2648,14 @@ CPU-only on the project's reference T480 (8-core / 16GB). Cloud-routed models (`
 | `/research/pdf` 1-page | ~6 min | Cold-start dominated |
 | `/health` | ~43ms | Postgres + Ollama + Milvus + Redis (warm) |
 
-### Retrieval quality baseline (2026-04-18, KB=501 entries)
+### Retrieval quality baseline
 
-- Coverage: 95%
-- Mean Recall@5: 0.95
-- Mean MRR: 0.86
+| KB size | Date | Coverage | Recall@5 | Recall@10 | MRR | Harness |
+|---|---|---|---|---|---|---|
+| 501 | 2026-04-18 | 95.0% | 0.95 | — | 0.86 | `scripts/score_retrieval.py` (in-process) |
+| **1093** | **2026-05-07 (W.8)** | **95.0%** | **0.933** | **0.933** | **0.860** | HTTP `/rag` (W.8 ad-hoc, equivalent semantics) |
+
+Quality held flat under 2x corpus growth. MRR identical; Recall@5 -1.7pt on a single multi-doc query (g016 — got 2 of 3 expected docs in top-5). One MISS (g011) consistent with prior runs. See §17.26 for the W.8 sprint details + the ground_truth.json staleness finding it surfaced.
 
 `scripts/score_retrieval.py` computes `recall@5`, `recall@10`, `mrr`, `coverage` against `tests/fixtures/golden_set.json`. CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval code; live scoring is local/manual (GitHub runners lack Milvus + Ollama).
 

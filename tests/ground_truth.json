@@ -1,12 +1,17 @@
 {
   "metadata": {
-    "version": "1.1",
+    "version": "1.2",
     "created": "2026-03-29",
-    "updated": "2026-03-29",
+    "updated": "2026-05-07",
     "corpus_size": 83,
+    "live_kb_size_at_review": 1093,
+    "stale": true,
+    "stale_reason": "expected_doc_ids use legacy 'eng-...' naming; live KB uses scaffold-<title>-<hash> format. Results at KB=1093 are orphan-ID misses, not retrieval regressions. Live eval is scripts/score_retrieval.py against tests/fixtures/golden_set.json.",
     "embedding_model": "qwen3-embedding:8b",
-    "embedding_dimensions": 4096,
-    "distance_metric": "L2",
+    "embedding_dimensions": 512,
+    "embedding_dimensions_note": "MRL-truncated 512 dims as of 2026-04 (was 4096 at corpus creation).",
+    "distance_metric": "COSINE",
+    "distance_metric_note": "HNSW_SQ8 COSINE as of 2026-04 (was L2 at corpus creation).",
     "domains": ["prompt", "rag", "eng", "llm", "spec"],
     "query_types": {
       "factual": 15,
@@ -17,7 +22,8 @@
       "negative": 5
     },
     "changelog": [
-      "v1.1: Added secondary relevant docs (relevance=1) based on initial eval run"
+      "v1.1: Added secondary relevant docs (relevance=1) based on initial eval run",
+      "v1.2 (2026-05-07): marked stale — entry_id naming drifted (eng-* → scaffold-*); embedding dim changed (4096 → 512 MRL); metric changed (L2 → COSINE). Live eval moved to score_retrieval.py + golden_set.json"
     ]
   },
   "queries": [
