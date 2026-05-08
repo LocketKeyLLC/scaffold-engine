@@ -4,10 +4,16 @@ Mock tests cover logic. These verify column shape, JSON serialization,
 and status-transition behavior against the actual schema — catches
 regressions where a column rename or constraint change would silently
 pass the mocks.
+
+Sprint X.11 + X.12 — refine_idea now uses model_router.tool_call. The
+fixtures here mock that call and pass the brief via
+``tool_calls[0].arguments``; pre-X.11 fixtures patched
+``model_router.generate`` and supplied JSON text on ``resp.text``.
 """
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -19,14 +25,23 @@ from app.modules.idea_refinement import refine_idea
 pytestmark = pytest.mark.asyncio
 
 
-class _FakeResp:
-    """Mimic model_router.GenerateResponse — only the fields refine_idea reads."""
-    def __init__(self, text_value: str, success: bool = True, error: str | None = None):
-        self.text = text_value
-        self.success = success
-        self.error = error
-        self.model = "test-model"
-        self.total_duration_ms = 5
+def _fake_tool_call_resp(args: dict | None = None, *, success: bool = True,
+                         error: str | None = None) -> SimpleNamespace:
+    """Mimic model_router.tool_call's ModelResponse — only the fields
+    refine_idea reads. ``args=None`` produces the empty tool_calls list
+    used by the fail-closed path."""
+    if args is None or not success:
+        tool_calls = []
+    else:
+        tool_calls = [SimpleNamespace(arguments=args)]
+    return SimpleNamespace(
+        text="",
+        success=success,
+        error=error,
+        model="test-model",
+        total_duration_ms=5,
+        tool_calls=tool_calls,
+    )
 
 
 @pytest.fixture
@@ -42,8 +57,8 @@ def stub_llm_ok():
         "complexity": "low",
         "ambiguities": [],
     }
-    with patch("app.modules.idea_refinement.model_router.generate",
-               new=AsyncMock(return_value=_FakeResp(json.dumps(brief)))):
+    with patch("app.modules.idea_refinement.model_router.tool_call",
+               new=AsyncMock(return_value=_fake_tool_call_resp(brief))):
         yield brief
 
 
@@ -75,8 +90,8 @@ async def test_refine_idea_inserts_job_and_persists_brief(db_session, stub_llm_o
 
 async def test_refine_idea_failure_marks_job_failed(db_session, track_job):
     """LLM error path: job moves to 'failed' with truncated error_summary."""
-    bad = _FakeResp("", success=False, error="ollama timeout")
-    with patch("app.modules.idea_refinement.model_router.generate",
+    bad = _fake_tool_call_resp(success=False, error="ollama timeout")
+    with patch("app.modules.idea_refinement.model_router.tool_call",
                new=AsyncMock(return_value=bad)):
         result = await refine_idea("anything", db_session)
 

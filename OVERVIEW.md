@@ -2114,6 +2114,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.9 | Tier 2 audit — `synthesized` filter on `GET /jobs` (§17.36) | done 2026-05-08 |
 | X.10 | Tier 2 audit — prompt_optimizer `_llm_verify` → `tool_call` migration (§17.37) | done 2026-05-08 |
 | X.11 | Tier 2 audit — idea_refinement `refine_idea` → `tool_call` migration (§17.38) | done 2026-05-08 |
+| X.12 | Tier 2 audit — gt_extractor `extract_ground_truths` → `tool_call` migration (§17.39) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2731,7 +2732,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 9 | `synthesized` filter on `GET /jobs` | **DONE in X.9** | New `synthesized: bool \| None` query param. None = no filter; true/false = WHERE `compiled_output_synthesized = :synthesized`. 5 new tests. OpenAPI 44 paths unchanged (existing path gained a param). |
 | 10 | prompt_optimizer JSON-coaxing → tool-call migration | **DONE in X.10** | `_llm_verify` migrated to `tool_call` + `RECORD_VERIFICATION_TOOL`. `_llm_optimize` *not* a target — returns free-form text (the rewritten prompt), not structured output. 10 new tests; 3 obsolete JSON-parse-chain tests retired. |
 | 11 | idea_refinement tool-call migration | **DONE in X.11** | `refine_idea` migrated; `REFINE_BRIEF_TOOL` schema (9 fields, 5 required); REFINE_SYSTEM simplified by ~15 lines. 13 tests updated. |
-| 12 | gt_extractor tool-call migration | Same shape as #10 | 1 site. |
+| 12 | gt_extractor tool-call migration | **DONE in X.12** | `extract_ground_truths` distill site migrated; `RECORD_DISTILLED_ENTRIES_TOOL` schema; `_parse_entries` + `_ParseFailed` removed (dead). 4-way `_tool_args` duplication settled — consolidation queued as next-priority cleanup. |
 | 13 | CI smoke for retrieval regressions | CI config | Tiny fixture (3 queries) run on PRs touching `app/modules/rag_pipeline.py`. Catches regressions cheaply without needing live Milvus. |
 | 14 | Quarterly RAG re-baseline cadence | Scheduling | `make rebaseline` cron / runbook. Surfaces drift early. |
 | 15 | `tests/ground_truth.json` regen at KB=1093 | Calibration, multi-hour | Re-curate expected_doc_ids against the current `scaffold-<title>-<hash>` naming. Defer until a quarterly rebaseline shows a need. |
@@ -2934,6 +2935,25 @@ The change in `app/modules/idea_refinement.py`:
 **Project pattern (validated, memory-worthy from X.10 + X.11):** when migrating a `generate()`+`parse_json_object()` site to `tool_call()`, the failure-mode names shift but the contract is identical. Pre-migration: `parse_json_object returned None` → fail. Post-migration: `_tool_args returned None` (no tool_calls, success=False, args not dict) → fail. The error-string change (`"output was not valid JSON"` → `"did not produce a valid refined brief"`) is operator-facing and worth keeping precise — the new wording matches what an operator now sees in logs and chat messages, where there's no JSON for them to debug directly.
 
 **Test-suite delta:** `tests/test_idea_refinement.py` updated — 13 tests pass (was 13). The shared `_make_llm_response` helper rebuilt to produce `tool_call`-shaped responses (`success=True`, `tool_calls=[ToolCall(arguments=...)]`); `args=`, `no_calls=`, and `error=` parameters cover happy / fail-closed / dispatch-error scenarios. Bulk-replace `mock_mr.generate = AsyncMock(...)` → `mock_mr.tool_call = AsyncMock(...)`. Two tests rewritten in detail: `test_calls_generate_with_idea_text` → `test_calls_tool_call_with_idea_text` (now inspects `kwargs["messages"]` for the user-message content); `test_unparseable_json_returns_failed` → `test_no_tool_calls_returns_failed` (passes `no_calls=True` to trigger the X.11 fail-closed path). The `test_model_overrides_used` assertion on `call_kwargs.get("role")` works unchanged because `tool_call` accepts the same `role=`/`overrides=` kwargs as `generate`. Combined `-k "idea_refinement or ideation_workflow or model_router_tool_call"`: 21 passed, 4 skipped (4 pre-existing skips in `test_ideation_workflow_phase1.py` due to environment loadability — unrelated to X.11).
+
+### 17.39 Sprint X.12 — `gt_extractor.extract_ground_truths` → `tool_call` migration (2026-05-08)
+
+Tier 2 audit row #12 — last of the W.6 follow-on track. After X.12, every JSON-coaxing site identified during the workflow-quality audit has been migrated. Same shape as X.10 / X.11; the differentiator is the output type — gt_extractor emits an *array* of entries rather than a single object.
+
+The change in `app/modules/gt_extractor.py`:
+
+- New `RECORD_DISTILLED_ENTRIES_TOOL` (Tool dataclass) with the array-wrapper pattern already established in `research_agent.RECORD_ENTRIES_TOOL`: `input_schema = {entries: [{title, content, tags, source}]}`. Required at the entry level: `title`, `content` (the two fields TOON formatting can't emit a row without). `tags` and `source` are optional — `format_toon_rows` already defaults them to empty-string and `pending-verification`.
+- `DISTILL_SYSTEM` shrunk by ~15 lines (dropped the inline JSON-array schema). `DISTILL_PROMPT` shrunk by 1 line (`Return ONLY the JSON array.` closer dropped).
+- `model_router.generate()` → `model_router.tool_call()`. `route_kwargs = {"role": "model_router"}` (the small/fast role per #6.3) threads through unchanged.
+- Read path: `_parse_entries(resp.text)` + `_ParseFailed` exception → `_tool_args(resp)` + `args["entries"]` check. Status code mapping preserved: `parse_failed` returned when `_tool_args` returns None or `args["entries"]` isn't a list. The `_ParseFailed` exception class and `_parse_entries` helper are **deleted** — both were internal-only and have no callers post-X.12.
+- Imports cleaned: `from app.utils.llm_parsing import parse_json_array` removed; `from app.providers.base import Tool` added.
+- New module-private `_tool_args(resp)` helper, byte-equal with the three other copies. **Four modules now duplicate the 5-line helper**, which is the trigger I queued in §17.38 for consolidation. Consolidation deliberately not done in X.12 — the four sites are settled now, so a clean sweep can produce a single shared utility (e.g. `app/utils/tool_call_args.py`) plus four import-only diffs in one commit. Doing it in X.12 would muddle the migration commit with refactor work.
+
+**Project pattern (memory-worthy from X.10 + X.11 + X.12):** the W.6 tool-call migration pattern is now validated across 4 sites with three distinct output shapes — single object (X.10 verifier), single complex object (X.11 brief with 9 fields), array of objects (X.12 entries). The wrapper handles all three identically: schema in code, prose-prompt simplified, `_tool_args` reads `tool_calls[0].arguments`, fail-closed when args missing or wrong type. **For future structured-output LLM calls, default to `tool_call()` from day one — don't add new `chat()`+`parse_json_*()` sites.** The "intentional duplication" of `_tool_args` was tolerable at 2 sites; at 4 it crosses the line, so the next sprint consolidates it.
+
+**Side fix (X.11 leftover):** two integration tests in `tests/integration/test_idea_refinement_db.py` patched `model_router.generate` and supplied JSON text via `_FakeResp.text` — pre-X.11 fixture shape. The X.11 sprint scope ran the unit tests but not the integration tests, so these regressions slipped through. Folded into X.12: rewrote the helper as `_fake_tool_call_resp(args=...)` returning a `SimpleNamespace` with `tool_calls=[SimpleNamespace(arguments=args)]`. 3/3 integration tests pass.
+
+**Test-suite delta:** `tests/test_gt_extractor.py` updated — `TestDistillationUsesRouterModel.test_extract_uses_model_router` swapped to mock `tool_call`; `TestTitleFieldConsistency.test_distill_system_emits_title` renamed to `test_distill_tool_schema_uses_title_not_topic` and now reads the schema dict on `RECORD_DISTILLED_ENTRIES_TOOL` (post-X.12 the JSON schema lives in code, not in the system-prompt prose). `tests/test_gt_extractor_module.py` `test_extract_ground_truths_dedupes_by_url` swapped to mock `tool_call` with empty entries. `tests/test_gt_extractor_model.py` is AST-walk only — needed no change because the `route_kwargs = {"role": "model_router"}` literal is unchanged. Combined `-k "gt_extractor or model_router_tool_call or prompt_optimizer or idea_refinement"`: **82/82** across all four migrated modules + their orchestrator-level callers.
 
 ---
 

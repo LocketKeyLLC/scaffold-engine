@@ -174,11 +174,15 @@ async def test_extract_ground_truths_dedupes_by_url():
         return duplicated
 
     # Return "no entries" from the LLM distillation so we short-circuit safely.
-    # The real code path calls model_router.generate, not .chat.
-    fake_generate_resp = SimpleNamespace(text="[]", success=True)
+    # Sprint X.12: gt_extractor now uses model_router.tool_call. The wrapper
+    # response carries entries via tool_calls[0].arguments["entries"] = [].
+    fake_call = SimpleNamespace(arguments={"entries": []})
+    fake_resp = SimpleNamespace(
+        text="", success=True, tool_calls=[fake_call],
+    )
 
     with patch.object(gx, "search_searxng", side_effect=fake_search), \
-         patch.object(gx.model_router, "generate", AsyncMock(return_value=fake_generate_resp)):
+         patch.object(gx.model_router, "tool_call", AsyncMock(return_value=fake_resp)):
         result = await gx.extract_ground_truths("topic")
 
     # Even though 3 raw results * multiple queries, dedupe by URL = 2 unique

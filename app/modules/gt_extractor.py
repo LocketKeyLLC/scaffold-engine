@@ -24,8 +24,8 @@ from app.utils.github_ingest import (
     GitHubRepoNotFoundError,
     check_github_rate_limit,
 )
+from app.providers.base import Tool
 from app.utils.http_clients import get_github_client, get_searxng_client
-from app.utils.llm_parsing import parse_json_array
 from app.utils.topic_detection import detect_topic_id as _topic_detect_impl
 
 logger = logging.getLogger("scaffold.gt")
@@ -58,33 +58,85 @@ TOPIC_KEYWORDS = {
 
 DISTILL_SYSTEM = """You are a knowledge distillation engine. Given raw search results about a topic, extract discrete factual knowledge entries.
 
-OUTPUT FORMAT (strict JSON array, no markdown fences):
-[
-  {
-    "title": "short-hyphenated-title",
-    "content": "Single self-contained fact. Technically precise. No filler.",
-    "tags": "comma,separated,tags",
-    "source": "URL or citation"
-  }
-]
-
 Rules:
 - Each entry is ONE atomic fact or concept
 - Be specific: include numbers, names, versions where applicable
 - Discard noise, opinions, marketing language
 - 5-10 entries per extraction
 - Content must NOT contain escaped quotes or backslashes
-- The "title" field is REQUIRED on every entry
-- If no useful facts found, return an empty array []"""
+- If no useful facts found, return an empty entries array"""
 
 DISTILL_PROMPT = """Extract factual knowledge entries from these search results about: {topic}
 
 Search results:
 ---
 {results}
----
+---"""
 
-Return ONLY the JSON array."""
+# Sprint X.12 — native tool-call schema. The wrapper parses structured args
+# on native-tool providers and falls back to JSON-coaxing on non-native
+# providers, so callers always read entries via resp.tool_calls[0].
+# arguments["entries"]. Replaces the legacy "OUTPUT FORMAT (strict JSON
+# array)..." prose block in DISTILL_SYSTEM.
+RECORD_DISTILLED_ENTRIES_TOOL = Tool(
+    name="record_distilled_entries",
+    description=(
+        "Record extracted factual knowledge entries from search results."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "entries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Short-hyphenated-title",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": (
+                                "Single self-contained fact. Technically "
+                                "precise. No filler."
+                            ),
+                        },
+                        "tags": {
+                            "type": "string",
+                            "description": "Comma-separated tags",
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "URL or citation",
+                        },
+                    },
+                    "required": ["title", "content"],
+                },
+            },
+        },
+        "required": ["entries"],
+    },
+)
+
+
+def _tool_args(resp) -> dict | None:
+    """Read the first tool call's arguments dict from a ModelResponse,
+    or None if no tool was called or arguments aren't a dict.
+
+    Sprint W.6 / X.10 / X.11 / X.12 — same shape as research_agent,
+    prompt_optimizer, idea_refinement copies. Four modules now duplicate
+    this 5-line helper; consolidation into a shared utility is queued
+    as the next Tier 2 audit-tail item now that the 4-way duplication
+    is settled.
+    """
+    if not getattr(resp, "success", False):
+        return None
+    calls = getattr(resp, "tool_calls", None) or []
+    if not calls:
+        return None
+    args = calls[0].arguments
+    return args if isinstance(args, dict) else None
 
 
 # ---------------------------------------------------------------------------
@@ -398,9 +450,12 @@ async def extract_ground_truths(
 
     prompt = DISTILL_PROMPT.format(topic=topic, results=results_text)
     route_kwargs = {"model": model} if model else {"role": "model_router"}
-    resp = await model_router.generate(
-        prompt,
-        system=DISTILL_SYSTEM,
+    resp = await model_router.tool_call(
+        messages=[
+            {"role": "system", "content": DISTILL_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        tools=[RECORD_DISTILLED_ENTRIES_TOOL],
         temperature=0.2,
         max_tokens=4096,
         **route_kwargs,
@@ -409,15 +464,19 @@ async def extract_ground_truths(
     if not resp.success:
         return {"status": "llm_failed", "topic": topic, "error": resp.error}
 
-    try:
-        entries = _parse_entries(resp.text)
-    except _ParseFailed as exc:
+    # Sprint X.12 — read structured args. Wrapper handles parsing on both
+    # native and coaxing providers. Failure path (no tool_calls, missing
+    # 'entries' key, wrong type) maps to status='parse_failed' to preserve
+    # the pre-X.12 caller contract.
+    args = _tool_args(resp)
+    if args is None or not isinstance(args.get("entries"), list):
         return {
             "status": "parse_failed",
             "topic": topic,
-            "error": f"Could not parse LLM output as JSON array: {exc}",
-            "raw_output": resp.text[:500],
+            "error": "LLM did not produce a valid entries array",
+            "raw_output": (resp.text or "")[:500],
         }
+    entries = args["entries"]
 
     if not entries:
         return {
@@ -458,23 +517,10 @@ async def extract_ground_truths(
     return result
 
 
-class _ParseFailed(Exception):
-    """LLM output could not be parsed as a JSON array."""
-
-
-def _parse_entries(raw: str) -> list[dict]:
-    """Parse JSON array from LLM output.
-
-    Returns:
-        list[dict]: parsed entries (possibly empty if the LLM returned `[]`).
-
-    Raises:
-        _ParseFailed: the output was not a valid JSON array.
-    """
-    parsed = parse_json_array(raw)
-    if parsed is None:
-        raise _ParseFailed("parse_json_array returned None")
-    return parsed
+# Sprint X.12 — `_parse_entries` and `_ParseFailed` removed. The
+# `model_router.tool_call` wrapper handles JSON-array parsing on both
+# native-tool and coaxing-fallback providers; failures surface via
+# `_tool_args` returning None (or args["entries"] not being a list).
 
 
 # --- backward-compat aliases ---

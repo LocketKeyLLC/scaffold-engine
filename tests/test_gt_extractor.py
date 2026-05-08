@@ -48,9 +48,18 @@ class TestSanitizeToonContent:
 
 @pytest.mark.smoke
 class TestTitleFieldConsistency:
-    def test_distill_system_emits_title(self):
-        assert '"title"' in gt.DISTILL_SYSTEM
-        assert '"topic"' not in gt.DISTILL_SYSTEM
+    def test_distill_tool_schema_uses_title_not_topic(self):
+        """Sprint X.12: the JSON schema moved from DISTILL_SYSTEM prose
+        into RECORD_DISTILLED_ENTRIES_TOOL.input_schema. The naming
+        consistency check now lives there — `title` is the canonical
+        field, `topic` is the legacy alias _normalize_legacy_keys
+        rewrites."""
+        item_props = (
+            gt.RECORD_DISTILLED_ENTRIES_TOOL.input_schema
+            ["properties"]["entries"]["items"]["properties"]
+        )
+        assert "title" in item_props
+        assert "topic" not in item_props
 
     def test_new_header_uses_title(self):
         hdr = gt._new_toon_header("knowledge/rag-systems.toon")
@@ -72,23 +81,31 @@ class TestTitleFieldConsistency:
 class TestDistillationUsesRouterModel:
     @pytest.mark.asyncio
     async def test_extract_uses_model_router(self):
+        """Sprint E.7 + X.12: distill defaults to role="model_router". The
+        call site uses model_router.tool_call (post-X.12) but the role/
+        overrides kwargs threading is identical."""
         fake_search = [{"title": "t", "url": "https://x.test/1", "content": "c"}]
+        fake_call = MagicMock()
+        fake_call.arguments = {
+            "entries": [
+                {"title": "fact", "content": "c", "tags": "a", "source": "u"},
+            ],
+        }
         fake_resp = MagicMock(
             success=True,
-            text='[{"title":"fact","content":"c","tags":"a","source":"u"}]',
+            text="",
             model="qwen3:4b",
             total_duration_ms=123,
             error=None,
+            tool_calls=[fake_call],
         )
         with patch.object(gt, "search_searxng", AsyncMock(return_value=fake_search)), \
-             patch.object(gt.model_router, "generate", AsyncMock(return_value=fake_resp)) as gen:
+             patch.object(gt.model_router, "tool_call", AsyncMock(return_value=fake_resp)) as tc:
             await gt.extract_ground_truths("rag systems")
 
-        assert gen.call_count == 1
-        # Sprint E.7: distill defaults to role="model_router" (no caller override
-        # passed). The model tag itself resolves inside model_router.generate.
-        assert gen.call_args.kwargs.get("role") == "model_router"
-        assert "model" not in gen.call_args.kwargs
+        assert tc.call_count == 1
+        assert tc.call_args.kwargs.get("role") == "model_router"
+        assert "model" not in tc.call_args.kwargs
 
 
 @pytest.mark.smoke
