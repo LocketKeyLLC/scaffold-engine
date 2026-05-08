@@ -2098,6 +2098,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | W.1 | Workflow audit — verifier-feedback loop on retry (§17.19) | done 2026-05-07 |
 | W.2 | Workflow audit — _compile_output heuristics polish (§17.20) | done 2026-05-07 |
 | W.3 | Workflow audit — DAG generator validator-driven retry loop (§17.21) | done 2026-05-07 |
+| W.4 | Workflow audit — prompt-build try/except wrap (§17.22) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2431,6 +2432,27 @@ Tier 1 / item 3 from the workflow audit. Until W.3, when `dag_generator` produce
 - Surface validator warnings in `scaffold dag <id>` and OWUI's `_render_dag` output (currently only consumers parsing the raw `/dag` response see them).
 - Consider per-domain validator strictness (e.g., research-heavy DAGs may legitimately use CodeGen for "Generate scraping script" — current rules don't capture that).
 - Track validator-call ROI: if telemetry shows a high rate of `validator_clean_after_retry_attempt_N`, the loop is paying for itself; if `validator_circuit_break_attempt_N` dominates, it's noise.
+
+### 17.22 Sprint W.4 — prompt-build try/except wrap (2026-05-07)
+
+Tier 1 / item 4 from the workflow audit. Until W.4, the prompt-assembly phase in `execute_next_node` (build → RAG/SearXNG/Milvus injection → upstream stitching → optimize) was **not** wrapped in try/except. If anything threw — `_build_prompt` on a malformed snapshot, `_fetch_rag_context` on a Milvus pool exhaustion, an unexpected dict shape during upstream stitching — the exception bubbled up to `execute_all_nodes`'s generic `except Exception` handler. That handler did cleanup-via-raw-SQL: marked the running node `failed` with `completed_at = NOW()`, but **never set `last_verification_reason`**. Net effect: W.1's verifier-feedback loop on the subsequent `/exec/retry` had nothing to feed back to the LLM — same prompt, same likely failure.
+
+**Change** in `app/modules/execution_agent.py`:
+- Wrap the entire prompt-assembly block (~593–658) in try/except.
+- On exception: open a fresh session, call `_set_node_status(failed, verification_reason="prompt build error: <e>")`, log via `_log_execution`, and return the same dict shape the existing timeout/exec-error paths return — adding `reason="prompt_build_error"` so callers can distinguish.
+- Note in code: the inner `optimize_prompt` try/except is intentionally narrower than the outer W.4 wrap. Optimizer failures fall back to `raw_prompt` (degraded-but-functional). Real exceptions earlier in assembly hit the W.4 outer handler and fail the node cleanly with a feedback-eligible reason.
+
+**Test-suite delta** (`tests/test_execution_agent_prompt_build.py`, new): 4 cases covering (1) `_build_prompt` raise → failed-shape dict, (2) `_set_node_status` invoked with `verification_reason` matching the build-error string, (3) helper exception (here: `_fetch_rag_context`) is caught by the outer wrap as a backstop even if helpers' internal try/except contracts shift, (4) the W.4 wrap is scoped only to the assembly phase — LLM-dispatch failures still flow through the existing exec-error handler with `verification_reason='execution error: ...'` (not `'prompt build error: ...'`).
+
+**Combined W.1+W.2+W.3+W.4 baseline: 86/86.**
+
+**What this does NOT do** (deferred):
+- Differentiated error categorization. The handler tags every assembly failure with `reason="prompt_build_error"`. Splitting into `rag_fetch_failed` / `upstream_truncation_failed` / `template_format_failed` etc. would help observability but not retry quality (W.1's loop already gets the message-level reason).
+- Auto-skip on persistent prompt-build failure. If three retries each fail with an identical reason, we just spin until `execution_global_retry_cap`. A future enhancement could short-circuit on identical `verification_reason` (mirrors the W.3 circuit-breaker pattern).
+
+**Open follow-ups (audit-tail)**:
+- Same observability point as W.3: surface the prompt-build-error reason in OWUI's node-failed render.
+- Consider extending the wrap to `_fetch_upstream_outputs` (currently inside the first session block, before the W.4 wrap starts). Failures there bubble out of the `async with` and currently go to `execute_all_nodes`'s generic handler — same gap, but for a narrower set of exceptions (DB layer, async-session lifecycle).
 
 ---
 

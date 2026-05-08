@@ -589,73 +589,106 @@ async def execute_next_node(
         }
     # ---- Session closed. LLM phase begins. ----
 
-    # Build raw prompt.
-    raw_prompt = _build_prompt(node_snapshot, brief)
+    # Sprint W.4 — prompt-build try/except wrap. The whole assembly path
+    # (build → RAG/SearXNG/Milvus injection → upstream stitching → optimize)
+    # is wrapped so a failure here marks the node 'failed' with
+    # last_verification_reason populated, consistent with the timeout +
+    # exec-error paths below. Without this wrap, an exception here bubbles
+    # up to execute_all_nodes' generic handler, which forces the node to
+    # 'failed' but leaves last_verification_reason NULL — defeating W.1's
+    # retry-feedback loop on the subsequent /exec/retry.
+    try:
+        # Build raw prompt.
+        raw_prompt = _build_prompt(node_snapshot, brief)
 
-    # Inject RAG grounding BEFORE optimize (optimizer should see grounded content).
-    project_goal = " ".join(brief.get("goals", [])) if brief else ""
-    rag_query = f"{project_goal}: {title}" if project_goal else title
-    job_domain = brief.get("domain") if brief else None
+        # Inject RAG grounding BEFORE optimize (optimizer should see grounded content).
+        project_goal = " ".join(brief.get("goals", [])) if brief else ""
+        rag_query = f"{project_goal}: {title}" if project_goal else title
+        job_domain = brief.get("domain") if brief else None
 
-    if tool_lower == "milvus":
-        rag_block = await _milvus_search(title, node_key=node_key, domain=node_snapshot.get("domain"))
-        if rag_block:
-            raw_prompt = f"{raw_prompt}\n\n## Knowledge Base Results\n{rag_block}"
-            logger.info("milvus_context_injected: chars=%d node='%s'", len(rag_block), title)
-    elif tool_lower == "searxng":
-        search_results = await _searxng_search(title)
-        raw_prompt = f"{raw_prompt}\n\n## Web Search Results\n{search_results}"
-        logger.info("searxng_context_injected: chars=%d node='%s'", len(search_results), title)
-    else:
-        rag_context = await _fetch_rag_context(rag_query, top_k=settings.verifier_top_k, domain=job_domain)
-        if rag_context:
-            raw_prompt = f"{raw_prompt}\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}"
-            logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
+        if tool_lower == "milvus":
+            rag_block = await _milvus_search(title, node_key=node_key, domain=node_snapshot.get("domain"))
+            if rag_block:
+                raw_prompt = f"{raw_prompt}\n\n## Knowledge Base Results\n{rag_block}"
+                logger.info("milvus_context_injected: chars=%d node='%s'", len(rag_block), title)
+        elif tool_lower == "searxng":
+            search_results = await _searxng_search(title)
+            raw_prompt = f"{raw_prompt}\n\n## Web Search Results\n{search_results}"
+            logger.info("searxng_context_injected: chars=%d node='%s'", len(search_results), title)
+        else:
+            rag_context = await _fetch_rag_context(rag_query, top_k=settings.verifier_top_k, domain=job_domain)
+            if rag_context:
+                raw_prompt = f"{raw_prompt}\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}"
+                logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
 
-    # Inject upstream outputs (size-managed).
-    if upstream_outputs:
-        total_chars = sum(len(v) for v in upstream_outputs.values())
-        truncated_keys = []
-        if total_chars > settings.max_upstream_chars:
-            for nk in upstream_outputs:
-                orig_len = len(upstream_outputs[nk])
-                share = max(settings.compile_output_min_chunk, int(settings.max_upstream_chars * orig_len / total_chars))
-                if orig_len > share:
-                    upstream_outputs[nk] = _truncate_output(upstream_outputs[nk], share)
-                    truncated_keys.append(nk)
-            logger.info(
-                "upstream_truncated",
-                extra=dict(
-                    event="upstream_truncated",
-                    node_key=node_key,
-                    original_chars=total_chars,
-                    truncated_chars=sum(len(v) for v in upstream_outputs.values()),
-                    upstream_nodes=truncated_keys,
-                ),
+        # Inject upstream outputs (size-managed).
+        if upstream_outputs:
+            total_chars = sum(len(v) for v in upstream_outputs.values())
+            truncated_keys = []
+            if total_chars > settings.max_upstream_chars:
+                for nk in upstream_outputs:
+                    orig_len = len(upstream_outputs[nk])
+                    share = max(settings.compile_output_min_chunk, int(settings.max_upstream_chars * orig_len / total_chars))
+                    if orig_len > share:
+                        upstream_outputs[nk] = _truncate_output(upstream_outputs[nk], share)
+                        truncated_keys.append(nk)
+                logger.info(
+                    "upstream_truncated",
+                    extra=dict(
+                        event="upstream_truncated",
+                        node_key=node_key,
+                        original_chars=total_chars,
+                        truncated_chars=sum(len(v) for v in upstream_outputs.values()),
+                        upstream_nodes=truncated_keys,
+                    ),
+                )
+            parts = [f"### {nk}\n{upstream_text}" for nk, upstream_text in upstream_outputs.items()]
+            raw_prompt = (
+                "## Upstream Node Outputs (MANDATORY CONTEXT — your output MUST build on and be consistent with this work)\n"
+                + "\n\n".join(parts)
+                + "\n\n---\n\n## YOUR TASK (build on the upstream outputs above — do NOT rewrite or contradict them):\n"
+                + raw_prompt
             )
-        parts = [f"### {nk}\n{upstream_text}" for nk, upstream_text in upstream_outputs.items()]
-        raw_prompt = (
-            "## Upstream Node Outputs (MANDATORY CONTEXT — your output MUST build on and be consistent with this work)\n"
-            + "\n\n".join(parts)
-            + "\n\n---\n\n## YOUR TASK (build on the upstream outputs above — do NOT rewrite or contradict them):\n"
-            + raw_prompt
-        )
 
-    # Optimize prompt (now sees grounded content).
-    if not skip_optimize:
-        try:
-            opt_result = await optimize_prompt(
-                prompt=raw_prompt,
-                skip_verify=True,
-                model_overrides=model_overrides,
-            )
-            exec_prompt = opt_result.optimized_prompt
-            logger.info("Prompt optimized: %d -> %d tokens", opt_result.token_count_before, opt_result.token_count_after)
-        except Exception as e:
-            logger.warning("Prompt optimization failed, using raw: %s", e)
+        # Optimize prompt (now sees grounded content). The inner try/except
+        # below is intentionally narrower than the outer W.4 wrap — optimizer
+        # failures fall back to raw_prompt rather than failing the node, while
+        # exceptions raised before this point reach the W.4 outer handler.
+        if not skip_optimize:
+            try:
+                opt_result = await optimize_prompt(
+                    prompt=raw_prompt,
+                    skip_verify=True,
+                    model_overrides=model_overrides,
+                )
+                exec_prompt = opt_result.optimized_prompt
+                logger.info("Prompt optimized: %d -> %d tokens", opt_result.token_count_before, opt_result.token_count_after)
+            except Exception as e:
+                logger.warning("Prompt optimization failed, using raw: %s", e)
+                exec_prompt = raw_prompt
+        else:
             exec_prompt = raw_prompt
-    else:
-        exec_prompt = raw_prompt
+    except Exception as build_exc:
+        err_msg = f"prompt build error: {build_exc}"
+        logger.exception(
+            "node_prompt_build_failed: node='%s' job=%s error=%s",
+            title, job_id, build_exc,
+        )
+        async with async_session() as _err_db:
+            await _set_node_status(
+                _err_db, node_id, "failed",
+                verification_reason=err_msg,
+            )
+            await _log_execution(_err_db, job_id, node_id, "error", err_msg)
+        return {
+            "status": "failed",
+            "node_key": node_key,
+            "title": title,
+            "error": err_msg,
+            "verification_reason": err_msg,
+            "reason": "prompt_build_error",
+            "message": "Prompt build failed. Review brief, RAG sources, or upstream outputs; retry when fixed.",
+        }
 
     # Execute with timeout guard.
     _node_t0 = time.monotonic()
