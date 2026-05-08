@@ -2123,6 +2123,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | J.2.a | Native single-page web UI — read-only browse (§17.45) | done 2026-05-08 |
 | J.2.b | Native single-page web UI — submit flow (ideate + confirm) (§17.46) | done 2026-05-08 |
 | J.2.c | Native single-page web UI — execute SSE (HTMX hx-sse) (§17.47) | done 2026-05-08 |
+| J.3.a | Cost + latency telemetry foundation — schema + logging hook (§17.48) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -3142,6 +3143,47 @@ Phase 3 (final) of roadmap item J.2 — closes the native web UI. Adds live SSE-
 **Test-suite delta:** `tests/test_web_ui.py` extended from 25 → **43 cases**. New (18): `TestRunButtonVisibility` (9: parametrized over executable + non-executable statuses), `TestPostRun` (1: container fragment), `TestRunStream` (7: content-type, node_done rendering, node_failed with error, HTML-escape, terminal-event-breaks, mid-stream-failure-emits-error, unknown-event-passthrough), `TestSseExtensionLoaded` (1: layout includes htmx-ext-sse). The async-iterator mock pattern (`_async_iter_factory(events)` returning an async generator function) is captured as a reusable test helper. All 43 pass; auth/middleware/main suites unchanged.
 
 **Roadmap item J.2 is complete** across phases a + b + c. Native web UI now covers: read-only browse (J.2.a), submit flow ideate+confirm (J.2.b), live execute SSE (J.2.c). The browser-only path from "open localhost" → submit idea → confirm → watch nodes execute → view compiled output is end-to-end functional. OWUI remains as the rich frontend; this is the demo + remote-deploy path.
+
+### 17.48 Sprint J.3.a — cost + latency telemetry foundation (2026-05-08)
+
+Phase 1 of the last roadmap item — capture per-LLM-call cost and latency so future phases (J.3.b rollup endpoint, J.3.c CLI/OWUI/Make surfaces) have a foundation to query. J.3.a ships **schema + logging hook only**; no surfaces yet, but raw SQL queries already work end-to-end.
+
+Migration 030 (`db/migrations/030_cost_telemetry.sql`):
+
+- Two new tables, single DO block per X.5's lesson (asyncpg's prepared-statement protocol rejects multi-statement bodies).
+- **`model_costs`** — `provider TEXT, model TEXT, input_per_1m_usd NUMERIC, output_per_1m_usd NUMERIC, updated_at`. PK on `(provider, model)`. Seeded with current cloud-provider rates (openai gpt-4o, gpt-4o-mini, gpt-4-turbo; anthropic claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5). `ON CONFLICT DO NOTHING` so operator-edited values are preserved across re-applies.
+- **`llm_call_logs`** — `id BIGSERIAL, job_id UUID NULL, node_id UUID NULL, provider, model, prompt_tokens, completion_tokens, latency_ms, cost_usd NUMERIC, success, created_at`. `cost_usd` is **computed at insert time** so historical reads don't drift when `model_costs` rates are updated. job_id/node_id are nullable so off-job calls (`validate_models`, standalone `/optimize`, etc.) are still tracked, just ungrouped.
+- Two indexes: partial `idx_llm_call_logs_job_id (job_id) WHERE job_id IS NOT NULL` (off-job calls don't bloat the index), and `idx_llm_call_logs_created_at (created_at DESC)` for recency queries.
+- **Local Ollama models intentionally NOT seeded.** `compute_cost_usd` returns 0 when no `model_costs` row exists — every Ollama model is automatically free without per-model seed updates. Cloud-only spend surfaces cleanly.
+
+`app/utils/cost_tracking.py` (new):
+
+- **ContextVars** `current_job_id` / `current_node_id` carry job/node identity from `execute_next_node` across the async boundary into the recorder. ContextVars are per-task in asyncio, so each `execute_next_node` running under `execute_all_nodes`'s `create_task()` gets its own clean context — no manual reset needed.
+- `compute_cost_usd(db, provider, model, prompt_tokens, completion_tokens) → float` — single source of truth for the formula `(prompt × in_rate + completion × out_rate) / 1M`. Defensive: zero/negative tokens clamp to 0; missing rate row returns 0; blank provider/model returns 0 without a SELECT.
+- `record_llm_call(resp)` — async fire-and-forget. Reads ContextVars, opens its **own short-lived session** (so it can't conflict with the caller's session-lifetime policy — `execute_next_node` holds NO session open across LLM calls), looks up the rate, INSERTs the log row. Wrapped in try/except at every level: telemetry must never break the LLM call path.
+
+`model_router.py` wiring:
+
+- New `_record_call(resp) → resp` helper at the top of the module. Lazy-imports `record_llm_call` (avoids circular-import surface area), swallows any failure, returns the input untouched so it can be inlined as `return await _record_call(resp)` at every public-method exit.
+- Wired into `generate` (both role + model paths), `chat` (both paths), `tool_call` (4 paths: role+native, role+coaxing, model+native, model+coaxing), `embed` (model path only — the role path returns embeddings directly without a `ModelResponse`, can't be recorded; TODO J.3.b). `classify` delegates to `generate` so it's covered transitively.
+- The `provider` field on `ModelResponse` (set by each provider impl when constructing — verified for both `OllamaProvider` and `OpenAIProvider`) carries the right tag for the rate lookup. Multiple-attempt dispatches log the final `resp` only — operators see the call that actually returned to them.
+
+`execution_agent.execute_next_node`:
+
+- Imports `current_job_id` / `current_node_id`, calls `.set(...)` immediately after Phase 1's session closes (right where the LLM phase begins). No reset because `execute_next_node` runs as its own asyncio task under `execute_all_nodes`'s `create_task()` — the task ends when the function returns, taking the ContextVars with it.
+
+**What's NOT in J.3.a** (deferred):
+- Surfaces: no `/jobs/{id}/costs` endpoint, no `scaffold jobs status --costs` flag, no OWUI `X-Job-Cost` header, no `make costs` rollup. Operators query via raw SQL for now.
+- Off-job entry-point coverage: `refine_idea` and `_run_with_session_lifecycle` (research) don't yet set the ContextVars, so their LLM calls have NULL `job_id`. Bulk LLM cost (DAG execution) is correctly attributed; everything else lands in the "ad-hoc" group.
+- `embed` role-path (provider.embed returns `list[list[float]]` not `ModelResponse`).
+
+**Project pattern (memory-worthy):** when adding telemetry to a hot path that has many call sites and several dispatch branches, **don't thread the telemetry kwarg through every signature** — use ContextVars set by the entry-point (here: `execute_next_node`) and read by a single recorder helper inside the dispatch boundary (here: `model_router._record_call`). One-line set at the entry, one-line `await _record_call(resp)` at each return. Lazy-imports + try/except at every level keep the telemetry path from coupling the LLM path's failure modes.
+
+**Project pattern (memory-worthy):** for cost tables that drift over time (provider price changes), seed only what you can stand by today and **compute cost at insert time, not at read time**. Reading historical `cost_usd` should be deterministic regardless of how many times the operator's edited the rate table since. The `model_costs` table is editable for *future* calls; the `llm_call_logs.cost_usd` column is immutable history.
+
+**Test-suite delta:** `tests/test_cost_tracking.py` (new): 10 cases — `TestComputeCostUsd` (5: priced call returns USD; unknown provider → 0; zero tokens → 0; negative tokens clamped; blank provider/model → 0), `TestRecordLlmCall` (3: writes row with ContextVars; DB failure swallowed; no ContextVars writes NULL job_id), `TestContextVarDefaults` (2: defaults to None; copy_context isolation). Cross-suite regression `-k "model_router or execution_agent_compile or execution_agent_feedback or execution_agent_prompt or execution_agent_upstream"`: **107/107**, no breakage from the wiring.
+
+Live-applied migration 030; second apply confirmed idempotent (empty `applied` list). 6 seed rates inserted, 0 log rows yet (logs accumulate from the next live LLM call onward).
 
 ---
 

@@ -41,6 +41,7 @@ from app.modules.execution_compile import _compile_output  # re-exported for tes
 from app.modules.execution_verify import VERIFY_SYSTEM, _verify_output  # re-exported for test patches
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag
+from app.utils.cost_tracking import current_job_id, current_node_id
 
 logger = logging.getLogger(__name__)
 
@@ -633,6 +634,15 @@ async def execute_next_node(
             "last_verification_reason": node.get("last_verification_reason"),
         }
     # ---- Session closed. LLM phase begins. ----
+
+    # Sprint J.3.a — set cost-tracking ContextVars so every model_router
+    # call inside this task records its log row tagged with this job +
+    # node. The values persist for the rest of this asyncio task; since
+    # execute_next_node runs as its own create_task() under
+    # execute_all_nodes (and ContextVars are per-task), no manual reset
+    # is needed — the task ends when the function returns.
+    current_job_id.set(job_id)
+    current_node_id.set(str(node_id))
 
     # Sprint W.4 — prompt-build try/except wrap. The whole assembly path
     # (build → RAG/SearXNG/Milvus injection → upstream stitching → optimize)

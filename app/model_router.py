@@ -168,6 +168,23 @@ async def _call_ollama(
 # Retry + fallback wrapper
 # ---------------------------------------------------------------------------
 
+async def _record_call(resp: ModelResponse) -> ModelResponse:
+    """Sprint J.3.a — fire-and-forget cost/latency telemetry hook.
+
+    Imports the recorder lazily and swallows any failure: telemetry must
+    never break the LLM call path. Returns the input untouched so this
+    can be inlined as ``return await _record_call(resp)`` at every
+    public-method exit. The recorder reads job/node ContextVars set by
+    ``execute_next_node`` and writes one ``llm_call_logs`` row.
+    """
+    try:
+        from app.utils.cost_tracking import record_llm_call
+        await record_llm_call(resp)
+    except Exception:
+        pass  # already logged inside record_llm_call's try/except
+    return resp
+
+
 async def _dispatch_with_retry(
     endpoint: str,
     payload: dict[str, Any],
@@ -325,7 +342,7 @@ async def generate(
         )
         if not resp.success:
             resp.error = _format_provider_error(resp, role)
-        return resp
+        return await _record_call(resp)
 
     model = model or settings.model_general
     payload: dict[str, Any] = {
@@ -336,7 +353,8 @@ async def generate(
     }
     if system:
         payload["system"] = system
-    return await _dispatch_with_retry("/api/generate", payload, model, fallback)
+    resp = await _dispatch_with_retry("/api/generate", payload, model, fallback)
+    return await _record_call(resp)
 
 
 async def chat(
@@ -360,7 +378,7 @@ async def chat(
         )
         if not resp.success:
             resp.error = _format_provider_error(resp, role)
-        return resp
+        return await _record_call(resp)
 
     model = model or settings.model_general
     payload: dict[str, Any] = {
@@ -369,7 +387,8 @@ async def chat(
         "stream": False,
         "options": {"temperature": temperature, "num_predict": max_tokens},
     }
-    return await _dispatch_with_retry("/api/chat", payload, model, fallback)
+    resp = await _dispatch_with_retry("/api/chat", payload, model, fallback)
+    return await _record_call(resp)
 
 
 async def tool_call(
@@ -420,28 +439,31 @@ async def tool_call(
             )
             if not resp.success:
                 resp.error = _format_provider_error(resp, role)
-            return resp
-        return await _tool_call_via_coaxing(
+            return await _record_call(resp)
+        coaxed = await _tool_call_via_coaxing(
             provider, resolved_model, messages, tools,
             temperature=temperature, max_tokens=max_tokens,
             role=role, fallback=fallback,
         )
+        return await _record_call(coaxed)
 
     # Legacy direct-model path → go through the ollama provider's tool_call.
     model = model or settings.model_general
     from app.providers import get_provider
     provider = get_provider("ollama")
     if getattr(provider, "supports_native_tools", False):
-        return await provider.tool_call(
+        resp = await provider.tool_call(
             model, messages, tools,
             temperature=temperature, max_tokens=max_tokens,
             tool_choice=tool_choice,
         )
-    return await _tool_call_via_coaxing(
+        return await _record_call(resp)
+    coaxed = await _tool_call_via_coaxing(
         provider, model, messages, tools,
         temperature=temperature, max_tokens=max_tokens,
         role=None, fallback=fallback,
     )
+    return await _record_call(coaxed)
 
 
 async def _tool_call_via_coaxing(
@@ -527,6 +549,10 @@ async def embed(
         "input": inputs,
     }
     resp = await _dispatch_with_retry("/api/embed", payload, model, fallback=None)
+    # J.3.a — record before returning. Embedding cost on local Ollama is
+    # 0; the role-path (provider.embed) returns embeddings directly without
+    # a ModelResponse and is left un-recorded — TODO J.3.b.
+    await _record_call(resp)
     if not resp.success:
         logger.error("Embedding failed after retries: %s", resp.error)
         return []
