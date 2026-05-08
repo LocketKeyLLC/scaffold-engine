@@ -317,3 +317,219 @@ class TestCompileOutputExplicitMarker:
         assert "alpha" in result
         assert "beta" in result
         assert "---" in result
+
+
+# ---------------------------------------------------------------------------
+# Sprint W.7 — opt-in LLM synthesis pass
+# ---------------------------------------------------------------------------
+
+
+def _synthesis_response(text: str = "synthesized prose"):
+    """Build a model_router.tool_call response with a render_summary call."""
+    from app.providers.base import ModelResponse, ToolCall
+    return ModelResponse(
+        text="", model="fake", success=True,
+        tool_calls=[ToolCall(
+            id="t0", name="render_summary",
+            arguments={"summary": text},
+        )],
+    )
+
+
+def _synthesis_failure():
+    from app.providers.base import ModelResponse
+    return ModelResponse(
+        text="", model="fake", success=False, error="ollama down",
+    )
+
+
+def _make_db_with_brief(rows, brief_description="Build a parser"):
+    """make_mock_db returns a db whose every .execute() yields the same rows.
+    For W.7 we also need the brief lookup to return a refined_brief dict.
+    Using AsyncMock with side_effect lets us route the second call (brief
+    SELECT) to a separate result."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    nodes_result = MagicMock()
+    nodes_mappings = MagicMock()
+    nodes_mappings.all.return_value = rows
+    nodes_result.mappings.return_value = nodes_mappings
+
+    brief_result = MagicMock()
+    brief_mappings = MagicMock()
+    brief_mappings.first.return_value = {
+        "refined_brief": {"description": brief_description},
+    }
+    brief_result.mappings.return_value = brief_mappings
+
+    db = AsyncMock()
+    # First call: SELECT dag_nodes ... (compile path)
+    # Second call: SELECT refined_brief ... (synthesis path)
+    db.execute = AsyncMock(side_effect=[nodes_result, brief_result])
+    return db
+
+
+@pytest.mark.smoke
+class TestCompileOutputSynthesis:
+    """W.7 — opt-in LLM synthesis. Default OFF; when ON, runs on all
+    strategies except CodeGen-source paths (CodeGen guard preserves code)."""
+
+    async def test_synthesis_disabled_returns_heuristic_no_llm_call(self):
+        """Default behavior: synthesis off → heuristic returned, no LLM call."""
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Plan", "tool": "LLM",
+             "status": "done", "output_text": "plan content"},
+            {"node_key": "T2", "title": "Build", "tool": "LLM",
+             "status": "done", "output_text": "build content"},
+        ])
+        synth_mock = AsyncMock()
+        with patch.object(settings, "compile_synthesis_enabled", False), \
+             patch(
+                 "app.modules.execution_compile._synthesize_compiled_output",
+                 new=synth_mock,
+             ):
+            result = await _compile_output("job-1", db)
+
+        # Strategy 3 heuristic shape
+        assert "## T1: Plan" in result
+        assert "## T2: Build" in result
+        # No synthesis call.
+        synth_mock.assert_not_called()
+
+    async def test_synthesis_enabled_strategy3_uses_llm_output(self):
+        """Strategy 3 + synthesis ON → LLM-rewritten narrative replaces
+        heuristic body."""
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        db = _make_db_with_brief([
+            {"node_key": "T1", "title": "Plan", "tool": "LLM",
+             "status": "done", "output_text": "plan content"},
+            {"node_key": "T2", "title": "Build", "tool": "LLM",
+             "status": "done", "output_text": "build content"},
+        ])
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch(
+                 "app.model_router.tool_call",
+                 new=AsyncMock(return_value=_synthesis_response(
+                     "Coherent narrative covering both Plan and Build.",
+                 )),
+             ):
+            result = await _compile_output("job-1", db)
+
+        assert result == "Coherent narrative covering both Plan and Build."
+
+    async def test_synthesis_fail_open_returns_heuristic(self):
+        """LLM call raises → fall back to heuristic body."""
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        db = _make_db_with_brief([
+            {"node_key": "T1", "title": "Plan", "tool": "LLM",
+             "status": "done", "output_text": "plan"},
+            {"node_key": "T2", "title": "Build", "tool": "LLM",
+             "status": "done", "output_text": "build"},
+        ])
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch(
+                 "app.model_router.tool_call",
+                 new=AsyncMock(side_effect=RuntimeError("ollama down")),
+             ):
+            result = await _compile_output("job-1", db)
+
+        # Heuristic shape preserved.
+        assert "## T1: Plan" in result
+        assert "## T2: Build" in result
+
+    async def test_synthesis_unsuccessful_response_falls_back(self):
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        db = _make_db_with_brief([
+            {"node_key": "T1", "title": "Plan", "tool": "LLM",
+             "status": "done", "output_text": "plan"},
+            {"node_key": "T2", "title": "Build", "tool": "LLM",
+             "status": "done", "output_text": "build"},
+        ])
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch(
+                 "app.model_router.tool_call",
+                 new=AsyncMock(return_value=_synthesis_failure()),
+             ):
+            result = await _compile_output("job-1", db)
+
+        assert "## T1: Plan" in result
+
+    async def test_codegen_guard_skips_synthesis_strategy_2(self):
+        """Strategy 2 (last CodeGen): synthesis ON but CodeGen guard fires
+        → heuristic returned verbatim, no LLM call."""
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        code_payload = "def hello():\n    print('hi')"
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Plan", "tool": "LLM",
+             "status": "done", "output_text": "plan"},
+            {"node_key": "T2", "title": "Implement", "tool": "CodeGen",
+             "status": "done", "output_text": code_payload},
+        ])
+        synth_call = AsyncMock()
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch(
+                 "app.model_router.tool_call",
+                 new=synth_call,
+             ):
+            result = await _compile_output("job-1", db)
+
+        # CodeGen output preserved verbatim.
+        assert result == code_payload
+        # CodeGen guard ran inside _synthesize_compiled_output before the
+        # LLM call would have fired.
+        synth_call.assert_not_called()
+
+    async def test_synthesis_enabled_strategy0_single_leaf(self):
+        """Strategy 0 single-leaf with non-CodeGen tool → synthesis fires."""
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        db = _make_db_with_brief([
+            {"node_key": "T1", "title": "Research", "tool": "LLM",
+             "status": "done", "output_text": "raw research dump"},
+            {"node_key": "T2", "title": "Synthesize", "tool": "LLM",
+             "status": "done", "output_text": "explicit leaf body",
+             "is_output_node": True},
+        ])
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch(
+                 "app.model_router.tool_call",
+                 new=AsyncMock(return_value=_synthesis_response(
+                     "Polished narrative version.",
+                 )),
+             ):
+            result = await _compile_output("job-1", db)
+
+        assert result == "Polished narrative version."
+
+    async def test_synthesis_strategy0_codegen_leaf_skipped(self):
+        """Strategy 0 single-leaf with tool=CodeGen → guard fires, raw code returned."""
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        code = "fn main() { println!(\"hi\"); }"
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Write the binary", "tool": "CodeGen",
+             "status": "done", "output_text": code,
+             "is_output_node": True},
+        ])
+        synth_call = AsyncMock()
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch(
+                 "app.model_router.tool_call",
+                 new=synth_call,
+             ):
+            result = await _compile_output("job-1", db)
+        assert result == code
+        synth_call.assert_not_called()

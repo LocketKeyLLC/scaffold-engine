@@ -239,6 +239,15 @@ class Settings(BaseSettings):
     # so the cap rarely binds for them. Default 100k chars handles typical
     # multi-node outputs; pathological cases (50+ verbose nodes) get clipped.
     compile_output_max_chars: int = Field(default=100_000, ge=1_000, le=2_000_000)
+    # Sprint W.7 — opt-in LLM-driven post-processing pass on the compiled
+    # output. Default OFF so existing job behavior is unchanged. When ON,
+    # the heuristic body produced by _compile_output is fed to an LLM that
+    # rewrites the sectioned dump into a coherent narrative. Fail-open:
+    # any LLM/parse failure returns the heuristic body unchanged.
+    # CodeGen-deliverable jobs (Strategy 2 with tool='CodeGen' source) skip
+    # synthesis even when enabled — executable code passes through verbatim.
+    compile_synthesis_enabled: bool = False
+    compile_synthesis_max_tokens: int = Field(default=4096, ge=512, le=16384)
     # Sprint W.3 — DAG generator tool-pick validator. After the LLM emits a DAG,
     # a second-pass validator LLM checks each task's tool selection against the
     # documented rules and returns issues; if any are found, the generator is

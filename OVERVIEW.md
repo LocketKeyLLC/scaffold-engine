@@ -2101,6 +2101,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | W.4 | Workflow audit — prompt-build try/except wrap (§17.22) | done 2026-05-07 |
 | W.5 | Workflow audit — assist_replan.selective LLM regen (§17.23) | done 2026-05-07 |
 | W.6 | Workflow audit — native tool-call migration (research/verify) (§17.24) | done 2026-05-07 |
+| W.7 | Workflow audit — opt-in LLM synthesis pass on compiled output (§17.25) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2536,6 +2537,51 @@ Tier 1 / item 6 from the workflow audit. Replaces the long-standing "ask the LLM
 - `idea_refinement.py` and `gt_extractor.py` migrations (each has its own coaxed call site).
 - Provider-side: `OllamaProvider.tool_call` returns immediately on partial response (no retry). Consider parity with `generate`/`chat`'s retry/fallback once we see real production failure modes.
 - Coaxing-path observability: log when the wrapper falls back to coaxing so operators can see which roles' providers can't handle native tools.
+
+### 17.25 Sprint W.7 — opt-in LLM synthesis pass on compiled output (2026-05-07)
+
+Tier 1 / item 7 from the workflow audit. The lever W.2 explicitly deferred. Until W.7, `_compile_output` produced heuristic output only — Strategy 3 in particular was "a long, redundant, sectioned dump rather than a coherent deliverable" (audit's words). W.7 ships a post-processor that rewrites the heuristic into prose via the LLM, behind an opt-in kill switch.
+
+**Scope** (decided via explicit user pick):
+- **Default OFF** (`compile_synthesis_enabled=false`). Existing job behavior unchanged on every deployment until someone explicitly turns it on.
+- **All paths eligible**: Strategy 0 (single + multi-leaf), Strategy 2, Strategy 3. Per user request.
+- **CodeGen guard** (added on top of the user's pick): when synthesis would otherwise fire on a Strategy-2 (last-CodeGen) or single-leaf-Strategy-0 path with `tool='CodeGen'`, the synthesizer short-circuits without an LLM call and returns the raw heuristic. Executable code passes through verbatim — synthesizing it as prose would silently corrupt deliverables. Logged at INFO so operators can see when the guard fires. Multi-leaf and Strategy-3 paths have heterogeneous `source_tool` and don't hit the guard; the synthesis system prompt instructs the model to "preserve code blocks verbatim inside their original triple-backtick fences" so embedded code in mixed deliverables survives.
+
+**Implementation** (`app/modules/execution_compile.py`, +~165 lines):
+- `_synthesize_compiled_output(*, job_id, heuristic, source_strategy, source_tool, db, model_overrides)` — async helper. Fetches `refined_brief` for goal context. Skips if `source_tool='CodeGen'` (guard). Calls `model_router.tool_call` with a `render_summary` Tool whose `input_schema={summary: string}`. Reads `resp.tool_calls[0].arguments["summary"]`. Returns `None` on any failure (LLM exception, unsuccessful response, no tool call, args not dict, empty/non-string summary).
+- `_maybe_synthesize(*, job_id, heuristic, strategy, source_tool, db)` — centralizes the fail-open contract. Called from each strategy's return path. If `compile_synthesis_enabled=False`, returns the heuristic unchanged. If synthesis returns None (failure or guard), returns the heuristic. Otherwise returns the synthesized text.
+- `SYNTHESIS_SYSTEM` prompt is explicit about preserving facts/numbers/code blocks and removing redundancy + section headers + horizontal rules. Length guidance: "roughly the same total length as the input" (don't compress aggressively).
+- Synthesis temperature 0.2 (lower than research/decompose because we want faithful rewriting, not creative variance).
+
+**New settings** (`app/config.py`):
+- `compile_synthesis_enabled: bool = False` — kill switch (default OFF).
+- `compile_synthesis_max_tokens: int = 4096` — cap on the synthesized response (range 512–16384).
+
+**Strategy applicability table** (when `compile_synthesis_enabled=True`):
+
+| Strategy | source_tool | Synthesis fires? | Notes |
+|---|---|---|---|
+| 0 single-leaf, non-CodeGen | LLM/SearXNG/Milvus | Yes | Polishes the explicit-output node |
+| 0 single-leaf, CodeGen | CodeGen | **No** (guard) | Code preserved verbatim |
+| 0 multi-leaf | mixed (None) | Yes | Code blocks preserved by prompt rule |
+| 2 last-CodeGen | CodeGen | **No** (guard) | Code is the deliverable |
+| 3 concat-all | mixed (None) | Yes | The audit's primary target |
+
+**Cost**: when enabled, +1 LLM call per Strategy-{0,3} job completion (~3–7s + tokens). Strategy 2 and CodeGen-leaf Strategy 0 have zero cost overhead due to the guard. Disable via `compile_synthesis_enabled=false` if cost-sensitive or if narrative output isn't valuable for the workload.
+
+**Test-suite delta** (`tests/test_execution_agent_compile.py`): 7 new in `TestCompileOutputSynthesis` — synthesis disabled returns heuristic with no LLM call; Strategy 3 + enabled → synthesized text; LLM call exception → fail-open to heuristic; unsuccessful response → fail-open; CodeGen guard on Strategy 2 → no LLM call, code returned verbatim; Strategy 0 single-leaf non-CodeGen → synthesis fires; Strategy 0 single-leaf CodeGen → guard fires, code preserved. Total file count: 15 (W.2 baseline) → 22. **Combined regression baseline (W track + verify + research): 259/259.**
+
+**Patching note for tests**: synthesis tests patch `app.model_router.tool_call` — *not* `app.modules.execution_compile.model_router.tool_call` — because `_synthesize_compiled_output` does `from app import model_router` lazily inside the function (avoids a circular import; the same pattern is used elsewhere in execution_compile). The lazy import means there's no module-level `model_router` attribute on `execution_compile`. Patching the canonical attribute on the source module works for both call paths.
+
+**What this does NOT do** (deferred):
+- Per-job opt-in (e.g., a column on `jobs` allowing some jobs to enable synthesis while others don't). The current setting is global only. Per-job opt-in adds API + schema surface; defer until there's a concrete operator request.
+- Synthesis budget telemetry. Once J.3 (cost telemetry) lands, track synthesis tokens under a "compile_synthesis" budget so operators can see if the post-processing is worth its cost.
+- Cache synthesized output. Re-running `_compile_output` against a job with already-cached compiled_output skips recompute (W.2 cache path), but no per-strategy cache for synthesis. Re-running synthesis on the same heuristic input is unlikely (compile only runs at job completion or `/exec` blocked-cache miss), so this is academic.
+
+**Open follow-ups (audit-tail):**
+- Surface a `synthesized=true|false` flag in `/exec/status/{job_id}` so consumers know whether compiled_output is a synthesized narrative or the raw heuristic. Useful for downstream "show me what was generated" UIs.
+- Consider lower temperatures on the synthesis call for code-heavy deliverables — though the explicit "preserve verbatim" instruction should already handle this.
+- W.7 + J.3: when cost telemetry lands, log per-call synthesis tokens; if the synthesized output is barely longer than the heuristic, the synthesis is likely just paraphrasing — not adding value. Use that as a signal to recommend turning synthesis off for that workload.
 
 ---
 
