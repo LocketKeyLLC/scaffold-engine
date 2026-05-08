@@ -6,6 +6,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.modules import research_agent as ra
+from app.providers.base import ToolCall
+
+
+def _llm_with_entries(entries_json: str):
+    """Fake response that satisfies both generate (.text) and W.6
+    tool_call (.tool_calls[0].arguments['entries']) read paths."""
+    parsed = json.loads(entries_json) if entries_json else []
+    return MagicMock(
+        success=True, text=entries_json, error=None,
+        tool_calls=[ToolCall(id="t0", name="record_entries",
+                              arguments={"entries": parsed})],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -181,13 +193,14 @@ class TestRunResearchUrlMode:
     @pytest.mark.asyncio
     async def test_url_mode_happy_path(self):
         """URL topic -> skips decompose/search, reaches research_complete."""
-        fake_resp = MagicMock(success=True, text='[{"title":"T","content":"body content here long enough","tags":"","source":"https://example.com/page","source_type":"community"}]', error=None)
+        fake_resp = _llm_with_entries('[{"title":"T","content":"body content here long enough","tags":"","source":"https://example.com/page","source_type":"community"}]')
 
         with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(42), None))), \
              patch.object(ra, "_robots_allowed", AsyncMock(return_value=True)), \
              patch.object(ra, "_fetch_url_bounded", AsyncMock(return_value="<html>x</html>")), \
              patch("asyncio.to_thread", AsyncMock(return_value="Clean article body " * 30)), \
              patch.object(ra.model_router, "generate", AsyncMock(return_value=fake_resp)), \
+             patch.object(ra.model_router, "tool_call", AsyncMock(return_value=fake_resp)), \
              patch.object(ra, "ingest_entries", AsyncMock(return_value={"new": 1, "versioned": 0, "rejected": 0, "skipped_hash": 0})), \
              patch.object(ra, "_generate_summary", AsyncMock(return_value="summary text")), \
              patch.object(ra, "_update_session_iteration", AsyncMock()), \

@@ -11,7 +11,7 @@ class TestDecomposeTopic:
     @pytest.mark.asyncio
     async def test_parses_valid_json(self):
         with patch("app.modules.research_agent.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
             from app.modules.research_agent import _decompose_topic
 
             result = await _decompose_topic("Redis caching", model="qwen3:4b")
@@ -24,7 +24,7 @@ class TestDecomposeTopic:
     @pytest.mark.asyncio
     async def test_fallback_on_bad_json(self):
         with patch("app.modules.research_agent.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response("not json at all"))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response("not json at all"))
             from app.modules.research_agent import _decompose_topic
 
             result = await _decompose_topic("Redis caching", model="qwen3:4b")
@@ -36,7 +36,7 @@ class TestDecomposeTopic:
     @pytest.mark.asyncio
     async def test_fallback_on_llm_failure(self):
         with patch("app.modules.research_agent.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response("", success=False))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response("", success=False))
             from app.modules.research_agent import _decompose_topic
 
             result = await _decompose_topic("Redis caching", model="qwen3:4b")
@@ -47,7 +47,7 @@ class TestDecomposeTopic:
     @pytest.mark.asyncio
     async def test_existing_facets_in_prompt(self):
         with patch("app.modules.research_agent.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
             from app.modules.research_agent import _decompose_topic
 
             await _decompose_topic(
@@ -56,7 +56,9 @@ class TestDecomposeTopic:
                 gap_focus="security aspects",
             )
 
-            prompt_text = mock_mr.generate.call_args[0][0]
+            # W.6: code now uses tool_call(messages=[...]). User message is the prompt.
+            messages = mock_mr.tool_call.call_args.kwargs["messages"]
+            prompt_text = next(m["content"] for m in messages if m["role"] == "user")
             assert "overview" in prompt_text
             assert "security aspects" in prompt_text
 
@@ -151,7 +153,7 @@ class TestExtractEntries:
     @pytest.mark.asyncio
     async def test_extracts_entries(self):
         with patch("app.modules.research_agent.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_EXTRACTION))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_EXTRACTION))
             from app.modules.research_agent import _extract_entries
 
             entries = await _extract_entries(MOCK_SEARCH_RESULTS, "Redis caching", model="qwen2.5:7b")
@@ -163,7 +165,7 @@ class TestExtractEntries:
     @pytest.mark.asyncio
     async def test_empty_results_returns_empty(self):
         with patch("app.modules.research_agent.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock()
+            mock_mr.tool_call = mock_mr.generate = AsyncMock()
             from app.modules.research_agent import _extract_entries
 
             entries = await _extract_entries([], "Redis", model="qwen2.5:7b")
@@ -174,7 +176,7 @@ class TestExtractEntries:
     @pytest.mark.asyncio
     async def test_llm_failure_returns_empty(self):
         with patch("app.modules.research_agent.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response("", success=False))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response("", success=False))
             from app.modules.research_agent import _extract_entries
 
             entries = await _extract_entries(MOCK_SEARCH_RESULTS, "Redis", model="qwen2.5:7b")
@@ -191,7 +193,7 @@ class TestExtractEntries:
         with patch("app.modules.research_agent.model_router") as mock_mr, \
              patch("app.modules.research_agent._fetch_and_extract",
                    new_callable=AsyncMock) as mock_fetch:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_EXTRACTION))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_EXTRACTION))
             mock_fetch.return_value = []
             from app.modules.research_agent import _extract_entries
 
@@ -211,7 +213,7 @@ class TestAnalyzeGaps:
     @pytest.mark.asyncio
     async def test_parses_gap_response(self):
         with patch("app.modules.research_agent.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_GAP_ANALYSIS))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_GAP_ANALYSIS))
             from app.modules.research_agent import _analyze_gaps, ResearchState
 
             state = ResearchState(topic="Redis")
@@ -227,7 +229,7 @@ class TestAnalyzeGaps:
     @pytest.mark.asyncio
     async def test_fallback_on_failure(self):
         with patch("app.modules.research_agent.model_router") as mock_mr:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response("garbage", success=True))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response("garbage", success=True))
             from app.modules.research_agent import _analyze_gaps, ResearchState
 
             state = ResearchState(topic="Redis")
@@ -275,7 +277,7 @@ class TestRunResearch:
              patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.create_task") as mock_task:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
 
             done_future = asyncio.Future()
             done_future.set_result("Summary text.")
@@ -306,7 +308,7 @@ class TestRunResearch:
              patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.create_task") as mock_task:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
 
             done_future = asyncio.Future()
             done_future.set_result("Summary text.")
@@ -339,7 +341,7 @@ class TestRunResearch:
              patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.create_task") as mock_task:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
 
             call_count = [0]
             def side_effect(coro):
@@ -377,7 +379,7 @@ class TestRunResearch:
              patch("app.modules.research_agent._finalize_session", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock), \
              patch("app.modules.research_agent.asyncio.create_task") as mock_task:
-            mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
 
             done_future = asyncio.Future()
             done_future.set_result("No data.")

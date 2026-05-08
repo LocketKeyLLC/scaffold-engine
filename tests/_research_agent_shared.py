@@ -26,12 +26,59 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 def _make_generate_response(text: str, success: bool = True):
-    """Build a mock model_router.generate response."""
+    """Build a mock model_router.generate / tool_call response.
+
+    Sprint W.6: research_agent migrated from generate to tool_call. The
+    helper now also pre-populates ``tool_calls`` based on the text shape
+    so existing fixtures (JSON object/array strings) work for both code
+    paths without per-test edits:
+
+      - text parses as a JSON object → tool_calls=[ToolCall(args=parsed)]
+      - text parses as a JSON array  → tool_calls=[ToolCall(args={"entries": parsed})]
+      - else (prose / plaintext)     → tool_calls=[]
+    """
+    from app.providers.base import ToolCall
     resp = types.SimpleNamespace()
     resp.success = success
     resp.text = text
     resp.error = None if success else "mock error"
+    resp.tool_calls = []
+    if success and text:
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            resp.tool_calls = [ToolCall(id="t0", name="mock_tool", arguments=parsed)]
+        elif isinstance(parsed, list):
+            resp.tool_calls = [ToolCall(
+                id="t0", name="mock_tool",
+                arguments={"entries": parsed},
+            )]
     return resp
+
+
+def _make_tool_call_response(arguments: dict, success: bool = True, name: str = "mock_tool"):
+    """Build a mock model_router.tool_call response with explicit args."""
+    from app.providers.base import ToolCall
+    resp = types.SimpleNamespace()
+    resp.success = success
+    resp.text = ""
+    resp.error = None if success else "mock error"
+    resp.tool_calls = [ToolCall(id="t0", name=name, arguments=arguments)] if success else []
+    return resp
+
+
+def _wire_router(mock_mr, response):
+    """Bind both generate and tool_call on a patched model_router mock to the
+    same response. Sprint W.6 — research_agent migrated from generate to
+    tool_call but several tests still patch mock_mr.generate. Wiring both
+    ensures whichever call path the production code takes is intercepted.
+    The shared response shape (.text + .tool_calls + .success) lets one
+    fixture serve both APIs."""
+    mock_mr.generate = AsyncMock(return_value=response)
+    mock_mr.tool_call = AsyncMock(return_value=response)
+    return mock_mr
 
 GOOD_DECOMPOSITION = json.dumps({
     "topic_complexity": "medium",
@@ -88,4 +135,4 @@ import uuid
 from sqlalchemy import text as sql_text
 
 
-__all__ = ['AsyncMock', 'GOOD_DECOMPOSITION', 'GOOD_EXTRACTION', 'GOOD_GAP_ANALYSIS', 'MOCK_SEARCH_RESULTS', 'MagicMock', '__all__', '_check_contradictions', '_make_generate_response', 'asyncio', 'json', 'patch', 'pytest', 'sql_text', 'types', 'uuid']
+__all__ = ['AsyncMock', 'GOOD_DECOMPOSITION', 'GOOD_EXTRACTION', 'GOOD_GAP_ANALYSIS', 'MOCK_SEARCH_RESULTS', 'MagicMock', '__all__', '_check_contradictions', '_make_generate_response', '_make_tool_call_response', 'asyncio', 'json', 'patch', 'pytest', 'sql_text', 'types', 'uuid']

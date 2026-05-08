@@ -26,7 +26,8 @@ from typing import Any, Optional
 import httpx
 
 from app.config import settings
-from app.providers.base import ModelResponse  # noqa: F401 — public re-export
+from app.providers.base import ModelResponse, Tool, ToolCall  # noqa: F401 — public re-export
+from app.utils.llm_parsing import parse_json_object
 
 logger = logging.getLogger("scaffold.router")
 
@@ -369,6 +370,137 @@ async def chat(
         "options": {"temperature": temperature, "num_predict": max_tokens},
     }
     return await _dispatch_with_retry("/api/chat", payload, model, fallback)
+
+
+async def tool_call(
+    messages: list[dict[str, str]],
+    tools: list[Tool],
+    model: str | None = None,
+    *,
+    role: str | None = None,
+    overrides: dict | None = None,
+    temperature: float = 0.7,
+    max_tokens: int = 4096,
+    tool_choice: str = "auto",
+    fallback: str | None = None,
+) -> ModelResponse:
+    """Call an LLM with native tool-calling, falling back to JSON-coaxing
+    for providers that don't support native tools.
+
+    Sprint W.6 — single public entry point so callers can replace
+    ``model_router.chat() + parse_json_object()`` patterns with one call
+    that returns structured arguments via ``resp.tool_calls[0].arguments``.
+
+    Behavior:
+      - role=...: dispatched through the provider abstraction.
+        ``supports_native_tools=True`` → provider.tool_call().
+        Otherwise → coaxing fallback (chat + JSON parse) so role-bound
+        callers keep working on mixed-capability stacks.
+      - model=...: legacy direct path. Goes through the registered
+        ``ollama`` provider (matches generate/chat behavior).
+      - Empty ``tools`` list short-circuits to chat (returns a normal
+        ModelResponse with empty tool_calls). Useful as a no-op test path.
+
+    Returns a :class:`ModelResponse`. On success with a tool invocation,
+    ``tool_calls`` is populated. On the coaxing fallback, the wrapper
+    synthesizes a single ToolCall (``id="coaxed_0"``) by parsing the
+    response against the *first* tool's ``input_schema``. On parse
+    failure, ``tool_calls`` stays empty — callers treat that as "no
+    tool selected" or a soft failure.
+    """
+    _reject_role_model_collision(role, model)
+
+    if role:
+        resolved_model, provider = _resolve_role(role, overrides)
+        if getattr(provider, "supports_native_tools", False):
+            resp = await provider.tool_call(
+                resolved_model, messages, tools,
+                temperature=temperature, max_tokens=max_tokens,
+                tool_choice=tool_choice,
+            )
+            if not resp.success:
+                resp.error = _format_provider_error(resp, role)
+            return resp
+        return await _tool_call_via_coaxing(
+            provider, resolved_model, messages, tools,
+            temperature=temperature, max_tokens=max_tokens,
+            role=role, fallback=fallback,
+        )
+
+    # Legacy direct-model path → go through the ollama provider's tool_call.
+    model = model or settings.model_general
+    from app.providers import get_provider
+    provider = get_provider("ollama")
+    if getattr(provider, "supports_native_tools", False):
+        return await provider.tool_call(
+            model, messages, tools,
+            temperature=temperature, max_tokens=max_tokens,
+            tool_choice=tool_choice,
+        )
+    return await _tool_call_via_coaxing(
+        provider, model, messages, tools,
+        temperature=temperature, max_tokens=max_tokens,
+        role=None, fallback=fallback,
+    )
+
+
+async def _tool_call_via_coaxing(
+    provider,
+    model: str,
+    messages: list[dict[str, str]],
+    tools: list[Tool],
+    *,
+    temperature: float,
+    max_tokens: int,
+    role: str | None,
+    fallback: str | None,
+) -> ModelResponse:
+    """Coaxing fallback for providers without native tool support.
+
+    Prepends a system message instructing the model to emit JSON
+    matching the FIRST tool's ``input_schema``, then calls chat and
+    parses the result. Multi-tool coaxing isn't expressible via a
+    single prompt; callers needing that should pin a tool-capable
+    provider.
+
+    Empty ``tools`` short-circuits to a plain chat call (no schema
+    injection) so the wrapper is a no-op for the empty-tools case.
+    """
+    if not tools:
+        return await provider.chat_completion(
+            model, messages, temperature=temperature,
+            max_tokens=max_tokens, fallback=fallback,
+        )
+
+    primary = tools[0]
+    import json as _json
+    schema_text = _json.dumps(primary.input_schema, indent=2)
+    coaxing_system = (
+        f"You must respond by calling the tool '{primary.name}'.\n"
+        f"Tool description: {primary.description}\n\n"
+        f"Tool input schema (JSON):\n{schema_text}\n\n"
+        f"Respond with ONLY a JSON object matching the schema. "
+        f"No prose, no markdown fences."
+    )
+    augmented = [{"role": "system", "content": coaxing_system}] + list(messages)
+
+    resp = await provider.chat_completion(
+        model, augmented, temperature=temperature,
+        max_tokens=max_tokens, fallback=fallback,
+    )
+    if not resp.success:
+        if role:
+            resp.error = _format_provider_error(resp, role)
+        return resp
+
+    parsed = parse_json_object(resp.text or "")
+    if isinstance(parsed, dict):
+        resp.tool_calls = [ToolCall(
+            id="coaxed_0",
+            name=primary.name,
+            arguments=parsed,
+        )]
+    return resp
 
 
 async def embed(

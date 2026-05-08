@@ -1,8 +1,14 @@
 """Verifier for execution_agent — checks node output meets task requirements.
 
-Fail-closed: every error path (chat exception, parse failure, missing schema
-key, timeout) returns ('fail', reason, 0.0). Used by ``execute_next_node``
-between node execution and node-status persistence.
+Fail-closed: every error path (LLM exception, parse failure, missing schema
+key, timeout, no tool call returned) returns ('fail', reason, 0.0). Used by
+``execute_next_node`` between node execution and node-status persistence.
+
+Sprint W.6: migrated from chat() + parse_json_object to native tool calling
+via model_router.tool_call(). On a provider that supports native tools, the
+verdict comes back as resp.tool_calls[0].arguments. On non-tool providers,
+the wrapper coaxes JSON via system prompt and synthesizes the same shape,
+so the read path is identical.
 """
 from __future__ import annotations
 
@@ -12,14 +18,14 @@ from typing import Literal
 
 from app import model_router
 from app.config import settings
+from app.providers.base import Tool
 
 logger = logging.getLogger(__name__)
 
 
 VERIFY_SYSTEM = """You are a Requirements Satisfaction Checker. Your ONLY job is to confirm that the required functionality is present and correct.
 
-Respond with ONLY a JSON object in this format:
-{"pass": true, "reason": "one sentence", "confidence": 0.95}
+You MUST report your verdict by calling the ``record_verification`` tool. Do NOT respond with prose; the verdict must come from the tool call.
 
 RULES:
 - PASS if the output contains what the task requested, even partially.
@@ -31,24 +37,41 @@ RULES:
 Example 1 — PASS (exact match):
 TASK: "List 3 sorting algorithms"
 OUTPUT: "Bubble sort, merge sort, quicksort"
-{"pass": true, "reason": "Three sorting algorithms listed as requested", "confidence": 0.95}
+record_verification(pass=true, reason="Three sorting algorithms listed as requested", confidence=0.95)
 
 Example 2 — PASS (exceeds scope, still correct):
 TASK: "Define a function signature for merging two sorted lists"
-OUTPUT: "def merge_sorted(a, b):\n    result = []\n    while a and b:\n        if a[0] <= b[0]: result.append(a.pop(0))\n        else: result.append(b.pop(0))\n    return result + a + b"
-{"pass": true, "reason": "Function signature present with full implementation — extra detail is acceptable", "confidence": 0.93}
+OUTPUT: "def merge_sorted(a, b): ..."
+record_verification(pass=true, reason="Function signature present with full implementation — extra detail is acceptable", confidence=0.93)
 
-Example 3 — PASS (broad answer to narrow task):
-TASK: "Handle empty list edge case"
-OUTPUT: "The function checks if either list is empty and returns the other list directly. It also handles the general merge case for non-empty lists."
-{"pass": true, "reason": "Empty list handling is addressed as requested", "confidence": 0.90}
-
-Example 4 — FAIL (genuinely missing):
+Example 3 — FAIL (genuinely missing):
 TASK: "List 3 sorting algorithms"
-OUTPUT: "Bubble sort is a comparison-based algorithm that repeatedly steps through the list"
-{"pass": false, "reason": "Only one algorithm mentioned, task requires three", "confidence": 0.90}
+OUTPUT: "Bubble sort is a comparison-based algorithm..."
+record_verification(pass=false, reason="Only one algorithm mentioned, task requires three", confidence=0.90)"""
 
-Respond with ONLY the JSON object."""
+
+VERIFY_TOOL = Tool(
+    name="record_verification",
+    description="Record the verifier's verdict on whether the output meets the task's requirements.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "pass": {
+                "type": "boolean",
+                "description": "True if required functionality is present (even partially); false only if missing or fundamentally incorrect.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "One-sentence justification for the verdict.",
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Confidence in the verdict, 0.0 to 1.0.",
+            },
+        },
+        "required": ["pass", "reason", "confidence"],
+    },
+)
 
 
 async def _verify_output(
@@ -57,7 +80,6 @@ async def _verify_output(
     model: str,
 ) -> tuple[Literal["pass", "fail"], str, float]:
     """Verify output quality. Fail-closed: any error/parse/timeout => ('fail', ...)."""
-    from app.utils.llm_parsing import parse_json_object
     messages = [
         {"role": "system", "content": VERIFY_SYSTEM},
         {"role": "user", "content": f"TASK: {task_title}\n\nOUTPUT:\n{output}"},
@@ -65,24 +87,40 @@ async def _verify_output(
 
     async def _body() -> tuple[Literal["pass", "fail"], str, float]:
         try:
-            resp = await model_router.chat(messages=messages, model=model)
+            resp = await model_router.tool_call(
+                messages=messages, tools=[VERIFY_TOOL], model=model,
+                temperature=0.0,
+            )
         except Exception as e:
-            logger.warning("verify_chat_failed: %s", e)
-            return "fail", f"verifier chat failed: {e}", 0.0
-        raw = (resp.text or "").strip()
-        if not raw:
-            return "fail", "verifier returned empty response", 0.0
-        data = parse_json_object(raw)
-        if not isinstance(data, dict):
-            logger.warning("verify_parse_failed | raw: %s", raw[:300])
-            return "fail", "verifier output unparseable", 0.0
-        if "pass" not in data:
-            logger.warning("verify_schema_missing_pass: %s", str(data)[:200])
+            logger.warning("verify_tool_call_failed: %s", e)
+            return "fail", f"verifier call failed: {e}", 0.0
+
+        if not resp.success:
+            logger.warning("verify_response_unsuccessful: %s", resp.error)
+            return "fail", f"verifier response error: {resp.error}", 0.0
+
+        if not resp.tool_calls:
+            # Model declined to call the tool (or coaxing parse failed).
+            logger.warning(
+                "verify_no_tool_call | text: %s", (resp.text or "")[:300],
+            )
+            return "fail", "verifier produced no tool call", 0.0
+
+        args = resp.tool_calls[0].arguments
+        if not isinstance(args, dict):
+            logger.warning("verify_arguments_not_object: %s", str(args)[:200])
+            return "fail", "verifier arguments not an object", 0.0
+        if "pass" not in args:
+            logger.warning("verify_schema_missing_pass: %s", str(args)[:200])
             return "fail", "verifier response missing 'pass' key", 0.0
+        try:
+            confidence = float(args.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
         return (
-            "pass" if bool(data.get("pass", False)) else "fail",
-            str(data.get("reason", "")),
-            float(data.get("confidence", 0.0)),
+            "pass" if bool(args.get("pass", False)) else "fail",
+            str(args.get("reason", "")),
+            confidence,
         )
 
     try:

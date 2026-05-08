@@ -2100,6 +2100,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | W.3 | Workflow audit — DAG generator validator-driven retry loop (§17.21) | done 2026-05-07 |
 | W.4 | Workflow audit — prompt-build try/except wrap (§17.22) | done 2026-05-07 |
 | W.5 | Workflow audit — assist_replan.selective LLM regen (§17.23) | done 2026-05-07 |
+| W.6 | Workflow audit — native tool-call migration (research/verify) (§17.24) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2485,6 +2486,56 @@ Tier 1 / item 5 from the workflow audit. The TODO comment at `assist_replan.appl
 - Surface `regenerated_count` + `regen_errors` in OWUI assist UI / SSE so operators see when the engine rewrote hints behind their backs.
 - Consider sharing the `downstream_node_keys` BFS helper between `assist_replan` and `dag_generator` rather than potentially recomputing it. Currently the BFS is only run in `apply_selective_replan` and the result is passed to `regen` — fine, but worth flagging if a third caller appears.
 - Cost telemetry once J.3 lands — track regen LLM tokens per session under "assist replan" budget.
+
+### 17.24 Sprint W.6 — Native tool-call migration (research_agent + execution_verify) (2026-05-07)
+
+Tier 1 / item 6 from the workflow audit. Replaces the long-standing "ask the LLM nicely to emit JSON, then parse the text" pattern in research_agent + execution_verify with native tool-calling via Sprint I.2's `Tool` / `ToolCall` / `LLMProvider.tool_call()` API. Per scope decision: **full migration** (every coaxed call site in the two target modules) + **fall back to JSON coaxing** when the bound provider doesn't advertise `supports_native_tools`.
+
+**New foundation: `model_router.tool_call()`** (~135 lines). Public API mirroring `generate`/`chat`:
+- `messages: list[dict]`, `tools: list[Tool]`, `model=` or `role=` (mutually exclusive), `temperature`, `max_tokens`, `tool_choice`, `fallback`. Returns a `ModelResponse` whose `tool_calls` is populated on success.
+- Role-based path delegates to `provider.tool_call(...)` when `provider.supports_native_tools` is True; otherwise routes through a coaxing fallback.
+- Coaxing fallback: prepends a system message instructing the model to emit JSON matching the *first* tool's `input_schema`, calls `chat_completion`, parses the response, and synthesizes `tool_calls=[ToolCall(id="coaxed_0", name=..., arguments=parsed_dict)]`. On parse failure, `tool_calls` stays empty — callers treat that as "no tool selected" or a soft failure.
+- Multi-tool coaxing isn't expressible via a single prompt; callers needing it must pin a tool-capable provider. Documented limitation.
+- Empty `tools=[]` short-circuits to a plain chat call (no schema injection) — useful as a no-op test path.
+- Legacy `model=` path goes through the registered `ollama` provider (matches `generate`/`chat` legacy behavior). Both paths inherit the role-aware error-message decoration from `_format_provider_error`.
+
+**Migrated sites:**
+
+| Module | Function | Tool | Schema returns |
+|---|---|---|---|
+| `execution_verify` | `_verify_output` | `record_verification` | `{pass: bool, reason: str, confidence: float}` |
+| `research_agent` | `_decompose_topic` | `plan_research` | `{topic_complexity, facets, queries[]}` |
+| `research_agent` | `_gap_analysis` | `assess_coverage` | `{coverage_pct, covered_facets, gap_facets, gap_queries, assessment, needs_clarification, clarifying_question}` |
+| `research_agent` | `_extract_facts` (search path) | `record_entries` | `{entries: [{title, content, tags, source, confidence_score, source_type, facet}]}` |
+| `research_agent` | URL-mode extract | `record_entries` | (same) |
+| `research_agent` | PDF-mode extract | `record_entries` | (same) |
+
+**Six call sites total**, three of which share the `record_entries` tool. Tool `input_schema` is the canonical schema source — it replaces the prior "OUTPUT FORMAT (strict JSON, no markdown fences):" prose in each system prompt. The system prompts retain rules + few-shot examples but no longer carry the schema (avoids drift between prompt + parser).
+
+**Helper added**: `research_agent._tool_args(resp)` reads `resp.tool_calls[0].arguments` if present and a dict, else returns `None`. Single read pattern across all migrated callers.
+
+**Backward-compat in tests**: `_make_generate_response` (in `tests/_research_agent_shared.py`) now also pre-populates `.tool_calls` based on the response text shape (object → wrapped as `arguments=parsed_dict`; array → `arguments={"entries": parsed_list}`). Existing fixtures (`GOOD_DECOMPOSITION`, `GOOD_EXTRACTION`, `GOOD_GAP_ANALYSIS`) keep working without per-test edits. New helper `_make_tool_call_response(arguments)` for new tests that prefer the structured form.
+
+**Test-suite delta:**
+- `tests/test_model_router_tool_call.py` (new): 8 cases for the wrapper — role/native, role/coaxing-fallback, role/coaxing-failure, role/coaxing-unparseable, model/native, role/model collision rejection, empty-tools no-op.
+- `tests/test_verify_extraction.py` rewritten: 9 cases targeting the new tool-call contract — pass-true, pass-false-with-extra-fields, fail-from-verdict, no-tool-call, missing-pass-key, unsuccessful-response, tool-call-exception, non-numeric-confidence-coerced, timeout. The pre-W.6 cases that tested `parse_json_object` leniency on raw text (markdown-fenced, think-tagged, preamble-prefixed) moved to the wrapper test (since they're now the wrapper's concern, not the verifier's).
+- `tests/test_research_agent_core.py`: 17 cases updated via sweep `mock_mr.generate = AsyncMock(...)` → `mock_mr.tool_call = mock_mr.generate = AsyncMock(...)`. One assertion (`call_args[0][0]` → `call_args.kwargs["messages"][1]["content"]`) updated for the kwargs-only call shape.
+- `tests/test_research_pdf_mode.py` + `tests/test_research_url_mode.py`: 4 fake-LLM construction sites switched to a local `_llm_with_entries(...)` builder that pre-populates `.tool_calls`, plus an extra `tool_call` patch alongside each existing `generate` patch. Both code paths intercepted; tests pass under either dispatch.
+- **Combined regression baseline (W track + verify + research): 252/252.**
+
+**What this does NOT do** (deferred):
+- `prompt_optimizer` migration — uses JSON coaxing in 2 helper-internal sites; deferred per scope (audit row was "research/execution agents", not optimizer). Add as a follow-up if optimizer quality regressions appear.
+- `idea_refinement` / `gt_extractor` / `dag_generator` migrations — same: deferred. Each has its own JSON-coaxing pattern, but DAG validator (W.3) already wraps dag_generator's tool-pick output, and ideation has its own re-prompt loop. The "low-friction wins are migrated" principle applies.
+- Multi-tool coaxing. Coaxing fallback only exposes the first tool to the model; multi-tool callers must pin a native-tools provider. Documented in `_tool_call_via_coaxing` docstring.
+- Removing `parse_json_object` / `parse_json_array` imports across the codebase — they're still used by ad-hoc ingestion paths and the dag_validator/regen flows. Keep them for now; revisit in a future cleanup pass.
+
+**Operating principle for new modules** (project-applicable): when a module needs structured LLM output, default to `model_router.tool_call(messages, tools=[Tool(...)])` and read `resp.tool_calls[0].arguments`. Don't add new "Respond with ONLY a JSON object" coaxing — the wrapper already handles non-tool providers via its built-in coaxing fallback.
+
+**Open follow-ups (audit-tail):**
+- `prompt_optimizer` JSON-coaxing cleanup (2 sites).
+- `idea_refinement.py` and `gt_extractor.py` migrations (each has its own coaxed call site).
+- Provider-side: `OllamaProvider.tool_call` returns immediately on partial response (no retry). Consider parity with `generate`/`chat`'s retry/fallback once we see real production failure modes.
+- Coaxing-path observability: log when the wrapper falls back to coaxing so operators can see which roles' providers can't handle native tools.
 
 ---
 

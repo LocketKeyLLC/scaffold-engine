@@ -32,8 +32,9 @@ from app import model_router
 from app.config import settings, get_model
 from app.database import async_session
 from app.modules.rag_pipeline import ingest_entries
+from app.providers.base import Tool
 from app.utils.http_clients import get_generic_http_client
-from app.utils.llm_parsing import parse_json_array, parse_json_object
+from app.utils.llm_parsing import parse_json_array, parse_json_object  # noqa: F401 — kept for back-compat re-exports
 
 # Re-exports for test patches and existing call sites — keeps
 # `app.modules.research_agent.X` working after the 2026-05-05 split.
@@ -250,6 +251,109 @@ Write in clear prose paragraphs. Include key facts, numbers, and specifics.
 Keep it under 500 words. No markdown headers — just flowing text with topic transitions."""
 
 
+# Sprint W.6 — native tool-call schemas. The wrapper falls back to
+# JSON-coaxing on providers without native tool support, so callers
+# always read structured output via resp.tool_calls[0].arguments
+# regardless of provider capability.
+
+_QUERY_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "description": "3-8 keyword search terms (NOT a natural-language question)"},
+        "facet": {"type": "string", "description": "Which facet of the topic this query covers"},
+        "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+        "search_category": {"type": "string", "enum": ["general", "news", "science", "it"]},
+    },
+    "required": ["query", "facet", "search_category"],
+}
+
+PLAN_RESEARCH_TOOL = Tool(
+    name="plan_research",
+    description="Decompose a research topic into facets and search queries.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "topic_complexity": {"type": "string", "enum": ["simple", "medium", "complex"]},
+            "facets": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "3-8 distinct facets covering different aspects of the topic",
+            },
+            "queries": {
+                "type": "array",
+                "items": _QUERY_ITEM_SCHEMA,
+                "description": "Searches to run for the topic; each query targets a single facet",
+            },
+        },
+        "required": ["topic_complexity", "facets", "queries"],
+    },
+)
+
+RECORD_ENTRIES_TOOL = Tool(
+    name="record_entries",
+    description="Record extracted factual knowledge entries from search results.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "entries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "content": {"type": "string", "description": "Self-contained factual statement"},
+                        "tags": {"type": "string", "description": "Comma-separated tags"},
+                        "source": {"type": "string", "description": "Source URL"},
+                        "confidence_score": {"type": "number"},
+                        "source_type": {
+                            "type": "string",
+                            "description": "tech_docs | news | community | official_docs | curated",
+                        },
+                        "facet": {"type": "string"},
+                    },
+                    "required": ["title", "content"],
+                },
+            },
+        },
+        "required": ["entries"],
+    },
+)
+
+ASSESS_COVERAGE_TOOL = Tool(
+    name="assess_coverage",
+    description="Report which facets of the topic are covered, what's missing, and any gap queries to run next.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "coverage_pct": {"type": "integer", "minimum": 0, "maximum": 100},
+            "covered_facets": {"type": "array", "items": {"type": "string"}},
+            "gap_facets": {"type": "array", "items": {"type": "string"}},
+            "gap_queries": {"type": "array", "items": _QUERY_ITEM_SCHEMA},
+            "assessment": {"type": "string", "description": "One paragraph on coverage state"},
+            "needs_clarification": {"type": "boolean"},
+            "clarifying_question": {"type": "string"},
+        },
+        "required": ["coverage_pct", "covered_facets", "gap_facets"],
+    },
+)
+
+
+def _tool_args(resp) -> dict | None:
+    """Read the first tool call's arguments dict from a ModelResponse,
+    or None if no tool was called or arguments aren't a dict.
+
+    Sprint W.6 — single helper used by every research_agent caller so
+    the read pattern stays consistent across native + coaxing paths.
+    """
+    if not getattr(resp, "success", False):
+        return None
+    calls = getattr(resp, "tool_calls", None) or []
+    if not calls:
+        return None
+    args = calls[0].arguments
+    return args if isinstance(args, dict) else None
+
+
 # =============================================================================
 # Decomposition, search, extraction, gap analysis, summary
 # =============================================================================
@@ -267,32 +371,38 @@ async def _decompose_topic(
     if gap_focus:
         prompt += f"\n\nFocus specifically on these gaps: {gap_focus}"
 
-    resp = await model_router.generate(
-        prompt, model=model, system=DECOMPOSE_SYSTEM_V1,
-        temperature=0.4, max_tokens=2048,
+    resp = await model_router.tool_call(
+        messages=[
+            {"role": "system", "content": DECOMPOSE_SYSTEM_V1},
+            {"role": "user", "content": prompt},
+        ],
+        tools=[PLAN_RESEARCH_TOOL],
+        model=model, temperature=0.4, max_tokens=2048,
     )
-    if resp.success:
-        parsed = parse_json_object(resp.text)
-        if parsed and "queries" in parsed:
-            facets = parsed.get("facets", [])
-            if len(facets) >= 2:
-                return parsed
-            logger.info("decomposition_retry: got %d facets, retrying", len(facets))
-            retry_prompt = (
-                f"Decompose this research topic into search queries:\n\n"
-                f"TOPIC: {topic}\n\n"
-                f"IMPORTANT: Break into at least 3 distinct subtopics. "
-                f"Your previous attempt only produced {len(facets)} facet(s). "
-                f"Each facet must cover a DIFFERENT aspect of the topic."
-            )
-            retry_resp = await model_router.generate(
-                retry_prompt, model=model, system=DECOMPOSE_SYSTEM_V1,
-                temperature=0.5, max_tokens=2048,
-            )
-            if retry_resp.success:
-                retry_parsed = parse_json_object(retry_resp.text)
-                if retry_parsed and "queries" in retry_parsed:
-                    return retry_parsed
+    parsed = _tool_args(resp)
+    if parsed and "queries" in parsed:
+        facets = parsed.get("facets", [])
+        if len(facets) >= 2:
+            return parsed
+        logger.info("decomposition_retry: got %d facets, retrying", len(facets))
+        retry_prompt = (
+            f"Decompose this research topic into search queries:\n\n"
+            f"TOPIC: {topic}\n\n"
+            f"IMPORTANT: Break into at least 3 distinct subtopics. "
+            f"Your previous attempt only produced {len(facets)} facet(s). "
+            f"Each facet must cover a DIFFERENT aspect of the topic."
+        )
+        retry_resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": DECOMPOSE_SYSTEM_V1},
+                {"role": "user", "content": retry_prompt},
+            ],
+            tools=[PLAN_RESEARCH_TOOL],
+            model=model, temperature=0.5, max_tokens=2048,
+        )
+        retry_parsed = _tool_args(retry_resp)
+        if retry_parsed and "queries" in retry_parsed:
+            return retry_parsed
 
     return {
         "topic_complexity": "medium",
@@ -417,16 +527,19 @@ async def _extract_entries(
             f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['content'][:600]}"
             for r in batch
         )
-        resp = await model_router.generate(
-            EXTRACT_PROMPT_V1.format(topic=topic, results=results_text),
-            model=model, system=EXTRACT_SYSTEM_V1,
-            temperature=0.1, max_tokens=1024,
+        resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": EXTRACT_SYSTEM_V1},
+                {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=topic, results=results_text)},
+            ],
+            tools=[RECORD_ENTRIES_TOOL],
+            model=model, temperature=0.1, max_tokens=1024,
         )
 
         entries: list[dict] = []
-        if resp.success and resp.text and len(resp.text.strip()) > 5:
-            parsed = parse_json_array(resp.text) or []
-            entries = [e for e in parsed if isinstance(e, dict)]
+        parsed_args = _tool_args(resp)
+        if parsed_args and isinstance(parsed_args.get("entries"), list):
+            entries = [e for e in parsed_args["entries"] if isinstance(e, dict)]
             if entries:
                 for entry in entries:
                     src_url = entry.get("source", "")
@@ -497,14 +610,17 @@ async def _analyze_gaps(
     )
 
     for attempt in range(2):
-        resp = await model_router.generate(
-            prompt, model=model, system=GAP_SYSTEM_V1,
-            temperature=0.3, max_tokens=2048,
+        resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": GAP_SYSTEM_V1},
+                {"role": "user", "content": prompt},
+            ],
+            tools=[ASSESS_COVERAGE_TOOL],
+            model=model, temperature=0.3, max_tokens=2048,
         )
-        if resp.success:
-            parsed = parse_json_object(resp.text)
-            if parsed:
-                return parsed
+        parsed = _tool_args(resp)
+        if parsed:
+            return parsed
         if attempt == 0:
             logger.info("gap_analysis_retry: attempt 1 failed, retrying")
 
@@ -1051,10 +1167,13 @@ async def _run_research_url_mode(
             f"Title: {page_title}\nURL: {url}\nSnippet: {c[:600]}"
             for c in batch_chunks
         )
-        task = asyncio.create_task(model_router.generate(
-            EXTRACT_PROMPT_V1.format(topic=prompt_topic, results=results_text),
+        task = asyncio.create_task(model_router.tool_call(
+            messages=[
+                {"role": "system", "content": EXTRACT_SYSTEM_V1},
+                {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=prompt_topic, results=results_text)},
+            ],
+            tools=[RECORD_ENTRIES_TOOL],
             model=extract_model,
-            system=EXTRACT_SYSTEM_V1,
             temperature=0.1,
             max_tokens=1024,
         ))
@@ -1065,9 +1184,9 @@ async def _run_research_url_mode(
         resp = task.result()
 
         batch_entries: list[dict] = []
-        if resp.success and resp.text and len(resp.text.strip()) > 5:
-            parsed = parse_json_array(resp.text) or []
-            batch_entries = [e for e in parsed if isinstance(e, dict)]
+        parsed_args = _tool_args(resp)
+        if parsed_args and isinstance(parsed_args.get("entries"), list):
+            batch_entries = [e for e in parsed_args["entries"] if isinstance(e, dict)]
             for entry in batch_entries:
                 src_url = entry.get("source", "") or url
                 entry["source"] = src_url
@@ -1189,10 +1308,13 @@ async def _run_research_pdf_mode(
             f"URL: {virtual_url}\nSnippet: {c[:600]}"
             for c in batch_chunks
         )
-        task = asyncio.create_task(model_router.generate(
-            EXTRACT_PROMPT_V1.format(topic=filename, results=results_text),
+        task = asyncio.create_task(model_router.tool_call(
+            messages=[
+                {"role": "system", "content": EXTRACT_SYSTEM_V1},
+                {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=filename, results=results_text)},
+            ],
+            tools=[RECORD_ENTRIES_TOOL],
             model=extract_model,
-            system=EXTRACT_SYSTEM_V1,
             temperature=0.1,
             max_tokens=1024,
         ))
@@ -1203,9 +1325,9 @@ async def _run_research_pdf_mode(
         resp = task.result()
 
         batch_entries: list[dict] = []
-        if resp.success and resp.text and len(resp.text.strip()) > 5:
-            parsed = parse_json_array(resp.text) or []
-            batch_entries = [e for e in parsed if isinstance(e, dict)]
+        parsed_args = _tool_args(resp)
+        if parsed_args and isinstance(parsed_args.get("entries"), list):
+            batch_entries = [e for e in parsed_args["entries"] if isinstance(e, dict)]
             for entry in batch_entries:
                 entry["source"] = virtual_url
                 llm_conf = entry.get("confidence_score")

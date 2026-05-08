@@ -6,6 +6,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.modules import research_agent as ra
+from app.providers.base import ToolCall
+
+
+def _llm_with_entries(entries_json: str):
+    """Build a fake response that satisfies both generate (.text) and the
+    W.6 tool_call (.tool_calls[0].arguments['entries']) read paths.
+    Pass a JSON-array string of entries; the array is wrapped in
+    {'entries': [...]} for the tool_calls path."""
+    parsed = json.loads(entries_json) if entries_json else []
+    return MagicMock(
+        success=True, text=entries_json, error=None,
+        tool_calls=[ToolCall(id="t0", name="record_entries",
+                              arguments={"entries": parsed})],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -170,14 +184,13 @@ class TestRunResearchPdf:
     @pytest.mark.asyncio
     async def test_happy_path_emits_complete(self):
         pdf_bytes = _make_test_pdf("Milvus vector DB content. " * 30)
-        fake_llm = MagicMock(
-            success=True,
-            text='[{"title":"Milvus","content":"Milvus is a vector DB.","tags":"","source":"pdf://x.pdf","source_type":"tech_docs"}]',
-            error=None,
+        fake_llm = _llm_with_entries(
+            '[{"title":"Milvus","content":"Milvus is a vector DB.","tags":"","source":"pdf://x.pdf","source_type":"tech_docs"}]'
         )
 
         with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(100), None))), \
              patch.object(ra.model_router, "generate", AsyncMock(return_value=fake_llm)), \
+             patch.object(ra.model_router, "tool_call", AsyncMock(return_value=fake_llm)), \
              patch.object(ra, "ingest_entries", AsyncMock(return_value={"new": 1, "versioned": 0, "rejected": 0, "skipped_hash": 0})), \
              patch.object(ra, "_generate_summary", AsyncMock(return_value="summary")), \
              patch.object(ra, "_update_session_iteration", AsyncMock()), \
@@ -254,11 +267,12 @@ class TestRunResearchPdf:
         """Passing extractor='plumber' reaches _extract_pdf_text."""
         pdf_bytes = _make_test_pdf("content " * 50)
         extract_mock = AsyncMock(return_value=("extracted text " * 40, 1, "plumber"))
-        fake_llm = MagicMock(success=True, text='[]', error=None)
+        fake_llm = _llm_with_entries('[]')
 
         with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(103), None))), \
              patch.object(ra, "_extract_pdf_text", extract_mock), \
              patch.object(ra.model_router, "generate", AsyncMock(return_value=fake_llm)), \
+             patch.object(ra.model_router, "tool_call", AsyncMock(return_value=fake_llm)), \
              patch.object(ra, "ingest_entries", AsyncMock(return_value={"new": 0, "versioned": 0, "rejected": 0, "skipped_hash": 0})), \
              patch.object(ra, "_generate_summary", AsyncMock(return_value="s")), \
              patch.object(ra, "_update_session_iteration", AsyncMock()), \
@@ -275,10 +289,11 @@ class TestRunResearchPdf:
         pdf_bytes = _make_test_pdf("content " * 50)
         guard_mock = AsyncMock(return_value=("sid-104", None))
         ingest_mock = AsyncMock(return_value={"new": 1, "versioned": 0, "rejected": 0, "skipped_hash": 0})
-        fake_llm = MagicMock(success=True, text='[{"title":"T","content":"C","tags":"","source":"pdf://x.pdf","source_type":"tech_docs"}]', error=None)
+        fake_llm = _llm_with_entries('[{"title":"T","content":"C","tags":"","source":"pdf://x.pdf","source_type":"tech_docs"}]')
 
         with patch.object(ra, "_guard_and_create_session", guard_mock), \
              patch.object(ra.model_router, "generate", AsyncMock(return_value=fake_llm)), \
+             patch.object(ra.model_router, "tool_call", AsyncMock(return_value=fake_llm)), \
              patch.object(ra, "ingest_entries", ingest_mock), \
              patch.object(ra, "_generate_summary", AsyncMock(return_value="s")), \
              patch.object(ra, "_update_session_iteration", AsyncMock()), \
