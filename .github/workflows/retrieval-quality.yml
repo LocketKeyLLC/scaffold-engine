@@ -8,6 +8,7 @@ on:
       - 'scripts/score_retrieval.py'
       - 'tests/fixtures/golden_set.json'
       - 'tests/test_score_retrieval.py'
+      - 'tests/test_rag_pipeline_smoke.py'
 
 jobs:
   score:
@@ -24,8 +25,12 @@ jobs:
       - name: Install test deps
         run: pip install pytest pytest-asyncio
 
-      - name: Run scoring unit tests
-        run: pytest tests/test_score_retrieval.py -v
+      # Sprint X.14 — runs two layers cheaply (no Milvus / Ollama / cross-encoder):
+      #   - test_score_retrieval.py: scoring math (recall@k, MRR)
+      #   - test_rag_pipeline_smoke.py: 3-query orchestration smoke
+      #     (RRF fusion, dedup, threshold-skip path)
+      - name: Run scoring + smoke tests
+        run: pytest tests/test_score_retrieval.py tests/test_rag_pipeline_smoke.py -v
 
       - name: Upload report if present
         if: always()

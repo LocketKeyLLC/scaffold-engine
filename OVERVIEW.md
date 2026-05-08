@@ -2116,6 +2116,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.11 | Tier 2 audit — idea_refinement `refine_idea` → `tool_call` migration (§17.38) | done 2026-05-08 |
 | X.12 | Tier 2 audit — gt_extractor `extract_ground_truths` → `tool_call` migration (§17.39) | done 2026-05-08 |
 | X.13 | Tier 2 cleanup — `_tool_args` consolidation → `app/utils/tool_call_args.py` (§17.40) | done 2026-05-08 |
+| X.14 | Tier 2 audit — CI smoke for retrieval regressions (§17.41) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2734,7 +2735,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 10 | prompt_optimizer JSON-coaxing → tool-call migration | **DONE in X.10** | `_llm_verify` migrated to `tool_call` + `RECORD_VERIFICATION_TOOL`. `_llm_optimize` *not* a target — returns free-form text (the rewritten prompt), not structured output. 10 new tests; 3 obsolete JSON-parse-chain tests retired. |
 | 11 | idea_refinement tool-call migration | **DONE in X.11** | `refine_idea` migrated; `REFINE_BRIEF_TOOL` schema (9 fields, 5 required); REFINE_SYSTEM simplified by ~15 lines. 13 tests updated. |
 | 12 | gt_extractor tool-call migration | **DONE in X.12** | `extract_ground_truths` distill site migrated; `RECORD_DISTILLED_ENTRIES_TOOL` schema; `_parse_entries` + `_ParseFailed` removed (dead). 4-way `_tool_args` duplication settled — consolidation queued as next-priority cleanup. |
-| 13 | CI smoke for retrieval regressions | CI config | Tiny fixture (3 queries) run on PRs touching `app/modules/rag_pipeline.py`. Catches regressions cheaply without needing live Milvus. |
+| 13 | CI smoke for retrieval regressions | **DONE in X.14** | New `tests/test_rag_pipeline_smoke.py` (3 queries: overlap-dedup, disjoint-fusion, threshold-skip-bypass). Wired into existing `retrieval-quality.yml` workflow. ~1s runtime; no live Milvus/Ollama/cross-encoder. |
 | 14 | Quarterly RAG re-baseline cadence | Scheduling | `make rebaseline` cron / runbook. Surfaces drift early. |
 | 15 | `tests/ground_truth.json` regen at KB=1093 | Calibration, multi-hour | Re-curate expected_doc_ids against the current `scaffold-<title>-<hash>` naming. Defer until a quarterly rebaseline shows a need. |
 | 16 | `test_execution_handler_module.py` SimpleNamespace fixture drift | Test debt, ~30 min | 8/20 broken since X.2 added `compiled_output_synthesized` to the row that `execution_status` SELECTs. Fixtures need the new attr. Same drift class as X.3 (frozen test fixture vs. live schema). |
@@ -2970,6 +2971,25 @@ The change:
 **Project pattern (memory-worthy):** the "intentional duplication is fine when small" rule has a clean breakpoint — **2 copies tolerable, 3 borderline, 4 always consolidate**. By 4 copies the cost of keeping them in sync (docstring drift, missing improvements like the `args not dict` defense, accidental signature divergence) outweighs the benefit of a flat dependency graph. When you find yourself adding a 4th copy of anything, that's the signal — sweep into a shared utility in the same commit, not a follow-up. (X.13 was a follow-up because the duplication was only flagged after each migration sprint; the rule going forward is to consolidate at-the-moment-of-the-4th-copy.)
 
 **Test-suite delta:** `tests/test_tool_call_args.py` (new): 8 cases on `read_tool_args` directly — happy path, multi-call returns first, success=False, empty list, missing attr, attr=None, args not dict (list and string variants), missing success attr. The four existing test files for the migrated modules continue to pass unchanged because they all mock through the public function surface, not through the helper. Combined regression after consolidation (`-k "gt_extractor or model_router_tool_call or prompt_optimizer or idea_refinement or research_agent or tool_call_args"`): **129/129** (was 121/121 + 8 new helper tests).
+
+### 17.41 Sprint X.14 — CI smoke for retrieval regressions (2026-05-08)
+
+Tier 2 audit row #13. The pre-X.14 `retrieval-quality.yml` workflow ran on PRs touching `rag_pipeline.py` but only invoked `tests/test_score_retrieval.py` — unit tests on the scoring math (`_recall_at_k`, `_mrr`). The orchestration logic in `query_rag` itself (RRF fusion, dedup, threshold filtering, supersede sweep) had no CI-checkable smoke. X.14 adds it.
+
+The change:
+
+- New `tests/test_rag_pipeline_smoke.py` (3 cases). All three patch the same dependency stack: `_get_collection` (return MagicMock), `_embed_query` (return a 512-d float vector), `_vector_search` + `_keyword_search` (return canned `RagResult` lists), `_lookup_superseded` (return empty set). `skip_rerank=True` bypasses the cross-encoder so CI doesn't need to load the 0.6B reranker model. Total runtime: ~1.2 s.
+  - **`test_overlap_dedupes_and_boosts_rrf`** — vector and keyword both return entry e1. Asserts `result_count == 1` (dedup), both `vector_score` and `keyword_score` carried through, RRF score non-zero. Catches a regression where `_rrf_fuse`'s key-merging breaks and emits duplicates.
+  - **`test_disjoint_results_preserves_both`** — vector returns e1, keyword returns e2. Asserts both surface in the final result set. Catches a regression where one source's hits get silently dropped during fusion.
+  - **`test_below_threshold_falls_back_with_warning`** — both sources return low-score hits, `confidence_threshold=0.99`. Documents and verifies the **post-rerank-only** semantic of the threshold filter: in `skip_rerank=True` mode the threshold is bypassed entirely, and the metadata reports `fell_back_to_top3=False` (the fallback only applies when rerank actually ran). Catches a regression where the skip-rerank path either drops results below threshold or fires the fallback warning incorrectly.
+
+- `.github/workflows/retrieval-quality.yml` — pytest invocation extended to include the new file. The workflow's `paths:` filter gains `tests/test_rag_pipeline_smoke.py` so a PR that only touches the smoke test still triggers the workflow. `continue-on-error: true` preserved (matches existing posture; the main `test.yml` is the blocking gate).
+
+**Why the smoke catches what it catches.** The smoke deliberately doesn't validate retrieval *quality* (that's the live `score_retrieval.py` harness's job, run on demand against the real KB). It validates retrieval *plumbing* — the dataclass-replacement-based fusion algorithm, the sort order after fusion, the metadata fields the response advertises, the dedup behavior on overlapping `entry_id`. These are the regressions an LLM-generated refactor would most likely introduce, and they're the ones that surface as "answers degraded" rather than "answers wrong".
+
+**Project pattern (memory-worthy):** when a workflow exists but only covers a *narrow* slice of a module's behavior (here: scoring math), extending its pytest invocation is preferred to creating a parallel workflow. One workflow per module-of-concern keeps the CI dashboard scannable. Add a `paths:` filter entry per new file so the existing trigger logic stays valid.
+
+**Test-suite delta:** `tests/test_rag_pipeline_smoke.py` (new): 3 cases covering RRF fusion, disjoint preservation, and threshold-bypass semantics. Combined CI-target run (`pytest tests/test_score_retrieval.py tests/test_rag_pipeline_smoke.py`): **13/13 in 1.81s**. Workflow YAML re-validated with `yaml.safe_load`. The existing main test suite is unaffected — the new file is opt-in via the workflow's `paths:` trigger.
 
 ---
 
