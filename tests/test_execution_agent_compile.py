@@ -19,7 +19,7 @@ class TestCompileOutputStrategy2:
              "status": "done", "output_text": "def hello():\n    print('hi')"},
         ])
         from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
+        result, _was_syn = await _compile_output("job-1", db)
         assert result == "def hello():\n    print('hi')"
 
     async def test_codegen_not_last_falls_through(self):
@@ -30,7 +30,7 @@ class TestCompileOutputStrategy2:
              "status": "done", "output_text": "summary here"},
         ])
         from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
+        result, _was_syn = await _compile_output("job-1", db)
         assert "## T1:" in result
         assert "## T2:" in result
 
@@ -49,7 +49,7 @@ class TestCompileOutputStrategy3:
              "status": "done", "output_text": "review notes"},
         ])
         from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
+        result, _was_syn = await _compile_output("job-1", db)
         assert "## T1: Research" in result
         assert "## T2: Analyze" in result
         assert "## T3: Review" in result
@@ -65,7 +65,7 @@ class TestCompileOutputStrategy3:
              "status": "blocked", "output_text": None},
         ])
         from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
+        result, _was_syn = await _compile_output("job-1", db)
         assert "## T1: Research" in result
         assert "T2" not in result
         assert "T3" not in result
@@ -81,7 +81,7 @@ class TestCompileOutputStrategy3:
              "status": "blocked", "output_text": None},
         ])
         from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
+        result, _was_syn = await _compile_output("job-1", db)
         assert result is None
 
 
@@ -104,7 +104,7 @@ class TestCompileOutputW2Strategy3:
              "is_output_node": True},
         ])
         from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
+        result, _was_syn = await _compile_output("job-1", db)
         assert result is not None
         assert "Partial deliverable" in result
         assert "2 of 3" in result
@@ -125,7 +125,7 @@ class TestCompileOutputW2Strategy3:
             for i in range(1, 5)
         ])
         from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
+        result, _was_syn = await _compile_output("job-1", db)
         assert result is not None
         # Truncation marker should appear in each section.
         assert result.count("[...truncated") >= 1
@@ -169,7 +169,7 @@ class TestCompileOutputPartial:
              "status": "blocked", "output_text": None},
         ])
         from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
+        result, _was_syn = await _compile_output("job-1", db)
         assert "kb results" in result
         assert "T2" not in result
         partial = "[PARTIAL — some nodes failed or blocked]\n\n" + result
@@ -185,7 +185,7 @@ class TestCompileOutputPartial:
              "status": "failed", "output_text": None},
         ])
         from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
+        result, _was_syn = await _compile_output("job-1", db)
         assert result is None
 
 
@@ -287,7 +287,7 @@ class TestCompileOutputExplicitMarker:
              "is_output_node": True},
         ])
         from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
+        result, _was_syn = await _compile_output("job-1", db)
         assert result == "EXPLICIT WINNER"
     async def test_explicit_marker_but_not_done_falls_through(self):
         db = make_mock_db([
@@ -299,7 +299,7 @@ class TestCompileOutputExplicitMarker:
              "is_output_node": True},
         ])
         from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
+        result, _was_syn = await _compile_output("job-1", db)
         assert "fallback content" in result
         assert "T2" not in result
 
@@ -313,7 +313,7 @@ class TestCompileOutputExplicitMarker:
              "is_output_node": True},
         ])
         from app.modules.execution_agent import _compile_output
-        result = await _compile_output("job-1", db)
+        result, _was_syn = await _compile_output("job-1", db)
         assert "alpha" in result
         assert "beta" in result
         assert "---" in result
@@ -391,7 +391,7 @@ class TestCompileOutputSynthesis:
                  "app.modules.execution_compile._synthesize_compiled_output",
                  new=synth_mock,
              ):
-            result = await _compile_output("job-1", db)
+            result, _was_syn = await _compile_output("job-1", db)
 
         # Strategy 3 heuristic shape
         assert "## T1: Plan" in result
@@ -418,7 +418,7 @@ class TestCompileOutputSynthesis:
                      "Coherent narrative covering both Plan and Build.",
                  )),
              ):
-            result = await _compile_output("job-1", db)
+            result, _was_syn = await _compile_output("job-1", db)
 
         assert result == "Coherent narrative covering both Plan and Build."
 
@@ -438,7 +438,7 @@ class TestCompileOutputSynthesis:
                  "app.model_router.tool_call",
                  new=AsyncMock(side_effect=RuntimeError("ollama down")),
              ):
-            result = await _compile_output("job-1", db)
+            result, _was_syn = await _compile_output("job-1", db)
 
         # Heuristic shape preserved.
         assert "## T1: Plan" in result
@@ -459,7 +459,7 @@ class TestCompileOutputSynthesis:
                  "app.model_router.tool_call",
                  new=AsyncMock(return_value=_synthesis_failure()),
              ):
-            result = await _compile_output("job-1", db)
+            result, _was_syn = await _compile_output("job-1", db)
 
         assert "## T1: Plan" in result
 
@@ -482,7 +482,7 @@ class TestCompileOutputSynthesis:
                  "app.model_router.tool_call",
                  new=synth_call,
              ):
-            result = await _compile_output("job-1", db)
+            result, _was_syn = await _compile_output("job-1", db)
 
         # CodeGen output preserved verbatim.
         assert result == code_payload
@@ -509,7 +509,7 @@ class TestCompileOutputSynthesis:
                      "Polished narrative version.",
                  )),
              ):
-            result = await _compile_output("job-1", db)
+            result, _was_syn = await _compile_output("job-1", db)
 
         assert result == "Polished narrative version."
 
@@ -530,6 +530,207 @@ class TestCompileOutputSynthesis:
                  "app.model_router.tool_call",
                  new=synth_call,
              ):
-            result = await _compile_output("job-1", db)
+            result, _was_syn = await _compile_output("job-1", db)
         assert result == code
         synth_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Sprint X.2 — synthesized flag + skipped-verify banner
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+class TestCompileOutputSynthesizedFlag:
+    """X.2 — _compile_output returns (text, was_synthesized: bool)."""
+
+    async def test_synthesis_disabled_returns_false(self):
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        db = make_mock_db([
+            {"node_key": "T1", "title": "X", "tool": "LLM",
+             "status": "done", "output_text": "out"},
+            {"node_key": "T2", "title": "Y", "tool": "LLM",
+             "status": "done", "output_text": "out2"},
+        ])
+        with patch.object(settings, "compile_synthesis_enabled", False):
+            text_value, was_syn = await _compile_output("job-1", db)
+        assert text_value is not None
+        assert was_syn is False
+
+    async def test_synthesis_enabled_and_succeeded_returns_true(self):
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+        from app.providers.base import ModelResponse, ToolCall
+
+        db = _make_db_with_brief([
+            {"node_key": "T1", "title": "X", "tool": "LLM",
+             "status": "done", "output_text": "out"},
+            {"node_key": "T2", "title": "Y", "tool": "LLM",
+             "status": "done", "output_text": "out2"},
+        ])
+        ok_resp = ModelResponse(
+            text="", model="fake", success=True,
+            tool_calls=[ToolCall(id="t0", name="render_summary",
+                                  arguments={"summary": "Polished narrative."})],
+        )
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch("app.model_router.tool_call",
+                   new=AsyncMock(return_value=ok_resp)):
+            text_value, was_syn = await _compile_output("job-1", db)
+        assert text_value == "Polished narrative."
+        assert was_syn is True
+
+    async def test_synthesis_enabled_but_fail_open_returns_false(self):
+        """LLM call fails → heuristic returned + was_synthesized=False so the
+        caller persists compiled_output_synthesized=False on jobs."""
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        db = _make_db_with_brief([
+            {"node_key": "T1", "title": "X", "tool": "LLM",
+             "status": "done", "output_text": "out"},
+            {"node_key": "T2", "title": "Y", "tool": "LLM",
+             "status": "done", "output_text": "out2"},
+        ])
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch("app.model_router.tool_call",
+                   new=AsyncMock(side_effect=RuntimeError("ollama down"))):
+            text_value, was_syn = await _compile_output("job-1", db)
+        assert text_value is not None
+        assert was_syn is False
+        assert "## T1" in text_value  # heuristic shape
+
+    async def test_codegen_guard_returns_false(self):
+        """Strategy 2 (last CodeGen) is guarded — synthesis never fires →
+        was_synthesized stays False even with synthesis enabled."""
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Plan", "tool": "LLM",
+             "status": "done", "output_text": "plan"},
+            {"node_key": "T2", "title": "Implement", "tool": "CodeGen",
+             "status": "done", "output_text": "def hi(): pass"},
+        ])
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch("app.model_router.tool_call",
+                   new=AsyncMock()):
+            text_value, was_syn = await _compile_output("job-1", db)
+        assert text_value == "def hi(): pass"
+        assert was_syn is False
+
+    async def test_empty_result_returns_none_false(self):
+        """No done nodes → (None, False) — caller stores NULL + synthesized=False."""
+        from app.modules.execution_agent import _compile_output
+
+        db = make_mock_db([
+            {"node_key": "T1", "title": "X", "tool": "LLM",
+             "status": "failed", "output_text": None},
+        ])
+        text_value, was_syn = await _compile_output("job-1", db)
+        assert text_value is None
+        assert was_syn is False
+
+
+@pytest.mark.smoke
+class TestSkippedVerifyBanner:
+    """X.2 — when N nodes were skipped during execution, prepend an
+    operational banner so consumers can tell the deliverable doesn't
+    cover the full DAG. Sits AFTER synthesis on the call path so it
+    survives any LLM rewriting."""
+
+    async def test_no_skipped_no_banner(self):
+        from app.modules.execution_agent import _compile_output
+
+        db = make_mock_db([
+            {"node_key": "T1", "title": "A", "tool": "LLM",
+             "status": "done", "output_text": "alpha"},
+            {"node_key": "T2", "title": "B", "tool": "LLM",
+             "status": "done", "output_text": "beta"},
+        ])
+        text_value, _ = await _compile_output("job-1", db)
+        assert text_value is not None
+        assert "Note:" not in text_value
+        assert "skipped" not in text_value.lower()
+
+    async def test_one_skipped_banner_singular(self):
+        """skipped_count=1 → singular wording ('1 of 3 task were skipped' would
+        be ungrammatical; banner uses 'task' singular)."""
+        from app.modules.execution_agent import _compile_output
+
+        db = make_mock_db([
+            {"node_key": "T1", "title": "A", "tool": "LLM",
+             "status": "done", "output_text": "alpha"},
+            {"node_key": "T2", "title": "B", "tool": "LLM",
+             "status": "done", "output_text": "beta"},
+            {"node_key": "T3", "title": "C", "tool": "LLM",
+             "status": "skipped", "output_text": None},
+        ])
+        text_value, _ = await _compile_output("job-1", db)
+        assert text_value is not None
+        assert text_value.startswith("_Note: 1 of 3 task were skipped")
+        # Body still present after the banner
+        assert "alpha" in text_value
+        assert "beta" in text_value
+
+    async def test_multiple_skipped_banner_plural(self):
+        from app.modules.execution_agent import _compile_output
+
+        db = make_mock_db([
+            {"node_key": "T1", "title": "A", "tool": "LLM",
+             "status": "done", "output_text": "alpha"},
+            {"node_key": "T2", "title": "B", "tool": "LLM",
+             "status": "skipped", "output_text": None},
+            {"node_key": "T3", "title": "C", "tool": "LLM",
+             "status": "skipped", "output_text": None},
+        ])
+        text_value, _ = await _compile_output("job-1", db)
+        assert text_value is not None
+        assert text_value.startswith("_Note: 2 of 3 tasks were skipped")
+        assert "alpha" in text_value
+
+    async def test_banner_survives_synthesis(self):
+        """Banner is prepended AFTER synthesis, so even if the LLM rewrites
+        the heuristic into a clean narrative, the banner stays at the top."""
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+        from app.providers.base import ModelResponse, ToolCall
+
+        db = _make_db_with_brief([
+            {"node_key": "T1", "title": "Plan", "tool": "LLM",
+             "status": "done", "output_text": "plan content"},
+            {"node_key": "T2", "title": "Build", "tool": "LLM",
+             "status": "done", "output_text": "build content"},
+            {"node_key": "T3", "title": "Polish", "tool": "LLM",
+             "status": "skipped", "output_text": None},
+        ])
+        ok_resp = ModelResponse(
+            text="", model="fake", success=True,
+            tool_calls=[ToolCall(id="t0", name="render_summary",
+                                  arguments={"summary": "Clean narrative output."})],
+        )
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch("app.model_router.tool_call",
+                   new=AsyncMock(return_value=ok_resp)):
+            text_value, was_syn = await _compile_output("job-1", db)
+        assert text_value is not None
+        assert text_value.startswith("_Note: 1 of 3 task were skipped")
+        # Synthesized body follows the banner
+        assert "Clean narrative output." in text_value
+        assert was_syn is True
+
+    async def test_empty_result_no_banner(self):
+        """When _compile_output returns None, banner doesn't fire (no text to prepend to)."""
+        from app.modules.execution_agent import _compile_output
+
+        db = make_mock_db([
+            {"node_key": "T1", "title": "A", "tool": "LLM",
+             "status": "skipped", "output_text": None},
+            {"node_key": "T2", "title": "B", "tool": "LLM",
+             "status": "skipped", "output_text": None},
+        ])
+        text_value, was_syn = await _compile_output("job-1", db)
+        assert text_value is None
+        assert was_syn is False

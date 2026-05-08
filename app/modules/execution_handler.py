@@ -16,8 +16,16 @@ logger = logging.getLogger("scaffold.execution_handler")
 async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
     """Get current execution state: job status + all nodes with actionable next."""
     # Job info
+    # Sprint X.2 — `compiled_output_synthesized` surfaces whether the
+    # stored compiled_output is the LLM-synthesized narrative (W.7) or
+    # the raw heuristic body. Lets clients render a "synthesized by LLM"
+    # badge when appropriate.
     job_result = await db.execute(
-        text("SELECT id, title, status, compiled_output FROM jobs WHERE id = :job_id"),
+        text(
+            "SELECT id, title, status, compiled_output, "
+            "       compiled_output_synthesized "
+            "FROM jobs WHERE id = :job_id"
+        ),
         {"job_id": str(job_id)}
     )
     job = job_result.fetchone()
@@ -97,6 +105,7 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         "job_title": job.title,
         "job_status": job.status,
         "compiled_output": job.compiled_output,
+        "synthesized": bool(job.compiled_output_synthesized),
         "counts": counts,
         "total_nodes": len(nodes),
         "next_node": next_node,

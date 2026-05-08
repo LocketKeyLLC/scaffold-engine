@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     completed_at TIMESTAMPTZ,
     error_summary TEXT,
     compiled_output TEXT,
+    compiled_output_synthesized BOOLEAN NOT NULL DEFAULT FALSE,
     metadata JSONB DEFAULT '{}'::jsonb
 );
 

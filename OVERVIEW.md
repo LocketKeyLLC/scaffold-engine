@@ -2104,6 +2104,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | W.7 | Workflow audit — opt-in LLM synthesis pass on compiled output (§17.25) | done 2026-05-07 |
 | W.8 | Workflow audit — RAG quality re-baseline at KB=1093 (§17.26) | done 2026-05-07 |
 | X.1 | Tier 2 audit — threshold cluster + reranker /health (§17.27) | done 2026-05-07 |
+| X.2 | Tier 2 audit — synthesized flag + skipped-verify banner (§17.28) | done 2026-05-07 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2664,6 +2665,36 @@ A silent prewarm failure previously only logged a single `WARNING` line, which `
 - Add a /health overall-status downgrade for `reranker.status="down"`. Current behavior: `reranker` is informational; the response's top-level `status` field still ignores it. A future change could promote rerank-failed to `degraded`, but operators may legitimately run with the cross-encoder disabled (e.g., RRF-only mode in CI), so promoting silently could surprise.
 
 **Open Tier 2 follow-ups** (per the audit memo): research-session idle-tracking column; OWUI file-routing diagnostic capture; `_compile_output` skipped-verify banner; 5-place API-key sync target; W.4-style wrap on `_fetch_upstream_outputs`; prompt_optimizer / idea_refinement / gt_extractor tool-call migrations; per-job synthesis opt-in column; `synthesized=true|false` flag on `/exec/status`; ground_truth.json regen; quarterly re-baseline cadence; CI smoke for retrieval; `tests/test_cleanup.py` drift fix.
+
+### 17.28 Sprint X.2 — synthesized flag + skipped-verify banner (2026-05-07)
+
+Second Tier 2 sprint. Bundles two small observability adds that surface existing internal state — both audit-listed, both close W.7 deferred follow-ups.
+
+**Item A — `synthesized=true|false` on `/exec/status/{job_id}`** (W.7 follow-up): consumers couldn't tell whether `compiled_output` is the LLM-synthesized narrative (W.7 path) or the raw heuristic body. Now they can.
+
+- Migration **027** — `ALTER TABLE jobs ADD COLUMN compiled_output_synthesized BOOLEAN NOT NULL DEFAULT FALSE`. Idempotent (`IF NOT EXISTS`). `db/init.sql` baseline updated to match.
+- `_compile_output` return signature changed from `str | None` to `tuple[str | None, bool]`. The `bool` is True iff the W.7 LLM-synthesis pass actually replaced the heuristic — synthesis-disabled, fail-open, CodeGen-guarded, and empty-heuristic paths all return `False`.
+- `_maybe_synthesize` adapted to return `(text, was_synthesized)`.
+- `execute_next_node` (and the partial-blocked-cache path) destructure the tuple and persist both `compiled_output` + `compiled_output_synthesized` in the same `UPDATE`. The auto-completion log line gained a `synthesized=` field.
+- `execution_status` (`/exec/status` handler) reads the new column and adds `synthesized: bool` to the response payload, alongside the existing `compiled_output` field.
+
+**Item B — `_compile_output` skipped-verify banner**: when N nodes were `skipped` during execution, the deliverable now carries a short operational banner at the top: `_Note: N of M task(s) were skipped during execution; the deliverable below covers the verified tasks only._`. Consumers no longer need to cross-reference `/exec/status.counts` to know whether the compiled output is "the full DAG's deliverable" or "what's left after skips."
+
+- Implementation: `_prepend_skipped_banner(text, skipped_count, total)` is applied **after** synthesis on every strategy's return path. Banner sits AFTER synthesis is intentional — it's operational metadata, not narrative content, so it survives any LLM rewriting (the synthesis prompt explicitly preserves facts but it's safer to put the banner outside the LLM's reach entirely).
+- Singular vs plural wording handled (`task` vs `tasks`).
+- Empty result (`text=None`) suppresses the banner — no banner without a body.
+
+**Test-suite delta** (`tests/test_execution_agent_compile.py`): 19 existing call sites updated to destructure the tuple (`result, _was_syn = ...`). 10 new tests in two classes: `TestCompileOutputSynthesizedFlag` (5: synthesis-disabled→False, synthesis-succeeded→True, fail-open→False, CodeGen-guard→False, empty→False) and `TestSkippedVerifyBanner` (5: no-skip→no-banner, 1-skipped→singular, multi-skipped→plural, banner-survives-synthesis, empty-result→no-banner). **Combined regression baseline (W track + X.1 + X.2): 278/278.**
+
+**What this does NOT do** (deferred):
+- A `synthesized=true|false` filter on `GET /jobs` listing. The flag is per-job; surfacing it in list views would let UIs show a "synthesized by LLM" badge in the jobs table, but the tier-2 audit row called out only `/exec/status`.
+- Per-job opt-in for synthesis (column on jobs to override the global setting). Discussed but kept as a separate audit-tail item — needs schema + API surface beyond what X.2 ships.
+- Banner styling. The current banner is plain markdown italic; OWUI/CLI render it inline with the rest of the deliverable. A future polish could inject CSS hooks, but the audit ask was just operator-visibility.
+
+**Open follow-ups (audit-tail):**
+- Add `synthesized` filter to `GET /jobs` listing.
+- Per-job synthesis opt-in column.
+- Cost-telemetry tie-in: when J.3 lands, log per-call synthesis tokens against the `synthesized=true` jobs so the cost is attributable.
 
 ---
 

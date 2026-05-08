@@ -233,27 +233,62 @@ def _join_sections(sections: list[str]) -> str:
 async def _maybe_synthesize(
     *, job_id: str, heuristic: str | None,
     strategy: str, source_tool: str | None, db,
-) -> str | None:
+) -> tuple[str | None, bool]:
     """If synthesis is enabled and the heuristic is non-empty, run the
     LLM post-processor; on failure (or CodeGen guard) return the heuristic
-    unchanged. Centralizes the W.7 fail-open contract for every strategy."""
+    unchanged.
+
+    Sprint X.2 — returns (text, was_synthesized: bool). was_synthesized is
+    True iff the LLM rewrite actually replaced the heuristic. Synthesis
+    disabled, CodeGen-guarded, fail-open, and empty-heuristic paths all
+    return (text_or_None, False). Lets callers persist the synthesized
+    flag on jobs.compiled_output_synthesized.
+    """
     if heuristic is None or not settings.compile_synthesis_enabled:
-        return heuristic
+        return heuristic, False
     synthesized = await _synthesize_compiled_output(
         job_id=job_id, heuristic=heuristic,
         source_strategy=strategy, source_tool=source_tool, db=db,
     )
-    return synthesized if synthesized else heuristic
+    if synthesized:
+        return synthesized, True
+    return heuristic, False
 
 
-async def _compile_output(job_id: str, db) -> str | None:
+def _prepend_skipped_banner(text: str | None, skipped_count: int, total: int) -> str | None:
+    """Sprint X.2 — when N nodes were skipped during execution, prepend a
+    short operational banner so consumers can tell the deliverable doesn't
+    cover the full DAG. Sits AFTER synthesis on the call path, so the
+    banner survives any LLM rewriting (operational metadata, not narrative
+    content).
+
+    Returns the input unchanged when text is None or skipped_count is 0.
+    """
+    if text is None or skipped_count <= 0:
+        return text
+    plural = "task" if skipped_count == 1 else "tasks"
+    banner = (
+        f"_Note: {skipped_count} of {total} {plural} were skipped during "
+        f"execution; the deliverable below covers the verified tasks only._"
+        f"\n\n---\n\n"
+    )
+    return banner + text
+
+
+async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
     """Compile node outputs into a single deliverable.
 
-    Returns ``None`` when no done node contributed output. Returns the
-    compiled string otherwise. Sprint W.7 — when
-    ``settings.compile_synthesis_enabled`` is True, the heuristic body is
-    fed through an LLM post-processor (with a CodeGen guard preserving
-    executable output verbatim).
+    Returns ``(text, was_synthesized)``:
+      - ``text`` is ``None`` when no done node contributed output.
+      - ``was_synthesized`` is True iff the W.7 LLM-synthesis pass
+        actually replaced the heuristic. False when synthesis is
+        disabled, fail-open, CodeGen-guarded, or empty-heuristic.
+
+    Sprint X.2 changed the return type from ``str | None`` to
+    ``tuple[str | None, bool]`` so callers can persist the synthesized
+    flag on ``jobs.compiled_output_synthesized``. The X.2 skipped-verify
+    banner is prepended *after* synthesis (operational metadata, not
+    narrative — survives any LLM rewriting).
     """
     rows = await db.execute(
         text(
@@ -265,6 +300,19 @@ async def _compile_output(job_id: str, db) -> str | None:
     )
     nodes = rows.mappings().all()
 
+    # Sprint X.2 — count skipped + total for the banner. Total counts
+    # only nodes that ever had something to do (excludes failed deps
+    # blocking; those show up as 'pending' in /exec/status' counts).
+    skipped_count = sum(1 for n in nodes if n["status"] == "skipped")
+    total_count = len(nodes)
+
+    async def _finish(text_value: str | None, was_synthesized: bool) -> tuple[str | None, bool]:
+        """Apply the X.2 skipped banner + return."""
+        return (
+            _prepend_skipped_banner(text_value, skipped_count, total_count),
+            was_synthesized,
+        )
+
     # Strategy 0 (#97): explicit is_output_node marker wins over heuristics.
     explicit = [
         n for n in nodes
@@ -273,33 +321,36 @@ async def _compile_output(job_id: str, db) -> str | None:
     if explicit:
         if len(explicit) == 1:
             heuristic = explicit[0]["output_text"]
-            return await _maybe_synthesize(
+            text_value, was_syn = await _maybe_synthesize(
                 job_id=job_id, heuristic=heuristic,
                 strategy="0_single_leaf", source_tool=explicit[0]["tool"],
                 db=db,
             )
+            return await _finish(text_value, was_syn)
         heuristic = _join_sections([_format_section(n) for n in explicit])
         # Multi-leaf: source_tool is None so the CodeGen guard doesn't
         # short-circuit on a heterogeneous leaf set. If any leaf is
         # CodeGen the synthesized prose still respects the verbatim-code
         # rule via SYNTHESIS_SYSTEM ("preserve code blocks verbatim
         # inside their original triple-backtick fences").
-        return await _maybe_synthesize(
+        text_value, was_syn = await _maybe_synthesize(
             job_id=job_id, heuristic=heuristic,
             strategy="0_multi_leaf", source_tool=None, db=db,
         )
+        return await _finish(text_value, was_syn)
 
     # Strategy 2: last CodeGen node is the deliverable.
     done = [n for n in nodes if n["status"] == "done" and n["output_text"]]
     if done and done[-1]["tool"] == "CodeGen":
-        return await _maybe_synthesize(
+        text_value, was_syn = await _maybe_synthesize(
             job_id=job_id, heuristic=done[-1]["output_text"],
             strategy="2_last_codegen", source_tool="CodeGen", db=db,
         )
+        return await _finish(text_value, was_syn)
 
     # Strategy 3: concat-all-done-with-headers fallback.
     if not done:
-        return None
+        return None, False
 
     # Diagnostic — this path means the DAG produced output but no leaf node
     # was marked. Either the dag_generator's leaf-set logic missed this DAG
@@ -345,7 +396,8 @@ async def _compile_output(job_id: str, db) -> str | None:
     # Strategy 3 has no single source-tool — done set is heterogeneous.
     # CodeGen guard isn't applicable; SYNTHESIS_SYSTEM still preserves
     # code blocks verbatim within the prose.
-    return await _maybe_synthesize(
+    text_value, was_syn = await _maybe_synthesize(
         job_id=job_id, heuristic=heuristic,
         strategy="3_concat_all", source_tool=None, db=db,
     )
+    return await _finish(text_value, was_syn)

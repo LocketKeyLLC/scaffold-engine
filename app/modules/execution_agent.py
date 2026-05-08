@@ -456,11 +456,15 @@ async def execute_next_node(
                 flipped = result.fetchone()
                 await db.commit()
                 if flipped is not None:
-                    compiled = await _compile_output(job_id, db)
+                    # X.2: _compile_output now returns (text, was_synthesized).
+                    compiled, was_synthesized = await _compile_output(job_id, db)
                     if compiled:
                         await db.execute(
-                            text("UPDATE jobs SET compiled_output = :co WHERE id = :jid"),
-                            {"co": compiled, "jid": job_id},
+                            text(
+                                "UPDATE jobs SET compiled_output = :co, "
+                                "compiled_output_synthesized = :syn WHERE id = :jid"
+                            ),
+                            {"co": compiled, "syn": was_synthesized, "jid": job_id},
                         )
                         await db.commit()
                 return {"status": "complete", "message": "All nodes done. Job complete."}
@@ -482,11 +486,16 @@ async def execute_next_node(
                     await db.commit()
                     logger.info("partial_compiled_cache_hit: job=%s chars=%s", job_id, len(partial_result))
                 else:
-                    partial_result = await _compile_output(job_id, db)
+                    # X.2: tuple return; persist synthesized flag too.
+                    partial_result, partial_synthesized = await _compile_output(job_id, db)
                     if partial_result:
                         await db.execute(
-                            text("UPDATE jobs SET compiled_output = :co, status = 'blocked' WHERE id = :jid"),
-                            {"co": partial_result, "jid": job_id},
+                            text(
+                                "UPDATE jobs SET compiled_output = :co, "
+                                "compiled_output_synthesized = :syn, "
+                                "status = 'blocked' WHERE id = :jid"
+                            ),
+                            {"co": partial_result, "syn": partial_synthesized, "jid": job_id},
                         )
                     else:
                         await db.execute(
@@ -820,17 +829,21 @@ async def execute_next_node(
             if flipped is not None:
                 job_complete = True
                 logger.info("job_autocompleted: job=%s", job_id)
-                compiled = await _compile_output(job_id, db)
-                # _compile_output returns None when no done node contributed
-                # (e.g., every node was skipped). Store NULL in that case.
+                # X.2: _compile_output returns (text, was_synthesized).
+                # Returns None text when no done node contributed (e.g.,
+                # every node was skipped). Store NULL in that case.
+                compiled, was_synthesized = await _compile_output(job_id, db)
                 await db.execute(
-                    text("UPDATE jobs SET compiled_output = :out WHERE id = :jid"),
-                    {"out": compiled, "jid": job_id},
+                    text(
+                        "UPDATE jobs SET compiled_output = :out, "
+                        "compiled_output_synthesized = :syn WHERE id = :jid"
+                    ),
+                    {"out": compiled, "syn": was_synthesized, "jid": job_id},
                 )
                 await db.commit()
                 logger.info(
-                    "compiled_output_stored: chars=%s job=%s",
-                    len(compiled) if compiled else 0, job_id,
+                    "compiled_output_stored: chars=%s synthesized=%s job=%s",
+                    len(compiled) if compiled else 0, was_synthesized, job_id,
                 )
 
     return {
