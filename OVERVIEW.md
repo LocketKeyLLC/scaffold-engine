@@ -2117,6 +2117,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.12 | Tier 2 audit — gt_extractor `extract_ground_truths` → `tool_call` migration (§17.39) | done 2026-05-08 |
 | X.13 | Tier 2 cleanup — `_tool_args` consolidation → `app/utils/tool_call_args.py` (§17.40) | done 2026-05-08 |
 | X.14 | Tier 2 audit — CI smoke for retrieval regressions (§17.41) | done 2026-05-08 |
+| X.15 | Tier 2 test-debt — `test_execution_handler_module.py` SimpleNamespace fixture drift (§17.42) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2738,7 +2739,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 13 | CI smoke for retrieval regressions | **DONE in X.14** | New `tests/test_rag_pipeline_smoke.py` (3 queries: overlap-dedup, disjoint-fusion, threshold-skip-bypass). Wired into existing `retrieval-quality.yml` workflow. ~1s runtime; no live Milvus/Ollama/cross-encoder. |
 | 14 | Quarterly RAG re-baseline cadence | Scheduling | `make rebaseline` cron / runbook. Surfaces drift early. |
 | 15 | `tests/ground_truth.json` regen at KB=1093 | Calibration, multi-hour | Re-curate expected_doc_ids against the current `scaffold-<title>-<hash>` naming. Defer until a quarterly rebaseline shows a need. |
-| 16 | `test_execution_handler_module.py` SimpleNamespace fixture drift | Test debt, ~30 min | 8/20 broken since X.2 added `compiled_output_synthesized` to the row that `execution_status` SELECTs. Fixtures need the new attr. Same drift class as X.3 (frozen test fixture vs. live schema). |
+| 16 | `test_execution_handler_module.py` SimpleNamespace fixture drift | **DONE in X.15** | New `_job_row` helper defaults the X.2 `compiled_output_synthesized` + X.6 `compile_synthesis_override` columns. 8 fixture sites converted; 9/9 green. |
 | 17 | `test_execution_agent_compile.py` 5 stale W.7/X.2 cases | Test debt, ~30 min | 5 pre-existing failures across `TestCompileOutputW2Strategy3`, `TestCompileOutputSynthesis`, `TestCompileOutputSynthesizedFlag`, `TestSkippedVerifyBanner`. Need to inspect and rebuild fixtures. |
 | 18 | `test_health_cleanup.py` un-skip | Test debt, ~30 min | Module-level skip currently dead-codes TestHealth* (useful, distinct from `test_x1_thresholds_and_health.py`) along with TestReapStaleJobs (obsolete). Decide: salvage TestHealth* or delete the file. |
 
@@ -2990,6 +2991,19 @@ The change:
 **Project pattern (memory-worthy):** when a workflow exists but only covers a *narrow* slice of a module's behavior (here: scoring math), extending its pytest invocation is preferred to creating a parallel workflow. One workflow per module-of-concern keeps the CI dashboard scannable. Add a `paths:` filter entry per new file so the existing trigger logic stays valid.
 
 **Test-suite delta:** `tests/test_rag_pipeline_smoke.py` (new): 3 cases covering RRF fusion, disjoint preservation, and threshold-bypass semantics. Combined CI-target run (`pytest tests/test_score_retrieval.py tests/test_rag_pipeline_smoke.py`): **13/13 in 1.81s**. Workflow YAML re-validated with `yaml.safe_load`. The existing main test suite is unaffected — the new file is opt-in via the workflow's `paths:` trigger.
+
+### 17.42 Sprint X.15 — `test_execution_handler_module.py` SimpleNamespace fixture drift (2026-05-08)
+
+Tier 2 test-debt row #16. Same drift class as X.3 (cleanup-test 8-reaper) and the deferred test fixes folded into X.12 — frozen `SimpleNamespace` fixtures vs. a live schema that grew columns underneath them. `execution_status` SELECTs both `compiled_output_synthesized` (X.2) and `compile_synthesis_override` (X.6) from every job row; pre-X.15 fixtures predated both columns and crashed with `AttributeError` on every test that hit the SELECT path. 8 of 9 tests in the file were broken.
+
+The fix:
+
+- New `_job_row(**kw)` helper alongside the existing `_row(**kw)`. Defaults `compiled_output_synthesized=False` and `compile_synthesis_override=None` (the semantically-correct null states for legacy fixtures predating X.2/X.6) via `kw.setdefault(...)` so callers can override either field when a test cares about it.
+- 8 job-building call sites swapped from `_row(...)` to `_job_row(...)`. Node-building `_row(...)` calls untouched — `execution_status` doesn't SELECT new columns from `dag_nodes`, only from `jobs`. The split between `_job_row` and `_row` documents the row-shape distinction at the test-helper level.
+
+**Project pattern (memory-worthy):** when a SELECT-driven function gains columns over multiple sprints (X.2 added one, X.6 added another), tests using `SimpleNamespace` fixtures for the row break with `AttributeError` rather than a meaningful assertion failure. Two long-term mitigations: (a) prefer `MagicMock` over `SimpleNamespace` for row fixtures — `MagicMock`'s default `attr` access returns another mock, never raises (but loses the strict-attribute discipline), or (b) add a typed helper like `_job_row(**kw)` per row-shape that enforces all current columns at construction time. Option (b) is what X.15 does; the cost is one more helper to maintain when columns drift, the benefit is fixture failures show up as "I forgot to add the new column to `_job_row`" rather than as silent attribute access through a permissive mock.
+
+**Test-suite delta:** `tests/test_execution_handler_module.py`: 1/9 → **9/9** (fixed 8 broken cases + the previously-passing case stays passing). Combined `-k "execution_handler or execution_agent"` run: 109 passed, 5 pre-existing failures remain in `test_execution_agent_compile.py` (Tier 2 audit row #17 — a separate test-debt sprint).
 
 ---
 

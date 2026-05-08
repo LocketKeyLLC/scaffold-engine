@@ -12,6 +12,21 @@ def _row(**kw):
     return SimpleNamespace(**kw)
 
 
+def _job_row(**kw):
+    """Build a job-row SimpleNamespace with X.2 + X.6 column defaults.
+
+    ``execution_status`` SELECTs ``compiled_output_synthesized`` (X.2)
+    and ``compile_synthesis_override`` (X.6) from every job row; pre-X.15
+    fixtures pre-dated those columns and crashed with AttributeError on
+    every test that hit the SELECT path. Defaulting both to their
+    semantically-correct null states (False / None) keeps the legacy
+    test bodies focused on the behavior they actually exercise.
+    """
+    kw.setdefault("compiled_output_synthesized", False)
+    kw.setdefault("compile_synthesis_override", None)
+    return SimpleNamespace(**kw)
+
+
 def _mock_db(job_row, node_rows):
     """Return a db whose two sequential execute() calls return (job, nodes)."""
     job_result = MagicMock()
@@ -33,7 +48,7 @@ async def test_execution_status_returns_error_when_job_missing():
 
 
 async def test_execution_status_identifies_next_pending_with_deps_met():
-    job = _row(id="j1", title="t", status="executing", compiled_output=None)
+    job = _job_row(id="j1", title="t", status="executing", compiled_output=None)
     nodes = [
         _row(node_key="T1", title="First", status="done", execution_order=1,
              depends_on=[], assigned_model=None),
@@ -50,7 +65,7 @@ async def test_execution_status_identifies_next_pending_with_deps_met():
 
 async def test_skipped_counts_as_satisfied_for_deps(regression_check=True):
     """#7.6 — a skipped upstream shouldn't lock downstream."""
-    job = _row(id="j1", title="t", status="executing", compiled_output=None)
+    job = _job_row(id="j1", title="t", status="executing", compiled_output=None)
     nodes = [
         _row(node_key="T1", title="", status="skipped", execution_order=1,
              depends_on=[], assigned_model=None),
@@ -64,7 +79,7 @@ async def test_skipped_counts_as_satisfied_for_deps(regression_check=True):
 
 async def test_failed_node_is_not_actionable(regression_check=True):
     """#7.7 — failed nodes require /exec/retry, not picked up by /execute."""
-    job = _row(id="j1", title="t", status="executing", compiled_output=None)
+    job = _job_row(id="j1", title="t", status="executing", compiled_output=None)
     nodes = [
         _row(node_key="T1", title="", status="failed", execution_order=1,
              depends_on=[], assigned_model=None),
@@ -77,7 +92,7 @@ async def test_failed_node_is_not_actionable(regression_check=True):
 
 
 async def test_status_counts_by_state():
-    job = _row(id="j1", title="t", status="running", compiled_output=None)
+    job = _job_row(id="j1", title="t", status="running", compiled_output=None)
     nodes = [
         _row(node_key=f"T{i}", title="", status=status, execution_order=i,
              depends_on=[], assigned_model=None)
@@ -100,7 +115,7 @@ async def test_next_actions_populated_for_failed_status():
     """When the job is 'failed' the response surfaces retry/skip/delete
     options with the actual failed node_key substituted."""
     job_id = uuid4()
-    job = _row(id="j1", title="t", status="failed", compiled_output=None)
+    job = _job_row(id="j1", title="t", status="failed", compiled_output=None)
     nodes = [
         _row(node_key="T1", title="", status="done", execution_order=1,
              depends_on=[], assigned_model=None),
@@ -121,8 +136,8 @@ async def test_next_actions_populated_for_failed_status():
 async def test_next_actions_for_awaiting_confirmation():
     """An awaiting-confirmation job offers /confirm + delete."""
     job_id = uuid4()
-    job = _row(id="j1", title="t", status="awaiting_confirmation",
-               compiled_output=None)
+    job = _job_row(id="j1", title="t", status="awaiting_confirmation",
+                   compiled_output=None)
     db = _mock_db(job, [])
     result = await execution_handler.execution_status(job_id, db)
     kinds = {a["action"] for a in result["next_actions"]}
@@ -131,7 +146,7 @@ async def test_next_actions_for_awaiting_confirmation():
 
 async def test_next_actions_for_completed_renders_view_output():
     job_id = uuid4()
-    job = _row(id="j1", title="t", status="completed", compiled_output="out")
+    job = _job_row(id="j1", title="t", status="completed", compiled_output="out")
     nodes = [
         _row(node_key="T1", title="", status="done", execution_order=1,
              depends_on=[], assigned_model=None),
@@ -147,7 +162,7 @@ async def test_next_actions_blocked_node_picks_correct_node_key():
     """Pending node whose deps aren't met → blocked_node_key surfaces in
     skip suggestions for in-flight jobs."""
     job_id = uuid4()
-    job = _row(id="j1", title="t", status="running", compiled_output=None)
+    job = _job_row(id="j1", title="t", status="running", compiled_output=None)
     nodes = [
         _row(node_key="T1", title="", status="failed", execution_order=1,
              depends_on=[], assigned_model=None),
