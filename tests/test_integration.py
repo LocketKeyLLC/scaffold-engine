@@ -64,10 +64,16 @@ async def test_health_endpoint(client):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.validate
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(180)
 @pytest.mark.asyncio
 async def test_rag_query_round_trip():
-    """query_rag returns results with expected fields for a known domain."""
+    """query_rag returns results with expected fields for a known domain.
+
+    Timeout 180s (was 60s): cold-start CrossEncoder load + first batch on
+    CPU-only inference can spend ~80s on the reranker pass. Warm runs
+    finish in seconds. The 3x headroom keeps cold-start green without
+    masking real perf regressions.
+    """
     from app.modules.rag_pipeline import query_rag
 
     result = await query_rag("HNSW vector search", domain="eng", top_k=3)

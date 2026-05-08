@@ -84,7 +84,7 @@ async def test_compile_output_prefers_explicit_leaf(db_session, insert_job):
         {"k": "T3", "t": "third",  "s": "done", "o": 2, "tool": "LLM",
          "out": "the deliverable", "leaf": True},
     ])
-    out = await _compile_output(job_id, db_session)
+    out, _was_synthesized = await _compile_output(job_id, db_session)
     assert out == "the deliverable"
 
 
@@ -95,7 +95,7 @@ async def test_compile_output_falls_back_to_last_codegen(db_session, insert_job)
         {"k": "T1", "t": "first",  "s": "done", "o": 0, "tool": "LLM",     "out": "thinking"},
         {"k": "T2", "t": "second", "s": "done", "o": 1, "tool": "CodeGen", "out": "final code"},
     ])
-    out = await _compile_output(job_id, db_session)
+    out, _was_synthesized = await _compile_output(job_id, db_session)
     assert out == "final code"
 
 
@@ -106,7 +106,7 @@ async def test_compile_output_concatenates_when_no_codegen(db_session, insert_jo
         {"k": "T1", "t": "first",  "s": "done", "o": 0, "tool": "LLM", "out": "alpha"},
         {"k": "T2", "t": "second", "s": "done", "o": 1, "tool": "LLM", "out": "beta"},
     ])
-    out = await _compile_output(job_id, db_session)
+    out, _was_synthesized = await _compile_output(job_id, db_session)
     assert "## T1: first" in out
     assert "alpha" in out
     assert "## T2: second" in out
@@ -119,6 +119,6 @@ async def test_compile_output_skips_failed_nodes(db_session, insert_job):
         {"k": "T1", "t": "ok",      "s": "done",   "o": 0, "tool": "LLM", "out": "good"},
         {"k": "T2", "t": "bad",     "s": "failed", "o": 1, "tool": "LLM", "out": "broken"},
     ])
-    out = await _compile_output(job_id, db_session)
+    out, _was_synthesized = await _compile_output(job_id, db_session)
     assert "good" in out
     assert "broken" not in out

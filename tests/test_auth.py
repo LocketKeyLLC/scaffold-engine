@@ -9,47 +9,54 @@ from fastapi import HTTPException
 def _api_key_set(monkeypatch):
     """Reload auth module with an API key set so tests are deterministic.
 
-    Pydantic Settings is a singleton (instantiated at import of app.config),
-    so we must reload BOTH app.config and app.auth — reloading auth alone
-    leaves settings.scaffold_api_key pinned to the value at first import.
+    Note: we monkeypatch `settings.scaffold_api_key` *in place* rather than
+    `importlib.reload(app.config)`. Reloading config swaps in a new Settings
+    singleton, but every other module that did `from app.config import
+    settings` already holds a reference to the OLD instance — their
+    `settings.X` reads then become invisible to subsequent test patches
+    on the new instance. That cross-test leak surfaced as flaky failures
+    in test_dag_generator and test_execution_agent_compile when this
+    fixture ran earlier in the suite. Reloading only `app.auth` (which
+    captures `_RAW_KEY` at import time) is sufficient and isolation-safe.
     """
     import importlib
+    from pydantic import SecretStr
     import app.config
     import app.auth
     monkeypatch.setenv("SCAFFOLD_API_KEY", "testkey123")
-    importlib.reload(app.config)
+    monkeypatch.setattr(
+        app.config.settings, "scaffold_api_key", SecretStr("testkey123"),
+    )
     importlib.reload(app.auth)
     yield app.auth
-    # Teardown: leave auth in a usable state for the NEXT test's import-time
-    # check. Empty key + no opt-out raises RuntimeError at import, so we
-    # always restore a known-good key here. monkeypatch will undo the env
-    # changes, but the reloaded modules need to see something valid mid-frame.
-    monkeypatch.setenv("SCAFFOLD_API_KEY", "testkey123")
-    importlib.reload(app.config)
+    # Teardown: monkeypatch restores settings.scaffold_api_key + env, but
+    # auth.py captured the OLD _RAW_KEY at the start of this fixture. Reload
+    # auth one more time so subsequent tests see a key consistent with the
+    # restored settings.scaffold_api_key.
     importlib.reload(app.auth)
 
 
 @pytest.fixture
 def _api_key_unset(monkeypatch):
-    """Reload auth with no key AND SCAFFOLD_AUTH_DISABLED=1 (the real dev opt-out).
+    """Reload auth with empty key AND SCAFFOLD_AUTH_DISABLED=1 (the real dev opt-out).
 
     Empty key WITHOUT SCAFFOLD_AUTH_DISABLED=1 raises RuntimeError at module
     import — that's the documented contract in app/auth.py:11-15. The
     "permissive" mode is only reachable via the explicit opt-out flag.
+
+    Same monkeypatch-in-place strategy as _api_key_set; see that fixture
+    for why we don't reload app.config.
     """
     import importlib
+    from pydantic import SecretStr
     import app.config
     import app.auth
     monkeypatch.delenv("SCAFFOLD_API_KEY", raising=False)
     monkeypatch.setenv("SCAFFOLD_AUTH_DISABLED", "1")
-    importlib.reload(app.config)
+    monkeypatch.setattr(app.config.settings, "scaffold_api_key", SecretStr(""))
+    monkeypatch.setattr(app.config.settings, "scaffold_auth_disabled", True)
     importlib.reload(app.auth)
     yield app.auth
-    # Teardown: same reasoning as _api_key_set. Drop the opt-out flag,
-    # restore a key, reload — leaves the module valid for the next import.
-    monkeypatch.delenv("SCAFFOLD_AUTH_DISABLED", raising=False)
-    monkeypatch.setenv("SCAFFOLD_API_KEY", "testkey123")
-    importlib.reload(app.config)
     importlib.reload(app.auth)
 
 

@@ -37,8 +37,11 @@ class TestScheduleHelp:
         assert "Schedule commands" in out
 
     def test_unknown_sub_returns_help(self, pipe):
+        """Unknown sub should emit a short pointer to `/schedule help` rather
+        than dumping the full table; regression contract is just that the
+        user gets a discoverable next step, not a silent no-op."""
         out = pipe._handle_schedule("/schedule bogus")
-        assert "Schedule commands" in out
+        assert "Unknown" in out or "/schedule help" in out
 
 
 class TestScheduleList:

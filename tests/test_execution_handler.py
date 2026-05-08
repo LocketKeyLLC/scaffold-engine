@@ -303,9 +303,13 @@ class TestRetryResponseShape:
 
 class TestConnectionErrors:
     def test_status_connection_error_rendered(self):
+        """Patch must target `_HTTP_SESSION.get` (the Session), not the
+        module-level `requests.get` — execution_handler routes through
+        the Session for keep-alive reuse. Same gotcha caught in X.18 for
+        research tests."""
         p = _pipeline()
         with patch.object(
-            execution_handler.requests, "get",
+            execution_handler._HTTP_SESSION, "get",
             side_effect=requests.exceptions.ConnectionError("refused"),
         ):
             result = p._status(["/exec", "status", "job-1"])
