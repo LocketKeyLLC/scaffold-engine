@@ -217,3 +217,38 @@ tr.next-node { background: #eff6ff; }
   margin: 16px 0;
 }
 .confirm-flow h2 { margin-top: 0; }
+
+/* J.2.c — execute SSE run flow */
+.run-flow {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  padding: 12px 16px;
+  border-radius: 4px;
+  margin: 16px 0;
+}
+.run-flow h2 { margin-top: 0; }
+.run-flow-streaming { background: #eff6ff; border-color: #bfdbfe; }
+.run-event-feed {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.run-event {
+  padding: 4px 8px;
+  border-left: 3px solid var(--border);
+  margin-bottom: 2px;
+  background: var(--bg-panel);
+}
+.run-event-start    { border-left-color: var(--status-running); }
+.run-event-done     { border-left-color: var(--status-completed); }
+.run-event-failed   { border-left-color: var(--status-failed); }
+.run-event-retry    { border-left-color: var(--status-blocked); }
+.run-event-complete { border-left-color: var(--status-completed); background: #dcfce7; font-weight: 600; }
+.run-event-error    { border-left-color: var(--status-failed); background: #fee2e2; font-weight: 600; }
+.event-icon { display: inline-block; width: 1.2em; }
+.event-meta { color: var(--fg-muted); font-size: 12px; margin-left: 8px; }
+.event-error { color: var(--status-failed); }
+.event-verified { color: var(--status-completed); }

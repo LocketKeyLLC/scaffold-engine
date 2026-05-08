@@ -2122,6 +2122,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.17 | Tier 2 test-debt — `test_health_cleanup.py` un-skip + scope down (§17.44) | done 2026-05-08 |
 | J.2.a | Native single-page web UI — read-only browse (§17.45) | done 2026-05-08 |
 | J.2.b | Native single-page web UI — submit flow (ideate + confirm) (§17.46) | done 2026-05-08 |
+| J.2.c | Native single-page web UI — execute SSE (HTMX hx-sse) (§17.47) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -3106,6 +3107,41 @@ Phase 2 of roadmap item J.2. Adds the ideate + confirm forms so a browser user c
 **Test-suite delta:** `tests/test_web_ui.py` extended from 13 → **25 cases**. New: `TestNewIdeaForm` (1: form renders with domain options), `TestPostIdeate` (5: refining-redirect, ideate-called-with-form-values, empty-idea 422, invalid-domain 422, blank-domain → None), `TestPostConfirm` (3: detail-redirect, confirm-called-with-feedback, blank-feedback → None), `TestConfirmFormVisibility` (3: shown for `awaiting_confirmation`, hidden for `running`, hidden for `completed`). All 25 pass. Auth/middleware/main suites unchanged.
 
 **Routes still excluded from OpenAPI** (the router is `include_in_schema=False`); path count unchanged at 44.
+
+### 17.47 Sprint J.2.c — native single-page web UI: execute SSE (2026-05-08)
+
+Phase 3 (final) of roadmap item J.2 — closes the native web UI. Adds live SSE-streamed progress for `/execute/all` so a browser user can watch DAG execution event-by-event, the way OWUI shows it via the `scaffold_router` pipeline.
+
+**Three pieces of SSE plumbing.** The orchestrator's `/execute/all` is already an SSE endpoint (POST → `text/event-stream` of `{event, data}` dicts). The SDK's `AsyncClient.aiter_execute_all(job_id)` async-iterates those events. The web layer fits between the two:
+
+- **`POST /web/jobs/{job_id}/run`** swaps the trigger button with an SSE-listening container fragment (`_run_section_streaming.html`). The fragment carries HTMX SSE attributes — `hx-ext="sse" sse-connect="..." sse-swap="message" hx-swap="beforeend"` — so the browser's `EventSource` opens on insert.
+- **`GET /web/jobs/{job_id}/run/stream`** is the proxy. It opens an `aiter_execute_all` and yields each event as an SSE `event: message\ndata: <li ...></li>\n\n` line. Each event is rendered to a single-line HTML `<li>` via `_render_event_html(event_name, data)` so it fits on one `data:` line (multi-line SSE payloads work but require per-line `data:` prefixes — single-line is simpler). HTMX appends each `<li>` to the listening `<ul>` as it arrives.
+- **AsyncClient singleton** (`get_sdk_async_long_client`) is the third Client now in `app/web/routes.py`. The sync Client can't async-iterate SSE; this one uses `scaffold_client.AsyncClient` with the same 1800 s timeout as the long sync client. Distinct singleton from the read + long sync clients so an in-flight 25-min execution doesn't tie up either.
+
+**Event taxonomy.** `_render_event_html` maps each event name to a fragment with a distinct CSS class (`run-event-{start,done,failed,retry,complete,error,other}`):
+- `node_start` → ▶ key + title (running…)
+- `node_done` → ✓ key + title (+ verified badge if W.1 verifier passed)
+- `node_failed` → ✗ key + title + error
+- `node_retry` → ↻ key + budget remaining
+- `pipeline_complete` → ✦ summary (passed/failed/total)
+- `error` / `blocked` / `execution_failed` → ⚠ + message
+- Unknown event names → minimal "other" fragment so future SDK additions surface to operators rather than being silently dropped (a safety net captured in test coverage).
+
+**Two correctness invariants** — both tested:
+1. **HTML escape on operator-supplied text.** Node titles and error messages flow through `html.escape` before going into the SSE stream. A node titled `<script>alert(1)</script>` arrives at the browser as `&lt;script&gt;alert(1)&lt;/script&gt;`. Without this, an attacker who can name a node executes script in the operator's browser.
+2. **Terminal events break the stream.** `_TERMINAL_EVENTS = {pipeline_complete, error, blocked, execution_failed, execution_cancelled}` causes the generator to `return` after emitting. Events that come after a terminal (rare, but possible if the orchestrator regresses) are NOT rendered. Browser's `EventSource` closes when the response body ends.
+
+**Mid-stream failure path.** If `aiter_execute_all` itself raises (orchestrator process dies, network blip), the route catches the exception, logs it, and emits one final `error`-class fragment so the UI shows what went wrong rather than freezing silently.
+
+**Run button visibility.** `job_detail.html` shows the trigger button only when `job.job_status` is `planning`, `executing`, or `blocked` — the three states where `/execute/all` can make progress. `awaiting_confirmation`, `completed`, `failed`, `cancelled`, `refining`, `researching` all hide it. Tested with `pytest.mark.parametrize` across all 9 statuses.
+
+**Layout adds the HTMX SSE extension** (one extra `<script>` tag pointing at the unpkg CDN). The base HTMX core is already loaded from J.2.a.
+
+**Project pattern (memory-worthy):** when proxying an upstream SSE source through a local web route that needs to render server-side HTML fragments per event, **render to single-line HTML at server side and emit `event: message\ndata: <line>\n\n`**. Single-line keeps the SSE wire format simple and the browser's `EventSource` parses it directly. Multi-line `data:` works but adds escape-on-newline complexity; for HTMX the single-line approach maps cleanly to `sse-swap="message" hx-swap="beforeend"`. Always `html.escape` operator-supplied text before it goes into the stream.
+
+**Test-suite delta:** `tests/test_web_ui.py` extended from 25 → **43 cases**. New (18): `TestRunButtonVisibility` (9: parametrized over executable + non-executable statuses), `TestPostRun` (1: container fragment), `TestRunStream` (7: content-type, node_done rendering, node_failed with error, HTML-escape, terminal-event-breaks, mid-stream-failure-emits-error, unknown-event-passthrough), `TestSseExtensionLoaded` (1: layout includes htmx-ext-sse). The async-iterator mock pattern (`_async_iter_factory(events)` returning an async generator function) is captured as a reusable test helper. All 43 pass; auth/middleware/main suites unchanged.
+
+**Roadmap item J.2 is complete** across phases a + b + c. Native web UI now covers: read-only browse (J.2.a), submit flow ideate+confirm (J.2.b), live execute SSE (J.2.c). The browser-only path from "open localhost" → submit idea → confirm → watch nodes execute → view compiled output is end-to-end functional. OWUI remains as the rich frontend; this is the demo + remote-deploy path.
 
 ---
 

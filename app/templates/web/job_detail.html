@@ -26,6 +26,20 @@
   </section>
   {% endif %}
 
+  {% if job.job_status in ("planning", "executing", "blocked") %}
+  <section class="run-flow" id="run-section">
+    <h2>Execute</h2>
+    <p class="meta">
+      Status is <code>{{ job.job_status }}</code>. Click below to run all
+      pending nodes; live progress streams via SSE.
+    </p>
+    <button hx-post="/web/jobs/{{ job_id }}/run"
+            hx-swap="outerHTML"
+            hx-target="#run-section"
+            class="btn btn-primary">Run all nodes</button>
+  </section>
+  {% endif %}
+
   {% if job.job_status == "awaiting_confirmation" %}
   <section class="confirm-flow">
     <h2>Confirm to proceed</h2>

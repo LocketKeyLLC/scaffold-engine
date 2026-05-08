@@ -22,7 +22,11 @@ from fastapi.testclient import TestClient
 
 from app.auth import require_api_key
 from app.main import app
-from app.web.routes import get_sdk_client, get_sdk_long_client
+from app.web.routes import (
+    get_sdk_async_long_client,
+    get_sdk_client,
+    get_sdk_long_client,
+)
 
 
 @pytest.fixture
@@ -41,12 +45,23 @@ def fake_long_client():
 
 
 @pytest.fixture
-def client(fake_client, fake_long_client):
-    """TestClient with auth bypassed AND both SDK Client deps overridden
-    so the routes never instantiate a real Client at module-load time."""
+def fake_async_long_client():
+    """Mock AsyncClient. ``aiter_execute_all`` is set per-test to an
+    async-generator function so each case can drive the SSE stream."""
+    return MagicMock()
+
+
+@pytest.fixture
+def client(fake_client, fake_long_client, fake_async_long_client):
+    """TestClient with auth bypassed AND all three SDK Client deps
+    overridden so the routes never instantiate real Clients at
+    module-load time."""
     app.dependency_overrides[require_api_key] = lambda: "test"
     app.dependency_overrides[get_sdk_client] = lambda: fake_client
     app.dependency_overrides[get_sdk_long_client] = lambda: fake_long_client
+    app.dependency_overrides[get_sdk_async_long_client] = (
+        lambda: fake_async_long_client
+    )
     try:
         with TestClient(app, follow_redirects=False) as tc:
             yield tc
@@ -54,6 +69,17 @@ def client(fake_client, fake_long_client):
         app.dependency_overrides.pop(require_api_key, None)
         app.dependency_overrides.pop(get_sdk_client, None)
         app.dependency_overrides.pop(get_sdk_long_client, None)
+        app.dependency_overrides.pop(get_sdk_async_long_client, None)
+
+
+def _async_iter_factory(events: list):
+    """Build a function that returns an async iterator yielding the
+    given events. Tests assign this to ``fake_async_long_client.
+    aiter_execute_all`` so the mock signature matches the real SDK."""
+    async def _aiter(*args, **kwargs):
+        for evt in events:
+            yield evt
+    return _aiter
 
 
 @pytest.mark.smoke
@@ -393,3 +419,180 @@ class TestConfirmFormVisibility:
         }
         resp = client.get("/web/jobs/j3")
         assert 'action="/web/jobs/j3/confirm"' not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# J.2.c — execute SSE
+# ---------------------------------------------------------------------------
+
+
+def _job_status_response(status: str) -> dict:
+    return {
+        "job_id": "j-run", "job_title": "demo", "job_status": status,
+        "compiled_output": None, "synthesized": False,
+        "synthesis_override": None,
+        "counts": {}, "total_nodes": 0,
+        "next_node": None, "next_actions": [], "nodes": [],
+    }
+
+
+@pytest.mark.smoke
+class TestRunButtonVisibility:
+    """The Run button only appears when the orchestrator's status allows
+    /execute/all to make progress. (planning, executing, blocked)."""
+
+    @pytest.mark.parametrize("status", ["planning", "executing", "blocked"])
+    def test_button_shown_for_executable_statuses(self, client, fake_client, status):
+        fake_client.jobs.status.return_value = _job_status_response(status)
+        resp = client.get("/web/jobs/j-run")
+        assert 'hx-post="/web/jobs/j-run/run"' in resp.text
+        assert "Run all nodes" in resp.text
+
+    @pytest.mark.parametrize(
+        "status",
+        ["awaiting_confirmation", "completed", "failed",
+         "cancelled", "refining", "researching"],
+    )
+    def test_button_hidden_for_non_executable_statuses(self, client, fake_client, status):
+        fake_client.jobs.status.return_value = _job_status_response(status)
+        resp = client.get("/web/jobs/j-run")
+        assert 'hx-post="/web/jobs/j-run/run"' not in resp.text
+
+
+@pytest.mark.smoke
+class TestPostRun:
+    """POST /web/jobs/{id}/run returns the SSE-listening container fragment."""
+
+    def test_returns_sse_container_html(self, client):
+        resp = client.post("/web/jobs/j-run/run")
+        assert resp.status_code == 200
+        body = resp.text
+        # Container has the HTMX SSE attributes the listening UL needs.
+        assert 'hx-ext="sse"' in body
+        assert 'sse-connect="/web/jobs/j-run/run/stream"' in body
+        assert 'sse-swap="message"' in body
+        assert 'hx-swap="beforeend"' in body
+        # Container retains the run-section id so HTMX can swap it cleanly.
+        assert 'id="run-section"' in body
+
+
+@pytest.mark.smoke
+class TestRunStream:
+    """GET /web/jobs/{id}/run/stream proxies AsyncClient.aiter_execute_all
+    events, rendering each as an HTML <li> wrapped in SSE message format."""
+
+    def test_returns_event_stream_content_type(self, client, fake_async_long_client):
+        fake_async_long_client.aiter_execute_all = _async_iter_factory([
+            {"event": "pipeline_complete",
+             "data": {"passed": 0, "failed": 0, "total_nodes": 0}},
+        ])
+        resp = client.get("/web/jobs/j-run/run/stream")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+
+    def test_renders_node_done_event_as_li(self, client, fake_async_long_client):
+        fake_async_long_client.aiter_execute_all = _async_iter_factory([
+            {"event": "node_done",
+             "data": {"node_key": "T1", "title": "Plan", "verified": True}},
+            {"event": "pipeline_complete",
+             "data": {"passed": 1, "failed": 0, "total_nodes": 1}},
+        ])
+        resp = client.get("/web/jobs/j-run/run/stream")
+        body = resp.text
+        # SSE message format: each event ends with blank line.
+        assert "event: message" in body
+        # The rendered <li> for node_done carries the key + title + verified flag.
+        assert "run-event-done" in body
+        assert "<code>T1</code>" in body
+        assert "Plan" in body
+        assert "verified" in body
+        # Terminal event also rendered.
+        assert "run-event-complete" in body
+
+    def test_renders_node_failed_with_error(self, client, fake_async_long_client):
+        fake_async_long_client.aiter_execute_all = _async_iter_factory([
+            {"event": "node_failed",
+             "data": {"node_key": "T2", "title": "Build",
+                      "verification_reason": "tool not found"}},
+            {"event": "pipeline_complete",
+             "data": {"passed": 0, "failed": 1, "total_nodes": 1}},
+        ])
+        resp = client.get("/web/jobs/j-run/run/stream")
+        body = resp.text
+        assert "run-event-failed" in body
+        assert "<code>T2</code>" in body
+        # Error message surfaced in the fragment.
+        assert "tool not found" in body
+
+    def test_html_escapes_node_titles(self, client, fake_async_long_client):
+        """Node titles can contain operator-supplied text. They must be
+        HTML-escaped so a title like ``<script>`` doesn't punch through
+        into the live SSE feed."""
+        fake_async_long_client.aiter_execute_all = _async_iter_factory([
+            {"event": "node_start",
+             "data": {"node_key": "T1", "title": "<script>alert(1)</script>"}},
+            {"event": "pipeline_complete", "data": {}},
+        ])
+        resp = client.get("/web/jobs/j-run/run/stream")
+        body = resp.text
+        # Raw <script> must NOT appear; the escaped form must.
+        assert "<script>alert" not in body
+        assert "&lt;script&gt;alert" in body
+
+    def test_terminal_event_breaks_stream(self, client, fake_async_long_client):
+        """After pipeline_complete, the route should stop iterating —
+        events that come after the terminal must NOT appear."""
+        fake_async_long_client.aiter_execute_all = _async_iter_factory([
+            {"event": "node_done",
+             "data": {"node_key": "T1", "title": "First"}},
+            {"event": "pipeline_complete", "data": {"passed": 1, "failed": 0}},
+            # These should NOT be rendered — generator returns on terminal.
+            {"event": "node_done",
+             "data": {"node_key": "T-ghost", "title": "After-Terminal"}},
+        ])
+        resp = client.get("/web/jobs/j-run/run/stream")
+        body = resp.text
+        assert "First" in body
+        assert "After-Terminal" not in body
+        assert "T-ghost" not in body
+
+    def test_async_iter_failure_renders_error_event(self, client, fake_async_long_client):
+        """If the AsyncClient's iterator itself raises, the route catches
+        the exception and emits a final error event so the UI doesn't
+        silently freeze."""
+        async def _raising(*args, **kwargs):
+            yield {"event": "node_done",
+                   "data": {"node_key": "T1", "title": "First"}}
+            raise RuntimeError("orchestrator died mid-stream")
+
+        fake_async_long_client.aiter_execute_all = _raising
+        resp = client.get("/web/jobs/j-run/run/stream")
+        body = resp.text
+        # The earlier event made it through.
+        assert "First" in body
+        # The error fragment was emitted.
+        assert "run-event-error" in body
+        assert "orchestrator died mid-stream" in body
+
+    def test_unknown_event_passes_through(self, client, fake_async_long_client):
+        """Unknown event names get a minimal 'other' rendering so SDK-side
+        additions surface to operators rather than being silently dropped."""
+        fake_async_long_client.aiter_execute_all = _async_iter_factory([
+            {"event": "future_event_kind", "data": {"foo": "bar"}},
+            {"event": "pipeline_complete", "data": {}},
+        ])
+        resp = client.get("/web/jobs/j-run/run/stream")
+        body = resp.text
+        assert "run-event-other" in body
+        assert "future_event_kind" in body
+
+
+@pytest.mark.smoke
+class TestSseExtensionLoaded:
+    """Layout templates load the htmx-ext-sse script so the SSE container
+    fragments returned by /run actually function in the browser."""
+
+    def test_sse_extension_in_layout(self, client, fake_client):
+        fake_client.jobs.status.return_value = _job_status_response("planning")
+        resp = client.get("/web/jobs/j-run")
+        assert "htmx-ext-sse" in resp.text
