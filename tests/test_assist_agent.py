@@ -118,6 +118,8 @@ async def test_submit_step_idempotent_on_already_committed():
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_submit_step_rejects_pending_step():
+    """Pending step → structured `must_claim_first:` ValueError so the
+    router can map it to a 409 the OWUI pipeline detects."""
     db = AsyncMock()
     db.execute.side_effect = [
         _result(mappings_first={
@@ -125,8 +127,29 @@ async def test_submit_step_rejects_pending_step():
             "session_id": "s1", "job_id": "j1", "node_key": "T1",
         }),
     ]
-    with pytest.raises(ValueError, match="cannot accept submit"):
+    with pytest.raises(ValueError, match=r"^must_claim_first:"):
         await assist_agent.submit_step(
             session_id="s1", node_key="T1",
             evidence="x", action="submit", db=db,
         )
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_submit_step_rejects_non_claimable_non_pending():
+    """Statuses other than pending/committed/skipped fall to the generic
+    rejection (e.g., 'applied' before commit). Must NOT use the
+    must_claim_first prefix — that's reserved for pending."""
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _result(mappings_first={
+            "step_id": "x", "status": "applied",
+            "session_id": "s1", "job_id": "j1", "node_key": "T1",
+        }),
+    ]
+    with pytest.raises(ValueError, match="cannot accept submit") as exc:
+        await assist_agent.submit_step(
+            session_id="s1", node_key="T1",
+            evidence="x", action="submit", db=db,
+        )
+    assert "must_claim_first" not in str(exc.value)

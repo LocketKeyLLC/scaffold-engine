@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from app.database import get_db
-from app.modules import assist_agent
+from app.modules import assist_agent, assist_session_map
 
 router = APIRouter(tags=["Assist"])
 
@@ -46,6 +46,39 @@ class AssistHandoffInput(BaseModel):
 class AssistFrictionInput(BaseModel):
     node_key: str
     note: str
+
+
+class AssistChatMapInput(BaseModel):
+    session_id: str
+    last_node_key: Optional[str] = None
+
+
+# ── Per-chat session map ─────────────────────────────────────────────
+# Path scoped under `/assist/_chatmap/` to avoid colliding with
+# `/assist/{session_id}/...`. The `_` prefix marks this as pipeline
+# UX state, not part of the assist-session lifecycle.
+
+
+@router.put("/assist/_chatmap/{chat_id}")
+async def assist_chatmap_put(chat_id: str, body: AssistChatMapInput):
+    await assist_session_map.remember(
+        chat_id, session_id=body.session_id, last_node_key=body.last_node_key,
+    )
+    return {"chat_id": chat_id, "stored": True}
+
+
+@router.get("/assist/_chatmap/{chat_id}")
+async def assist_chatmap_get(chat_id: str):
+    entry = await assist_session_map.recall(chat_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"no chat map for {chat_id}")
+    return {"chat_id": chat_id, **entry}
+
+
+@router.delete("/assist/_chatmap/{chat_id}")
+async def assist_chatmap_delete(chat_id: str):
+    await assist_session_map.forget(chat_id)
+    return {"chat_id": chat_id, "cleared": True}
 
 
 @router.post("/assist/start")
@@ -108,6 +141,11 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
         msg = str(exc)
         if "not found" in msg:
             raise HTTPException(status_code=404, detail=msg)
+        if msg.startswith("must_claim_first:"):
+            raise HTTPException(
+                status_code=409,
+                detail={"error_code": "must_claim_first", "message": msg.split(": ", 1)[1]},
+            )
         raise HTTPException(status_code=409, detail=msg)
 
 

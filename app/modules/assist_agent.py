@@ -338,6 +338,11 @@ async def submit_step(
                 "status": step["status"],
                 "no_op": True,
             }
+        if step["status"] == "pending":
+            raise ValueError(
+                f"must_claim_first: step {node_key} is pending; "
+                f"call /assist/{session_id}/next to claim it before submitting"
+            )
         raise ValueError(
             f"step {node_key} status {step['status']!r} cannot accept submit"
         )

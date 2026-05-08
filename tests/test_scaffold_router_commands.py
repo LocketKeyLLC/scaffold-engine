@@ -883,3 +883,177 @@ class TestCostCommand:
         out = pipe._handle_command("/help")
         assert "/cost" in out
 
+
+# ===================================================================
+# Assist Mode chat-memory dispatch (per-chat session_id + node_key memory)
+# ===================================================================
+
+
+_UUID_A = "11111111-2222-3333-4444-555555555555"
+_UUID_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+def _http_call_log(monkeypatch):
+    """Patch _HTTP_SESSION put/get/delete/post and return a call log.
+
+    Each entry: (verb, url, json_body_or_None). Response is configured per
+    (verb, path-prefix) via the returned `responses` dict.
+    """
+    log: list[tuple[str, str, dict | None]] = []
+    responses: dict[tuple[str, str], MagicMock] = {}
+
+    def _match(verb: str, url: str) -> MagicMock:
+        for (v, prefix), resp in responses.items():
+            if v == verb and prefix in url:
+                return resp
+        return _make_response(404, {"detail": "no mock"})
+
+    def _put(url, **kw):
+        log.append(("put", url, kw.get("json")))
+        return _match("put", url)
+
+    def _get(url, **kw):
+        log.append(("get", url, None))
+        return _match("get", url)
+
+    def _delete(url, **kw):
+        log.append(("delete", url, None))
+        return _match("delete", url)
+
+    def _post(url, **kw):
+        log.append(("post", url, kw.get("json")))
+        return _match("post", url)
+
+    monkeypatch.setattr("scaffold_router._HTTP_SESSION.put", _put)
+    monkeypatch.setattr("scaffold_router._HTTP_SESSION.get", _get)
+    monkeypatch.setattr("scaffold_router._HTTP_SESSION.delete", _delete)
+    monkeypatch.setattr("scaffold_router._HTTP_SESSION.post", _post)
+    return log, responses
+
+
+@pytest.mark.smoke
+class TestAssistChatMemory:
+    """`/assist <subcommand>` accepts an implicit session_id resolved via
+    body['metadata']['chat_id'] -> /assist/_chatmap/{chat_id}."""
+
+    def _body_with_chat(self, chat_id: str) -> dict:
+        return {"metadata": {"chat_id": chat_id}}
+
+    def test_start_remembers_session_in_chatmap(self, pipe, monkeypatch):
+        """`/assist <job_id>` must PUT chat_id→session_id after starting."""
+        log, responses = _http_call_log(monkeypatch)
+        responses[("post", "/assist/start")] = _make_response(
+            200, {"session_id": _UUID_A, "job_id": "job-1", "pending_steps": 3},
+        )
+        responses[("get", f"/assist/{_UUID_A}/next")] = _make_response(
+            200, {"session_id": _UUID_A, "node_key": "T1", "title": "step",
+                  "status": "active", "depends_on": []},
+        )
+        responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
+
+        list(pipe.pipe("/assist job-1", "m", [], self._body_with_chat("chat-A")))
+        puts = [e for e in log if e[0] == "put" and "_chatmap/chat-A" in e[1]]
+        assert puts, f"expected PUT to /assist/_chatmap/chat-A, got: {log}"
+        assert puts[0][2] == {"session_id": _UUID_A, "last_node_key": "T1"} or \
+               puts[0][2] == {"session_id": _UUID_A, "last_node_key": None}
+
+    def test_next_resolves_session_from_chatmap_when_arg_omitted(self, pipe, monkeypatch):
+        """`/assist next` with no session_id falls back to GET _chatmap."""
+        log, responses = _http_call_log(monkeypatch)
+        responses[("get", "/assist/_chatmap/chat-B")] = _make_response(
+            200, {"chat_id": "chat-B", "session_id": _UUID_A, "last_node_key": None},
+        )
+        responses[("get", f"/assist/{_UUID_A}/next")] = _make_response(
+            200, {"session_id": _UUID_A, "node_key": "T1", "title": "step",
+                  "status": "active", "depends_on": []},
+        )
+        responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
+
+        out = "".join(pipe.pipe("/assist next", "m", [], self._body_with_chat("chat-B")))
+        # The /next call must have hit the recalled session id.
+        next_calls = [e for e in log if e[0] == "get" and f"/assist/{_UUID_A}/next" in e[1]]
+        assert next_calls, f"expected GET /assist/{_UUID_A}/next, got: {log}"
+        assert "T1" in out
+
+    def test_explicit_uuid_arg_overrides_chatmap(self, pipe, monkeypatch):
+        """An explicit UUID first arg must beat the recalled session — the
+        whole reason chat memory is opt-in: the user is steering."""
+        log, responses = _http_call_log(monkeypatch)
+        # Chatmap says UUID_A, but user types UUID_B.
+        responses[("get", "/assist/_chatmap/chat-C")] = _make_response(
+            200, {"chat_id": "chat-C", "session_id": _UUID_A, "last_node_key": None},
+        )
+        responses[("get", f"/assist/{_UUID_B}/next")] = _make_response(
+            200, {"session_id": _UUID_B, "node_key": "T9", "title": "x",
+                  "status": "active", "depends_on": []},
+        )
+        responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
+
+        list(pipe.pipe(f"/assist next {_UUID_B}", "m", [], self._body_with_chat("chat-C")))
+        next_calls = [e for e in log if e[0] == "get" and "/next" in e[1]]
+        assert any(_UUID_B in url for _, url, _ in next_calls), \
+            f"explicit UUID must win; got: {next_calls}"
+        assert not any(_UUID_A in url for _, url, _ in next_calls), \
+            f"explicit UUID must override recall; got: {next_calls}"
+
+    def test_missing_chat_id_and_no_arg_yields_friendly_error(self, pipe, monkeypatch):
+        """No chat_id (e.g. CLI/curl) and no explicit session_id should
+        produce an actionable usage hint, not a NoneType crash."""
+        _http_call_log(monkeypatch)
+        out = "".join(pipe.pipe("/assist next", "m", [], {}))
+        assert "No active assist session" in out
+        assert "/assist <job_id>" in out
+
+    def test_submit_renders_must_claim_first_hint(self, pipe, monkeypatch):
+        """409 with error_code=must_claim_first → actionable hint, not raw HTTP."""
+        log, responses = _http_call_log(monkeypatch)
+        responses[("get", "/assist/_chatmap/chat-D")] = _make_response(
+            200, {"chat_id": "chat-D", "session_id": _UUID_A, "last_node_key": "T1"},
+        )
+        responses[("post", f"/assist/{_UUID_A}/submit")] = _make_response(
+            409, {"detail": {"error_code": "must_claim_first",
+                             "message": "step T1 is pending"}},
+        )
+
+        msg = f"/assist submit\n```\nsome evidence\n```"
+        out = "".join(pipe.pipe(msg, "m", [], self._body_with_chat("chat-D")))
+        assert "claim it first" in out.lower() or "claim" in out.lower()
+        assert "/assist next" in out
+
+    def test_done_clears_chatmap_on_terminal_session(self, pipe, monkeypatch):
+        """`/assist done` on a completed/abandoned/cancelled session must
+        DELETE the chatmap so the next `/assist <job_id>` starts clean."""
+        log, responses = _http_call_log(monkeypatch)
+        responses[("get", "/assist/_chatmap/chat-E")] = _make_response(
+            200, {"chat_id": "chat-E", "session_id": _UUID_A, "last_node_key": None},
+        )
+        responses[("get", f"/assist/{_UUID_A}")] = _make_response(
+            200, {"session_id": _UUID_A, "job_id": "job-1", "status": "completed"},
+        )
+        responses[("get", "/exec/status/")] = _make_response(
+            200, {"status": "completed", "compiled_output": "ok"},
+        )
+        responses[("delete", "/assist/_chatmap/")] = _make_response(200, {"cleared": True})
+
+        list(pipe.pipe("/assist done", "m", [], self._body_with_chat("chat-E")))
+        deletes = [e for e in log if e[0] == "delete" and "_chatmap/chat-E" in e[1]]
+        assert deletes, f"expected DELETE /assist/_chatmap/chat-E on terminal status; got: {log}"
+
+    def test_submit_uses_remembered_node_key(self, pipe, monkeypatch):
+        """`/assist submit` with no node_key falls back to last_node_key
+        from chat memory."""
+        log, responses = _http_call_log(monkeypatch)
+        responses[("get", "/assist/_chatmap/chat-F")] = _make_response(
+            200, {"chat_id": "chat-F", "session_id": _UUID_A, "last_node_key": "T7"},
+        )
+        responses[("post", f"/assist/{_UUID_A}/submit")] = _make_response(
+            200, {"node_key": "T7", "status": "committed", "next_node_key": None},
+        )
+        responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
+
+        msg = "/assist submit\n```\nevidence here\n```"
+        list(pipe.pipe(msg, "m", [], self._body_with_chat("chat-F")))
+        posts = [e for e in log if e[0] == "post" and "/submit" in e[1]]
+        assert posts and posts[0][2]["node_key"] == "T7", \
+            f"expected node_key='T7' from chat memory; got: {posts}"
+

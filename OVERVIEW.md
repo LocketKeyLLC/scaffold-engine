@@ -3270,6 +3270,32 @@ The X.7 sprint note flagged these as "env-dependent" because they were hitting t
 
 Total Tier-2 audit-tail rows now closed (post-X.18): #1, #2, #3, #4, #5, #6, #7, #8, #9, #10, #11, #12, #13, #16, #17, #18 plus the X.18 small-batch sweep. Only #14 (quarterly RAG re-baseline cadence) and #15 (ground_truth.json regen) remain — both multi-hour calibration items, deferred to a quarterly sweep.
 
+### 17.52 Sprint W.9 — Assist Mode chat-memory + structured `must_claim_first` (2026-05-08)
+
+Assist Mode shipped (W-track) but two papercuts kept biting on real walks: every subcommand needed `<session_id>` pasted into chat, and a submit on a step the user hadn't claimed yet returned a raw `HTTP 409: step T1 status 'pending' cannot accept submit` blob. W.9 closes both.
+
+**1. Per-chat session memory.** The orchestrator now exposes `PUT/GET/DELETE /assist/_chatmap/{chat_id}` backed by Redis (`app/modules/assist_session_map.py`, TTL = `assist_idle_threshold_days`). On `/assist <job_id>` the OWUI pipeline stashes `chat_id → {session_id, last_node_key}`; subcommands accept the session_id as **optional** (UUID-shape detection: explicit arg always wins over recall). `/assist next` refreshes `last_node_key` so `/assist submit` can also drop the node arg. `/assist done` on a terminal session clears the entry; pause/resume don't.
+
+The map intentionally lives on the orchestrator side — the upstream pipelines image (`ghcr.io/open-webui/pipelines`) doesn't ship `redis-py`, so doing this in-pipeline would have meant forking the image. Keeping Redis ownership in the orchestrator is also the right home: pipelines can scale horizontally without splitting state.
+
+Toggle: valve `assist_session_memory_enabled` (default `true`). When chat_id is unavailable (curl/CLI/older OWUI builds), behavior degrades to the old explicit-arg flow with a friendly usage hint instead of a `NoneType` crash.
+
+**2. `must_claim_first` structured rejection.** `app/modules/assist_agent.py:submit_step` now raises `ValueError('must_claim_first: ...')` specifically when the step is in `pending` (vs the generic `'cannot accept submit'` for `applied` etc.). `app/routers/assist.py` maps that prefix to `HTTPException(409, detail={"error_code": "must_claim_first", "message": ...})`. The pipeline detects it and renders `⚠️ Step T1 is still pending — claim it first. Run /assist next ...` instead of the raw HTTP body. Other unrecognized statuses keep the generic 409 so future status additions don't silently route through the new branch.
+
+**Path-collision note.** `/assist/_chatmap/{chat_id}` is 3-segment; `/assist/{session_id}` is 2-segment, so no overlap. Chatmap routes are also declared first in `app/routers/assist.py`. The `_` prefix marks the path as pipeline UX state, not part of the assist-session lifecycle, so future tooling that walks `/assist/{sid}/*` ignores it.
+
+**Backward compat.** Every legacy form still works: `/assist next <session_id>`, `/assist submit <session_id> <node_key>` followed by fenced evidence, `/assist done <session_id>`, etc. A user pasting from a different chat or with the valve off is unaffected. The `_render_step` next-step hint was switched to the short form (`/assist submit` rather than `/assist submit <sid> <nk>`) since chat memory is on by default; the help table documents both forms explicitly.
+
+**Test-suite delta:**
+- `tests/test_assist_agent.py`: updated `test_submit_step_rejects_pending_step` to assert the `must_claim_first:` prefix; new `test_submit_step_rejects_non_claimable_non_pending` ensures other rejections (e.g. `applied`) still hit the generic message. 7 → 8.
+- `tests/test_assist_session_map.py`: new file. 7 cases — round-trip remember/recall, last_node_key preservation when omitted, missing→None, redis-failure swallowing for both remember and recall, forget delete.
+- `tests/test_scaffold_router_commands.py::TestAssistChatMemory`: new class. 7 cases — start remembers, next resolves on omitted arg, explicit UUID overrides recall, missing chat_id+no arg yields friendly error, `must_claim_first` 409 renders the hint, `/assist done` on terminal status DELETEs the chatmap, `/assist submit` without node uses remembered `last_node_key`.
+- Full suite: 1215 passed, 4 skipped, 9 pre-existing failures (verified by stashing W.9 changes — failures reproduce on `main`; none touch `app/modules/assist_*`, `app/routers/assist`, or `pipelines/scaffold_router`).
+
+**What's still on the table for assist UX/perf (not in scope here):**
+- Verifier perf: `replan_policy='context_only'` (default) calls a 7b LLM on every submit. Moving that off the request path (background queue or batch-on-commit) is the next win.
+- `/confirm`-driven `_assist_start` path doesn't pass `chat_id` through, so the auto-confirm-into-assist flow doesn't get session memory. Plumbing `body` to `_handle_confirm`'s call site is a one-line follow-up.
+
 ---
 
 ## 18. Performance benchmarks

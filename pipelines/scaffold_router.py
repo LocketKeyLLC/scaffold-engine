@@ -374,6 +374,11 @@ class Pipeline:
         assist_default_handoff_policy: str = "manual"           # manual | auto_on_skip | auto_all_remaining
         assist_default_replan_policy: str = "context_only"      # context_only | selective | full | disabled
         assist_max_evidence_chars: int = 200_000
+        # When true, the pipeline remembers `chat_id → session_id` via the
+        # orchestrator's /assist/_chatmap endpoint so subcommands accept
+        # an optional <session_id>. Default on; flip off to force users
+        # back to explicit session IDs (debugging or shared-chat setups).
+        assist_session_memory_enabled: bool = True
 
         # Model overrides
         model_general: str = "qwen3-vl:235b-instruct-cloud"
@@ -938,7 +943,7 @@ class Pipeline:
             "/assist/handoff", "/assist/pause", "/assist/resume",
             "/assist/done", "/assist/friction", "/assist/help",
         ):
-            yield from self._handle_assist(msg); return
+            yield from self._handle_assist(msg, body=body); return
         if self._is_cmd(msg, "/execute"):
             yield from self._handle_execute(msg); return
         if self._is_cmd(msg, "/confirm"):
@@ -1173,20 +1178,104 @@ class Pipeline:
 
     _ASSIST_HELP = (
         "**Assistant Mode** — walk through a job's DAG step-by-step with human evidence.\n\n"
+        "After `/assist <job_id>`, this chat remembers the active session, so "
+        "`<session_id>` is **optional** in every follow-up. Pass an explicit "
+        "`<session_id>` to override (e.g. resume a session from a different chat).\n\n"
         "| Command | Description |\n"
         "|---|---|\n"
         "| `/assist <job_id>` | Start a session and render the first step. |\n"
-        "| `/assist next <session_id>` | Fetch the next pending step. |\n"
-        "| `` /assist submit <session_id> <node_key>\\n```evidence``` `` | Submit human evidence (multi-line via triple-backtick fence). |\n"
-        "| `/assist skip <session_id> <node_key>` | Skip a node. |\n"
-        "| `/assist handoff <session_id> <node_key> [single\\|all]` | Hand a node back to autonomous executor. |\n"
-        "| `/assist pause <session_id>` | Pause; resume later. |\n"
-        "| `/assist resume <session_id>` | Resume a paused session. |\n"
-        "| `/assist done <session_id>` | Show the compiled output. |\n"
-        "| `/assist friction <session_id> <node_key> <note>` | Log a friction note for post-mortem. |\n"
+        "| `/assist next [<session_id>]` | Fetch the next pending step. |\n"
+        "| `` /assist submit [<session_id>] [<node_key>]\\n```evidence``` `` | Submit human evidence. Both args optional after `/assist next`. |\n"
+        "| `/assist skip [<session_id>] [<node_key>]` | Skip a node. |\n"
+        "| `/assist handoff [<session_id>] <node_key> [single\\|all]` | Hand a node back to autonomous executor. |\n"
+        "| `/assist pause [<session_id>]` | Pause; resume later. |\n"
+        "| `/assist resume [<session_id>]` | Resume a paused session. |\n"
+        "| `/assist done [<session_id>]` | Show the compiled output (clears chat memory). |\n"
+        "| `/assist friction [<session_id>] [<node_key>] <note>` | Log a friction note. |\n"
         "| `/assist help` | Show this message. |\n\n"
         "_Tip: paste multi-line evidence inside a triple-backtick fence; it will be captured intact._"
     )
+
+    # UUID4-ish: matches a Postgres `uuid` rendered as a string. Used to
+    # decide whether the user's first arg is an explicit session_id or
+    # the start of the per-subcommand args (node_key / mode / note).
+    _UUID_RE = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _chat_id_from_body(body: dict | None) -> str | None:
+        if not isinstance(body, dict):
+            return None
+        meta = body.get("metadata")
+        if not isinstance(meta, dict):
+            return None
+        cid = meta.get("chat_id")
+        return cid if isinstance(cid, str) and cid else None
+
+    def _assist_remember(
+        self, chat_id: str | None, *, session_id: str, last_node_key: str | None = None,
+    ) -> None:
+        """Best-effort: stash chat→session in the orchestrator's chatmap.
+        Failures are logged and swallowed — explicit-arg flow still works."""
+        if not chat_id or not self.valves.assist_session_memory_enabled:
+            return
+        try:
+            _HTTP_SESSION.put(
+                f"{self.valves.orchestrator_url}/assist/_chatmap/{chat_id}",
+                json={"session_id": session_id, "last_node_key": last_node_key},
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            logger.debug("assist_remember failed: %s", e)
+
+    def _assist_recall(self, chat_id: str | None) -> dict | None:
+        if not chat_id or not self.valves.assist_session_memory_enabled:
+            return None
+        try:
+            r = _HTTP_SESSION.get(
+                f"{self.valves.orchestrator_url}/assist/_chatmap/{chat_id}",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            logger.debug("assist_recall failed: %s", e)
+            return None
+        if r.status_code != 200:
+            return None
+        return r.json()
+
+    def _assist_forget(self, chat_id: str | None) -> None:
+        if not chat_id or not self.valves.assist_session_memory_enabled:
+            return
+        try:
+            _HTTP_SESSION.delete(
+                f"{self.valves.orchestrator_url}/assist/_chatmap/{chat_id}",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            logger.debug("assist_forget failed: %s", e)
+
+    def _resolve_session_id(
+        self, args: list, chat_id: str | None,
+    ) -> tuple[str | None, list]:
+        """If args[0] is UUID-shaped, pop and return it as session_id.
+        Otherwise look up via chat_id. Returns (session_id, remaining_args)."""
+        if args and self._UUID_RE.match(args[0]):
+            return args[0], args[1:]
+        recalled = self._assist_recall(chat_id)
+        return ((recalled or {}).get("session_id"), args)
+
+    @staticmethod
+    def _no_session_msg(sub: str) -> str:
+        return (
+            f"❌ No active assist session in this chat. "
+            f"Either start one with `/assist <job_id>` or pass an explicit "
+            f"session id, e.g. `/assist {sub} <session_id> ...`."
+        )
 
     @staticmethod
     def _extract_fenced(msg: str) -> tuple[str, str]:
@@ -1204,9 +1293,18 @@ class Pipeline:
         return head.strip(), body.strip()
 
     def _render_step(self, step: dict) -> str:
-        """Format a /assist/next response as markdown chat output."""
+        """Format a /assist/next response as markdown chat output.
+
+        Prompts use the short (no-session-id) form since chat memory is on
+        by default. The explicit `<session_id>` form still works — users
+        in a different chat or with `assist_session_memory_enabled=false`
+        should paste it; see `/assist help`.
+        """
         if step.get("status") in ("completed", "abandoned", "cancelled"):
-            return f"✅ **Session `{step['session_id']}` is {step['status']}.** Run `/assist done {step['session_id']}` to view the compiled output."
+            return (
+                f"✅ **Session `{step['session_id']}` is {step['status']}.** "
+                f"Run `/assist done` to view the compiled output."
+            )
         if not step.get("node_key"):
             counts = step.get("step_counts", {})
             counts_str = ", ".join(f"{k}={v}" for k, v in counts.items()) or "n/a"
@@ -1214,7 +1312,7 @@ class Pipeline:
                 f"⏳ **No claimable step right now.**\n\n"
                 f"Step roll-up: {counts_str}\n\n"
                 f"Some steps may already be presented to you and waiting on submit. "
-                f"Use `/assist next {step['session_id']}` again after you submit."
+                f"Use `/assist next` again after you submit."
             )
         upstream = step.get("upstream_outputs") or {}
         upstream_block = ""
@@ -1234,17 +1332,22 @@ class Pipeline:
             f"**Task prompt:**\n\n```\n{step.get('base_prompt', '')}\n```\n\n"
             f"**When done, submit your evidence:**\n"
             f"````\n"
-            f"/assist submit {step['session_id']} {step['node_key']}\n"
+            f"/assist submit\n"
             f"```\n"
             f"<your output here — command output, file diff, summary, anything>\n"
             f"```\n"
             f"````\n"
         )
 
-    def _handle_assist(self, msg: str) -> Generator[str, None, None]:
-        """Dispatch /assist subcommands. Stateless — session_id is echoed
-        back to the user and accepted as the first arg of each follow-up,
-        same pattern as `/research/reply <session_id>`."""
+    def _handle_assist(
+        self, msg: str, *, body: dict | None = None,
+    ) -> Generator[str, None, None]:
+        """Dispatch /assist subcommands. Per-chat session memory in
+        `/assist/_chatmap/{chat_id}` lets users omit `<session_id>` after
+        a `/assist <job_id>` start. An explicit UUID-shaped first arg
+        always wins over the remembered session — handy when a user is
+        juggling two sessions across two chats."""
+        chat_id = self._chat_id_from_body(body)
         head, fenced = self._extract_fenced(msg)
         parts = head.split(None, 4)
         cmd = parts[0] if parts else "/assist"
@@ -1260,57 +1363,98 @@ class Pipeline:
             arg1 = parts[1]
             # /assist <subcommand> ... — route to subcommand handler
             if arg1 in ("next", "submit", "skip", "handoff", "pause", "resume", "done", "friction"):
-                # Re-prepend the subcommand and route via the slash-form below.
-                yield from self._dispatch_assist_sub(arg1, parts[2:], fenced); return
+                yield from self._dispatch_assist_sub(arg1, parts[2:], fenced, chat_id=chat_id); return
             # Otherwise treat arg1 as job_id
             job_id = arg1
-            yield from self._assist_start(job_id); return
+            yield from self._assist_start(job_id, chat_id=chat_id); return
 
         # Slash-form subcommands: /assist/next, /assist/submit, etc.
         if cmd.startswith("/assist/"):
             sub = cmd.split("/", 2)[2]  # "next" / "submit" / ...
-            yield from self._dispatch_assist_sub(sub, parts[1:], fenced); return
+            yield from self._dispatch_assist_sub(sub, parts[1:], fenced, chat_id=chat_id); return
 
         yield self._ASSIST_HELP
 
-    def _dispatch_assist_sub(self, sub: str, args: list, fenced: str) -> Generator[str, None, None]:
+    def _dispatch_assist_sub(
+        self, sub: str, args: list, fenced: str, *, chat_id: str | None,
+    ) -> Generator[str, None, None]:
+        # Resolve session_id: explicit UUID arg > recalled-from-chat.
+        sid, rest = self._resolve_session_id(args, chat_id)
         if sub == "next":
-            if not args:
-                yield "Usage: `/assist next <session_id>`"; return
-            yield from self._assist_next(args[0]); return
+            if not sid:
+                yield self._no_session_msg("next"); return
+            yield from self._assist_next(sid, chat_id=chat_id); return
         if sub == "submit":
-            if len(args) < 2:
-                yield "Usage: `/assist submit <session_id> <node_key>` followed by triple-backtick fenced evidence."; return
-            yield from self._assist_submit(args[0], args[1], fenced or (" ".join(args[2:]) if len(args) > 2 else "")); return
+            if not sid:
+                yield self._no_session_msg("submit"); return
+            # Node key: explicit arg > remembered last_node_key from chatmap.
+            node_key = rest[0] if rest else None
+            if not node_key:
+                recalled = self._assist_recall(chat_id)
+                node_key = (recalled or {}).get("last_node_key")
+            if not node_key:
+                yield (
+                    "❌ No node specified and no recent step in chat memory. "
+                    "Run `/assist next` first, or pass `<node_key>` explicitly."
+                ); return
+            evidence = fenced or (" ".join(rest[1:]) if len(rest) > 1 else "")
+            yield from self._assist_submit(sid, node_key, evidence, chat_id=chat_id); return
         if sub == "skip":
-            if len(args) < 2:
-                yield "Usage: `/assist skip <session_id> <node_key>`"; return
-            yield from self._assist_skip(args[0], args[1]); return
+            if not sid:
+                yield self._no_session_msg("skip"); return
+            node_key = rest[0] if rest else None
+            if not node_key:
+                recalled = self._assist_recall(chat_id)
+                node_key = (recalled or {}).get("last_node_key")
+            if not node_key:
+                yield (
+                    "❌ No node specified and no recent step in chat memory. "
+                    "Run `/assist next` first, or pass `<node_key>` explicitly."
+                ); return
+            yield from self._assist_skip(sid, node_key, chat_id=chat_id); return
         if sub == "handoff":
-            if len(args) < 2:
-                yield "Usage: `/assist handoff <session_id> <node_key> [single|all]`"; return
-            mode = (args[2] if len(args) > 2 else "single").lower()
+            if not sid or not rest:
+                yield self._no_session_msg("handoff") if not sid else \
+                    "Usage: `/assist handoff [<session_id>] <node_key> [single|all]`"; return
+            mode = (rest[1] if len(rest) > 1 else "single").lower()
             mode = "all_remaining" if mode in ("all", "all_remaining") else "single"
-            yield from self._assist_handoff(args[0], args[1], mode); return
+            yield from self._assist_handoff(sid, rest[0], mode); return
         if sub == "pause":
-            if not args:
-                yield "Usage: `/assist pause <session_id>`"; return
-            yield from self._assist_simple_post(args[0], "pause"); return
+            if not sid:
+                yield self._no_session_msg("pause"); return
+            yield from self._assist_simple_post(sid, "pause"); return
         if sub == "resume":
-            if not args:
-                yield "Usage: `/assist resume <session_id>`"; return
-            yield from self._assist_simple_post(args[0], "resume"); return
+            if not sid:
+                yield self._no_session_msg("resume"); return
+            yield from self._assist_simple_post(sid, "resume"); return
         if sub == "done":
-            if not args:
-                yield "Usage: `/assist done <session_id>`"; return
-            yield from self._assist_done(args[0]); return
+            if not sid:
+                yield self._no_session_msg("done"); return
+            yield from self._assist_done(sid, chat_id=chat_id); return
         if sub == "friction":
-            if len(args) < 3:
-                yield "Usage: `/assist friction <session_id> <node_key> <note>`"; return
-            yield from self._assist_friction(args[0], args[1], " ".join(args[2:])); return
+            if not sid:
+                yield self._no_session_msg("friction"); return
+            # friction needs node_key and note; remembered node fills the
+            # node slot if user types only `/assist friction "the note"`.
+            if not rest:
+                yield "Usage: `/assist friction [<session_id>] [<node_key>] <note>`"; return
+            if len(rest) >= 2:
+                node_key, note = rest[0], " ".join(rest[1:])
+            else:
+                recalled = self._assist_recall(chat_id)
+                node_key = (recalled or {}).get("last_node_key")
+                note = rest[0]
+            if not node_key:
+                yield (
+                    "❌ No node in chat memory. Pass `<node_key>` explicitly: "
+                    "`/assist friction <node_key> <note>`."
+                ); return
+            yield from self._assist_friction(sid, node_key, note); return
         yield self._ASSIST_HELP
 
-    def _assist_start(self, job_id: str) -> Generator[str, None, None]:
+    def _assist_start(
+        self, job_id: str, *, chat_id: str | None = None,
+    ) -> Generator[str, None, None]:
         try:
             r = _HTTP_SESSION.post(
                 f"{self.valves.orchestrator_url}/assist/start",
@@ -1328,14 +1472,17 @@ class Pipeline:
             yield f"❌ Could not start assist session: HTTP {r.status_code} {r.text[:200]}"; return
         d = r.json()
         sid = d["session_id"]
+        self._assist_remember(chat_id, session_id=sid)
         yield (
             f"🤝 **Assist session started** — `{sid}`\n\n"
             f"Job `{d['job_id']}` is now in `assisted_executing` ({d['pending_steps']} pending step(s)).\n\n"
             f"Fetching first step...\n\n---\n\n"
         )
-        yield from self._assist_next(sid)
+        yield from self._assist_next(sid, chat_id=chat_id)
 
-    def _assist_next(self, session_id: str) -> Generator[str, None, None]:
+    def _assist_next(
+        self, session_id: str, *, chat_id: str | None = None,
+    ) -> Generator[str, None, None]:
         try:
             r = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/assist/{session_id}/next",
@@ -1348,9 +1495,19 @@ class Pipeline:
             yield f"❌ Session `{session_id}` not found."; return
         if r.status_code >= 400:
             yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
-        yield self._render_step(r.json())
+        step = r.json()
+        # Refresh remembered last_node_key when /next claims a real step.
+        # Skip on terminal-status responses where node_key is None.
+        if step.get("node_key"):
+            self._assist_remember(
+                chat_id, session_id=session_id, last_node_key=step["node_key"],
+            )
+        yield self._render_step(step)
 
-    def _assist_submit(self, session_id: str, node_key: str, evidence: str) -> Generator[str, None, None]:
+    def _assist_submit(
+        self, session_id: str, node_key: str, evidence: str,
+        *, chat_id: str | None = None,
+    ) -> Generator[str, None, None]:
         if not evidence:
             yield "Empty evidence. Wrap your output in a triple-backtick fence and resend."; return
         if len(evidence) > self.valves.assist_max_evidence_chars:
@@ -1370,20 +1527,39 @@ class Pipeline:
             )
         except requests.exceptions.RequestException as e:
             yield f"❌ Connection error: {e}"; return
+        if r.status_code == 409:
+            # Structured detail: {"error_code": "must_claim_first", ...}
+            try:
+                detail = r.json().get("detail", {})
+            except Exception:
+                detail = {}
+            if isinstance(detail, dict) and detail.get("error_code") == "must_claim_first":
+                yield (
+                    f"⚠️ Step `{node_key}` is still pending — claim it first.\n\n"
+                    f"Run `/assist next` (no arg in this chat), then resend your submit."
+                ); return
         if r.status_code >= 400:
             yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
         d = r.json()
         if d.get("no_op"):
             yield f"ℹ️ Step `{node_key}` already `{d['status']}`. No change."; return
         next_nk = d.get("next_node_key")
+        # Update remembered node so the next `/assist submit` (no args) is
+        # right. None on terminal => clear it so we don't suggest a
+        # stale step.
+        self._assist_remember(
+            chat_id, session_id=session_id, last_node_key=next_nk,
+        )
         msg = f"✅ Step `{node_key}` committed. "
         if next_nk:
-            msg += f"Next: `{next_nk}`. Run `/assist next {session_id}` to fetch."
+            msg += f"Next: `{next_nk}`. Run `/assist next` to fetch."
         else:
-            msg += f"All steps terminal — run `/assist done {session_id}` to view compiled output."
+            msg += f"All steps terminal — run `/assist done` to view compiled output."
         yield msg
 
-    def _assist_skip(self, session_id: str, node_key: str) -> Generator[str, None, None]:
+    def _assist_skip(
+        self, session_id: str, node_key: str, *, chat_id: str | None = None,
+    ) -> Generator[str, None, None]:
         try:
             r = _HTTP_SESSION.post(
                 f"{self.valves.orchestrator_url}/assist/{session_id}/submit",
@@ -1397,11 +1573,14 @@ class Pipeline:
             yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
         d = r.json()
         next_nk = d.get("next_node_key")
+        self._assist_remember(
+            chat_id, session_id=session_id, last_node_key=next_nk,
+        )
         msg = f"⏭ Step `{node_key}` skipped. "
         if next_nk:
             msg += f"Next: `{next_nk}`."
         else:
-            msg += f"All steps terminal — run `/assist done {session_id}`."
+            msg += f"All steps terminal — run `/assist done`."
         yield msg
 
     def _assist_handoff(self, session_id: str, node_key: str, mode: str) -> Generator[str, None, None]:
@@ -1471,7 +1650,9 @@ class Pipeline:
         d = r.json()
         yield f"✅ Session `{session_id}` -> `{d.get('status', action)}`."
 
-    def _assist_done(self, session_id: str) -> Generator[str, None, None]:
+    def _assist_done(
+        self, session_id: str, *, chat_id: str | None = None,
+    ) -> Generator[str, None, None]:
         # Pull session, then job's compiled_output via /exec/status.
         try:
             r = _HTTP_SESSION.get(
@@ -1486,6 +1667,12 @@ class Pipeline:
         if r.status_code >= 400:
             yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
         sess = r.json()
+        # Clear chat memory when a user explicitly invokes /assist done on a
+        # terminal session — the next /assist <job_id> in this chat starts
+        # cleanly. Pause/resume intentionally do NOT forget; user expects
+        # mid-session pause to round-trip.
+        if sess.get("status") in ("completed", "abandoned", "cancelled"):
+            self._assist_forget(chat_id)
         job_id = sess.get("job_id")
         try:
             r2 = _HTTP_SESSION.get(
