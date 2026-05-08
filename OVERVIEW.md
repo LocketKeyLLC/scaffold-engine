@@ -2112,6 +2112,7 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | X.7 | Tier 2 audit — OWUI scaffold_router routing-decision diagnostic (§17.34) | done 2026-05-08 |
 | X.8 | Tier 2 audit — `make sync-api-key` 5-place propagation (§17.35) | done 2026-05-08 |
 | X.9 | Tier 2 audit — `synthesized` filter on `GET /jobs` (§17.36) | done 2026-05-08 |
+| X.10 | Tier 2 audit — prompt_optimizer `_llm_verify` → `tool_call` migration (§17.37) | done 2026-05-08 |
 
 ### 17.2 Sprint E — Provider abstraction (2026-05-06)
 
@@ -2727,7 +2728,7 @@ Snapshot of the W + X audit state so a future session can pick up cleanly.
 | 7 | OWUI file-routing diagnostic capture | **DONE in X.7** | New `valves.log_routing_decisions` (off by default) + `_classify_dispatch` + `_log_routing_decision`. Single structured line per pipe() call: decision/command/wrapper_stripped/files_count/normalize_rewrites. 13 new tests. |
 | 8 | 5-place API-key sync target | **DONE in X.8** | `make sync-api-key [KEY=sk-...]` strict-syncs across `.env` + 5x `valves.json` + `~/.bashrc`. Idempotent; verifies + propagates from `.env` when no arg. 9 sandboxed tests. |
 | 9 | `synthesized` filter on `GET /jobs` | **DONE in X.9** | New `synthesized: bool \| None` query param. None = no filter; true/false = WHERE `compiled_output_synthesized = :synthesized`. 5 new tests. OpenAPI 44 paths unchanged (existing path gained a param). |
-| 10 | prompt_optimizer JSON-coaxing → tool-call migration | Pattern follow-on to W.6 | 2 sites in `prompt_optimizer.py` still use coaxing. Mechanical with W.6 wrapper. |
+| 10 | prompt_optimizer JSON-coaxing → tool-call migration | **DONE in X.10** | `_llm_verify` migrated to `tool_call` + `RECORD_VERIFICATION_TOOL`. `_llm_optimize` *not* a target — returns free-form text (the rewritten prompt), not structured output. 10 new tests; 3 obsolete JSON-parse-chain tests retired. |
 | 11 | idea_refinement tool-call migration | Same shape as #10 | 1 site. |
 | 12 | gt_extractor tool-call migration | Same shape as #10 | 1 site. |
 | 13 | CI smoke for retrieval regressions | CI config | Tiny fixture (3 queries) run on PRs touching `app/modules/rag_pipeline.py`. Catches regressions cheaply without needing live Milvus. |
@@ -2895,6 +2896,26 @@ The change in `app/main.py::list_jobs`:
 **Project pattern (validated, memory-worthy):** when extending an existing list endpoint with a new filter, the where-clause-list + params-dict idiom (already used for `status` and `q`) composes cleanly with `AND`. Add the new filter as one more `if param is not None: where_clauses.append(...); params[k] = v` block. Don't refactor the join logic for "cleanness" — the linear pattern is what makes it easy to audit for SQL-injection safety. The "SAFE:" comment block at the top of the where-clause assembly stays as the single audit anchor; just add the new bind-name to the comment.
 
 **Test-suite delta:** `tests/test_jobs_synthesized_filter.py` (new): 5 cases — `synthesized=True` and `=False` both add the WHERE clause + bind correct value, `None` (omitted) emits no clause + no bind (regression guard against accidental always-on filtering), composes with `status`, composes with `q`. Tests invoke `list_jobs` directly with a mocked `AsyncSession` capturing every `execute()` call's SQL + params — fast, DB-independent, exercises the actual filter-assembly logic. OpenAPI snapshot regenerated; param visible in spec at `paths./jobs.get.parameters[].name='synthesized'`.
+
+### 17.37 Sprint X.10 — `prompt_optimizer._llm_verify` → `tool_call` migration (2026-05-08)
+
+Tier 2 audit row #10. W.6 follow-on: removes the last JSON-coaxing site in `prompt_optimizer.py` and aligns the verifier with the structured-output pattern already adopted in `research_agent` and `execution_verify`.
+
+The change in `app/modules/prompt_optimizer.py`:
+
+- New `RECORD_VERIFICATION_TOOL` (Tool dataclass) with `input_schema = {preserved: bool, reason: string}`, `required = [preserved]`. Schema lives in code, not in the prompt prose.
+- `VERIFY_SYSTEM` simplified — dropped the "Respond with a single JSON object. No preamble. No markdown fences. Schema:..." prose block. The tool schema enforces the structure; the system prompt now only carries the role description.
+- `_llm_verify` body: `model_router.chat()` → `model_router.tool_call(messages, tools=[RECORD_VERIFICATION_TOOL], ...)`. The legacy fail-closed parsing chain (`parse_json_object` primary → regex fallback → fail closed) is gone — the wrapper handles parsing on native-tool providers and falls back to JSON-coaxing on non-native providers, returning a synthesized `ToolCall` with parsed args either way.
+- New module-private `_tool_args(resp)` helper, byte-equal with `research_agent._tool_args`. Reads `resp.tool_calls[0].arguments` if present + dict, else None. Intentional duplication: keeps the dependency arrow simple and the helper is 5 lines.
+- Fail-closed contract preserved: any failure path (no tool_calls, missing `preserved` key, `success=False`, args not a dict) returns `(False, "")`. The `# 1 / 2 / 3` comment chain in the old body is gone — the wrapper consolidates the parsing into one path.
+
+**Why `_llm_optimize` was NOT a migration target.** The audit-tail row called out "2 sites in prompt_optimizer.py still use coaxing" but only one (`_llm_verify`) is actually structured-output coaxing. `_llm_optimize` returns the rewritten prompt as free-form text — the system prompt enforces formatting (imperative blocks, no preamble, etc.) but the output is plain prose, not a JSON envelope. Wrapping it in a `Tool(input_schema={"rewritten": "string"})` would just add a JSON layer over a string, no clarity improvement, one extra parsing failure mode. The W.6 pattern is for cases where the LLM emits a *structure* (object with multiple fields, or a typed array), not for cases where the LLM emits a single string. Documenting this distinction here so future audit-tail readers don't redo the analysis.
+
+**Project pattern (validated, memory-worthy):** when migrating from `chat()` + JSON-coaxing to `tool_call()`, the system prompt's "Respond with JSON. Schema: {...}" prose can be deleted entirely — the Tool's `input_schema` carries that contract. Keep only the role + task description in `VERIFY_SYSTEM` (and analogues). The result is shorter prompts (fewer tokens) and a single source of truth for the schema (code, not prose). Same rule applies to all future W.6-pattern migrations: prompt prose describes intent; the tool schema describes shape.
+
+**Test-suite delta:** `tests/test_prompt_optimizer_verify.py` rewritten — 10 cases (4 happy paths: preserved=true with reason, =false with reason, true with no reason field, reason truncated at 200 chars; 4 fail-closed: no tool_calls, missing preserved key, dispatch failure, args not a dict; 2 contract: uses tool_call not chat, passes RECORD_VERIFICATION_TOOL). Three obsolete JSON-parse-chain tests in `test_prompt_optimizer.py` (`test_llm_verify_accepts_structured_true`, `_handles_markdown_fenced_json`, etc.) deleted with a pointer comment to the new file. The orchestrator-level `optimize_prompt` tests in `test_prompt_optimizer.py` are unchanged — they mock `_llm_verify` directly, so they're insulated from the X.10 internal refactor.
+
+Combined `-k "prompt_optimizer or model_router_tool_call"` regression: 35/35.
 
 ---
 

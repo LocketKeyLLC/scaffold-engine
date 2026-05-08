@@ -90,31 +90,11 @@ def test_clarity_score_is_clamped_to_one():
 
 
 # ---------------------------------------------------------------------------
-# _llm_verify — parse-verify chain
+# _llm_verify coverage moved to tests/test_prompt_optimizer_verify.py
+# (Sprint X.10 — verifier migrated to model_router.tool_call). Three
+# JSON-parse-chain tests removed here; their tool_call equivalents live
+# in the dedicated file.
 # ---------------------------------------------------------------------------
-@pytest.mark.smoke
-async def test_llm_verify_accepts_structured_true():
-    fake_resp = SimpleNamespace(text='{"preserved": true, "reason": "all intent kept"}')
-    with patch.object(po.model_router, "chat", AsyncMock(return_value=fake_resp)):
-        preserved, reason = await po._llm_verify("orig", "opt", "m")
-    assert preserved is True
-    assert "intent" in reason
-
-
-@pytest.mark.smoke
-async def test_llm_verify_accepts_structured_false():
-    fake_resp = SimpleNamespace(text='{"preserved": false, "reason": "scope changed"}')
-    with patch.object(po.model_router, "chat", AsyncMock(return_value=fake_resp)):
-        preserved, reason = await po._llm_verify("orig", "opt", "m")
-    assert preserved is False
-
-
-@pytest.mark.smoke
-async def test_llm_verify_handles_markdown_fenced_json():
-    fake_resp = SimpleNamespace(text='```json\n{"preserved": true, "reason": "ok"}\n```')
-    with patch.object(po.model_router, "chat", AsyncMock(return_value=fake_resp)):
-        preserved, _ = await po._llm_verify("orig", "opt", "m")
-    assert preserved is True
 
 
 # ---------------------------------------------------------------------------

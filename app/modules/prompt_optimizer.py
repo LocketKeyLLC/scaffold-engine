@@ -12,6 +12,7 @@ from typing import Optional
 
 from app import model_router
 from app.config import get_model
+from app.providers.base import Tool
 
 logger = logging.getLogger("scaffold.prompt_optimizer")
 
@@ -154,14 +155,58 @@ RULES:
 VERIFY_SYSTEM = """\
 ROLE: Semantic intent verifier.
 
-Respond with a single JSON object. No preamble. No markdown fences.
-
-Schema: {"preserved": true|false, "reason": "<one sentence>"}
-
 TASK: Determine if the OPTIMIZED prompt preserves ALL semantic intent of the ORIGINAL.
-- true = all constraints, goals, and scope are intact
-- false = any intent, constraint, or scope is lost or distorted
+- preserved=true if all constraints, goals, and scope are intact
+- preserved=false if any intent, constraint, or scope is lost or distorted
 """
+
+# Sprint X.10 — native tool-call schema for the verifier. Replaces the
+# legacy "Respond with a single JSON object..." coaxing prose. The wrapper
+# parses structured args on native-tool providers and falls back to JSON-
+# coaxing internally on non-native providers, so callers always read via
+# resp.tool_calls[0].arguments regardless of provider capability.
+RECORD_VERIFICATION_TOOL = Tool(
+    name="record_verification",
+    description=(
+        "Report whether the optimized prompt preserves all semantic intent "
+        "of the original."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "preserved": {
+                "type": "boolean",
+                "description": (
+                    "True iff every constraint, goal, and scope element from "
+                    "the original survives in the optimized prompt"
+                ),
+            },
+            "reason": {
+                "type": "string",
+                "description": "One sentence explaining the verdict",
+            },
+        },
+        "required": ["preserved"],
+    },
+)
+
+
+def _tool_args(resp) -> dict | None:
+    """Read the first tool call's arguments dict from a ModelResponse,
+    or None if no tool was called or arguments aren't a dict.
+
+    Sprint W.6 / X.10 — same shape as research_agent._tool_args.
+    Intentional duplication: keeps the dependency arrow simple and the
+    helper trivially small.
+    """
+    if not getattr(resp, "success", False):
+        return None
+    calls = getattr(resp, "tool_calls", None) or []
+    if not calls:
+        return None
+    args = calls[0].arguments
+    return args if isinstance(args, dict) else None
+
 
 async def _llm_optimize(pre_cleaned: str, model: str) -> str:
     from app.utils.llm_parsing import strip_think_tags
@@ -173,10 +218,11 @@ async def _llm_optimize(pre_cleaned: str, model: str) -> str:
 async def _llm_verify(original: str, optimized: str, model: str) -> tuple[bool, str]:
     """Verify the optimized prompt preserves the semantic intent of the original.
 
-    Parsing strategy (fail-closed):
-      1. Primary: parse_json_object — handles markdown fences, partial JSON, etc.
-      2. Fallback: strict regex match on \\bpreserved\\s*[:=]\\s*(true|false)\\b
-      3. Both fail: return (False, <raw[:120]>) — default deny, not allow
+    Sprint X.10 — uses model_router.tool_call so structured output is
+    parsed by the wrapper (native or coaxing) rather than coaxed via
+    prompt prose. Fail-closed contract is preserved: any failure (no
+    tool_calls, missing 'preserved' key, dispatch error) returns False
+    to prevent silently accepting a corrupted optimization.
 
     Args:
         original: The original prompt text.
@@ -184,33 +230,27 @@ async def _llm_verify(original: str, optimized: str, model: str) -> tuple[bool, 
         model: Verifier model tag.
 
     Returns:
-        Tuple of (preserved, reason). ``preserved`` defaults to False on any
-        parse/LLM failure to prevent accepting a corrupted optimization.
+        Tuple of (preserved, reason). ``preserved`` defaults to False on
+        any failure path.
     """
-    import re
-    from app.utils.llm_parsing import parse_json_object, strip_think_tags
-
     messages = [
         {"role": "system", "content": VERIFY_SYSTEM},
         {"role": "user", "content": f"ORIGINAL:\n{original}\n\nOPTIMIZED:\n{optimized}"},
     ]
-    resp = await model_router.chat(messages=messages, model=model)
-    raw = strip_think_tags(resp.text or "")
-
-    # 1. Primary: structured JSON parse
-    data = parse_json_object(raw)
-    if isinstance(data, dict) and "preserved" in data:
-        return bool(data["preserved"]), str(data.get("reason", ""))[:200]
-
-    # 2. Fallback: strict regex for preserved: true|false
-    match = re.search(r"\bpreserved\s*[:=]\s*(true|false)\b", raw, re.IGNORECASE)
-    if match:
-        logger.warning("Verifier JSON parse failed; used regex fallback: %s", raw[:120])
-        return match.group(1).lower() == "true", raw[:120]
-
-    # 3. Fail closed — neither parser succeeded
-    logger.warning("Verifier unparseable, defaulting to not-preserved: %s", raw[:200])
-    return False, raw[:120]
+    resp = await model_router.tool_call(
+        messages=messages,
+        tools=[RECORD_VERIFICATION_TOOL],
+        model=model,
+    )
+    args = _tool_args(resp)
+    if not args or "preserved" not in args:
+        logger.warning(
+            "Verifier tool_call returned no preserved verdict; failing closed"
+        )
+        return False, ""
+    preserved = bool(args["preserved"])
+    reason = str(args.get("reason", ""))[:200]
+    return preserved, reason
 
 async def optimize_prompt(
     prompt: str,
