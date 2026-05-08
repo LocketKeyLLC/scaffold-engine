@@ -4,18 +4,32 @@
   "updated_at": "2026-05-07",
   "kb_snapshot_entries": 501,
   "kb_snapshot_note": "Post batch ingestion push (191 -> 501 across 31 runs)",
-  "rebaseline": {
-    "kb_size": 1093,
-    "ts": "2026-05-08T02:55:11Z",
-    "harness": "HTTP /rag (W.8 ad-hoc; equivalent metric semantics to scripts/score_retrieval.py)",
-    "metrics": {
-      "coverage": 0.950,
-      "mean_recall_at_5": 0.933,
-      "mean_recall_at_10": 0.933,
-      "mean_mrr": 0.860
+  "rebaseline": [
+    {
+      "kb_size": 1093,
+      "ts": "2026-05-08T02:55:11Z",
+      "harness": "HTTP /rag (W.8 ad-hoc; equivalent metric semantics to scripts/score_retrieval.py)",
+      "metrics": {
+        "coverage": 0.95,
+        "mean_recall_at_5": 0.933,
+        "mean_recall_at_10": 0.933,
+        "mean_mrr": 0.86
+      },
+      "note": "Sprint W.8 \u2014 quality held flat under 2x corpus growth (501 \u2192 1093). MRR identical to KB=501 baseline; Recall@5 -1.7pt on a single multi-doc query (g016, 2-of-3 expected docs in top-5). One MISS (g011) consistent with prior runs. See OVERVIEW \u00a717.26 + \u00a718."
     },
-    "note": "Sprint W.8 — quality held flat under 2x corpus growth (501 → 1093). MRR identical to KB=501 baseline; Recall@5 -1.7pt on a single multi-doc query (g016, 2-of-3 expected docs in top-5). One MISS (g011) consistent with prior runs. See OVERVIEW §17.26 + §18."
-  },
+    {
+      "kb_size": "TBD \u2014 fill in from psql or /health",
+      "ts": "2026-05-08",
+      "harness": "HTTP /rag (operator local \u2014 placeholder)",
+      "metrics": {
+        "coverage": 0,
+        "mean_recall_at_5": 0,
+        "mean_recall_at_10": 0,
+        "mean_mrr": 0
+      },
+      "note": "Quarterly calibration scaffolding \u2014 operator to fill in actual metrics from local /score_retrieval run."
+    }
+  ],
   "pairs": [
     {
       "id": "g001",
@@ -24,7 +38,10 @@
         "scaffold-parallel-implementation-of-kahn's-algorithm-054cfbad",
         "scaffold-kahn's-algorithm-implementation-2b2d3d06"
       ],
-      "expected_titles_contain": ["Kahn", "algorithm"],
+      "expected_titles_contain": [
+        "Kahn",
+        "algorithm"
+      ],
       "domain": "eng",
       "difficulty": "medium",
       "tier": "direct_lookup",
@@ -36,7 +53,10 @@
       "expected_entry_ids": [
         "scaffold-topological-sorting-process-079a7191"
       ],
-      "expected_titles_contain": ["topological", "sorting"],
+      "expected_titles_contain": [
+        "topological",
+        "sorting"
+      ],
       "domain": "rag",
       "difficulty": "medium",
       "tier": "direct_lookup",
@@ -49,7 +69,9 @@
         "scaffold-web-security-implementation-guides-dfe09110",
         "scaffold-content-security-policy-(csp)-4bad0089"
       ],
-      "expected_titles_contain": ["security"],
+      "expected_titles_contain": [
+        "security"
+      ],
       "domain": "rag",
       "difficulty": "easy",
       "tier": "troubleshooting",
@@ -62,7 +84,9 @@
         "scaffold-truncation-in-mathematics-and-computer-science-ef2f0d67",
         "scaffold-truncation-definition-4e224245"
       ],
-      "expected_titles_contain": ["truncation"],
+      "expected_titles_contain": [
+        "truncation"
+      ],
       "domain": "rag",
       "difficulty": "easy",
       "tier": "parameter_tuning",
@@ -74,7 +98,10 @@
       "expected_entry_ids": [
         "scaffold-vector-telemetry-data-router-91e23a2a"
       ],
-      "expected_titles_contain": ["Vector", "telemetry"],
+      "expected_titles_contain": [
+        "Vector",
+        "telemetry"
+      ],
       "domain": "rag",
       "difficulty": "easy",
       "tier": "code_adjacent",
@@ -87,7 +114,10 @@
         "scaffold-kahn's-algorithm-implementation-37c0f092",
         "scaffold-kahn's-algorithm-for-topological-sorting-aca1c3a8"
       ],
-      "expected_titles_contain": ["Kahn", "algorithm"],
+      "expected_titles_contain": [
+        "Kahn",
+        "algorithm"
+      ],
       "domain": "rag",
       "difficulty": "medium",
       "tier": "comparative",
@@ -100,7 +130,10 @@
         "scaffold-cache-invalidation-d0152326",
         "scaffold-redis-cache-invalidation-patterns-61f6cf5a"
       ],
-      "expected_titles_contain": ["cache", "invalidation"],
+      "expected_titles_contain": [
+        "cache",
+        "invalidation"
+      ],
       "domain": "eng",
       "difficulty": "easy",
       "tier": "troubleshooting",
@@ -113,7 +146,10 @@
         "scaffold-write-through-pattern-43f8c68a",
         "scaffold-write-behind-caching-3e943468"
       ],
-      "expected_titles_contain": ["write", "caching"],
+      "expected_titles_contain": [
+        "write",
+        "caching"
+      ],
       "domain": "eng",
       "difficulty": "easy",
       "tier": "parameter_tuning",
@@ -125,7 +161,10 @@
       "expected_entry_ids": [
         "scaffold-caching-data-between-runs-fce6caca"
       ],
-      "expected_titles_contain": ["caching", "runs"],
+      "expected_titles_contain": [
+        "caching",
+        "runs"
+      ],
       "domain": "eng",
       "difficulty": "medium",
       "tier": "direct_lookup",
@@ -138,7 +177,10 @@
         "scaffold-grpc-vs-rest-performance-eadb4807",
         "scaffold-grpc-vs-rest-performance-benchmark-5b7b8ac4"
       ],
-      "expected_titles_contain": ["gRPC", "REST"],
+      "expected_titles_contain": [
+        "gRPC",
+        "REST"
+      ],
       "domain": "eng",
       "difficulty": "easy",
       "tier": "comparative",
@@ -150,7 +192,10 @@
       "expected_entry_ids": [
         "scaffold-storage-quotas-and-eviction-38e530dc"
       ],
-      "expected_titles_contain": ["storage", "quotas"],
+      "expected_titles_contain": [
+        "storage",
+        "quotas"
+      ],
       "domain": "eng",
       "difficulty": "hard",
       "tier": "parameter_tuning",
@@ -162,7 +207,10 @@
       "expected_entry_ids": [
         "scaffold-parallel-kahn's-algorithm-60db8c02"
       ],
-      "expected_titles_contain": ["parallel", "Kahn"],
+      "expected_titles_contain": [
+        "parallel",
+        "Kahn"
+      ],
       "domain": "rag",
       "difficulty": "easy",
       "tier": "comparative",
@@ -175,7 +223,9 @@
         "scaffold-keycloak-docker-image-57117089",
         "scaffold-keycloak-d2a361b2"
       ],
-      "expected_titles_contain": ["Keycloak"],
+      "expected_titles_contain": [
+        "Keycloak"
+      ],
       "domain": "rag",
       "difficulty": "easy",
       "tier": "code_adjacent",
@@ -187,7 +237,10 @@
       "expected_entry_ids": [
         "scaffold-oauth2-proxy-06302d54"
       ],
-      "expected_titles_contain": ["OAuth2", "proxy"],
+      "expected_titles_contain": [
+        "OAuth2",
+        "proxy"
+      ],
       "domain": "rag",
       "difficulty": "easy",
       "tier": "troubleshooting",
@@ -199,7 +252,10 @@
       "expected_entry_ids": [
         "scaffold-docker-image-qwen3-reranker-vllm-0b827d85"
       ],
-      "expected_titles_contain": ["qwen3", "reranker"],
+      "expected_titles_contain": [
+        "qwen3",
+        "reranker"
+      ],
       "domain": "rag",
       "difficulty": "easy",
       "tier": "code_adjacent",
@@ -213,7 +269,10 @@
         "scaffold-bitnami-helm-chart-for-milvus-b8603f4c",
         "scaffold-bitnami/milvus-0edbc48d"
       ],
-      "expected_titles_contain": ["bitnami", "milvus"],
+      "expected_titles_contain": [
+        "bitnami",
+        "milvus"
+      ],
       "domain": "rag",
       "difficulty": "easy",
       "tier": "code_adjacent",
@@ -225,7 +284,10 @@
       "expected_entry_ids": [
         "scaffold-compression-dictionary-transport-a3f299a4"
       ],
-      "expected_titles_contain": ["compression", "dictionary"],
+      "expected_titles_contain": [
+        "compression",
+        "dictionary"
+      ],
       "domain": "eng",
       "difficulty": "easy",
       "tier": "direct_lookup",
@@ -238,7 +300,10 @@
         "scaffold-fastapi-docker-image-size-906ddba5",
         "scaffold-fastapi-docker-image-5fa90e31"
       ],
-      "expected_titles_contain": ["FastAPI", "Docker"],
+      "expected_titles_contain": [
+        "FastAPI",
+        "Docker"
+      ],
       "domain": "eng",
       "difficulty": "easy",
       "tier": "code_adjacent",
@@ -250,7 +315,10 @@
       "expected_entry_ids": [
         "scaffold-lossless-compression-28cb4801"
       ],
-      "expected_titles_contain": ["lossless", "compression"],
+      "expected_titles_contain": [
+        "lossless",
+        "compression"
+      ],
       "domain": "eng",
       "difficulty": "easy",
       "tier": "direct_lookup",
@@ -262,7 +330,10 @@
       "expected_entry_ids": [
         "scaffold-minimizing-eventual-consistency-3bf7caae"
       ],
-      "expected_titles_contain": ["eventual", "consistency"],
+      "expected_titles_contain": [
+        "eventual",
+        "consistency"
+      ],
       "domain": "eng",
       "difficulty": "easy",
       "tier": "parameter_tuning",
