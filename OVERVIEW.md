@@ -3426,6 +3426,34 @@ Defense-in-depth posture for the seven-container compose: drop root from every s
 
 **§15 invariant impact:** new invariant **#16 — Non-root runtime posture** captures the rules a future change must respect (UID pins, the volume-ownership chown migration, the dev override's compensations). Existing invariants are unaffected — the X.28 changes are purely additive defenses on top of the existing posture.
 
+### 17.65 Audit pass — bootstrap.sh subnet pin + orchestrator healthcheck (2026-05-09)
+
+Two HIGH-severity findings from a fresh audit pass surfaced after the §17.63 SSD migration shook out, both closed in one commit.
+
+**B1 — `scripts/bootstrap.sh::ensure_network` had no subnet pin.** §17.63 already flagged this as a follow-up: the live `ai-network` was manually re-created with `--subnet 172.18.0.0/16 --gateway 172.18.0.1` after the data-root move because containers reach host-installed Ollama at the bridge gateway `172.18.0.1:11434`, hardcoded in compose env (`OLLAMA_BASE_URL: http://172.18.0.1:11434`) and operator memory. The script itself still ran `docker network create "$1"` with no flags, so a fresh bootstrap on any host would have landed on the next free `172.X.0.0/16` and silently broken Ollama reachability.
+
+The fix:
+- `ensure_network` now takes optional `subnet` + `gateway` args (back-compat preserved for the volume-only call sites). When both are passed and the network is being created, they're flowed through as `--driver bridge --subnet ... --gateway ...`.
+- When the network already exists, the function inspects the actual subnet via `docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'` and warns (without recreating) if it differs from the expected pin. Recreating would require detaching every running container — the right operator action is to stop the stack, `docker network rm ai-network`, and re-bootstrap. The warn message says exactly that.
+- Call site updated: `ensure_network "ai-network" "172.18.0.0/16" "172.18.0.1"`.
+
+**B2 — `scaffold-orchestrator` had no `healthcheck:` stanza.** Postgres, Milvus, and Redis all defined healthchecks; the orchestrator did not. Docker could only tell the process was running, not whether the API was actually responsive. The orchestrator depends_on the three storage services with `condition: service_healthy`, but no service depends on the orchestrator with that condition — yet — and `docker compose ps` and `docker inspect` had no signal to surface to operators.
+
+The fix:
+- New `healthcheck:` block on `scaffold-orchestrator` matching the milvus stanza in shape: `["CMD", "curl", "-f", "http://localhost:8000/health"]`, `interval: 30s`, `timeout: 10s`, `retries: 5`, `start_period: 90s`.
+- `start_period: 90s` covers lifespan migrations + Milvus connect + reranker prewarm. Observed prewarm times this sprint: 7.8 s warm cache, ~13 s cold. The conservative 90 s avoids false-positive unhealthy events on cold deploys.
+- `curl` is already present in the runtime image (verified via `docker exec scaffold-orchestrator which curl` → `/usr/bin/curl`). No Dockerfile change required.
+
+**Verification:**
+- `bash -n scripts/bootstrap.sh` — syntax OK.
+- `docker compose config --quiet` — YAML valid.
+- Live re-run of the new `ensure_network` against the existing `ai-network` correctly emits `network 'ai-network' present (subnet 172.18.0.0/16)`. Wrong-subnet path correctly warns.
+- `docker compose up -d scaffold-orchestrator` recreated the container; healthcheck transitioned to `healthy` after the standard warmup. `docker inspect` confirms `Health.Status=healthy`, `FailingStreak=0`.
+
+**Test-suite delta:** none — both fixes are infrastructure-level (compose YAML + bootstrap shell). The 1099/4/22 baseline (in the prod runtime container, post-SSD migration with empty Milvus) is unchanged. The 4 RAG-empty failures and 22 skips are §17.63 carryovers, not introduced or affected by this commit.
+
+**§16.5 status delta:** the deployment-surface audit gap is one finding closer to closed. Still open from the same audit pass: `.env.example` documents only 14/131 Settings fields (M1), no `bootstrap-host.sh` companion (I1), bench gates not wired into `make ci` (I4), Milvus repopulation plan (N4).
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

@@ -110,12 +110,45 @@ fi
 
 # Network + volumes that compose declares as external must exist.
 ensure_network() {
-    if docker network inspect "$1" >/dev/null 2>&1; then
-        ok "network '$1' present"
+    # Args: name [subnet] [gateway]
+    # When subnet+gateway are given, the network is created with the explicit
+    # IPAM pin. If the network already exists with a different subnet, warn —
+    # don't recreate (would require detaching every running container). The
+    # ai-network pin is load-bearing: containers reach the host-installed
+    # Ollama at the bridge gateway 172.18.0.1, hardcoded in compose env and
+    # operator memory. Without the pin a fresh bootstrap on any host lands on
+    # the next free 172.X.0.0/16 and silently breaks Ollama reachability.
+    local name="$1"
+    local subnet="${2:-}"
+    local gateway="${3:-}"
+    if docker network inspect "$name" >/dev/null 2>&1; then
+        if [[ -n "$subnet" ]]; then
+            local actual
+            actual="$(docker network inspect "$name" \
+                --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null)"
+            if [[ -n "$actual" && "$actual" != "$subnet" ]]; then
+                warn "network '$name' exists but subnet '$actual' differs from expected '$subnet'"
+                printf '       %sto fix: stop the stack, run \`docker network rm %s\`, re-run bootstrap%s\n' \
+                    "$C_DIM" "$name" "$C_RST"
+            else
+                ok "network '$name' present (subnet ${actual:-unset})"
+            fi
+        else
+            ok "network '$name' present"
+        fi
     else
-        info "creating network '$1'"
-        docker network create "$1" >/dev/null
-        ok "network '$1' created"
+        info "creating network '$name'"
+        if [[ -n "$subnet" && -n "$gateway" ]]; then
+            docker network create \
+                --driver bridge \
+                --subnet "$subnet" \
+                --gateway "$gateway" \
+                "$name" >/dev/null
+            ok "network '$name' created (subnet $subnet, gateway $gateway)"
+        else
+            docker network create "$name" >/dev/null
+            ok "network '$name' created"
+        fi
     fi
 }
 ensure_volume() {
@@ -128,7 +161,7 @@ ensure_volume() {
     fi
 }
 
-ensure_network "ai-network"
+ensure_network "ai-network" "172.18.0.0/16" "172.18.0.1"
 ensure_volume "open-webui"
 ensure_volume "milvus-data-v2"
 

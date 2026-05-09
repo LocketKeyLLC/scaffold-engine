@@ -194,6 +194,14 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    healthcheck:
+      # /health covers postgres + ollama + milvus + redis + reranker; ~43 ms warm.
+      # start_period covers lifespan migrations + reranker prewarm + Milvus connect.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
     restart: unless-stopped
     networks:
       - ai-network
