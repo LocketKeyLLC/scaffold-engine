@@ -27,8 +27,24 @@ agent: ## Run execution agent tests only
 eval: ## Run retrieval eval against ground truth
 	docker exec -e SCAFFOLD_API_KEY=$(API_KEY) $(CONTAINER) python3 tests/eval_retrieval.py
 
-bench: ## Run performance benchmark suite
+bench: ## Run full e2e performance benchmark (~43 min)
 	docker exec $(CONTAINER) python3 tests/benchmarks/bench_pipeline.py
+
+bench-rag: ## Run RAG retrieval micro-bench (no LLM, ~30s)
+	docker exec $(CONTAINER) python3 tests/benchmarks/bench_rag.py
+
+bench-embed: ## Run embedder + cache micro-bench (~30s)
+	docker exec $(CONTAINER) python3 tests/benchmarks/bench_embed.py
+
+bench-check-rag: ## Gate: fail if bench_rag warm_mean_ms regressed >1.5x median of last 3
+	docker exec $(CONTAINER) python3 tests/benchmarks/bench_check.py \
+		--file tests/benchmarks/bench_rag_results.jsonl \
+		--metric summary.warm_mean_ms --threshold 1.5 --direction up
+
+bench-check-embed: ## Gate: fail if bench_embed cold_mean_ms regressed >1.5x median of last 3
+	docker exec $(CONTAINER) python3 tests/benchmarks/bench_check.py \
+		--file tests/benchmarks/bench_embed_results.jsonl \
+		--metric summary.cold_mean_ms --threshold 1.5 --direction up
 
 ci: ## Run CI-safe tests (no live Ollama/Milvus needed)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v \

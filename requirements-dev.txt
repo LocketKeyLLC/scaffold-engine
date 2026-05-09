@@ -2,3 +2,5 @@
 pytest==9.0.2
 pytest-timeout==2.4.0
 pytest-asyncio==1.3.0
+# X.21 — bench_pipeline + bench_rag + bench_embed system metrics
+psutil==7.2.2

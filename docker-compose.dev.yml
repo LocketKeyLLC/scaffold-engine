@@ -20,3 +20,9 @@ services:
       # the committed docs/openapi.json. The write path goes through stdout
       # in `make openapi-snapshot`, so no rw mount is needed.
       - ./docs:/code/docs:ro
+      # X.21 — writable mount for bench_pipeline + bench_rag + bench_embed.
+      # The script directory itself is read-only (under /code/tests:ro) so
+      # results JSONL writes need a separate rw home. Mounting just the
+      # benchmarks/ subdir keeps tests/ as a whole read-only so bench
+      # scripts can't accidentally mutate test sources.
+      - ./tests/benchmarks:/code/tests/benchmarks

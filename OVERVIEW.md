@@ -3314,6 +3314,48 @@ W.9's noted follow-up. The default replan policy (`context_only`) used to call t
 
 **Carryover.** The `/confirm`→assist chat-id plumbing remains the last sub-one-line follow-up from W-track. Not a perf or UX issue, just a nice-to-have for users on `assist_after_confirm=true`. **→ Closed in W.11.**
 
+### 17.57 Sprint X.21 — perf benchmarking: component micro-benches + regression gate (2026-05-08)
+
+§16.5 audit-flagged "no formal performance benchmarking" was overstated — `tests/benchmarks/bench_pipeline.py` has been a 541-line e2e bench since pre-X track. Real gaps: (1) no component-level benches, so RAG retrieval drift is invisible until the macro number creeps up; (2) no regression gating, so drift just accumulates silently; (3) only 2 baselines in `results.jsonl`, last on 2026-04-02 (pre-W track). X.21 closes the first two; refreshing the macro baseline (~43 min run) is mechanical and deferred.
+
+**New benches (component-level, run in seconds):**
+
+- **`tests/benchmarks/bench_rag.py`** — retrieval-only: `query → embed → Milvus → rerank`, no LLM. Three phases per query (cold + warm × N iterations) over a fixed query set. Records `latency_ms_p50/p95/p99` per query plus an aggregate `summary.warm_mean_ms` and `summary.warm_max_ms`. Output: `bench_rag_results.jsonl`.
+- **`tests/benchmarks/bench_embed.py`** — embedder + cache: three phases (cold-cleared-cache, cached-after-cold, warm-no-cache-after-clear) so the cache speedup is directly observable. Records `summary.{cold_mean_ms, warm_no_cache_mean_ms, cached_mean_ms, cache_speedup_x}`. Output: `bench_embed_results.jsonl`.
+
+Both call `app.utils.http_clients.init_clients()` before benching — the standalone-script context doesn't run the FastAPI lifespan, so without that the embedder calls fail with `Ollama client not initialized`. Caught immediately during smoke testing, fixed in script.
+
+Both fall back to `/tmp/scaffold-bench/` if the script's directory is read-only (the runtime container mounts `/code` ro). The dev override now adds a writable bind for `tests/benchmarks/` so `make bench-rag` from a dev-image run lands in the repo. Operators on the runtime image still get bench output via `/tmp` and can `docker cp` if they want persistence.
+
+**Regression gate — `tests/benchmarks/bench_check.py`:**
+
+Generic over any benchmark JSONL (works for `bench_pipeline`, `bench_rag`, `bench_embed`). Reads the last run, compares the chosen metric to the **median of the previous N runs** (default 3), exits 2 on regression. Median beats last-only because one outlier shouldn't false-fire; the unit test `test_uses_median_of_prior_runs_not_last` is the regression guard for that contract.
+
+```
+python tests/benchmarks/bench_check.py \
+    --file tests/benchmarks/bench_rag_results.jsonl \
+    --metric summary.warm_mean_ms \
+    --threshold 1.5 --direction up
+# exit 0 = OK, 2 = regression
+```
+
+`--direction up` is for latency-style metrics (lower = better; regression when latest > baseline × threshold). `--direction down` is for throughput (higher = better; regression when latest < baseline × threshold). Wired into `make bench-check-rag` and `make bench-check-embed`.
+
+**Findings the benches surfaced during their first run:**
+
+1. **Embedder cache layering.** Initial `bench_embed` showed `cache_speedup_x = 1.0` — i.e. no measurable gain from the L1 cache. Tracemalloc-style: my bench called `model_router.embed()` directly, which doesn't check the cache (the cache lives one level up, in `rag_pipeline._embed_content`). Switched bench to call `_embed_content` instead — same path RAG ingest uses — and `cached_mean_ms` dropped to 0 vs 930ms warm. Real production behavior: the cache works; my test path was wrong.
+2. **`init_clients()` is required for any standalone script that imports `app.modules.*`.** Worth documenting; future bench/CLI scripts hit the same trap.
+
+**Test-suite delta:** new `tests/test_bench_check.py`, 18 cases — `_resolve` (dotted/indexed JSONpath), `_is_regression` (direction + threshold + zero-baseline guard), `main()` (skip on insufficient history, regression detection, median-vs-last-run distinction, throughput-direction case). Full suite: 1253 → 1271 passing.
+
+**Live verification:** both benches ran end-to-end on the prod-runtime container (read-only `/code`), wrote JSONL to `/tmp/scaffold-bench/`, and the regression gate exits 0 on a single run (insufficient history) as designed.
+
+**What's still on the §16.5 list (deferred, sprint-scale):**
+- Refresh the macro baseline (`make bench`, ~43 min). Mechanical; do whenever there's a quiet hour.
+- Add `make bench-check-pipeline` once a baseline exists.
+- Wire the gates into `make ci` so PRs see regression failures (currently the gates run by hand; no CI integration).
+- Deployment-surface audit (Dockerfile, compose, .env.example).
+
 ### 17.56 Sprint X.20 — system-wide observability rollups (2026-05-08)
 
 §16.5 audit-flagged observability completeness was a multi-axis target; X.20 closes the cheapest, highest-value sliver: read-side rollups over telemetry that already exists. Three new endpoints, no new infra dependencies, no new tables.
