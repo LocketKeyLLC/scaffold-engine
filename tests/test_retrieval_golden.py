@@ -13,10 +13,13 @@ Tier: make validate
 import pytest
 
 from app.modules.rag_pipeline import query_rag
+from tests._milvus_helpers import skip_if_milvus_empty
 # Per-query KB-availability skips below (3 queries currently active; 4 skipped
 # pending KB content). The previous module-level pytestmark.skip was removed
 # 2026-04-28 after live KB inspection (664 entries: eng=261, llm=218, rag=175,
-# spec=8, prompt=0).
+# spec=8, prompt=0). Audit B3 (2026-05-09) added the collection-level guard
+# below so a fully-empty Milvus (e.g. post-§17.63 SSD migration) skips all
+# parametrizations instead of hard-failing on `assert len(topics) > 0`.
 
 # ---------------------------------------------------------------------------
 # Golden queries: (query, domain, expected_topic_substring)
@@ -90,6 +93,7 @@ GOLDEN_QUERIES = [
 )
 async def test_golden_retrieval(query: str, domain: str, expected_substr: str):
     """Assert the expected document appears in top-3 for a golden query."""
+    skip_if_milvus_empty()
     result = await query_rag(query, domain=domain, top_k=3)
 
     topics = [r["title"] for r in result["results"]]

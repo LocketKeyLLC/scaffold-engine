@@ -73,7 +73,15 @@ async def test_rag_query_round_trip():
     CPU-only inference can spend ~80s on the reranker pass. Warm runs
     finish in seconds. The 3x headroom keeps cold-start green without
     masking real perf regressions.
+
+    Skipped when Milvus is empty (audit B3, post-§17.63 SSD migration).
+    Pre-fix this test hard-failed on the ``assert len(docs) > 0`` below
+    even though the failure mode was "no data to retrieve," not "retrieval
+    pipeline broken."
     """
+    from tests._milvus_helpers import skip_if_milvus_empty
+    skip_if_milvus_empty()
+
     from app.modules.rag_pipeline import query_rag
 
     result = await query_rag("HNSW vector search", domain="eng", top_k=3)

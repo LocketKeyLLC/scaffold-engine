@@ -3636,6 +3636,28 @@ def _make_create_task_side_effect(result):
 
 **§16.5 status delta:** M7 closed. The M-series of the audit (M1-M7) is now fully closed. Open from the audit: I1, I4, N4, B3-B6, plus the wider §16.5 deferrals.
 
+### 17.73 Audit pass — skip RAG tests when Milvus is empty (2026-05-09)
+
+B3 from the audit. Post-§17.63 SSD migration left `toon_v2` empty, and four live-retrieval tests hard-failed on `assert len(docs) > 0` even though the failure mode was "no data to retrieve" rather than "retrieval pipeline broken." `tests/test_retrieval_golden.py` already had per-query skip marks for "this partition lacks a specific doc" cases, but no guard for "the whole collection is empty" — that's the gap B3 named.
+
+**What changed:**
+
+- New `tests/_milvus_helpers.py` (leading underscore so pytest skips collection):
+  - `get_collection_entry_count(name="toon_v2") -> int` — calls `pymilvus.utility.list_collections()` + `Collection(name).num_entities` via the same `connections.connect(uri=settings.milvus_uri)` path the orchestrator's `/health` uses. Returns 0 on any failure (collection missing, Milvus unreachable, pymilvus import error) — caller treats all as "empty."
+  - `skip_if_milvus_empty(name="toon_v2") -> None` — `pytest.skip(...)` if count is zero. Use as the first line of any live-retrieval test.
+- `tests/test_integration.py::test_rag_query_round_trip` — calls `skip_if_milvus_empty()` before the production import. Docstring updated to name B3 + the failure mode.
+- `tests/test_retrieval_golden.py::test_golden_retrieval` — same call at the top of the test body. The pre-existing per-query skip marks still fire first (pytest evaluates `pytest.mark.skip` at collection time), so partition-empty cases get their narrower message; collection-fully-empty cases get the new B3 message.
+
+**Verification (Milvus currently empty per §17.63):**
+- Pre-fix: `pytest tests/test_integration.py::test_rag_query_round_trip tests/test_retrieval_golden.py` produced 4 failed + 4 skipped.
+- Post-fix: 0 failed + 8 skipped (4 per-partition mark + 4 collection-empty via the new helper). Test output cleanly attributes the skips to `tests/_milvus_helpers.py:53` ("Milvus collection 'toon_v2' is empty — repopulate via /research").
+
+When Milvus is repopulated (N4: KB repopulation plan), `skip_if_milvus_empty()` becomes a no-op and the per-partition marks return to being the only relevant guards. No future cleanup needed once the KB is back.
+
+**Test-suite delta:** test count unchanged. The 4 RAG-empty failures from §17.64's baseline (1322 passed / 4 failed / 4 skipped) become 4 additional skips, so the post-§17.63 baseline becomes 1322 passed / 0 failed / 8 skipped — green again until the KB is repopulated.
+
+**§16.5 status delta:** B3 closed. Open from the audit: I1, I4, N4, B4-B6, plus the wider §16.5 deferrals.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
