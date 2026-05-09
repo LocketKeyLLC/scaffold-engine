@@ -40,6 +40,7 @@ from app.modules.prompt_inspector import list_prompts, get_prompt, update_prompt
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag as _query_rag
 from app.routers.assist import router as assist_router
+from app.routers.observability import router as observability_router
 from app.routers.status import router as status_router
 from app.schemas import (
     JOB_STATUSES,
@@ -336,6 +337,7 @@ app.add_middleware(PerformanceMiddleware)
 app.add_middleware(RequestIdMiddleware)
 app.include_router(status_router)
 app.include_router(assist_router)
+app.include_router(observability_router)
 
 # Sprint J.2.a — native single-page web UI. Auth-bypassed so a browser
 # hitting localhost:8000/web/jobs works without sending headers; the

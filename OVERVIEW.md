@@ -3314,6 +3314,29 @@ W.9's noted follow-up. The default replan policy (`context_only`) used to call t
 
 **Carryover.** The `/confirm`→assist chat-id plumbing remains the last sub-one-line follow-up from W-track. Not a perf or UX issue, just a nice-to-have for users on `assist_after_confirm=true`. **→ Closed in W.11.**
 
+### 17.56 Sprint X.20 — system-wide observability rollups (2026-05-08)
+
+§16.5 audit-flagged observability completeness was a multi-axis target; X.20 closes the cheapest, highest-value sliver: read-side rollups over telemetry that already exists. Three new endpoints, no new infra dependencies, no new tables.
+
+**New endpoints (all under `/observability/*`, all `Depends(require_api_key)`):**
+
+| Endpoint | Source table | Purpose |
+|---|---|---|
+| `GET /observability/llm?window_minutes=N&provider=&model=` | `llm_call_logs` | System-wide LLM cost + latency aggregated by `(provider, model)`. Includes `calls`, `successes/failures`, token totals, and `latency_ms_p50/p95/p99` per group. Sorted by cost DESC. Complements per-job `/jobs/{id}/costs`. |
+| `GET /observability/errors?resolved=&since_minutes=&limit=` | `error_logs` | Recent error_logs with optional `resolved` flag and time-window filter. Pass `resolved=false` for an oncall view of "what's still broken." |
+| `GET /observability/jobs?window_minutes=N&limit=` | `jobs` ⨝ `llm_call_logs` | Recent jobs sorted by total cost DESC, with each row's call count + cost + tokens + latency totals. LEFT JOIN preserves zero-call jobs (planning-only, pre-J.3.a). |
+
+**Design notes.** All three readers fail-open — a missing telemetry table or transient DB error returns the zero/empty shape, never 500. Same pattern as `cost_rollup`. The percentile aggregation uses `percentile_cont` (continuous); for very small windows or low call counts the percentiles converge to the SUM, which is the right behavior. Query params have FastAPI `Query(ge=, le=)` validators so `?window_minutes=99999` returns 422 rather than running an unbounded scan.
+
+**What X.20 does NOT do** (deferred, not in scope):
+- **Prometheus `/metrics` endpoint.** Would need `prometheus-client` dep + a Grafana setup to be useful. Defer until there's operational pressure for it.
+- **Per-HTTP-request rollup.** The `PerformanceMiddleware` only logs request latency to stdout, not DB. The dead `performance_logs` table exists but its writer (`log_model_call`) is unused — separate cleanup. To get request-level p50/p95 in the rollup surface, the middleware would need a small DB write per non-/health request.
+- **OpenTelemetry tracing.** Per-job timeline view would be useful, but the data model is already in Postgres (job → nodes → llm_call_logs). A view-layer build is enough; OTel is overkill for a single-orchestrator deployment.
+
+**Test-suite delta:** new `tests/test_observability_rollups.py`, 15 cases. Helper-level tests assert filter params thread through to the SQL bind dict (catches accidental drops) and that omitted filters pass `None` so the SQL's IS NULL branch disables them. Endpoint-level tests assert query-param validation (window_minutes/limit caps) returns 422 rather than running unbounded queries. Full suite: 1238 → 1253 passing.
+
+**Live verification.** Restart + curl all three endpoints returns 200 with the zero shape on a fresh restart (no calls logged yet). Will populate as soon as any LLM activity hits `_record_call`.
+
 ### 17.55 Sprint X.19 — retry-loop coverage matrix (2026-05-08)
 
 §16.5 of the audit explicitly noted: *"no coverage matrix for execution_agent's retry loop."* Closed.
