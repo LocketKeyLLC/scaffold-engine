@@ -3604,6 +3604,38 @@ M6 from the audit + closes #151. `app/utils/github_ingest.py::_get_tree` carried
 
 **§16.5 status delta:** M6 closed. Open from the audit: I1, I4, N4, B3-B6, M7, plus the wider §16.5 deferrals.
 
+### 17.72 Audit pass — silence un-awaited-coroutine warnings (2026-05-09)
+
+M7 from the audit. `make test` produced three `RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited` messages, surfaced as `PytestUnraisableExceptionWarning` during teardown. The warnings were noisy but harmless; X.26 had already noted the flake source. Tracemalloc traceback only showed pytest internals — the leaks fired during GC, after the test body had returned.
+
+**Root cause:** three tests in `TestRunResearch` (`test_emits_research_started_first`, `test_emits_research_complete_last`, `test_no_results_breaks_early`) patched `asyncio.create_task` with `mock_task.return_value = done_future`. The production code calls `asyncio.create_task(some_coro)` — the mock returned a pre-resolved future but the *coroutine argument* was never awaited or closed, so Python's GC eventually surfaced one warning per leaked coro per test.
+
+A sibling test in the same file (`test_shallow_depth_one_iteration`) already used the right pattern: `mock_task.side_effect = lambda coro: (coro.close(), pre_resolved_future)`. The fix ports that pattern to the three leaking tests via a small file-level helper:
+
+```python
+def _make_create_task_side_effect(result):
+    def _side_effect(coro):
+        coro.close()        # critical — silences the warning
+        f = asyncio.Future()
+        f.set_result(result)
+        return f
+    return _side_effect
+```
+
+**What changed:**
+
+- `tests/test_research_agent_core.py` — new `_make_create_task_side_effect(result)` helper (10 lines, with a docstring naming M7 + the warning class). Three test bodies converted: each `mock_task.return_value = done_future` (3 lines) collapses into `mock_task.side_effect = _make_create_task_side_effect("...")` (1 line).
+- `test_shallow_depth_one_iteration` left untouched — its inline side-effect carries call-count branching that the simple helper doesn't model. Refactoring would have widened the diff for a behavioral no-op; the helper covers the three leaky tests cleanly.
+
+**Verification:**
+- `pytest tests/test_research_agent_helpers.py tests/test_research_agent_core.py -W error::RuntimeWarning` — 28/28 pass, no warnings raised. Pre-fix this command would have errored on the first `RuntimeWarning`.
+- Normal-mode test output: zero `RuntimeWarning` lines. The X.26-flagged flake source is closed.
+- Broader research-agent suite (`-k research_agent`): 39/39 pass, 9.17s.
+
+**Test-suite delta:** test count unchanged. Behavioral coverage identical; only the noise is removed.
+
+**§16.5 status delta:** M7 closed. The M-series of the audit (M1-M7) is now fully closed. Open from the audit: I1, I4, N4, B3-B6, plus the wider §16.5 deferrals.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

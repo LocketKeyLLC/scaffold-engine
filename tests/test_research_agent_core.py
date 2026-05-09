@@ -5,6 +5,27 @@ Shared imports + helpers live in _research_agent_shared.
 """
 from tests._research_agent_shared import *  # noqa: F401, F403
 
+
+def _make_create_task_side_effect(result):
+    """Side-effect for `patch('asyncio.create_task')`.
+
+    The production code calls ``asyncio.create_task(some_coro)``. Mocking
+    via ``mock_task.return_value = future`` left ``some_coro`` un-awaited
+    and un-closed — pytest then surfaced ``RuntimeWarning: coroutine
+    AsyncMockMixin._execute_mock_call was never awaited`` at GC time
+    (audit M7). This side-effect closes the coro deterministically and
+    returns a pre-resolved future carrying ``result``.
+    """
+    def _side_effect(coro):
+        # Closing the coroutine before the future resolves silences the
+        # un-awaited warning. Order matters: close first, then return.
+        coro.close()
+        f = asyncio.Future()
+        f.set_result(result)
+        return f
+    return _side_effect
+
+
 class TestDecomposeTopic:
     """Tests for _decompose_topic() - LLM decomposes topic into queries."""
 
@@ -279,9 +300,7 @@ class TestRunResearch:
              patch("app.modules.research_agent.asyncio.create_task") as mock_task:
             mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
 
-            done_future = asyncio.Future()
-            done_future.set_result("Summary text.")
-            mock_task.return_value = done_future
+            mock_task.side_effect = _make_create_task_side_effect("Summary text.")
 
             from app.modules.research_agent import run_research
 
@@ -310,9 +329,7 @@ class TestRunResearch:
              patch("app.modules.research_agent.asyncio.create_task") as mock_task:
             mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
 
-            done_future = asyncio.Future()
-            done_future.set_result("Summary text.")
-            mock_task.return_value = done_future
+            mock_task.side_effect = _make_create_task_side_effect("Summary text.")
 
             from app.modules.research_agent import run_research
 
@@ -381,9 +398,7 @@ class TestRunResearch:
              patch("app.modules.research_agent.asyncio.create_task") as mock_task:
             mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
 
-            done_future = asyncio.Future()
-            done_future.set_result("No data.")
-            mock_task.return_value = done_future
+            mock_task.side_effect = _make_create_task_side_effect("No data.")
 
             from app.modules.research_agent import run_research
 
