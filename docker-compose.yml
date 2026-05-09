@@ -96,9 +96,8 @@ services:
       LOG_JSON_FORMAT: "true"
       LOG_FILE: /var/log/scaffold/app.jsonl
       MODEL_ROUTER: qwen3:4b
-      # /code/sdk on the path lets `from scaffold_client import ...` work
-      # in cli/scaffold_cli/client.py and ad-hoc python invocations.
-      PYTHONPATH: /code:/code/sdk
+      # PYTHONPATH=/code:/code/sdk is now image-intrinsic (Dockerfile),
+      # so it does not need to be re-declared here.
       MODEL_EMBEDDER_PIPELINE: qwen3-embedding:8b
       MODEL_RERANKER: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
       MODEL_CODER: qwen2.5-coder:7b
@@ -121,13 +120,12 @@ services:
     env_file:
       - .env
     volumes:
-      - ./app:/code/app:ro
-      - ./tests:/code/tests:ro
-      - ./cli:/code/cli:ro
-      - ./sdk:/code/sdk:ro
-      - ./scripts:/code/scripts:ro
-      - ./ground_truths:/code/ground_truths:ro
-      - ./db:/code/db:ro
+      # Prod runs strictly from baked image layers (Dockerfile `runtime`
+      # stage COPYs app/, scripts/, db/, sdk/scaffold_client/, cli/scaffold_cli/).
+      # Host-source bind mounts live in docker-compose.dev.yml only —
+      # mounting them here would silently shadow the image with whatever
+      # is on disk, defeating the multi-stage hermetic build, and would
+      # cause Docker to auto-create any missing host paths as root:root.
       - hf-cache:/code/.cache/huggingface
       - scaffold-logs:/var/log/scaffold
     restart: unless-stopped

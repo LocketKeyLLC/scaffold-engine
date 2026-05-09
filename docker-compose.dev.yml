@@ -10,9 +10,19 @@ services:
     environment:
       # Drift fix (Apr 26 2026): prevent stale .pyc / AST cache after host file edits.
       PYTHONDONTWRITEBYTECODE: "1"
-    # Dev-only mounts: unlock 17 tests that probe pipelines/, Dockerfile,
-    # and .github/workflows/ from the test runner. Read-only, no prod impact.
+    # Dev-only mounts. All :ro so the container view cannot mutate host
+    # source. These shadow the image's baked-in copies with the working
+    # tree so edits pick up live without a rebuild — the live-reload
+    # affordance the prod compose used to (incorrectly) enable.
     volumes:
+      # Source tree — live edit during development.
+      - ./app:/code/app:ro
+      - ./tests:/code/tests:ro
+      - ./cli:/code/cli:ro
+      - ./sdk:/code/sdk:ro
+      - ./scripts:/code/scripts:ro
+      - ./db:/code/db:ro
+      # Pipeline + repo-shape inputs probed by tests.
       - ./pipelines:/code/pipelines:ro
       - ./Dockerfile:/code/Dockerfile:ro
       - ./.github:/code/.github:ro

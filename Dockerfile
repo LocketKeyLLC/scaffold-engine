@@ -50,6 +50,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV VIRTUAL_ENV=/opt/venv
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+# Image-intrinsic so `from scaffold_client import ...` (app/web/routes.py)
+# and `cd /code/cli && python -m scaffold_cli ...` work without compose
+# having to re-declare them on every service.
+ENV PYTHONPATH="/code:/code/sdk"
 
 # Prune dev-only packages so this stage carries prod deps only.
 COPY requirements-dev.txt /tmp/requirements-dev.txt
@@ -61,9 +65,18 @@ RUN python /tmp/_prune_dev_deps.py /tmp/requirements-dev.txt \
 COPY --from=builder /code/.cache /code/.cache
 
 # Application code only — no tests/, no Makefile, no pyproject in runtime.
-COPY app/ /code/app/
-COPY scripts/ /code/scripts/
-COPY db/ /code/db/
+COPY app/                       /code/app/
+COPY scripts/                   /code/scripts/
+COPY db/                        /code/db/
+# sdk/scaffold_client is imported at runtime by app/web/routes.py
+# (jobs/list + jobs/detail). PYTHONPATH includes /code/sdk so the
+# package resolves at /code/sdk/scaffold_client/. Tests stay dev-only.
+COPY sdk/scaffold_client/       /code/sdk/scaffold_client/
+# cli/scaffold_cli backs `make idea / resume / explain / whatnow /
+# confirm / retry / skip / node-logs / config`, all of which shell into
+# the running container. Shipping it keeps those host-side targets
+# functional against a prod image.
+COPY cli/scaffold_cli/          /code/cli/scaffold_cli/
 
 EXPOSE 8000
 CMD ["python", "-m", "app.run_server"]
@@ -86,14 +99,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV VIRTUAL_ENV=/opt/venv
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+ENV PYTHONPATH="/code:/code/sdk"
 
 COPY --from=builder /code/.cache /code/.cache
 
-COPY app/         /code/app/
-COPY tests/       /code/tests/
-COPY scripts/     /code/scripts/
-COPY db/          /code/db/
-COPY Makefile     /code/Makefile
+COPY app/           /code/app/
+COPY tests/         /code/tests/
+COPY scripts/       /code/scripts/
+COPY db/            /code/db/
+COPY sdk/           /code/sdk/
+COPY cli/           /code/cli/
+COPY Makefile       /code/Makefile
 COPY pyproject.toml /code/pyproject.toml
 
 EXPOSE 8000
