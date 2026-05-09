@@ -135,6 +135,12 @@ services:
     networks:
       - ai-network
   scaffold-orchestrator:
+    # Deterministic local tag so a Dockerfile / source change doesn't
+    # silently rebuild on `docker compose up -d`. Compose only rebuilds
+    # when the tag is missing or `--build` is passed; `make build` is
+    # the explicit gate. Override SCAFFOLD_IMAGE_TAG in .env (or push
+    # a registry-tagged build) when graduating to a real prod deploy.
+    image: scaffold-engine:${SCAFFOLD_IMAGE_TAG:-local}
     build:
       context: .
       dockerfile: Dockerfile

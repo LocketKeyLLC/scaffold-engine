@@ -3,6 +3,10 @@
 # Or set COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml in your shell.
 services:
   scaffold-orchestrator:
+    # Distinct tag from prod (scaffold-engine:local) so dev rebuilds
+    # never clobber the prod-image tag. `make build-dev` is the
+    # explicit gate that rebuilds + tags this image.
+    image: scaffold-engine:dev
     build:
       context: .
       dockerfile: Dockerfile

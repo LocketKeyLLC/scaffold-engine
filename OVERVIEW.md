@@ -3471,6 +3471,28 @@ M1 from the same audit pass that produced §17.65. The file documented 14 active
 
 **§16.5 status delta:** M1 closed. Still open from the audit: I1 (`bootstrap-host.sh`), I4 (CI bench gates), N4 (Milvus repopulation plan), and the wider §16.5 deferrals (live-Postgres concurrency tests, macro bench refresh).
 
+### 17.67 Audit pass — orchestrator image tag (2026-05-09)
+
+M2 from the audit: the prod compose's `scaffold-orchestrator` had a `build:` stanza but no `image:` tag, so compose auto-named the artifact `scaffold-engine-scaffold-orchestrator:latest` and would silently rebuild on any `docker compose up -d` if the Dockerfile or context changed. The §17.62 hermetic-compose work made the prod runtime stop reading host source, but the image identity itself was still implicit; a clean `make doctor` could quietly rebuild the prod image without the operator asking for it. M2 closes the identity side.
+
+**What changed:**
+- `docker-compose.yml::scaffold-orchestrator` gains `image: scaffold-engine:${SCAFFOLD_IMAGE_TAG:-local}` alongside the existing `build:`. With both keys present compose builds + tags on first up; subsequent `compose up -d` (no `--build`) will use the existing tag without rebuilding. The env-var override leaves room to graduate to a versioned or registry-pushed tag without editing the file.
+- `docker-compose.dev.yml::scaffold-orchestrator` gains `image: scaffold-engine:dev`. Distinct tag from prod so `make build-dev` can never clobber the prod-image tag and vice versa. Hardcoded — dev doesn't need versioning.
+- `Makefile`: `build` target's docstring updated to flag it as the explicit rebuild gate (`compose up` no longer auto-rebuilds). New `build-dev` target wraps the dev-overlay rebuild path. Both added to `.PHONY`.
+- `.env.example`: new `SCAFFOLD_IMAGE_TAG` block in the `4. ADVANCED — infrastructure` section explaining the override.
+
+**Why a tag, not a digest:** the audit's "publish a digest-pinned image" guidance assumes a registry. The user is single-host with no registry today; a deterministic local tag closes the silent-rebuild gap without forcing a registry workflow. The `${SCAFFOLD_IMAGE_TAG:-local}` parameterization leaves the registry-pinned form (`SCAFFOLD_IMAGE_TAG=v1.2.3` or a digest reference) as a one-line .env change when that day comes.
+
+**Verification:**
+- `docker compose config --quiet` against both prod-only and prod+dev — valid.
+- `docker compose config | grep image:` shows the orchestrator now resolves to `scaffold-engine:local` (prod) and `scaffold-engine:dev` (with overlay).
+- Pre-existing image `scaffold-engine-scaffold-orchestrator:latest` (310901236eaf) was tagged in place as `scaffold-engine:local` so compose finds it without rebuilding the running container.
+- `docker compose up -d scaffold-orchestrator` recreated the container (image-key change in compose config), used the cached tag — image creation timestamp unchanged. Second `compose up -d` was a true no-op (no recreation, no rebuild). Healthcheck transitioned to healthy.
+
+**Test-suite delta:** none. Pure YAML + Makefile + .env.example.
+
+**§16.5 status delta:** M2 closed. Open from the audit: I1, I4, N4, B3-B6, M3-M7, plus the wider §16.5 deferrals.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

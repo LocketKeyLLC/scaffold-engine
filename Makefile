@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test test-cli test-sdk agent eval bench build logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config
+.PHONY: test test-cli test-sdk agent eval bench build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -159,8 +159,11 @@ sync-schemas: ## Refresh sdk/scaffold_client/schemas.py from app/schemas.py (byt
 ## Build & Ops
 ## ──────────────────────────────────────────────
 
-build: ## Rebuild and restart the orchestrator container
+build: ## Rebuild scaffold-engine:${SCAFFOLD_IMAGE_TAG:-local} (prod) and restart orchestrator. Explicit rebuild gate — `compose up` no longer auto-rebuilds.
 	$(COMPOSE) up -d --build $(CONTAINER)
+
+build-dev: ## Rebuild scaffold-engine:dev and restart orchestrator under the dev overlay.
+	$(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml up -d --build $(CONTAINER)
 
 logs: ## Tail orchestrator logs (last 50 lines)
 	docker logs $(CONTAINER) --tail=50
