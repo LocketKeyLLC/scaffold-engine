@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import threading
 import time
 from dataclasses import dataclass, field
@@ -70,7 +71,11 @@ def _get_cross_encoder():
             except Exception as e:
                 last_err = e
                 if attempt < _MAX_ATTEMPTS:
-                    delay = _BASE_DELAY_S * (2 ** (attempt - 1))
+                    # Full-jitter exponential backoff: decorrelates concurrent
+                    # cold-loads against the HF cache when multiple processes
+                    # restart in lockstep (e.g. compose recreate).
+                    capped = _BASE_DELAY_S * (2 ** (attempt - 1))
+                    delay = random.uniform(0.0, capped)
                     logger.warning(
                         "crossencoder_load_retry: attempt=%d/%d error=%s retry_in=%.1fs",
                         attempt, _MAX_ATTEMPTS, e, delay,
