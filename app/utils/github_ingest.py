@@ -6,10 +6,12 @@ returning them as {path, content} dicts ready for TOON ingestion.
 import asyncio
 import ast
 import base64
+import json
 import logging
 from typing import Any
 
 import httpx
+import redis.asyncio as aioredis
 
 from app.config import settings
 from app.utils.http_clients import get_github_client
@@ -17,6 +19,86 @@ from app.utils.http_clients import get_github_client
 logger = logging.getLogger(__name__)
 
 _DOCS_PREFIX = "docs/"
+
+# Audit M6 — versioned cache key prefix for the tree response cache. Bumping
+# the version invalidates every cached entry (use when the cached payload
+# shape changes, not when GitHub data changes — that's what ETags are for).
+_GITHUB_TREE_CACHE_KEY_PREFIX = "github:tree:v1"
+
+_redis: aioredis.Redis | None = None
+
+
+async def _redis_client() -> aioredis.Redis | None:
+    """Lazy-init Redis client for the tree cache.
+
+    Returns None if the cache is disabled (TTL=0) or if the connection
+    init fails. All callers fail-open: a None client means "skip the
+    cache, do a live API call."
+    """
+    global _redis
+    if settings.github_tree_cache_ttl_seconds <= 0:
+        return None
+    if _redis is None:
+        try:
+            _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+        except Exception as exc:
+            logger.warning("github_ingest: redis init failed, cache disabled: %s", exc)
+            return None
+    return _redis
+
+
+def _tree_cache_key(owner: str, repo: str, branch: str) -> str:
+    return f"{_GITHUB_TREE_CACHE_KEY_PREFIX}:{owner}/{repo}:{branch}"
+
+
+async def _read_cached_tree(
+    owner: str, repo: str, branch: str,
+) -> tuple[str, list[dict], bool] | None:
+    """Return (etag, blobs, truncated) from cache, or None on miss/error/disabled."""
+    r = await _redis_client()
+    if r is None:
+        return None
+    try:
+        raw = await r.get(_tree_cache_key(owner, repo, branch))
+        if not raw:
+            return None
+        entry = json.loads(raw)
+        return entry["etag"], entry["blobs"], entry["truncated"]
+    except Exception as exc:
+        logger.debug("github_ingest: tree cache read failed: %s", exc)
+        return None
+
+
+async def _write_cached_tree(
+    owner: str, repo: str, branch: str,
+    etag: str, blobs: list[dict], truncated: bool,
+) -> None:
+    r = await _redis_client()
+    if r is None:
+        return
+    try:
+        payload = json.dumps({"etag": etag, "blobs": blobs, "truncated": truncated})
+        await r.set(
+            _tree_cache_key(owner, repo, branch),
+            payload,
+            ex=settings.github_tree_cache_ttl_seconds,
+        )
+    except Exception as exc:
+        logger.debug("github_ingest: tree cache write failed: %s", exc)
+
+
+async def _refresh_cached_tree_ttl(owner: str, repo: str, branch: str) -> None:
+    """Touch an existing entry's TTL on a 304 hit — keeps hot entries hot."""
+    r = await _redis_client()
+    if r is None:
+        return
+    try:
+        await r.expire(
+            _tree_cache_key(owner, repo, branch),
+            settings.github_tree_cache_ttl_seconds,
+        )
+    except Exception as exc:
+        logger.debug("github_ingest: tree cache TTL refresh failed: %s", exc)
 
 
 class GitHubRepoNotFoundError(Exception):
@@ -83,14 +165,31 @@ async def _fetch_readme(client: httpx.AsyncClient, owner: str, repo: str) -> tup
 
 
 async def _get_tree(client: httpx.AsyncClient, owner: str, repo: str, branch: str) -> tuple[list[dict], bool]:
-    # TODO(#151): Cache tree response in Redis keyed by (owner, repo, branch, sha)
-    # to avoid repeated GitHub API calls on re-ingests of the same repo.
-    # Deferred — current call volume is low and rate limit headroom is adequate.
+    """Fetch repo tree, with optional Redis cache backed by GitHub ETag.
+
+    Audit M6 (closes #151). Cache stores ``(etag, blobs, truncated)`` per
+    ``(owner, repo, branch)``. On hit we send ``If-None-Match: <etag>``;
+    GitHub returns 304 (free — doesn't count against rate limit) when the
+    tree hasn't changed, and we return the cached blobs unchanged. On 200
+    we re-parse and refresh the cache. Cache failures fail-open to a
+    normal live call.
+    """
+    cached = await _read_cached_tree(owner, repo, branch)
+    headers = {"If-None-Match": cached[0]} if cached is not None else None
+
     r = await client.get(
         f"/repos/{owner}/{repo}/git/trees/{branch}",
         params={"recursive": "1"},
+        headers=headers,
     )
     _check_rate_limit(r)
+
+    if r.status_code == 304 and cached is not None:
+        # GitHub confirms unchanged — return cached payload, refresh TTL.
+        _, cached_blobs, cached_truncated = cached
+        await _refresh_cached_tree_ttl(owner, repo, branch)
+        return cached_blobs, cached_truncated
+
     r.raise_for_status()
     data = r.json()
     truncated = bool(data.get("truncated"))
@@ -102,6 +201,10 @@ async def _get_tree(client: httpx.AsyncClient, owner: str, repo: str, branch: st
             owner, repo,
         )
     blobs = [e for e in data.get("tree", []) if e.get("type") == "blob"]
+
+    etag = r.headers.get("etag")
+    if etag:
+        await _write_cached_tree(owner, repo, branch, etag, blobs, truncated)
     # Return (blobs, truncated) — caller decides whether to surface/raise
     return blobs, truncated
 

@@ -3571,6 +3571,39 @@ M5 from the audit: the upstream `searxng/searxng` image declares two `VOLUME` in
 
 **§16.5 status delta:** M5 closed. Open from the audit: I1, I4, N4, B3-B6, M6-M7, plus the wider §16.5 deferrals.
 
+### 17.71 Audit pass — GitHub tree Redis cache (2026-05-09)
+
+M6 from the audit + closes #151. `app/utils/github_ingest.py::_get_tree` carried the only TODO marker in the repo: cache the `/repos/{owner}/{repo}/git/trees/{branch}?recursive=1` response so that re-ingests of the same repo don't burn rate-limit budget on a request that almost always returns the same payload. Deferred originally because "current call volume is low and rate limit headroom is adequate" — true today, but the marker had grown stale (the rate-limit pressure scenario it was waiting on isn't going to spontaneously appear; the right time to add the cache is when the design is small).
+
+**What changed:**
+
+- `app/config.py` — new setting `github_tree_cache_ttl_seconds: int = Field(default=1800, ge=0, le=86400)`. Default 30 min. `0` disables the cache entirely (every call is a live API hit, identical to pre-M6 behavior — useful for debugging or when memory pressure on Redis matters).
+- `app/utils/github_ingest.py` — five new module-level helpers:
+  - `_redis_client()` — lazy-init `aioredis.from_url(settings.redis_url)`, returns None when TTL=0 or init fails (fail-open).
+  - `_tree_cache_key(owner, repo, branch)` — versioned key prefix `github:tree:v1:{owner}/{repo}:{branch}`. Bumping the `v1` invalidates every cached entry without flushing all of Redis.
+  - `_read_cached_tree` / `_write_cached_tree` / `_refresh_cached_tree_ttl` — the three cache ops, each wrapped in try/except so any Redis failure (connection, JSON parse, TypeError on missing keys) falls open to a normal live call.
+- `_get_tree` itself — modified to consult the cache before each API call and send `If-None-Match: <cached_etag>` when an entry exists. GitHub returns `304 Not Modified` (free per their conditional-request rules — does not count against the rate limit) when the tree hasn't changed; on 304 we return the cached `(blobs, truncated)` and refresh TTL. On 200 we re-parse and overwrite the cached entry. The TODO marker is gone; the original docstring grew a "Closes #151" reference.
+- `tests/test_github_ingest.py` gained an autouse fixture that short-circuits `_redis_client()` to None for the existing 8 tests (so they don't accidentally interact with whichever Redis state happens to be in the dev container at test time).
+- `tests/test_github_ingest_cache.py` — new file, 6 cases mirroring the cache flow:
+  - Miss → live call → response with etag is cached (key + TTL + payload shape verified).
+  - Hit + 304 → cached blobs returned, body never parsed (`json.assert_not_called()`), TTL refreshed.
+  - Hit + 200 → cache rewritten with new etag.
+  - TTL=0 → `_redis_client()` returns None, cache fully disabled.
+  - Redis GET raises → fail-open; live call still completes.
+  - Different branches → distinct keys; a 'main' entry doesn't shadow a 'develop' fetch.
+- `.env.example` — new `GITHUB_TREE_CACHE_TTL_SECONDS` block in the GitHub-ingestion advanced section explaining the override.
+
+**Why ETag, not (owner, repo, branch, sha):** the original TODO suggested keying the cache on the resolved tree SHA. That would have forced a separate API call to resolve the SHA before a cache lookup — defeating the cache. ETags + `If-None-Match` give equivalent freshness guarantees through one round trip: GitHub validates the ETag server-side, returns 304 if unchanged. Per GitHub's docs, 304 responses don't deduct from the rate limit, so the cache is also rate-limit-correct.
+
+**Verification:**
+- 14/14 tests pass in the dev image (8 existing + 6 new), 2.81s.
+- Built the prod image; orchestrator transitions to `health=healthy` with `image=scaffold-engine:local`. `/health` reports postgres/ollama/milvus/redis all `up`.
+- No live `/research github:...` smoke run because the KB is empty post-§17.63 and a real run would also exercise the (currently slow) extraction path; the unit tests cover the cache logic exhaustively.
+
+**Test-suite delta:** +6 cases. Existing test count unchanged.
+
+**§16.5 status delta:** M6 closed. Open from the audit: I1, I4, N4, B3-B6, M7, plus the wider §16.5 deferrals.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

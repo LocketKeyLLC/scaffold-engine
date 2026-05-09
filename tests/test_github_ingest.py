@@ -4,6 +4,17 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
+@pytest.fixture(autouse=True)
+def _disable_tree_cache():
+    """The pre-M6 tests assume no caching layer. Audit M6 added one, so
+    short-circuit `_redis_client()` to None for these tests; the new
+    cache-specific tests in test_github_ingest_cache.py opt back in by
+    patching at a different level.
+    """
+    with patch("app.utils.github_ingest._redis_client", AsyncMock(return_value=None)):
+        yield
+
+
 def _make_response(status_code=200, json_data=None, headers=None):
     resp = MagicMock()
     resp.status_code = status_code

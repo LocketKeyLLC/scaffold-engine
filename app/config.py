@@ -180,6 +180,14 @@ class Settings(BaseSettings):
     github_blob_concurrency: int = Field(default=8, ge=1, le=64)
     github_timeout: int = Field(default=30, ge=1, le=300)
     github_api_base: str = "https://api.github.com"
+    # Audit M6 — Redis cache for /repos/{o}/{r}/git/trees/{b} responses.
+    # Cache is keyed by (owner, repo, branch) and stores (etag, blobs,
+    # truncated). On hit, an If-None-Match header is sent so GitHub can
+    # return 304 (which doesn't count against the rate limit) when the
+    # tree hasn't changed. 0 disables the cache (forces every call to
+    # be a live API hit). Default 30 min covers the burst case (someone
+    # iterating on `/research`) without holding entries forever.
+    github_tree_cache_ttl_seconds: int = Field(default=1800, ge=0, le=86400)
     openapi_max_endpoints: int = Field(default=200, ge=1, le=5000)
     openapi_max_params_per_endpoint: int = Field(default=50, ge=1, le=500)
     openapi_timeout: int = Field(default=30, ge=1, le=300)
