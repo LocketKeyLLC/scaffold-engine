@@ -3690,6 +3690,34 @@ B4 from the audit. The W.6 + X.10-X.12 sweep migrated every JSON-coaxing site EX
 
 **§16.5 status delta:** B4 closed. The audit's "JSON-coaxing remains" surface is now zero. Open from the audit: I1, I4, N4, B5, B6, plus the wider §16.5 deferrals.
 
+### 17.75 Audit pass — `make test` enforces the dev image (2026-05-09)
+
+B5 from the audit. The §15 invariant says "`make test` runs in the dev image" — but the Makefile's actual implementation was `docker exec $(CONTAINER) pytest`, which targets whatever image happens to be loaded. After the §17.62 hermetic-compose work made the prod runtime image strip `tests/`, `pipelines/`, and the writable `/code` mount, running `make test` against the prod image silently skipped ~245 cases (1099 passed instead of 1344) and emitted `PytestCacheWarning` against the read-only rootfs. Worse, two of the test families (`test_observability_resolve`, `test_github_ingest_cache`, `test_assist_replan_divergence` from M4/M6/B4) live entirely in the dev tree — they don't even get COLLECTED in the prod image. A user running `make test` after a `make build` (which flips to prod) saw fewer tests, fewer skips than expected, and several spurious warnings.
+
+**What changed:**
+
+- New private `_ensure_dev` Make target. Inspects `docker inspect $(CONTAINER) --format '{{.Config.Image}}'`; if the image tag doesn't end in `:dev`, runs `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d $(CONTAINER)` to flip the orchestrator to `scaffold-engine:dev` and waits for it to come up. No-op when dev is already loaded (prints a dim "✓ dev image already loaded" line so the operator sees the gate firing). Listed in `.PHONY`.
+- Five test-running targets gained the gate as a prerequisite:
+  - `test` (the audit's named target)
+  - `test-cli`, `test-sdk` (their docstrings already claimed "dev container" but didn't enforce it)
+  - `agent` (smoke subset)
+  - `ci` (CI-safe subset)
+- Stale test-count comment on `make test` updated: was "~1226 passing, 4 skipped" (which didn't match anything since X.18); now "~1340 passing, ~8 skipped post-§17.63" — the actual baseline observed today.
+- `eval`, `bench`, `bench-rag`, `bench-embed`, `bench-check-*` are NOT gated. Bench targets measure runtime perf and are valid against either image; `eval` reads from a live RAG state that doesn't depend on the test tree. If a future audit wants stricter gating on those, it's a one-line add.
+
+**Why auto-switch (vs error-with-message):** the user's normal flow alternates between dev (for editing + tests) and prod (for live API verification). Forcing the operator to run `make build-dev` manually before every `make test` adds friction without protecting from anything an auto-switch can't. The auto-switch leaves the user on dev after the run; they explicitly flip back via `make build` (already the documented path).
+
+**Verification:**
+
+- Pre-fix `make test` against prod image: 1099 passed / 4 failed / 22 skipped in 2:17. The 4 failures were the §17.63 RAG-empty cases (since closed in B3). The 22 skips were silent — pytest skipped tests it couldn't collect because `tests/` wasn't in the prod image.
+- Post-fix `make test` (auto-switched to dev): **1344 passed / 0 failed / 8 skipped in 4:37.** 245 cases recovered from silent skip; 4 prior failures already converted to clean skips by B3.
+- Second `make test` call (dev already loaded): `_ensure_dev` printed "✓ dev image already loaded" and proceeded directly to pytest — confirmed no-op.
+- `make build` after the test run flipped back to `scaffold-engine:local` cleanly. Round-trip works.
+
+**Test-suite delta:** test count unchanged. The recovered 245 cases were already passing — they just weren't being run in the wrong image. The pre-X.20 stale "~1226" count is now an accurate "~1340" reflecting M4/M6/B4 additions (~+23) on top of the X.28 1322 baseline.
+
+**§16.5 status delta:** B5 closed. Open from the audit: I1, I4, N4, B6, plus the wider §16.5 deferrals.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

@@ -6,22 +6,39 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: test test-cli test-sdk agent eval bench build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config
+.PHONY: _ensure_dev test test-cli test-sdk agent eval bench build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config
 
 ## ──────────────────────────────────────────────
 ## Testing
 ## ──────────────────────────────────────────────
 
-test: ## Run all tests in Docker (~1226 passing, 4 skipped)
+# Audit B5 — `make test` (and siblings that exec pytest) must run in the
+# dev image. The prod runtime image strips tests/, pytest, and the
+# pipelines/ tree (§17.62 hermetic compose), so running pytest there
+# silently skips ~22 cases and emits PytestCacheWarning against the
+# read-only rootfs. This guard auto-switches the orchestrator container
+# to scaffold-engine:dev (via the dev compose overlay) when needed; it's
+# a no-op when dev is already loaded. After the test run the user can
+# flip back to prod via `make build` (or `docker compose up -d`).
+_ensure_dev:
+	@if docker inspect $(CONTAINER) --format '{{.Config.Image}}' 2>/dev/null | grep -q ':dev$$'; then \
+		printf '\033[2m✓ dev image already loaded\033[0m\n'; \
+	else \
+		printf '\033[1;36m→ switching scaffold-orchestrator to dev image (B5)\033[0m\n'; \
+		$(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml up -d $(CONTAINER); \
+		until docker ps --filter name=^$(CONTAINER)$$ --format '{{.Status}}' | grep -qE 'healthy|Up'; do sleep 2; done; \
+	fi
+
+test: _ensure_dev ## Run all tests in dev image (~1340 passing, ~8 skipped post-§17.63)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v
 
-test-cli: ## Run scaffold CLI tests (cli/tests/) inside the dev container
+test-cli: _ensure_dev ## Run scaffold CLI tests (cli/tests/) inside the dev container
 	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m pytest tests/ --timeout=10 -v"
 
-test-sdk: ## Run scaffold SDK tests (sdk/tests/) inside the dev container
+test-sdk: _ensure_dev ## Run scaffold SDK tests (sdk/tests/) inside the dev container
 	docker exec $(CONTAINER) sh -c "cd /code/sdk && python -m pytest tests/ --timeout=10 -v"
 
-agent: ## Run execution agent tests only
+agent: _ensure_dev ## Run execution agent tests only (dev image)
 	docker exec $(CONTAINER) pytest tests/test_execution_agent.py -m smoke --timeout=30 -v
 
 eval: ## Run retrieval eval against ground truth
@@ -46,7 +63,7 @@ bench-check-embed: ## Gate: fail if bench_embed cold_mean_ms regressed >1.5x med
 		--file tests/benchmarks/bench_embed_results.jsonl \
 		--metric summary.cold_mean_ms --threshold 1.5 --direction up
 
-ci: ## Run CI-safe tests (no live Ollama/Milvus needed)
+ci: _ensure_dev ## Run CI-safe tests (no live Ollama/Milvus needed; dev image)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v \
 		--ignore=tests/eval_retrieval.py \
 		-m "not validate"
