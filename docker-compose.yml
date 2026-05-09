@@ -1,6 +1,22 @@
 # Scaffold Engine — Docker Compose
 # Milvus runs in compose with ETCD_USE_EMBED=true (standalone, no external etcd/minio).
 # Ollama is HOST-installed — reachable at 172.18.0.1:11434
+#
+# Hardening posture (X.28, 2026-05-09):
+#   - scaffold-orchestrator runs as scaffold:scaffold (UID/GID 10001), see Dockerfile.
+#   - postgres + redis run as their image's app user (999); cap_drop: ALL is safe there.
+#   - pipelines runs as host UID 1000 so writes to ./pipelines (still required for OWUI
+#     valve UI persistence) land as the host user, not root. The five top-level pipeline
+#     .py files are additionally mounted :ro per-file so an inside-container compromise
+#     cannot rewrite the executable code on the host.
+#   - searxng's host config dir is now :ro — settings.yml is never written by the
+#     container. user matches the image's searxng UID (977).
+#   - open-webui + milvus stay as image defaults (root) — adding cap_drop ALL is known
+#     to break their entrypoints. They get no-new-privileges defense-in-depth only.
+#   - Existing scaffold-engine_{hf-cache,scaffold-logs} volumes were created when the
+#     orchestrator ran as root; run scripts/chown_named_volumes.sh once after pull
+#     before the first non-root deploy, otherwise the orchestrator cannot write logs
+#     or the HF cache.
 services:
   open-webui:
     image: ghcr.io/open-webui/open-webui@sha256:b80a96e14bb15ea79aec96fbdad4aeab6b3ee7b61520d83b5dbc8c4f47d433a9
@@ -19,6 +35,8 @@ services:
       - .env
     volumes:
       - open-webui:/app/backend/data
+    security_opt:
+      - no-new-privileges:true
     restart: always
     networks:
       - ai-network
@@ -27,6 +45,13 @@ services:
     container_name: open-webui-pipelines
     ports:
       - "9099:9099"
+    # Match host UID 1000 so the bind-mounted ./pipelines/<name>/valves.json
+    # writes (driven by the OWUI valve UI) land as the host user instead of
+    # root. The image runs as root by default; pinning user: here is the
+    # only way to neutralize the "container escape rewrites valves.json as
+    # root" half of the threat. See per-file :ro mounts below for the
+    # other half — the executable .py code.
+    user: "1000:1000"
     environment:
       - PIPELINES_API_KEY=${OPENWEBUI_PIPELINES_KEY:?OPENWEBUI_PIPELINES_KEY is required}
       # Forwarded to pipeline _apply_env_fallbacks so a wiped valves.json
@@ -42,7 +67,20 @@ services:
     env_file:
       - .env
     volumes:
+      # The pipelines tree as a whole stays bind-mounted so OWUI's valve
+      # UI can persist <name>/valves.json. Per-file :ro overlays below
+      # then re-protect the actual executable code so a compromised
+      # pipeline cannot rewrite its own .py on the host.
       - ./pipelines:/app/pipelines
+      - ./pipelines/scaffold_router.py:/app/pipelines/scaffold_router.py:ro
+      - ./pipelines/dag_viewer.py:/app/pipelines/dag_viewer.py:ro
+      - ./pipelines/execution_handler.py:/app/pipelines/execution_handler.py:ro
+      - ./pipelines/gt_browser.py:/app/pipelines/gt_browser.py:ro
+      - ./pipelines/prompt_inspector.py:/app/pipelines/prompt_inspector.py:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: always
     networks:
       - ai-network
@@ -51,8 +89,17 @@ services:
     container_name: searxng
     ports:
       - "8888:8080"
+    # 977 is the searxng user baked into the upstream image and matches
+    # the existing host /home/aedefruscio/searxng/settings.yml ownership.
+    user: "977:977"
     volumes:
-      - /home/aedefruscio/searxng:/etc/searxng
+      # :ro — searxng never writes its own config. The previous rw mount
+      # left settings.yml host-rewritable from inside the container.
+      - /home/aedefruscio/searxng:/etc/searxng:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: always
     networks:
       - ai-network
@@ -61,6 +108,10 @@ services:
     container_name: scaffold-postgres
     ports:
       - "127.0.0.1:5432:5432"
+    # 999 is the postgres uid/gid baked into the image and matches the
+    # existing scaffold-postgres-data volume ownership. Skipping the
+    # entrypoint root drop avoids needing CAP_SETUID/SETGID/CHOWN.
+    user: "999:999"
     environment:
       POSTGRES_DB: scaffold_engine
       POSTGRES_USER: ${POSTGRES_USER:-scaffold}
@@ -76,6 +127,10 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: always
     networks:
       - ai-network
@@ -128,6 +183,17 @@ services:
       # cause Docker to auto-create any missing host paths as root:root.
       - hf-cache:/code/.cache/huggingface
       - scaffold-logs:/var/log/scaffold
+    # Rootfs is read-only — application writes go to the two named
+    # volumes above. /tmp is a small tmpfs because various libs (e.g.
+    # huggingface_hub, pip caches indirectly via setuptools, asyncpg
+    # certs unpacks) write transient files there.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
     networks:
       - ai-network
@@ -150,8 +216,13 @@ services:
     ports:
       - "19530:19530"
       - "9091:9091"
+    # seccomp:unconfined is preserved — milvus's embedded etcd needs
+    # syscalls (mmap/clone/etc) the default Docker seccomp profile
+    # blocks. no-new-privileges is added on top: orthogonal to seccomp,
+    # blocks setuid escalation paths inside the container.
     security_opt:
       - seccomp:unconfined
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 30s
@@ -164,12 +235,19 @@ services:
   scaffold-redis:
     image: redis:8-alpine@sha256:81b6f81d6a6c5b9019231a2e8eb10085e3a139a34f833dcc965a8a959b040b72
     container_name: scaffold-redis
+    # 999:1000 is the redis user/group baked into redis:8-alpine.
+    # /data is already chowned redis:redis in the existing volume.
+    user: "999:1000"
     command: >
       redis-server --save 60 1000
       --loglevel warning --maxmemory 2gb
       --maxmemory-policy allkeys-lru
     volumes:
       - redis-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: always
     networks:
       - ai-network

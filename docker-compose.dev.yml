@@ -7,9 +7,28 @@ services:
       context: .
       dockerfile: Dockerfile
       target: dev
+    # X.28: prod runs as scaffold (UID 10001). For dev we override to
+    # the host UID/GID so the writable bench mount below can be written
+    # without chmoding the host tree. Read-only mounts work for either
+    # UID because the host repo is mode 775 (world-readable).
+    user: "1000:1000"
+    # X.28: prod is read_only with rootfs locked. Dev needs the rootfs
+    # writable for pytest's tmp dirs, coverage, and ad-hoc poking, so
+    # the override drops read_only.
+    read_only: false
+    # cap_drop: [ALL] is inherited from prod. Pytest does not exercise
+    # syscalls that require extra caps (no raw sockets, no chown, no
+    # privileged binds). If a future test does need a cap, add it here
+    # via cap_add. Compose merges cap_add onto the inherited cap_drop.
     environment:
       # Drift fix (Apr 26 2026): prevent stale .pyc / AST cache after host file edits.
       PYTHONDONTWRITEBYTECODE: "1"
+      # X.28: dev runs as host UID 1000 but prod's `scaffold-logs` named
+      # volume is owned by scaffold UID 10001 (per chown_named_volumes.sh).
+      # Empty LOG_FILE skips the RotatingFileHandler init in
+      # app/logging_config.py — stdout still carries the structured log
+      # stream, which `docker logs` captures, so dev visibility is intact.
+      LOG_FILE: ""
     # Dev-only mounts. All :ro so the container view cannot mutate host
     # source. These shadow the image's baked-in copies with the working
     # tree so edits pick up live without a rebuild — the live-reload
