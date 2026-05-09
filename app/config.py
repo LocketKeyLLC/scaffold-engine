@@ -306,6 +306,35 @@ class Settings(BaseSettings):
     log_json_format: bool = True
     log_file: str | None = None
 
+    # Sprint X.26 — observability surface. Closes the §16.5 gap list:
+    #   * /metrics (Prometheus) when metrics_enabled
+    #   * file + DB alert sinks (alert_file_path, alert_db_enabled)
+    #   * push X.20 thresholds (alert_eval_*, conservative defaults)
+    #   * calibration cron failure + no-fire watchdog
+    #   * env-gated OTel (off unless otel_enabled + endpoint set)
+    metrics_enabled: bool = True
+    metrics_path: str = "/metrics"
+
+    alert_file_path: str = ""              # empty disables file sink
+    alert_db_enabled: bool = True
+    alert_cooldown_seconds: int = Field(default=3600, ge=0, le=86400)
+
+    alert_eval_enabled: bool = True
+    alert_eval_interval_seconds: int = Field(default=300, ge=30, le=3600)
+    alert_eval_window_minutes: int = Field(default=60, ge=1, le=1440)
+
+    alert_unresolved_errors_threshold: int = Field(default=1, ge=0, le=10000)
+    alert_cost_window_usd_threshold: float = Field(default=5.0, ge=0.0, le=100000.0)
+    alert_p95_latency_ms_threshold: int = Field(default=120000, ge=0, le=3600000)
+
+    calibration_watchdog_enabled: bool = True
+    calibration_watchdog_interval_seconds: int = Field(default=900, ge=60, le=86400)
+    calibration_grace_minutes: int = Field(default=120, ge=10, le=1440)
+
+    otel_enabled: bool = False
+    otel_service_name: str = "scaffold-engine"
+    otel_otlp_endpoint: str = ""           # http://otel-collector:4318/v1/traces
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @model_validator(mode="after")

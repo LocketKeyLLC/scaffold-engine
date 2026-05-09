@@ -15,6 +15,7 @@ setuptools>=70.0.0,<72
 json_repair==0.58.7
 requests==2.33.1
 structlog==25.5.0
+prometheus-client==0.21.1
 pytest==9.0.2
 pytest-timeout==2.4.0
 pytest-asyncio==1.3.0

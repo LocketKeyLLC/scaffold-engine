@@ -15,6 +15,7 @@ from typing import Optional
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import text
 
 from app.config import settings
@@ -57,9 +58,65 @@ async def init_scheduler() -> Optional[AsyncIOScheduler]:
         timezone=settings.scheduler_timezone,
     )
     await _rehydrate()
+    _register_observability_jobs()
     _scheduler.start()
     logger.info('event="scheduler_started" jobs=%d', len(_scheduler.get_jobs()))
     return _scheduler
+
+
+def _register_observability_jobs() -> None:
+    """Sprint X.26 — register the X.20 push eval + calibration watchdog
+    interval jobs alongside the cron-driven research schedules.
+
+    These jobs use APScheduler's in-memory store via ``jobstore='memory'``
+    so they don't pollute the ``apscheduler_jobs`` SQLAlchemy table that
+    rehydrates user-defined research schedules. ``replace_existing=True``
+    keeps re-init idempotent.
+    """
+    if _scheduler is None:
+        return
+
+    # in-memory jobstore registered lazily so the SQLAlchemy store stays
+    # the default for user schedules.
+    try:
+        _scheduler.add_jobstore("memory", alias="memory")
+    except Exception:
+        # already registered (re-init path) — ignore.
+        pass
+
+    if settings.alert_eval_enabled:
+        from app.observability import thresholds as _thresholds
+        _scheduler.add_job(
+            _thresholds.tick,
+            trigger=IntervalTrigger(seconds=settings.alert_eval_interval_seconds),
+            id="x26_threshold_eval",
+            jobstore="memory",
+            replace_existing=True,
+            misfire_grace_time=settings.scheduler_misfire_grace_time,
+        )
+        logger.info(
+            'event="threshold_eval_registered" interval_s=%d window_m=%d',
+            settings.alert_eval_interval_seconds,
+            settings.alert_eval_window_minutes,
+        )
+
+    if settings.calibration_watchdog_enabled:
+        from app.observability import calibration_watchdog as _watchdog
+        _scheduler.add_job(
+            _watchdog.tick,
+            trigger=IntervalTrigger(
+                seconds=settings.calibration_watchdog_interval_seconds,
+            ),
+            id="x26_calibration_watchdog",
+            jobstore="memory",
+            replace_existing=True,
+            misfire_grace_time=settings.scheduler_misfire_grace_time,
+        )
+        logger.info(
+            'event="calibration_watchdog_registered" interval_s=%d grace_m=%d',
+            settings.calibration_watchdog_interval_seconds,
+            settings.calibration_grace_minutes,
+        )
 
 
 async def shutdown_scheduler() -> None:

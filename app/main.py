@@ -39,6 +39,7 @@ from app.modules.research_agent import run_research, run_research_pdf, resume_re
 from app.modules.prompt_inspector import list_prompts, get_prompt, update_prompt, get_history
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag as _query_rag
+from app.routers.alerts import router as alerts_router
 from app.routers.assist import router as assist_router
 from app.routers.observability import router as observability_router
 from app.routers.status import router as status_router
@@ -342,12 +343,22 @@ async def lifespan(app: FastAPI):
         logger.info('event="startup_cleanup_skipped" CLEANUP_ON_STARTUP=%s', _cleanup_startup)
 
     _cleanup_task = start_cleanup_task()
-    # Start APScheduler (rehydrates scheduled_jobs from DB)
+    # Start APScheduler (rehydrates scheduled_jobs from DB; X.26 also
+    # registers the threshold-eval + calibration-watchdog interval jobs).
     try:
         from app.scheduler import init_scheduler
         await init_scheduler()
     except Exception as exc:
         logger.error('event="scheduler_init_failed" error=%s', exc)
+
+    # Sprint X.26 — OTel init is strictly opt-in and a no-op unless
+    # `otel_enabled` + an OTLP HTTP endpoint are configured. Failures
+    # log a warning and continue; tracing is never load-bearing.
+    try:
+        from app.observability.otel import init_tracing
+        init_tracing(app)
+    except Exception as exc:
+        logger.warning('event="otel_init_top_level_failed" error=%s', exc)
     yield
 
     # Shutdown
@@ -400,6 +411,22 @@ app.add_middleware(RequestIdMiddleware)
 app.include_router(status_router)
 app.include_router(assist_router)
 app.include_router(observability_router)
+app.include_router(alerts_router)
+
+
+# Sprint X.26 — Prometheus exposition. No auth (Prometheus scrapers
+# don't carry our X-API-Key header by convention; the surface is
+# read-only counters/gauges with no PII), consistent with /health.
+@app.get(settings.metrics_path, dependencies=[], include_in_schema=False)
+async def metrics_endpoint(request: Request):
+    """Sprint X.26 — Prometheus scrape endpoint. Returns 404 when
+    `metrics_enabled` is False so operators can disable the surface
+    without unmounting the route. The X-API-Key gate is bypassed so a
+    Prometheus instance can scrape with the default `/metrics` config."""
+    if not settings.metrics_enabled:
+        raise HTTPException(status_code=404)
+    from app.observability.metrics import expose
+    return await expose(request)
 
 # Sprint J.2.a — native single-page web UI. Auth-bypassed so a browser
 # hitting localhost:8000/web/jobs works without sending headers; the

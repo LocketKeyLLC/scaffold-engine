@@ -22,6 +22,42 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# ── X.26: emit alerts on start / success / failure ──────────────────
+# Routes through the orchestrator container's CLI so the alert lands in
+# system_alerts (DB) and the configured file sink. If the orchestrator
+# container is down, the alert is logged-only and the script continues —
+# we never want alerting itself to break the calibration pipeline.
+ALERT_CONTAINER="${SCAFFOLD_ALERT_CONTAINER:-scaffold-orchestrator}"
+
+emit_alert() {
+    # $1=kind  $2=severity  $3=message  $4=payload (JSON, optional)
+    local kind="$1" severity="$2" message="$3" payload="${4:-{}}"
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "[calibration] docker missing; skipping alert kind=${kind}" >&2
+        return 0
+    fi
+    docker exec "$ALERT_CONTAINER" python -m app.observability.alerts emit \
+        --kind "$kind" --severity "$severity" --message "$message" \
+        --payload "$payload" >/dev/null 2>&1 \
+        || echo "[calibration] alert emit failed (kind=${kind}); continuing" >&2
+}
+
+# ERR trap: any failure between here and the success leg fires
+# `calibration.failed`. ${BASH_COMMAND} pinpoints the failing step in
+# the alert payload so the operator can jump straight to it.
+on_err() {
+    local rc=$?
+    local cmd="${BASH_COMMAND:-unknown}"
+    local payload
+    payload=$(printf '{"exit_code":%d,"failing_command":%s}' "$rc" \
+              "$(printf '%s' "$cmd" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")
+    emit_alert "calibration.failed" "critical" \
+        "Quarterly calibration script exited ${rc} on: ${cmd}" \
+        "$payload"
+    exit "$rc"
+}
+trap on_err ERR
+
 # ── 0. Pre-flight checks ────────────────────────────────────────────────────
 
 if ! command -v gh >/dev/null 2>&1; then
@@ -49,6 +85,9 @@ LABEL="${YEAR}-Q${QUARTER}"
 TS_TODAY=$(date -u +%Y-%m-%d)
 
 echo "[calibration] kicking off ${LABEL} (${TS_TODAY} UTC)"
+emit_alert "calibration.started" "info" \
+    "Quarterly calibration ${LABEL} kicking off (${TS_TODAY} UTC)" \
+    "$(printf '{"label":"%s","date":"%s"}' "$LABEL" "$TS_TODAY")"
 
 # ── 2. Sync main + branch ───────────────────────────────────────────────────
 
@@ -209,3 +248,10 @@ PR_URL=$(gh pr create --draft \
 
 echo "[calibration] done. branch=${BRANCH} commit=$(git rev-parse --short HEAD)"
 echo "[calibration] PR: ${PR_URL}"
+
+# Disarm the ERR trap before emitting the success alert so an alert
+# emit failure here can't escalate into a spurious 'failed' alert.
+trap - ERR
+emit_alert "calibration.ok" "info" \
+    "Quarterly calibration ${LABEL} completed; PR opened" \
+    "$(printf '{"label":"%s","branch":"%s","pr_url":"%s"}' "$LABEL" "$BRANCH" "$PR_URL")"

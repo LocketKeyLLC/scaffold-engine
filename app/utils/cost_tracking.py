@@ -160,3 +160,15 @@ async def record_llm_call(resp) -> None:
             "record_llm_call_failed: provider=%s model=%s error=%s",
             provider, model, exc,
         )
+
+    # Sprint X.26 — Prometheus mirror. Runs after the DB insert so a
+    # failed insert still produces a metric (the operator sees the
+    # "DB sink down" symptom in the metric stream too).
+    try:
+        from app.observability import metrics as _metrics
+        _metrics.record_llm_call(
+            provider=provider, model=model,
+            success=success, latency_ms=latency_ms,
+        )
+    except Exception:
+        logger.debug("record_llm_call_metrics_failed", exc_info=True)

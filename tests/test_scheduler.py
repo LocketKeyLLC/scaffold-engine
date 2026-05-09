@@ -40,7 +40,22 @@ class TestSchedulerLifecycle:
             mock_sched_cls.return_value = mock_scheduler
             await sched_mod.init_scheduler()
 
-            assert mock_scheduler.add_job.call_count == 2
+            # 2 user schedules rehydrated from DB + 2 X.26 observability
+            # interval jobs (threshold eval, calibration watchdog) registered
+            # by _register_observability_jobs. The user schedules are added
+            # to the default jobstore; the X.26 jobs use jobstore="memory".
+            assert mock_scheduler.add_job.call_count == 4
+            user_schedule_calls = [
+                c for c in mock_scheduler.add_job.call_args_list
+                if c.kwargs.get("jobstore") != "memory"
+            ]
+            assert len(user_schedule_calls) == 2
+            x26_calls = [
+                c for c in mock_scheduler.add_job.call_args_list
+                if c.kwargs.get("jobstore") == "memory"
+            ]
+            x26_ids = {c.kwargs.get("id") for c in x26_calls}
+            assert x26_ids == {"x26_threshold_eval", "x26_calibration_watchdog"}
             mock_scheduler.start.assert_called_once()
 
         await sched_mod.shutdown_scheduler()

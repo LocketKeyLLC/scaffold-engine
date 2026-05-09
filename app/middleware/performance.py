@@ -56,6 +56,22 @@ class PerformanceMiddleware(BaseHTTPMiddleware):
             request.method, path,
             response.status_code, elapsed_ms, elapsed_s,
         )
+        # Sprint X.26 — record into Prometheus. Use the matched route's
+        # path template when available so per-id paths (/jobs/{id}/...)
+        # don't explode label cardinality. Falls back to the literal
+        # path for unrouted requests (404s before route resolution).
+        try:
+            from app.observability import metrics as _metrics
+            route = request.scope.get("route")
+            template = getattr(route, "path", None) or path
+            _metrics.record_http_request(
+                method=request.method,
+                path_template=template,
+                status=response.status_code,
+                duration_s=elapsed_s,
+            )
+        except Exception:
+            logger.debug("perf_metrics_record_failed", exc_info=True)
         # Streaming responses have already emitted headers when call_next
         # returns; mutating ``response.headers`` here is a silent no-op for
         # the wire. Skip the header set so the intent is clear.
