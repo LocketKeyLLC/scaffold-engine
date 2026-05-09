@@ -122,24 +122,9 @@ CREATE TABLE IF NOT EXISTS artifacts (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 6. performance_logs: Latency metrics per model call
-CREATE TABLE IF NOT EXISTS performance_logs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    job_id UUID REFERENCES jobs(id) ON DELETE SET NULL,
-    node_id UUID REFERENCES dag_nodes(id) ON DELETE SET NULL,
-    model TEXT NOT NULL,
-    endpoint TEXT NOT NULL,
-    request_type TEXT NOT NULL DEFAULT 'generate'
-        CHECK (request_type IN ('generate', 'embed', 'rerank', 'classify')),
-    ttft_ms INT,
-    total_duration_ms INT NOT NULL,
-    tokens_prompt INT,
-    tokens_completion INT,
-    tokens_per_sec FLOAT,
-    success BOOLEAN NOT NULL DEFAULT TRUE,
-    error_message TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+-- 6. (removed) performance_logs — replaced by llm_call_logs (migration 030).
+--    Dead writer log_model_call() was never called after J.3.a; table dropped
+--    by migration 031.
 
 -- 7. benchmark_results: Model accuracy benchmarks per domain
 CREATE TABLE IF NOT EXISTS benchmark_results (
@@ -179,19 +164,18 @@ CREATE INDEX IF NOT EXISTS idx_execution_logs_created ON execution_logs(created_
 CREATE INDEX IF NOT EXISTS idx_error_logs_job_id ON error_logs(job_id);
 CREATE INDEX IF NOT EXISTS idx_error_logs_resolved ON error_logs(resolved);
 CREATE INDEX IF NOT EXISTS idx_artifacts_job_id ON artifacts(job_id);
-CREATE INDEX IF NOT EXISTS idx_performance_logs_model ON performance_logs(model);
-CREATE INDEX IF NOT EXISTS idx_performance_logs_created ON performance_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_blockers_status ON blockers(status);
 -- idx_jobs_status was added with the original baseline (pre-runner). No
 -- migration file declares it because it predates the schema_migrations
 -- table; documented here so future audits don't re-flag it as orphaned.
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
--- The next two indexes are also (re-)created by migration 006_add_indexes.sql
+-- This index is also (re-)created by migration 006_add_indexes.sql
 -- (CREATE INDEX IF NOT EXISTS makes both sides idempotent). Kept here so a
--- DB bootstrapping straight from init.sql has them without waiting on the
+-- DB bootstrapping straight from init.sql has it without waiting on the
 -- runner; migration 006 is the historical source of record.
+-- (idx_performance_logs_job_id was here pre-031; removed when the
+-- performance_logs table was dropped.)
 CREATE INDEX IF NOT EXISTS idx_dag_nodes_domain ON dag_nodes(domain);
-CREATE INDEX IF NOT EXISTS idx_performance_logs_job_id ON performance_logs(job_id);
 
 -- Updated_at trigger function
 CREATE OR REPLACE FUNCTION update_updated_at()

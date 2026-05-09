@@ -3314,6 +3314,23 @@ W.9's noted follow-up. The default replan policy (`context_only`) used to call t
 
 **Carryover.** The `/confirm`→assist chat-id plumbing remains the last sub-one-line follow-up from W-track. Not a perf or UX issue, just a nice-to-have for users on `assist_after_confirm=true`. **→ Closed in W.11.**
 
+### 17.58 Sprint X.22 — drop dead `performance_logs` table + `log_model_call` helper (2026-05-08)
+
+X.20 surfaced this and X.21 noted it: `performance_logs` had no writers (J.3.a's `_record_call` → `llm_call_logs` replaced the path), and `app/middleware/performance.py:log_model_call()` was a 50-line helper that nothing called. X.22 drops both.
+
+**What changed:**
+- New migration `db/migrations/031_drop_performance_logs.sql` — DROP INDEX × 3 + DROP TABLE, all `IF EXISTS`-guarded for idempotency. Single `DO $$...$$` block per the X.5 lesson (asyncpg's prepared-statement protocol rejects multi-statement bodies).
+- `db/init.sql` — removed the `CREATE TABLE performance_logs` block + 3 indexes. The baseline now reflects the post-031 state.
+- `app/middleware/performance.py` — removed `log_model_call()`, `_truncate()`, `_MODEL_MAX`, `_ENDPOINT_MAX`. The module's docstring keeps a one-paragraph note explaining the helper used to live here so a future grep against `log_model_call` lands on context, not silence. `PerformanceMiddleware` (HTTP request timing — actively used) is untouched.
+- `tests/test_performance_middleware.py` — dropped 7 tests (4 for `_truncate`, 3 for `log_model_call`). The 4 HTTP-middleware tests are kept.
+- `app/main.py:delete_job` docstring — was claiming "Sets `performance_logs.job_id` NULL" via the FK ON DELETE SET NULL. With the table gone, the docstring would have lied; replaced with a note that `llm_call_logs` rows are unaffected by job delete (no FK; off-job calls live there too).
+
+**Why now:** the dead table accumulates nothing but takes a slot in `\d` output, the dead helper is a future-grep trap (someone might `grep log_model_call` and assume there's a code path to update). The cleanup is small enough to ship in one commit; the deferral was always about decoupling cleanup from X.20's value-delivery.
+
+**Live verification:** post-restart, `\dt performance_logs` returns no rows; `schema_migrations` shows `031_drop_performance_logs.sql` applied.
+
+**Test-suite delta:** -7 cases. 1271 → 1264 passing. No regressions.
+
 ### 17.57 Sprint X.21 — perf benchmarking: component micro-benches + regression gate (2026-05-08)
 
 §16.5 audit-flagged "no formal performance benchmarking" was overstated — `tests/benchmarks/bench_pipeline.py` has been a 541-line e2e bench since pre-X track. Real gaps: (1) no component-level benches, so RAG retrieval drift is invisible until the macro number creeps up; (2) no regression gating, so drift just accumulates silently; (3) only 2 baselines in `results.jsonl`, last on 2026-04-02 (pre-W track). X.21 closes the first two; refreshing the macro baseline (~43 min run) is mechanical and deferred.

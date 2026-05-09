@@ -1226,7 +1226,8 @@ async def list_jobs(
 @app.delete("/jobs/{job_id}", response_model=DeleteResponse, tags=["Management"])
 async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
     """Hard-delete a job. Cascade removes dag_nodes / execution_logs / artifacts /
-    error_logs (FK ON DELETE CASCADE). Sets performance_logs.job_id NULL."""
+    error_logs (FK ON DELETE CASCADE). llm_call_logs rows are unaffected
+    (no FK; off-job calls live there too)."""
     try:
         UUID(job_id)
     except (ValueError, AttributeError, TypeError):
