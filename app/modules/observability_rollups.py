@@ -47,8 +47,8 @@ _LLM_ROLLUP_SQL = """
                  WITHIN GROUP (ORDER BY latency_ms), 0)   AS latency_ms_p99
     FROM llm_call_logs
     WHERE created_at >= NOW() - make_interval(mins => :window_minutes)
-      AND (:provider_filter IS NULL OR provider = :provider_filter)
-      AND (:model_filter    IS NULL OR model    = :model_filter)
+      AND (CAST(:provider_filter AS TEXT) IS NULL OR provider = CAST(:provider_filter AS TEXT))
+      AND (CAST(:model_filter    AS TEXT) IS NULL OR model    = CAST(:model_filter    AS TEXT))
     GROUP BY provider, model
     ORDER BY cost_usd DESC, calls DESC
 """
@@ -127,9 +127,10 @@ _ERRORS_SQL = """
         created_at,
         resolved_at
     FROM error_logs
-    WHERE (:resolved_filter IS NULL OR resolved = :resolved_filter)
-      AND (:since_minutes   IS NULL
-           OR created_at >= NOW() - make_interval(mins => :since_minutes))
+    WHERE (CAST(:resolved_filter AS BOOLEAN) IS NULL
+           OR resolved = CAST(:resolved_filter AS BOOLEAN))
+      AND (CAST(:since_minutes AS INTEGER) IS NULL
+           OR created_at >= NOW() - make_interval(mins => CAST(:since_minutes AS INTEGER)))
     ORDER BY created_at DESC
     LIMIT :limit
 """

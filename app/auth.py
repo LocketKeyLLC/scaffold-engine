@@ -26,7 +26,13 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 # without credentials so external orchestrators (compose healthchecks,
 # uptime pingers, etc.) can read the dependency status. Adding a future
 # /healthz alias is a one-line set extension here.
-_AUTH_EXEMPT_PATHS = frozenset({"/health", "/"})
+#
+# X.26: ``settings.metrics_path`` is exempted because Prometheus scrapers
+# don't carry our X-API-Key header by convention, and the surface is
+# read-only counters/gauges with no PII (matches the /health rationale).
+# The set is built at module load — if metrics_path is reconfigured, the
+# orchestrator must restart for the exemption to track.
+_AUTH_EXEMPT_PATHS = frozenset({"/health", "/", settings.metrics_path})
 
 # Sprint J.2.a — prefix-based auth exemption. The native web UI lives at
 # ``/web/*`` and serves a browsable page (operators don't pass headers in

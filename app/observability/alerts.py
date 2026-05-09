@@ -214,12 +214,16 @@ async def list_recent(
 ) -> dict[str, Any]:
     """Recent system_alerts rows. Fail-open: empty list on any DB error."""
     try:
+        # asyncpg's prepared-statement protocol can't type-infer a bare
+        # `:param IS NULL` — explicit casts disambiguate without changing
+        # behavior. Same pattern as `(CAST(:payload AS JSONB))` in emit().
         rows = await db.execute(
             text(
                 "SELECT id, kind, severity, message, payload, dedup_key, created_at "
                 "FROM system_alerts "
-                "WHERE (:kind IS NULL OR kind = :kind) "
-                "  AND (:since IS NULL OR created_at >= NOW() - make_interval(mins => :since)) "
+                "WHERE (CAST(:kind AS TEXT) IS NULL OR kind = CAST(:kind AS TEXT)) "
+                "  AND (CAST(:since AS INTEGER) IS NULL "
+                "       OR created_at >= NOW() - make_interval(mins => CAST(:since AS INTEGER))) "
                 "ORDER BY created_at DESC LIMIT :limit"
             ),
             {"kind": kind, "since": since_minutes, "limit": limit},
