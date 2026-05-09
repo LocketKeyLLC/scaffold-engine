@@ -193,8 +193,11 @@ class TestExecuteAllNodesAbnormalExit:
              patch("app.modules.execution_agent._get_job", mock_get_job), \
              patch("app.modules.execution_agent._peek_next_node", mock_get_next), \
              patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
-            from app.modules.execution_agent import execute_all_nodes
+            from app.modules.execution_agent import execute_all_nodes, drain_cleanup_tasks
             events = await _collect_sse(execute_all_nodes("job-1"))
+            # X.24: cleanup runs as a detached task — wait for it before
+            # asserting on the mocked DB.
+            await drain_cleanup_tasks()
 
         event_names = [e[0] for e in events]
         assert "execution_failed" in event_names, f"execution_failed missing from {event_names}"
@@ -236,12 +239,15 @@ class TestExecuteAllNodesAbnormalExit:
                  patch("app.modules.execution_agent._get_job", mock_get_job), \
                  patch("app.modules.execution_agent._peek_next_node", mock_get_next), \
                  patch("app.modules.execution_agent.execute_next_node", mock_exec_next):
-                from app.modules.execution_agent import execute_all_nodes
+                from app.modules.execution_agent import execute_all_nodes, drain_cleanup_tasks
                 try:
                     async for chunk in execute_all_nodes("job-1"):
                         events.append(chunk)
                 except asyncio.CancelledError:
                     reraised = True
+                # X.24: cleanup runs as a detached task — wait for it
+                # under the patch so the mocked DB sees the UPDATE.
+                await drain_cleanup_tasks()
             return events, reraised
 
         _, reraised = await _run_collecting()

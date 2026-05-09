@@ -72,6 +72,79 @@ def _reset_execution_slot_sem() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sprint X.24 — detached cleanup tasks for cancelled execute_all_nodes runs.
+# Live verification surfaced that ``await`` calls inside execute_all_nodes'
+# ``finally`` block were being interrupted by re-entrant cancellation
+# (Starlette/uvicorn cancels the request task when the client disconnects;
+# the first CancelledError is caught by the except handler, but the next
+# await inside ``finally`` raises again, abandoning the DB cleanup half
+# done). Spawning cleanup as a detached task — same pattern W.10 uses for
+# the assist verifier — decouples it from the cancelled chain so it runs
+# to completion regardless. Strong refs in _CLEANUP_TASKS keep tasks alive
+# (asyncio.create_task only holds a weak ref).
+# ---------------------------------------------------------------------------
+_CLEANUP_TASKS: set[asyncio.Task] = set()
+
+
+async def _cleanup_stuck_running_job(job_id: str, exit_reason: str | None) -> None:
+    """Reset a job stuck at ``running`` to a terminal status and mark any
+    orphaned ``running`` dag_nodes as ``failed``. No-op if the job is no
+    longer at ``running`` (clean exits already set ``completed``/``blocked``)."""
+    try:
+        async with async_session() as db:
+            status_row = await db.execute(
+                text("SELECT status FROM jobs WHERE id = :jid"),
+                {"jid": job_id},
+            )
+            current_status = status_row.scalar()
+            if current_status != "running":
+                return
+            if exit_reason == "cancelled":
+                terminal = "cancelled"
+            elif exit_reason == "exception":
+                terminal = "failed"
+            else:
+                terminal = "failed"  # safety default (Session 3 early-return etc.)
+            await db.execute(
+                text("UPDATE jobs SET status = :s, updated_at = now() WHERE id = :jid"),
+                {"s": terminal, "jid": job_id},
+            )
+            await db.execute(
+                text(
+                    "UPDATE dag_nodes SET status = 'failed', completed_at = NOW() "
+                    "WHERE job_id = :jid AND status = 'running'"
+                ),
+                {"jid": job_id},
+            )
+            await db.commit()
+            logger.warning(
+                "execute_all_nodes_cleanup: job=%s running->%s (reason=%s)",
+                job_id, terminal, exit_reason,
+            )
+    except Exception as exc:
+        logger.error(
+            "execute_all_nodes_cleanup_failed: job=%s error=%s", job_id, exc,
+        )
+
+
+def _spawn_cleanup_task(job_id: str, exit_reason: str | None) -> asyncio.Task:
+    """Schedule cleanup as a detached task with a strong ref to prevent GC."""
+    task = asyncio.create_task(_cleanup_stuck_running_job(job_id, exit_reason))
+    _CLEANUP_TASKS.add(task)
+    task.add_done_callback(_CLEANUP_TASKS.discard)
+    return task
+
+
+async def drain_cleanup_tasks(timeout: float = 5.0) -> None:
+    """Test hook — wait for all in-flight cleanup tasks to complete."""
+    if _CLEANUP_TASKS:
+        await asyncio.wait_for(
+            asyncio.gather(*list(_CLEANUP_TASKS), return_exceptions=True),
+            timeout=timeout,
+        )
+
+
+# ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
 
@@ -1223,82 +1296,88 @@ async def execute_all_nodes(
         })
         return
 
-    # ---- Session 1: concurrent execution guard (atomic check-and-set) ----
-    # #17: guard excludes 'completed' so finished jobs can't be re-executed.
-    async with async_session() as db:
-        guard_result = await db.execute(
-            text("""
-                UPDATE jobs SET status = 'running', updated_at = now()
-                WHERE id = :jid AND status NOT IN ('running', 'completed')
-                RETURNING id
-            """),
-            {"jid": job_id},
-        )
-        if guard_result.rowcount == 0:
-            job_check = await _get_job(db, job_id)
-            if not job_check:
-                yield _sse("error", {"message": f"Job {job_id} not found"})
-            elif job_check["status"] == "completed":
-                yield _sse("error", {
-                    "message": "Job already completed; cannot re-execute",
-                    "job_id": job_id,
-                    "http_status": 409,
-                })
-            else:
-                yield _sse("error", {
-                    "message": "Job is already executing",
-                    "job_id": job_id,
-                    "http_status": 409,
-                })
-            _release_slot()
-            return
-        await db.commit()
-
-    # ---- Session 2: validate job ----
-    async with async_session() as db:
-        job = await _get_job(db, job_id)
-    if not job:
-        yield _sse("error", {"message": f"Job {job_id} not found"})
-        _release_slot()
-        return
-    # Allowlist: only 'running' (set by Session 1 guard above) or 'executing'.
-    # 'refining' and 'planning' are not executable here — callers should finish
-    # those phases and flip status before streaming /execute/all.
-    if job["status"] not in ("running", "executing"):
-        yield _sse("error", {
-            "message": f"Job status is '{job['status']}' — not executable",
-        })
-        _release_slot()
-        return
-
-    # ---- Session 3: auto-generate DAG if missing ----
-    async with async_session() as db:
-        row = await db.execute(
-            text("SELECT COUNT(*) FROM dag_nodes WHERE job_id = :id"),
-            {"id": job_id},
-        )
-        dag_exists = row.scalar() > 0
-        if not dag_exists:
-            try:
-                from app.modules.dag_generator import generate_dag as _gen_dag
-                dag_result = await _gen_dag(job_id, db)
-                yield _sse("dag_generated", {
-                    "job_id": job_id,
-                    "task_count": dag_result.get("task_count", 0),
-                    "strategy": dag_result.get("strategy", "unknown"),
-                })
-            except Exception as exc:
-                logger.error("auto_dag_generation_failed: job=%s error=%s", job_id, exc)
-                yield _sse("error", {"message": f"DAG generation failed: {exc}"})
-                _release_slot()
-                return
-
-    # ---- Main execute loop, wrapped for abnormal-exit cleanup (#2) ----
+    # ---- Cleanup state for the wider try/except/finally below ----
+    # X.24 (post-live-verification fix): the cleanup wrap now covers Sessions
+    # 1-3 too, not just the main loop. Cancellation during Session 3's
+    # auto-DAG-generation (a slow LLM call) used to escape the function
+    # without releasing the slot or flipping the job out of 'running'.
+    # ``_owns_job_running`` gates DB cleanup so a Session 1 guard rejection
+    # (where another runner legitimately owns the row) does not corrupt
+    # that runner's job.
     exit_reason: str | None = None  # None = clean exit
     exit_exception: BaseException | None = None
     retry_budget = settings.execution_global_retry_cap
+    _owns_job_running = False
 
     try:
+        # ---- Session 1: concurrent execution guard (atomic check-and-set) ----
+        # #17: guard excludes 'completed' so finished jobs can't be re-executed.
+        async with async_session() as db:
+            guard_result = await db.execute(
+                text("""
+                    UPDATE jobs SET status = 'running', updated_at = now()
+                    WHERE id = :jid AND status NOT IN ('running', 'completed')
+                    RETURNING id
+                """),
+                {"jid": job_id},
+            )
+            if guard_result.rowcount == 0:
+                job_check = await _get_job(db, job_id)
+                if not job_check:
+                    yield _sse("error", {"message": f"Job {job_id} not found"})
+                elif job_check["status"] == "completed":
+                    yield _sse("error", {
+                        "message": "Job already completed; cannot re-execute",
+                        "job_id": job_id,
+                        "http_status": 409,
+                    })
+                else:
+                    yield _sse("error", {
+                        "message": "Job is already executing",
+                        "job_id": job_id,
+                        "http_status": 409,
+                    })
+                return  # finally releases slot; _owns_job_running=False skips DB cleanup
+            await db.commit()
+            _owns_job_running = True
+
+        # ---- Session 2: validate job ----
+        async with async_session() as db:
+            job = await _get_job(db, job_id)
+        if not job:
+            yield _sse("error", {"message": f"Job {job_id} not found"})
+            return
+        # Allowlist: only 'running' (set by Session 1 guard above) or 'executing'.
+        # 'refining' and 'planning' are not executable here — callers should finish
+        # those phases and flip status before streaming /execute/all.
+        if job["status"] not in ("running", "executing"):
+            yield _sse("error", {
+                "message": f"Job status is '{job['status']}' — not executable",
+            })
+            return
+
+        # ---- Session 3: auto-generate DAG if missing ----
+        async with async_session() as db:
+            row = await db.execute(
+                text("SELECT COUNT(*) FROM dag_nodes WHERE job_id = :id"),
+                {"id": job_id},
+            )
+            dag_exists = row.scalar() > 0
+            if not dag_exists:
+                try:
+                    from app.modules.dag_generator import generate_dag as _gen_dag
+                    dag_result = await _gen_dag(job_id, db)
+                    yield _sse("dag_generated", {
+                        "job_id": job_id,
+                        "task_count": dag_result.get("task_count", 0),
+                        "strategy": dag_result.get("strategy", "unknown"),
+                    })
+                except Exception as exc:
+                    logger.error("auto_dag_generation_failed: job=%s error=%s", job_id, exc)
+                    yield _sse("error", {"message": f"DAG generation failed: {exc}"})
+                    return
+
+        # ---- Main execute loop ----
         while True:
             # ---- Session 4 (short peek only; execute_next_node owns its own sessions) ----
             node = await _peek_next_node(job_id)
@@ -1457,20 +1536,16 @@ async def execute_all_nodes(
 
     except asyncio.CancelledError as _cancelled:
         # Client disconnect / stream aclose(). Cleanup in finally, then re-raise.
+        # X.24 post-live-verification: do NOT yield ``execution_cancelled``
+        # here. In production, CancelledError only fires on real client
+        # disconnect (the consumer is gone), and yielding suspends the
+        # generator until garbage collection — which delays cleanup
+        # arbitrarily and leaves the slot + DB row leaked. The docstring's
+        # ``execution_cancelled`` event becomes effectively dead in production
+        # but harmless; the SSE stream is closed at the disconnect anyway.
         exit_reason = "cancelled"
         exit_exception = _cancelled
         logger.info("execute_all_nodes_cancelled: job=%s", job_id)
-        try:
-            elapsed_ms = int((time.monotonic() - t0) * 1000)
-            yield _sse("execution_cancelled", {
-                "job_id": job_id,
-                "status": "cancelled",
-                "message": "Execution cancelled by client",
-                "nodes_completed": len(node_results),
-                "duration_ms": elapsed_ms,
-            })
-        except Exception:
-            pass  # stream already closed — best-effort
     except Exception as _exc:
         # Unexpected runtime error. Emit SSE (best-effort), cleanup in finally.
         exit_reason = "exception"
@@ -1488,53 +1563,25 @@ async def execute_all_nodes(
         except Exception:
             pass  # stream may already be closed
     finally:
-        # Always-on cleanup: if job stuck at 'running', transition to terminal.
-        # Clean exits (return inside loop) already set 'completed'/'blocked'
-        # via execute_next_node or terminal branches — this is a no-op for them.
-        try:
-            async with async_session() as _cleanup_db:
-                status_row = await _cleanup_db.execute(
-                    text("SELECT status FROM jobs WHERE id = :jid"),
-                    {"jid": job_id},
-                )
-                current_status = status_row.scalar()
-                if current_status == "running":
-                    if exit_reason == "cancelled":
-                        terminal = "cancelled"
-                    elif exit_reason == "exception":
-                        terminal = "failed"
-                    else:
-                        terminal = "failed"  # safety default
-                    await _cleanup_db.execute(
-                        text("""
-                            UPDATE jobs SET status = :s, updated_at = now()
-                            WHERE id = :jid
-                        """),
-                        {"s": terminal, "jid": job_id},
-                    )
-                    # Orphaned node cleanup — any claimed-but-never-completed node.
-                    await _cleanup_db.execute(
-                        text("""
-                            UPDATE dag_nodes
-                            SET status = 'failed', completed_at = NOW()
-                            WHERE job_id = :jid AND status = 'running'
-                        """),
-                        {"jid": job_id},
-                    )
-                    await _cleanup_db.commit()
-                    logger.warning(
-                        "execute_all_nodes_cleanup: job=%s running->%s (reason=%s)",
-                        job_id, terminal, exit_reason,
-                    )
-        except Exception as _cleanup_exc:
-            logger.error(
-                "execute_all_nodes_cleanup_failed: job=%s error=%s",
-                job_id, _cleanup_exc,
-            )
+        # Cleanup is gated on ``_owns_job_running`` — a Session 1 guard
+        # rejection means the row's 'running' status belongs to another
+        # runner, and flipping it would corrupt that runner's job. Clean
+        # exits (return inside main loop) already set 'completed'/'blocked'
+        # via execute_next_node, so the cleanup is a no-op for them
+        # (current_status != 'running').
+        #
+        # Spawned as a detached task because awaits inside this finally
+        # were interrupted by re-entrant cancellation in live verification,
+        # leaving the DB cleanup half-done and the slot leaked. The
+        # detached task is independent of the cancelled request task
+        # and runs to completion. Tests use ``drain_cleanup_tasks()``.
+        if _owns_job_running:
+            _spawn_cleanup_task(job_id, exit_reason)
 
         # X.24: release the process-wide slot before any re-raise so a
-        # queued run can pick up immediately. Idempotent — _release_slot
-        # has already been called for the early-return paths in Sessions 1-3.
+        # queued run can pick up immediately. Always reached because the
+        # outer try wraps Sessions 1-3 + main loop. Sync release is safe
+        # under cancellation; the spawned cleanup task above is async.
         _release_slot()
 
         # Re-raise CancelledError so the framework knows we were cancelled.

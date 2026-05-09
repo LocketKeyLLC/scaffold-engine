@@ -219,6 +219,77 @@ class TestExecutionConcurrencyCap:
         assert events[1][1]["http_status"] == 503
         assert "queue timeout" in events[1][1]["message"].lower()
 
+    async def test_cancel_during_session3_releases_slot_and_cleans_job(
+        self, _cap_one, monkeypatch,
+    ):
+        """Regression for the live-verification finding: cancellation while
+        Session 3 (auto-DAG generation) was awaiting an LLM call leaked the
+        slot and left the job stuck at ``running`` because the cleanup
+        ``await`` inside ``finally`` was interrupted by re-entrant
+        cancellation. With the spawn-detached cleanup pattern, both the
+        slot and the DB row recover."""
+        guard_result = MagicMock(); guard_result.rowcount = 1
+        # DAG count = 0 → execute_all_nodes calls dag_generator.generate_dag.
+        dag_check = MagicMock(); dag_check.scalar.return_value = 0
+        # Background cleanup task: SELECT status, then UPDATE jobs, UPDATE dag_nodes.
+        cleanup_status = MagicMock(); cleanup_status.scalar.return_value = "running"
+        cleanup_update_jobs = MagicMock()
+        cleanup_update_nodes = MagicMock()
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[
+            guard_result,        # Session 1 atomic guard UPDATE
+            dag_check,           # Session 3 SELECT COUNT(*) FROM dag_nodes
+            cleanup_status,      # cleanup task: SELECT status
+            cleanup_update_jobs, # cleanup task: UPDATE jobs SET status
+            cleanup_update_nodes,# cleanup task: UPDATE dag_nodes
+        ])
+        db.commit = AsyncMock()
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=db)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        sess = MagicMock(return_value=ctx)
+
+        get_job = AsyncMock(return_value={"status": "executing", "id": "job-1"})
+
+        # Patch generate_dag to raise CancelledError — simulates a real
+        # disconnect during the LLM call inside Session 3.
+        async def _cancelling_gen_dag(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        # generate_dag is imported lazily inside execute_all_nodes; patch the
+        # source module so the import binding picks up the mock.
+        from app.modules import dag_generator
+        monkeypatch.setattr(dag_generator, "generate_dag", _cancelling_gen_dag)
+
+        async def _run():
+            reraised = False
+            with patch("app.modules.execution_agent.async_session", sess), \
+                 patch("app.modules.execution_agent._get_job", get_job):
+                try:
+                    async for _ in ea.execute_all_nodes("job-1"):
+                        pass
+                except asyncio.CancelledError:
+                    reraised = True
+                # Cleanup runs detached — drain inside the patch.
+                await ea.drain_cleanup_tasks()
+            return reraised
+
+        reraised = await _run()
+        assert reraised, "CancelledError must propagate out (framework needs it)"
+
+        # Slot must be released for subsequent runs.
+        sem = ea._get_execution_slot_sem()
+        assert not sem.locked(), "Slot leaked after Session 3 cancellation"
+
+        # DB cleanup must have flipped the job to 'cancelled'.
+        update_calls = [
+            c for c in db.execute.call_args_list
+            if len(c.args) > 1 and isinstance(c.args[1], dict)
+               and c.args[1].get("s") == "cancelled"
+        ]
+        assert update_calls, "Cleanup UPDATE with status='cancelled' did not fire"
+
     async def test_cap_two_allows_one_concurrent_acquire(self, monkeypatch):
         """cap=2 → with one slot already taken, a run still acquires the
         second slot without queueing."""
