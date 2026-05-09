@@ -3493,6 +3493,18 @@ M2 from the audit: the prod compose's `scaffold-orchestrator` had a `build:` sta
 
 **§16.5 status delta:** M2 closed. Open from the audit: I1, I4, N4, B3-B6, M3-M7, plus the wider §16.5 deferrals.
 
+### 17.68 Audit pass — `requirements-ci.txt` setuptools exact-pin (2026-05-09)
+
+M3 from the audit. `requirements-ci.txt:14` carried `setuptools>=70.0.0,<72` while every other entry in the file was exact-pinned (and the file's own header asserts "Pinned to match requirements.txt / requirements-dev.txt production versions … so CI never drifts from what the container actually runs"). The range-pin contradicted both the §15 "Pinned everything" invariant and the file's own stated contract.
+
+The fix:
+- One-line swap: `setuptools>=70.0.0,<72` → `setuptools==71.1.0`. The version matches `requirements.txt:14` (already exact-pinned) and the value `pip show setuptools` reports inside the running orchestrator.
+- Verification: `grep -vE '^(#|\s*$)' requirements-ci.txt | grep -vE '==[0-9]'` returns nothing — all 16 active entries are now exact-pinned.
+
+**Test-suite delta:** none. Same setuptools version was already resolving in CI; the constraint is just tightened.
+
+**§16.5 status delta:** M3 closed. Open from the audit: I1, I4, N4, B3-B6, M4-M7, plus the wider §16.5 deferrals.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
