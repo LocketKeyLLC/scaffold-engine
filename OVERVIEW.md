@@ -3312,7 +3312,19 @@ W.9's noted follow-up. The default replan policy (`context_only`) used to call t
 - `tests/test_assist_replan_regen.py`: new `TestContextOnlyAsync` class. 6 cases — tight-timeout wait_for proves submit returns without awaiting verifier; divergence flag lands after drain; non-major divergence → no UPDATE; verifier exception is swallowed; selective stays synchronous (regression); disabled never calls verifier.
 - All assist files (4 modules + integration): 36 passed in 4.57s.
 
-**Carryover.** The `/confirm`→assist chat-id plumbing remains the last sub-one-line follow-up from W-track. Not a perf or UX issue, just a nice-to-have for users on `assist_after_confirm=true`.
+**Carryover.** The `/confirm`→assist chat-id plumbing remains the last sub-one-line follow-up from W-track. Not a perf or UX issue, just a nice-to-have for users on `assist_after_confirm=true`. **→ Closed in W.11.**
+
+### 17.54 Sprint W.11 — `/confirm`→assist chat-id plumbing (2026-05-08)
+
+The last carryover from W.9 + W.10. When `valves.assist_after_confirm=True`, `/confirm` auto-chains into `/assist/start` instead of `/execute/all`. Pre-W.11, that auto path called `_assist_start(job_id)` without `chat_id`, so users who opted into the auto-route lost the W.9 chat memory the explicit `/assist <job_id>` flow gives them. Three-line fix:
+
+- `pipe()` dispatch passes `body=body` into `_handle_confirm` (line 950).
+- `_handle_confirm` signature gains keyword-only `body: dict | None = None` (default preserves any non-pipe callers).
+- The auto-into-assist branch calls `_assist_start(job_id, chat_id=self._chat_id_from_body(body))`.
+
+**Test-suite delta:** new `test_confirm_into_assist_carries_chat_id` in `TestConfirmCommand` (asserts the W.9 chatmap PUT fires with the expected chat_id). Full scaffold_router file: 139 → 140.
+
+W track is now fully closed. No outstanding assist work.
 
 ---
 

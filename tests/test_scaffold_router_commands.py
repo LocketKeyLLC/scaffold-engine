@@ -193,6 +193,42 @@ class TestConfirmCommand:
         assert any("/dag" in u for u in urls)
         assert any("/execute/all" in u for u in urls), f"/execute/all never called — got {urls}"
 
+    def test_confirm_into_assist_carries_chat_id(self, pipe, monkeypatch):
+        """When valves.assist_after_confirm=True, /confirm auto-chains into
+        /assist/start AND must plumb chat_id from body['metadata']['chat_id']
+        so the W.9 chatmap PUT happens. Regression: pre-fix, the auto path
+        called _assist_start(job_id) without chat_id, so OWUI users on the
+        valve never got the implicit-session memory."""
+        pipe.valves.assist_after_confirm = True
+        log, responses = _http_call_log(monkeypatch)
+        responses[("post", "/ideate/confirm")] = _make_response(
+            200, {"status": "planning", "job_id": "job-77"},
+        )
+        responses[("post", "/dag")] = _make_response(
+            200, {"task_count": 2, "tasks": []},
+        )
+        responses[("post", "/assist/start")] = _make_response(
+            200, {"session_id": _UUID_A, "job_id": "job-77", "pending_steps": 2},
+        )
+        responses[("get", f"/assist/{_UUID_A}/next")] = _make_response(
+            200, {"session_id": _UUID_A, "node_key": "T1", "title": "step",
+                  "status": "active", "depends_on": []},
+        )
+        responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
+
+        body = {"metadata": {"chat_id": "chat-confirm-into-assist"}}
+        list(pipe.pipe("/confirm job-77", "m", [{"role": "user", "content": "/confirm job-77"}], body))
+
+        puts = [
+            e for e in log
+            if e[0] == "put" and "_chatmap/chat-confirm-into-assist" in e[1]
+        ]
+        assert puts, (
+            f"/confirm with assist_after_confirm=True must PUT to "
+            f"/assist/_chatmap/<chat_id> after starting; got log: {log}"
+        )
+        assert puts[0][2]["session_id"] == _UUID_A
+
 
 @pytest.mark.smoke
 class TestContextStripping:

@@ -947,7 +947,7 @@ class Pipeline:
         if self._is_cmd(msg, "/execute"):
             yield from self._handle_execute(msg); return
         if self._is_cmd(msg, "/confirm"):
-            yield from self._handle_confirm(msg); return
+            yield from self._handle_confirm(msg, body=body); return
 
         if msg.startswith("/"):
             result = self._handle_command(msg)
@@ -1057,7 +1057,9 @@ class Pipeline:
         yield f"Executing all nodes for job `{job_id}`...\n\n"
         yield from self._execute_and_stream(job_id, 0)
 
-    def _handle_confirm(self, msg: str) -> Generator[str, None, None]:
+    def _handle_confirm(
+        self, msg: str, *, body: dict | None = None,
+    ) -> Generator[str, None, None]:
         parts = msg.split(None, 2)
         if len(parts) < 2:
             yield "Usage: `/confirm <job_id> [feedback]`"
@@ -1146,9 +1148,13 @@ class Pipeline:
 
         # If the operator opted into Assist Mode auto-routing, hand off to
         # /assist/start instead of /execute/all. Default valve is False.
+        # Plumb chat_id from body so the auto-into-assist flow gets W.9
+        # session memory just like an explicit /assist <job_id> would.
         if self.valves.assist_after_confirm:
             yield f"📋 Execution plan ready — entering Assist Mode for {num_nodes} steps...\n\n"
-            yield from self._assist_start(job_id)
+            yield from self._assist_start(
+                job_id, chat_id=self._chat_id_from_body(body),
+            )
             return
 
         yield f"📋 Execution plan ready — running {num_nodes} steps...\n\n"
