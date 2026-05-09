@@ -279,6 +279,18 @@ class Settings(BaseSettings):
     dag_validator_max_retries: int = Field(default=2, ge=0, le=5)
     dag_validator_max_tokens: int = Field(default=1024, ge=256, le=8192)
     execution_global_retry_cap: int = Field(default=20, ge=0, le=1000)
+    # Sprint X.24 — process-wide cap on concurrent execute_all_nodes runs.
+    # Each run drives its own inference loop and holds short-lived DB
+    # sessions. N concurrent callers (HTTP /execute/all, assist-handoff,
+    # scheduled jobs) can exhaust the SQLAlchemy pool (pool_size=5,
+    # max_overflow=10) and cascade 500s. Default 1 keeps the single-user
+    # invariant strict; raise once the pool is sized to match.
+    execution_global_concurrency: int = Field(default=1, ge=1, le=32)
+    # Max queue wait when the cap is full. 0 = wait forever; otherwise
+    # the run emits a 503-shaped SSE error and bails. Default 1800s
+    # matches scheduler_job_timeout so a queued run can't outlive the
+    # scheduler that booked it.
+    execution_queue_timeout_seconds: int = Field(default=1800, ge=0, le=86400)
     sse_keepalive_seconds: float = Field(default=15.0, ge=1.0, le=300.0)
 
     # Manual prompt-edit cap (POST /prompts/{job_id}/{node_key}). Both

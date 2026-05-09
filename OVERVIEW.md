@@ -3314,6 +3314,31 @@ W.9's noted follow-up. The default replan policy (`context_only`) used to call t
 
 **Carryover.** The `/confirm`→assist chat-id plumbing remains the last sub-one-line follow-up from W-track. Not a perf or UX issue, just a nice-to-have for users on `assist_after_confirm=true`. **→ Closed in W.11.**
 
+### 17.59 Sprint X.24 — process-wide concurrency cap on `/execute/all` (2026-05-08)
+
+§16.5 audit-flagged "no global concurrency cap on /execute/all" — only `research_fetch_concurrency` and `github_blob_concurrency` existed. With the SQLAlchemy pool sized at `pool_size=5, max_overflow=10`, N concurrent callers (HTTP /execute/all, assist-handoff, scheduled jobs, calibration cron, future shared deployments) drive N parallel inference loops and short-lived DB sessions. Past ~10 concurrent runs the pool exhausts and downstream requests cascade to 500. Single-user today, but the W.9 calibration cron (fires 2026-07-01) plus any future sharing breaks this. X.24 closes it.
+
+**What changed:**
+
+- `app/config.py` — two new settings:
+  - `execution_global_concurrency: int` (default `1`, range `[1, 32]`) — process-wide cap on parallel `execute_all_nodes` runs.
+  - `execution_queue_timeout_seconds: int` (default `1800`, range `[0, 86400]`, `0` = wait forever) — max queue wait before a run bails with a 503-shaped SSE error. Default matches `scheduler_job_timeout` so a queued run can't outlive the scheduler that booked it.
+- `app/modules/execution_agent.py` — module-level `asyncio.Semaphore` (lazy-init, value bound at first call from `settings.execution_global_concurrency`) acquired by `execute_all_nodes` *before* the existing per-job atomic guard. Acquiring first means a queued run does **not** flip the job to `running` (which would fool both the stale-job reaper and observability rollups). Released on every exit path: each early `return` in Sessions 1-3 calls `_release_slot()` explicitly, and the main-loop `finally` calls it before re-raising. Idempotent.
+- New SSE event `queued` is emitted only when the slot is currently locked, with payload `{job_id, cap, timeout_seconds}`. Unknown event types pass through `_render_event_html` and the SDK transparently — no consumer breakage.
+- Test hook `_reset_execution_slot_sem()` lets tests rebuild the semaphore after mutating settings.
+
+**Why first-acquire-then-guard:** the pre-existing atomic guard (line 1228) is a *per-job* race-stopper; the new cap is a *process-wide aggregate*. They're orthogonal. Acquiring the slot before the guard means a queued run waits without claiming DB rows; if by the time it gets the slot another caller has already finished or claimed the same job, the guard still rejects it correctly. Worst case: one wasted slot-cycle on a duplicate-submit, which is fine.
+
+**Why module global, not Redis:** the orchestrator runs as `uvicorn worker=1`, so a process-local `asyncio.Semaphore` is sufficient. If the deployment goes multi-worker the cap must move to Redis (noted as a comment at the semaphore definition).
+
+**Why the cap and not just a bigger pool:** raising the pool only delays the failure mode. The fundamental cost of N parallel runs is N × (RAG queries + LLM dispatch + verifier loop), which exhausts CPU-only inference far before the pool — the pool was just the most visible symptom. The cap is the right primitive; pool sizing follows.
+
+**Test-suite delta:** new `tests/test_execution_agent_concurrency.py`, 5 cases — no `queued` when slot is free, slot pre-held emits `queued` then proceeds on release, slot released on Session 1 guard rejection (next run not queued), queue timeout produces 503-shaped error, `cap=2` allows the second concurrent acquire without queueing. Full suite: 1291 → 1296 passing.
+
+**Live verification:** not yet performed — change ships without a restart-side test. The 5 unit cases above cover the cap, the queued-then-release flow, and slot release on every documented exit path. Pre-merge ask: fire two simultaneous `aiter_execute_all` consumers against the running orchestrator and confirm the second sees a `queued` SSE before any `node_start`.
+
+**Surface still open from §16.5:** deployment-surface audit, refresh macro bench baseline, wire bench gates into `make ci`, Prometheus `/metrics`, OTel per-job timeline.
+
 ### 17.58 Sprint X.22 — drop dead `performance_logs` table + `log_model_call` helper (2026-05-08)
 
 X.20 surfaced this and X.21 noted it: `performance_logs` had no writers (J.3.a's `_record_call` → `llm_call_logs` replaced the path), and `app/middleware/performance.py:log_model_call()` was a 50-line helper that nothing called. X.22 drops both.

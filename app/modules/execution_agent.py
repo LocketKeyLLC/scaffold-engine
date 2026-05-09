@@ -46,6 +46,32 @@ from app.utils.cost_tracking import current_job_id, current_node_id
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Sprint X.24 — process-wide cap on concurrent execute_all_nodes runs.
+# Lazy-init so the value is read from settings at first use; tests reset
+# via _reset_execution_slot_sem() after mutating settings. Single-process
+# uvicorn (worker=1) means a plain module global is sufficient — no
+# cross-process Redis lock needed. If we ever go multi-worker the cap
+# must move to Redis.
+# ---------------------------------------------------------------------------
+_execution_slot_sem: asyncio.Semaphore | None = None
+
+
+def _get_execution_slot_sem() -> asyncio.Semaphore:
+    global _execution_slot_sem
+    if _execution_slot_sem is None:
+        _execution_slot_sem = asyncio.Semaphore(
+            settings.execution_global_concurrency
+        )
+    return _execution_slot_sem
+
+
+def _reset_execution_slot_sem() -> None:
+    """Test hook — drop the cached semaphore so the next call re-reads settings."""
+    global _execution_slot_sem
+    _execution_slot_sem = None
+
+
+# ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
 
@@ -1163,6 +1189,40 @@ async def execute_all_nodes(
     t0 = time.monotonic()
     node_results: list[dict] = []
 
+    # ---- Sprint X.24: process-wide concurrency cap ----
+    # Acquired before any DB work so a queued run does not flip the job to
+    # 'running' (which would fool both observability and the stale-job
+    # reaper). Released at every exit path: each early `return` below calls
+    # ``_release_slot()`` explicitly, and the main-loop ``finally`` calls
+    # it before re-raising. Idempotent — safe to call more than once.
+    _slot_sem = _get_execution_slot_sem()
+    _slot_acquired = False
+
+    def _release_slot() -> None:
+        nonlocal _slot_acquired
+        if _slot_acquired:
+            _slot_sem.release()
+            _slot_acquired = False
+
+    if _slot_sem.locked():
+        yield _sse("queued", {
+            "job_id": job_id,
+            "cap": settings.execution_global_concurrency,
+            "timeout_seconds": settings.execution_queue_timeout_seconds,
+        })
+    try:
+        _q_timeout = settings.execution_queue_timeout_seconds or None
+        await asyncio.wait_for(_slot_sem.acquire(), timeout=_q_timeout)
+        _slot_acquired = True
+    except asyncio.TimeoutError:
+        yield _sse("error", {
+            "message": "Execution queue timeout — too many concurrent runs",
+            "job_id": job_id,
+            "cap": settings.execution_global_concurrency,
+            "http_status": 503,
+        })
+        return
+
     # ---- Session 1: concurrent execution guard (atomic check-and-set) ----
     # #17: guard excludes 'completed' so finished jobs can't be re-executed.
     async with async_session() as db:
@@ -1190,6 +1250,7 @@ async def execute_all_nodes(
                     "job_id": job_id,
                     "http_status": 409,
                 })
+            _release_slot()
             return
         await db.commit()
 
@@ -1198,6 +1259,7 @@ async def execute_all_nodes(
         job = await _get_job(db, job_id)
     if not job:
         yield _sse("error", {"message": f"Job {job_id} not found"})
+        _release_slot()
         return
     # Allowlist: only 'running' (set by Session 1 guard above) or 'executing'.
     # 'refining' and 'planning' are not executable here — callers should finish
@@ -1206,6 +1268,7 @@ async def execute_all_nodes(
         yield _sse("error", {
             "message": f"Job status is '{job['status']}' — not executable",
         })
+        _release_slot()
         return
 
     # ---- Session 3: auto-generate DAG if missing ----
@@ -1227,6 +1290,7 @@ async def execute_all_nodes(
             except Exception as exc:
                 logger.error("auto_dag_generation_failed: job=%s error=%s", job_id, exc)
                 yield _sse("error", {"message": f"DAG generation failed: {exc}"})
+                _release_slot()
                 return
 
     # ---- Main execute loop, wrapped for abnormal-exit cleanup (#2) ----
@@ -1467,6 +1531,11 @@ async def execute_all_nodes(
                 "execute_all_nodes_cleanup_failed: job=%s error=%s",
                 job_id, _cleanup_exc,
             )
+
+        # X.24: release the process-wide slot before any re-raise so a
+        # queued run can pick up immediately. Idempotent — _release_slot
+        # has already been called for the early-return paths in Sessions 1-3.
+        _release_slot()
 
         # Re-raise CancelledError so the framework knows we were cancelled.
         if exit_reason == "cancelled" and exit_exception is not None:
