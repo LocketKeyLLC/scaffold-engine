@@ -614,6 +614,26 @@ class JobSynthesisOverrideResponse(BaseModel):
     override: bool | None
 
 
+class ErrorLogResolveInput(BaseModel):
+    """Audit M4 — input for PATCH /observability/errors/{id}.
+
+    ``resolved`` is required so the caller declares intent explicitly.
+    ``resolution`` is a free-form note describing the triage decision
+    (e.g. "fixed_by: W.6 tool_call migration"); empty / None means
+    no note. The endpoint stamps ``resolved_at = NOW()`` when
+    resolved=true, and clears it when resolved=false.
+    """
+    resolved: bool
+    resolution: str | None = None
+
+
+class ErrorLogResolveResponse(BaseModel):
+    error_id: str
+    resolved: bool
+    resolution: str | None
+    resolved_at: str | None
+
+
 class JobSummary(BaseModel):
     id: str
     title: str

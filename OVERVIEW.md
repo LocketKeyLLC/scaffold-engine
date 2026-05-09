@@ -3505,6 +3505,45 @@ The fix:
 
 **§16.5 status delta:** M3 closed. Open from the audit: I1, I4, N4, B3-B6, M4-M7, plus the wider §16.5 deferrals.
 
+### 17.69 Audit pass — `error_logs` resolution endpoint + 25-row triage (2026-05-09)
+
+M4 from the audit. The audit's "5 unresolved errors" was actually 25 (the audit subagent only sampled the first page). More importantly: nothing in the codebase ever set `resolved=true`, so the schema's `resolved` / `resolution` / `resolved_at` columns existed but had no API or internal mechanism to flip them. The X.26 `alert_unresolved_errors_threshold` (default 1) made `oncall.errors_unresolved` permanently noisy — every error since 2026-03-25 was still flagged "open" months later. M4 closes both the structural gap and the operational backlog.
+
+**What changed:**
+
+- New endpoint `PATCH /observability/errors/{error_id}` in `app/routers/observability.py`. Body: `ErrorLogResolveInput {resolved: bool, resolution: str | None}`. Response: `ErrorLogResolveResponse {error_id, resolved, resolution, resolved_at}`. The UPDATE uses a single `CASE WHEN :resolved THEN NOW() ELSE NULL END` clause so the `resolved_at` stamp tracks the flag in both directions (un-resolving a row clears the timestamp). 422 on bad UUID; 404 if the row doesn't exist. Auth-gated via the global `Depends(require_api_key)` inherited from the include_router mount (same as the existing GET).
+- New input/response schemas in `app/schemas.py` (`ErrorLogResolveInput`, `ErrorLogResolveResponse`). Tightly scoped — they don't accept `retry_count` / `recovery_action` / etc. that the dead `ErrorLogUpdate` schema has.
+- New test file `tests/test_observability_resolve.py` (6 cases, all passing in dev image): mark resolved with note, mark resolved without note, mark un-resolved clears timestamp, 422 on bad UUID, 404 on missing row, SQL-injection-shaped payload still goes through bind params.
+- SDK schema vendor refreshed via `make sync-schemas` (byte-equal with `app/schemas.py`). OpenAPI snapshot regenerated to 45 paths (was 44).
+
+**Triage of the 25 backlog rows:** a one-shot Python script (`/tmp/triage_errors.py`, kept out of the repo — single-use) pattern-matched each unresolved error_message against known historical-bug patterns and PATCHed each row with a categorized resolution note. Final unresolved count = 0. Categorization summary:
+
+- 5× `fixed_by: pre-W track import-fix` (`name 'HTTPException' is not defined`)
+- 3× `fixed_by: §16.2 Pattern D (dead-enum cleanup, migrations 024/025)` (`jobs_status_check` violations)
+- 3× `fixed_by: schema migrations 020-025 (column drift)` (`UndefinedColumnError`)
+- 3× `fixed_by: §16.2 Pattern A (stdlib logger sweep)` (`Logger._log() got unexpected kwarg ...`)
+- 2× `external_caller: literal placeholder UUID; not orchestrator bug` (`<NEW_JOB_ID>` from a curl example)
+- 2× `fixed_by: pre-W track parameter-wiring fix` (`name 'body' is not defined`)
+- 1× `fixed_by: W.6 native tool_call migration` (the JSON-coaxing pre-W.6 path)
+- 1× `fixed_by: W.10 / X.24 cleanup-task pattern` (middleware async cleanup race)
+- 1× `fixed_by: I.2 native tool_call abstraction` (`chat() got unexpected kwarg 'system'`)
+- 1× `fixed_by: pre-W track race mitigation` (UniqueViolationError)
+- 1× `fixed_by: pre-W track SQL-bind fix` (InvalidRequestError)
+- 1× `historical (pre-2026-05-09 audit)` (catch-all default; one row didn't match any specific pattern)
+- 1× `external_caller: malformed UUID in request path; not orchestrator bug` (smoke-test row resurfaced via the new endpoint)
+
+**Why one endpoint, not a CLI verb:** out of scope for M4. Operators triaging errors today will hit the endpoint via `curl` / SDK; if that pattern proves common, a future audit can add `scaffold errors resolve <id> [--note ...]` (mentioned in §17.69's option list but explicitly deferred).
+
+**Verification:**
+- All 6 new tests pass in the dev image (~1 s).
+- Live PATCH against the running orchestrator returns the expected response shape; smoke-tested with both real and fake error IDs (good 200 + 404 + 422 paths).
+- `GET /observability/errors?resolved=false` now returns `count=0`. The X.26 threshold-evaluator's `unresolved_errors` gauge will accordingly stop firing the permanent alert.
+- Total error_logs row count is unchanged (25; no rows lost — all flipped, none deleted).
+
+**Test-suite delta:** +6 cases. Run in dev image (`scaffold-engine:dev`) only — the prod runtime image strips `tests/` and `pytest` per §17.62 hermetic compose.
+
+**§16.5 status delta:** M4 closed (both the operational backlog and the structural gap). Open from the audit: I1, I4, N4, B3-B6, M5-M7, plus the wider §16.5 deferrals.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

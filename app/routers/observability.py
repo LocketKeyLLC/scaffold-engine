@@ -2,22 +2,27 @@
 
 Three read-only endpoints over existing telemetry tables:
 
-  GET /observability/llm    — llm_call_logs aggregated by (provider, model)
-  GET /observability/errors — recent error_logs filtered by resolved flag
-  GET /observability/jobs   — recent jobs joined with their LLM totals
+  GET   /observability/llm           — llm_call_logs aggregated by (provider, model)
+  GET   /observability/errors        — recent error_logs filtered by resolved flag
+  GET   /observability/jobs          — recent jobs joined with their LLM totals
+  PATCH /observability/errors/{id}   — mark an error_log row resolved (M4)
 
-All endpoints fail-open: a missing telemetry table or transient DB
-error returns the zero/empty shape, never 500. Mounted in app/main.py
-via ``app.include_router(observability_router)``; inherits the global
-``Depends(require_api_key)``.
+All read endpoints fail-open: a missing telemetry table or transient
+DB error returns the zero/empty shape, never 500. Mounted in
+app/main.py via ``app.include_router(observability_router)``;
+inherits the global ``Depends(require_api_key)``.
 """
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.modules import observability_rollups
+from app.schemas import ErrorLogResolveInput, ErrorLogResolveResponse
 
 router = APIRouter(tags=["Observability"])
 
@@ -97,4 +102,57 @@ async def recent_jobs_endpoint(
         window_minutes=window_minutes,
         limit=limit,
         db=db,
+    )
+
+
+@router.patch(
+    "/observability/errors/{error_id}",
+    response_model=ErrorLogResolveResponse,
+)
+async def resolve_error_endpoint(
+    error_id: str,
+    body: ErrorLogResolveInput,
+    db: AsyncSession = Depends(get_db),
+) -> ErrorLogResolveResponse:
+    """Audit M4 — mark an error_log row resolved (or un-resolved).
+
+    Body ``{"resolved": true, "resolution": "..."}`` flips the row's
+    ``resolved`` flag, stores the optional triage note, and stamps
+    ``resolved_at = NOW()``. Body ``{"resolved": false}`` un-resolves
+    the row and clears ``resolved_at``; the resolution note is
+    overwritten to whatever the caller passes (None to clear).
+
+    Without this endpoint there was no API mechanism for clearing
+    ``error_logs`` rows, so the X.26 ``alert_unresolved_errors_threshold``
+    threshold went off as soon as the first ever error was recorded
+    and never cleared.
+
+    422 on bad UUID; 404 if the row doesn't exist.
+    """
+    try:
+        UUID(error_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="error_id must be a valid UUID")
+
+    r = await db.execute(text("""
+        UPDATE error_logs
+           SET resolved = :resolved,
+               resolution = :resolution,
+               resolved_at = CASE WHEN :resolved THEN NOW() ELSE NULL END
+         WHERE id = :id
+        RETURNING id, resolved, resolution, resolved_at
+    """), {
+        "id": error_id,
+        "resolved": body.resolved,
+        "resolution": body.resolution,
+    })
+    row = r.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"error_log not found: {error_id}")
+    await db.commit()
+    return ErrorLogResolveResponse(
+        error_id=str(row.id),
+        resolved=row.resolved,
+        resolution=row.resolution,
+        resolved_at=row.resolved_at.isoformat() if row.resolved_at else None,
     )

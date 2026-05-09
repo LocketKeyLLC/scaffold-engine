@@ -1,6 +1,30 @@
 {
   "components": {
     "schemas": {
+      "AssistChatMapInput": {
+        "properties": {
+          "last_node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Node Key"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "AssistChatMapInput",
+        "type": "object"
+      },
       "AssistFrictionInput": {
         "properties": {
           "node_key": {
@@ -236,6 +260,73 @@
           "id"
         ],
         "title": "DeleteResponse",
+        "type": "object"
+      },
+      "ErrorLogResolveInput": {
+        "description": "Audit M4 — input for PATCH /observability/errors/{id}.\n\n``resolved`` is required so the caller declares intent explicitly.\n``resolution`` is a free-form note describing the triage decision\n(e.g. \"fixed_by: W.6 tool_call migration\"); empty / None means\nno note. The endpoint stamps ``resolved_at = NOW()`` when\nresolved=true, and clears it when resolved=false.",
+        "properties": {
+          "resolution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution"
+          },
+          "resolved": {
+            "title": "Resolved",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "resolved"
+        ],
+        "title": "ErrorLogResolveInput",
+        "type": "object"
+      },
+      "ErrorLogResolveResponse": {
+        "properties": {
+          "error_id": {
+            "title": "Error Id",
+            "type": "string"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution"
+          },
+          "resolved": {
+            "title": "Resolved",
+            "type": "boolean"
+          },
+          "resolved_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved At"
+          }
+        },
+        "required": [
+          "error_id",
+          "resolved",
+          "resolution",
+          "resolved_at"
+        ],
+        "title": "ErrorLogResolveResponse",
         "type": "object"
       },
       "ExecRetryInput": {
@@ -1708,6 +1799,147 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/assist/_chatmap/{chat_id}": {
+      "delete": {
+        "operationId": "assist_chatmap_delete_assist__chatmap__chat_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "chat_id",
+            "required": true,
+            "schema": {
+              "title": "Chat Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Chatmap Delete",
+        "tags": [
+          "Assist"
+        ]
+      },
+      "get": {
+        "operationId": "assist_chatmap_get_assist__chatmap__chat_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "chat_id",
+            "required": true,
+            "schema": {
+              "title": "Chat Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Chatmap Get",
+        "tags": [
+          "Assist"
+        ]
+      },
+      "put": {
+        "operationId": "assist_chatmap_put_assist__chatmap__chat_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "chat_id",
+            "required": true,
+            "schema": {
+              "title": "Chat Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistChatMapInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Chatmap Put",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
     "/assist/start": {
       "post": {
         "operationId": "assist_start_assist_start_post",
@@ -2981,7 +3213,7 @@
     },
     "/jobs/{job_id}": {
       "delete": {
-        "description": "Hard-delete a job. Cascade removes dag_nodes / execution_logs / artifacts /\nerror_logs (FK ON DELETE CASCADE). Sets performance_logs.job_id NULL.",
+        "description": "Hard-delete a job. Cascade removes dag_nodes / execution_logs / artifacts /\nerror_logs (FK ON DELETE CASCADE). llm_call_logs rows are unaffected\n(no FK; off-job calls live there too).",
         "operationId": "delete_job_jobs__job_id__delete",
         "parameters": [
           {
@@ -3277,6 +3509,406 @@
           }
         ],
         "summary": "Get Logs"
+      }
+    },
+    "/observability/alerts": {
+      "get": {
+        "description": "Recent alerts. Sorted newest first. Fail-open (empty list) on DB error.",
+        "operationId": "list_alerts_endpoint_observability_alerts_get",
+        "parameters": [
+          {
+            "description": "Filter by alert kind (exact match).",
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by alert kind (exact match).",
+              "title": "Kind"
+            }
+          },
+          {
+            "description": "Only alerts created within the last N minutes.",
+            "in": "query",
+            "name": "since_minutes",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 10080,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only alerts created within the last N minutes.",
+              "title": "Since Minutes"
+            }
+          },
+          {
+            "description": "Max rows returned.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "description": "Max rows returned.",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response List Alerts Endpoint Observability Alerts Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Alerts Endpoint",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
+    "/observability/errors": {
+      "get": {
+        "description": "Recent error_logs rows for an oncall view.\n\nPass ``resolved=false`` for \"what's still broken.\" ``since_minutes``\nbounds how far back to look — useful for \"errors in the last hour\"\ntriage. Sorted newest first.",
+        "operationId": "recent_errors_endpoint_observability_errors_get",
+        "parameters": [
+          {
+            "description": "Filter by resolved flag. Omit for all; pass false for an oncall view.",
+            "in": "query",
+            "name": "resolved",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by resolved flag. Omit for all; pass false for an oncall view.",
+              "title": "Resolved"
+            }
+          },
+          {
+            "description": "Only errors created within the last N minutes.",
+            "in": "query",
+            "name": "since_minutes",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 10080,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only errors created within the last N minutes.",
+              "title": "Since Minutes"
+            }
+          },
+          {
+            "description": "Max rows returned (default 50).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Max rows returned (default 50).",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Recent Errors Endpoint Observability Errors Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Recent Errors Endpoint",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
+    "/observability/errors/{error_id}": {
+      "patch": {
+        "description": "Audit M4 — mark an error_log row resolved (or un-resolved).\n\nBody ``{\"resolved\": true, \"resolution\": \"...\"}`` flips the row's\n``resolved`` flag, stores the optional triage note, and stamps\n``resolved_at = NOW()``. Body ``{\"resolved\": false}`` un-resolves\nthe row and clears ``resolved_at``; the resolution note is\noverwritten to whatever the caller passes (None to clear).\n\nWithout this endpoint there was no API mechanism for clearing\n``error_logs`` rows, so the X.26 ``alert_unresolved_errors_threshold``\nthreshold went off as soon as the first ever error was recorded\nand never cleared.\n\n422 on bad UUID; 404 if the row doesn't exist.",
+        "operationId": "resolve_error_endpoint_observability_errors__error_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "error_id",
+            "required": true,
+            "schema": {
+              "title": "Error Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ErrorLogResolveInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLogResolveResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Resolve Error Endpoint",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
+    "/observability/jobs": {
+      "get": {
+        "description": "Recent jobs with their LLM cost + latency totals.\n\nLists jobs created within the window, sorted by total cost DESC\n(then created_at DESC). Each row carries the job's status and its\naggregated cost/tokens/latency from ``llm_call_logs``. Jobs with\nzero logged calls (planning-only, or pre-J.3.a) appear with zeros\nrather than being omitted.\n\nUseful for \"what's been expensive in the last hour/day\" without\npaging through ``/jobs`` and calling ``/jobs/{id}/costs`` per row.",
+        "operationId": "recent_jobs_endpoint_observability_jobs_get",
+        "parameters": [
+          {
+            "description": "Job creation window in minutes (default 24h).",
+            "in": "query",
+            "name": "window_minutes",
+            "required": false,
+            "schema": {
+              "default": 1440,
+              "description": "Job creation window in minutes (default 24h).",
+              "maximum": 10080,
+              "minimum": 1,
+              "title": "Window Minutes",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Max rows returned (default 25).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "description": "Max rows returned (default 25).",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Recent Jobs Endpoint Observability Jobs Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Recent Jobs Endpoint",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
+    "/observability/llm": {
+      "get": {
+        "description": "System-wide LLM cost + latency rollup.\n\nAggregates ``llm_call_logs`` over the last ``window_minutes`` minutes,\ngrouped by ``(provider, model)`` and sorted by total cost DESC.\nIncludes call count, success/failure split, token totals, and\np50/p95/p99 latency per group.\n\nComplements ``GET /jobs/{id}/costs`` (per-job) — this is the\n\"what's the system spending right now\" view.",
+        "operationId": "llm_rollup_endpoint_observability_llm_get",
+        "parameters": [
+          {
+            "description": "Aggregation window in minutes (max 7 days).",
+            "in": "query",
+            "name": "window_minutes",
+            "required": false,
+            "schema": {
+              "default": 60,
+              "description": "Aggregation window in minutes (max 7 days).",
+              "maximum": 10080,
+              "minimum": 1,
+              "title": "Window Minutes",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Filter to one provider (e.g. 'openai', 'ollama').",
+            "in": "query",
+            "name": "provider",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter to one provider (e.g. 'openai', 'ollama').",
+              "title": "Provider"
+            }
+          },
+          {
+            "description": "Filter to one model (exact match, e.g. 'gpt-4o').",
+            "in": "query",
+            "name": "model",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter to one model (exact match, e.g. 'gpt-4o').",
+              "title": "Model"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Llm Rollup Endpoint Observability Llm Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Llm Rollup Endpoint",
+        "tags": [
+          "Observability"
+        ]
       }
     },
     "/optimize": {
