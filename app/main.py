@@ -118,50 +118,99 @@ def _check_reranker_state(state) -> dict:
 
 
 async def _pre_migration_sweep() -> dict:
-    """Idempotent pre-migration sweep of stuck 'running' research_sessions.
+    """Idempotent startup crash-recovery sweep.
 
-    Returns a small status dict the lifespan caller logs:
+    Two independent stages, both run unconditionally; either is a no-op
+    on a fresh or healthy DB:
 
-    - ``{"skipped": True, "reason": "table_not_yet_created", "cleared": 0}``
-      on fresh DBs where ``research_sessions`` hasn't been created by
-      migration 010 yet.
-    - ``{"skipped": False, "reason": None, "cleared": <int>}`` after a
-      successful UPDATE; the count is the number of stale rows cancelled.
+    1. **research_sessions** — cancel any ``'running'`` row older than
+       5 minutes. Audit item 7: makes migration 020's UNIQUE-index
+       precondition robust regardless of when 020 first applies and
+       regardless of crash-recovery state.
+    2. **dag_nodes** — reset any ``'running'`` row to ``'pending'`` and
+       refresh ``updated_at`` on the owning jobs. No time threshold:
+       at lifespan startup the orchestrator process is the only one that
+       could have set a node to 'running', so any such row is by
+       definition a crash-orphan (X.25, see below).
 
-    Audit item 7. Runs on every startup so migration 020's UNIQUE-index
-    precondition is robust regardless of when 020 first applies and
-    regardless of crash-recovery state. Idempotent — running it on a
-    healthy DB matches no rows and changes nothing.
+    Returns the legacy three-key shape for back-compat with the lifespan
+    log (``skipped`` / ``reason`` / ``cleared`` describe stage 1) plus
+    additive keys for stage 2 (``dag_nodes_reset``, ``parent_jobs_refreshed``).
 
-    Sprint X.1: cutoff tightened 30min → 5min. The wide cutoff was a
-    legacy artifact from before runtime client-disconnect handling
-    (``_sse_with_disconnect_watch``) reliably finalized rows live; with
-    that handler in place, any 'running' row at startup is by definition
-    a crash-orphan (the orchestrator wasn't around to update it). The 5-
-    minute buffer remains so a session that started in the seconds
-    before lifespan completed isn't pre-emptively cancelled.
+    Sprint X.1: research_sessions cutoff tightened 30min → 5min once
+    ``_sse_with_disconnect_watch`` reliably finalized rows live.
+
+    Sprint X.25: stage 2 added. Previously dag_nodes relied on the 30-min
+    periodic orphan reaper (``_REAP_ORPHAN_NODES_SQL``), which used
+    ``started_at < NOW() - threshold`` — correct under live operation but
+    leaving up to a 30-min dead window after a crash where nodes sat
+    'running' and ``_REAP_RUNNING_SQL`` (which refuses to fail jobs with
+    a running node) couldn't reap the parents. Resetting at startup with
+    no threshold closes the window: any 'running' node at startup is an
+    orphan because no executor exists yet.
     """
     async with async_session() as db:
         async with db.begin():
-            exists = await db.execute(text(
+            sessions_exist = await db.execute(text(
                 "SELECT 1 FROM information_schema.tables "
                 "WHERE table_name = 'research_sessions'"
             ))
-            if exists.scalar() is None:
-                return {"skipped": True, "reason": "table_not_yet_created", "cleared": 0}
-            result = await db.execute(text("""
-                UPDATE research_sessions
-                   SET status = 'cancelled',
-                       error_message = COALESCE(error_message, 'reaped_at_startup'),
-                       completed_at = NOW(),
-                       updated_at = NOW()
-                 WHERE status = 'running'
-                   AND updated_at < NOW() - INTERVAL '5 minutes'
-            """))
+            if sessions_exist.scalar() is None:
+                sessions_skipped = True
+                sessions_reason = "table_not_yet_created"
+                sessions_cleared = 0
+            else:
+                sessions_result = await db.execute(text("""
+                    UPDATE research_sessions
+                       SET status = 'cancelled',
+                           error_message = COALESCE(error_message, 'reaped_at_startup'),
+                           completed_at = NOW(),
+                           updated_at = NOW()
+                     WHERE status = 'running'
+                       AND updated_at < NOW() - INTERVAL '5 minutes'
+                """))
+                sessions_skipped = False
+                sessions_reason = None
+                sessions_cleared = (
+                    sessions_result.rowcount
+                    if sessions_result.rowcount is not None else 0
+                )
+
+            nodes_exist = await db.execute(text(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_name = 'dag_nodes'"
+            ))
+            if nodes_exist.scalar() is None:
+                dag_nodes_reset = 0
+                parent_jobs_refreshed = 0
+            else:
+                nodes_result = await db.execute(text("""
+                    UPDATE dag_nodes
+                       SET status = 'pending',
+                           updated_at = NOW()
+                     WHERE status = 'running'
+                    RETURNING job_id
+                """))
+                node_rows = nodes_result.fetchall()
+                dag_nodes_reset = len(node_rows)
+                parent_jobs_refreshed = 0
+                if node_rows:
+                    affected_job_ids = list({str(r.job_id) for r in node_rows})
+                    refresh_result = await db.execute(text("""
+                        UPDATE jobs
+                           SET updated_at = NOW()
+                         WHERE id = ANY(CAST(:ids AS uuid[]))
+                           AND status IN ('running', 'executing')
+                        RETURNING id
+                    """), {"ids": affected_job_ids})
+                    parent_jobs_refreshed = len(refresh_result.fetchall())
+
             return {
-                "skipped": False,
-                "reason": None,
-                "cleared": result.rowcount if result.rowcount is not None else 0,
+                "skipped": sessions_skipped,
+                "reason": sessions_reason,
+                "cleared": sessions_cleared,
+                "dag_nodes_reset": dag_nodes_reset,
+                "parent_jobs_refreshed": parent_jobs_refreshed,
             }
 
 
@@ -202,11 +251,15 @@ async def lifespan(app: FastAPI):
     try:
         sweep = await _pre_migration_sweep()
         if sweep["skipped"]:
-            logger.info("startup_sweep_skipped: reason=%s", sweep["reason"])
+            logger.info(
+                "startup_sweep_skipped: reason=%s dag_nodes_reset=%d parent_jobs_refreshed=%d",
+                sweep["reason"], sweep["dag_nodes_reset"], sweep["parent_jobs_refreshed"],
+            )
         else:
             logger.info(
-                "startup_sweep_complete: stale_running_cleared=%d",
-                sweep["cleared"],
+                "startup_sweep_complete: stale_running_cleared=%d "
+                "dag_nodes_reset=%d parent_jobs_refreshed=%d",
+                sweep["cleared"], sweep["dag_nodes_reset"], sweep["parent_jobs_refreshed"],
             )
     except Exception as exc:
         # Keep this defensive — sweep failure must not block startup since
@@ -266,8 +319,15 @@ async def lifespan(app: FastAPI):
     else:
         app.state.reranker_prewarm_skipped = True
 
-    # Optional startup cleanup
-    if os.getenv("CLEANUP_ON_STARTUP", "").lower() == "true":
+    # Eager cleanup at startup. Default-on (X.25): the periodic reaper's
+    # first sweep is gated by `cleanup_interval_seconds` (15 min default),
+    # so without an explicit eager pass any non-orphan stale state
+    # (e.g. long-phase jobs whose updated_at is already past threshold)
+    # waits one full interval before being reaped. Combined with the
+    # `_pre_migration_sweep` dag_nodes reset above, this closes the
+    # restart-mid-DAG dead window. Opt out with CLEANUP_ON_STARTUP=false.
+    _cleanup_startup = os.getenv("CLEANUP_ON_STARTUP", "true").strip().lower()
+    if _cleanup_startup not in ("0", "false", "no", "off"):
         logger.info('event="startup_cleanup_begin"')
         try:
             async with async_session() as db:
@@ -278,6 +338,8 @@ async def lifespan(app: FastAPI):
                 )
         except Exception as exc:
             logger.error('event="startup_cleanup_failed" error=%s', exc)
+    else:
+        logger.info('event="startup_cleanup_skipped" CLEANUP_ON_STARTUP=%s', _cleanup_startup)
 
     _cleanup_task = start_cleanup_task()
     # Start APScheduler (rehydrates scheduled_jobs from DB)

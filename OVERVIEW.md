@@ -3339,6 +3339,22 @@ W.9's noted follow-up. The default replan policy (`context_only`) used to call t
 
 **Surface still open from §16.5:** deployment-surface audit, refresh macro bench baseline, wire bench gates into `make ci`, Prometheus `/metrics`, OTel per-job timeline.
 
+### 17.60 Sprint X.25 — close the 30-min restart-mid-DAG dead window (2026-05-09)
+
+A second §16.5 follow-on, surfaced while reviewing X.24's lifecycle invariants. Restart-mid-DAG (process kill, container restart, deploy) left a deterministic dead window: any `dag_nodes` row sitting in `running` at crash time stayed `running` after the orchestrator came back up, because the only thing that reset it was the periodic orphan reaper at `app/modules/cleanup.py::_REAP_ORPHAN_NODES_SQL` (`started_at < NOW() - 30 min`). Worse, `_REAP_RUNNING_SQL` *refuses* to fail jobs that have a running node (correctly — it doesn't want to clobber a live execution), so the parent job was also locked in `executing` for that 30-minute period. `_pre_migration_sweep` had handled the analogous `research_sessions` case since X.1 but never extended to dag_nodes, and `CLEANUP_ON_STARTUP` was opt-in (default empty string → not "true" → skipped).
+
+**What changed:**
+
+- `app/main.py::_pre_migration_sweep()` — now a two-stage sweep. Stage 1 is unchanged (cancel `running` research_sessions older than 5 min, audit item 7). Stage 2 is new: `UPDATE dag_nodes SET status='pending' WHERE status='running' RETURNING job_id`, **with no time threshold**. At lifespan startup the executor process does not exist yet by definition, so any 'running' node is a crash-orphan — same reasoning that justified the 5-min cutoff in stage 1, but tighter (no buffer needed because a crashed-then-restarted orchestrator is unambiguous, whereas a recently-started session could in theory race with the periodic reaper). After resetting nodes, parent jobs in `running`/`executing` get a fresh `updated_at` so `_REAP_RUNNING_SQL`'s 30-min lease isn't pre-charged against a job that just survived a crash.
+- Return shape is additive: legacy `{"skipped", "reason", "cleared"}` keys preserved (lifespan log + 5 existing tests depend on them); new `dag_nodes_reset` and `parent_jobs_refreshed` keys carry the stage-2 counts.
+- `CLEANUP_ON_STARTUP` is now **default-on** with the same opt-out vocabulary as `SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP` (`false`/`0`/`no`/`off`). The periodic reaper's first sweep is still gated by `cleanup_interval_seconds` (15 min), so without an explicit eager pass any non-orphan stale state — long-phase jobs whose `updated_at` is already past threshold, paused-research with expired pause_expires_at — waited one full interval. Combined with the stage-2 dag_nodes reset, this closes the dead window.
+
+**Why both fixes, when the prompt suggested either/or:** they're orthogonal and reinforce each other. The dag_nodes reset is necessary (without it, even an eager `reap_stale_jobs` can't unstick the parent job because the running node still exists). The default-on cleanup is sufficient for everything *else* that's stale across a restart (long-phase, planning, awaiting_confirmation, abandoned assist sessions). Doing one without the other leaves a class of stale state on the table.
+
+**Test-suite delta:** `tests/test_pre_migration_sweep.py` rewritten to drive the two-stage shape — 4 → 8 cases. New cases: stage-2 reset with no time threshold, parent-jobs refresh fires only when nodes were reset, dag_nodes existence-check short-circuit, both-tables-missing skip path. Full suite: 1297 → **1301 passing**, 4 skipped, 1 unrelated pre-existing failure (`test_retrieval_golden.py::test_golden_retrieval[...test-driven development-eng-test]` — pytest-timeout in Milvus poll, confirmed pre-existing on main with a stash-and-rerun).
+
+**Migration impact:** none. No schema changes. The dag_nodes existence check via `information_schema.tables` makes stage 2 a no-op on truly fresh DBs (where init.sql hasn't run yet). On established DBs, the SQL runs in the same transaction as stage 1 — atomic w.r.t. the migration runner that follows.
+
 ### 17.58 Sprint X.22 — drop dead `performance_logs` table + `log_model_call` helper (2026-05-08)
 
 X.20 surfaced this and X.21 noted it: `performance_logs` had no writers (J.3.a's `_record_call` → `llm_call_logs` replaced the path), and `app/middleware/performance.py:log_model_call()` was a 50-line helper that nothing called. X.22 drops both.
