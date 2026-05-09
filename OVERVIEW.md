@@ -3314,6 +3314,33 @@ W.9's noted follow-up. The default replan policy (`context_only`) used to call t
 
 **Carryover.** The `/confirm`→assist chat-id plumbing remains the last sub-one-line follow-up from W-track. Not a perf or UX issue, just a nice-to-have for users on `assist_after_confirm=true`. **→ Closed in W.11.**
 
+### 17.55 Sprint X.19 — retry-loop coverage matrix (2026-05-08)
+
+§16.5 of the audit explicitly noted: *"no coverage matrix for execution_agent's retry loop."* Closed.
+
+**Coverage map (post-X.19):**
+
+| Surface | Test file | Coverage |
+|---|---|---|
+| `app/model_router.py:_dispatch_with_retry` | `tests/test_model_router.py` | max_retries exhaustion, fallback model swap, primary success — already covered pre-X.19. |
+| `app/modules/execution_agent.py:_format_reviewer_feedback` | `tests/test_execution_agent_feedback.py` | retry_count gating, reason gating, attempt-counter rendering — already covered. |
+| `app/modules/execution_agent.py:_build_prompt` (W.1 injection) | `tests/test_execution_agent_feedback.py` | block prepended on retry; first-attempt unaffected — already covered. |
+| `app/modules/execution_agent.py:_set_node_status` | `tests/test_execution_agent_feedback.py` | persists `last_verification_reason`; None passthrough for non-W.1 callers — already covered. |
+| `app/modules/execution_agent.py:retry_failed_node` | **new `tests/test_execution_agent_retry.py`** | 10 cases: validation (not-found, wrong-status, exhausted retries, boundary at retry_count=max-1), leaf reset, BFS reset of pending+failed downstream with done/skipped preservation, transitive dependents via BFS diamond shape, unrelated-branch isolation, return-shape contract. |
+| **W.1 round-trip** (DB row → `_build_prompt` → LLM input) | **new in `tests/test_execution_agent_feedback.py`** | 2 cases: retry-state row's `last_verification_reason` reaches the model's user message verbatim; first-attempt row with stale reason produces no feedback block. |
+
+**Key contract closed.** Pre-X.19, the W.1 wiring between a persisted rejection reason and the next attempt's prompt was tested only at the helper level — `_format_reviewer_feedback` and `_build_prompt` worked in isolation, but nothing asserted that `execute_next_node` carried the row's `retry_count` + `last_verification_reason` through `node_snapshot` and into the actual LLM call. The new round-trip tests use `model_router.chat` capture + a `_ShortCircuit` exception to assert the prompt verbatim without needing the full execute lifecycle mocked.
+
+**Critical contract closed for `retry_failed_node`.** The downstream-reset semantics — that retrying an upstream preserves successful (`done`) and operator-skipped (`skipped`) sibling subgraphs — was undocumented as a test invariant before X.19. A regression that flipped `done` nodes to `pending` on retry would silently undo successful work; the new `test_pending_and_failed_downstream_reset_done_preserved` and `test_skipped_downstream_preserved` are the regression guards.
+
+**Test-suite delta:** +12 cases. 1226 → 1238 passing.
+
+**What's still uncovered (out of X.19 scope, audit §16.5):**
+- Live concurrency tests for `_get_next_node`'s atomic claim under simultaneous /execute calls (require real Postgres; integration suite).
+- Performance benchmarking — single-job throughput, RAG end-to-end latency, executor concurrency under load. Audit-flagged but unmeasured.
+- Observability completeness — log fan-out, metric coverage, alerting hooks.
+- Deployment-surface audit — Dockerfile, compose, .env.example.
+
 ### 17.54 Sprint W.11 — `/confirm`→assist chat-id plumbing (2026-05-08)
 
 The last carryover from W.9 + W.10. When `valves.assist_after_confirm=True`, `/confirm` auto-chains into `/assist/start` instead of `/execute/all`. Pre-W.11, that auto path called `_assist_start(job_id)` without `chat_id`, so users who opted into the auto-route lost the W.9 chat memory the explicit `/assist <job_id>` flow gives them. Three-line fix:

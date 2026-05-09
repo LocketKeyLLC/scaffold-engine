@@ -13,6 +13,7 @@ from app.modules.execution_agent import (
     _build_prompt,
     _format_reviewer_feedback,
     _set_node_status,
+    execute_next_node,
 )
 
 
@@ -162,3 +163,180 @@ async def test_set_node_status_passes_none_when_caller_omits_reason():
     args, _ = db.execute.call_args
     _, params = args
     assert params["verification_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# W.1 integration — `execute_next_node` wires retry state from the DB row
+# through `_build_prompt` and into the LLM call.
+# ---------------------------------------------------------------------------
+#
+# The unit tests above prove `_format_reviewer_feedback` and `_build_prompt`
+# work in isolation, and that `_set_node_status` persists the reason. The
+# missing piece was: does `execute_next_node` actually carry retry_count +
+# last_verification_reason from the SQL row through to the prompt the model
+# receives? Without that wiring, the persisted reason is dead text.
+#
+# This test patches the row-claim seam (`_get_next_node`), captures what
+# the model is asked, and asserts the feedback block landed in the user
+# message. It deliberately short-circuits before verifier/persistence so
+# the test surface is the wiring contract, not the full execute lifecycle.
+
+
+from contextlib import asynccontextmanager
+from unittest.mock import patch
+from app.modules import execution_agent
+
+
+@asynccontextmanager
+async def _fake_session(db):
+    """Build a context-manager-shaped fake for `async with async_session()`."""
+    yield db
+
+
+def _fake_session_factory(db):
+    """Module-level patcher: replace `async_session` with a callable that
+    returns the context manager. Mirrors the pattern in test_execution_agent_*."""
+    return lambda: _fake_session(db)
+
+
+@pytest.mark.asyncio
+async def test_execute_next_node_wires_retry_feedback_through_to_llm_prompt():
+    """Retry-state row → `_build_prompt` → LLM input must contain the W.1
+    block. Patches the LLM call to capture the prompt and short-circuit."""
+    job_id = "11111111-2222-3333-4444-555555555555"
+
+    captured_messages = {}
+
+    class _ShortCircuit(Exception):
+        """Raised after capture to bail early with a known signal."""
+
+    async def _capture_and_bail(messages, model=None, **kw):
+        # `messages = [{"role": "system", ...}, {"role": "user", ...}]`
+        captured_messages["all"] = messages
+        raise _ShortCircuit()
+
+    db = AsyncMock()
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+
+    job_row = {
+        "id": job_id, "status": "running",
+        "refined_brief": {"description": "Build a bash linter"},
+    }
+    # Row state: this node failed once, verifier said the output was wrong.
+    # On retry, the prompt MUST carry that rejection reason forward.
+    node_row = {
+        "id": "node-uuid",
+        "node_key": "T1",
+        "title": "List 3 algorithms",
+        "tool": "LLM",
+        "prompt_template": "Name three sorting algorithms.",
+        "domain": None,
+        "depends_on": [],
+        "assigned_model": None,
+        "retry_count": 1,
+        "last_verification_reason": "Only one algorithm given; task asked for three",
+    }
+
+    with patch.object(
+        execution_agent, "async_session", _fake_session_factory(db),
+    ), patch.object(
+        execution_agent, "_get_job", AsyncMock(return_value=job_row),
+    ), patch.object(
+        execution_agent, "_get_next_node", AsyncMock(return_value=node_row),
+    ), patch.object(
+        execution_agent, "_fetch_upstream_outputs", AsyncMock(return_value={}),
+    ), patch.object(
+        execution_agent, "_fetch_rag_context", AsyncMock(return_value=None),
+    ), patch.object(
+        execution_agent, "_log_execution", AsyncMock(),
+    ), patch.object(
+        execution_agent, "_set_node_status", AsyncMock(),
+    ), patch.object(
+        execution_agent.model_router, "chat", _capture_and_bail,
+    ):
+        # skip_optimize keeps optimize_prompt out of the picture.
+        # The captured _ShortCircuit exception bubbles up through the
+        # execute path's exception handler, which writes 'failed' and
+        # returns a failed-shape dict — we don't assert on that.
+        result = await execute_next_node(job_id, skip_optimize=True)
+
+    # Result is a failed-shape because we raised _ShortCircuit; we don't
+    # care about that. The contract is what the model SAW.
+    assert "all" in captured_messages, "model_router.chat was never invoked"
+    user_msg = next(
+        m["content"] for m in captured_messages["all"] if m["role"] == "user"
+    )
+    assert "Reviewer feedback (attempt 2)" in user_msg, (
+        "W.1 feedback block missing — execute_next_node didn't wire "
+        "retry_count + last_verification_reason from the row into the "
+        f"user prompt. Got prompt:\n{user_msg[:500]}"
+    )
+    assert "Only one algorithm given" in user_msg, (
+        "rejection reason from last_verification_reason must appear "
+        "verbatim in the prompt — that's the entire point of W.1."
+    )
+    # And a sanity check: the original task prompt is still there too.
+    assert "Name three sorting algorithms." in user_msg
+
+
+@pytest.mark.asyncio
+async def test_execute_next_node_first_attempt_has_no_feedback_block():
+    """Counterpart: a first-attempt row (retry_count=0) must NOT inject the
+    block, even if last_verification_reason has stale content from a prior
+    cleanup or hand-edited row."""
+    job_id = "22222222-2222-3333-4444-555555555555"
+    captured_messages = {}
+
+    class _ShortCircuit(Exception):
+        pass
+
+    async def _capture_and_bail(messages, model=None, **kw):
+        captured_messages["all"] = messages
+        raise _ShortCircuit()
+
+    db = AsyncMock()
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+
+    job_row = {
+        "id": job_id, "status": "running",
+        "refined_brief": {"description": "x"},
+    }
+    node_row = {
+        "id": "node-uuid",
+        "node_key": "T1",
+        "title": "Plan task",
+        "tool": "LLM",
+        "prompt_template": "Plan it.",
+        "domain": None,
+        "depends_on": [],
+        "assigned_model": None,
+        "retry_count": 0,  # ← first attempt
+        "last_verification_reason": "stale leftover from migration",
+    }
+
+    with patch.object(
+        execution_agent, "async_session", _fake_session_factory(db),
+    ), patch.object(
+        execution_agent, "_get_job", AsyncMock(return_value=job_row),
+    ), patch.object(
+        execution_agent, "_get_next_node", AsyncMock(return_value=node_row),
+    ), patch.object(
+        execution_agent, "_fetch_upstream_outputs", AsyncMock(return_value={}),
+    ), patch.object(
+        execution_agent, "_fetch_rag_context", AsyncMock(return_value=None),
+    ), patch.object(
+        execution_agent, "_log_execution", AsyncMock(),
+    ), patch.object(
+        execution_agent, "_set_node_status", AsyncMock(),
+    ), patch.object(
+        execution_agent.model_router, "chat", _capture_and_bail,
+    ):
+        await execute_next_node(job_id, skip_optimize=True)
+
+    user_msg = next(
+        m["content"] for m in captured_messages["all"] if m["role"] == "user"
+    )
+    assert "Reviewer feedback" not in user_msg
+    assert "stale leftover" not in user_msg
