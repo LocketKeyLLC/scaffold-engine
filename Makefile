@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: _ensure_dev test test-cli test-sdk agent eval bench build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config
+.PHONY: _ensure_dev test test-cli test-sdk agent eval bench build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -74,6 +74,12 @@ ci: _ensure_dev ## Run CI-safe tests (no live Ollama/Milvus needed; dev image)
 
 bootstrap: ## First-time setup: generate .env, create network/volumes, build + start stack
 	@bash scripts/bootstrap.sh $(BOOTSTRAP_ARGS)
+
+bootstrap-host: ## Audit I1: host-level setup audit (SSD mount, daemon.json, ai-network pin, volume chown). Run BEFORE `make bootstrap` on a fresh host.
+	@bash scripts/bootstrap-host.sh
+
+bootstrap-host-check: ## Same as bootstrap-host, but read-only — no changes applied.
+	@bash scripts/bootstrap-host.sh check
 
 doctor: ## Health audit: probe every dep + verify key sync (read-only)
 	@bash scripts/doctor.sh

@@ -3732,6 +3732,63 @@ B6 from the audit. `scripts/quarterly_calibration_pr.sh:13` carried a Crontab-en
 
 **§16.5 status delta:** B6 closed. **The B-series of the audit (B1-B6) is now fully closed.** Open from the audit: I1, I4, N4, plus the wider §16.5 deferrals.
 
+### 17.77 Audit pass — `scripts/bootstrap-host.sh` companion (2026-05-09)
+
+I1 from the audit. The §17.63 SSD migration documented six host-level steps in OVERVIEW prose (SSD format + mount, fstab entry, repo symlink, Docker `daemon.json` data-root + `/var/lib/docker` rsync, `ai-network` subnet pin, named-volume chown) but never automated them. A fresh deploy on another host couldn't `git clone && make bootstrap` and have a working stack — the operator had to read §17.63 carefully and replay every step by hand. I1 closes that gap.
+
+**Design decision — auto-apply only the safe steps.** The destructive / sudo / first-time steps (disk format, fstab edit, dockerd restart, `/var/lib/docker` rsync) are real failure modes if hidden inside a "run this script" experience: a wrong-device `wipefs -a` or a partial rsync would brick the host. So the script splits into two tiers:
+
+- **Auto-applied (idempotent):** symlink creation, ai-network creation when missing, volume chown via the existing X.28 `chown_named_volumes.sh`.
+- **Detected and reported:** disk-format / fstab / daemon.json / dockerd-restart / data-root rsync. The script prints the exact commands the operator must run, exits non-zero, and a re-run picks back up at the missing step.
+
+Both tiers share one read-only `check` mode (`bootstrap-host.sh check`) that audits the state without changing anything.
+
+**What the script verifies (in order):**
+
+1. `/mnt/adamssd` is a mounted ext4 filesystem (via `findmnt` — works regardless of how the SSD is named).
+2. `/etc/fstab` carries an entry for `/mnt/adamssd` with `nofail` set (so a detached SSD doesn't stall boot).
+3. `~/scaffold-engine` is a symlink pointing at `/mnt/adamssd/scaffold-engine`. If absent on apply mode, creates it. If exists as a real directory (not a symlink), refuses to clobber — operator action required.
+4. `/etc/docker/daemon.json` exists and contains `"data-root": "/mnt/adamssd/docker"`. Cross-checks against `docker info`'s `DockerRootDir` so a config-drift between file and running daemon surfaces as a "restart pending" warn.
+5. `ai-network` exists with the pinned `172.18.0.0/16` subnet (gateway `172.18.0.1`). On apply, creates it when missing. When it exists with a wrong subnet, warns + reports the recreation steps but does NOT auto-recreate (would require detaching every running container — same posture as the B1 fix in `bootstrap.sh::ensure_network`).
+6. The `scaffold-engine_scaffold-logs` volume is owned by UID/GID `10001:10001` (the X.28 scaffold-user pin). On mismatch in apply mode, runs `scripts/chown_named_volumes.sh` (idempotent per X.28). When the volume doesn't exist yet (fresh host before first compose-up), prints a deferral note rather than failing.
+
+**Make targets:**
+
+- `make bootstrap-host` — check + apply.
+- `make bootstrap-host-check` — read-only audit.
+
+Both wired into `.PHONY`. Help-text wording calls out that `bootstrap-host` runs BEFORE `bootstrap` on a fresh host (because `bootstrap.sh::ensure_network` and the rest of `bootstrap.sh` assume the network + Docker daemon are already configured correctly).
+
+**Verification on the live host (post-§17.63):**
+
+```
+$ make bootstrap-host-check
+== 1. /mnt/adamssd ext4 mount ==
+✓ /mnt/adamssd mounted ext4 from /dev/sda
+== 2. fstab persistence ==
+    UUID=890b531e-…  /mnt/adamssd  ext4  defaults,nofail,…  0  2
+✓ fstab entry present (nofail set …)
+== 3. /home/aedefruscio/scaffold-engine symlink ==
+✓ symlink already correct: /home/aedefruscio/scaffold-engine → /mnt/adamssd/scaffold-engine
+== 4. /etc/docker/daemon.json data-root ==
+✓ daemon.json data-root → /mnt/adamssd/docker
+✓ running dockerd reports DockerRootDir=/mnt/adamssd/docker
+== 5. ai-network subnet pin (172.18.0.0/16, gateway 172.18.0.1) ==
+✓ ai-network present (subnet 172.18.0.0/16)
+== 6. Named-volume ownership (UID 10001 = scaffold user, X.28) ==
+✓ scaffold-engine_scaffold-logs owned by 10001:10001
+== Summary ==
+✓ host bootstrap is complete — nothing to do
+```
+
+Exit code 0 on the current host (every §17.63 step previously applied by hand survives the audit). On a fresh host every step would fail in turn until the operator follows the printed commands; subsequent re-runs incrementally green out.
+
+**Why not parameterize the SSD device path:** `findmnt -no SOURCE /mnt/adamssd` returns whatever device is actually mounted, so the script doesn't need to know `/dev/sda` vs `/dev/sdb` etc. The disk-format command in the warn output names `/dev/sda` only as an example — the operator is expected to verify with `lsblk` first (the warn text says so explicitly).
+
+**Test-suite delta:** none — the script is host-level operator tooling, not orchestrator code.
+
+**§16.5 status delta:** I1 closed. Open from the audit: I4, N4, plus the wider §16.5 deferrals.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
