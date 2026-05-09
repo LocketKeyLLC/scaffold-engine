@@ -88,7 +88,7 @@ All containers on Docker `ai-network` bridge (172.18.0.0/16). Pipelines and orch
 | SearXNG | 8888 | `searxng` | pinned by SHA256 |
 | Ollama | 11434 | (host, not containerized) | local install, CPU-only |
 
-Compose: `docker-compose.yml` is the prod runtime (no tests, no Makefile in image). `docker-compose.dev.yml` is the dev override (mounts `tests/`, `Makefile`, `docs/` for snapshot regen, adds dev pip deps). `make dev-up` brings up the dev overlay; `make test` requires the dev image.
+Compose: `docker-compose.yml` is the prod runtime — image is hermetic, **zero host-source bind mounts**, only the `hf-cache` and `scaffold-logs` named volumes are mounted (post-X.27, 2026-05-09; §17.62). `docker-compose.dev.yml` is the dev override that bind-mounts `app/`, `tests/`, `cli/`, `sdk/`, `scripts/`, `db/`, `pipelines/`, `Dockerfile`, `.github/`, `docs/` (all `:ro`) plus `tests/benchmarks/` (rw) for live edit + bench writes. `make dev-up` brings up the dev overlay; `make test` requires the dev image.
 
 All pip deps in `requirements.txt` (prod) / `requirements-dev.txt` / `requirements-ci.txt` (CI), every line pinned. All container images pinned by SHA256 digest in compose.
 
@@ -3355,6 +3355,27 @@ A second §16.5 follow-on, surfaced while reviewing X.24's lifecycle invariants.
 
 **Migration impact:** none. No schema changes. The dag_nodes existence check via `information_schema.tables` makes stage 2 a no-op on truly fresh DBs (where init.sql hasn't run yet). On established DBs, the SQL runs in the same transaction as stage 1 — atomic w.r.t. the migration runner that follows.
 
+### 17.62 Sprint X.27 — prod-compose hermetic: drop host-source bind mounts (2026-05-09, `35d9454`)
+
+The §15-style invariant "**prod = no tests, no host source**" was false in `docker-compose.yml`. Lines 124–130 mounted seven host directories (`./app`, `./tests`, `./cli`, `./sdk`, `./scripts`, `./ground_truths`, `./db`) into the prod container as `:ro`, silently shadowing the multi-stage `Dockerfile` runtime stage's careful COPYs with whatever sat on the host. This neutered the hermetic-build guarantee and meant a host-side edit propagated into "prod" on next restart, never going through the build/test gate. Docker's bind-mount auto-mkdir behavior also created `./ground_truths` on the host as `root:root` (the dir was never tracked in git; the compose mount was its sole creator), leaving an unwritable phantom directory on the user's filesystem.
+
+The catch that made this non-trivial to fix: `app/web/routes.py:58,99` imports `scaffold_client` from `sdk/` at runtime, and the `make idea / resume / explain / whatnow / confirm / retry / skip / node-logs / config` targets shell into `/code/cli/scaffold_cli/` via `docker exec`. Both were resolving **only** through the bind mounts. Naive removal would have broken `/jobs` + `/jobs/{id}` in the live web UI.
+
+**What changed (one commit, three files):**
+
+- **`Dockerfile` runtime stage:** added `COPY sdk/scaffold_client/ /code/sdk/scaffold_client/` and `COPY cli/scaffold_cli/ /code/cli/scaffold_cli/`. The per-package `tests/` subdirs stay dev-only — they are not shipped to the runtime image.
+- **`Dockerfile` runtime + dev stages:** `ENV PYTHONPATH="/code:/code/sdk"` baked into the image. PYTHONPATH used to live only in `docker-compose.yml` env, so any `docker run` against the image (without compose) silently dropped `scaffold_client` resolution. Now PYTHONPATH is image-intrinsic; compose carries no environment-dependency on this contract.
+- **`Dockerfile` dev stage:** `COPY sdk/ /code/sdk/` and `COPY cli/ /code/cli/` (full trees, including `tests/` so `make test-cli` and `make test-sdk` work even without the dev override).
+- **`docker-compose.yml`:** all seven host-source bind mounts removed. Only `hf-cache:/code/.cache/huggingface` and `scaffold-logs:/var/log/scaffold` remain (named volumes, no host-source surface). Redundant `PYTHONPATH` env dropped (now image-intrinsic).
+- **`docker-compose.dev.yml`:** the live-edit mounts moved here where they belong, all `:ro` so the container view cannot mutate host source: `./app`, `./tests`, `./cli`, `./sdk`, `./scripts`, `./db`, plus the existing `./pipelines`, `./Dockerfile`, `./.github`, `./docs`, and the rw `./tests/benchmarks` for bench result writes. `./ground_truths` is bind-mounted nowhere — runtime never reads it; only `cli/scaffold_cli/main.py` references the literal `ground_truths/` as a *target path inside the GitHub KB repo*, written via the `gh` API, not a local FS path.
+- **Phantom dir reclaim:** `./ground_truths` (empty, root-owned) `rmdir`'d on the host. With the bind-mount gone, the trap closes itself — Docker has no reason to recreate it.
+
+**Live verification:** rebuilt and recreated the orchestrator on the new dev overlay; `/health` returns green for postgres + ollama + milvus + redis + reranker; `from scaffold_client import Client` resolves; `mount` inside the container shows the new dev override set with no `ground_truths`. Standalone `docker run --target runtime` confirms `scaffold_client` and `scaffold_cli.main` import cleanly **without** any compose env supplying PYTHONPATH (i.e. the runtime image is now self-sufficient).
+
+**Test-suite delta:** no test changes; **1325 passed, 4 skipped, 1 failed** in 9m42s (`make test` in dev image). The single failure is `test_retrieval_golden::test_golden_retrieval[Explain the principles of test-driven development-eng-test]` — the same pre-existing X.25/X.26 carryover (pytest-timeout >60s in the live retrieval path), unrelated to compose/Dockerfile changes. Net regressions: zero.
+
+**§15 invariant impact:** the "prod image strips dev artifacts" claim now matches the deployed surface — the previous text was aspirational, now it is actually enforced. Compose can no longer drift away from it without an explicit edit (and any new mount has to land in the dev override, not in prod).
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
@@ -3641,7 +3662,7 @@ Every project-specific term you'll see in chat, in CLI output, in the SDK, in co
 
 **Bridge gateway** — Docker's `ai-network` bridge; `172.18.0.1` is the host's address from inside any container on the network. Used by the orchestrator and pipelines to reach host Ollama. `host.docker.internal` is NOT available on Pop!_OS native Docker.
 
-**Bind mount** — Docker volume that maps a host directory into a container. The dev compose mounts `./app:/code/app:ro`, `./tests:/code/tests:ro`, etc., so source edits show up live in the running container.
+**Bind mount** — Docker volume that maps a host directory into a container. The dev compose mounts `./app:/code/app:ro`, `./tests:/code/tests:ro`, etc., so source edits show up live in the running container. The prod compose mounts none of these — image is hermetic (X.27, §17.62). One Docker gotcha: if a referenced host bind path does not exist, Docker silently `mkdir`s it as `root:root` *before* applying any `:ro` flag, so a stray host-source mount can leave unwritable phantom dirs on the host filesystem.
 
 ### Configuration
 
