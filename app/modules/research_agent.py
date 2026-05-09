@@ -1087,6 +1087,32 @@ async def _run_research_github_mode(
         yield evt
 
 
+def _classify_extract_no_entries_reason(resp, parsed_args) -> str:
+    """Audit Finding A — explain *why* a tool_call extract returned no entries.
+
+    Pre-fix the URL/PDF extract sites logged ``…extract_failed: success=True
+    error=None`` in the most common case (model returned 200 OK but didn't
+    invoke the structured tool — typical W.6 brittleness on smaller CPU
+    models). Operators couldn't tell that scenario from a real LLM failure.
+    This helper returns a tight string distinguishing four cases:
+
+      - ``no_response``                — wrapper returned None (defensive).
+      - ``llm_error:<short>``          — actual dispatch / transport failure.
+      - ``no_tool_calls``              — 200 OK but model produced no tool_calls
+                                         (the W.6 case the fallback is for).
+      - ``tool_args_missing_entries``  — tool was invoked but the args dict
+                                         lacked the required ``entries`` key.
+    """
+    if resp is None:
+        return "no_response"
+    if not getattr(resp, "success", False):
+        err = (getattr(resp, "error", "") or "")[:80]
+        return f"llm_error:{err}" if err else "llm_error:unknown"
+    if not parsed_args:
+        return "no_tool_calls"
+    return "tool_args_missing_entries"
+
+
 async def _run_research_url_mode(
     url: str,
     state: ResearchState,
@@ -1145,9 +1171,24 @@ async def _run_research_url_mode(
     prompt_topic = page_title if page_title != url[:200] else f"content at {url}"
     batch_size = _EXTRACT_BATCH_FULL_PAGE
     entries: list[dict] = []
+    # Audit Finding B — explicit batch counters so a future hang can be
+    # localized via `make logs-research`. The pre-fix code logged nothing
+    # between the first batch's warning and `extraction_complete`, so an
+    # operator inspecting an indefinitely-running session had no signal
+    # for which iteration was in flight.
+    total_batches = (len(chunks) + batch_size - 1) // batch_size
+    logger.info(
+        "url_mode_extract_loop_start: chunks=%d batches=%d batch_size=%d url=%s",
+        len(chunks), total_batches, batch_size, url,
+    )
 
     for i in range(0, len(chunks), batch_size):
+        batch_idx = i // batch_size
         batch_chunks = chunks[i:i + batch_size]
+        logger.info(
+            "url_mode_extract_batch_start: batch=%d/%d chunks_in_batch=%d",
+            batch_idx, total_batches, len(batch_chunks),
+        )
         results_text = "\n\n".join(
             f"Title: {page_title}\nURL: {url}\nSnippet: {c[:600]}"
             for c in batch_chunks
@@ -1182,14 +1223,18 @@ async def _run_research_url_mode(
                 entry.setdefault("source_type", "community")
             entries.extend(batch_entries)
         else:
+            # Audit Finding A — distinguish "model declined to use the
+            # structured tool" from a genuine LLM dispatch failure. Pre-
+            # fix the warning logged "url_mode_extract_failed: success=True
+            # error=None" with no signal for which path fell through.
+            reason = _classify_extract_no_entries_reason(resp, parsed_args)
             logger.warning(
-                "url_mode_extract_failed: batch=%d success=%s error=%s",
-                i // batch_size,
-                resp.success if resp else None,
-                resp.error if resp else "no-resp",
+                "url_mode_extract_no_entries: batch=%d reason=%s falling_back_to_chunks",
+                batch_idx, reason,
             )
 
         if not batch_entries:
+            fallback_count = 0
             for c in batch_chunks:
                 if len(c) > 50:
                     entries.append({
@@ -1201,7 +1246,23 @@ async def _run_research_url_mode(
                         "source_type": "community",
                         "facet": "direct_url",
                     })
+                    fallback_count += 1
+            logger.info(
+                "url_mode_extract_batch_done: batch=%d/%d "
+                "entries_from_llm=0 entries_from_chunks=%d total_entries_so_far=%d",
+                batch_idx, total_batches, fallback_count, len(entries),
+            )
+        else:
+            logger.info(
+                "url_mode_extract_batch_done: batch=%d/%d "
+                "entries_from_llm=%d entries_from_chunks=0 total_entries_so_far=%d",
+                batch_idx, total_batches, len(batch_entries), len(entries),
+            )
 
+    logger.info(
+        "url_mode_extract_loop_complete: total_entries=%d batches=%d url=%s",
+        len(entries), total_batches, url,
+    )
     yield _sse("extraction_complete", {
         "iteration": 1,
         "entries_extracted": len(entries),
@@ -1333,11 +1394,11 @@ async def _run_research_pdf_mode(
                 entry["source_type"] = entry.get("source_type") or "tech_docs"
             entries.extend(batch_entries)
         else:
+            # Audit Finding A — same wording fix as the URL-mode site.
+            reason = _classify_extract_no_entries_reason(resp, parsed_args)
             logger.warning(
-                "pdf_mode_extract_failed: batch=%d success=%s error=%s",
-                i // batch_size,
-                resp.success if resp else None,
-                resp.error if resp else "no-resp",
+                "pdf_mode_extract_no_entries: batch=%d reason=%s falling_back_to_chunks",
+                i // batch_size, reason,
             )
 
         if not batch_entries:

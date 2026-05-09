@@ -3868,6 +3868,44 @@ Neither finding blocks N4's runbook deliverable — when these are fixed, `scrip
 
 **Audit close-out:** The 2026-05-09 audit's full punch list (B1-B6, M1-M7, I1, I4, N4) is now closed in code. Wider §16.5 deferrals remain (macro bench baseline refresh, live-Postgres concurrency tests, ground_truth.json regen at KB=1093) — all explicitly scoped as "operator-time deferrals" rather than code work. Two new findings (A + B above) were surfaced during N4's smoke test and are queued for a future audit.
 
+### 17.80 Audit-tail — Finding A wording fix + Finding B loop instrumentation (2026-05-09)
+
+Finding A from §17.79 is fully fixed. Finding B is partially fixed — the structural hang it surfaced needs a reproduction to root-cause, so this commit adds the diagnostics needed to localize it on the next attempt rather than speculating at a fix.
+
+**Finding A — `..._extract_failed` warning wording.** Pre-fix, both `_run_research_url_mode` and `_run_research_pdf_mode` logged `"…_extract_failed: success=True error=None"` whenever the LLM returned 200 OK without using the structured tool — exactly the W.6 brittleness the chunk-fallback was built for, but the operator couldn't tell that case apart from a real LLM failure. New helper `_classify_extract_no_entries_reason(resp, parsed_args)` returns one of four tight reasons:
+
+- `no_response` — wrapper returned None (defensive; rare)
+- `llm_error:<short>` — actual dispatch / transport failure (truncated to 80 chars)
+- `no_tool_calls` — 200 OK but no tool_calls in response (the W.6 case)
+- `tool_args_missing_entries` — tool was invoked but args lacked the required `entries` key
+
+Both warning sites renamed `…_extract_no_entries` (the previous "_failed" wording was misleading — the code path treats this as a fallback, not a hard failure). 7 tests in `tests/test_research_agent_extract_no_entries.py::TestClassifyExtractNoEntriesReason` lock the four branches + the two truncation / unknown-error edge cases against future drift.
+
+**Finding B — direct_url extraction hangs after batch 0.** Pre-fix the URL-mode batch loop logged ONE warning (the original `extract_failed`) and otherwise emitted no INFO between `iteration_started` and the post-loop `extraction_complete` SSE event. The smoke ingest in §17.79 hung silently somewhere AFTER batch 1's LLM call returned (verified via `llm_call_logs`) and BEFORE `extraction_complete` was yielded — but the operator inspecting `make logs-research` had no signal for which step the orchestrator was wedged on.
+
+The fix is observability, not control flow. Three new INFO lines bracket the loop:
+
+```
+url_mode_extract_loop_start: chunks=N batches=M batch_size=K url=…
+url_mode_extract_batch_start: batch=I/M chunks_in_batch=N
+url_mode_extract_batch_done: batch=I/M entries_from_llm=X entries_from_chunks=Y total_entries_so_far=Z
+url_mode_extract_loop_complete: total_entries=N batches=M url=…
+```
+
+A test (`TestExtractLoopInstrumentation::test_url_mode_loop_logs_localize_a_hang`) drives the URL-mode generator with a stubbed empty-tool_calls LLM and asserts every line fires. The legacy `extract_failed` wording is regression-guarded — the test fails if it leaks back. When a future ingest hangs again, `make logs-research` will show exactly which named step is missing.
+
+**Why not auto-cap the loop with a timeout:** the underlying Ollama HTTP call already has a 600s timeout per batch (`Ollama.tool_call(timeout=600)`); a stuck HTTP would have errored within 10 minutes. The §17.79 hang persisted ~30 minutes past the second LLM call's return, so the cause is post-HTTP — wrapping the loop in `asyncio.wait_for` would mask the real bug rather than fix it. The instrumentation localizes; the next sprint root-causes once we can reproduce.
+
+**Verification:**
+
+- 36 tests pass (`tests/test_research_agent_extract_no_entries.py` + `test_research_agent_helpers.py` + `test_research_agent_core.py`) in 5.39s on dev image.
+- `grep -c "extract_failed" app/modules/research_agent.py` → `0`. The misleading wording is gone.
+- `grep "_classify_extract_no_entries_reason" app/modules/research_agent.py` → 3 hits (1 def, 2 use-sites for url + pdf modes).
+
+**Test-suite delta:** +8 cases across one new file. Existing research-agent suite count + status unchanged.
+
+**Audit-tail status:** Finding A closed. Finding B's diagnostics shipped; the underlying root cause stays open until a reproduction with the new logs identifies the stuck step. Audit findings list now contains only Finding B's root-cause investigation.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
