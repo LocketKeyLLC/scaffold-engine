@@ -1,6 +1,11 @@
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
+# X.28: prod rootfs is read_only and /code is root-owned in the dev image
+# (orchestrator runs as scaffold/10001, dev tests as 1000). Pin the cache
+# under /tmp (tmpfs in prod, writable in dev) so pytest can persist
+# nodeids/lastfailed without PytestCacheWarning at every shutdown.
+cache_dir = "/tmp/.pytest_cache"
 # default 30s timeout (individual tests can override via @pytest.mark.timeout) - fix #9.5
 # asyncio_mode=auto removes the need for @pytest.mark.asyncio on every async test - fix #9.4
 addopts = [
