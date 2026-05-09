@@ -3831,6 +3831,43 @@ Independently verified the regression-detection path with a synthetic JSONL (lat
 
 **§16.5 status delta:** I4 closed. Open from the audit: N4 (Milvus repopulation plan) plus the wider §16.5 deferrals (macro bench baseline refresh — purely a "set aside a quiet hour" operator task — and live-Postgres concurrency tests).
 
+### 17.79 Audit pass — KB repopulation runbook + smoke-ingest follow-up (2026-05-09)
+
+N4 from the audit. The §17.63 SSD migration left `toon_v2` empty; the audit flagged "pick ~6 topics representative of the prior corpus, run /research on each, re-baseline retrieval quality at KB=200ish, then expand." Per §17.63's own walk-away decision the orphan-segment import path is unviable (partition fan-out widened from 4 to 64; Parquet bytes survive on disk but etcd no longer maps the collection-id). So the realistic path is re-`/research` from canonical sources. The runbook captures that.
+
+**What changed:**
+
+`scripts/repopulate_kb.sh` (new, ~180 lines). Curated source list spanning the four populated partitions in the pre-migration corpus (eng, llm, rag, spec — the prompt partition was empty in the prior baseline too), three ingest modes:
+
+- **Tier 1 — fast (3-8 min each):** 2 `github:` repos (anthropic-cookbook, torchtune) + 4 Wikipedia URLs (Test-driven_development, Software_design_pattern, Vector_database, Retrieval-augmented_generation). The Wikipedia URLs are aligned with the active `test_golden_retrieval` queries so a successful repopulation directly unblocks the B3-skipped golden tests.
+- **Tier 2 — autonomous topic research (~22 min each):** 3 entries seeding the rag and llm partitions through the full search → extract → ingest loop.
+- Each row tagged with kind / target / expected partition / runtime / description; the dry-run (default) prints them as a structured table.
+- `--apply` runs the listed ingestions serially through the live `/research` endpoint, streaming SSE events to stdout (`tee` + `grep` filter so heartbeats don't drown the relevant events). Honors the orchestrator's existing concurrency caps; parallelism would dogpile Ollama on this CPU-only host.
+- `--tier fast` / `--tier topic` / `--tier all` (default) lets the operator pick a budget.
+- Pre-/post-flight uses `/health` to snapshot Milvus `entry_count` so the script exits non-zero if the corpus didn't grow after `--apply`.
+
+**Smoke ingest attempt + new findings (separate from N4 itself):**
+
+A live `/research` against `https://en.wikipedia.org/wiki/Test-driven_development` was kicked off as the smoke test. The first extraction LLM call to `qwen2.5:7b` succeeded (HTTP 200, `success=True`, latency 5:42, 514 completion tokens via `/observability/llm`). After that the orchestrator went silent: 30+ minutes elapsed with `{"status": "extracting", "iteration": 1}` heartbeats but no further LLM calls, no `extraction_complete` event, no `iteration_complete`, no entries in Milvus. The session was manually cancelled to free the slot. Two new findings surfaced — flagged here as audit-tail items, NOT folded into N4:
+
+- **Finding A — `url_mode_extract_failed` log wording is misleading.** `app/modules/research_agent.py:1186` warns "url_mode_extract_failed: batch=N success=%s error=%s" with `success=True error=None` when the model's response is 200 OK but contains no tool_calls (W.6 migration: the model declined to use the structured tool and returned plain text instead). The condition is "no parsed args" not "extract failed"; rename or restructure the message so an operator scanning logs can tell tool-call non-conformance from a genuine LLM failure.
+- **Finding B — direct_url extraction loop appears to hang after batch 0 when the LLM returns no tool_calls.** Falls through to the chunk-fallback path at `:1192-1203` which appends entries to `entries[]`, but the loop never emits `extraction_complete` and the request never advances to embed/ingest. Two embedding calls did fire (per `/observability/llm`) but Milvus entry_count stayed at 0. Reproduces deterministically with the Wikipedia URL above; needs a focused investigation of the loop's exit conditions and whether the chunk-fallback entries actually reach `_ingest_with_progress`. Likely interacts with the same W.6 brittleness X.10/X.11/X.12/B4 already had to harden in their respective sites.
+
+Neither finding blocks N4's runbook deliverable — when these are fixed, `scripts/repopulate_kb.sh --apply --tier fast` will work end-to-end. They're tracked as new audit findings.
+
+**Verification:**
+
+- `bash scripts/repopulate_kb.sh` (dry-run): prints both tiers cleanly, shows current Milvus entry_count, lists all 9 sources with partition + runtime estimates.
+- `bash scripts/repopulate_kb.sh --help`: full usage text.
+- `bash -n scripts/repopulate_kb.sh`: syntax OK.
+- Smoke ingest reached the extract phase live; cancelled cleanly via direct UPDATE on `research_sessions` after the bug surfaced. Post-cancel `/research/sessions?status=running` returns count=0.
+
+**Test-suite delta:** none — pure operator tooling.
+
+**§16.5 status delta:** N4 closed (the runbook is the deliverable per the audit's "plan" framing). The §17.64 footer's note that "RAG retrieval tests fail because the active toon_v2 collection is empty" remains accurate but those tests now skip cleanly via B3; running this runbook will additionally unblock the affirmative-pass case once Findings A + B are resolved upstream.
+
+**Audit close-out:** The 2026-05-09 audit's full punch list (B1-B6, M1-M7, I1, I4, N4) is now closed in code. Wider §16.5 deferrals remain (macro bench baseline refresh, live-Postgres concurrency tests, ground_truth.json regen at KB=1093) — all explicitly scoped as "operator-time deferrals" rather than code work. Two new findings (A + B above) were surfaced during N4's smoke test and are queued for a future audit.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
