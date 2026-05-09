@@ -12,7 +12,7 @@ API_URL   ?= http://localhost:8000
 ## Testing
 ## ──────────────────────────────────────────────
 
-test: ## Run all tests in Docker (~745 passing, 5 skipped)
+test: ## Run all tests in Docker (~1226 passing, 4 skipped)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v
 
 test-cli: ## Run scaffold CLI tests (cli/tests/) inside the dev container
