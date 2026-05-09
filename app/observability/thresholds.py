@@ -194,8 +194,18 @@ async def tick() -> None:
                     len(summary["fired"]), summary["window_minutes"],
                 )
             else:
-                logger.debug(
-                    'event="threshold_eval_clean" window_m=%d', summary["window_minutes"],
+                # INFO (not DEBUG) so the operator has a positive heartbeat
+                # at the configured log_level. The APScheduler executor log
+                # already proves dispatch happened; this proves the body ran
+                # to completion. unresolved/cost surfaced so a clean tick
+                # still answers "what did it see?" at a glance.
+                logger.info(
+                    'event="threshold_eval_clean" window_m=%d '
+                    'unresolved=%d cost_usd=%.4f p95_breaches=%d',
+                    summary["window_minutes"],
+                    int(summary.get("unresolved_errors") or 0),
+                    float(summary.get("total_cost_usd") or 0.0),
+                    len(summary.get("p95_breaches") or []),
                 )
     except Exception as exc:
         # Don't let scheduler tick errors crash the scheduler thread.
