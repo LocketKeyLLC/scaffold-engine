@@ -131,7 +131,8 @@ async def test_dispatch_retries_on_failure_then_falls_back():
             return model_router.ModelResponse(model=model, success=False, error="fail")
         return model_router.ModelResponse(model=model, text="fallback ok", success=True)
 
-    with patch.object(model_router, "_call_ollama", side_effect=fake_call):
+    with patch.object(model_router, "_call_ollama", side_effect=fake_call), \
+         patch.object(model_router, "_sleep_for_attempt", AsyncMock()):
         resp = await model_router._dispatch_with_retry(
             "/api/generate", {}, "primary", fallback="fallback", max_retries=3,
         )
@@ -168,12 +169,154 @@ async def test_dispatch_skips_fallback_when_same_as_primary():
         call_log.append(model)
         return model_router.ModelResponse(model=model, success=False, error="nope")
 
-    with patch.object(model_router, "_call_ollama", side_effect=fake_call):
+    with patch.object(model_router, "_call_ollama", side_effect=fake_call), \
+         patch.object(model_router, "_sleep_for_attempt", AsyncMock()):
         resp = await model_router._dispatch_with_retry(
             "/api/generate", {}, "same", fallback="same", max_retries=2,
         )
     assert resp.success is False
     assert call_log == ["same", "same"]  # only 2 attempts, no 3rd for fallback
+
+
+# ---------------------------------------------------------------------------
+# Retry policy: classifier + backoff + per-error-class branching
+# ---------------------------------------------------------------------------
+@pytest.mark.smoke
+def test_classify_failure_retries_on_timeout():
+    resp = model_router.ModelResponse(model="m", success=False, error="Timeout after 30s")
+    assert model_router._classify_failure(resp) == "retry"
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("code", [408, 425, 429, 500, 502, 503, 504])
+def test_classify_failure_retries_on_transient_http(code):
+    resp = model_router.ModelResponse(
+        model="m", success=False, error=f"HTTP {code}: upstream brownout",
+    )
+    assert model_router._classify_failure(resp) == "retry"
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("code", [400, 401, 403, 404, 422])
+def test_classify_failure_fails_fast_on_deterministic_http(code):
+    resp = model_router.ModelResponse(
+        model="m", success=False, error=f"HTTP {code}: nope",
+    )
+    assert model_router._classify_failure(resp) == "fail_fast"
+
+
+@pytest.mark.smoke
+def test_classify_failure_retries_on_generic_connection_error():
+    """str(e) for ConnectionResetError / ECONNREFUSED / DNS failures has no
+    'HTTP ' or 'Timeout' prefix — must default to retry, not fail_fast."""
+    resp = model_router.ModelResponse(
+        model="m", success=False, error="ConnectionResetError(104, ...)",
+    )
+    assert model_router._classify_failure(resp) == "retry"
+
+
+@pytest.mark.smoke
+def test_classify_failure_retries_on_malformed_http_error():
+    """If we can't parse the status code, default to retry rather than
+    silently failing fast."""
+    resp = model_router.ModelResponse(model="m", success=False, error="HTTP weird")
+    assert model_router._classify_failure(resp) == "retry"
+
+
+@pytest.mark.smoke
+def test_backoff_seconds_is_bounded_by_cap():
+    """Across 1000 samples at a high attempt index, no value exceeds the
+    cap. Validates the min(BASE * 2^attempt, CAP) clamp."""
+    samples = [model_router._backoff_seconds(20) for _ in range(1000)]
+    assert max(samples) <= model_router._BACKOFF_CAP_SEC
+    assert min(samples) >= 0.0
+
+
+@pytest.mark.smoke
+def test_backoff_seconds_grows_with_attempt():
+    """Mean delay at attempt 3 should clearly exceed mean at attempt 0
+    (full jitter: E[delay] = base * 2^attempt / 2, capped)."""
+    early = sum(model_router._backoff_seconds(0) for _ in range(500)) / 500
+    late = sum(model_router._backoff_seconds(3) for _ in range(500)) / 500
+    assert late > early
+
+
+@pytest.mark.smoke
+async def test_dispatch_fails_fast_on_4xx_skips_primary_retries():
+    """A 401/404/etc. on the primary jumps straight to the fallback —
+    no point hammering a model that's missing or an auth that's wrong."""
+    call_log = []
+
+    async def fake_call(endpoint, payload, model, timeout):
+        call_log.append(model)
+        if model == "primary":
+            return model_router.ModelResponse(
+                model=model, success=False, error="HTTP 404: model not found",
+            )
+        return model_router.ModelResponse(model=model, text="fb ok", success=True)
+
+    with patch.object(model_router, "_call_ollama", side_effect=fake_call), \
+         patch.object(model_router, "_sleep_for_attempt", AsyncMock()) as sleep_mock:
+        resp = await model_router._dispatch_with_retry(
+            "/api/generate", {}, "primary", fallback="fallback", max_retries=5,
+        )
+    assert resp.success is True
+    assert resp.fallback_used is True
+    assert call_log == ["primary", "fallback"]
+    assert sleep_mock.await_count == 0  # never sleep on fail_fast
+
+
+@pytest.mark.smoke
+async def test_dispatch_sleeps_between_transient_retries():
+    """Between transient failures (e.g. 503), the loop must sleep with
+    backoff. Sleep count = primary attempts - 1 (no sleep after last)."""
+    async def fake_call(endpoint, payload, model, timeout):
+        return model_router.ModelResponse(
+            model=model, success=False, error="HTTP 503: brownout",
+        )
+
+    with patch.object(model_router, "_call_ollama", side_effect=fake_call), \
+         patch.object(model_router, "_sleep_for_attempt", AsyncMock()) as sleep_mock:
+        await model_router._dispatch_with_retry(
+            "/api/generate", {}, "same", fallback="same", max_retries=4,
+        )
+    # 4 attempts → 3 sleeps between them, with attempt indices 0,1,2.
+    assert sleep_mock.await_count == 3
+    assert [c.args[0] for c in sleep_mock.await_args_list] == [0, 1, 2]
+
+
+@pytest.mark.smoke
+async def test_dispatch_no_sleep_on_first_try_success():
+    """Happy path: success on attempt 0 → zero sleeps."""
+    async def fake_call(endpoint, payload, model, timeout):
+        return model_router.ModelResponse(model=model, text="ok", success=True)
+
+    with patch.object(model_router, "_call_ollama", side_effect=fake_call), \
+         patch.object(model_router, "_sleep_for_attempt", AsyncMock()) as sleep_mock:
+        await model_router._dispatch_with_retry(
+            "/api/generate", {}, "same", fallback="same", max_retries=3,
+        )
+    assert sleep_mock.await_count == 0
+
+
+@pytest.mark.smoke
+async def test_dispatch_retries_count_reflects_actual_attempts_on_fail_fast():
+    """When fail_fast aborts after 1 attempt, the resp.retries field on
+    the fallback should reflect 1, not max_retries."""
+    async def fake_call(endpoint, payload, model, timeout):
+        if model == "primary":
+            return model_router.ModelResponse(
+                model=model, success=False, error="HTTP 401: unauthorized",
+            )
+        return model_router.ModelResponse(model=model, text="fb ok", success=True)
+
+    with patch.object(model_router, "_call_ollama", side_effect=fake_call), \
+         patch.object(model_router, "_sleep_for_attempt", AsyncMock()):
+        resp = await model_router._dispatch_with_retry(
+            "/api/generate", {}, "primary", fallback="fallback", max_retries=5,
+        )
+    assert resp.success is True
+    assert resp.retries == 1
 
 
 # ---------------------------------------------------------------------------

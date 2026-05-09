@@ -19,7 +19,9 @@ use to route per-role calls to non-Ollama backends.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
 import time
 from typing import Any, Optional
 
@@ -168,6 +170,53 @@ async def _call_ollama(
 # Retry + fallback wrapper
 # ---------------------------------------------------------------------------
 
+# HTTP status codes worth retrying. Everything else (auth, validation, 404)
+# won't recover by waiting — bail to fallback immediately.
+_RETRYABLE_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+# Full-jitter exponential backoff: sleep ∈ [0, min(BASE * 2^attempt, CAP)].
+# Base 0.5s / cap 8s gives windows of [0,0.5], [0,1], [0,2], [0,4], [0,8] —
+# enough to ride out an Ollama brownout without piling on, and the 0-floor
+# decorrelates concurrent retries (AWS "full jitter" pattern).
+_BACKOFF_BASE_SEC = 0.5
+_BACKOFF_CAP_SEC = 8.0
+
+
+def _classify_failure(resp: ModelResponse) -> str:
+    """Return ``'retry'`` for transient failures, ``'fail_fast'`` for
+    deterministic ones.
+
+    Transient: timeouts, 5xx, 429, connection-class exceptions (RST,
+    ECONNREFUSED, DNS) — these can recover on a second attempt.
+    Deterministic: 4xx other than 408/425/429 — auth, validation, missing
+    model. Retrying the same primary just delays the inevitable fallback.
+    """
+    err = resp.error or ""
+    if err.startswith("Timeout"):
+        return "retry"
+    if err.startswith("HTTP "):
+        try:
+            code = int(err.split(None, 2)[1].rstrip(":"))
+        except (IndexError, ValueError):
+            return "retry"
+        return "retry" if code in _RETRYABLE_HTTP_CODES else "fail_fast"
+    # Generic exception path (httpx connect errors, RST, DNS, etc.) —
+    # almost always transient, so retry.
+    return "retry"
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Full-jitter exponential backoff. ``attempt`` is 0-indexed: 0 is the
+    delay *after* the first failed call, before the second call."""
+    capped = min(_BACKOFF_BASE_SEC * (2 ** attempt), _BACKOFF_CAP_SEC)
+    return random.uniform(0.0, capped)
+
+
+async def _sleep_for_attempt(attempt: int) -> None:
+    """Coroutine wrapper around the backoff sleep so tests can patch it."""
+    await asyncio.sleep(_backoff_seconds(attempt))
+
+
 async def _record_call(resp: ModelResponse) -> ModelResponse:
     """Sprint J.3.a — fire-and-forget cost/latency telemetry hook.
 
@@ -192,13 +241,22 @@ async def _dispatch_with_retry(
     fallback: str | None = None,
     max_retries: int | None = None,
 ) -> ModelResponse:
-    """Retry cascade: up to max_retries on primary, then swap to fallback."""
+    """Retry cascade with exponential backoff + per-error-class branching.
+
+    Transient failures (timeout, 5xx, 429, connection-class) are retried on
+    the primary up to ``max_retries`` times, sleeping with full-jitter
+    exponential backoff between attempts. Deterministic failures (4xx
+    other than 408/425/429) skip remaining primary attempts and jump
+    straight to the fallback — waiting won't fix a 401 or a missing model.
+    """
     retries = max_retries if max_retries is not None else settings.max_retries
     fallback = fallback or _smart_fallback(model, settings.model_fallback)
 
     # Phase 1: retry primary model
     last_resp = ModelResponse(model=model, success=False, error="no attempt", provider="ollama")
+    attempts_used = 0
     for attempt in range(retries):
+        attempts_used = attempt + 1
         payload["model"] = model
         last_resp = await _call_ollama(
             endpoint, payload, model, _timeout_for(model),
@@ -206,10 +264,18 @@ async def _dispatch_with_retry(
         if last_resp.success:
             last_resp.retries = attempt
             return last_resp
+
+        classification = _classify_failure(last_resp)
         logger.warning(
-            "Attempt %d/%d failed for %s: %s",
-            attempt + 1, retries, model, last_resp.error,
+            "Attempt %d/%d failed for %s [%s]: %s",
+            attempt + 1, retries, model, classification, last_resp.error,
         )
+        if classification == "fail_fast":
+            break
+        # Sleep before the next primary attempt only; no point sleeping
+        # after the last attempt or right before the fallback swap.
+        if attempt + 1 < retries:
+            await _sleep_for_attempt(attempt)
 
     # Phase 2: fallback (skip if fallback == primary)
     if fallback and fallback != model:
@@ -218,14 +284,14 @@ async def _dispatch_with_retry(
         fb_resp = await _call_ollama(
             endpoint, payload, fallback, _timeout_for(fallback),
         )
-        fb_resp.retries = retries
+        fb_resp.retries = attempts_used
         fb_resp.fallback_used = True
         if fb_resp.success:
             return fb_resp
         last_resp = fb_resp
 
     # All attempts exhausted
-    last_resp.retries = retries
+    last_resp.retries = attempts_used
     logger.error("All attempts exhausted for %s (fallback: %s)", model, fallback)
     return last_resp
 
