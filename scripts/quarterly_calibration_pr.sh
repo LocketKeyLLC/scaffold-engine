@@ -10,7 +10,10 @@
 # in the real numbers before marking the PR ready.
 #
 # Crontab entry (8am UTC = 4am EST/EDT, 1st of Jan/Apr/Jul/Oct):
-#   0 8 1 1,4,7,10 *  /home/aedefruscio/scaffold-engine/scripts/quarterly_calibration_pr.sh >> /tmp/quarterly_calibration.log 2>&1
+#   0 8 1 1,4,7,10 *  /mnt/adamssd/scaffold-engine/scripts/quarterly_calibration_pr.sh >> /tmp/quarterly_calibration.log 2>&1
+# (The repo's symlink at ~/scaffold-engine resolves to the same place
+#  per §17.63, but cron has no shell-expansion contract for ~ — pin
+#  the absolute SSD path so a freshly-installed crontab is reliable.)
 #
 # Run manually any time to test:
 #   bash scripts/quarterly_calibration_pr.sh

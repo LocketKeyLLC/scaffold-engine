@@ -3718,6 +3718,20 @@ B5 from the audit. The §15 invariant says "`make test` runs in the dev image" �
 
 **§16.5 status delta:** B5 closed. Open from the audit: I1, I4, N4, B6, plus the wider §16.5 deferrals.
 
+### 17.76 Audit pass — refresh stale cron-example path (2026-05-09)
+
+B6 from the audit. `scripts/quarterly_calibration_pr.sh:13` carried a Crontab-entry example that hardcoded `/home/aedefruscio/scaffold-engine/scripts/...` — the pre-§17.63 NVMe path. The symlink set up during the SSD migration means the path still resolves at runtime, but a fresh operator reading the comment after the §17.63 move would have no signal that the absolute path is now under `/mnt/adamssd/`.
+
+**The fix:** one-line swap to `/mnt/adamssd/scaffold-engine/scripts/...`, with a 3-line note clarifying that the `~/scaffold-engine` symlink works equally for human reading but cron lacks a reliable shell-expansion contract for `~` so the SSD-absolute path is pinned.
+
+**Why not parameterize via `$HOME` or `$USER`:** cron environments don't reliably expand either; the manpage's `MAILTO=` block is one of the few env vars cron sets. Pinning the absolute path is the only contract that works on a vanilla `crontab -l`.
+
+**Adjacent stale path NOT touched:** the OVERVIEW §17.63 paragraph mentions `/home/aedefruscio/scaffold-engine` as part of describing the symlink relationship — that reference is intentional and correct. `.claude/settings.local.json` also references the old path in its Claude Code permission allowlist, but that's the operator's local Claude config, not project artifact.
+
+**Test-suite delta:** none. Comment-only.
+
+**§16.5 status delta:** B6 closed. **The B-series of the audit (B1-B6) is now fully closed.** Open from the audit: I1, I4, N4, plus the wider §16.5 deferrals.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
