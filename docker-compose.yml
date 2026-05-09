@@ -96,6 +96,12 @@ services:
       # :ro — searxng never writes its own config. The previous rw mount
       # left settings.yml host-rewritable from inside the container.
       - /home/aedefruscio/searxng:/etc/searxng:ro
+      # Named cache volume so the upstream image's `VOLUME /var/cache/searxng`
+      # instruction doesn't auto-create a new anonymous volume on every
+      # `compose up`. Cache content is non-essential (runtime query cache)
+      # but persisting it across restarts is harmless and avoids the
+      # dangling-volume cruft the audit pass M5 flagged.
+      - searxng-cache:/var/cache/searxng
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -285,6 +291,7 @@ volumes:
   hf-cache:
   scaffold-logs:
   redis-data:
+  searxng-cache:
   milvus-data-v2:
     external: true
     name: milvus-data-v2

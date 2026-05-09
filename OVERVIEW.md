@@ -3405,7 +3405,7 @@ Decision: **walk away.** The orphan stays on disk in `milvus-data-v2/data/insert
 
 **§16.5 status delta:** the deployment-surface audit gap is now harder, not easier — there is now meaningful operational state outside git that a fresh clone cannot reproduce. The audit needs to capture: the SSD layout (this section), the `daemon.json` format, the `ai-network` subnet pin requirement, the volume-ownership chown step. None of these were ever in scope for `make test` or `make ci`; they are pure host conventions. A `scripts/bootstrap-host.sh` companion to the existing `scripts/bootstrap.sh` (which is repo-aware) would be the right place for a one-shot reproducer.
 
-**Post-write follow-up (2026-05-09, same day):** after the stack was exercised end-to-end, `/var/lib/docker.old` was removed (`sudo rm -rf`) — the rollback safety net was no longer needed and the ~9 GB returned to the NVMe (`df -h /` post-cleanup: 54 G used / 160 G free, vs 63 G / 151 G before). The two pre-migration Milvus volumes (`milvus-data` 427 MB, `milvus-data-backup-20260413` 304 MB) were also `docker volume rm`'d after the orphan walk-away decision — both held the same 4.7 MB of pre-`-v2` era segments and added no new content over the active `milvus-data-v2`. Final volume topology: **8 named** (`milvus-data-v2`, `scaffold-postgres-data`, `scaffold-engine_hf-cache`, `scaffold-engine_redis-data`, `scaffold-engine_scaffold-logs`, `open-webui`, `open-webui-data`, `searxng-data`) **+ 1 anonymous** (created by the upstream `searxng` image's `VOLUME` instruction at `compose up`; harmless and would just be recreated if removed).
+**Post-write follow-up (2026-05-09, same day):** after the stack was exercised end-to-end, `/var/lib/docker.old` was removed (`sudo rm -rf`) — the rollback safety net was no longer needed and the ~9 GB returned to the NVMe (`df -h /` post-cleanup: 54 G used / 160 G free, vs 63 G / 151 G before). The two pre-migration Milvus volumes (`milvus-data` 427 MB, `milvus-data-backup-20260413` 304 MB) were also `docker volume rm`'d after the orphan walk-away decision — both held the same 4.7 MB of pre-`-v2` era segments and added no new content over the active `milvus-data-v2`. Volume topology at this point: 8 named + 1 anonymous (the upstream `searxng` image's `VOLUME /var/cache/searxng`), with three of the named volumes (`open-webui-data`, `searxng-data`, `scaffold-engine_scaffold-postgres-data`) being unattached orphans from earlier compose configurations. Audit pass M5 (§17.70) cleaned all four to land on the final topology: **7 named** (`milvus-data-v2`, `scaffold-postgres-data`, `scaffold-engine_hf-cache`, `scaffold-engine_redis-data`, `scaffold-engine_scaffold-logs`, `scaffold-engine_searxng-cache`, `open-webui`) **+ 0 anonymous**.
 
 ### 17.64 Sprint X.28 — non-root container hardening (2026-05-09)
 
@@ -3543,6 +3543,33 @@ M4 from the audit. The audit's "5 unresolved errors" was actually 25 (the audit 
 **Test-suite delta:** +6 cases. Run in dev image (`scaffold-engine:dev`) only — the prod runtime image strips `tests/` and `pytest` per §17.62 hermetic compose.
 
 **§16.5 status delta:** M4 closed (both the operational backlog and the structural gap). Open from the audit: I1, I4, N4, B3-B6, M5-M7, plus the wider §16.5 deferrals.
+
+### 17.70 Audit pass — searxng cache + 4-volume orphan cleanup (2026-05-09)
+
+M5 from the audit: the upstream `searxng/searxng` image declares two `VOLUME` instructions (`/etc/searxng` and `/var/cache/searxng`); the prod compose bind-mounted `/etc/searxng` against the host config dir but didn't declare anything for the cache, so Docker auto-created an anonymous volume on every `compose up`. Investigation surfaced three additional dangling named-volume orphans from earlier compose configurations (`open-webui-data` 1.0 GB, `searxng-data` 72 KB, `scaffold-engine_scaffold-postgres-data` 4 KB empty) that the §17.63 OVERVIEW had listed as part of the "final" topology but which the current compose didn't actually reference.
+
+**What changed:**
+- `docker-compose.yml::searxng` gains `searxng-cache:/var/cache/searxng` mount + a top-level `searxng-cache:` named-volume declaration. The upstream image's `VOLUME` instruction now resolves to the named volume at first attach, so subsequent `compose up` runs don't accumulate anonymous-volume cruft. Cache contents are runtime query cache — non-essential, but persisting across restarts is harmless and avoids the dangling-volume noise.
+- After recreating searxng, the four orphans were removed in one pass via `docker volume rm` (each by name / id):
+  - `bd22ee03737...` — the previous anonymous searxng cache, now superseded
+  - `open-webui-data` — 1.0 GB of OWUI state from before the volume rename to `open-webui` (webui.db, vector_db, uploads, cache from 2026-03-24); user-confirmed deletion
+  - `searxng-data` — 72 KB containing only an old `settings.yml`, superseded by the `/home/aedefruscio/searxng:/etc/searxng:ro` bind mount
+  - `scaffold-engine_scaffold-postgres-data` — empty 4 KB orphan (`lost+found` only) from a previous compose project-name prefix
+
+**Why a named cache volume rather than just pruning periodically:** the prune-on-cadence approach treats the symptom; declaring the volume in compose treats the cause. A future `compose up` on a fresh host would otherwise reproduce the same anonymous-volume pattern and re-fire M5 in any future audit. With the named declaration, the issue is structurally closed.
+
+**Verification:**
+- `docker compose config --quiet` — valid.
+- `docker compose up -d searxng` — recreated cleanly; `searxng-cache` named volume created at first attach.
+- `docker inspect searxng` confirms two mounts: bind `/etc/searxng` + volume `scaffold-engine_searxng-cache → /var/cache/searxng`.
+- `curl -o /dev/null -w '%{http_code}' http://localhost:8888/` — `200`.
+- Final state: 7 named volumes, 0 dangling, 0 anonymous. ~1 GB reclaimed from `/mnt/adamssd` (`df -h` 30 G → 31 G used after settling, but the OWUI orphan went from 1.0 GB visible to gone).
+
+**§17.63 amendment:** the post-write follow-up paragraph in §17.63 had listed an "8 named + 1 anonymous" final topology with `open-webui-data` and `searxng-data` as legitimate members. That was inaccurate — both were orphans the migration didn't drop. §17.63 has been edited in this commit to reflect the corrected reality and reference §17.70 as the cleanup pass.
+
+**Test-suite delta:** none. Pure compose YAML + host volume cleanup.
+
+**§16.5 status delta:** M5 closed. Open from the audit: I1, I4, N4, B3-B6, M6-M7, plus the wider §16.5 deferrals.
 
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
