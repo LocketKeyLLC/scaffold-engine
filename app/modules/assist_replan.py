@@ -28,13 +28,12 @@ executor uses post-LLM, preserving the model-stack invariant.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from typing import Any
 
 from sqlalchemy import text
 
-from app.utils.llm_parsing import parse_json_object
+from app.providers.base import Tool
+from app.utils.tool_call_args import read_tool_args
 
 logger = logging.getLogger("scaffold.assist.replan")
 
@@ -59,18 +58,66 @@ Decide: does the human output meet the task's intent?
 - A different deliverable type, missing required content, or pivoting to a
   different solution path IS divergence.
 
-Respond with a single JSON object, no prose:
-{{"diverges": true|false, "severity": "minor"|"major", "reason": "<short>"}}"""
+Call the record_divergence tool exactly once with your verdict."""
+
+
+# Audit B4 — native tool-call schema for the divergence verifier. Replaces
+# the W.6-era "Respond with a single JSON object…" coaxing prose. Mirrors
+# the X.10 RECORD_VERIFICATION_TOOL pattern: schema lives in code, not in
+# prompt prose; the wrapper parses structured args on native-tool providers
+# and falls back to JSON-coaxing internally on non-native providers, so
+# callers always read via `resp.tool_calls[0].arguments`.
+RECORD_DIVERGENCE_TOOL = Tool(
+    name="record_divergence",
+    description=(
+        "Report whether the human-supplied step output diverges from the "
+        "task's intent."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "diverges": {
+                "type": "boolean",
+                "description": (
+                    "True iff the human output substantively departs from "
+                    "the task — different deliverable type, missing required "
+                    "content, or a pivot to a different solution path. "
+                    "Trivial wording / formatting differences are NOT divergence."
+                ),
+            },
+            "severity": {
+                "type": "string",
+                "enum": ["minor", "major"],
+                "description": (
+                    "'major' when divergence is meaningful enough to trigger "
+                    "downstream replan; 'minor' otherwise. Always emit when "
+                    "diverges=true."
+                ),
+            },
+            "reason": {
+                "type": "string",
+                "description": "One short sentence explaining the verdict.",
+            },
+        },
+        "required": ["diverges"],
+    },
+)
 
 
 async def detect_divergence(
     *, title: str, prompt: str, evidence: str, model_overrides: dict | None = None,
 ) -> dict:
-    """Run the divergence verifier. Returns the parsed JSON dict.
+    """Run the divergence verifier. Returns the parsed dict.
 
-    Returns `{diverges: False, severity: 'minor', reason: 'detection_unavailable'}`
-    on any failure (parse error, model unavailable) — assist mode must
-    not block on a flaky detector. Logs the failure for observability.
+    Audit B4 — migrated from `model_router.chat()` + `parse_json_object()`
+    JSON-coaxing to `model_router.tool_call()` with the schema in
+    ``RECORD_DIVERGENCE_TOOL``. Closes the last unmigrated JSON-coaxing
+    site flagged by §17.9 / the audit's tool-call survey.
+
+    Returns `{diverges: False, severity: 'minor', reason: 'detection_unavailable'|'detection_unparsed'}`
+    on any failure (model unavailable, no tool_calls, missing 'diverges'
+    key) — assist mode must not block on a flaky detector. Fail-closed
+    contract is preserved across the migration.
     """
     # Defer the model_router import; it pulls heavy http client state.
     from app import model_router
@@ -83,23 +130,27 @@ async def detect_divergence(
         evidence=(evidence or "")[:4000],
     )
     try:
-        resp = await model_router.chat(
+        resp = await model_router.tool_call(
             messages=[{"role": "user", "content": msg}],
+            tools=[RECORD_DIVERGENCE_TOOL],
             model=model,
             max_tokens=200,
         )
-        raw = getattr(resp, "text", "") or ""
     except Exception as e:
         logger.warning("divergence_detector_failed: %s", e)
         return {"diverges": False, "severity": "minor", "reason": "detection_unavailable"}
-    parsed = parse_json_object(raw)
-    if not parsed or "diverges" not in parsed:
-        logger.warning("divergence_detector_unparsed: raw=%r", (raw or "")[:200])
+    args = read_tool_args(resp)
+    if not args or "diverges" not in args:
+        logger.warning(
+            "divergence_detector_unparsed: no diverges key in tool_calls "
+            "(text_head=%r)",
+            (getattr(resp, "text", "") or "")[:200],
+        )
         return {"diverges": False, "severity": "minor", "reason": "detection_unparsed"}
     return {
-        "diverges": bool(parsed.get("diverges")),
-        "severity": parsed.get("severity", "minor"),
-        "reason": parsed.get("reason", "")[:200],
+        "diverges": bool(args.get("diverges")),
+        "severity": args.get("severity") or "minor",
+        "reason": str(args.get("reason", ""))[:200],
     }
 
 

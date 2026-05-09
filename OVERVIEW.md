@@ -3658,6 +3658,38 @@ When Milvus is repopulated (N4: KB repopulation plan), `skip_if_milvus_empty()` 
 
 **§16.5 status delta:** B3 closed. Open from the audit: I1, I4, N4, B4-B6, plus the wider §16.5 deferrals.
 
+### 17.74 Audit pass — `assist_replan.detect_divergence` tool_call migration (2026-05-09)
+
+B4 from the audit. The W.6 + X.10-X.12 sweep migrated every JSON-coaxing site EXCEPT `assist_replan.detect_divergence` — the audit's tool-call survey caught it. The pre-fix function did `model_router.chat()` with a "Respond with a single JSON object, no prose" prompt suffix, then ran `parse_json_object(raw)` over the response text. Same brittleness pattern X.10/X.11/X.12 already eliminated everywhere else: a thinking-prefix, a stray sentence after the JSON, or a model that decides to be helpful and add explanation, all crashed the parse and dropped through to the fail-closed `detection_unparsed` path — silently disabling divergence detection until the next call.
+
+**What changed:**
+
+- New module-level `RECORD_DIVERGENCE_TOOL = Tool(...)` mirroring the X.10 `RECORD_VERIFICATION_TOOL` shape:
+  - Schema: `{ diverges: bool (required), severity: enum["minor","major"], reason: string }`.
+  - Description: same one-paragraph criteria the prompt prose carried, but as a tool description rather than user-message coaxing.
+- `detect_divergence` now calls `model_router.tool_call(messages=..., tools=[RECORD_DIVERGENCE_TOOL], model=..., max_tokens=200)` and reads via `read_tool_args(resp)` — the same `app/utils/tool_call_args.py::read_tool_args` helper consolidated in X.13.
+- The prompt prose dropped its "Respond with a single JSON object…" suffix in favor of a one-line "Call the record_divergence tool exactly once with your verdict." cue. Provider wrappers handle native tool-call routing; coaxing only happens internally on non-native providers.
+- Fail-closed contract preserved verbatim across the migration:
+  - Dispatch raises → `{diverges: False, severity: 'minor', reason: 'detection_unavailable'}`
+  - No tool_calls / missing `diverges` key → `{diverges: False, severity: 'minor', reason: 'detection_unparsed'}`
+- Cleanup: `parse_json_object` import removed (no longer used anywhere in the module). Unused `json` and `typing.Any` imports also dropped.
+
+**Why this matters operationally:** assist mode's selective/full replan policies are gated on `divergence['severity'] == 'major'`. A failed parse on the prior code path silently downgraded "major" verdicts to `detection_unparsed` (severity defaulting to `minor`), which then short-circuited the replan dispatch via `if not div["diverges"] or div["severity"] != "major": return None`. Tool-call structured output makes that path ~impossible.
+
+**New tests** (`tests/test_assist_replan_divergence.py`, 11 cases — pre-B4 the function had no direct tests; existing `test_assist_replan_regen.py` patched `detect_divergence` as a black box):
+
+- `TestDetectDivergence` (7 cases): happy-path major divergence with full payload, happy-path no-divergence with severity defaulting to "minor" when omitted, dispatch raises → `detection_unavailable`, empty `tool_calls` → `detection_unparsed`, malformed args missing `diverges` key → `detection_unparsed`, evidence + prompt truncated at 4000 chars each (cap on context-window pressure), wrapper called with `RECORD_DIVERGENCE_TOOL` (regression guard: prevents an accidental revert to chat-coaxing).
+- `TestRecordDivergenceTool` (4 cases): schema contract — required keys, `diverges` is boolean, `severity` enum is exactly {minor, major}, tool name is `record_divergence`. Catches accidental schema drift in PR review.
+
+**Verification:**
+- 26/26 pass in dev image (11 new + 15 existing `test_assist_replan_regen` cases unchanged) — 1.88 s.
+- `grep parse_json_object app/modules/assist_replan.py` returns only docstring/comment references documenting the migration. Zero live call sites.
+- The audit's "Pattern 3 helper-internal sites" subset is no longer cleanly mapped to JSON-coaxing — every helper path now uses tool_call. The §17.9 deferred Pattern 3 model-routing question (helpers taking `model: str` from upstream rather than routing through `provider_for_role`) remains separately open.
+
+**Test-suite delta:** +11 cases. Existing assist tests unchanged.
+
+**§16.5 status delta:** B4 closed. The audit's "JSON-coaxing remains" surface is now zero. Open from the audit: I1, I4, N4, B5, B6, plus the wider §16.5 deferrals.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
