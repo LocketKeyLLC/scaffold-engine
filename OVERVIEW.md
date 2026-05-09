@@ -3789,6 +3789,48 @@ Exit code 0 on the current host (every §17.63 step previously applied by hand s
 
 **§16.5 status delta:** I1 closed. Open from the audit: I4, N4, plus the wider §16.5 deferrals.
 
+### 17.78 Audit pass — bench regression gates wired into `make ci` (2026-05-09)
+
+I4 from the audit. X.21 (§17.57) shipped `bench-check-rag` and `bench-check-embed` as Make targets but flagged "Wire the gates into `make ci` so PRs see regression failures (currently the gates run by hand; no CI integration)" as deferred. The X.21 entry also noted "Add `bench-check-pipeline` once a baseline exists." `tests/benchmarks/results.jsonl` has carried two runs since pre-W track (latest 2026-04-02), so the macro-level gate was unblocked too. I4 closes both threads in one Makefile change.
+
+**What changed (Makefile only):**
+
+- New `bench-check-pipeline` target — runs `bench_check.py` against `tests/benchmarks/results.jsonl` with metric `pipeline.total_pipeline_s` (latency-style, `--direction up --threshold 1.5`). Threshold matches the X.21 pattern for the other two component-level gates. The file already has 2 entries so the gate is immediately useful — `--prior-runs 3` falls back to using whatever prior history exists (1 record in this case, which still gives a defensible baseline).
+- New aggregate `bench-check` target depending on all three gates (`bench-check-rag bench-check-embed bench-check-pipeline`). Make's standard prerequisite chain — any sub-gate exiting non-zero short-circuits the whole target.
+- All three sub-gates (and the aggregate) gained the `_ensure_dev` prerequisite from B5 — the gates need `tests/benchmarks/bench_check.py` accessible inside the container, which is dev-image-only after §17.62 hermetic compose.
+- `make ci` now invokes `$(MAKE) bench-check` after the pytest run. A `printf` separator makes the section boundary clear in CI logs.
+
+**Why it's safe to chain unconditionally:** `bench_check.py` already handles the three "no signal" cases by exit 0 with a `[bench_check] … Skipping.` message:
+
+1. JSONL file does not exist (e.g., `bench_rag_results.jsonl` on a fresh repo) → `_load(path)` returns `[]` → `len(records) < 2` skip path.
+2. JSONL has fewer than 2 entries → same skip path.
+3. Latest run's metric resolves to non-numeric / missing → "metric not found" skip path.
+
+So `make ci` can never spuriously fail because no bench history exists. It only fails when bench data exists AND the latest run is materially worse than the median of the prior 3.
+
+**Verification on the live host:**
+
+End-to-end `make ci` (auto-switched to dev via the B5 `_ensure_dev` prerequisite):
+
+```
+=============== 1336 passed, 16 deselected in 240.13s (0:04:00) ================
+
+--- Audit I4: bench regression gates ---
+[bench_check] not enough runs for summary.warm_mean_ms (0 found; need at least 2). Skipping.
+[bench_check] not enough runs for summary.cold_mean_ms (0 found; need at least 2). Skipping.
+[bench_check] OK on pipeline.total_pipeline_s: latest=1539.52 baseline_median=2502.181 (over 1 prior runs)
+```
+
+Exit code 0. The 1336/16-deselected count is 8 fewer than `make test` because `make ci` filters with `-m "not validate"` — the validate-marked tests need live Milvus content (`test_rag_query_round_trip`, `test_golden_retrieval` parametrizations).
+
+Independently verified the regression-detection path with a synthetic JSONL (latest=300, 3 prior at 100): `bench_check.py` correctly emits `REGRESSION on summary.warm_mean_ms: latest=300 baseline_median=100.0 ratio=3.00 (direction=up threshold=1.5)` and exits 2. So a real future regression in `make ci` would propagate up and fail the run.
+
+**What this doesn't do:** the GitHub Actions cloud-runner CI (`/.github/workflows/ci.yml`) still runs only the Tier-1 smoke job — its bench gates would need a self-hosted runner with the full Docker stack (the Tier-2 stanza is documented in `ci.yml` but stays commented out until that runner exists). The `make ci` target is the Makefile-level proxy operators run locally before pushing.
+
+**Test-suite delta:** none. The chained `bench-check` is configuration plumbing, not a new test.
+
+**§16.5 status delta:** I4 closed. Open from the audit: N4 (Milvus repopulation plan) plus the wider §16.5 deferrals (macro bench baseline refresh — purely a "set aside a quiet hour" operator task — and live-Postgres concurrency tests).
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

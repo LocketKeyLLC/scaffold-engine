@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: _ensure_dev test test-cli test-sdk agent eval bench build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config
+.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -53,20 +53,34 @@ bench-rag: ## Run RAG retrieval micro-bench (no LLM, ~30s)
 bench-embed: ## Run embedder + cache micro-bench (~30s)
 	docker exec $(CONTAINER) python3 tests/benchmarks/bench_embed.py
 
-bench-check-rag: ## Gate: fail if bench_rag warm_mean_ms regressed >1.5x median of last 3
+bench-check-rag: _ensure_dev ## Gate: fail if bench_rag warm_mean_ms regressed >1.5x median of last 3
 	docker exec $(CONTAINER) python3 tests/benchmarks/bench_check.py \
 		--file tests/benchmarks/bench_rag_results.jsonl \
 		--metric summary.warm_mean_ms --threshold 1.5 --direction up
 
-bench-check-embed: ## Gate: fail if bench_embed cold_mean_ms regressed >1.5x median of last 3
+bench-check-embed: _ensure_dev ## Gate: fail if bench_embed cold_mean_ms regressed >1.5x median of last 3
 	docker exec $(CONTAINER) python3 tests/benchmarks/bench_check.py \
 		--file tests/benchmarks/bench_embed_results.jsonl \
 		--metric summary.cold_mean_ms --threshold 1.5 --direction up
 
-ci: _ensure_dev ## Run CI-safe tests (no live Ollama/Milvus needed; dev image)
+bench-check-pipeline: _ensure_dev ## Gate: fail if bench_pipeline total_pipeline_s regressed >1.5x median of last 3
+	docker exec $(CONTAINER) python3 tests/benchmarks/bench_check.py \
+		--file tests/benchmarks/results.jsonl \
+		--metric pipeline.total_pipeline_s --threshold 1.5 --direction up
+
+# Audit I4 — aggregate gate. Runs all three regression checks; fails on
+# the first regression. Each sub-gate skips gracefully (exit 0) when its
+# JSONL file is missing or has fewer than 2 prior runs, so this target
+# is safe to wire into `make ci` even on a fresh repo with no bench
+# history yet.
+bench-check: bench-check-rag bench-check-embed bench-check-pipeline ## Gate: run every bench-check; skips gates whose JSONL file is missing or sparse
+
+ci: _ensure_dev ## Run CI-safe tests (no live services; dev image) + bench regression gates (skip on missing/sparse history)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v \
 		--ignore=tests/eval_retrieval.py \
 		-m "not validate"
+	@printf '\n--- Audit I4: bench regression gates ---\n'
+	$(MAKE) bench-check
 
 ## ──────────────────────────────────────────────
 ## Setup
