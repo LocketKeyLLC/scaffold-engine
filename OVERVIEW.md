@@ -3452,7 +3452,24 @@ The fix:
 
 **Test-suite delta:** none — both fixes are infrastructure-level (compose YAML + bootstrap shell). The 1099/4/22 baseline (in the prod runtime container, post-SSD migration with empty Milvus) is unchanged. The 4 RAG-empty failures and 22 skips are §17.63 carryovers, not introduced or affected by this commit.
 
-**§16.5 status delta:** the deployment-surface audit gap is one finding closer to closed. Still open from the same audit pass: `.env.example` documents only 14/131 Settings fields (M1), no `bootstrap-host.sh` companion (I1), bench gates not wired into `make ci` (I4), Milvus repopulation plan (N4).
+**§16.5 status delta:** the deployment-surface audit gap is one finding closer to closed. Still open from the same audit pass: no `bootstrap-host.sh` companion (I1), bench gates not wired into `make ci` (I4), Milvus repopulation plan (N4).
+
+### 17.66 Audit pass — `.env.example` Settings sweep (2026-05-09)
+
+M1 from the same audit pass that produced §17.65. The file documented 14 active vars + ~64 commented examples, against `app/config.py`'s 131 typed `Settings` fields. Every X.20+ knob (alerting, calibration watchdog, OTel, /metrics, execution concurrency, synthesis, DAG validator, assist replan, web loopback, fetch caps, expanded reaper set) was missing from the canonical onboarding surface.
+
+**The sweep:**
+- Cross-checked `^\s+\w+:\s*(int|str|bool|float|...)` field declarations in `app/config.py` against `^[A-Z_]+=` patterns in `.env.example`. Initial diff: 117 fields undocumented; final diff: 0 (the only `Settings` field still not surfaced as an env example is the dict-typed `topic_to_domain`, which is now mentioned with a JSON-form override hint).
+- New `4. ADVANCED — *` sub-sections added: stale-job reapers (split out from scheduler), assist mode (W.5 regen), compile / synthesis (W.2 / W.7), DAG validator (W.3), execution concurrency (X.24), web UI loopback (J.2), observability /metrics + alerts (X.26), calibration watchdog (X.26), OpenTelemetry (X.26).
+- Existing sections kept their structure; only fleshed out where vars were silently missing (e.g. `EXECUTION_GLOBAL_RETRY_CAP`, `SSE_KEEPALIVE_SECONDS`, `RESEARCH_FETCH_CONCURRENCY`, `GT_GITHUB_BRANCH`, etc).
+- `CLEANUP_ON_STARTUP` flipped from `false` to `true` in the example to match the X.25 default-on flip in code (the example was stale; defaults-in-doc and defaults-in-code now agree).
+- Header gained a third pointer: `scaffold config show` (the X.5 endpoint) for live discovery of every field with its current value, default, and is-default flag — useful for ops sweeps where the file is incomplete or out of date.
+
+**Verification:** comm-diff between `app/config.py` field names and uppercased `.env.example` keys returns no real misses (only the dict-literal positional integers `1..6` from `topic_to_domain` show up as false positives — they're map keys, not settings). File grew 203 → 360 lines; every group has a one-paragraph rationale block above the vars.
+
+**No code changes** — pure documentation sweep. Zero test-suite impact (no asserts touch `.env.example`).
+
+**§16.5 status delta:** M1 closed. Still open from the audit: I1 (`bootstrap-host.sh`), I4 (CI bench gates), N4 (Milvus repopulation plan), and the wider §16.5 deferrals (live-Postgres concurrency tests, macro bench refresh).
 
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
