@@ -21,3 +21,13 @@ markers = [
     "smoke: Fast sanity checks - unit tests, extraction pipeline (<2 min)",
     "validate: Integration tests - API, reranker, verifier (<15 min)",
 ]
+# Known noise: ~6-8 RuntimeWarnings per full-suite run with messages
+# `coroutine 'AsyncMockMixin._execute_mock_call' was never awaited` and
+# `coroutine 'Connection._cancel' was never awaited`. These fire from
+# pytest's internal stash teardown (_pytest/stash.py:108) AFTER the
+# warning-capture context exits, so neither `filterwarnings = [...]`
+# in this table nor `-W` via addopts catches them. Tracemalloc traces
+# show no user-code frames — they originate in asyncio/unittest.mock
+# internals — and warning attribution shifts by test order, confirming
+# they aren't per-test bugs. CLI-supplied `-W` does suppress them;
+# leaving them visible here so a future investigator has a record.

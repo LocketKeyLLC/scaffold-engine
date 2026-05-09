@@ -350,6 +350,79 @@ async def test_embed_role_returns_list_of_vectors():
 
 
 @pytest.mark.asyncio
+async def test_embed_role_path_records_cost():
+    """J.3.d — role-path embedding must call _record_call so cost rollups
+    don't silently lose embedding spend on paid providers (OpenAI).
+    Tokens are estimated from input char count since LLMProvider.embed
+    returns just vectors (no usage info)."""
+    from app.providers.base import ModelResponse, LLMProvider
+
+    captured: list = []
+
+    async def fake_record(resp):
+        captured.append(resp)
+        return resp
+
+    # Stub provider whose embed() returns a fixed vector, exposing only
+    # what the role-path needs: model + name + embed coro.
+    class _StubProvider:
+        name = "openai"
+        async def embed(self, model, texts):
+            return [[0.1] * 8 for _ in texts]
+
+    fake_resolve = MagicMock(return_value=("text-embedding-3-small", _StubProvider()))
+
+    with patch.object(model_router, "_record_call", side_effect=fake_record), \
+         patch.object(model_router, "_resolve_role", fake_resolve):
+        result = await model_router.embed(
+            ["hello world", "second input"],
+            role="model_embedder_pipeline",
+        )
+
+    assert len(result) == 2
+    assert len(captured) == 1
+    synth: ModelResponse = captured[0]
+    assert synth.provider == "openai"
+    assert synth.model == "text-embedding-3-small"
+    assert synth.success is True
+    # 11 + 12 = 23 chars total; 23 // 4 = 5 estimated tokens.
+    assert synth.tokens_prompt == 5
+    assert synth.tokens_completion == 0
+    # Latency was measured (positive int, may be 0 on very fast paths).
+    assert synth.total_duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_embed_role_path_records_failure_when_provider_returns_empty():
+    """When provider.embed returns [] (auth fail / outage), the recorded
+    call must have success=False so cost rollups distinguish failed
+    spend from successful spend."""
+    from app.providers.base import ModelResponse
+
+    captured: list = []
+
+    async def fake_record(resp):
+        captured.append(resp)
+        return resp
+
+    class _FailingProvider:
+        name = "openai"
+        async def embed(self, model, texts):
+            return []  # provider's documented failure mode
+
+    fake_resolve = MagicMock(return_value=("text-embedding-3-small", _FailingProvider()))
+
+    with patch.object(model_router, "_record_call", side_effect=fake_record), \
+         patch.object(model_router, "_resolve_role", fake_resolve):
+        result = await model_router.embed("x", role="model_embedder_pipeline")
+
+    assert result == []
+    assert len(captured) == 1
+    assert captured[0].success is False
+    assert captured[0].provider == "openai"
+
+
+@pytest.mark.asyncio
 async def test_classify_default_routes_through_router_role():
     """classify() with no args must route through model_router role —
     preserves prior default of using settings.model_router but now via

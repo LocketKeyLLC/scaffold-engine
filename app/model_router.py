@@ -541,7 +541,28 @@ async def embed(
 
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
-        return await provider.embed(resolved_model, inputs)
+        # J.3.d — wrap provider.embed in a synthetic ModelResponse so the
+        # role-path participates in cost/latency telemetry alongside the
+        # legacy direct-Ollama path. Tokens are estimated from input char
+        # count (OpenAI's ~4-char-per-token rule of thumb) because
+        # LLMProvider.embed returns just the vector list — exact counts
+        # would require widening the provider contract. For Ollama the
+        # rate is 0 so the estimate doesn't affect cost; for OpenAI it
+        # gives an approximate (~10%) cost reading rather than nothing.
+        start = time.monotonic()
+        embeddings = await provider.embed(resolved_model, inputs)
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        from app.providers.base import ModelResponse
+        synth = ModelResponse(
+            model=resolved_model,
+            success=bool(embeddings),
+            total_duration_ms=elapsed_ms,
+            tokens_prompt=sum(len(s) for s in inputs) // 4,
+            tokens_completion=0,
+            provider=provider.name,
+        )
+        await _record_call(synth)
+        return embeddings
 
     model = model or settings.model_embedder_pipeline
     payload: dict[str, Any] = {
@@ -549,9 +570,6 @@ async def embed(
         "input": inputs,
     }
     resp = await _dispatch_with_retry("/api/embed", payload, model, fallback=None)
-    # J.3.a — record before returning. Embedding cost on local Ollama is
-    # 0; the role-path (provider.embed) returns embeddings directly without
-    # a ModelResponse and is left un-recorded — TODO J.3.b.
     await _record_call(resp)
     if not resp.success:
         logger.error("Embedding failed after retries: %s", resp.error)
