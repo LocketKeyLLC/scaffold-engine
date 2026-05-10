@@ -22,9 +22,14 @@ from app.main import app
 from app.modules.cost_rollup import get_job_cost_totals, get_job_costs
 
 
-def _mock_db(totals_row: dict | None, breakdown_rows: list[dict] | None = None):
-    """Build an AsyncMock db whose first execute returns the totals
-    mappings.first(), second returns the breakdown mappings.all()."""
+def _mock_db(
+    totals_row: dict | None,
+    breakdown_rows: list[dict] | None = None,
+    kind_rows: list[dict] | None = None,
+):
+    """Build an AsyncMock db whose execute returns totals (first),
+    by-provider breakdown (second), and §17.90 by-kind breakdown (third).
+    """
     totals_result = MagicMock()
     totals_mappings = MagicMock()
     totals_mappings.first.return_value = totals_row
@@ -35,8 +40,15 @@ def _mock_db(totals_row: dict | None, breakdown_rows: list[dict] | None = None):
     breakdown_mappings.all.return_value = breakdown_rows or []
     breakdown_result.mappings.return_value = breakdown_mappings
 
+    kind_result = MagicMock()
+    kind_mappings = MagicMock()
+    kind_mappings.all.return_value = kind_rows or []
+    kind_result.mappings.return_value = kind_mappings
+
     db = AsyncMock()
-    db.execute = AsyncMock(side_effect=[totals_result, breakdown_result])
+    db.execute = AsyncMock(side_effect=[
+        totals_result, breakdown_result, kind_result,
+    ])
     return db
 
 
@@ -131,7 +143,83 @@ class TestGetJobCosts:
         db = _mock_db(totals, [])
         result = await get_job_costs("job-empty", db)
         assert result["by_provider"] == []
+        assert result["by_kind"] == []  # §17.90 — empty kind list too
         assert result["total_cost_usd"] == 0.0
+
+
+@pytest.mark.smoke
+class TestGetJobCostsKindBreakdown:
+    """§17.90 — by_kind breakdown splits synthesis spend from execution spend."""
+
+    async def test_returns_kind_breakdown_when_present(self):
+        totals = {
+            "total_cost_usd": 0.06,
+            "total_prompt_tokens": 11000,
+            "total_completion_tokens": 4500,
+            "total_latency_ms": 65000,
+            "call_count": 11,
+        }
+        kind_rows = [
+            # SQL coalesces NULL → 'uncategorized'; here the rows
+            # already carry the resolved literal.
+            {"kind": "synthesis", "calls": 1,
+             "cost_usd": 0.012, "prompt_tokens": 3000,
+             "completion_tokens": 800, "latency_ms": 7000},
+            {"kind": "uncategorized", "calls": 10,
+             "cost_usd": 0.048, "prompt_tokens": 8000,
+             "completion_tokens": 3700, "latency_ms": 58000},
+        ]
+        db = _mock_db(totals, [], kind_rows)
+        result = await get_job_costs("job-1", db)
+
+        assert len(result["by_kind"]) == 2
+        # SQL sorts descending by cost_usd; synthesis is first only if it
+        # spent more than execution. In this fixture it did not, so the
+        # ordering reflects the input list (preserved as-is by the helper).
+        kinds = {row["kind"]: row for row in result["by_kind"]}
+        assert kinds["synthesis"]["calls"] == 1
+        assert kinds["synthesis"]["cost_usd"] == pytest.approx(0.012)
+        assert kinds["uncategorized"]["calls"] == 10
+        assert kinds["uncategorized"]["cost_usd"] == pytest.approx(0.048)
+
+    async def test_kind_breakdown_fails_open_on_db_error(self):
+        """If the third (kind) query raises — e.g. test env without the
+        §17.90 migration — by_kind comes back empty but by_provider and
+        totals are still populated. Fail-open posture matches the rest
+        of the rollup."""
+        totals = {
+            "total_cost_usd": 0.05,
+            "total_prompt_tokens": 10000,
+            "total_completion_tokens": 4000,
+            "total_latency_ms": 60000,
+            "call_count": 10,
+        }
+        breakdown = [
+            {"provider": "openai", "model": "gpt-4o", "calls": 10,
+             "cost_usd": 0.05, "prompt_tokens": 10000,
+             "completion_tokens": 4000, "latency_ms": 60000},
+        ]
+        # Build a db that succeeds on the first two queries then raises.
+        totals_result = MagicMock()
+        totals_mappings = MagicMock()
+        totals_mappings.first.return_value = totals
+        totals_result.mappings.return_value = totals_mappings
+        breakdown_result = MagicMock()
+        breakdown_mappings = MagicMock()
+        breakdown_mappings.all.return_value = breakdown
+        breakdown_result.mappings.return_value = breakdown_mappings
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[
+            totals_result,
+            breakdown_result,
+            RuntimeError("column llm_call_logs.call_kind does not exist"),
+        ])
+        result = await get_job_costs("job-1", db)
+        assert result["by_kind"] == []
+        # Totals and by_provider remain populated — fail-open is partial.
+        assert result["total_cost_usd"] == pytest.approx(0.05)
+        assert len(result["by_provider"]) == 1
 
 
 # ---------------------------------------------------------------------------

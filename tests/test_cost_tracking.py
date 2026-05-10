@@ -18,7 +18,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.utils.cost_tracking import (
+    call_kind,
     compute_cost_usd,
+    current_call_kind,
     current_job_id,
     current_node_id,
     record_llm_call,
@@ -227,5 +229,124 @@ class TestContextVarDefaults:
 
         result = ctx.run(_set_and_read)
         assert result == "ctx-test-job"
+
+
+@pytest.mark.smoke
+class TestCallKindTelemetry:
+    """§17.90 — synthesis budget telemetry. ``call_kind`` context manager
+    tags every LLM call inside its block with the given kind so the cost
+    rollup can split synthesis spend from execution spend."""
+
+    def test_default_is_none(self):
+        ctx = copy_context()
+        assert ctx.run(current_call_kind.get) is None
+
+    def test_contextmanager_sets_and_resets(self):
+        """Entering the block sets the kind; exiting resets to the prior
+        value (None at module top-level, or a nested kind from an outer
+        block). Failure case: a leak would silently mis-tag the next
+        unrelated LLM call."""
+        ctx = copy_context()
+
+        def _drive():
+            assert current_call_kind.get() is None
+            with call_kind("synthesis"):
+                assert current_call_kind.get() == "synthesis"
+            # Reset on block exit.
+            assert current_call_kind.get() is None
+
+        ctx.run(_drive)
+
+    def test_contextmanager_resets_even_on_exception(self):
+        ctx = copy_context()
+
+        def _drive():
+            try:
+                with call_kind("synthesis"):
+                    assert current_call_kind.get() == "synthesis"
+                    raise RuntimeError("boom")
+            except RuntimeError:
+                pass
+            # Exception inside the block must still reset.
+            assert current_call_kind.get() is None
+
+        ctx.run(_drive)
+
+    async def test_record_llm_call_writes_call_kind_when_set(self):
+        """The ContextVar value at record_llm_call time lands on the
+        llm_call_logs.call_kind column."""
+        captured = {}
+
+        class _FakeDB:
+            async def execute(self, sql, params=None):
+                if "INSERT INTO llm_call_logs" in str(sql):
+                    captured.update(params or {})
+                    return MagicMock()
+                row = MagicMock()
+                row.first.return_value = None
+                return row
+
+            async def commit(self):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        ctx = copy_context()
+
+        async def _runner():
+            resp = SimpleNamespace(
+                provider="ollama", model="qwen3:4b",
+                tokens_prompt=400, tokens_completion=150,
+                total_duration_ms=800, success=True,
+            )
+            with patch("app.database.async_session", lambda: _FakeDB()):
+                with call_kind("synthesis"):
+                    await record_llm_call(resp)
+
+        await ctx.run(_runner)
+        assert captured.get("call_kind") == "synthesis"
+
+    async def test_record_llm_call_writes_null_when_kind_unset(self):
+        """Default ContextVar (None) flows through to a NULL DB write so
+        non-synthesis paths don't accidentally get tagged."""
+        captured = {}
+
+        class _FakeDB:
+            async def execute(self, sql, params=None):
+                if "INSERT INTO llm_call_logs" in str(sql):
+                    captured.update(params or {})
+                    return MagicMock()
+                row = MagicMock()
+                row.first.return_value = None
+                return row
+
+            async def commit(self):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        ctx = copy_context()
+
+        async def _runner():
+            resp = SimpleNamespace(
+                provider="ollama", model="qwen3:4b",
+                tokens_prompt=10, tokens_completion=5,
+                total_duration_ms=50, success=True,
+            )
+            with patch("app.database.async_session", lambda: _FakeDB()):
+                await record_llm_call(resp)  # no call_kind block
+
+        await ctx.run(_runner)
+        # call_kind key is present but None — INSERT writes NULL.
+        assert "call_kind" in captured
+        assert captured["call_kind"] is None
         # Original context unaffected — copy_context isolates the change.
         assert current_job_id.get() is None

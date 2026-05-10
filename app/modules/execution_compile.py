@@ -147,22 +147,28 @@ async def _synthesize_compiled_output(
 
     # Defer the import to avoid a circular dependency at module-import time.
     from app import model_router
+    from app.utils.cost_tracking import call_kind
 
     route_kwargs = {"role": "model_general"}
     if model_overrides:
         route_kwargs["overrides"] = model_overrides
 
+    # §17.90 — tag this LLM call as "synthesis" so the cost rollup can
+    # split synthesis spend from execution spend. Without the tag the
+    # row inserts with call_kind=NULL and falls into the rollup's
+    # "uncategorized" bucket.
     try:
-        resp = await model_router.tool_call(
-            messages=[
-                {"role": "system", "content": SYNTHESIS_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-            tools=[SYNTHESIS_TOOL],
-            temperature=0.2,
-            max_tokens=settings.compile_synthesis_max_tokens,
-            **route_kwargs,
-        )
+        with call_kind("synthesis"):
+            resp = await model_router.tool_call(
+                messages=[
+                    {"role": "system", "content": SYNTHESIS_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+                tools=[SYNTHESIS_TOOL],
+                temperature=0.2,
+                max_tokens=settings.compile_synthesis_max_tokens,
+                **route_kwargs,
+            )
     except Exception as exc:
         logger.warning(
             "compile_synthesis_call_failed: job=%s error=%s", job_id, exc,

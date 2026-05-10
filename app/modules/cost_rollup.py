@@ -52,6 +52,24 @@ _BREAKDOWN_SQL = """
     ORDER BY cost_usd DESC, calls DESC
 """
 
+# §17.90 — kind breakdown groups calls by their call_kind tag
+# (currently only "synthesis"; everything else NULL → "uncategorized").
+# COALESCE folds NULL into the literal string so the response shape is
+# uniform; operators see a row for each meaningful bucket.
+_KIND_BREAKDOWN_SQL = """
+    SELECT
+        COALESCE(call_kind, 'uncategorized')    AS kind,
+        COUNT(*)                                AS calls,
+        COALESCE(SUM(cost_usd), 0)              AS cost_usd,
+        COALESCE(SUM(prompt_tokens), 0)         AS prompt_tokens,
+        COALESCE(SUM(completion_tokens), 0)     AS completion_tokens,
+        COALESCE(SUM(latency_ms), 0)            AS latency_ms
+    FROM llm_call_logs
+    WHERE job_id = :jid
+    GROUP BY COALESCE(call_kind, 'uncategorized')
+    ORDER BY cost_usd DESC, calls DESC
+"""
+
 
 def _zero_totals() -> dict[str, Any]:
     return {
@@ -110,6 +128,21 @@ async def get_job_costs(job_id: str, db) -> dict[str, Any]:
         )
         records = []
 
+    # §17.90 — kind breakdown is a separate fail-open query so a missing
+    # column (pre-migration test env) or transient DB error returns an
+    # empty list rather than 500ing the by_provider path too.
+    try:
+        kind_rows = await db.execute(
+            text(_KIND_BREAKDOWN_SQL), {"jid": str(job_id)},
+        )
+        kind_records = kind_rows.mappings().all()
+    except Exception as exc:
+        logger.debug(
+            "get_job_costs_kind_breakdown_failed: job=%s error=%s "
+            "(returning empty kind breakdown)", job_id, exc,
+        )
+        kind_records = []
+
     by_provider = [
         {
             "provider": r["provider"],
@@ -122,8 +155,20 @@ async def get_job_costs(job_id: str, db) -> dict[str, Any]:
         }
         for r in records
     ]
+    by_kind = [
+        {
+            "kind": r["kind"],
+            "calls": int(r["calls"] or 0),
+            "cost_usd": float(r["cost_usd"] or 0.0),
+            "prompt_tokens": int(r["prompt_tokens"] or 0),
+            "completion_tokens": int(r["completion_tokens"] or 0),
+            "latency_ms": int(r["latency_ms"] or 0),
+        }
+        for r in kind_records
+    ]
     return {
         "job_id": str(job_id),
         **totals,
         "by_provider": by_provider,
+        "by_kind": by_kind,
     }

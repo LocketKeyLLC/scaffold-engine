@@ -4224,6 +4224,58 @@ Closes the §17.9-deferred + §17.74-restated Pattern 3 thread end-to-end. Pre-�
 
 **§16.5 status delta.** §17.9 + §17.74's Pattern 3 thread is now closed end-to-end. The §17.74 commentary ("the §17.9 deferred Pattern 3 model-routing question … remains separately open") is the back-pointer that becomes the §17.89 closure target. Open from the same audit family: the deployment-surface audit closure entry (still the last named-but-unclosed §16.5 thread), the 5 golden-retrieval doc-ingest skips (multi-hour curation), the macro-bench baseline refresh (43 min wall-clock), the `tests/ground_truth.json` regen (multi-hour calibration), and the quarterly RAG re-baseline cadence (scheduling decision).
 
+### 17.90 W.7 follow-up — synthesis budget telemetry (2026-05-10)
+
+Closes the §17.25 W.7 deferred follow-up: "Once J.3 (cost telemetry) lands, track synthesis tokens under a 'compile_synthesis' budget so operators can see if the post-processing is worth its cost." Pre-§17.90, every `llm_call_logs` row landed in a single undifferentiated bucket — the rollup at `GET /jobs/{id}/costs` returned a per-(provider, model) breakdown but no per-call-category split. With synthesis enabled (`compile_synthesis_enabled=true`), operators couldn't tell whether a job's spend was 90% execution + 10% post-processing or the inverse without manually filtering rows by `prompt_tokens` heuristics.
+
+**What changed:**
+
+- **Migration `033_llm_call_logs_call_kind.sql`** — adds `call_kind TEXT NULL` to `llm_call_logs` + a partial index `idx_llm_call_logs_call_kind (call_kind) WHERE call_kind IS NOT NULL`. The partial form is intentional: NULL is the common case (every non-synthesis call today), so a full index would waste space. Idempotent `IF NOT EXISTS` on both the column and the index — re-applies cleanly against a DB that already has them.
+- **`app/utils/cost_tracking.py`**:
+  - New `current_call_kind: ContextVar[Optional[str]]` alongside the existing `current_job_id` / `current_node_id`. Default None.
+  - New `call_kind(kind: str)` context manager — `with call_kind("synthesis"): await model_router.tool_call(...)`. Uses `ContextVar.set/reset` so nested scopes and concurrent asyncio tasks under the same event loop don't leak across each other.
+  - `record_llm_call` reads `current_call_kind.get()` and passes it as the `call_kind` bind param on the INSERT. None → SQL NULL.
+- **`app/modules/execution_compile.py`** — `_synthesize_compiled_output` wraps the `model_router.tool_call(...)` call in `with call_kind("synthesis"):`. Single 1-line behavior change at the right boundary; every other LLM call site (research, verifier, optimizer, exec) continues to write NULL.
+- **`app/modules/cost_rollup.py`** — `get_job_costs` runs a new `_KIND_BREAKDOWN_SQL` query (`GROUP BY COALESCE(call_kind, 'uncategorized')`) and returns `by_kind: list[dict]` alongside the existing `by_provider`. Fail-open on its own try/except — a missing column or transient DB error gives an empty list without tanking the rest of the rollup (matches the §17.69 / J.3.b posture).
+- **`app/schemas.py`** — new `JobCostsKindItem` Pydantic model; `JobCostsResponse.by_kind: list[JobCostsKindItem] = []`. Additive; `docs/openapi.json` regenerated and `make openapi-check` is clean.
+- **SDK schemas vendored** — `make sync-schemas` brings `sdk/scaffold_client/schemas.py` to byte-equality with `app/schemas.py`. No SDK method-surface change required — `client.jobs.costs(job_id)` already returns the parsed dict; consumers just see a new key.
+
+**Why a context manager, not a kwarg.** The alternative would be to thread `call_kind: str | None = None` through every `model_router.{tool_call, chat, generate, ...}` signature and every site that calls them. That's a 50+ site touch for one category. ContextVar + `with call_kind(...)`-block matches the existing `current_job_id` / `current_node_id` pattern (set once at the entry boundary; read once inside `record_llm_call`); the synthesis call site is the only category-setter today, so the API surface stays where it belongs.
+
+**Why `"uncategorized"` for NULL.** The `COALESCE(call_kind, 'uncategorized')` in the breakdown SQL means the response shape is uniform — every row has a string `kind`. Consumers don't have to handle NULL. The literal name is descriptive (not "default" or "other"), so an operator scanning the breakdown knows immediately that those calls predate or opted out of tagging.
+
+**Live verification.** Tagged-row round-trip against the live DB:
+
+```
+> with call_kind("synthesis"):
+>     await record_llm_call(SimpleNamespace(
+>         provider="ollama", model="qwen3:4b",
+>         tokens_prompt=42, tokens_completion=7,
+>         total_duration_ms=99, success=True,
+>     ))
+insert_done
+
+> SELECT call_kind, prompt_tokens, completion_tokens
+>   FROM llm_call_logs WHERE job_id='00000000-...-99';
+ call_kind | prompt_tokens | completion_tokens
+-----------+---------------+-------------------
+ synthesis |            42 |                 7
+```
+
+End-to-end: context manager → ContextVar → `record_llm_call` → `INSERT` → column populated. Test row deleted post-verify.
+
+**Test-suite delta:**
+
+- `tests/test_cost_tracking.py` — new `TestCallKindTelemetry` class with 5 cases: default is None; contextmanager sets + resets cleanly; reset fires even when the block raises; `record_llm_call` writes the tag when set; `record_llm_call` writes NULL when unset. **15 → 20 passing** in the file.
+- `tests/test_cost_rollup.py` — `_mock_db` helper extended to wire the third (kind) query; existing `test_no_breakdown_returns_empty_list` now also asserts `by_kind == []`; new `TestGetJobCostsKindBreakdown` class (2 cases: happy path with synthesis + uncategorized rows; fail-open on a DB error in the kind query). **9 → 11 passing** in the file.
+- SDK 138/138, CLI 135/135 unchanged. App suite gated on the longer-running golden-retrieval cross-encoder paths but the §17.90-affected modules (cost_tracking + cost_rollup + execution_compile) all pass clean: 28/28 in the focused run.
+
+**Operator path forward.** A future audit-tail can extend the tag surface to other categories (`"verify"`, `"research"`, `"optimize"`, etc.) by adding one `with call_kind("verify"): ...` around each of the helpers migrated in §17.89. Doing them all in one sweep was deliberately out of scope here — the W.7 ask was specifically synthesis. Adding more categories is a 1-line touch per site once the operator needs the data.
+
+**Project pattern (memory-worthy).** When adding a new dimension to an existing telemetry stream (here: a call-category to per-LLM-call rows), the right shape is: (1) one NULL-able column with a partial index, not a separate audit table; (2) a ContextVar with a wrapping `@contextmanager` so call sites can opt in with a single `with` block instead of a kwarg threaded through 5 function signatures; (3) the rollup query uses `COALESCE(<col>, '<sentinel>')` so consumers don't have to handle NULL; (4) the rollup function has its own try/except around the new query so a pre-migration test env or transient error returns `[]` instead of 500ing the rest of the response. This is the same pattern J.3.a + M4 used (small additive column, fail-open reader); it composes cleanly.
+
+**§16.5 status delta.** W.7 follow-up cluster is now closed: §17.34 (X.6) added the per-job synthesis opt-in column; §17.49 (J.3.b) shipped the cost rollup endpoint; §17.90 closes the "see synthesis spend separately" gap. The remaining W-track items in §17.25's deferred list (per-job synthesis budget alerting, synthesis re-run cache) remain academic — no operator pressure today.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

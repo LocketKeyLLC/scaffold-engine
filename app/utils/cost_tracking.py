@@ -26,8 +26,9 @@ the migration); production paths run with telemetry on by default.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Optional
+from typing import Iterator, Optional
 
 from sqlalchemy import text
 
@@ -43,6 +44,32 @@ current_job_id: ContextVar[Optional[str]] = ContextVar(
 current_node_id: ContextVar[Optional[str]] = ContextVar(
     "scaffold_current_node_id", default=None,
 )
+# §17.90 — call_kind categorizes the LLM call for the cost rollup
+# (e.g. "synthesis" for the W.7 compile-time polish pass). NULL by
+# default; callers wrap their LLM call in ``call_kind("synthesis")``
+# to tag it. Other categories may follow but each must be explicit —
+# leaving it unset is the right answer for the generic execution path.
+current_call_kind: ContextVar[Optional[str]] = ContextVar(
+    "scaffold_current_call_kind", default=None,
+)
+
+
+@contextmanager
+def call_kind(kind: str) -> Iterator[None]:
+    """Tag every LLM call inside the ``with`` block with ``kind``.
+
+    Uses ContextVar.set/reset so nested scopes (and concurrent asyncio
+    tasks under the same event loop) don't leak across each other —
+    same semantics as the existing ``current_job_id`` / ``current_node_id``
+    contract. Designed for short-lived wrapping; for long-running setters
+    (e.g. an entry-point that lives for an entire job), use
+    ``current_call_kind.set(...)`` directly without resetting.
+    """
+    token = current_call_kind.set(kind)
+    try:
+        yield
+    finally:
+        current_call_kind.reset(token)
 
 
 async def _lookup_rate(db, provider: str, model: str) -> tuple[float, float]:
@@ -122,6 +149,7 @@ async def record_llm_call(resp) -> None:
 
     job_id = current_job_id.get()
     node_id = current_node_id.get()
+    kind = current_call_kind.get()
 
     try:
         async with async_session() as db:
@@ -133,11 +161,11 @@ async def record_llm_call(resp) -> None:
                     "INSERT INTO llm_call_logs ("
                     "  job_id, node_id, provider, model, "
                     "  prompt_tokens, completion_tokens, latency_ms, "
-                    "  cost_usd, success"
+                    "  cost_usd, success, call_kind"
                     ") VALUES ("
                     "  :job_id, :node_id, :provider, :model, "
                     "  :prompt_tokens, :completion_tokens, :latency_ms, "
-                    "  :cost_usd, :success"
+                    "  :cost_usd, :success, :call_kind"
                     ")"
                 ),
                 {
@@ -150,6 +178,7 @@ async def record_llm_call(resp) -> None:
                     "latency_ms": latency_ms,
                     "cost_usd": cost,
                     "success": success,
+                    "call_kind": kind,
                 },
             )
             await db.commit()

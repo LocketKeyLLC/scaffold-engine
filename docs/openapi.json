@@ -751,9 +751,56 @@
         "title": "JobCostsBreakdownItem",
         "type": "object"
       },
-      "JobCostsResponse": {
-        "description": "Sprint J.3.b — aggregate cost + latency for one job, with breakdown.\n\n``by_provider`` is sorted descending by cost_usd then calls so the\nbiggest spend lines surface first. ``call_count``/``total_*`` are\njob-wide totals across all (provider, model) combinations.",
+      "JobCostsKindItem": {
+        "description": "§17.90 — one row of the per-call_kind cost breakdown.\n\n``kind`` is the literal string from ``llm_call_logs.call_kind``\nwith NULL folded into the sentinel ``\"uncategorized\"`` so consumers\ndon't have to handle NULL. Currently only ``\"synthesis\"`` is set\nexplicitly (by ``_synthesize_compiled_output``); everything else\nlands in ``\"uncategorized\"``.",
         "properties": {
+          "calls": {
+            "title": "Calls",
+            "type": "integer"
+          },
+          "completion_tokens": {
+            "title": "Completion Tokens",
+            "type": "integer"
+          },
+          "cost_usd": {
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "latency_ms": {
+            "title": "Latency Ms",
+            "type": "integer"
+          },
+          "prompt_tokens": {
+            "title": "Prompt Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "calls",
+          "cost_usd",
+          "prompt_tokens",
+          "completion_tokens",
+          "latency_ms"
+        ],
+        "title": "JobCostsKindItem",
+        "type": "object"
+      },
+      "JobCostsResponse": {
+        "description": "Sprint J.3.b — aggregate cost + latency for one job, with breakdown.\n\n``by_provider`` is sorted descending by cost_usd then calls so the\nbiggest spend lines surface first. ``call_count``/``total_*`` are\njob-wide totals across all (provider, model) combinations.\n\n§17.90 added ``by_kind`` — same shape, grouped by ``call_kind``.\nUseful for splitting compile-time synthesis spend from execution\nspend (W.7 follow-up).",
+        "properties": {
+          "by_kind": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/JobCostsKindItem"
+            },
+            "title": "By Kind",
+            "type": "array"
+          },
           "by_provider": {
             "items": {
               "$ref": "#/components/schemas/JobCostsBreakdownItem"

@@ -581,12 +581,33 @@ class JobCostsBreakdownItem(BaseModel):
     latency_ms: int
 
 
+class JobCostsKindItem(BaseModel):
+    """§17.90 — one row of the per-call_kind cost breakdown.
+
+    ``kind`` is the literal string from ``llm_call_logs.call_kind``
+    with NULL folded into the sentinel ``"uncategorized"`` so consumers
+    don't have to handle NULL. Currently only ``"synthesis"`` is set
+    explicitly (by ``_synthesize_compiled_output``); everything else
+    lands in ``"uncategorized"``.
+    """
+    kind: str
+    calls: int
+    cost_usd: float
+    prompt_tokens: int
+    completion_tokens: int
+    latency_ms: int
+
+
 class JobCostsResponse(BaseModel):
     """Sprint J.3.b — aggregate cost + latency for one job, with breakdown.
 
     ``by_provider`` is sorted descending by cost_usd then calls so the
     biggest spend lines surface first. ``call_count``/``total_*`` are
     job-wide totals across all (provider, model) combinations.
+
+    §17.90 added ``by_kind`` — same shape, grouped by ``call_kind``.
+    Useful for splitting compile-time synthesis spend from execution
+    spend (W.7 follow-up).
     """
     job_id: str
     total_cost_usd: float
@@ -595,6 +616,7 @@ class JobCostsResponse(BaseModel):
     total_latency_ms: int
     call_count: int
     by_provider: list[JobCostsBreakdownItem]
+    by_kind: list[JobCostsKindItem] = []
 
 
 class JobSynthesisOverrideInput(BaseModel):
