@@ -35,7 +35,7 @@ class TestDecomposeTopic:
             mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_DECOMPOSITION))
             from app.modules.research_agent import _decompose_topic
 
-            result = await _decompose_topic("Redis caching", model="qwen3:4b")
+            result = await _decompose_topic("Redis caching")
 
             assert "queries" in result
             assert "facets" in result
@@ -48,7 +48,7 @@ class TestDecomposeTopic:
             mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response("not json at all"))
             from app.modules.research_agent import _decompose_topic
 
-            result = await _decompose_topic("Redis caching", model="qwen3:4b")
+            result = await _decompose_topic("Redis caching")
 
             assert "queries" in result
             assert len(result["queries"]) >= 3
@@ -60,7 +60,7 @@ class TestDecomposeTopic:
             mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response("", success=False))
             from app.modules.research_agent import _decompose_topic
 
-            result = await _decompose_topic("Redis caching", model="qwen3:4b")
+            result = await _decompose_topic("Redis caching")
 
             assert "queries" in result
             assert result["topic_complexity"] == "medium"
@@ -72,7 +72,7 @@ class TestDecomposeTopic:
             from app.modules.research_agent import _decompose_topic
 
             await _decompose_topic(
-                "Redis caching", model="qwen3:4b",
+                "Redis caching",
                 existing_facets=["overview", "performance"],
                 gap_focus="security aspects",
             )
@@ -177,7 +177,7 @@ class TestExtractEntries:
             mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_EXTRACTION))
             from app.modules.research_agent import _extract_entries
 
-            entries = await _extract_entries(MOCK_SEARCH_RESULTS, "Redis caching", model="qwen2.5:7b")
+            entries = await _extract_entries(MOCK_SEARCH_RESULTS, "Redis caching")
 
             assert len(entries) == 2
             assert entries[0]["title"] == "Redis default port"
@@ -189,7 +189,7 @@ class TestExtractEntries:
             mock_mr.tool_call = mock_mr.generate = AsyncMock()
             from app.modules.research_agent import _extract_entries
 
-            entries = await _extract_entries([], "Redis", model="qwen2.5:7b")
+            entries = await _extract_entries([], "Redis")
 
             assert entries == []
             mock_mr.generate.assert_not_awaited()
@@ -200,7 +200,7 @@ class TestExtractEntries:
             mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response("", success=False))
             from app.modules.research_agent import _extract_entries
 
-            entries = await _extract_entries(MOCK_SEARCH_RESULTS, "Redis", model="qwen2.5:7b")
+            entries = await _extract_entries(MOCK_SEARCH_RESULTS, "Redis")
 
             assert entries == []
 
@@ -222,7 +222,7 @@ class TestExtractEntries:
                 {"title": f"R{i}", "url": f"https://ex.com/{i}", "content": f"Content {i}"}
                 for i in range(15)
             ]
-            entries = await _extract_entries(results, "Redis", model="qwen2.5:7b")
+            entries = await _extract_entries(results, "Redis")
 
             assert mock_mr.generate.await_count == 2
             assert len(entries) == 4
@@ -241,7 +241,7 @@ class TestAnalyzeGaps:
             state.outline_facets = ["overview", "performance", "security"]
             state.all_entries = [{"facet": "overview", "title": "T", "content": "C"}]
 
-            result = await _analyze_gaps(state, model="qwen3:4b")
+            result = await _analyze_gaps(state)
 
             assert result["coverage_pct"] == 60
             assert "security" in result["gap_facets"]
@@ -257,7 +257,7 @@ class TestAnalyzeGaps:
             state.outline_facets = ["overview"]
             state.all_entries = []
 
-            result = await _analyze_gaps(state, model="qwen3:4b")
+            result = await _analyze_gaps(state)
 
             assert result["coverage_pct"] == 0
             assert result["reason"] == "gap_analysis_failed"

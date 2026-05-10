@@ -154,7 +154,7 @@ class TestIngestPhaseHeartbeats:
                 mode="direct_url",
                 topic="https://example.com",
                 t0=0.0,
-                summary_model=None,  # skip summary for this test
+                summarize=False,  # skip summary for this test
             ):
                 events.append(evt)
 
@@ -198,7 +198,7 @@ class TestIngestPhaseHeartbeats:
             async for evt in _ingest_and_finalize_direct(
                 state=state, session_id="t",
                 entries=[{"content": str(i), "title": "x"} for i in range(5)],
-                mode="direct_url", topic="x", t0=0.0, summary_model=None,
+                mode="direct_url", topic="x", t0=0.0, summarize=False,
             ):
                 events.append(evt)
 

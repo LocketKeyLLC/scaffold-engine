@@ -345,11 +345,16 @@ ASSESS_COVERAGE_TOOL = Tool(
 
 async def _decompose_topic(
     topic: str,
-    model: str,
+    *,
+    role: str = "model_verifier",
+    overrides: dict | None = None,
     existing_facets: list | None = None,
     gap_focus: str | None = None,
 ) -> dict:
-    """Decompose topic into queries. Retries once on <2 facets; falls back."""
+    """Decompose topic into queries. Retries once on <2 facets; falls back.
+
+    §17.89 Pattern 3 — dispatch via role= so MODEL_VERIFIER_PROVIDER is honored.
+    """
     prompt = f"Decompose this research topic into search queries:\n\nTOPIC: {topic}"
     if existing_facets:
         prompt += f"\n\nAlready covered facets (do NOT repeat): {', '.join(existing_facets)}"
@@ -362,7 +367,7 @@ async def _decompose_topic(
             {"role": "user", "content": prompt},
         ],
         tools=[PLAN_RESEARCH_TOOL],
-        model=model, temperature=0.4, max_tokens=2048,
+        role=role, overrides=overrides, temperature=0.4, max_tokens=2048,
     )
     parsed = read_tool_args(resp)
     if parsed and "queries" in parsed:
@@ -383,7 +388,7 @@ async def _decompose_topic(
                 {"role": "user", "content": retry_prompt},
             ],
             tools=[PLAN_RESEARCH_TOOL],
-            model=model, temperature=0.5, max_tokens=2048,
+            role=role, overrides=overrides, temperature=0.5, max_tokens=2048,
         )
         retry_parsed = read_tool_args(retry_resp)
         if retry_parsed and "queries" in retry_parsed:
@@ -469,11 +474,14 @@ async def _search_queries(
 async def _extract_entries(
     results: list[dict],
     topic: str,
-    model: str,
+    *,
+    role: str = "model_verifier",
+    overrides: dict | None = None,
 ) -> list[dict]:
     """Distill search results into knowledge entries.
 
     Fetches full pages via trafilatura; chunks long pages; snippet fallback.
+    §17.89 Pattern 3 — dispatch via role= so MODEL_VERIFIER_PROVIDER is honored.
     """
     if not results:
         return []
@@ -518,7 +526,7 @@ async def _extract_entries(
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=topic, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],
-            model=model, temperature=0.1, max_tokens=1024,
+            role=role, overrides=overrides, temperature=0.1, max_tokens=1024,
         )
 
         entries: list[dict] = []
@@ -569,7 +577,9 @@ async def _extract_entries(
 
 async def _analyze_gaps(
     state: ResearchState,
-    model: str,
+    *,
+    role: str = "model_verifier",
+    overrides: dict | None = None,
 ) -> dict:
     """Analyze coverage gaps. Retries once on parse failure.
 
@@ -601,7 +611,7 @@ async def _analyze_gaps(
                 {"role": "user", "content": prompt},
             ],
             tools=[ASSESS_COVERAGE_TOOL],
-            model=model, temperature=0.3, max_tokens=2048,
+            role=role, overrides=overrides, temperature=0.3, max_tokens=2048,
         )
         parsed = read_tool_args(resp)
         if parsed:
@@ -626,9 +636,14 @@ async def _analyze_gaps(
 
 async def _generate_summary(
     state: ResearchState,
-    model: str,
+    *,
+    role: str = "model_verifier",
+    overrides: dict | None = None,
 ) -> str:
-    """Generate human-readable summary of all collected research."""
+    """Generate human-readable summary of all collected research.
+
+    §17.89 Pattern 3 — dispatch via role= so MODEL_VERIFIER_PROVIDER is honored.
+    """
     entry_texts = [
         f"[{e.get('facet', '?')}] {e.get('content', '')}"
         for e in state.all_entries
@@ -641,7 +656,7 @@ async def _generate_summary(
     )
 
     resp = await model_router.generate(
-        prompt, model=model, system=SUMMARY_SYSTEM_V1,
+        prompt, role=role, overrides=overrides, system=SUMMARY_SYSTEM_V1,
         temperature=0.3, max_tokens=2048,
     )
 
@@ -696,8 +711,8 @@ async def _execute_iteration_loop(
     state: ResearchState,
     session_id: str,
     initial_queries: list[dict],
-    decompose_model: str,
-    extract_model: str,
+    *,
+    overrides: dict | None,
     topic: str,
     allow_pause: bool,
 ) -> AsyncGenerator[str, None]:
@@ -734,7 +749,7 @@ async def _execute_iteration_loop(
             break
 
         extract_task = asyncio.create_task(
-            _extract_entries(results, topic, model=extract_model)
+            _extract_entries(results, topic, overrides=overrides)
         )
         async for hb in _await_with_heartbeat(
             extract_task, {"status": "extracting", "iteration": state.iteration}
@@ -791,7 +806,7 @@ async def _execute_iteration_loop(
             })
             break
 
-        gap_task = asyncio.create_task(_analyze_gaps(state, model=decompose_model))
+        gap_task = asyncio.create_task(_analyze_gaps(state, overrides=overrides))
         async for hb in _await_with_heartbeat(
             gap_task, {"status": "analyzing_gaps"}
         ):
@@ -850,7 +865,8 @@ async def _ingest_and_finalize_direct(
     mode: str,
     topic: str,
     t0: float,
-    summary_model: str | None = None,
+    summary_overrides: dict | None = None,
+    summarize: bool = False,
     extra_complete_fields: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Truncate → ingest → (optional summary) → finalize. Caller already emitted
@@ -917,9 +933,9 @@ async def _ingest_and_finalize_direct(
     })
 
     summary: str | None = None
-    if summary_model is not None and state.all_entries:
+    if summarize and state.all_entries:
         summary_task = asyncio.create_task(
-            _generate_summary(state, model=summary_model)
+            _generate_summary(state, overrides=summary_overrides)
         )
         async for hb in _await_with_heartbeat(
             summary_task, {"status": "summarizing"}
@@ -1182,8 +1198,8 @@ async def _run_research_url_mode(
     url: str,
     state: ResearchState,
     session_id: str,
-    extract_model: str,
-    summary_model: str,
+    *,
+    overrides: dict | None,
     t0: float,
 ) -> AsyncGenerator[str, None]:
     """URL-mode: fetch one URL, extract via trafilatura, chunk, distill, ingest."""
@@ -1264,7 +1280,8 @@ async def _run_research_url_mode(
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=prompt_topic, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],
-            model=extract_model,
+            role="model_verifier",
+            overrides=overrides,
             temperature=0.1,
             max_tokens=1024,
         ))
@@ -1334,8 +1351,9 @@ async def _run_research_url_mode(
     })
 
     # Audit Finding C — unload extract model before embed loads. See
-    # _unload_ollama_model docstring for context.
-    await _unload_ollama_model(extract_model)
+    # _unload_ollama_model docstring for context. §17.89 — resolve the model
+    # name for the unload helper from the same role+overrides used above.
+    await _unload_ollama_model(get_model("model_verifier", overrides))
 
     async for evt in _ingest_and_finalize_direct(
         state=state,
@@ -1344,7 +1362,8 @@ async def _run_research_url_mode(
         mode="direct_url",
         topic=url,
         t0=t0,
-        summary_model=summary_model,
+        summary_overrides=overrides,
+        summarize=True,
     ):
         yield evt
 
@@ -1355,8 +1374,8 @@ async def _run_research_pdf_mode(
     extractor: str,
     state: ResearchState,
     session_id: str,
-    extract_model: str,
-    summary_model: str,
+    *,
+    overrides: dict | None,
     t0: float,
 ) -> AsyncGenerator[str, None]:
     """PDF-mode: extract bytes via pypdf (or plumber fallback), distill, ingest."""
@@ -1429,7 +1448,8 @@ async def _run_research_pdf_mode(
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=filename, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],
-            model=extract_model,
+            role="model_verifier",
+            overrides=overrides,
             temperature=0.1,
             max_tokens=1024,
         ))
@@ -1489,8 +1509,9 @@ async def _run_research_pdf_mode(
     })
 
     # Audit Finding C — unload extract model before embed loads. See
-    # _unload_ollama_model docstring for context.
-    await _unload_ollama_model(extract_model)
+    # _unload_ollama_model docstring for context. §17.89 — resolve the
+    # model name for unload from the same role+overrides used above.
+    await _unload_ollama_model(get_model("model_verifier", overrides))
 
     async for evt in _ingest_and_finalize_direct(
         state=state,
@@ -1499,7 +1520,8 @@ async def _run_research_pdf_mode(
         mode="direct_pdf",
         topic=filename,
         t0=t0,
-        summary_model=summary_model,
+        summary_overrides=overrides,
+        summarize=True,
         extra_complete_fields={
             "page_count": page_count,
             "extractor_used": used,
@@ -1578,10 +1600,9 @@ async def run_research(
                 ):
                     yield evt
             elif mode == "direct_url":
-                extract_m = get_model("model_verifier", model_overrides)
-                summary_m = get_model("model_verifier", model_overrides)
                 async for evt in _run_research_url_mode(
-                    topic, state, session_id, extract_m, summary_m, t0,
+                    topic, state, session_id,
+                    overrides=model_overrides, t0=t0,
                 ):
                     yield evt
 
@@ -1591,11 +1612,8 @@ async def run_research(
             yield evt
         return
 
-    # --- Topic mode ---
-    decompose_model = get_model("model_verifier", model_overrides)
-    extract_model = get_model("model_verifier", model_overrides)
-    summary_model = get_model("model_verifier", model_overrides)
-
+    # --- Topic mode (§17.89: pre-resolved model_* names dropped; helpers
+    # route via role= and the same overrides dict.) ---
     async def _topic_inner():
         yield _sse("research_started", {
             "topic": topic,
@@ -1605,7 +1623,7 @@ async def run_research(
             "session_id": session_id,
         })
 
-        decomposition = await _decompose_topic(topic, model=decompose_model)
+        decomposition = await _decompose_topic(topic, overrides=model_overrides)
         state.outline_facets = decomposition.get("facets", [topic])
         queries = decomposition.get("queries", [])
 
@@ -1619,8 +1637,7 @@ async def run_research(
             state=state,
             session_id=session_id,
             initial_queries=queries,
-            decompose_model=decompose_model,
-            extract_model=extract_model,
+            overrides=model_overrides,
             topic=topic,
             allow_pause=True,
         ):
@@ -1633,7 +1650,7 @@ async def run_research(
         summary: str | None = None
         try:
             summary_task = asyncio.create_task(
-                _generate_summary(state, model=summary_model)
+                _generate_summary(state, overrides=model_overrides)
             )
             async for hb in _await_with_heartbeat(
                 summary_task, {"status": "summarizing"},
@@ -1731,9 +1748,6 @@ async def resume_research(
 
     state = _rehydrate_state(row)
     topic = row["topic"]
-    decompose_model = get_model("model_verifier", model_overrides)
-    extract_model = get_model("model_verifier", model_overrides)
-    summary_model = get_model("model_verifier", model_overrides)
 
     async def _resume_inner():
         yield _sse("research_resumed", {
@@ -1746,7 +1760,7 @@ async def resume_research(
         # #142: targeted decompose with reply as gap_focus (replaces 2-query seed)
         decomposition = await _decompose_topic(
             topic,
-            model=decompose_model,
+            overrides=model_overrides,
             existing_facets=state.outline_facets,
             gap_focus=reply,
         )
@@ -1763,8 +1777,7 @@ async def resume_research(
             state=state,
             session_id=session_id,
             initial_queries=new_queries,
-            decompose_model=decompose_model,
-            extract_model=extract_model,
+            overrides=model_overrides,
             topic=topic,
             allow_pause=False,
         ):
@@ -1774,7 +1787,7 @@ async def resume_research(
         summary: str | None = None
         try:
             summary_task = asyncio.create_task(
-                _generate_summary(state, model=summary_model)
+                _generate_summary(state, overrides=model_overrides)
             )
             async for hb in _await_with_heartbeat(
                 summary_task, {"status": "summarizing"},
@@ -1846,8 +1859,6 @@ async def run_research_pdf(
     state = ResearchState(
         topic=filename, depth="direct_pdf", domain=research_domain,
     )
-    extract_model = get_model("model_verifier", model_overrides)
-    summary_model = get_model("model_verifier", model_overrides)
 
     async def _pdf_inner():
         yield _sse("research_started", {
@@ -1865,8 +1876,7 @@ async def run_research_pdf(
             extractor=extractor,
             state=state,
             session_id=session_id,
-            extract_model=extract_model,
-            summary_model=summary_model,
+            overrides=model_overrides,
             t0=t0,
         ):
             yield evt

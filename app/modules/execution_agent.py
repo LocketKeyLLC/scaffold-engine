@@ -647,11 +647,19 @@ async def execute_next_node(
         tool = (node.get("tool") or "LLM").strip()
         tool_lower = tool.lower()
 
+        # §17.89 Pattern 3 — fold the per-node `_assigned` model AND the
+        # codegen-override into the per-call overrides dict so the dispatch
+        # below can route via role= (and pick up the configured provider)
+        # while still honoring the user's per-node model choice.
         # CodeGen override — only when assigned_model is blank.
+        exec_overrides = dict(model_overrides or {})
         if tool_lower == "codegen" and not _assigned:
-            exec_model = get_model("model_coder", model_overrides)
+            exec_role = "model_coder"
         else:
-            exec_model = _assigned or get_model("model_general", model_overrides)
+            exec_role = "model_general"
+            if _assigned:
+                exec_overrides["model_general"] = _assigned
+        exec_model = get_model(exec_role, exec_overrides)
         verifier_model = get_model("model_verifier", model_overrides)
 
         # ── Human: single atomic UPDATE short-circuit (H3) ──
@@ -853,7 +861,9 @@ async def execute_next_node(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": exec_prompt},
             ]
-            resp = await model_router.chat(messages=messages, model=exec_model)
+            resp = await model_router.chat(
+                messages=messages, role=exec_role, overrides=exec_overrides,
+            )
             if not resp.success:
                 raise RuntimeError(resp.error or "Model returned failure")
             return resp.text.strip()
@@ -914,7 +924,9 @@ async def execute_next_node(
         verify_status: Literal["pass", "fail", "skipped"] = "skipped"
         reason, confidence = "verification skipped", 0.0
     else:
-        vstatus, reason, confidence = await _verify_output(title, output, verifier_model)
+        vstatus, reason, confidence = await _verify_output(
+            title, output, overrides=model_overrides,
+        )
         verify_status = vstatus
         if verify_status == "fail":
             logger.warning("node_verification_failed: node='%s' reason=%s", title, reason)

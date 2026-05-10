@@ -53,12 +53,19 @@ class TestOptimizeModelOverrides:
         )
 
     def test_explicit_model_optimizer_wins_over_overrides(self):
-        """Explicit model_optimizer param must take precedence over get_model lookup."""
+        """Explicit model_optimizer param must take precedence over get_model lookup.
+
+        §17.89 contract update: post-Pattern-3-migration, optimize_prompt no
+        longer passes `model=` to model_router. Instead it folds the explicit
+        ``model_optimizer`` into the per-call overrides dict under the
+        ``model_general`` key and dispatches via ``role="model_general"``,
+        letting provider_for_role's override precedence pick up the explicit
+        tag. The test asserts the new path: overrides kwarg carries the tag,
+        and `model_router.chat` receives `role`+`overrides` (never `model`).
+        """
         from app.modules.prompt_optimizer import optimize_prompt
 
-        with patch("app.modules.prompt_optimizer.model_router") as mr, \
-             patch("app.modules.prompt_optimizer.get_model",
-                   return_value="from-overrides:1b") as mock_gm:
+        with patch("app.modules.prompt_optimizer.model_router") as mr:
             mr.chat = AsyncMock(return_value=_mock_resp("clean prompt"))
 
             _run(optimize_prompt(
@@ -68,11 +75,14 @@ class TestOptimizeModelOverrides:
                 model_overrides={"model_verifier": "from-overrides:1b"},
             ))
 
-        # model_router.chat should have been called with the explicit tag as model
-        call_models = [c.kwargs.get("model") for c in mr.chat.call_args_list]
-        assert "explicit-tag:7b" in call_models, (
-            f"Explicit model_optimizer should be used. Got: {call_models}"
-        )
+        # Exactly one chat call (skip_verify=True skips _llm_verify).
+        assert mr.chat.await_count == 1
+        kwargs = mr.chat.await_args.kwargs
+        assert kwargs.get("role") == "model_general"
+        assert "model" not in kwargs
+        # The explicit model_optimizer was folded into the overrides dict
+        # under the role's settings field name.
+        assert kwargs.get("overrides", {}).get("model_general") == "explicit-tag:7b"
 
     def test_no_overrides_still_works(self):
         """Omitting model_overrides must not raise (backward compat)."""

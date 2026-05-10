@@ -53,7 +53,7 @@ class TestLLMVerifyHappyPath:
             mr.tool_call = AsyncMock(return_value=_tool_call_resp(
                 args={"preserved": True, "reason": "all intent intact"},
             ))
-            preserved, reason = _run(_llm_verify("orig", "opt", "verifier"))
+            preserved, reason = _run(_llm_verify("orig", "opt"))
         assert preserved is True
         assert "intact" in reason
 
@@ -63,7 +63,7 @@ class TestLLMVerifyHappyPath:
             mr.tool_call = AsyncMock(return_value=_tool_call_resp(
                 args={"preserved": False, "reason": "scope narrowed"},
             ))
-            preserved, reason = _run(_llm_verify("orig", "opt", "verifier"))
+            preserved, reason = _run(_llm_verify("orig", "opt"))
         assert preserved is False
         assert "narrowed" in reason
 
@@ -74,7 +74,7 @@ class TestLLMVerifyHappyPath:
             mr.tool_call = AsyncMock(return_value=_tool_call_resp(
                 args={"preserved": True},
             ))
-            preserved, reason = _run(_llm_verify("orig", "opt", "verifier"))
+            preserved, reason = _run(_llm_verify("orig", "opt"))
         assert preserved is True
         assert reason == ""
 
@@ -87,7 +87,7 @@ class TestLLMVerifyHappyPath:
             mr.tool_call = AsyncMock(return_value=_tool_call_resp(
                 args={"preserved": True, "reason": long_reason},
             ))
-            _, reason = _run(_llm_verify("orig", "opt", "verifier"))
+            _, reason = _run(_llm_verify("orig", "opt"))
         assert len(reason) == 200
 
 
@@ -103,7 +103,7 @@ class TestLLMVerifyFailClosed:
         from app.modules.prompt_optimizer import _llm_verify
         with patch("app.modules.prompt_optimizer.model_router") as mr:
             mr.tool_call = AsyncMock(return_value=_tool_call_resp(no_calls=True))
-            preserved, reason = _run(_llm_verify("orig", "opt", "verifier"))
+            preserved, reason = _run(_llm_verify("orig", "opt"))
         assert preserved is False
         assert reason == ""
 
@@ -115,7 +115,7 @@ class TestLLMVerifyFailClosed:
             mr.tool_call = AsyncMock(return_value=_tool_call_resp(
                 args={"reason": "I forgot the verdict"},
             ))
-            preserved, reason = _run(_llm_verify("orig", "opt", "verifier"))
+            preserved, reason = _run(_llm_verify("orig", "opt"))
         assert preserved is False
         assert reason == ""
 
@@ -127,7 +127,7 @@ class TestLLMVerifyFailClosed:
             mr.tool_call = AsyncMock(return_value=_tool_call_resp(
                 success=False, args={"preserved": True},  # success=False ignores args
             ))
-            preserved, reason = _run(_llm_verify("orig", "opt", "verifier"))
+            preserved, reason = _run(_llm_verify("orig", "opt"))
         assert preserved is False, (
             "success=False must fail closed even if args claim preserved=true — "
             "we cannot trust args from a non-successful response."
@@ -144,7 +144,7 @@ class TestLLMVerifyFailClosed:
             call.arguments = ["not", "a", "dict"]
             r.tool_calls = [call]
             mr.tool_call = AsyncMock(return_value=r)
-            preserved, _ = _run(_llm_verify("orig", "opt", "verifier"))
+            preserved, _ = _run(_llm_verify("orig", "opt"))
         assert preserved is False
 
 
@@ -163,7 +163,7 @@ class TestLLMVerifyContract:
                 "_llm_verify must NOT use model_router.chat after X.10 — "
                 "use tool_call so the wrapper handles structured-output parsing"
             ))
-            _run(_llm_verify("orig", "opt", "verifier"))
+            _run(_llm_verify("orig", "opt"))
         # tool_call was invoked exactly once.
         assert mr.tool_call.await_count == 1
 
@@ -175,8 +175,22 @@ class TestLLMVerifyContract:
             mr.tool_call = AsyncMock(return_value=_tool_call_resp(
                 args={"preserved": True},
             ))
-            _run(_llm_verify("orig", "opt", "verifier"))
+            _run(_llm_verify("orig", "opt"))
         # _llm_verify passes tools= as a keyword arg.
         kwargs = mr.tool_call.await_args.kwargs
         assert "tools" in kwargs
         assert RECORD_VERIFICATION_TOOL in kwargs["tools"]
+
+    def test_dispatches_via_role_not_model(self):
+        """§17.89 Pattern 3 — _llm_verify must route through role= so the
+        configured MODEL_VERIFIER_PROVIDER is honored. Pre-§17.89 the helper
+        passed model= directly which always went through the Ollama provider."""
+        from app.modules.prompt_optimizer import _llm_verify
+        with patch("app.modules.prompt_optimizer.model_router") as mr:
+            mr.tool_call = AsyncMock(return_value=_tool_call_resp(
+                args={"preserved": True},
+            ))
+            _run(_llm_verify("orig", "opt"))
+        kwargs = mr.tool_call.await_args.kwargs
+        assert kwargs.get("role") == "model_verifier"
+        assert "model" not in kwargs

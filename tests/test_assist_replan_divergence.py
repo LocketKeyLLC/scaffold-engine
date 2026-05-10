@@ -150,3 +150,35 @@ class TestRecordDivergenceTool:
 
     def test_tool_name(self):
         assert assist_replan.RECORD_DIVERGENCE_TOOL.name == "record_divergence"
+
+
+@pytest.mark.smoke
+class TestDispatchPath:
+    """§17.89 Pattern 3 — detect_divergence routes through role= so the
+    configured MODEL_VERIFIER_PROVIDER is honored. Pre-§17.89 it resolved
+    settings.model_verifier itself and bypassed the provider abstraction."""
+
+    async def test_dispatches_via_role_not_model(self):
+        resp = _resp_with_args({"diverges": False})
+        with patch("app.model_router.tool_call",
+                   AsyncMock(return_value=resp)) as mock_tc:
+            await assist_replan.detect_divergence(
+                title="t", prompt="p", evidence="e",
+            )
+        kwargs = mock_tc.await_args.kwargs
+        assert kwargs.get("role") == "model_verifier"
+        assert "model" not in kwargs
+
+    async def test_model_overrides_flow_through_to_provider(self):
+        """Per-request overrides forward to model_router.tool_call as the
+        ``overrides`` kwarg so provider_for_role's override precedence works."""
+        resp = _resp_with_args({"diverges": False})
+        overrides = {"model_verifier": "qwen3:7b"}
+        with patch("app.model_router.tool_call",
+                   AsyncMock(return_value=resp)) as mock_tc:
+            await assist_replan.detect_divergence(
+                title="t", prompt="p", evidence="e",
+                model_overrides=overrides,
+            )
+        kwargs = mock_tc.await_args.kwargs
+        assert kwargs.get("overrides") == overrides

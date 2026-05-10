@@ -192,26 +192,45 @@ RECORD_VERIFICATION_TOOL = Tool(
 )
 
 
-async def _llm_optimize(pre_cleaned: str, model: str) -> str:
+async def _llm_optimize(
+    pre_cleaned: str,
+    *,
+    role: str = "model_general",
+    overrides: dict | None = None,
+) -> str:
+    """§17.89 — role-routed; provider chosen via ``provider_for_role``."""
     from app.utils.llm_parsing import strip_think_tags
     messages = [{"role": "user", "content": f"Rewrite this prompt following all rules:\n\n{pre_cleaned}"}]
     messages = [{"role": "system", "content": OPTIMIZE_SYSTEM}] + messages
-    resp = await model_router.chat(messages=messages, model=model)
+    resp = await model_router.chat(messages=messages, role=role, overrides=overrides)
     return strip_think_tags(resp.text or "").strip()
 
-async def _llm_verify(original: str, optimized: str, model: str) -> tuple[bool, str]:
+async def _llm_verify(
+    original: str,
+    optimized: str,
+    *,
+    role: str = "model_verifier",
+    overrides: dict | None = None,
+) -> tuple[bool, str]:
     """Verify the optimized prompt preserves the semantic intent of the original.
 
     Sprint X.10 — uses model_router.tool_call so structured output is
     parsed by the wrapper (native or coaxing) rather than coaxed via
-    prompt prose. Fail-closed contract is preserved: any failure (no
-    tool_calls, missing 'preserved' key, dispatch error) returns False
-    to prevent silently accepting a corrupted optimization.
+    prompt prose. §17.89 — dispatch via ``role=`` so the configured
+    ``MODEL_VERIFIER_PROVIDER`` is honored. Fail-closed contract is
+    preserved: any failure (no tool_calls, missing 'preserved' key,
+    dispatch error) returns False to prevent silently accepting a
+    corrupted optimization.
 
     Args:
         original: The original prompt text.
         optimized: The rewritten prompt to verify against the original.
-        model: Verifier model tag.
+        role: Settings field name for the verifier model (default
+            ``model_verifier``). Pass an alternate role if a non-default
+            verifier is desired.
+        overrides: Per-request ``{role: model_name}`` overrides forwarded
+            to ``provider_for_role`` so the public ``optimize_prompt`` API
+            can still honor explicit ``model_verifier=...`` arguments.
 
     Returns:
         Tuple of (preserved, reason). ``preserved`` defaults to False on
@@ -224,7 +243,8 @@ async def _llm_verify(original: str, optimized: str, model: str) -> tuple[bool, 
     resp = await model_router.tool_call(
         messages=messages,
         tools=[RECORD_VERIFICATION_TOOL],
-        model=model,
+        role=role,
+        overrides=overrides,
     )
     args = read_tool_args(resp)
     if not args or "preserved" not in args:
@@ -257,20 +277,34 @@ async def optimize_prompt(
         OptimizationResult with original, optimized, and pre_cleaned text plus
         token counts, reduction %, clarity score, and preservation verdict.
     """
-    opt_model = model_optimizer or get_model("model_general", model_overrides)
-    ver_model = model_verifier or get_model("model_verifier", model_overrides)
+    # §17.89 Pattern 3 — push role+overrides into the helpers so dispatch
+    # routes through provider_for_role. Explicit model_optimizer / model_verifier
+    # args are folded into the per-call overrides dict so the public API
+    # contract (caller picks model) is preserved without bypassing provider
+    # selection.
+    opt_overrides = dict(model_overrides or {})
+    if model_optimizer:
+        opt_overrides["model_general"] = model_optimizer
+    ver_overrides = dict(model_overrides or {})
+    if model_verifier:
+        ver_overrides["model_verifier"] = model_verifier
+
+    opt_model = get_model("model_general", opt_overrides)
+    ver_model = get_model("model_verifier", ver_overrides)
 
     analysis = _analyze(prompt)
     issues_before = len(analysis.issues)
     pre_cleaned = _deterministic_strip(prompt)
 
     logger.info("Running LLM optimize pass with %s", opt_model)
-    optimized = await _llm_optimize(pre_cleaned, opt_model)
+    optimized = await _llm_optimize(pre_cleaned, overrides=opt_overrides)
 
     intent_preserved = True
     if not skip_verify:
         logger.info("Running verifier with %s", ver_model)
-        intent_preserved, reason = await _llm_verify(prompt, optimized, ver_model)
+        intent_preserved, reason = await _llm_verify(
+            prompt, optimized, overrides=ver_overrides,
+        )
         if not intent_preserved:
             # #6.12 — keep intent_preserved=False so callers/clarity score
             # reflect the real verify outcome. Rollback to pre_cleaned is a

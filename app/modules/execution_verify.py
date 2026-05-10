@@ -77,9 +77,18 @@ VERIFY_TOOL = Tool(
 async def _verify_output(
     task_title: str,
     output: str,
-    model: str,
+    *,
+    role: str = "model_verifier",
+    overrides: dict | None = None,
 ) -> tuple[Literal["pass", "fail"], str, float]:
-    """Verify output quality. Fail-closed: any error/parse/timeout => ('fail', ...)."""
+    """Verify output quality. Fail-closed: any error/parse/timeout => ('fail', ...).
+
+    §17.89 Pattern 3 — dispatch via ``role=`` so the configured
+    ``MODEL_VERIFIER_PROVIDER`` is honored. Pre-§17.89 the helper took a
+    pre-resolved model string and went through the legacy Ollama-only
+    path. The default ``role="model_verifier"`` matches the upstream
+    caller's prior `get_model("model_verifier", ...)` resolution.
+    """
     messages = [
         {"role": "system", "content": VERIFY_SYSTEM},
         {"role": "user", "content": f"TASK: {task_title}\n\nOUTPUT:\n{output}"},
@@ -88,7 +97,8 @@ async def _verify_output(
     async def _body() -> tuple[Literal["pass", "fail"], str, float]:
         try:
             resp = await model_router.tool_call(
-                messages=messages, tools=[VERIFY_TOOL], model=model,
+                messages=messages, tools=[VERIFY_TOOL],
+                role=role, overrides=overrides,
                 temperature=0.0,
             )
         except Exception as e:

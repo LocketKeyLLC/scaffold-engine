@@ -101,8 +101,7 @@ class TestExecuteIterationLoop:
             async for sse in _execute_iteration_loop(
                 state=state, session_id="sess",
                 initial_queries=[{"query": "q", "facet": "f"}],
-                decompose_model="m", extract_model="m",
-                topic="t", allow_pause=True,
+                overrides=None, topic="t", allow_pause=True,
             ):
                 events.append(sse)
 
@@ -147,8 +146,7 @@ class TestExecuteIterationLoop:
             async for sse in _execute_iteration_loop(
                 state=state, session_id="sess",
                 initial_queries=[{"query": "q", "facet": "f"}],
-                decompose_model="m", extract_model="m",
-                topic="t", allow_pause=True,
+                overrides=None, topic="t", allow_pause=True,
             ):
                 events.append(sse)
 

@@ -124,8 +124,7 @@ class TestExtractLoopInstrumentation:
                     url="https://example.com/x",
                     state=state,
                     session_id="sess-test",
-                    extract_model="qwen2.5:7b",
-                    summary_model="qwen2.5:7b",
+                    overrides=None,
                     t0=0.0,
                 )
                 events = []

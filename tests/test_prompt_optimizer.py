@@ -143,11 +143,15 @@ async def test_optimize_prompt_populates_all_result_fields():
 async def test_llm_optimize_strips_think_tags():
     """_llm_optimize must drop <think>...</think> blocks from model output."""
     fake_resp = SimpleNamespace(text="<think>internal reasoning</think>Write a summary.")
-    with patch.object(po.model_router, "chat", new=AsyncMock(return_value=fake_resp)):
-        out = await po._llm_optimize("raw prompt", model="fake-model")
+    with patch.object(po.model_router, "chat", new=AsyncMock(return_value=fake_resp)) as m:
+        out = await po._llm_optimize("raw prompt")
     assert "<think>" not in out
     assert "internal reasoning" not in out
     assert out == "Write a summary."
+    # §17.89 — verify the helper now dispatches via role= rather than model=.
+    _, kwargs = m.call_args
+    assert kwargs.get("role") == "model_general"
+    assert "model" not in kwargs
 
 
 @pytest.mark.smoke

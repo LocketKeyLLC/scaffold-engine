@@ -121,19 +121,21 @@ async def detect_divergence(
     """
     # Defer the model_router import; it pulls heavy http client state.
     from app import model_router
-    from app.config import settings
-    overrides = model_overrides or {}
-    model = overrides.get("model_verifier") or settings.model_verifier
     msg = _DIVERGENCE_PROMPT.format(
         title=title or "(untitled)",
         prompt=(prompt or "")[:4000],
         evidence=(evidence or "")[:4000],
     )
     try:
+        # §17.89 Pattern 3 — dispatch via role= so MODEL_VERIFIER_PROVIDER is
+        # honored. model_overrides flow through provider_for_role's overrides
+        # arg so a per-request {model_verifier: <name>} still wins over the
+        # default settings.model_verifier value.
         resp = await model_router.tool_call(
             messages=[{"role": "user", "content": msg}],
             tools=[RECORD_DIVERGENCE_TOOL],
-            model=model,
+            role="model_verifier",
+            overrides=model_overrides,
             max_tokens=200,
         )
     except Exception as e:

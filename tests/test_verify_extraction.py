@@ -58,7 +58,7 @@ class TestPassPath:
         patch_tool_call.return_value = _ok_with_args({
             "pass": True, "reason": "ok", "confidence": 0.9,
         })
-        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        status, reason, conf = await execution_agent._verify_output("t", "o")
         assert status == "pass"
         assert reason == "ok"
         assert conf == 0.9
@@ -70,7 +70,7 @@ class TestPassPath:
             "pass": True, "reason": "good", "confidence": 1.0,
             "future_field": "ignored",
         })
-        status, _, _ = await execution_agent._verify_output("t", "o", "m")
+        status, _, _ = await execution_agent._verify_output("t", "o")
         assert status == "pass"
 
 
@@ -83,7 +83,7 @@ class TestFailPath:
         patch_tool_call.return_value = _ok_with_args({
             "pass": False, "reason": "bad output", "confidence": 0.2,
         })
-        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        status, reason, conf = await execution_agent._verify_output("t", "o")
         assert status == "fail"
         assert reason == "bad output"
         assert conf == 0.2
@@ -97,7 +97,7 @@ class TestFailClosedOnErrors:
     async def test_no_tool_call_emitted(self, patch_tool_call):
         """Model declined to call the tool; coaxing parse may have failed."""
         patch_tool_call.return_value = _ok_with_args(None)  # tool_calls=[]
-        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        status, reason, conf = await execution_agent._verify_output("t", "o")
         assert status == "fail"
         assert "no tool call" in reason.lower()
         assert conf == 0.0
@@ -107,7 +107,7 @@ class TestFailClosedOnErrors:
         patch_tool_call.return_value = _ok_with_args({
             "reason": "forgot pass key", "confidence": 0.5,
         })
-        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        status, reason, conf = await execution_agent._verify_output("t", "o")
         assert status == "fail"
         assert "pass" in reason.lower()
         assert conf == 0.0
@@ -115,7 +115,7 @@ class TestFailClosedOnErrors:
     @pytest.mark.asyncio
     async def test_unsuccessful_response_returns_fail(self, patch_tool_call):
         patch_tool_call.return_value = _fail_response("429 rate-limited")
-        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        status, reason, conf = await execution_agent._verify_output("t", "o")
         assert status == "fail"
         assert "rate-limited" in reason.lower() or "response error" in reason.lower()
         assert conf == 0.0
@@ -123,7 +123,7 @@ class TestFailClosedOnErrors:
     @pytest.mark.asyncio
     async def test_tool_call_raises_returns_fail(self, patch_tool_call):
         patch_tool_call.side_effect = RuntimeError("connection refused")
-        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        status, reason, conf = await execution_agent._verify_output("t", "o")
         assert status == "fail"
         assert "connection" in reason.lower() or "call failed" in reason.lower()
         assert conf == 0.0
@@ -134,7 +134,7 @@ class TestFailClosedOnErrors:
         patch_tool_call.return_value = _ok_with_args({
             "pass": True, "reason": "ok", "confidence": "high",
         })
-        status, _, conf = await execution_agent._verify_output("t", "o", "m")
+        status, _, conf = await execution_agent._verify_output("t", "o")
         assert status == "pass"
         assert conf == 0.0
 
@@ -151,7 +151,22 @@ class TestTimeout:
 
         patch_tool_call.side_effect = _hang
         monkeypatch.setattr(execution_agent.settings, "verify_timeout_seconds", 0.1)
-        status, reason, conf = await execution_agent._verify_output("t", "o", "m")
+        status, reason, conf = await execution_agent._verify_output("t", "o")
         assert status == "fail"
         assert "timeout" in reason.lower()
         assert conf == 0.0
+
+
+@pytest.mark.asyncio
+async def test_verify_output_dispatches_via_role_not_model():
+    """§17.89 Pattern 3 — _verify_output must route through role= so the
+    configured MODEL_VERIFIER_PROVIDER is honored. Pre-§17.89 the helper
+    took a pre-resolved model string and bypassed the provider abstraction."""
+    with patch("app.modules.execution_verify.model_router.tool_call",
+               new=AsyncMock(return_value=_ok_with_args(
+                   {"pass": True, "reason": "ok", "confidence": 1.0}
+               ))) as m:
+        await execution_agent._verify_output("t", "o")
+    kwargs = m.call_args.kwargs
+    assert kwargs.get("role") == "model_verifier"
+    assert "model" not in kwargs
