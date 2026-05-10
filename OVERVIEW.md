@@ -4426,6 +4426,81 @@ The reranker now surfaces real-content top-3 results for the two newly-active go
 
 **§16.5 status delta.** Of the 5 §17.86-listed SKIPs, 2 are now active; 3 remain with operator-actionable rationales. The "5 currently-skipped golden-retrieval queries" deferral mentioned in §17.74 / §17.88 / §17.89 / §17.91 is reduced to 3 — not closed but more accurately scoped.
 
+### 17.93 Security hardening — SSRF guard on /research URL fetch + loopback-only port bindings (2026-05-10)
+
+Two HIGH findings from a fresh security audit (post-§17.91 deployment-surface closure) closed together. Both raise the bar against credentialed-attacker scenarios — neither was a "remote code execution" gap, but both materially reduced the internal-state exposure surface.
+
+**Finding 1 — SSRF in `/research url:` and `/research openapi:` modes.** Pre-§17.93, `_is_url()` in `app/modules/research_extractors.py` accepted any `http(s)://<netloc>`; `_fetch_url_bounded()` then GET'd whatever URL the API-key-holder passed. A token-holder could POST `/research {"topic": "http://172.18.0.1:11434/api/tags"}` and have the orchestrator dump the host Ollama's model list. Same surface reached `scaffold-postgres:5432`, `milvus-standalone:19530`, `localhost:8000` (orchestrator self-fetch), `169.254.169.254` (cloud metadata if deployed off-bare-metal), and arbitrary LAN devices. Severity scaled with API-key exposure — single-operator + private key → low; shared key or public deployment → high.
+
+**What changed (Finding 1):**
+
+- New `_is_public_host(url) -> tuple[bool, str]` in `app/modules/research_extractors.py`. Returns `(False, reason)` for:
+  - non-http(s) schemes (`file://`, `gopher://`, `ftp://`, `javascript:`, `data:`)
+  - literal private hostnames (`localhost`, `localhost.localdomain`, `0.0.0.0`, `ip6-localhost`, `ip6-loopback`)
+  - hostnames that resolve via `socket.getaddrinfo` to ANY IPv4/IPv6 address in: loopback (`127/8`, `::1`), link-local (`169.254/16`, `fe80::/10`), private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), reserved, multicast, or unspecified ranges.
+  - DNS-resolution failures (rejects rather than crashing — `socket.gaierror` is a fail-closed signal).
+- `_fetch_url_bounded()` calls `_is_public_host()` BEFORE the network fetch and returns `None` on reject — no HTTP call is attempted.
+- **Redirect re-validation.** The generic httpx client has `follow_redirects=True` for normal API fetches; without a post-redirect check, a 3xx hop to a private IP would bypass the pre-check. After the response lands, `_fetch_url_bounded` reads `resp.url` (httpx's post-redirect URL) and re-runs `_is_public_host` on it. If the final URL is private, the response is dropped before any body is read.
+- **Opt-out.** New `settings.research_allow_private_hosts: bool = False` (env `RESEARCH_ALLOW_PRIVATE_HOSTS`). When `True`, the IP-range check is skipped — useful for local-development scenarios where the orchestrator legitimately needs to fetch in-cluster services (e.g. an internal OpenAPI spec). The non-http scheme rejection is NOT opt-out-able; `file://` is always denied.
+
+**Finding 2 — Docker port bindings on `0.0.0.0`, not `127.0.0.1`.** Compose ports were bound to all host interfaces:
+
+| Service | Pre-§17.93 | Post-§17.93 |
+|---|---|---|
+| `scaffold-orchestrator` | `8000:8000` | `127.0.0.1:8000:8000` |
+| `open-webui` | `3000:8080` | `127.0.0.1:3000:8080` |
+| `open-webui-pipelines` | `9099:9099` | `127.0.0.1:9099:9099` |
+| `searxng` | `8888:8080` | `127.0.0.1:8888:8080` |
+| `milvus-standalone` | `19530:19530` + `9091:9091` | `127.0.0.1:19530:19530` + `127.0.0.1:9091:9091` |
+| `scaffold-postgres` | `127.0.0.1:5432:5432` (already correct) | unchanged |
+
+The orchestrator's API key gates most endpoints, but `/health`, `/metrics`, `/`, `/web/*`, and the entire OWUI / pipelines / Milvus / SearXNG surfaces have their own (or no) auth surface. Pre-§17.93, anyone on the same LAN could reach these.
+
+**Inter-container traffic is unaffected.** All services reach each other via the `ai-network` bridge using container-name DNS (e.g. `http://scaffold-postgres:5432`, `http://searxng:8080`, `http://scaffold-orchestrator:8000`), NOT through host ports. The host-port binding only affects clients OUTSIDE the bridge.
+
+**Live verification.** Post-compose-up:
+
+```
+$ ss -tln | grep -E ':(3000|9099|8888|8000|19530|9091|5432)\b'
+LISTEN 0      4096       127.0.0.1:19530   0.0.0.0:*
+LISTEN 0      4096       127.0.0.1:3000    0.0.0.0:*
+LISTEN 0      4096       127.0.0.1:9091    0.0.0.0:*
+LISTEN 0      4096       127.0.0.1:9099    0.0.0.0:*
+LISTEN 0      4096       127.0.0.1:8888    0.0.0.0:*
+LISTEN 0      4096       127.0.0.1:8000    0.0.0.0:*
+LISTEN 0      4096       127.0.0.1:5432    0.0.0.0:*
+```
+
+Every service is now LAN-isolated. Operators access from outside the host (e.g. browser on a workstation) need SSH port-forwarding (`ssh -L 8000:127.0.0.1:8000 host`) or an explicit reverse proxy. `curl localhost:8000` from the host itself still works (the orchestrator's `/web/*` UI is operator-only on the host now).
+
+**`.env.example` updated** to document `RESEARCH_ALLOW_PRIVATE_HOSTS=false` under the existing Fetch tunables block. Per §17.66 the example aims for 100% Settings coverage; this preserves that.
+
+**Test-suite delta:**
+
+- New `tests/test_research_ssrf_guard.py` — **31 cases** across 7 classes:
+  - scheme rejection (5 cases: file://, gopher://, ftp://, javascript:, data:)
+  - literal private hostnames (6 cases) + IPv6-unspecified edge case
+  - IP-range rejection via DNS mock (10 cases covering RFC1918, loopback, link-local, ULA, multicast, unspecified, AWS metadata IP `169.254.169.254`, the Docker bridge gateway `172.18.0.1`)
+  - public-host happy paths (4 cases: `8.8.8.8`, `1.1.1.1`, public Wikipedia IPv4, Cloudflare IPv6)
+  - DNS-failure fail-closed
+  - opt-out via `research_allow_private_hosts` setting (2 cases — flips the IP check, NOT the scheme check)
+  - end-to-end `_fetch_url_bounded` short-circuit (2 cases — no HTTP call made on rejected URL)
+- `tests/test_research_url_mode.py` — updated 4 existing fetch tests to set `mock_resp.url` explicitly so the new redirect re-validation pass doesn't trip on `MagicMock.url` defaulting to a non-URL string.
+- Impacted-tests run: **93 passed, 0 failed** in 10.69s (`test_research_ssrf_guard` + `test_research_url_mode` + `test_research_agent_*` + `test_finding_b_root_cause`).
+- Full app suite gated on the long-running golden-retrieval cross-encoder paths but the §17.93-affected modules all pass clean.
+
+**No OpenAPI drift.** `make openapi-check` clean — the changes are internal-only (no new endpoints, no schema changes).
+
+**Operational impact.**
+
+- An attacker with a valid `X-API-Key` can no longer dump internal service state via `/research`. The orchestrator now refuses to fetch private/loopback/link-local IPs by default.
+- An attacker WITHOUT a valid API key can no longer even reach the orchestrator from outside the host. The pre-§17.93 attack surface against `/web/*` (auth-exempt) is now host-local only.
+- Existing operator workflows are unaffected: SSH from a workstation + `ssh -L 8000:127.0.0.1:8000 host` reaches the UI; `make doctor` / `curl localhost:8000/health` work from the host; container-to-container traffic unaffected.
+
+**Project pattern (memory-worthy).** SSRF guards belong at the FETCH choke point, not at the input validator. Putting the check in `_is_url()` (the input classifier) is tempting — but then a future caller that adds a new URL source (e.g. a redirect handler, an admin-uploaded URL list) silently bypasses it. The fetch helper is the one boundary every URL must cross to become a network call; gating there is structurally invariant. Same principle as putting input sanitization at the DB driver boundary, not at every endpoint.
+
+**§16.5 status delta.** Two HIGH security findings from the fresh audit are closed in code. Remaining MEDIUMs from the audit (`SCAFFOLD_AUTH_DISABLED` health-surface flag, `db/init.sql` migration lag, back-pointer pattern sweep across §17.88-92) are operator-actionable docs items, not active attack surface. LOW items (rate limiting, request body cap, log rotation, CLI version bump, pip-audit, CSP header) remain as nice-to-haves with no immediate operator pressure.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

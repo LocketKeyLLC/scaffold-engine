@@ -99,6 +99,9 @@ class TestFetchUrlBounded:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.headers = {"content-length": str(10 * 1024 * 1024)}  # 10 MB
+        # §17.93 — set resp.url to the original URL so the redirect re-check
+        # is skipped (no redirect simulated here).
+        mock_resp.url = "https://example.com/big"
 
         mock_stream_cm = AsyncMock()
         mock_stream_cm.__aenter__.return_value = mock_resp
@@ -116,6 +119,7 @@ class TestFetchUrlBounded:
         mock_resp.status_code = 200
         mock_resp.headers = {"content-length": str(len(body))}
         mock_resp.encoding = "utf-8"
+        mock_resp.url = "https://example.com/small"
 
         async def _chunks():
             yield body
@@ -135,6 +139,7 @@ class TestFetchUrlBounded:
         mock_resp = MagicMock()
         mock_resp.status_code = 500
         mock_resp.headers = {}
+        mock_resp.url = "https://example.com/err"
 
         mock_stream_cm = AsyncMock()
         mock_stream_cm.__aenter__.return_value = mock_resp
@@ -152,6 +157,7 @@ class TestFetchUrlBounded:
         mock_resp.status_code = 200
         mock_resp.headers = {}  # no content-length
         mock_resp.encoding = "utf-8"
+        mock_resp.url = "https://example.com/streaming"
 
         async def _chunks():
             yield big_chunk

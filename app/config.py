@@ -210,6 +210,12 @@ class Settings(BaseSettings):
     research_url_fetch_timeout: int = Field(default=30, ge=1, le=300)
     research_heartbeat_interval: int = Field(default=8, ge=1, le=120)
     research_max_entry_chars: int = Field(default=8000, ge=100, le=100000)
+    # §17.93 — SSRF guard knob. Default False rejects any /research url:
+    # or /research openapi: target whose hostname resolves to a private,
+    # loopback, link-local, reserved, or multicast IP. Flip to True ONLY
+    # for local-development scenarios where the orchestrator legitimately
+    # needs to fetch internal hosts (e.g. an in-cluster OpenAPI spec).
+    research_allow_private_hosts: bool = False
 
     # Research agent — topic → Milvus partition domain
     topic_to_domain: dict[int, str] = {

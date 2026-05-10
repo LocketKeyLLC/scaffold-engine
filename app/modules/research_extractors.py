@@ -7,9 +7,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import ipaddress
 import json
 import logging
 import re
+import socket
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -178,8 +180,71 @@ async def _robots_allowed(url: str, user_agent: str = "ScaffoldEngine/1.0") -> b
         return True
 
 
+_PRIVATE_HOSTNAMES = frozenset({
+    "localhost", "localhost.localdomain",
+    "0.0.0.0", "::", "ip6-localhost", "ip6-loopback",
+})
+
+
+def _is_public_host(url: str) -> tuple[bool, str]:
+    """§17.93 SSRF guard — return (ok, reason) for a target URL.
+
+    Rejects:
+      - non-http(s) schemes (file://, gopher://, etc.)
+      - literal private hostnames (localhost, 0.0.0.0, ip6-loopback)
+      - hostnames that resolve to any IPv4/IPv6 address in:
+        loopback, link-local, private (RFC1918, ULA), unspecified,
+        reserved, or multicast space.
+
+    ``settings.research_allow_private_hosts`` (default False) opts
+    out for local-development scenarios. The opt-out applies to the
+    full resolution check, not the scheme check — non-HTTP schemes
+    are always rejected.
+    """
+    try:
+        p = urlparse(url.strip())
+    except Exception as e:
+        return False, f"url_parse_failed: {e}"
+    if p.scheme not in ("http", "https"):
+        return False, f"non_http_scheme: {p.scheme!r}"
+    host = (p.hostname or "").lower().strip()
+    if not host:
+        return False, "empty_hostname"
+    if settings.research_allow_private_hosts:
+        return True, "private_hosts_allowed_by_setting"
+    if host in _PRIVATE_HOSTNAMES:
+        return False, f"literal_private_hostname: {host!r}"
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        return False, f"dns_resolve_failed: {e}"
+    for fam, _stype, _proto, _canon, sockaddr in infos:
+        ip_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False, f"unparseable_resolved_ip: {ip_str!r}"
+        if (
+            ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+        ):
+            return False, (
+                f"resolved_to_private_ip: host={host!r} ip={ip_str!r} "
+                f"flags=private:{ip.is_private},loopback:{ip.is_loopback},"
+                f"link_local:{ip.is_link_local}"
+            )
+    return True, "public_host"
+
+
 async def _fetch_url_bounded(url: str, max_bytes: int | None = None) -> str | None:
     """Stream-fetch with hard byte cap. Returns text or None on failure/cap."""
+    # §17.93 — SSRF guard. The fetch helper is the choke point for every
+    # /research url:, /research openapi:, and pre-fetch path; rejecting
+    # here covers all three without forcing per-caller validation.
+    ok, reason = _is_public_host(url)
+    if not ok:
+        logger.warning("url_fetch_rejected_ssrf: url=%s reason=%s", url, reason)
+        return None
     cap = max_bytes or settings.research_max_url_bytes
     try:
         # Item 12 — shared persistent client; per-call timeout override.
@@ -189,6 +254,21 @@ async def _fetch_url_bounded(url: str, max_bytes: int | None = None) -> str | No
             headers={"User-Agent": "ScaffoldEngine/1.0"},
             timeout=settings.research_url_fetch_timeout,
         ) as resp:
+            # §17.93 — re-validate the FINAL URL after any redirects.
+            # The generic client has follow_redirects=True for normal API
+            # fetches; without this re-check, an attacker could redirect
+            # an initially-public URL to a private IP (3xx hop) and bypass
+            # the pre-check. resp.url is the post-redirect-chain URL.
+            final_url = str(resp.url)
+            if final_url != url:
+                ok2, reason2 = _is_public_host(final_url)
+                if not ok2:
+                    logger.warning(
+                        "url_fetch_rejected_ssrf_after_redirect: "
+                        "initial=%s final=%s reason=%s",
+                        url, final_url, reason2,
+                    )
+                    return None
             if resp.status_code != 200:
                 logger.warning("url_fetch_status: url=%s status=%d", url, resp.status_code)
                 return None

@@ -21,8 +21,12 @@ services:
   open-webui:
     image: ghcr.io/open-webui/open-webui@sha256:b80a96e14bb15ea79aec96fbdad4aeab6b3ee7b61520d83b5dbc8c4f47d433a9
     container_name: open-webui
+    # §17.93 — bind to loopback only. Internal container traffic still
+    # reaches OWUI via the ai-network bridge DNS (`open-webui:8080`);
+    # external access is operator-only via http://127.0.0.1:3000 or an
+    # explicit SSH/reverse-proxy hop.
     ports:
-      - "3000:8080"
+      - "127.0.0.1:3000:8080"
     environment:
       - OLLAMA_BASE_URL=http://172.18.0.1:11434
       - OPENAI_API_BASE_URLS=http://pipelines:9099
@@ -43,8 +47,10 @@ services:
   pipelines:
     image: ghcr.io/open-webui/pipelines@sha256:b48e9bc338ce2be0acfbeff01810db72408a12f07739f9e3879c1f2b00952d6e
     container_name: open-webui-pipelines
+    # §17.93 — bind to loopback only. OWUI reaches pipelines via the
+    # bridge (`http://pipelines:9099` in OWUI's OPENAI_API_BASE_URLS).
     ports:
-      - "9099:9099"
+      - "127.0.0.1:9099:9099"
     # Match host UID 1000 so the bind-mounted ./pipelines/<name>/valves.json
     # writes (driven by the OWUI valve UI) land as the host user instead of
     # root. The image runs as root by default; pinning user: here is the
@@ -87,8 +93,10 @@ services:
   searxng:
     image: searxng/searxng@sha256:b6db575bb821d35279474090270db9e53e92432a66d19e7da51c0ef1b5ddb806
     container_name: searxng
+    # §17.93 — bind to loopback only. The orchestrator reaches SearXNG
+    # via the bridge (`http://searxng:8080`).
     ports:
-      - "8888:8080"
+      - "127.0.0.1:8888:8080"
     # 977 is the searxng user baked into the upstream image and matches
     # the existing host /home/aedefruscio/searxng/settings.yml ownership.
     user: "977:977"
@@ -152,8 +160,12 @@ services:
       dockerfile: Dockerfile
       target: runtime
     container_name: scaffold-orchestrator
+    # §17.93 — bind to loopback only. The API surface is operator-only;
+    # `/web/*`, `/health`, `/metrics`, `/` are auth-exempt and shouldn't
+    # be reachable from the LAN. Other containers reach the orchestrator
+    # via the bridge (`http://scaffold-orchestrator:8000`).
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-scaffold}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@scaffold-postgres:5432/scaffold_engine
       OLLAMA_BASE_URL: http://172.18.0.1:11434
@@ -237,9 +249,12 @@ services:
       - COMMON_STORAGETYPE=local
     volumes:
       - milvus-data-v2:/var/lib/milvus
+    # §17.93 — bind to loopback only. The orchestrator reaches Milvus
+    # via the bridge (`http://milvus-standalone:19530`). Port 9091 is
+    # Milvus's healthcheck endpoint, also operator-only.
     ports:
-      - "19530:19530"
-      - "9091:9091"
+      - "127.0.0.1:19530:19530"
+      - "127.0.0.1:9091:9091"
     # seccomp:unconfined is preserved — milvus's embedded etcd needs
     # syscalls (mmap/clone/etc) the default Docker seccomp profile
     # blocks. no-new-privileges is added on top: orthogonal to seccomp,
