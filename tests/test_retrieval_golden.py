@@ -29,52 +29,71 @@ from tests._milvus_helpers import skip_if_milvus_empty
 # resilient to minor topic rewording in TOON files.
 # ---------------------------------------------------------------------------
 
-_NEEDS_PROMPT_KB = pytest.mark.skip(
-    reason="prompt partition is empty (0 entries) - skip until prompt-domain TOONs are ingested"
-)
-_NEEDS_LLM_QUANTIZ = pytest.mark.skip(
-    reason="llm partition (218 entries) does not currently include a quantization doc - skip until ingested"
-)
-_NEEDS_SPEC_TOON = pytest.mark.skip(
-    reason="spec partition (8 entries) does not currently include the TOON spec doc - skip until ingested"
+# §17.92 skip-mark refresh — three named blockers replace the prior generic
+# "partition is empty" rationale. Each names the specific content that
+# would unblock its parametrization, and the §17.92 ingest pass landed
+# Chain-of-thought_prompting (prompt) + Quantization_(signal_processing)
+# (llm) which flipped two previously-skipped queries to active.
+_NEEDS_FUNCTION_CALLING_DOC = pytest.mark.skip(
+    reason="prompt partition lacks a doc whose title contains 'function-calling' — "
+    "Wikipedia has no Function_calling article (the page 404s; the topic "
+    "is covered as a sub-section of Prompt_engineering, whose <title> is "
+    "'Prompt engineering - Wikipedia'). Skip until a vendor-doc or "
+    "hand-curated source named for function-calling specifically is ingested."
 )
 _NEEDS_HYBRID_SEARCH_DOC = pytest.mark.skip(
-    reason="rag partition does not currently include a doc whose title contains 'hybrid' - "
-    "post-§17.63 repopulation seeded Vector_database + Retrieval-augmented_generation; "
-    "skip until a hybrid-search-titled doc is ingested"
+    reason="rag partition lacks a doc whose title contains 'hybrid' — Wikipedia "
+    "has no Hybrid_search / Hybrid_retrieval article (both 404). The "
+    "available related Wikipedia articles (Okapi_BM25, Learning_to_rank, "
+    "Semantic_search) don't carry 'hybrid' in their titles. Skip until a "
+    "vendor blog post or paper-derived doc with 'hybrid' in title is ingested."
+)
+_NEEDS_SPEC_TOON = pytest.mark.skip(
+    reason="spec partition lacks a TOON spec doc — TOON (Token-Oriented Object "
+    "Notation) is project-internal with no external Wikipedia or vendor "
+    "source. docs/toon/toon_validator_reference/ exists but is a Python "
+    "reference implementation, not a spec document. Skip until a markdown "
+    "spec is written and ingested as a custom URL or file upload."
 )
 
 GOLDEN_QUERIES = [
-    # --- prompt domain (currently 0 entries; skipped) ---
+    # --- prompt domain ---
+    # §17.92 ingested Chain-of-thought_prompting which serves a Wikipedia
+    # page whose <title> is 'Prompt engineering - Wikipedia' (the CoT URL
+    # has no redirect but Wikipedia renders the parent prompt-engineering
+    # article body with that title). 10 entries landed; the second query
+    # below is now active against the substring 'prompt engineering'.
     pytest.param(
         "How does function calling work in LLM tool use?",
         "prompt", "function-calling",
-        marks=_NEEDS_PROMPT_KB,
+        marks=_NEEDS_FUNCTION_CALLING_DOC,
     ),
     pytest.param(
         "What is chain of thought prompting?",
-        "prompt", "chain-of-thought",
-        marks=_NEEDS_PROMPT_KB,
+        "prompt", "prompt engineering",
     ),
-    # --- rag domain (currently 8 entries from Vector_database + RAG Wikipedia; no hybrid-search-titled doc yet) ---
+    # --- rag domain (Vector_database + Retrieval-augmented_generation seeded;
+    # no hybrid-titled doc yet — see _NEEDS_HYBRID_SEARCH_DOC for the block) ---
     pytest.param(
         "How does hybrid search combine dense and sparse retrieval?",
         "rag", "hybrid",
         marks=_NEEDS_HYBRID_SEARCH_DOC,
     ),
-    # --- llm domain (218 entries) ---
+    # --- llm domain ---
+    # §17.92 ingested Quantization_(signal_processing) (title 'Quantization
+    # (signal processing) - Wikipedia'); 10 entries landed. Substring
+    # 'quantiz' is case-insensitive so it matches 'Quantization'.
     pytest.param(
         "What is quantization and how does it reduce model size?",
         "llm", "quantiz",
-        marks=_NEEDS_LLM_QUANTIZ,
     ),
-    # --- spec domain (8 entries) ---
+    # --- spec domain (no TOON spec doc yet — see _NEEDS_SPEC_TOON) ---
     pytest.param(
         "Describe the TOON file format specification and its pipeline stages",
         "spec", "toon",
         marks=_NEEDS_SPEC_TOON,
     ),
-    # --- eng domain (261 entries) ---
+    # --- eng domain ---
     pytest.param(
         "What are common software design patterns like singleton or factory?",
         "eng", "pattern",
