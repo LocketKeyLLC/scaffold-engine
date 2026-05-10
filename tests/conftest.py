@@ -10,10 +10,63 @@ errors — see drift-findings.md. If you really need to drop these, first
 convert the test suite to use `tests/` as a proper package (add
 `tests/__init__.py` and configure rootdir). Until then, keep them.
 """
+import os
+
 import app  # noqa: F401  — load-bearing; see note above
 import app.model_router  # noqa: F401  — load-bearing; see note above
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+# Cloud CI Tier 1 (`make ci-smoke`) installs only requirements-ci.txt — a
+# strict subset of prod deps that omits redis, apscheduler, pypdf, the
+# opentelemetry-* tree, sentence-transformers, etc. Test modules whose
+# top-level imports transitively need any of those would fail at COLLECTION
+# (pytest must import the module to discover its `-m smoke` markers). Gate
+# them out here so the smoke tier can run; they still run unconditionally
+# in `make test` / `make ci` inside the dev image where all deps are present.
+#
+# Maintenance: when a new test module surfaces an `ImportError` in cloud CI
+# logs ("ERROR tests/test_foo.py ... ModuleNotFoundError: No module named X"),
+# either (a) add `X` to requirements-ci.txt if it's lightweight, or (b) add
+# `test_foo.py` here if its dep chain is heavy.
+if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
+    collect_ignore = [
+        "integration/test_execution_db.py",
+        "test_assist_session_map.py",
+        "test_config_endpoint.py",
+        "test_cost_rollup.py",
+        "test_embedding.py",
+        "test_embedding_cache.py",
+        "test_execution_agent_concurrency.py",
+        "test_execution_agent_feedback.py",
+        "test_execution_agent_retry.py",
+        "test_github_ingest_cache.py",
+        "test_gt_browser_module.py",
+        "test_gt_extractor.py",
+        "test_gt_extractor_module.py",
+        "test_ideation_phase2_cancel.py",
+        "test_integration.py",
+        "test_main.py",
+        "test_observability_alerts.py",
+        "test_observability_metrics.py",
+        "test_observability_rollups.py",
+        "test_pre_migration_sweep.py",
+        "test_rag_pipeline_smoke.py",
+        "test_reindex.py",
+        "test_research_agent_core.py",
+        "test_research_agent_extract_no_entries.py",
+        "test_research_agent_helpers.py",
+        "test_research_agent_ingestion.py",
+        "test_research_agent_lifecycle.py",
+        "test_research_pause_resume.py",
+        "test_research_pdf_mode.py",
+        "test_research_ssrf_guard.py",
+        "test_research_url_mode.py",
+        "test_retrieval_golden.py",
+        "test_score_retrieval.py",
+        "test_verify_extraction.py",
+        "test_web_ui.py",
+    ]
 
 
 def make_mock_db(rows: list[dict] | None = None, *, scalar=None, rowcount=None):

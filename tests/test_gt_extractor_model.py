@@ -7,13 +7,16 @@ robust, fast, and catches future regressions cleanly without requiring runtime
 SearXNG / DB / scaffolding.
 """
 import ast
+from pathlib import Path
 
 import pytest
+
+_GT_EXTRACTOR_PATH = Path(__file__).resolve().parent.parent / "app" / "modules" / "gt_extractor.py"
 
 
 @pytest.mark.smoke
 def test_gt_distill_uses_model_router_role_as_default():
-    with open("/code/app/modules/gt_extractor.py") as f:
+    with open(_GT_EXTRACTOR_PATH) as f:
         source = f.read()
     tree = ast.parse(source)
 

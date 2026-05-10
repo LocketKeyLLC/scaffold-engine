@@ -76,7 +76,7 @@ bench-check-pipeline: _ensure_dev ## Gate: fail if bench_pipeline total_pipeline
 bench-check: bench-check-rag bench-check-embed bench-check-pipeline ## Gate: run every bench-check; skips gates whose JSONL file is missing or sparse
 
 ci-smoke: ## Cloud-CI smoke tests — host pytest on `-m smoke`, no docker, no live services. Used by .github/workflows/ci.yml.
-	pytest tests/ -m smoke --timeout=30 -v
+	SCAFFOLD_CI_SMOKE_MODE=1 pytest tests/ -m smoke --timeout=30 -v
 
 ci: _ensure_dev ## Run CI-safe tests (no live services; dev image) + bench regression gates (skip on missing/sparse history)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v \
