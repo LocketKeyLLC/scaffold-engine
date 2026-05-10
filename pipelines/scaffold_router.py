@@ -2120,7 +2120,8 @@ class Pipeline:
                 if f1 == 409:
                     yield "That question is already being processed. Please wait."
                     return
-                yield f"⚠️ Execution failed (HTTP {f1}). Please try again."
+                hint = self._drift_hint() if f1 == 401 else ""
+                yield f"⚠️ Execution failed (HTTP {f1}). Please try again.{hint}"
                 return
             if msg_type == "error":
                 yield from self._recover_from_disconnect(job_id)
