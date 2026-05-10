@@ -2,14 +2,22 @@
 -- Creates the 8 core tables that existed at project inception (#87).
 -- Additional tables (dedup_log, research_sessions, scheduled_jobs,
 -- apscheduler_jobs, prompt_revisions, assist_sessions, assist_steps,
--- + legacy) come from migrations 002–025.
+-- model_costs, llm_call_logs, system_alerts, + legacy) come from
+-- migrations 002–033.
 -- Idempotent (safe to re-run).
 --
--- Baseline currency: this file expresses post-migration-025 state for
--- jobs.status (14 statuses incl. assisted_*) and error_logs.error_type
--- (4 values, 'model_failure' and 'structural' dropped). The migration
--- runner advances any DB that bootstraps from a stricter baseline by
--- reapplying 002-025 in order.
+-- Baseline currency (§17.94 refresh — post-migration-033 state):
+--   * jobs.status: 14 statuses incl. assisted_*
+--   * jobs.compiled_output_synthesized: BOOLEAN (mig 027)
+--   * jobs.compile_synthesis_override: BOOLEAN NULL (mig 029)
+--   * dag_nodes.last_verification_reason: TEXT NULL (mig 026)
+--   * error_logs.error_type: 4 values ('model_failure', 'structural' dropped)
+-- ALTER-style migrations that touched the core tables have been folded
+-- in below; new tables created by migrations stay in their own files
+-- (the migration runner applies them on every startup, and the listed
+-- comments above point future readers at the right place to look).
+-- The migration runner advances any DB that bootstraps from a stricter
+-- baseline by reapplying 002-033 in order.
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
@@ -32,7 +40,17 @@ CREATE TABLE IF NOT EXISTS jobs (
     completed_at TIMESTAMPTZ,
     error_summary TEXT,
     compiled_output TEXT,
+    -- mig 007 (Sprint E ideation workflow): structured research blob
+    -- + plain-text workflow summary written by Phase 2 (research → ingest
+    -- → compile). research_data is JSONB so downstream consumers can
+    -- query specific keys; workflow_summary is human-readable.
+    research_data JSONB,
+    workflow_summary TEXT,
     compiled_output_synthesized BOOLEAN NOT NULL DEFAULT FALSE,
+    -- mig 029 (X.6): NULL = inherit settings.compile_synthesis_enabled;
+    -- TRUE/FALSE force per-job override. No DEFAULT so existing rows
+    -- and new rows start NULL (inherit).
+    compile_synthesis_override BOOLEAN,
     metadata JSONB DEFAULT '{}'::jsonb
 );
 
@@ -67,6 +85,16 @@ CREATE TABLE IF NOT EXISTS dag_nodes (
     max_retries INT NOT NULL DEFAULT 3,
     parallel_group INT,
     execution_order INT,
+    -- mig 017 (#97): explicit leaf marker set by the DAG generator at
+    -- INSERT time. _compile_output prefers explicit markers (Strategy 0)
+    -- before falling back to title-heuristic / last-CodeGen / concat.
+    is_output_node BOOLEAN NOT NULL DEFAULT FALSE,
+    -- mig 026 (W.1): the most recent verifier-rejection reason. Read by
+    -- execution_agent._build_prompt on retry to prepend a "Reviewer
+    -- feedback" block to the next attempt's user message. Intentionally
+    -- NOT nulled on retry-reset — the whole point of the feedback loop
+    -- is that the next attempt sees what the previous one got wrong.
+    last_verification_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     started_at TIMESTAMPTZ,
@@ -176,6 +204,10 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 -- (idx_performance_logs_job_id was here pre-031; removed when the
 -- performance_logs table was dropped.)
 CREATE INDEX IF NOT EXISTS idx_dag_nodes_domain ON dag_nodes(domain);
+-- mig 017: partial index for the explicit-marker path in _compile_output.
+CREATE INDEX IF NOT EXISTS idx_dag_nodes_output_node
+    ON dag_nodes (job_id, is_output_node)
+    WHERE is_output_node = TRUE;
 
 -- Updated_at trigger function
 CREATE OR REPLACE FUNCTION update_updated_at()

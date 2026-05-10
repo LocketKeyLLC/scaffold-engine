@@ -4501,6 +4501,57 @@ Every service is now LAN-isolated. Operators access from outside the host (e.g. 
 
 **§16.5 status delta.** Two HIGH security findings from the fresh audit are closed in code. Remaining MEDIUMs from the audit (`SCAFFOLD_AUTH_DISABLED` health-surface flag, `db/init.sql` migration lag, back-pointer pattern sweep across §17.88-92) are operator-actionable docs items, not active attack surface. LOW items (rate limiting, request body cap, log rotation, CLI version bump, pip-audit, CSP header) remain as nice-to-haves with no immediate operator pressure.
 
+### 17.94 `db/init.sql` refresh — catch up baseline to post-migration-033 (2026-05-10)
+
+Closes the §17.93-audit MEDIUM finding: "`db/init.sql` lags 6 migrations." The file's own header claimed "post-migration-025 state" but auditing showed drift going back to mig 007 (some columns from 2026-03 were never folded in). Fresh-cluster bootstraps still worked operationally — the migration runner applies the missing schema on every startup — but the §15 invariant ("init.sql is the authoritative baseline as of the highest applied migration") was contradicted.
+
+**Scope decision.** init.sql intentionally tracks the 8 CORE tables (jobs, dag_nodes, execution_logs, error_logs, artifacts, benchmark_results, blockers, schema_migrations). Tables added by migrations (research_sessions, dedup_log, scheduled_jobs, apscheduler_jobs, prompt_revisions, assist_sessions, assist_steps, model_costs, llm_call_logs, system_alerts, ...) stay in their migration files. The refresh below covers ALTER-style migrations that touched the core tables; it does NOT promote migration-only tables into init.sql.
+
+**Columns folded in:**
+
+| Column | Source mig | Note |
+|---|---|---|
+| `jobs.research_data JSONB` | 007 (ideation_workflow) | Structured Phase-2 research blob. Drift dates to 2026-03. |
+| `jobs.workflow_summary TEXT` | 007 | Plain-text Phase-2 summary. Same date. |
+| `dag_nodes.is_output_node BOOLEAN NOT NULL DEFAULT FALSE` | 017 (#97) | Explicit leaf marker for `_compile_output` Strategy 0. |
+| `dag_nodes.last_verification_reason TEXT` | 026 (W.1) | Verifier-feedback loop on retry. |
+| `jobs.compile_synthesis_override BOOLEAN` | 029 (X.6) | Per-job W.7 synthesis opt-in (NULL = inherit global). |
+
+**Indexes folded in:**
+
+| Index | Source mig |
+|---|---|
+| `idx_dag_nodes_output_node ON (job_id, is_output_node) WHERE is_output_node = TRUE` | 017 |
+
+**Header refresh.** "Baseline currency" comment block bumped from `post-migration-025` to `post-migration-033`, with explicit per-column attribution + a sentence pointing future readers at the migration files for tables not in init.sql (e.g., `model_costs`, `llm_call_logs`, `system_alerts`).
+
+**Verification — fresh-DB throwaway apply.**
+
+```
+$ psql -U scaffold -d postgres -c "CREATE DATABASE scaffold_init_test"
+$ psql -U scaffold -d scaffold_init_test < db/init.sql
+CREATE EXTENSION / CREATE TABLE × 8 / CREATE INDEX × ... / CREATE FUNCTION / CREATE TRIGGER × 3
+
+$ psql -d scaffold_init_test -c "\d jobs" | grep -E "compile_synthesis_override|...|research_data|workflow_summary"
+ research_data               | jsonb     | …  ✅
+ workflow_summary            | text      | …  ✅
+ compiled_output_synthesized | boolean   | NOT NULL DEFAULT false  ✅
+ compile_synthesis_override  | boolean   | …  ✅
+
+$ psql -d scaffold_init_test -c "\d dag_nodes" | grep -E "last_verification_reason|is_output_node"
+ is_output_node           | boolean | NOT NULL DEFAULT false  ✅
+ last_verification_reason | text    | …  ✅
+ "idx_dag_nodes_output_node" btree (job_id, is_output_node) WHERE is_output_node = true  ✅
+```
+
+A fresh-bootstrap DB now matches the live (post-all-migrations) schema for the core tables. The migration runner is still authoritative for everything else, and re-applying migrations 002-033 against the fresh-init DB is still safe (every migration in this set is idempotent — `IF NOT EXISTS` on columns/indexes; `ON CONFLICT DO NOTHING` on the `model_costs` seed).
+
+**Test-suite delta.** None — init.sql is only applied on fresh DB bootstraps; the live DB used by tests is already current. No code change, no test change.
+
+**Project pattern (memory-worthy).** When auditing a "baseline lag" gap, do TWO grep passes: (1) compare `\d <core_table>` against init.sql for the table you're refreshing today; (2) walk every prior ALTER migration that touched the same table. Older drift hides behind newer drift — I came in thinking "6 migrations missing" and found 8 columns / 1 index because two predated even the original §15 invariant claim. Init.sql should be re-verified against `\d table` for every core table, not just incremented from the last entry.
+
+**§16.5 status delta.** MEDIUM #2 from the §17.93 audit closed. Remaining MEDIUMs: back-pointer pattern sweep (§17.88-92), `SCAFFOLD_AUTH_DISABLED` health flag.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
