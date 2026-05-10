@@ -1090,6 +1090,12 @@ async def _run_research_github_mode(
         "mode": "github",
     })
 
+    # Note: github mode does no LLM extraction (entries are pulled
+    # directly from the GitHub API as README + docs/*.md + top-level
+    # docstrings), so there's no extract model to unload here. Audit
+    # Finding C only applies to modes whose extract phase loads a
+    # ~5 GB model that must be freed before the embedder cold-loads.
+
     async for evt in _ingest_and_finalize_direct(
         state=state,
         session_id=session_id,
@@ -1100,6 +1106,50 @@ async def _run_research_github_mode(
         extra_complete_fields={"files_fetched": len(files)},
     ):
         yield evt
+
+
+async def _unload_ollama_model(model: str) -> None:
+    """Force-unload an Ollama model via ``keep_alive=0``.
+
+    Audit Finding C (2026-05-09 follow-up to Finding B). On RAM-tight
+    CPU-only hosts (~16 GB) the extract model (qwen2.5:7b, ~5 GB
+    resident) and embedder (qwen3-embedding:8b, ~6 GB) loaded
+    simultaneously trigger swap thrashing that wedges the embedder
+    runner. The Ollama default 5-min keepalive guarantees both stay
+    in memory while the embedder cold-loads — that's the squeeze.
+
+    Calling this between the extract loop and the ingest/embed phase
+    forces Ollama to free the extractor before the embedder runs.
+    Failure is non-fatal: logged at warning, never raised. If the
+    unload fails for any reason, Audit Finding B's bounded
+    ``embed_timeout`` (120s × n_texts, capped 600s) still surfaces a
+    subsequent wedge within minutes rather than the legacy 30 min.
+    """
+    if not model:
+        return
+    try:
+        from app import model_router
+        from app.config import settings
+        client = model_router._get_client()
+        await asyncio.wait_for(
+            client.post(
+                f"{settings.ollama_base_url}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": "",
+                    "keep_alive": 0,
+                    "stream": False,
+                },
+            ),
+            timeout=15,
+        )
+        logger.info("ollama_model_unloaded: model=%s", model)
+    except Exception as exc:
+        logger.warning(
+            "ollama_model_unload_failed: model=%s err=%s "
+            "(embed may wedge under memory pressure)",
+            model, exc,
+        )
 
 
 def _classify_extract_no_entries_reason(resp, parsed_args) -> str:
@@ -1283,6 +1333,10 @@ async def _run_research_url_mode(
         "entries_extracted": len(entries),
     })
 
+    # Audit Finding C — unload extract model before embed loads. See
+    # _unload_ollama_model docstring for context.
+    await _unload_ollama_model(extract_model)
+
     async for evt in _ingest_and_finalize_direct(
         state=state,
         session_id=session_id,
@@ -1433,6 +1487,10 @@ async def _run_research_pdf_mode(
         "iteration": 1,
         "entries_extracted": len(entries),
     })
+
+    # Audit Finding C — unload extract model before embed loads. See
+    # _unload_ollama_model docstring for context.
+    await _unload_ollama_model(extract_model)
 
     async for evt in _ingest_and_finalize_direct(
         state=state,

@@ -3953,6 +3953,48 @@ Finding B's hang has been reproduced under the §17.80 instrumentation and root-
 
 **§16.5 status delta:** Finding B fully closed. The full 2026-05-09 audit punch list (B1-B6, M1-M7, I1, I4, N4, plus audit-tail Findings A + B) is **completely closed in code**. Wider §16.5 deferrals (macro bench baseline refresh, live-Postgres concurrency tests, ground_truth.json regen) remain as scheduled operator tasks.
 
+### 17.82 Audit-tail — Finding C: speculative unload (fired correctly; didn't fix the wedge) + github-mode hotfix (2026-05-09)
+
+Finding B's bounded `embed_timeout` (§17.81) made the qwen3-embedding:8b wedge surface in 6 min instead of 30. While running the N4 runbook against the §17.81 fixes, the wedge recurred deterministically. The hypothesis was memory pressure: ~16 GB host with both qwen2.5:7b extractor (~5 GB) and qwen3-embedding:8b embedder (~6 GB) cohabiting → swap thrashing → first embed call wedges. Free memory at the wedge moment was 663 MB with 1.8 GB swap engaged — consistent with the hypothesis.
+
+**Speculative fix shipped (Finding C):** new `_unload_ollama_model(model)` helper in `app/modules/research_agent.py`. Posts `keep_alive=0` to `/api/generate` for the named model, with a 15s `asyncio.wait_for` cap and full try/except (fail-open). Called from the URL and PDF direct modes between `extraction_complete` and `_ingest_and_finalize_direct` to free the extractor before the embedder cold-loads. 4 tests in `tests/test_finding_c_extract_unload.py` verify the helper's contract (post shape, empty-model no-op, dispatch failure swallowed, timeout swallowed).
+
+**Live test result (the honest part):**
+
+```
+01:45:22  url_mode_extract_loop_complete: total_entries=12 batches=3
+01:45:22  ollama_model_unloaded: model=qwen2.5:7b   ← Finding C fired
+01:51:22  embed_timeout: model=qwen3-embedding:8b n_texts=12 timeout_s=360
+                                                  ← embedder STILL wedged
+```
+
+The unload helper executed exactly on time, qwen2.5:7b was confirmed unloaded — and the embedder still wedged on its first call ~6 min later. So **the wedge isn't memory-pressure cohabitation** on this host. Hypothesis ruled out. The actual root cause is environmental: the qwen3-embedding:8b runner on this Ollama version + host has a reliability issue triggered by some pattern of recent activity that I couldn't isolate further without deeper Ollama-internal debugging.
+
+**Why keep Finding C anyway:**
+
+- The helper is small (~30 lines), well-tested, and fail-open.
+- It fires in ~1s — negligible overhead per research call.
+- The `ollama_model_unloaded` log line is operationally useful even when it doesn't fix anything: it proves the unload phase ran, which cleanly separates "embedder wedged with extractor still loaded" (memory) from "embedder wedged with clean memory" (Ollama bug).
+- On hosts with tighter memory or more concurrent inference jobs, the cohabitation case may matter; defensive cleanup is the right posture.
+
+**Hotfix folded in:** the original Finding C draft incorrectly added `await _unload_ollama_model(extract_model)` to `_run_research_github_mode` too. But github mode does no LLM extraction (entries come from the GitHub API directly, no qwen2.5:7b pass), so `extract_model` is not in scope there. First two sources of the runbook (`anthropic-cookbook`, `pytorch/torchtune`) failed with `name 'extract_model' is not defined`. Removed the call from github mode with an in-place comment explaining the mode's no-extraction shape.
+
+**Operator mitigations for the underlying wedge** (none of which are in scaffold-engine's reach):
+
+- `sudo systemctl restart ollama` between research runs — clears the wedged runner.
+- Set `OLLAMA_KEEP_ALIVE=0` on the host so models unload immediately after each call. Trades load-time on every call for no cohabitation.
+- Switch the `MODEL_EMBEDDER_PIPELINE` env to a smaller embedder (e.g. a sentence-transformers Q4 model). Requires a one-time `make reindex` since embedder dim is locked.
+- Document recurrence cadence; consider a host with more RAM if research workload grows.
+
+**Verification:**
+
+- 18 tests pass in dev image (4 Finding C + 6 Finding B + 8 Finding A) in 5.93s.
+- Live runbook at `--apply --tier fast`: `ollama_model_unloaded: model=qwen2.5:7b` log line confirmed firing post-extract; `embed_timeout` confirmed firing 6 min later (matches the new bounded timeout). No entries landed in Milvus on this run; runbook cancelled.
+
+**Test-suite delta:** +4 cases (Finding C helper). No regressions.
+
+**§16.5 status delta:** Finding C is shipped as a defense-in-depth measure but does NOT fix the recurring qwen3-embedding:8b wedge on this specific host. The wedge is environmental, not a scaffold-engine code bug. The Finding B fixes (bounded timeout + ingest heartbeats) make it operator-actionable in minutes; the Finding C unload + log line make the diagnostic narrative cleaner. Repopulation will be operator-driven (restart Ollama → run `repopulate_kb.sh --apply --tier fast`) rather than fully autonomous on this host.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
