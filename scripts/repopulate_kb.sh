@@ -29,6 +29,7 @@
 #   bash scripts/repopulate_kb.sh --apply         # run all enabled rows
 #   bash scripts/repopulate_kb.sh --apply --tier fast   # only github + url rows
 #   bash scripts/repopulate_kb.sh --apply --tier topic  # only autonomous topics
+#   bash scripts/repopulate_kb.sh --apply --force # bypass the running-session pre-flight
 #
 # Exits non-zero if any ingestion's SSE stream surfaces an error event
 # OR the orchestrator's post-run /health milvus.entry_count didn't grow.
@@ -51,11 +52,13 @@ dim()  { printf '%s%s%s\n' "$C_DIM" "$*" "$C_RST"; }
 
 # ── Args ──────────────────────────────────────────────────────────────
 APPLY=0
+FORCE=0
 TIER="all"  # all | fast | topic
 for arg in "$@"; do
     case "$arg" in
         --apply) APPLY=1 ;;
         --dry-run) APPLY=0 ;;
+        --force|-f) FORCE=1 ;;
         --tier=fast|--tier=topic|--tier=all) TIER="${arg#--tier=}" ;;
         --tier) shift || true ;;  # consumed below if present
         fast|topic|all)
@@ -63,13 +66,16 @@ for arg in "$@"; do
             if [[ "${PREV_ARG:-}" == "--tier" ]]; then TIER="$arg"; fi ;;
         --help|-h)
             cat <<'USAGE'
-Usage: bash scripts/repopulate_kb.sh [--dry-run|--apply] [--tier fast|topic|all]
+Usage: bash scripts/repopulate_kb.sh [--dry-run|--apply] [--tier fast|topic|all] [--force]
 
   --dry-run  (default) Print the curated source list without running anything.
   --apply              Actually invoke /research on each source, in series.
   --tier all (default) Every entry below.
        fast            github: + URL entries only (10-40 min total).
        topic           Autonomous topic research entries (~2-3 hours total).
+  --force              Skip the pre-flight stuck-session check on --apply.
+                       Use only if you've already inspected the existing
+                       running sessions and they're not blockers.
 
 Run from the repo root. Requires the orchestrator stack up + SCAFFOLD_API_KEY
 in .env (or exported). Streams each source's SSE events to stdout so progress
@@ -234,6 +240,65 @@ if [[ $APPLY != 1 ]]; then
     dim "Re-run with --apply to actually ingest. Each source streams its SSE events to stdout."
     dim "After --apply finishes, run \`scripts/score_retrieval.py\` to re-baseline retrieval quality."
     exit 0
+fi
+
+# ── Pre-flight: running-session guard ────────────────────────────────
+# The orchestrator enforces a single-running-research-session invariant
+# (uq_research_sessions_single_running, migration 020). If a previous
+# run was interrupted (Ctrl+C, container kill, host reboot), its
+# session row stays in 'running' until the periodic reaper finds it,
+# and every /research call below would error with "Research already
+# in progress" — making the runbook look broken when it's just blocked
+# behind a stale session.
+#
+# Pre-flight: query /research/sessions?status=running. If non-empty,
+# print the IDs + topics + a one-liner remediation, then exit non-zero
+# unless --force is set. Detected once at start; the script doesn't
+# re-check between sources because each well-formed run finalizes its
+# own session before the next starts.
+RUNNING_JSON="$(curl -sS --max-time 5 \
+    -H "X-Api-Key: $SCAFFOLD_API_KEY" \
+    "$ORCHESTRATOR_URL/research/sessions?status=running" 2>/dev/null || echo '{"total":-1}')"
+RUNNING_COUNT="$(printf '%s' "$RUNNING_JSON" | python3 -c \
+    'import json,sys
+try: print(json.load(sys.stdin)["total"])
+except Exception: print(-1)' 2>/dev/null || echo -1)"
+
+if [[ "$RUNNING_COUNT" == "-1" ]]; then
+    err "could not query /research/sessions (orchestrator unreachable?) — aborting"
+    exit 2
+fi
+
+if [[ "$RUNNING_COUNT" -gt 0 ]]; then
+    warn "$RUNNING_COUNT existing research session(s) in 'running' state:"
+    # Pull-out-then-format avoids backslash-escaped quotes inside an
+    # f-string (which would be interpreted as shell escapes when this
+    # python -c body is single-quoted from bash).
+    printf '%s' "$RUNNING_JSON" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for s in d.get("sessions", []):
+    sid = s["id"]
+    depth = s["depth"]
+    updated = s["updated_at"]
+    topic = s["topic"][:60]
+    print(f"    [{sid}] {depth:14} updated={updated} topic={topic}")
+' 2>/dev/null || true
+    if [[ $FORCE != 1 ]]; then
+        err "every /research call below would block on the single-running guard."
+        cat <<'REMEDIATE' >&2
+       Resolve before retrying:
+       1. If the session is genuinely still active, wait for it to complete.
+       2. If it's stuck (no recent updated_at), cancel it via:
+            docker exec scaffold-postgres psql -U scaffold -d scaffold_engine -c "
+              UPDATE research_sessions SET status='cancelled', updated_at=NOW(),
+                     last_activity_at=NOW() WHERE status='running';"
+       3. Or re-run with --force to proceed anyway (sources will likely error
+          until the running session finalizes).
+REMEDIATE
+        exit 2
+    fi
+    warn "--force passed — proceeding despite running session(s)."
 fi
 
 # ── Apply ─────────────────────────────────────────────────────────────

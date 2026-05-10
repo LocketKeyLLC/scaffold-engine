@@ -4064,6 +4064,32 @@ The 200-line cosmetic display cap is preserved; the previous error-event detecti
 
 The second §17.83 follow-up (`_sse_with_disconnect_watch` + lifecycle finalize on direct_url disconnects) stays open. With this runbook fix in place it's lower-priority — the failure mode that surfaced it was the runbook's SIGPIPE, not a genuine consumer disconnect.
 
+### 17.85 Audit-tail — runbook stuck-session pre-flight (2026-05-10)
+
+Continuation of §17.84's runbook hardening. Even with the SIGPIPE bug fixed, ANY interrupted prior run (Ctrl+C, container kill, host reboot, the second §17.83 follow-up's lifecycle gap) leaves a `research_sessions` row in `running` state. The orchestrator's `uq_research_sessions_single_running` partial index then rejects every `/research` POST with `event: error / data: {"message":"Research already in progress","http_status":409}`. Pre-§17.85 the runbook had no signal for this — it just printed the same `event: error` and moved on, making it look like the runbook itself was broken.
+
+**The fix** (`scripts/repopulate_kb.sh`):
+
+- New pre-flight section between the dry-run/apply branch and the actual ingestion loop.
+- Queries `GET /research/sessions?status=running` once at start.
+- If any rows are returned: lists each one (`id`, `depth`, `updated_at`, `topic` truncated to 60 chars), prints a remediation block that names the exact `psql` UPDATE to cancel a stuck session, and exits 2.
+- New `--force` / `-f` flag bypasses the check for operators who've already inspected the running sessions and know they're not blockers (e.g. another genuinely-active research call).
+- Dry-run mode is unchanged — the pre-flight only runs under `--apply`.
+
+**Implementation note:** the python session-listing helper is a `python3 -c '...'` block. The first draft used an f-string with backslash-escaped quotes (`f"...{s[\"id\"]}..."`); bash's single-quoting passes the backslashes through unmodified, but Python's tokenizer reads `\"` as a line-continuation followed by `"` and emits `SyntaxError: unexpected character after line continuation character`. `set -e` then aborted the script with exit 1 BEFORE the explicit `exit 2` in the pre-flight ran. Fixed by extracting the field accesses into named locals (`sid = s["id"]; print(f"...{sid}...")`), which avoids the same-quote-inside-f-string trap entirely.
+
+**Verified locally** (test sessions injected via direct DB insert):
+
+- 0 stuck sessions + `--apply`: pre-flight runs, no warn, proceeds to applying ingestions. ✅
+- 1 stuck session + `--apply` (no `--force`): warn fires, session listed with timestamp, remediation block printed, **exit 2**. ✅
+- 1 stuck session + `--apply --force`: warn fires + "--force passed — proceeding despite running session(s)" message, runbook continues to apply (sources predictably error with 409 from the orchestrator-side guard, as documented). ✅
+- Dry-run (no `--apply`): pre-flight not invoked, exit 0, output unchanged. ✅
+- `bash -n scripts/repopulate_kb.sh` syntax OK; `--help` text now lists `--force` with the use-case description.
+
+**Test-suite delta:** none — operator tooling.
+
+**Combined §17.84 + §17.85 outcome:** the runbook is now robust against both its own SIGPIPE-self-foot-shoot AND any externally-interrupted prior session. A clean `--apply` run on a quiet host completes all sources without operator intervention; if anything stale exists, the runbook stops with a diagnostic instead of silently producing 6 source errors.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
