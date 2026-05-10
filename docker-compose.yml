@@ -165,7 +165,11 @@ services:
       MODEL_ROUTER: qwen3:4b
       # PYTHONPATH=/code:/code/sdk is now image-intrinsic (Dockerfile),
       # so it does not need to be re-declared here.
-      MODEL_EMBEDDER_PIPELINE: qwen3-embedding:8b
+      # qwen3-embedding:8b on Ollama 0.17.5 wedged deterministically on this
+      # host's --ollama-engine path (audit Findings B+C, §17.81/82). Switched
+      # to nomic-embed-text: 137M params (50× smaller), 768-dim native →
+      # MRL-truncated to 512 by truncate_and_normalize, ~1s warm on CPU.
+      MODEL_EMBEDDER_PIPELINE: nomic-embed-text
       MODEL_RERANKER: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
       MODEL_CODER: qwen2.5-coder:7b
       MODEL_GENERAL: qwen3-vl:235b-instruct-cloud

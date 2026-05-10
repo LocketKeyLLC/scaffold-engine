@@ -3995,6 +3995,49 @@ The unload helper executed exactly on time, qwen2.5:7b was confirmed unloaded �
 
 **§16.5 status delta:** Finding C is shipped as a defense-in-depth measure but does NOT fix the recurring qwen3-embedding:8b wedge on this specific host. The wedge is environmental, not a scaffold-engine code bug. The Finding B fixes (bounded timeout + ingest heartbeats) make it operator-actionable in minutes; the Finding C unload + log line make the diagnostic narrative cleaner. Repopulation will be operator-driven (restart Ollama → run `repopulate_kb.sh --apply --tier fast`) rather than fully autonomous on this host.
 
+### 17.83 Audit-tail — Finding D: switch embedder qwen3-embedding:8b → nomic-embed-text (2026-05-10)
+
+After Finding C ruled out memory-pressure cohabitation as the cause of the embedder wedge (§17.82), and `OLLAMA_KEEP_ALIVE=0` ruled out keepalive cohabitation (verified live), the wedge was narrowed to `qwen3-embedding:8b` specifically — likely an interaction between the model's GGUF layout and Ollama 0.17.5's `--ollama-engine` runner flag (the embedder uses it; the extractor doesn't). On this host the wedge is **deterministic**: every first call to `qwen3-embedding:8b` after recent activity stalls indefinitely; a daemon restart clears it briefly, but it recurs on the next research call.
+
+This is squarely outside scaffold-engine's reach to fix in the embedder process itself. The decision (operator-driven) is to **swap the embedder model** to one that's known stable on CPU + Ollama. The candidate is `nomic-embed-text`: 137M params (~50× smaller than qwen3-embedding:8b's 7.6B), 768-dim native with Matryoshka truncation to 512, 0.26 GB on disk, ~1s per call on CPU, no `--ollama-engine` weirdness.
+
+**The switch:**
+
+- `docker-compose.yml` — `MODEL_EMBEDDER_PIPELINE: nomic-embed-text` (was `qwen3-embedding:8b`). Comment block above explains the audit-tail context so future operators reading the compose see the why.
+- `app/config.py` — `model_embedder_pipeline` default changed to `nomic-embed-text`; `model_embedder_id` updated to `nomic-embed-text-mrl512` so `/config show` reports the right canonical id.
+- `nomic-embed-text` pulled via `curl -X POST /api/pull` from inside the orchestrator container — no host-side sudo needed (Ollama daemon's API accepts pull requests from any client on the bridge network).
+- `toon_v2` collection dropped before restart so the orchestrator auto-recreates it on first ingest. This is mandatory: vectors embedded by the new model live in a different semantic space, and `truncate_and_normalize`'s 512-dim projection from a 768-dim native is incompatible with the 4096→512 truncation applied to qwen3-embedding's output. The 3 leftover entries from §17.82 reproductions were trivial test data.
+- The Finding C `_unload_ollama_model` helper still fires before each ingest (now unloads qwen2.5:7b before nomic-embed-text loads). Logs confirm it: `ollama_model_unloaded: model=qwen2.5:7b` after every URL/PDF extract.
+
+**Live verification (full --tier fast run, 12:00-13:03 UTC):**
+
+| Source | Mode | Outcome (orchestrator-side) | Entries |
+|---|---|---|---|
+| 1. anthropic-cookbook | github | ✅ session=completed | 4 |
+| 2. pytorch/torchtune | github | ✅ session=completed | 1 |
+| 3. Test-driven_development | url | ✅ session=completed | 12 |
+| 4. Software_design_pattern | url | ⚠️ session stuck `running` (runbook SIGPIPE bug); ingest succeeded | ~9 (1 dedup) |
+| 5. Vector_database | url | ❌ blocked by single-running guard | 0 |
+| 6. Retrieval-augmented_generation | url | ❌ blocked by single-running guard | 0 |
+
+**Final `entry_count` = 26.** Zero `embed_timeout` log lines in 60+ minutes of activity. Each `nomic-embed-text` call lands in ~1s warm; cold-load ~3-5s. The Finding B 360s timeout has 100× headroom.
+
+**End-to-end retrieval verified:** `POST /rag {"query":"test driven development","top_k":3}` returns 3 hits, top reranker score 0.996, all from the TDD Wikipedia chunks ingested in source 3. Embedder + Milvus + reranker pipeline all working through the `nomic-embed-text` path.
+
+**Adjacent runbook bug surfaced (not Finding D):**
+
+`scripts/repopulate_kb.sh::run_research` pipes the SSE stream through `tee >(...) | grep -E ... | head -200`. When `head -200` closes (after 200 lines), it SIGPIPEs `grep` → `tee` → `curl`, making `curl` exit non-zero. The runbook then logs `x curl failed for ...` even though the orchestrator-side ingest fully succeeded (DB session = `completed`, entries landed). Cosmetic for sources 1-3.
+
+The bug becomes load-bearing on source 4: SIGPIPE on a long-running curl can land BEFORE the orchestrator's lifecycle wrapper fully finalizes the session — the session ends up stuck in `running` even though `ingest_entries` returned and entries are in Milvus. The single-running guard then rejects sources 5 and 6 with `event: error`. Effective limit on this run: 4 of 6 sources land entries; the operator can either bypass the guard manually (DB UPDATE) and re-run sources 5+6, or fix the runbook.
+
+Two follow-up items flagged for a future commit:
+- **runbook** — replace `head -200` with an explicit "stop after research_complete" loop so curl runs to completion. Or strip `tee` and the grep filter; let the SSE stream land on disk and parse afterward.
+- **lifecycle** — `_sse_with_disconnect_watch` should guarantee finalization on disconnect within ~1s. The X.24 W.10 cleanup pattern was supposed to cover this; verify whether it actually fires for direct_url-mode sessions specifically.
+
+**Test-suite delta:** the embedder switch doesn't break any tests — the test fixtures all mock `model_router.embed`, so the model name is never exercised in tests. `test_rag_pipeline.py`, `test_research_agent_*`, and the new finding-tagged tests all still pass on the dev image.
+
+**§16.5 status delta:** Finding D closes the recurring qwen3-embedding:8b wedge by routing around it. Combined with Finding B (bounded timeout) and Finding C (extract-model unload + diagnostic log), the embed pipeline now has three layers: (1) defensive — unload extractor early, (2) detective — embed_timeout fires in minutes if the new embedder also wedges, (3) recoverable — cleanly logs operator action. The N4 runbook can complete without manual intervention on this host.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

@@ -113,14 +113,18 @@ class Settings(BaseSettings):
 
     # Embedding config
     embedding_dim: int = Field(default=512, ge=512, le=512)
-    model_embedder_id: str = "qwen3-embedding-8b-mrl512"
+    # Switched from qwen3-embedding-8b-mrl512 in audit-tail Finding D
+    # (§17.83) — that model wedged deterministically on this host's
+    # Ollama 0.17.5 --ollama-engine path. nomic-embed-text is 137M
+    # params (50× smaller), 768-dim native truncated to 512 via MRL.
+    model_embedder_id: str = "nomic-embed-text-mrl512"
     semantic_dedup_threshold: float = Field(default=0.95, ge=0.0, le=1.0)
     version_chain_threshold: float = Field(default=0.90, ge=0.0, le=1.0)
     embedding_batch_size: int = Field(default=32, ge=1, le=512)
 
     # Model assignments
     model_router: str = "qwen3:4b"
-    model_embedder_pipeline: str = "qwen3-embedding:8b"
+    model_embedder_pipeline: str = "nomic-embed-text"
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
     model_coder: str = "qwen2.5-coder:7b"
     model_general: str = "qwen3-vl:235b-instruct-cloud"
