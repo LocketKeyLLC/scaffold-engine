@@ -22,6 +22,7 @@ they get their own dispatch.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, AsyncIterator
@@ -102,16 +103,50 @@ class OllamaProvider(LLMProvider):
         model: str,
         texts: list[str],
         *,
-        timeout: int = 120,  # noqa: ARG002 — model_router resolves cloud vs local
+        timeout: int | None = None,
     ) -> list[list[float]]:
+        """Embed `texts` via Ollama's /api/embed.
+
+        Audit Finding B (root cause): a wedged Ollama embedder runner
+        previously left the orchestrator waiting on the dispatcher's
+        legacy ``settings.local_timeout`` (30 min default) before
+        surfacing the failure. SSE consumers saw 30 minutes of silence,
+        and a /research that should have completed in 5-10 minutes
+        instead returned a curl timeout.
+
+        Now bounded by ``asyncio.wait_for`` with a per-call cap derived
+        from input count: ``max(120, 30 * n_texts)`` seconds, capped at
+        600s. For 12 chunks that's 360s (6 min) — leaving substantial
+        headroom for legitimate CPU-only embed runs while surfacing
+        Ollama-side wedges roughly 4x faster.
+
+        On timeout returns an empty list and logs ``embed_timeout``;
+        callers (rag_pipeline._embed_contents_batch, ingest_entries)
+        already handle the empty-list case by treating individual
+        entries as "embed failed" and skipping them in upsert.
+        """
         from app import model_router
+        if timeout is None:
+            timeout = max(120, 30 * len(texts))
+            timeout = min(timeout, 600)
         payload: dict[str, Any] = {
             "model": model,
             "input": texts,
         }
-        resp = await model_router._dispatch_with_retry(
-            "/api/embed", payload, model, fallback=None,
-        )
+        try:
+            resp = await asyncio.wait_for(
+                model_router._dispatch_with_retry(
+                    "/api/embed", payload, model, fallback=None,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "embed_timeout: model=%s n_texts=%d timeout_s=%d "
+                "(suggests a wedged Ollama runner; restart `ollama` daemon)",
+                model, len(texts), timeout,
+            )
+            return []
         if not resp.success:
             logger.error("Embedding failed after retries: %s", resp.error)
             return []

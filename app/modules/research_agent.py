@@ -874,9 +874,24 @@ async def _ingest_and_finalize_direct(
 
     state.all_entries.extend(entries)
 
+    # Audit Finding B fix — wrap the ingest_entries await in a heartbeat
+    # generator so the SSE stream stays alive during embed + Milvus upsert.
+    # Pre-fix the stream went silent for the entire ingest phase; if Ollama
+    # wedged on the embedder runner, consumers saw 30 minutes of silence
+    # before curl timed out at the orchestrator's 1800s local_timeout.
+    # Heartbeats here let the operator see "ingesting" status and surface
+    # an Ollama hang via `make logs-research` instead of a black-box stall.
     ingested = 0
     if entries:
-        stats = await ingest_entries(entries, domain=state.domain)
+        ingest_task = asyncio.create_task(
+            ingest_entries(entries, domain=state.domain)
+        )
+        async for hb in _await_with_heartbeat(
+            ingest_task,
+            {"status": "ingesting", "iteration": state.iteration, "entries": len(entries)},
+        ):
+            yield hb
+        stats = ingest_task.result()
         state.total_new += stats.get("new", 0)
         state.total_versioned += stats.get("versioned", 0)
         state.total_rejected += stats.get("rejected", 0)

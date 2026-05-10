@@ -3906,6 +3906,53 @@ A test (`TestExtractLoopInstrumentation::test_url_mode_loop_logs_localize_a_hang
 
 **Audit-tail status:** Finding A closed. Finding B's diagnostics shipped; the underlying root cause stays open until a reproduction with the new logs identifies the stuck step. Audit findings list now contains only Finding B's root-cause investigation.
 
+### 17.81 Audit-tail — Finding B root-caused: bound embed timeout + ingest heartbeats (2026-05-09)
+
+Finding B's hang has been reproduced under the §17.80 instrumentation and root-caused. The hang is **Ollama-side**: the qwen3-embedding:8b runner gets stuck on its first inference after the extractor (qwen2.5:7b) was just heavily loaded. **Two scaffold-engine response gaps amplified the symptom** — and both are fixed in this commit.
+
+**Reproduction timeline (Wikipedia "Test-driven development" URL ingest, 12 chunks → 3 batches):**
+
+```
+23:55:51  loop_start (chunks=12 batches=3)
+00:01:12  batch_done batch=0/3   (5 chunk-fallback entries)
+00:05:55  batch_done batch=1/3   (10 entries total)
+00:08:25  batch_done batch=2/3   (12 entries total)
+00:08:25  loop_complete + extraction_complete SSE event
+00:08:25→ 30 minutes of silence — no SSE events, no embed POST in httpx logs
+00:38:25  curl --max-time 1800 timed out exactly at 30 min
+```
+
+**Root cause confirmed via direct probing:**
+
+- `docker exec scaffold-orchestrator curl -X POST http://172.18.0.1:11434/api/embed -d '{"model":"qwen3-embedding:8b","input":["test"]}'` from a separate shell **also timed out at 60s** with 0 bytes received. Ollama's embedder runner was wedged.
+- The Ollama runner process showed PID `281641`, state `SNl` (multi-threaded sleeping), 99% cumulative CPU but no instant response to `/api/embed`.
+- The orchestrator's httpx logger only emits the "POST 200 OK" line *after* a response arrives — that's why the POST never appeared in the orchestrator logs. The call was in flight for the full 30 minutes, blocked on the wedged runner.
+- Why 30 minutes specifically: the legacy embed path went through `_dispatch_with_retry → _call_ollama → client.post(timeout=_timeout_for(model))`, and `_timeout_for` returned `settings.local_timeout=1800` for the embedder model. That is the patience window — and exactly matches the `curl --max-time 1800` cap.
+
+**Why Ollama wedged is out of scope for scaffold-engine** — it's a known Ollama issue with model swapping under memory pressure on CPU-only hosts (qwen2.5:7b → qwen3-embedding:8b cohabitation can occasionally pin the embedder runner). The scaffold-engine response should be: surface the failure quickly + keep the SSE alive so the operator can diagnose.
+
+**Two fixes:**
+
+1. **`app/providers/ollama.py::OllamaProvider.embed`** — wrap the dispatcher in `asyncio.wait_for` with a per-call timeout that scales with input count: `min(600, max(120, 30 * n_texts))`. For 12 chunks: 360s (6 min) — roughly **4× faster failure surface** than the legacy 30-min ceiling. The previously-unused `timeout` parameter (`# noqa: ARG002`) is now load-bearing. On timeout we log `embed_timeout` with the explicit "wedged Ollama runner; restart `ollama` daemon" hint and return `[]`; callers (`rag_pipeline._embed_contents_batch`, `ingest_entries`) already treat empty embeddings as per-entry failure (the entries are skipped from upsert rather than crashing the whole ingest).
+
+2. **`app/modules/research_agent.py::_ingest_and_finalize_direct`** — wrap the `await ingest_entries(...)` in `_await_with_heartbeat(ingest_task, {"status": "ingesting", "iteration": ..., "entries": ...})`. Pre-fix the SSE stream went silent for the entire ingest phase; if Ollama hung, the consumer saw 30 min of nothing then a curl timeout. Now consumers see `event: heartbeat / data: {"status": "ingesting", "entries": N}` every interval, and the operator can attribute a stall to the ingest phase via `make logs-research`.
+
+**Tests** (`tests/test_finding_b_root_cause.py`, 6 cases):
+
+- `TestOllamaEmbedTimeoutBound` (4): default-timeout scaling formula; happy-path embed; failed-dispatcher returns []; timeout returns [] (verified with a slow-dispatch mock).
+- `TestIngestPhaseHeartbeats` (2): ingesting heartbeats fire during a slow ingest; heartbeat payload carries iteration + entry count for log correlation.
+
+**Verification:**
+- 6/6 new tests pass in dev image (5.17s).
+- Adjacent regression sweep (`-k "research_agent or rag_pipeline or finding_b"`): 74/74 pass in 10.39s. No regressions.
+- The orchestrator was restarted post-repro; the wedged Ollama runner survives (host-side, can't be killed without sudo) but the orchestrator's stuck event-loop task was discarded along with the old process.
+
+**Why not also fix the Ollama wedge:** out of scaffold-engine's scope. Mitigations the operator can apply: (a) `sudo systemctl restart ollama` clears the wedged runner; (b) reducing the keep-alive window so models unload between extract/embed phases makes recurrence less likely; (c) longer-term, the X.26 Prometheus `scaffold_llm_*` gauges + the new `embed_timeout` log line make the next occurrence visible in dashboards.
+
+**Test-suite delta:** +6 cases. No code-path regressions.
+
+**§16.5 status delta:** Finding B fully closed. The full 2026-05-09 audit punch list (B1-B6, M1-M7, I1, I4, N4, plus audit-tail Findings A + B) is **completely closed in code**. Wider §16.5 deferrals (macro bench baseline refresh, live-Postgres concurrency tests, ground_truth.json regen) remain as scheduled operator tasks.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
