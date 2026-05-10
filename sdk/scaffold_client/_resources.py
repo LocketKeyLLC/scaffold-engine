@@ -436,3 +436,64 @@ class AssistResource:
     def list_friction(self, session_id: str) -> dict[str, Any]:
         """``GET /assist/{session_id}/friction`` — every recorded note."""
         return self._client.request("GET", f"/assist/{session_id}/friction")
+
+
+class ObservabilityResource:
+    """``client.observability.*`` — operator triage on error_logs.
+
+    Mirrors the M4 endpoints in ``app/routers/observability.py``:
+
+    - ``recent_errors`` → ``GET /observability/errors``  (oncall view).
+    - ``resolve_error`` → ``PATCH /observability/errors/{id}`` (mark
+      resolved/un-resolved, optional triage note). §17.88 closes the
+      §17.69-deferred operator-side surface.
+
+    Cost / latency rollups (``GET /observability/llm`` and friends) are
+    intentionally not wrapped here — operators consume them via Grafana
+    against ``/metrics`` (X.26), not the SDK.
+    """
+
+    def __init__(self, client: "Client"):
+        self._client = client
+
+    def recent_errors(
+        self,
+        *,
+        resolved: bool | None = None,
+        since_minutes: int | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """``GET /observability/errors`` — recent error_log rows for triage.
+
+        ``resolved=False`` is the canonical oncall view ("what's still
+        broken"). ``since_minutes`` bounds the lookback window (max
+        10080 = 7d). Sorted newest first.
+        """
+        params = _drop_none({
+            "resolved": resolved,
+            "since_minutes": since_minutes,
+            "limit": limit,
+        })
+        return self._client.request("GET", "/observability/errors", params=params)
+
+    def resolve_error(
+        self,
+        error_id: str,
+        *,
+        resolved: bool = True,
+        resolution: str | None = None,
+    ) -> dict[str, Any]:
+        """``PATCH /observability/errors/{error_id}`` — flip the resolved flag.
+
+        Default ``resolved=True`` is the common path (operator triaged
+        and closed). ``resolved=False`` re-opens the row and clears
+        ``resolved_at``. ``resolution`` is a free-form triage note
+        (e.g. ``"fixed_by: §17.86 timeout bump"``); pass ``None`` to
+        leave / clear the note.
+
+        422 on bad UUID; 404 if the row doesn't exist.
+        """
+        return self._client.request(
+            "PATCH", f"/observability/errors/{error_id}",
+            json={"resolved": resolved, "resolution": resolution},
+        )

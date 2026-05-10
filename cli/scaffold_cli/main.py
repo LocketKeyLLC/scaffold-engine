@@ -3030,5 +3030,60 @@ def dag(
         click.echo(f"{key:<10} {st:<10} {deps:<22} {model}")
 
 
+ERRORS_EPILOG = """
+\b
+Examples:
+  scaffold errors resolve <error_id>                    mark resolved, no note
+  scaffold errors resolve <error_id> --note "fixed by Q.4 retry bump"
+
+Closes the §17.69-deferred operator surface for the M4 PATCH endpoint.
+The error_id is the UUID printed by `GET /observability/errors`.
+"""
+
+
+@cli.group(help="Triage operator-side error_logs (resolve / un-resolve).",
+           epilog=ERRORS_EPILOG)
+def errors() -> None:
+    pass
+
+
+@errors.command(
+    "resolve",
+    help="Mark an error_log row resolved (or --unresolve to re-open it).",
+)
+@click.argument("error_id")
+@click.option("--note", default=None,
+              help="Free-form triage note stored on the row.")
+@click.option("--unresolve", is_flag=True,
+              help="Re-open the row instead of resolving it.")
+@click.pass_context
+def errors_resolve(
+    ctx: click.Context,
+    error_id: str,
+    note: str | None,
+    unresolve: bool,
+) -> None:
+    """§17.88 — flip ``error_logs.resolved`` for a single row.
+
+    Maps to ``PATCH /observability/errors/{id}``. Default action is to
+    mark the row resolved + stamp ``resolved_at = NOW()``; ``--unresolve``
+    sends ``resolved=false`` which clears ``resolved_at``. The optional
+    ``--note`` is stored on the row's ``resolution`` column for the next
+    operator looking at the audit trail.
+    """
+    cfg = ctx.obj["cfg"]
+    body: dict[str, Any] = {"resolved": not unresolve, "resolution": note}
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.patch(f"/observability/errors/{error_id}", json=body)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    state = "resolved" if data.get("resolved") else "un-resolved"
+    click.secho(f"{state} {str(data.get('error_id', error_id))[:8]}", fg="green")
+    if data.get("resolution"):
+        click.echo(f"  note: {data['resolution']}")
+
+
 if __name__ == "__main__":
     cli()

@@ -1346,3 +1346,79 @@ def test_gt_extract_posts_topic_and_queries(runner):
     assert kwargs["json"]["topic"] == "kubernetes"
     assert kwargs["json"]["queries"] == ["lifecycle hooks", "init containers"]
     assert "extracted 7" in res.output
+
+
+# ---------------------------------------------------------------------------
+# §17.88 — `scaffold errors resolve` CLI verb
+# ---------------------------------------------------------------------------
+
+
+def test_errors_resolve_default_marks_resolved(runner):
+    """Default invocation PATCHes with ``resolved=true`` and no note."""
+    eid = "11111111-2222-3333-4444-555555555555"
+    response = {
+        "error_id": eid, "resolved": True,
+        "resolution": None, "resolved_at": "2026-05-10T12:00:00",
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        patch_mock = ClientCls.return_value.__enter__.return_value.patch
+        patch_mock.return_value = response
+        res = runner.invoke(cli, ["errors", "resolve", eid])
+    assert res.exit_code == 0
+    args, kwargs = patch_mock.call_args
+    assert args[0] == f"/observability/errors/{eid}"
+    assert kwargs["json"] == {"resolved": True, "resolution": None}
+    assert "resolved" in res.output
+    assert "11111111" in res.output
+
+
+def test_errors_resolve_with_note_forwards_resolution(runner):
+    """``--note`` flows through to the body's ``resolution`` field."""
+    eid = "11111111-2222-3333-4444-555555555555"
+    response = {
+        "error_id": eid, "resolved": True,
+        "resolution": "fixed by §17.86 timeout bump",
+        "resolved_at": "2026-05-10T12:00:00",
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        patch_mock = ClientCls.return_value.__enter__.return_value.patch
+        patch_mock.return_value = response
+        res = runner.invoke(cli, [
+            "errors", "resolve", eid, "--note", "fixed by §17.86 timeout bump",
+        ])
+    assert res.exit_code == 0
+    _, kwargs = patch_mock.call_args
+    assert kwargs["json"] == {
+        "resolved": True, "resolution": "fixed by §17.86 timeout bump",
+    }
+    assert "fixed by §17.86 timeout bump" in res.output
+
+
+def test_errors_resolve_unresolve_flag_reopens(runner):
+    """``--unresolve`` sends ``resolved=false`` and reports un-resolved."""
+    eid = "11111111-2222-3333-4444-555555555555"
+    response = {
+        "error_id": eid, "resolved": False,
+        "resolution": None, "resolved_at": None,
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        patch_mock = ClientCls.return_value.__enter__.return_value.patch
+        patch_mock.return_value = response
+        res = runner.invoke(cli, ["errors", "resolve", eid, "--unresolve"])
+    assert res.exit_code == 0
+    _, kwargs = patch_mock.call_args
+    assert kwargs["json"] == {"resolved": False, "resolution": None}
+    assert "un-resolved" in res.output
+
+
+def test_errors_resolve_orchestrator_404_exits_nonzero(runner):
+    """A 404 from the endpoint surfaces as a CLIError + non-zero exit."""
+    eid = "00000000-0000-0000-0000-000000000000"
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        patch_mock = ClientCls.return_value.__enter__.return_value.patch
+        patch_mock.side_effect = CLIError(
+            f"Resource not found (404): error_log not found: {eid}"
+        )
+        res = runner.invoke(cli, ["errors", "resolve", eid])
+    assert res.exit_code == 1
+    assert "(404)" in res.output

@@ -163,3 +163,28 @@ async def test_async_resource_subobjects_have_stable_identity(aclient):
     assert aclient.gt is aclient.gt
     assert aclient.rag is aclient.rag
     assert aclient.schedule is aclient.schedule
+    assert aclient.observability is aclient.observability
+
+
+# --------------------------------------------------------------------------
+# §17.88 — async observability resource (errors triage)
+# --------------------------------------------------------------------------
+
+
+async def test_async_observability_recent_errors_with_filters(aclient):
+    with patch.object(aclient, "request",
+                      AsyncMock(return_value={"errors": [], "count": 0})) as m:
+        await aclient.observability.recent_errors(resolved=False, since_minutes=60)
+    args, kwargs = _last_call(m)
+    assert args == ("GET", "/observability/errors")
+    assert kwargs["params"] == {
+        "resolved": False, "since_minutes": 60, "limit": 50,
+    }
+
+
+async def test_async_observability_resolve_error_with_note(aclient):
+    with patch.object(aclient, "request", AsyncMock(return_value={})) as m:
+        await aclient.observability.resolve_error("abc", resolution="triaged")
+    args, kwargs = _last_call(m)
+    assert args == ("PATCH", "/observability/errors/abc")
+    assert kwargs["json"] == {"resolved": True, "resolution": "triaged"}

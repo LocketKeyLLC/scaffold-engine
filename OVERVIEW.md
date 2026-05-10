@@ -4140,6 +4140,51 @@ Updated the table cells + the "Items 11 + 12 remain" prose. The 12-item roadmap 
 
 **Project pattern (memory-worthy).** When a `What this does NOT do (deferred)` block in an old §17.x entry gets resolved by a later sprint, the resolution should leave a back-pointer behind — either by editing the original deferral block in place (with a "→ Closed in §17.X" tag, the same convention W-track uses) or by a forward reference in the closing sprint's entry. Without that, the deferral language stays load-bearing in audits years after the fix shipped, and operators waste cycles re-checking. Going forward: when a sprint closes a prior `(deferred)` row, add a back-pointer in the original entry in the same commit.
 
+### 17.88 Audit-tail — `scaffold errors resolve` CLI verb + SDK observability resource (2026-05-10)
+
+Closes the §17.69-deferred operator-side surface for the M4 PATCH endpoint. Pre-§17.88, marking an `error_logs` row resolved required either a hand-rolled `curl -X PATCH`, a one-shot Python script (the path used to clear the §17.69 25-row backlog), or a SQL UPDATE — none of which is the right shape for the next operator who finds a noisy `oncall.errors_unresolved` page at 2 a.m. §17.88 wires the verb into both the SDK and the CLI so the canonical operator path is now ``scaffold errors resolve <id> [--note ...] [--unresolve]``.
+
+**SDK additions** (sync + async, `sdk/scaffold_client/_resources.py` + `_async_resources.py`):
+
+- New `ObservabilityResource` (sync) + `AsyncObservabilityResource` (async). Wired onto `Client` and `AsyncClient` as `c.observability`. Resource sub-object identity is stable per the standing convention (asserted in `test_resource_subobjects_have_stable_identity`).
+- Two methods, mirroring the M4 endpoint contract exactly:
+  - `recent_errors(*, resolved=None, since_minutes=None, limit=50)` → `GET /observability/errors`. The canonical oncall view is `recent_errors(resolved=False)`. `_drop_none` strips `None` filters so the orchestrator's `Query(...)` validators don't see spurious `?resolved=None` strings.
+  - `resolve_error(error_id, *, resolved=True, resolution=None)` → `PATCH /observability/errors/{id}`. Default `resolved=True` is the common path (operator triaged + closed); `resolved=False` re-opens the row and the orchestrator clears `resolved_at` server-side.
+- Cost / latency rollup endpoints (`GET /observability/llm`, `/jobs`) intentionally NOT wrapped — operators consume those via Grafana against the X.26 `/metrics` surface, not the SDK. Adding read-only wrappers for them now would commit the SDK to a contract that's better served by Prometheus tooling.
+
+**SDK version bump.** `sdk/scaffold_client/_version.py` + `sdk/pyproject.toml`: `1.3.0 → 1.4.0`. Additive (new resource sub-object); no breaking changes to existing methods. Follows the U.8.A → 1.2.0 + U.8.C → 1.3.0 minor-bump-per-resource cadence; the underlying FastAPI app contract (1.1.0) does not need to move because the M4 endpoints already shipped in §17.69.
+
+**CLI additions** (`cli/scaffold_cli/main.py`):
+
+- New `errors` Click group with one subcommand `resolve`. Mirrors the `jobs synthesis` command shape (`X.18`/`§17.51`) — uses the CLI's `c.patch(...)` thin wrapper directly rather than going through the SDK typed resource (consistent with the rest of the CLI's surface). The `errors` group's epilog gives copy-pasteable examples + names the §17.69 closure.
+- Surface: `scaffold errors resolve <error_id> [--note STR] [--unresolve]`.
+  - `--note` flows through to the body's `resolution` field. Free-form, intended for human triage notes (`fixed_by: §17.86 timeout bump`, `external_caller`, etc).
+  - `--unresolve` flips `resolved=false`, re-opening the row. Symmetric inverse so the operator can roll back a premature resolution without a separate verb.
+- Output:  `resolved <id8>` (or `un-resolved <id8>`) in green + the note line indented underneath when present. Non-zero exit on 404 / connection errors via the existing `CLIError` translation in `cli/scaffold_cli/client.py`.
+
+**Test-suite delta:**
+
+- SDK: `tests/test_typed_methods.py` +5 cases (no-filter happy path, with-filter happy path, default resolve, resolve-with-note, unresolve), `tests/test_async_typed_methods.py` +2 cases (representative recent_errors + resolve-with-note for async dispatch). The two `test_resource_subobjects_have_stable_identity` cases also gained an assertion for `c.observability is c.observability`. Suite total: **129 → 138 passing** in 2.17s.
+- CLI: `cli/tests/test_commands.py` +4 cases (default resolve, --note forwarding, --unresolve flips state, 404 → CLIError → non-zero exit). Suite total: **131 → 135 passing** in 1.08s.
+- Zero regressions in either suite.
+
+**Live verification.** Pulled the most recent error_log row (`a6481c6a-…`, a "badly formed hexadecimal UUID string" validation error from 2026-05-06 that the §17.69 backlog-triage pass had already marked resolved with `external_caller: ...`). Re-resolved it via the new CLI invocation:
+
+```
+$ python -m scaffold_cli.main --api-url http://localhost:8000 \
+    --api-key "$SCAFFOLD_API_KEY" \
+    errors resolve a6481c6a-5957-4957-833e-7dbe65577e4a \
+    --note "live-verified §17.88 SDK roundtrip"
+resolved a6481c6a
+  note: live-verified §17.88 SDK roundtrip
+```
+
+Round-trip GET on the same row confirmed the orchestrator stored the new resolution + restamped `resolved_at = 2026-05-10T17:24:01.657995+00:00`. End-to-end path CLI → SDK `Client.patch` → orchestrator endpoint → DB UPDATE → response shape → CLI render is verified live.
+
+**Project pattern (memory-worthy).** When closing a `(deferred — would need a CLI verb)` row from a prior audit, the right scope is usually the verb itself + a back-pointer in the original deferral, NOT a wider sweep that adds the GET counterpart, an OWUI surface, or a list view at the same time. The §17.69 deferral was specifically about the operator-resolution path; adding `errors list` would be net-new feature scope (operators today already have curl + Grafana for that read), and OWUI surfaces for triage are explicitly out-of-scope per §17.69's design note. Tight closure = one verb shipped + one back-pointer left + entry written; everything else can be its own audit-tail.
+
+**§16.5 status delta:** §17.69's deferred operator-side surface is now closed end-to-end. Open from the same audit family: I-line items partially nibbled in §17.65–68 + §17.77 still lack a single "deployment-surface audit" closure entry; that remains §16.5's last named-but-unclosed thread.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

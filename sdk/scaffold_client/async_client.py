@@ -30,6 +30,7 @@ from ._async_resources import (
     AsyncGtResource,
     AsyncJobsResource,
     AsyncModelsResource,
+    AsyncObservabilityResource,
     AsyncPromptsResource,
     AsyncRagResource,
     AsyncResearchResource,
@@ -71,6 +72,7 @@ class AsyncClient:
         self.assist = AsyncAssistResource(self)
         self.research = AsyncResearchResource(self)
         self.models = AsyncModelsResource(self)
+        self.observability = AsyncObservabilityResource(self)
 
     # ------------------------------------------------------------------
     # Generic dispatch

@@ -4,7 +4,8 @@ The top-level workflow methods (``ideate``, ``confirm``, ``execute``,
 ``optimize``, ``skip``, ``health``, ``status``) live directly on
 ``Client``. Larger groupings live on resource sub-objects:
 ``client.jobs``, ``client.dag``, ``client.prompts``, ``client.gt``,
-``client.rag``, ``client.schedule``.
+``client.rag``, ``client.schedule``, ``client.assist``,
+``client.research``, ``client.models``, ``client.observability``.
 
 SSE-streamed endpoints (``/research``, ``/execute/all``, ``/research/reply``,
 ``/research/pdf``) are served by ``AsyncClient`` only — see ``async_client``.
@@ -22,6 +23,7 @@ from ._resources import (
     GtResource,
     JobsResource,
     ModelsResource,
+    ObservabilityResource,
     PromptsResource,
     RagResource,
     ResearchResource,
@@ -69,6 +71,7 @@ class Client:
         self.assist = AssistResource(self)
         self.research = ResearchResource(self)
         self.models = ModelsResource(self)
+        self.observability = ObservabilityResource(self)
 
     # ------------------------------------------------------------------
     # Generic dispatch — typed methods delegate to this.

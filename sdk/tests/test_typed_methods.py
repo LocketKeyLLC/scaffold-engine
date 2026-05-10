@@ -410,3 +410,71 @@ def test_resource_subobjects_have_stable_identity(client):
     assert client.gt is client.gt
     assert client.rag is client.rag
     assert client.schedule is client.schedule
+    assert client.observability is client.observability
+
+
+# --------------------------------------------------------------------------
+# §17.88 — observability resource (errors triage)
+# --------------------------------------------------------------------------
+
+
+def test_observability_recent_errors_no_filters(client):
+    """No-arg call sends only the default ``limit=50`` param."""
+    with patch.object(client._http, "request",
+                      return_value=_resp(200, {"errors": [], "count": 0})) as m:
+        client.observability.recent_errors()
+    args, kwargs = _last_call(m)
+    assert args == ("GET", "/observability/errors")
+    assert kwargs["params"] == {"limit": 50}
+
+
+def test_observability_recent_errors_with_filters(client):
+    """``resolved`` + ``since_minutes`` flow through verbatim, no None leak."""
+    with patch.object(client._http, "request",
+                      return_value=_resp(200, {"errors": [], "count": 0})) as m:
+        client.observability.recent_errors(
+            resolved=False, since_minutes=60, limit=10,
+        )
+    _, kwargs = _last_call(m)
+    assert kwargs["params"] == {
+        "resolved": False, "since_minutes": 60, "limit": 10,
+    }
+
+
+def test_observability_resolve_error_default_resolves(client):
+    """Default call marks the row resolved with no triage note."""
+    with patch.object(client._http, "request",
+                      return_value=_resp(200, {
+                          "error_id": "abc", "resolved": True,
+                          "resolution": None, "resolved_at": "2026-05-10T00:00:00",
+                      })) as m:
+        client.observability.resolve_error("abc")
+    args, kwargs = _last_call(m)
+    assert args == ("PATCH", "/observability/errors/abc")
+    assert kwargs["json"] == {"resolved": True, "resolution": None}
+
+
+def test_observability_resolve_error_with_note(client):
+    """``resolution=`` is forwarded under the schema's ``resolution`` key."""
+    with patch.object(client._http, "request",
+                      return_value=_resp(200, {})) as m:
+        client.observability.resolve_error(
+            "abc", resolution="fixed_by: §17.86 timeout bump",
+        )
+    _, kwargs = _last_call(m)
+    assert kwargs["json"] == {
+        "resolved": True,
+        "resolution": "fixed_by: §17.86 timeout bump",
+    }
+
+
+def test_observability_resolve_error_unresolves(client):
+    """``resolved=False`` re-opens the row (clears resolved_at server-side)."""
+    with patch.object(client._http, "request",
+                      return_value=_resp(200, {
+                          "error_id": "abc", "resolved": False,
+                          "resolution": None, "resolved_at": None,
+                      })) as m:
+        client.observability.resolve_error("abc", resolved=False)
+    _, kwargs = _last_call(m)
+    assert kwargs["json"] == {"resolved": False, "resolution": None}

@@ -338,3 +338,38 @@ class AsyncAssistResource:
 
     async def list_friction(self, session_id: str) -> dict[str, Any]:
         return await self._client.request("GET", f"/assist/{session_id}/friction")
+
+
+class AsyncObservabilityResource:
+    def __init__(self, client: "AsyncClient"):
+        self._client = client
+
+    async def recent_errors(
+        self,
+        *,
+        resolved: bool | None = None,
+        since_minutes: int | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """``GET /observability/errors`` — recent error_log rows. §17.88."""
+        params = _drop_none({
+            "resolved": resolved,
+            "since_minutes": since_minutes,
+            "limit": limit,
+        })
+        return await self._client.request(
+            "GET", "/observability/errors", params=params,
+        )
+
+    async def resolve_error(
+        self,
+        error_id: str,
+        *,
+        resolved: bool = True,
+        resolution: str | None = None,
+    ) -> dict[str, Any]:
+        """``PATCH /observability/errors/{id}`` — flip resolved flag. §17.88."""
+        return await self._client.request(
+            "PATCH", f"/observability/errors/{error_id}",
+            json={"resolved": resolved, "resolution": resolution},
+        )
