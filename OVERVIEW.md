@@ -4689,6 +4689,28 @@ $ curl -sSI http://localhost:8000/health | grep -iE "content-security|nosniff|re
 
 **Project pattern (memory-worthy).** When a security audit's LOW items can be batched into one commit, bundle them — the per-commit overhead (CHANGELOG / OVERVIEW / push / suite-run cycle) is large enough that 5 × small commits buys nothing over 1 × bundled commit with a clear §-entry that names each item. The bundling rule is: bundle when the items share a theme (security hardening), don't share state changes that would conflict on rollback, and each individually-passes its own targeted tests before the bundle. If any one item would touch a hot path that affects the others, separate-commit it instead.
 
+### 17.101 Pipelines service healthcheck (2026-05-10)
+
+Fresh-eyes review surfaced that `open-webui-pipelines` had no `healthcheck:` block. Compose reported the service as "started" the instant the container init returned, regardless of whether the pipelines HTTP server was actually accepting connections on :9099. Today nothing `depends_on: pipelines: condition: service_healthy`, so the impact is latent — but the moment a future change wires OWUI (or anything else) to wait on pipelines being healthy, the dependency was silently a no-op.
+
+**Pre-check** (so the chosen command was not guessed):
+
+```
+$ docker exec open-webui-pipelines which curl
+/usr/bin/curl
+
+$ docker exec open-webui-pipelines curl -fsS http://127.0.0.1:9099/
+{"status":"true"}
+```
+
+`curl` ships in the image; `GET /` returns 200 with a small JSON envelope.
+
+**Change:** `docker-compose.yml:87-93` — insert a `healthcheck:` block on the pipelines service after `env_file:`, before `volumes:`. Test runs `curl -fsS http://127.0.0.1:9099/`. Interval 15s, timeout 5s, retries 3, start_period 30s (the image is python-heavy at boot — first request lands well within 30s on warm caches, slower on cold).
+
+**Verification:** `docker compose config -q` parses clean; rendered config shows the healthcheck block on the `pipelines` service. The currently-running container has no healthcheck applied — it predates this commit. Takes effect on next `docker compose up -d` recreate, which is deferred to the next operator window since recreate momentarily disconnects OWUI from pipelines.
+
+**What this doesn't fix yet.** No service currently `depends_on` pipelines with `condition: service_healthy`. The natural client is `open-webui:` (which loads pipelines at boot for the `/pipelines/*` model list). That follow-up edit is deliberately separate so the healthcheck can be observed independently first.
+
 ### 17.100 `/execute/all` SSE — surface 401 drift hint (parity with /confirm + /dag) (2026-05-10)
 
 Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mapped every non-409 HTTP error to a generic "Execution failed (HTTP {f1}). Please try again." with no `_drift_hint()`. The other paths in the same file (`_handle_confirm` at L1106, the /dag path at L1133) and `dag_viewer.py:244` all branch on 401 → append the drift hint. SSE execution was the lone outlier: an API-key rotation that desynced `valves.json` from `SCAFFOLD_API_KEY` would render every `/execute/all` 401 as a generic error, leaving the user to chase logs.

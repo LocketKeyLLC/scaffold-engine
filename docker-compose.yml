@@ -86,6 +86,12 @@ services:
       - SCAFFOLD_VALVES_ENV_OVERRIDE=${SCAFFOLD_VALVES_ENV_OVERRIDE:-false}
     env_file:
       - .env
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9099/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     volumes:
       # The pipelines tree as a whole stays bind-mounted so OWUI's valve
       # UI can persist <name>/valves.json. Per-file :ro overlays below
