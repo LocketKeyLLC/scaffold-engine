@@ -1998,10 +1998,10 @@ The original priority queue had 10 items. **All 10 are now fully resolved** in c
 
 ### 16.5 Items NOT covered by the audit
 
-- **Tests phase skipped** — no coverage matrix for `execution_agent`'s retry loop, `ideation_workflow`'s session-lifecycle, or `scheduler`'s misfire handling. The 14 pre-existing test failures in §14.1 are mock-side drift, not coverage gaps.
-- **Performance benchmarking** — likely PERF issues identified but not measured.
-- **Observability completeness** — log-line fan-out, metric coverage, alerting hooks not audited beyond foundation middleware.
-- **Deployment surface** — Dockerfile, compose, `.env.example` not audited.
+- **Tests phase skipped** — no coverage matrix for `execution_agent`'s retry loop, `ideation_workflow`'s session-lifecycle, or `scheduler`'s misfire handling. The 14 pre-existing test failures in §14.1 are mock-side drift, not coverage gaps. → Partially closed in §17.55 (X.19 retry-loop matrix); live-Postgres concurrency tests still open.
+- **Performance benchmarking** — likely PERF issues identified but not measured. → Closed in §17.57 (X.21 component benches) + §17.78 (I4 CI gates).
+- **Observability completeness** — log-line fan-out, metric coverage, alerting hooks not audited beyond foundation middleware. → Closed in §17.56 (X.20 rollups) + §17.61 (X.26 Prometheus + push thresholds + OTel scaffolding).
+- **Deployment surface** — Dockerfile, compose, `.env.example` not audited. → **Closed in §17.91** (formal closure entry: §17.62/64/65/66/67/68/70/77/78 contributors mapped + Dockerfile digest-pinned inline) and **§17.93** (SSRF guard + loopback-only port bindings).
 
 ### 16.6 Verification record (2026-05-07, post-`0c4cc12`)
 
@@ -2181,8 +2181,8 @@ Pip-installable `scaffold-engine-cli` at `cli/`. `scaffold version | doctor | id
 
 ### 17.9 Open follow-ups (not yet sprinted)
 
-- `research_agent` / `execution_agent` migration to native `tool_call()` (away from JSON-prompt coaxing)
-- Pattern 3 helper-internal call-site migration deferred from Sprint E.7
+- ~~`research_agent` / `execution_agent` migration to native `tool_call()` (away from JSON-prompt coaxing)~~ → Closed in W.6 + X.10–X.13 + §17.74.
+- ~~Pattern 3 helper-internal call-site migration deferred from Sprint E.7~~ → **Closed in §17.89** (Pattern 3 sweep: 12 helper-internal call sites across 5 modules now dispatch via `role=` + `overrides=` instead of legacy `model=`).
 - ~~Pre-existing CLI bug: `scaffold jobs status <id>` calls non-existent `GET /jobs/{id}`~~ → fixed in `bbd3a1c` (J.1 close-out); `jobs status` now calls `GET /exec/status/{id}` and renders the new shape.
 
 ### 17.10 U-sprint track — UX polish (2026-05-07, 6 commits)
@@ -2606,9 +2606,10 @@ Tier 1 / item 7 from the workflow audit. The lever W.2 explicitly deferred. Unti
 - Cache synthesized output. Re-running `_compile_output` against a job with already-cached compiled_output skips recompute (W.2 cache path), but no per-strategy cache for synthesis. Re-running synthesis on the same heuristic input is unlikely (compile only runs at job completion or `/exec` blocked-cache miss), so this is academic.
 
 **Open follow-ups (audit-tail):**
-- Surface a `synthesized=true|false` flag in `/exec/status/{job_id}` so consumers know whether compiled_output is a synthesized narrative or the raw heuristic. Useful for downstream "show me what was generated" UIs.
+- ~~Surface a `synthesized=true|false` flag in `/exec/status/{job_id}`~~ → Closed in §17.28 (X.2 synthesized flag + skipped-verify banner).
 - Consider lower temperatures on the synthesis call for code-heavy deliverables — though the explicit "preserve verbatim" instruction should already handle this.
-- W.7 + J.3: when cost telemetry lands, log per-call synthesis tokens; if the synthesized output is barely longer than the heuristic, the synthesis is likely just paraphrasing — not adding value. Use that as a signal to recommend turning synthesis off for that workload.
+- ~~W.7 + J.3: when cost telemetry lands, log per-call synthesis tokens~~ → **Closed in §17.90** (synthesis budget telemetry: `call_kind` column + `by_kind` rollup let operators split synthesis spend from execution spend without further per-call wiring).
+- Per-job synthesis opt-in column on `jobs` — already shipped in X.6 (§17.34, mig 029); the §17.25 deferral language was stale by the time the §17.87 audit caught it.
 
 ### 17.26 Sprint W.8 — RAG quality re-baseline at KB=1093 (2026-05-07)
 
@@ -3532,7 +3533,7 @@ M4 from the audit. The audit's "5 unresolved errors" was actually 25 (the audit 
 - 1× `historical (pre-2026-05-09 audit)` (catch-all default; one row didn't match any specific pattern)
 - 1× `external_caller: malformed UUID in request path; not orchestrator bug` (smoke-test row resurfaced via the new endpoint)
 
-**Why one endpoint, not a CLI verb:** out of scope for M4. Operators triaging errors today will hit the endpoint via `curl` / SDK; if that pattern proves common, a future audit can add `scaffold errors resolve <id> [--note ...]` (mentioned in §17.69's option list but explicitly deferred).
+**Why one endpoint, not a CLI verb:** out of scope for M4. Operators triaging errors today will hit the endpoint via `curl` / SDK; if that pattern proves common, a future audit can add `scaffold errors resolve <id> [--note ...]` (mentioned in §17.69's option list but explicitly deferred). → **Closed in §17.88** (SDK observability resource + `scaffold errors resolve <id> [--note ...] [--unresolve]` CLI verb).
 
 **Verification:**
 - All 6 new tests pass in the dev image (~1 s).
@@ -3684,7 +3685,7 @@ B4 from the audit. The W.6 + X.10-X.12 sweep migrated every JSON-coaxing site EX
 **Verification:**
 - 26/26 pass in dev image (11 new + 15 existing `test_assist_replan_regen` cases unchanged) — 1.88 s.
 - `grep parse_json_object app/modules/assist_replan.py` returns only docstring/comment references documenting the migration. Zero live call sites.
-- The audit's "Pattern 3 helper-internal sites" subset is no longer cleanly mapped to JSON-coaxing — every helper path now uses tool_call. The §17.9 deferred Pattern 3 model-routing question (helpers taking `model: str` from upstream rather than routing through `provider_for_role`) remains separately open.
+- The audit's "Pattern 3 helper-internal sites" subset is no longer cleanly mapped to JSON-coaxing — every helper path now uses tool_call. The §17.9 deferred Pattern 3 model-routing question (helpers taking `model: str` from upstream rather than routing through `provider_for_role`) remains separately open. → **Closed in §17.89** (12 helper-internal call sites across 5 modules now dispatch via `role=`).
 
 **Test-suite delta:** +11 cases. Existing assist tests unchanged.
 
@@ -4118,7 +4119,7 @@ Re-ingested sources 4-6 with explicit domain; `entry_count` final layout: **eng=
 
 2/2 active passed in 3:32 wall time (~106s avg per query, well within the 300s timeout). 5 skipped per the canonical "this partition / doc isn't seeded" markers.
 
-**§16.5 status delta:** B3 closure is now end-to-end real — the test suite's "skip when empty" guard from B3's original fix protects the still-empty partitions, while the now-populated partitions actually exercise retrieval against the post-§17.85 KB. The runbook → ingest → embed → reranker → golden-test path is wired and validated. Out of scope: ingesting more curated docs to flip more skips back to active queries (would unlock the 4 currently-skipped queries; one Wikipedia URL per skip).
+**§16.5 status delta:** B3 closure is now end-to-end real — the test suite's "skip when empty" guard from B3's original fix protects the still-empty partitions, while the now-populated partitions actually exercise retrieval against the post-§17.85 KB. The runbook → ingest → embed → reranker → golden-test path is wired and validated. Out of scope: ingesting more curated docs to flip more skips back to active queries (would unlock the 4 currently-skipped queries; one Wikipedia URL per skip). → **Partially closed in §17.92**: 2 of 5 SKIPs flipped to PASS (chain-of-thought → "Prompt engineering" Wikipedia; quantization → "Quantization (signal processing)" Wikipedia). 3 remain skipped (function-calling, hybrid, TOON) with refreshed `reason=` strings naming the specific blocker per skip-mark.
 
 ### 17.87 Audit-tail — roadmap doc-drift refresh + stale-TODO sweep (2026-05-10)
 
@@ -4551,6 +4552,32 @@ A fresh-bootstrap DB now matches the live (post-all-migrations) schema for the c
 **Project pattern (memory-worthy).** When auditing a "baseline lag" gap, do TWO grep passes: (1) compare `\d <core_table>` against init.sql for the table you're refreshing today; (2) walk every prior ALTER migration that touched the same table. Older drift hides behind newer drift — I came in thinking "6 migrations missing" and found 8 columns / 1 index because two predated even the original §15 invariant claim. Init.sql should be re-verified against `\d table` for every core table, not just incremented from the last entry.
 
 **§16.5 status delta.** MEDIUM #2 from the §17.93 audit closed. Remaining MEDIUMs: back-pointer pattern sweep (§17.88-92), `SCAFFOLD_AUTH_DISABLED` health flag.
+
+### 17.95 Audit-tail — back-pointer sweep across §17.88–93 closures (2026-05-10)
+
+Closes the §17.93-audit MEDIUM: "back-pointer pattern not followed in §17.88–92." My own §17.87 entry codified the rule ("when a sprint closes a prior `(deferred)` row, add a back-pointer in the original entry in the same commit"), then five subsequent closures (§17.88, §17.89, §17.90, §17.91, §17.92) committed without updating the original deferral blocks. Sweep adds the missing tags.
+
+**Back-pointers added:**
+
+| Original deferral | Closure |
+|---|---|
+| §17.9 "Pattern 3 helper-internal call-site migration deferred from Sprint E.7" | → Closed in §17.89 |
+| §17.25 (W.7) "log per-call synthesis tokens" follow-up | → Closed in §17.90 |
+| §17.25 (W.7) "synthesized=true|false flag on /exec/status" | → Closed in §17.28 (X.2) — already shipped; deferral language was stale |
+| §17.25 (W.7) per-job synthesis opt-in column on jobs | → Closed in §17.34 (X.6) — already shipped via mig 029; deferral language stale |
+| §17.69 (M4) "future audit can add `scaffold errors resolve <id>` CLI verb" | → Closed in §17.88 |
+| §17.74 (B4) "§17.9 deferred Pattern 3 model-routing question remains separately open" | → Closed in §17.89 |
+| §16.5 "Tests phase skipped — coverage matrix" | → Partially closed in §17.55; live-Postgres concurrency tests still open |
+| §16.5 "Performance benchmarking" | → Closed in §17.57 + §17.78 |
+| §16.5 "Observability completeness" | → Closed in §17.56 + §17.61 |
+| §16.5 "Deployment surface — Dockerfile, compose, .env.example not audited" | → Closed in §17.91 + §17.93 |
+| §17.86 "ingesting more curated docs to flip more skips" | → Partially closed in §17.92 (2 of 5) |
+
+**Doc-only change.** No code, no tests, no schema. The sweep is OVERVIEW.md edits. Operators reading any of the old `(deferred)` blocks now have a one-line forward pointer to the §-entry that landed the fix.
+
+**Project pattern (memory-worthy — strengthened version of the §17.87 rule).** The back-pointer rule has TWO failure modes: (1) closing a deferral without leaving a back-pointer (the rule's original target — silent fix-ship makes the deferral look load-bearing forever); (2) noting a deferral that turns out to have ALREADY shipped in an earlier sprint, then carrying that stale language forward in subsequent entries (W.7's "log synthesis tokens" was actually addressable from J.3.a forward, not a fresh blocker). The fix in both cases is the same: when in doubt, grep the deferral language against the migration directory and §17.x log before writing it in the new entry. If a fix has already shipped, the back-pointer is in the original; if it hasn't, both sides need to know. The mechanical move at closure time: `grep -nE "deferred|Open follow" OVERVIEW.md` for the related § range, edit the matched line(s) in-place in the SAME commit.
+
+**§16.5 status delta.** MEDIUM #3 (back-pointer sweep) from the §17.93 audit closed. Remaining MEDIUM: `SCAFFOLD_AUTH_DISABLED` health-surface flag.
 
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
