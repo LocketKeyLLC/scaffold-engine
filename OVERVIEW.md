@@ -4689,6 +4689,16 @@ $ curl -sSI http://localhost:8000/health | grep -iE "content-security|nosniff|re
 
 **Project pattern (memory-worthy).** When a security audit's LOW items can be batched into one commit, bundle them — the per-commit overhead (CHANGELOG / OVERVIEW / push / suite-run cycle) is large enough that 5 × small commits buys nothing over 1 × bundled commit with a clear §-entry that names each item. The bundling rule is: bundle when the items share a theme (security hardening), don't share state changes that would conflict on rollback, and each individually-passes its own targeted tests before the bundle. If any one item would touch a hot path that affects the others, separate-commit it instead.
 
+### 17.99 Wire `make ci-smoke` target — CI Tier 1 was calling a non-existent target (2026-05-10)
+
+Found during the fresh-eyes review: `.github/workflows/ci.yml:51` invokes `make ci-smoke` but the Makefile defines only `ci:` (which uses `_ensure_dev` + `docker exec` — wrong for cloud runners). Every push had been red on this step.
+
+**Change:** new `ci-smoke:` target in `Makefile`, inserted between `bench-check:` and `ci:`. Runs `pytest tests/ -m smoke --timeout=30 -v` directly on the host — no docker, matching how the workflow installs deps via `actions/setup-python@v5` + `requirements-ci.txt`.
+
+**Verification:** `make -n ci-smoke` resolves cleanly to the pytest invocation (target exists, dependencies satisfied).
+
+**What this doesn't fix yet.** If `requirements-ci.txt` is missing a module that a smoke-tagged test imports transitively, the CI run will now surface a concrete `ModuleNotFoundError` instead of the silent "no rule to make target" failure. That's the intended next signal — add exactly the missing module(s) to `requirements-ci.txt`, don't pre-add all 19 prod deps.
+
 ### 17.98 CI Python version alignment — 3.11 → 3.12.13 (2026-05-10)
 
 Closes a silent footgun caught during the fresh-eyes review: `.github/workflows/ci.yml:17` pinned `PYTHON_VERSION: "3.11"` while `Dockerfile:6` pins the runtime image to `python:3.12.13-slim` by SHA256 digest. Cloud-runner smoke tests therefore exercised a different interpreter than prod ever runs. The current suite happened to be syntax-compatible across 3.11/3.12 so nothing surfaced, but a future 3.12-only construct (e.g. `type` statements, PEP 695 generics) would pass CI and break the image.
