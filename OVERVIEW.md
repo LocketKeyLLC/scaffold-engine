@@ -2075,7 +2075,7 @@ All 18 original HIGH-severity findings: 15 fixed in code + 3 retracted within th
 
 ### 17.1 Roadmap state
 
-12-item roadmap. Items 1–10 done. Items 11 + 12 remain.
+12-item roadmap. All 12 items done (item 11 closed by J.2.a/b/c, §17.45–47; item 12 closed by J.3.a/b/c/d, §17.48–50 + §17.87).
 
 A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 outside the original 12-item roadmap. U.1–U.6 landed first (§17.10); a follow-up audit produced U.7 (§17.11), a coherent gap-fix that bumped the API contract to v1.1.0.
 
@@ -2086,8 +2086,8 @@ A separate **U-sprint track** (post-v1.0.0 UX polish) was added on 2026-05-07 ou
 | 8 | (Sprint H) Terminal CLI | done 2026-05-06 (`1f5f999`) |
 | 9 | (Sprint I) Streaming + native tool-calling | done 2026-05-06 (I.1 `f768553` + I.2 `3e5f3d6`) |
 | 10 | Python SDK + stable OpenAPI (Sprint J.1, 6 commits) | done 2026-05-07, tagged `v1.0.0` |
-| 11 | Native single-page web UI | pending |
-| 12 | Cost + latency telemetry | pending |
+| 11 | Native single-page web UI (Sprint J.2, 3 commits) | done 2026-05-08 (J.2.a `40681d6` + J.2.b `2a631bc` + J.2.c `8f4a32c`) |
+| 12 | Cost + latency telemetry (Sprint J.3, 4 commits) | done 2026-05-08 (J.3.a `185bc0a` + J.3.b `bf2a862` + J.3.c `0fd6da5` + J.3.d `abd1d00`) |
 | U-sprint track | Post-v1.0.0 UX polish, U.1–U.6 (§17.10) | done 2026-05-07 |
 | U.7 | UX gap audit + CLI parity sweep, API → v1.1.0 (§17.11) | done 2026-05-07 |
 | U.8.A | Assist Mode parity in SDK + CLI, SDK → v1.2.0 (§17.12) | done 2026-05-07 |
@@ -4119,6 +4119,26 @@ Re-ingested sources 4-6 with explicit domain; `entry_count` final layout: **eng=
 2/2 active passed in 3:32 wall time (~106s avg per query, well within the 300s timeout). 5 skipped per the canonical "this partition / doc isn't seeded" markers.
 
 **§16.5 status delta:** B3 closure is now end-to-end real — the test suite's "skip when empty" guard from B3's original fix protects the still-empty partitions, while the now-populated partitions actually exercise retrieval against the post-§17.85 KB. The runbook → ingest → embed → reranker → golden-test path is wired and validated. Out of scope: ingesting more curated docs to flip more skips back to active queries (would unlock the 4 currently-skipped queries; one Wikipedia URL per skip).
+
+### 17.87 Audit-tail — roadmap doc-drift refresh + stale-TODO sweep (2026-05-10)
+
+Doc-only refresh of §17.1 plus a small audit of §17.x deferral language that had outlived its underlying fix. Surfaced while answering an "outstanding issues?" question — three items the operator was about to action turned out to already be done.
+
+**Roadmap §17.1.** Items 11 + 12 still read "pending," but both shipped in the J.2 / J.3 sprint cluster on 2026-05-08:
+
+- Item 11 (Native single-page web UI): J.2.a `40681d6` (read-only browse, §17.45) + J.2.b `2a631bc` (submit flow, §17.46) + J.2.c `8f4a32c` (execute SSE, §17.47).
+- Item 12 (Cost + latency telemetry): J.3.a `185bc0a` (foundation, §17.48) + J.3.b `bf2a862` (rollup endpoint + SDK costs(), §17.49) + J.3.c `0fd6da5` (consumer surfaces, §17.50) + J.3.d `abd1d00` (role-path embed cost — closes §17.48's deferred TODO).
+
+Updated the table cells + the "Items 11 + 12 remain" prose. The 12-item roadmap is now fully done; further work tracks under U.x / W.x / X.x / J.x audit-tails rather than the original list.
+
+**Stale-TODO findings (no code change, just calling them out so the next reader doesn't re-action them):**
+
+- **§17.25 W.7 "What this does NOT do" — per-job synthesis opt-in.** Already shipped in X.6 (§17.34): migration `029_jobs_compile_synthesis_override.sql` adds `compile_synthesis_override BOOLEAN`, `PATCH /jobs/{id}/synthesis` flips it (`app/main.py:1421-1432`), `_resolve_synthesis_enabled` reads override-then-global (`app/modules/execution_compile.py:248-258`). The §17.25 deferral text is historical; do not re-implement.
+- **§17.48 J.3.a "What's NOT in J.3.a" — `embed` role-path cost.** Already shipped in J.3.d: `model_router.py:594-630` wraps `provider.embed()` in a synthetic `ModelResponse` (estimating prompt tokens at ~4 char/token per OpenAI's rule of thumb, since `LLMProvider.embed` returns just `list[list[float]]`) and feeds it to `_record_call`. The "TODO J.3.b" comment in §17.48's body is a historical breadcrumb to where the fix actually landed.
+
+**No test-suite delta.** Pure documentation refresh; no schema, code, or behavior changed. Working tree clean before this commit; clean after except for the OVERVIEW edit itself.
+
+**Project pattern (memory-worthy).** When a `What this does NOT do (deferred)` block in an old §17.x entry gets resolved by a later sprint, the resolution should leave a back-pointer behind — either by editing the original deferral block in place (with a "→ Closed in §17.X" tag, the same convention W-track uses) or by a forward reference in the closing sprint's entry. Without that, the deferral language stays load-bearing in audits years after the fix shipped, and operators waste cycles re-checking. Going forward: when a sprint closes a prior `(deferred)` row, add a back-pointer in the original entry in the same commit.
 
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
