@@ -4689,6 +4689,14 @@ $ curl -sSI http://localhost:8000/health | grep -iE "content-security|nosniff|re
 
 **Project pattern (memory-worthy).** When a security audit's LOW items can be batched into one commit, bundle them — the per-commit overhead (CHANGELOG / OVERVIEW / push / suite-run cycle) is large enough that 5 × small commits buys nothing over 1 × bundled commit with a clear §-entry that names each item. The bundling rule is: bundle when the items share a theme (security hardening), don't share state changes that would conflict on rollback, and each individually-passes its own targeted tests before the bundle. If any one item would touch a hot path that affects the others, separate-commit it instead.
 
+### 17.98 CI Python version alignment — 3.11 → 3.12.13 (2026-05-10)
+
+Closes a silent footgun caught during the fresh-eyes review: `.github/workflows/ci.yml:17` pinned `PYTHON_VERSION: "3.11"` while `Dockerfile:6` pins the runtime image to `python:3.12.13-slim` by SHA256 digest. Cloud-runner smoke tests therefore exercised a different interpreter than prod ever runs. The current suite happened to be syntax-compatible across 3.11/3.12 so nothing surfaced, but a future 3.12-only construct (e.g. `type` statements, PEP 695 generics) would pass CI and break the image.
+
+**Change:** one-liner — `PYTHON_VERSION: "3.12.13"`. `actions/setup-python@v5` accepts patch-version pins.
+
+**Verification:** static — no test-suite delta. CI runs on next push will report the resolved Python version in the "Set up Python" step.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

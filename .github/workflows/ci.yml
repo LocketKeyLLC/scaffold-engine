@@ -14,7 +14,7 @@ on:
     branches: [main]
 
 env:
-  PYTHON_VERSION: "3.11"
+  PYTHON_VERSION: "3.12.13"
 
 # ──────────────────────────────────────────────────────────
 # Tier 1: Cloud-safe smoke tests (no Milvus, no Postgres, no Ollama)
