@@ -4621,6 +4621,74 @@ Inverse path verified in unit tests (the live orchestrator stays in the safe `au
 
 **§16.5 status delta.** All 3 MEDIUMs from the §17.93 security audit are now closed: SSRF guard + port bindings (§17.93), init.sql refresh (§17.94), back-pointer sweep (§17.95), auth-posture health flag (§17.96). The §17.93 audit's LOW items (rate limiting, request body cap, log rotation, CLI version bump, pip-audit, CSP header) remain — nice-to-haves with no immediate operator pressure.
 
+### 17.97 LOW-tier operational + security hardening (2026-05-10)
+
+Closes 5 of 6 LOW items from the §17.93 audit in one bundled commit. Rate limiting (the 6th) is intentionally deferred — single-operator, loopback-only post-§17.93 deployment has no realistic attacker model that rate limiting would address, and a real implementation (slowapi or Caddy front-end) is multi-hour scope for academic value here.
+
+**1 — CLI version bump 0.5.0 → 0.6.0.** §17.88 shipped `scaffold errors resolve <id>` as a new CLI verb but the package version never moved. One-line bump in `cli/pyproject.toml` + `cli/scaffold_cli/__init__.py`. Follows the CLI's standing minor-bump-per-new-verb cadence (U.8.B → 0.3.0, U.8.E → 0.4.0, U.8.F → 0.5.0).
+
+**2 — Docker log rotation (`x-default-logging` anchor + per-service apply).** Default `json-file` driver has no size cap; on a long-running deployment per-request log lines fill `/var/lib/docker` over weeks. New YAML anchor caps each container at **30 MB × 5 files = 150 MB total per service** before rolling. Applied to all 7 service blocks (`open-webui`, `pipelines`, `searxng`, `scaffold-postgres`, `scaffold-orchestrator`, `milvus-standalone`, `scaffold-redis`) via `logging: *default-logging`. `docker compose config --quiet` clean.
+
+**3 — `pip-audit==2.9.0` dev dep + `make audit` target.** New CVE scan against pinned deps. Wired:
+
+- `requirements-dev.txt` adds `pip-audit==2.9.0` (local-only dev tool — NOT in `requirements.txt`).
+- `Makefile` adds `audit:` target that runs `pip-audit --strict --disable-pip -r /code/requirements.txt` (and `-ci.txt`, `-dev.txt`) inside the dev container. Iterates the three pinned-deps files so a vuln in any one fails the gate. `ARGS=...` passthrough for `--ignore-vuln GHSA-xxxx` overrides.
+- `docker-compose.dev.yml` adds 3 bind-mounts (`requirements*.txt:/code/requirements*.txt:ro`) so pip-audit can read them at scan time. The runtime + dev image stages don't preserve requirements files (builder stage installs from them, then they're discarded) — the mounts close the gap without forcing an image rebuild on every `requirements.txt` edit.
+- **Operator action required**: `make build-dev` to bake `pip-audit` into the dev image before `make audit` is callable. The target is wired; the dep is in `requirements-dev.txt`; only the actual image rebuild remains.
+
+**4 — Content-Security-Policy + nosniff + Referrer-Policy on HTML routes** (`app/middleware/security_headers.py`). New `SecurityHeadersMiddleware` adds CSP/nosniff/Referrer-Policy headers to responses on `/web/*` and `/research/pdf`. Non-HTML routes (JSON API, /health, /metrics, SSE streams) are intentionally skipped — CSP is meaningless for non-document responses. Policy (composed once at module load as `_CSP`):
+
+```
+default-src 'self'; script-src 'self' https://unpkg.com 'unsafe-inline';
+style-src 'self' 'unsafe-inline'; img-src 'self' data:;
+connect-src 'self'; font-src 'self' data:;
+object-src 'none'; frame-ancestors 'none'; base-uri 'self'
+```
+
+- `https://unpkg.com` allowed because `templates/web/_layout.html` loads HTMX from there.
+- `'unsafe-inline'` for script + style is the permissive default — keeps the current UI unbroken. Operator hardening path: drop `'unsafe-inline'` first (audit + nonce-ize inline scripts) before considering removing unpkg.com (the right move is to self-host HTMX under `/static/`).
+- `object-src 'none'` kills Flash/embed/object surface; `frame-ancestors 'none'` is clickjacking defense; `base-uri 'self'` prevents `<base href>` redirects.
+
+Middleware wiring (`app/main.py`) — added as OUTERMOST so CSP wraps the final response right before client send. Uses `setdefault` so a per-endpoint header override still wins.
+
+**5 — Global request body size cap** (`app/middleware/body_size_limit.py`). New `BodySizeLimitMiddleware` rejects requests whose `Content-Length` exceeds `settings.max_request_body_bytes` (default 2 MiB) with a 413 before the endpoint runs. Bypasses `/research/pdf` (which has its own larger `research_max_pdf_bytes` cap, default 20 MiB).
+
+Limitations documented in the module docstring:
+- `Content-Length` can be spoofed; chunked-transfer-encoding skips this check. For the single-operator post-§17.93 threat model the pre-check is sufficient. Uvicorn's `--h11-max-incomplete-event-size` would close the chunked-encoding gap but isn't configurable from FastAPI code.
+
+Middleware placement: between `Performance` and `RequestId` so it sees the bound `request_id` (for the 413 log line) AND rejects oversized payloads BEFORE `Performance` times an unnecessarily-long request.
+
+**Test-suite delta:**
+
+- New `tests/test_security_middleware.py` — **10 cases** across 2 classes:
+  - `TestSecurityHeaders`: 5 cases (CSP set on /web/*, /research/pdf; NOT set on /health; CSP contract — `object-src 'none'` + `frame-ancestors 'none'`; CSP allows unpkg.com).
+  - `TestBodySizeLimit`: 5 cases (under-cap pass-through, over-cap → 413, at-cap pass, no-Content-Length pass, /research/pdf bypass).
+- All 10 pass in 0.94s.
+
+**Live verification (post-orchestrator-restart):**
+
+```
+$ curl -sSI http://localhost:8000/web/jobs | grep -iE "content-security|nosniff|referrer"
+content-security-policy: default-src 'self'; script-src 'self' https://unpkg.com 'unsafe-inline'; …
+x-content-type-options: nosniff
+referrer-policy: same-origin
+
+$ curl -sSI http://localhost:8000/health | grep -iE "content-security|nosniff|referrer"
+(empty — JSON route correctly skipped)
+```
+
+**.env.example updated** with `MAX_REQUEST_BODY_BYTES` block. Per §17.66 the example aims for 100% Settings coverage; this preserves that.
+
+**No OpenAPI drift.** All five changes are infrastructure / middleware / Makefile / docs; no endpoint schema changes. `make openapi-check` clean.
+
+**LOW deferred (out of §17.97 scope):**
+
+- **Rate limiting.** slowapi or Caddy front-end. Realistic threat is "operator accidentally spams their own /research" — protected sufficiently today by the `uq_research_sessions_single_running` partial index (one /research at a time per host). For multi-tenant or public deployment, rate limiting is a real need; for single-operator + loopback + post-§17.93 setup, low value. ~1-2 hr to implement; left for when an operator actually has the pressure.
+
+**§16.5 status delta.** All 5 in-scope LOW items from §17.93 audit closed in one commit. Rate limiting (the 6th) explicitly deferred with documented rationale. The §17.93 security audit is now fully closed in code modulo that single deliberate deferral.
+
+**Project pattern (memory-worthy).** When a security audit's LOW items can be batched into one commit, bundle them — the per-commit overhead (CHANGELOG / OVERVIEW / push / suite-run cycle) is large enough that 5 × small commits buys nothing over 1 × bundled commit with a clear §-entry that names each item. The bundling rule is: bundle when the items share a theme (security hardening), don't share state changes that would conflict on rollback, and each individually-passes its own targeted tests before the bundle. If any one item would touch a hot path that affects the others, separate-commit it instead.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

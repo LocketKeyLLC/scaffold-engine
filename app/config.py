@@ -210,6 +210,11 @@ class Settings(BaseSettings):
     research_url_fetch_timeout: int = Field(default=30, ge=1, le=300)
     research_heartbeat_interval: int = Field(default=8, ge=1, le=120)
     research_max_entry_chars: int = Field(default=8000, ge=100, le=100000)
+    # §17.97 — global request body size cap (applies to all routes except
+    # /research/pdf which has its own larger cap). 2 MB covers every
+    # legitimate JSON body the orchestrator currently accepts; over that
+    # is almost certainly a malformed or oversized payload.
+    max_request_body_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
     # §17.93 — SSRF guard knob. Default False rejects any /research url:
     # or /research openapi: target whose hostname resolves to a private,
     # loopback, link-local, reserved, or multicast IP. Flip to True ONLY

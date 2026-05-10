@@ -25,9 +25,11 @@ from app.config import settings
 from app.modules.cleanup import start_cleanup_task, reap_stale_jobs
 from app.database import get_db, engine, async_session
 from app.logging_config import setup_logging
+from app.middleware.body_size_limit import BodySizeLimitMiddleware
 from app.middleware.error_logging import ErrorLoggingMiddleware
 from app.middleware.performance import PerformanceMiddleware
 from app.middleware.request_id import RequestIdMiddleware
+from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.modules.dag_generator import generate_dag as _generate_dag
 from app.modules.execution_agent import execute_next_node, skip_node, retry_failed_node, execute_all_nodes
 from app.modules.execution_handler import execution_status
@@ -407,7 +409,15 @@ app = FastAPI(
 # sees genuine 5xx exceptions.
 app.add_middleware(ErrorLoggingMiddleware)
 app.add_middleware(PerformanceMiddleware)
+# §17.97 — BodySize sits between Performance + RequestId so it sees the
+# bound request_id (for the 413 log line) and rejects oversized payloads
+# BEFORE Performance times an unnecessarily-long request.
+app.add_middleware(BodySizeLimitMiddleware)
 app.add_middleware(RequestIdMiddleware)
+# §17.97 — SecurityHeaders is OUTERMOST so CSP + nosniff + Referrer-Policy
+# wrap the final response right before client send. Set-here-only semantics
+# (uses setdefault) so a future per-endpoint header override still wins.
+app.add_middleware(SecurityHeadersMiddleware)
 app.include_router(status_router)
 app.include_router(assist_router)
 app.include_router(observability_router)

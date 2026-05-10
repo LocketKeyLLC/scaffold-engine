@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config
+.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config audit
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -81,6 +81,12 @@ ci: _ensure_dev ## Run CI-safe tests (no live services; dev image) + bench regre
 		-m "not validate"
 	@printf '\n--- Audit I4: bench regression gates ---\n'
 	$(MAKE) bench-check
+
+audit: _ensure_dev ## §17.97 — CVE scan against pinned deps via pip-audit (dev image). Scans requirements.txt + requirements-ci.txt + requirements-dev.txt. Non-zero exit on a known vulnerability; pass a tag through ARGS to ignore one (e.g. ARGS="--ignore-vuln GHSA-xxxx").
+	@for f in requirements.txt requirements-ci.txt requirements-dev.txt; do \
+		printf '\n\033[1;36m== pip-audit -r %s ==\033[0m\n' "$$f"; \
+		docker exec $(CONTAINER) pip-audit --strict --disable-pip -r "/code/$$f" $(ARGS) || exit $$?; \
+	done
 
 ## ──────────────────────────────────────────────
 ## Setup

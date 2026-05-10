@@ -62,3 +62,11 @@ services:
       # benchmarks/ subdir keeps tests/ as a whole read-only so bench
       # scripts can't accidentally mutate test sources.
       - ./tests/benchmarks:/code/tests/benchmarks
+      # §17.97 — requirements files for `make audit`. The runtime + dev
+      # image stages don't preserve these (builder stage installs from
+      # them, then they're discarded). Bind-mount :ro so pip-audit can
+      # read them at scan time without forcing an image rebuild on every
+      # `requirements.txt` edit.
+      - ./requirements.txt:/code/requirements.txt:ro
+      - ./requirements-dev.txt:/code/requirements-dev.txt:ro
+      - ./requirements-ci.txt:/code/requirements-ci.txt:ro
