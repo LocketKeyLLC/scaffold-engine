@@ -199,6 +199,22 @@ if [[ -f "$ENV_FILE" ]] && docker ps --format '{{.Names}}' | grep -qx scaffold-o
     fi
 fi
 
+# ---- 7b. Auth posture (§17.96) --------------------------------------
+hdr "Auth posture"
+explain "SCAFFOLD_AUTH_DISABLED=true bypasses the X-API-Key gate entirely — every endpoint is reachable without a key. The orchestrator surfaces this in /health.auth_enabled so misconfiguration is visible to operators without grepping boot logs. RED if disabled."
+
+if docker ps --format '{{.Names}}' | grep -qx scaffold-orchestrator; then
+    AUTH_ENABLED="$(curl -sS --max-time 5 http://localhost:8000/health 2>/dev/null \
+        | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("auth_enabled"))
+except Exception: print("")' 2>/dev/null || true)"
+    case "$AUTH_ENABLED" in
+        True)  pass "API key gate is in force (auth_enabled=true)" ;;
+        False) fail "AUTH DISABLED — every endpoint is reachable without an X-API-Key. Set SCAFFOLD_AUTH_DISABLED=false (or unset it) in .env and restart compose." ;;
+        *)     warn "could not read /health.auth_enabled — orchestrator may not be ready, or running a pre-§17.96 image" ;;
+    esac
+fi
+
 # ---- 8. Schema migrations -------------------------------------------
 hdr "Schema migrations"
 explain "Reports the highest applied migration. The runner auto-applies new files in db/migrations/ at lifespan startup; opt out with SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false. Lagging here means startup didn't complete the migration phase."

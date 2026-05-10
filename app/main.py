@@ -553,6 +553,15 @@ async def health():
         "status": status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "checks": checks,
+        # §17.96 — surface the auth posture so operators (and `make doctor`)
+        # can spot a SCAFFOLD_AUTH_DISABLED=true deployment without having
+        # to grep boot logs. True means the X-API-Key gate is in force;
+        # False means it's bypassed (the explicit opt-out flag is set in
+        # the env or .env). This field is intentionally exposed on the
+        # unauthenticated /health endpoint — it carries no secret, and the
+        # whole point of the surfacing is to catch misconfiguration that
+        # an attacker could already detect by trying any non-/health URL.
+        "auth_enabled": not settings.scaffold_auth_disabled,
     }
 
 

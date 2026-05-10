@@ -4579,6 +4579,48 @@ Closes the §17.93-audit MEDIUM: "back-pointer pattern not followed in §17.88�
 
 **§16.5 status delta.** MEDIUM #3 (back-pointer sweep) from the §17.93 audit closed. Remaining MEDIUM: `SCAFFOLD_AUTH_DISABLED` health-surface flag.
 
+### 17.96 `SCAFFOLD_AUTH_DISABLED` posture on /health + `make doctor` red-text check (2026-05-10)
+
+Closes the final §17.93-audit MEDIUM. Pre-§17.96, an operator who flipped `SCAFFOLD_AUTH_DISABLED=true` for one experiment and forgot had zero ongoing indication of the no-auth posture — `auth.py` logs a single boot warning, then every endpoint silently accepts unauthenticated requests forever. Operators who restarted later, or who didn't tail boot logs in the first place, had no signal.
+
+**What changed:**
+
+- **`/health` payload gains `auth_enabled: bool`.** Mirrors `not settings.scaffold_auth_disabled` so the operator-facing concept is the positive one ("auth is enabled" vs "auth is disabled"). Field is unauthenticated by design — it carries no secret, just a boolean that any port-scanner could derive by trying a non-/health URL. Surfacing it makes operator detection trivial.
+- **`scripts/doctor.sh` gains an "Auth posture" section** between the API-key sync block and the schema-migrations block. Reads `/health.auth_enabled`. Output:
+  - `auth_enabled=true` → `PASS API key gate is in force` (green).
+  - `auth_enabled=false` → `FAIL AUTH DISABLED — every endpoint is reachable without an X-API-Key. Set SCAFFOLD_AUTH_DISABLED=false (or unset it) in .env and restart compose.` (red).
+  - Unreadable (orchestrator down, pre-§17.96 image) → `WARN could not read /health.auth_enabled` (yellow).
+- **`make doctor-explain`** auto-inherits the new block (uses the same `explain()` helper). Two-line operator-facing description: what the field means + what to do if it's red.
+
+**Why this surface, not a CLI verb.** The natural use is during operator triage — `make doctor` after weird 401-style behavior, or after a compose restart that picked up a stale `.env`. Adding a separate `scaffold auth status` verb is over-scope for a single boolean; the doctor block names the symptom + the fix in one place.
+
+**Live verification.** Post-orchestrator-restart with `SCAFFOLD_AUTH_DISABLED=false` (default):
+
+```
+$ curl -sS http://localhost:8000/health | jq -r .auth_enabled
+true
+
+$ make doctor | grep -A1 "Auth posture"
+== Auth posture ==
+  PASS  API key gate is in force (auth_enabled=true)
+```
+
+Inverse path verified in unit tests (the live orchestrator stays in the safe `auth_enabled=true` state; toggling `SCAFFOLD_AUTH_DISABLED=true` for a live test would itself create a no-auth window).
+
+**Test-suite delta** (`tests/test_health_cleanup.py`):
+
+- 3 new cases in `TestHealthEndpointResponse`:
+  - `test_health_includes_auth_enabled_flag` — field is present and bool-typed.
+  - `test_health_auth_enabled_true_when_setting_false` — default path (auth on).
+  - `test_health_auth_enabled_false_when_setting_true` — patches `settings.scaffold_auth_disabled=True` and verifies the field flips to `False`.
+- File total: 10 → 13 passing in 3.45s.
+
+**No OpenAPI drift.** /health is in the schema but returns an untyped dict (no `response_model=`); FastAPI auto-generates `additionalProperties: true` so adding a field doesn't change the spec. `make openapi-check` clean.
+
+**Project pattern (memory-worthy).** When auth/security posture lives in a boolean env var, surface that boolean on the unauthenticated `/health` endpoint. The asymmetry — operators get instant detection, attackers learn nothing new (they could already probe `/jobs` with no key) — is the right trade-off. Same pattern works for any "feature flag I might forget I flipped": `metrics_enabled`, `otel_enabled`, calibration-watchdog, etc. could each get a `/health` mirror without authenticating the surface. (Not done in §17.96 — only auth got the surface because only auth has the "silent bypass" failure mode that operators need to detect quickly.)
+
+**§16.5 status delta.** All 3 MEDIUMs from the §17.93 security audit are now closed: SSRF guard + port bindings (§17.93), init.sql refresh (§17.94), back-pointer sweep (§17.95), auth-posture health flag (§17.96). The §17.93 audit's LOW items (rate limiting, request body cap, log rotation, CLI version bump, pip-audit, CSP header) remain — nice-to-haves with no immediate operator pressure.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.

@@ -170,6 +170,32 @@ class TestHealthEndpointResponse:
         assert "redis" in checks
         assert "reranker" in checks
 
+    def test_health_includes_auth_enabled_flag(self):
+        """§17.96 — surface SCAFFOLD_AUTH_DISABLED posture on /health
+        so `make doctor` can red-flag a no-auth deployment without
+        grepping boot logs. Field is unauthenticated by design — it
+        carries no secret, just the boolean."""
+        result = _call_health()
+        assert "auth_enabled" in result
+        assert isinstance(result["auth_enabled"], bool)
+
+    def test_health_auth_enabled_true_when_setting_false(self):
+        """Inverse mapping: scaffold_auth_disabled=False (default)
+        → auth_enabled=True. The /health surface flips the polarity
+        because 'enabled' is the positive operator-facing concept."""
+        from app.main import settings as _settings
+        with patch.object(_settings, "scaffold_auth_disabled", False):
+            result = _call_health()
+        assert result["auth_enabled"] is True
+
+    def test_health_auth_enabled_false_when_setting_true(self):
+        """scaffold_auth_disabled=True → auth_enabled=False. This is
+        what make doctor's RED check looks for."""
+        from app.main import settings as _settings
+        with patch.object(_settings, "scaffold_auth_disabled", True):
+            result = _call_health()
+        assert result["auth_enabled"] is False
+
 
 @pytest.mark.smoke
 class TestHealthDegradedStates:
