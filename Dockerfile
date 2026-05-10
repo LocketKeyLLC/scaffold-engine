@@ -3,7 +3,7 @@
 # Stage 1: builder — installs ALL deps (prod + dev), pre-downloads HF weights.
 # Discarded once runtime/dev are built.
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.12.13-slim AS builder
+FROM python:3.12.13-slim@sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa77ba265bc3a2fe AS builder
 
 WORKDIR /code
 
@@ -40,7 +40,7 @@ snapshot_download('tomaarsen/Qwen3-Reranker-0.6B-seq-cls', \
 # Existing volumes from a root-era build need a one-time chown — see
 # scripts/chown_named_volumes.sh.
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.12.13-slim AS runtime
+FROM python:3.12.13-slim@sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa77ba265bc3a2fe AS runtime
 
 WORKDIR /code
 
@@ -104,7 +104,7 @@ CMD ["python", "-m", "app.run_server"]
 # Runs as the same scaffold UID/GID (10001) as runtime so test artifacts
 # created via the writable bench mount land at predictable ownership.
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.12.13-slim AS dev
+FROM python:3.12.13-slim@sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa77ba265bc3a2fe AS dev
 
 WORKDIR /code
 
