@@ -138,18 +138,47 @@ run_research() {
         return 1
     fi
 
+    # Write curl output to a temp file rather than piping through
+    # `tee | grep | head -200`. The pipeline form was the §17.83
+    # follow-up bug: when `head -200` exited at line 200 it SIGPIPE'd
+    # back up through grep → tee → curl, making curl exit non-zero
+    # mid-stream. On long sources (URL mode, ~10min wall time) that
+    # SIGPIPE could land BEFORE the orchestrator's session-finalize,
+    # leaving the research_session row stuck in `running` and tripping
+    # the single-running guard for every subsequent source.
+    #
+    # File-based capture decouples curl from the parse stage entirely.
+    # curl runs to its `--max-time` ceiling or natural EOF, then we
+    # filter the static file in two follow-on steps.
+    local curl_log
+    curl_log="$(mktemp /tmp/repopulate_kb_curl.XXXXXX.log)"
+
     if ! curl -sS -N \
         --max-time 1800 \
         -H "Content-Type: application/json" \
         -H "X-Api-Key: $SCAFFOLD_API_KEY" \
         -X POST "$ORCHESTRATOR_URL/research" \
         -d "$payload" \
-        | tee >(grep -E '^event:|"event"' >/tmp/repopulate_kb_last.events) \
-        | grep -E '^event: (research_started|iteration_started|iteration_complete|research_complete|error)$|^data:' \
-        | head -200; then
-        err "curl failed for $kind:$target"
+        -o "$curl_log"; then
+        err "curl failed for $kind:$target (response captured at $curl_log)"
         return 1
     fi
+
+    # Snapshot the events stream for downstream analysis (mirrors the
+    # previous tee target so existing /tmp/repopulate_kb_last.events
+    # consumers keep working).
+    grep -E '^event:|"event"' "$curl_log" > /tmp/repopulate_kb_last.events 2>/dev/null || true
+
+    # Surface non-heartbeat events for the operator. awk's bounded loop
+    # runs over a static file so there's no upstream pipeline to
+    # SIGPIPE; the cap matches the prior `head -200` cosmetic limit.
+    awk '/^event: (research_started|iteration_started|iteration_complete|research_complete|error)$/||/^data:/{
+        print
+        c++
+        if (c >= 200) exit
+    }' "$curl_log"
+
+    rm -f "$curl_log"
 
     if grep -q '^event: error$' /tmp/repopulate_kb_last.events 2>/dev/null; then
         err "research SSE surfaced an error event for $kind:$target — see /tmp/repopulate_kb_last.events"

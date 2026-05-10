@@ -4038,6 +4038,32 @@ Two follow-up items flagged for a future commit:
 
 **§16.5 status delta:** Finding D closes the recurring qwen3-embedding:8b wedge by routing around it. Combined with Finding B (bounded timeout) and Finding C (extract-model unload + diagnostic log), the embed pipeline now has three layers: (1) defensive — unload extractor early, (2) detective — embed_timeout fires in minutes if the new embedder also wedges, (3) recoverable — cleanly logs operator action. The N4 runbook can complete without manual intervention on this host.
 
+### 17.84 Audit-tail — runbook SIGPIPE bug fix (2026-05-10)
+
+The first of §17.83's two flagged follow-ups. `scripts/repopulate_kb.sh::run_research` was piping the SSE stream through `tee >(grep…) | grep -E … | head -200`. When `head -200` exited at line 200, it sent SIGPIPE upstream → grep → tee → curl, killing curl mid-stream. On short sources (1-3 in the §17.83 run) the SIGPIPE landed AFTER the orchestrator's `research_complete` event, so the session row was correctly marked `completed`; the runbook just printed a misleading `x curl failed for …` warning. On long sources (4+), the SIGPIPE could land BEFORE the lifecycle wrapper finalized the session, leaving it stuck in `running` and tripping the single-running guard for every subsequent source — limiting the §17.83 run to 4/6 sources ingested.
+
+The fix is to decouple curl from the parse stage: capture curl's output to a `mktemp` file, then run the filters offline against the static file. There's no upstream-of-`head` pipeline, so no SIGPIPE chain. Specifically:
+
+- `curl … -o "$curl_log"` (file output, no pipe).
+- `grep -E '^event:|"event"' "$curl_log" > /tmp/repopulate_kb_last.events` (snapshot for downstream consumers; preserves the previous tee-target contract).
+- `awk '/match/{print; c++; if (c >= 200) exit}' "$curl_log"` (bounded display loop; awk on a static file with no upstream commands → exit cleanly at line 200).
+- `rm -f "$curl_log"` after use.
+
+The 200-line cosmetic display cap is preserved; the previous error-event detection (`grep -q '^event: error$' /tmp/repopulate_kb_last.events`) is unchanged. Behavior post-fix:
+
+- A real curl failure (timeout, connection refused, 5xx body) still surfaces via `if ! curl …`'s exit-code check.
+- A successful run prints non-heartbeat events through line 200 and exits cleanly. No spurious `x curl failed for …` for sources that completed.
+- A long-running source's lifecycle finalize is no longer cut short by the runbook's parse stage.
+
+**Verified locally:**
+- `bash -n scripts/repopulate_kb.sh` syntax OK.
+- Synthetic SSE log with mixed event types fed through the awk filter returns the same line-set as the prior grep.
+- Dry-run output (`bash scripts/repopulate_kb.sh`) unchanged: prints both tiers + 9 sources with correct partition tags.
+
+**Test-suite delta:** none — the runbook is operator tooling, not orchestrator code.
+
+The second §17.83 follow-up (`_sse_with_disconnect_watch` + lifecycle finalize on direct_url disconnects) stays open. With this runbook fix in place it's lower-priority — the failure mode that surfaced it was the runbook's SIGPIPE, not a genuine consumer disconnect.
+
 ### 17.61 Sprint X.26 — Prometheus `/metrics`, alert sinks, push thresholds, calibration paging, env-gated OTel (2026-05-09)
 
 Closes the §16.5 observability gaps that survived X.20: pull-only rollups, no `/metrics`, no OTel, no paging on calibration cron failure, no push alerting. Verified via `grep prometheus|opentelemetry → 0 hits` before the sprint.
