@@ -123,21 +123,29 @@ print_row() {
 }
 
 run_research() {
-    local kind="$1" target="$2"
+    local kind="$1" target="$2" partition="$3"
     local payload
+    # The third field of each *_SOURCES row is now load-bearing: it threads
+    # through to /research's `domain` parameter, overriding the auto-
+    # detector. Pre-fix the label was advisory only — `_detect_domain`
+    # keyword-scores the topic string and falls back to topic_id=1
+    # ("llm") when scoring is ambiguous, so most Wikipedia URLs landed
+    # in the llm partition regardless of subject. Explicit domain
+    # makes per-partition golden-retrieval tests reliable.
     if [[ "$kind" == "github" ]]; then
         # /research dispatches by topic shape; "github:owner/repo" triggers github mode.
-        payload=$(printf '{"topic":"github:%s","depth":"shallow"}' "$target")
+        payload=$(printf '{"topic":"github:%s","depth":"shallow","domain":"%s"}' "$target" "$partition")
     elif [[ "$kind" == "url" ]]; then
-        payload=$(printf '{"topic":"%s","depth":"shallow"}' "$target")
+        payload=$(printf '{"topic":"%s","depth":"shallow","domain":"%s"}' "$target" "$partition")
     elif [[ "$kind" == "topic" ]]; then
         # Escape quotes in the topic string; jq if available, sed fallback.
         if command -v jq >/dev/null 2>&1; then
-            payload=$(jq -nc --arg t "$target" '{topic:$t,depth:"shallow"}')
+            payload=$(jq -nc --arg t "$target" --arg d "$partition" \
+                '{topic:$t,depth:"shallow",domain:$d}')
         else
             local esc
             esc="$(printf '%s' "$target" | sed 's/"/\\"/g')"
-            payload=$(printf '{"topic":"%s","depth":"shallow"}' "$esc")
+            payload=$(printf '{"topic":"%s","depth":"shallow","domain":"%s"}' "$esc" "$partition")
         fi
     else
         err "unknown kind: $kind"
@@ -315,8 +323,8 @@ for row in "${ROWS_TO_RUN[@]}"; do
     IFS='|' read -r kind target part rt desc <<<"$row"
     hdr "[$((INGESTED+FAILED+1))/${#ROWS_TO_RUN[@]}] $kind | $target"
     info "$desc (expected ~${rt}m, partition=$part)"
-    if run_research "$kind" "$target"; then
-        ok "ingestion completed: $kind | $target"
+    if run_research "$kind" "$target" "$part"; then
+        ok "ingestion completed: $kind | $target (partition=$part)"
         INGESTED=$((INGESTED+1))
     else
         err "ingestion failed: $kind | $target — continuing with next source"
