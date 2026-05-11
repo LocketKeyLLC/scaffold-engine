@@ -4719,6 +4719,66 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.104 Provenance + confidence-by-source — surface ground-truth signals at retrieval (2026-05-10)
+
+Commit 2/8 of the phase-1 deep-search rollout. Adds storage + helpers for per-entry provenance (`source_ref`, `fetched_at`, `quality_signal`) and derives `confidence_score` from `source_type` when callers don't supply one. The §17.106–§17.109 producers populate these; this commit wires the pipeline end-to-end so producers call one helper and have it round-trip through `query_rag`.
+
+**Storage layout.** Provenance lives in a Postgres sidecar table (`rag_entry_provenance`, migration 034), keyed by `entry_id`. No foreign key — the authoritative row is in Milvus `toon_v2`; orphans (staleness sweep purges Milvus side) are harmless garbage. JSONB on `quality_signal` keeps per-source shape flexible (SO votes, HN points, HF likes, GH reactions).
+
+**Confidence-by-source.** `app/modules/provenance.py:CONFIDENCE_BY_SOURCE`:
+
+| Source type | Confidence | Rationale |
+|---|---|---|
+| `test_code` | 1.00 | CI-proven executable |
+| `release_notes` / `ci_config` | 0.95 | version-anchored |
+| `model_card` / `dataset_card` | 0.90 | HF revision-pinned |
+| `paper_abstract` / `so_answer` / `official_docs` / `curated` | 0.85 | strong gate (accepted/published) |
+| `tech_docs` | 0.80 | curated, can drift |
+| `wiki_article` | 0.75 | reviewed but mutable |
+| `hn_comment` | 0.65 | vote-gated |
+| `community` / `reddit_post` | 0.60 | allowlist + vote gate |
+| `ai_generated` | 0.55 | LLM output, unverified |
+| `real_time` / `news` | 0.50 | recency, no trust gate |
+
+Override path preserved — producers may pass explicit confidence when finer-grained signal exists.
+
+**Changes.**
+
+- **`app/modules/provenance.py`** (new) — `confidence_for`, `build_provenance`, `write_provenance`, `get_provenance_batch`.
+- **`db/migrations/034_rag_entry_provenance.sql`** (new) — idempotent `DO $$ ... END $$;` mirroring §17.90 migration 033 style. Table + index on `fetched_at`.
+- **`app/modules/rag_pipeline.py`** — `RagResult` += `confidence_score`, `source_type`; both Milvus searches fetch + populate; `ingest_entries` derives confidence (inspects the raw entry dict, not the normalized one — `_normalize_entry` defaults to 0.60 and would mask "caller didn't supply"); provenance writes batched to a single Postgres session after Milvus flush; `query_rag` batch-fetches provenance after the supersedes sweep and attaches `{source_ref, fetched_at, quality_signal}` to each result. DB unreachable → empty map; results carry `provenance: None`; no warnings appended (the None signal is sufficient).
+- **`tests/test_provenance.py`** (new) — parametrized confidence map, override-wins (including `0.0`), unknown-type fallback, `build_provenance` defaults, write/get round-trip via AsyncMock session.
+- **`tests/test_rag_pipeline.py`** — `_patch_rag_deps` extended with an `async_session` mock; without it, query_rag's new provenance fetch tried to open real Postgres connections from inside test event loops, producing 4 RuntimeWarnings and one hard fail on `test_returns_metadata_with_new_fields` (which asserts `warnings == []`).
+
+**Migration applied to live Postgres** (auto-applies on next orchestrator restart via `app/migrations.py` lifespan hook):
+
+```
+$ docker exec scaffold-postgres psql -U scaffold -d scaffold_engine -c "\d rag_entry_provenance"
+ entry_id       | text                     | not null |
+ source_ref     | text                     | not null | ''::text
+ fetched_at     | bigint                   | not null |
+ quality_signal | jsonb                    | not null | '{}'::jsonb
+ created_at     | timestamp with time zone | not null | now()
+Indexes: rag_entry_provenance_pkey PK (entry_id); idx_rag_entry_provenance_fetched_at (fetched_at)
+```
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_provenance.py tests/test_rag_pipeline.py \
+    tests/test_dedup_rejection.py tests/test_rag_entry.py tests/test_reindex.py \
+    --timeout=30 -q
+79 passed in 5.22s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1442 passed, 8 skipped in 596.44s (0:09:56)
+```
+
+Net +25 vs the §17.103 baseline (`1417 passed`) — all from new `test_provenance.py` + the rag_pipeline mock-helper extension. Same 8 skipped (live-Milvus + Wikipedia/TOON gold-set gaps; pre-existing).
+
+**Next.** §17.105 — SHA-keyed upstream HTTP cache (`fetchv1:{type}:{ref}:{path}`) + per-mode budget caps in `config.py`. Then the producer modes (§17.106–§17.109).
+
 ### 17.103 Deep-search foundation — extend `source_type` vocabulary + `code`/`qa` domains (2026-05-10)
 
 Commit 1/8 of the phase-1 deep-search rollout (GitHub deep, Hugging Face, SO/HN/arXiv, Reddit-allowlisted, Wikipedia). Pre-creates the `source_type` vocabulary and partition set the later producers will write into.

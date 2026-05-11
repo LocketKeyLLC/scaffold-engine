@@ -73,6 +73,15 @@ def _patch_rag_deps(
         else AsyncMock(return_value=([], {"backend": None, "skipped_rerank": True, "warnings": []}))
     )
 
+    # Mock async_session so query_rag's provenance batch-fetch doesn't try
+    # to hit a real Postgres from inside the test's event loop.
+    mock_result = MagicMock()
+    mock_result.mappings.return_value = []
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+
     return {
         "_get_collection": MagicMock(return_value=mock_collection),
         "_embed_query": AsyncMock(return_value=embedding),
@@ -80,6 +89,7 @@ def _patch_rag_deps(
         "_keyword_search": AsyncMock(return_value=keyword_results),
         "_rerank": rerank_mock,
         "_lookup_superseded": AsyncMock(side_effect=mock_superseded),
+        "async_session": MagicMock(return_value=mock_session),
     }
 
 

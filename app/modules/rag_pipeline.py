@@ -44,6 +44,11 @@ from app import model_router
 from app.config import settings, VALID_DOMAINS
 from app.utils.staleness import compute_expires_at
 from app.utils.embedding_cache import get_cache, truncate_and_normalize, normalize_cache_text
+from app.modules.provenance import (
+    confidence_for,
+    get_provenance_batch,
+    write_provenance,
+)
 
 from sqlalchemy import text
 from app.database import async_session
@@ -91,6 +96,8 @@ class RagResult:
     final_score: float = 0.0
     version: int = 1
     supersedes_id: str = ""
+    confidence_score: float = 0.0
+    source_type: str = ""
 
 
 _get_collection = get_collection
@@ -261,7 +268,7 @@ async def _vector_search(
                     output_fields=[
                         "canonical_text", "title", "domain_tags", "source_url",
                         "entry_id", "domain", "confidence_score", "version",
-                        "supersedes_id",
+                        "supersedes_id", "source_type",
                     ],
                 )
                 results = collection.search(**search_kwargs)
@@ -279,6 +286,8 @@ async def _vector_search(
                         vector_score=float(hit.score),
                         version=entity.get("version", 1),
                         supersedes_id=entity.get("supersedes_id", ""),
+                        confidence_score=float(entity.get("confidence_score", 0.0) or 0.0),
+                        source_type=entity.get("source_type", ""),
                     ))
             except Exception as e:
                 logger.warning("Vector search failed (domain=%s): %s", d, e)
@@ -334,6 +343,7 @@ async def _keyword_search(
                     output_fields=[
                         "canonical_text", "title", "domain_tags", "source_url",
                         "entry_id", "domain", "version", "supersedes_id",
+                        "confidence_score", "source_type",
                     ],
                     limit=top_k,
                 )
@@ -354,6 +364,8 @@ async def _keyword_search(
                         keyword_score=score,
                         version=r.get("version", 1),
                         supersedes_id=r.get("supersedes_id", ""),
+                        confidence_score=float(r.get("confidence_score", 0.0) or 0.0),
+                        source_type=r.get("source_type", ""),
                     ))
             except Exception as e:
                 logger.warning("Keyword search failed (domain=%s): %s", d, e)
@@ -607,6 +619,22 @@ async def query_rag(
             if superseded:
                 filtered = [r for r in filtered if r.entry_id not in superseded]
 
+    # Batch-fetch provenance for the final result set. Entries ingested
+    # without a provenance dict won't have a row; the map lacks those
+    # entry_ids and the per-result lookup yields None.
+    prov_map: dict[str, dict[str, Any]] = {}
+    if filtered:
+        final_ids = [r.entry_id for r in filtered if r.entry_id]
+        if final_ids:
+            try:
+                async with async_session() as session:
+                    prov_map = await get_provenance_batch(session, final_ids)
+            except Exception as e:
+                # Failed lookup → empty map → results carry provenance=None.
+                # No warnings.append: a missing provenance row is the same
+                # API shape whether it's "row absent" or "DB unreachable".
+                logger.warning("provenance_fetch_failed: %s", e)
+
     latency_ms = round((time.monotonic() - t0) * 1000, 1)
     top_score = round(filtered[0].final_score, 4) if filtered else 0.0
     logger.info(
@@ -625,6 +653,9 @@ async def query_rag(
             "domain": r.domain,
             "version": r.version,
             "supersedes_id": r.supersedes_id,
+            "confidence_score": r.confidence_score,
+            "source_type": r.source_type,
+            "provenance": prov_map.get(r.entry_id),
             "scores": {
                 "vector": round(r.vector_score, 4),
                 "keyword": round(r.keyword_score, 4),
@@ -736,6 +767,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
 
     now = int(time.time())
     safe_domain = _escape_literal(domain)
+    provenance_writes: list[tuple[str, dict]] = []
 
     # ---- Pass 1: normalize + exact-hash filter ----
     prepared: list[dict] = []
@@ -750,7 +782,12 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
         domain_tags = norm["domain_tags"]
         source_url = norm["source_url"]
         source_type = norm["source_type"]
-        confidence = norm["confidence"]
+        # _normalize_entry defaults confidence to 0.60, which would mask
+        # "caller didn't supply one" — check the raw entry to decide
+        # whether to derive from source_type instead.
+        explicit_confidence = entry.get("confidence", entry.get("confidence_score"))
+        confidence = confidence_for(source_type, explicit_confidence)
+        provenance = entry.get("provenance")
         ch = _content_hash(content)
 
         try:
@@ -778,6 +815,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
             "title": title, "content": content, "domain_tags": domain_tags,
             "source_url": source_url, "source_type": source_type,
             "confidence": confidence, "ch": ch, "embed_text": embed_text,
+            "provenance": provenance,
         })
 
     if not prepared:
@@ -903,6 +941,8 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
                 stats["versioned"] += 1
             else:
                 stats["new"] += 1
+            if p["provenance"]:
+                provenance_writes.append((entry_id, p["provenance"]))
         except Exception as e:
             logger.warning("ingest_upsert_failed: %s", e)
 
@@ -913,5 +953,14 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
             "ingested %d (new=%d versioned=%d rejected=%d hash_skipped=%d) into toon_v2",
             inserted, stats["new"], stats["versioned"], stats["rejected"], stats["skipped_hash"],
         )
+
+    if provenance_writes:
+        try:
+            async with async_session() as session:
+                for eid, prov in provenance_writes:
+                    await write_provenance(session, eid, prov)
+                await session.commit()
+        except Exception as e:
+            logger.error("provenance_batch_write_failed: %s n=%d", e, len(provenance_writes))
 
     return stats
