@@ -58,14 +58,18 @@ from app.modules.research_extractors import (
     _is_hf_ref,
     _is_hn_ref,
     _is_openapi_ref,
+    _is_reddit_ref,
     _is_so_ref,
     _is_url,
+    _is_wiki_ref,
     _parse_arxiv_ref,
     _parse_github_ref,
     _parse_hf_ref,
     _parse_hn_ref,
     _parse_openapi_ref,
+    _parse_reddit_ref,
     _parse_so_ref,
+    _parse_wiki_ref,
     _resolve_confidence,
     _robots_allowed,
     _score_source,
@@ -1269,7 +1273,9 @@ async def _run_research_forum_mode(
     from app.utils.forum_ingest import (
         fetch_arxiv,
         fetch_hn_items,
+        fetch_reddit_posts,
         fetch_so_answers,
+        fetch_wiki_pages,
     )
     from app.modules.provenance import build_provenance
     from app.config import settings as _settings
@@ -1299,6 +1305,14 @@ async def _run_research_forum_mode(
         if prefix == "arxiv":
             mode, val = value.split(":", 1)
             return await fetch_arxiv(mode, val, _settings.arxiv_max_sections)
+        if prefix == "reddit":
+            sub, q = value.split(":", 1)
+            return await fetch_reddit_posts(
+                sub, q, _settings.reddit_max_posts,
+                _settings.reddit_min_score, _settings.reddit_min_comments,
+            )
+        if prefix == "wiki":
+            return await fetch_wiki_pages(value, _settings.wiki_max_pages)
         raise ValueError(f"Unknown forum prefix: {prefix!r}")
 
     task = asyncio.create_task(_do_fetch())
@@ -1794,6 +1808,10 @@ async def run_research(
         mode, state_depth = "hn", "direct_hn"
     elif _is_arxiv_ref(topic):
         mode, state_depth = "arxiv", "direct_arxiv"
+    elif _is_reddit_ref(topic):
+        mode, state_depth = "reddit", "direct_reddit"
+    elif _is_wiki_ref(topic):
+        mode, state_depth = "wiki", "direct_wiki"
     elif _is_url(topic):
         mode, state_depth = "direct_url", "direct_url"
     else:
@@ -1845,16 +1863,22 @@ async def run_research(
                     kind, hf_id, state, session_id, t0,
                 ):
                     yield evt
-            elif mode in ("so", "hn", "arxiv"):
+            elif mode in ("so", "hn", "arxiv", "reddit", "wiki"):
                 if mode == "so":
                     value = _parse_so_ref(topic)
                 elif mode == "hn":
                     value = _parse_hn_ref(topic)
-                else:
+                elif mode == "arxiv":
                     # arxiv keeps an (id|query) tuple — pack into a single string
                     # for the forum-mode runner; the runner re-parses to dispatch.
                     arx_mode, arx_val = _parse_arxiv_ref(topic)
                     value = f"{arx_mode}:{arx_val}"
+                elif mode == "reddit":
+                    # reddit: pack (subreddit, query) the same way; runner unpacks.
+                    sub, q = _parse_reddit_ref(topic)
+                    value = f"{sub}:{q}"
+                else:  # wiki
+                    value = _parse_wiki_ref(topic)
                 async for evt in _run_research_forum_mode(
                     mode, value, state, session_id, t0,
                 ):

@@ -384,6 +384,8 @@ class Settings(BaseSettings):
     so_max_answers: int = Field(default=20, ge=1, le=100)
     so_min_score: int = Field(default=10, ge=0, le=10000)
     reddit_max_posts: int = Field(default=20, ge=1, le=100)
+    reddit_min_score: int = Field(default=50, ge=0, le=100000)
+    reddit_min_comments: int = Field(default=10, ge=0, le=10000)
     hn_max_items: int = Field(default=25, ge=1, le=200)
     hn_min_points: int = Field(default=100, ge=0, le=10000)
     arxiv_max_sections: int = Field(default=10, ge=1, le=50)

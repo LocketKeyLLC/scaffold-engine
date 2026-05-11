@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 _SE_BASE = "https://api.stackexchange.com/2.3"
 _HN_BASE = "https://hn.algolia.com/api/v1"
 _ARXIV_BASE = "http://export.arxiv.org/api/query"
+_REDDIT_BASE = "https://www.reddit.com"
+_WIKI_BASE = "https://en.wikipedia.org/w/api.php"
 
 # `@` not preceded by a word char — keeps the email-replacement placeholder
 # from being matched again by the username pass.
@@ -383,6 +385,191 @@ async def fetch_arxiv(mode: str, value: str, limit: int) -> list[dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------
+# Reddit (allowlisted)
+# ---------------------------------------------------------------------------
+
+async def fetch_reddit_posts(
+    subreddit: str, query: str, limit: int, min_score: int, min_comments: int,
+) -> list[dict[str, Any]]:
+    """Search a single allowlisted subreddit for top-scoring text posts.
+
+    Allowlist enforcement is the caller's job (``_parse_reddit_ref`` does it
+    at parse time). This function trusts ``subreddit``.
+
+    Quality gates: ``score >= min_score`` AND ``num_comments >= min_comments``
+    AND ``over_18=False``. Text posts only (``selftext`` non-empty) — link
+    posts have no body to ingest. Bodies PII-stripped before storage.
+
+    Search response cached by ``(subreddit, query, gates)`` with the short
+    TTL — Reddit search rankings drift as posts age.
+    """
+    if limit <= 0:
+        return []
+    client = get_generic_http_client()
+    cache = get_fetch_cache()
+
+    gate_key = f"q-{_query_hash(query)}-s{min_score}-c{min_comments}"
+    cached = await cache.get("reddit", f"sub-{subreddit.lower()}", gate_key)
+    if cached:
+        try:
+            data = json.loads(cached)
+        except Exception:
+            data = None
+    else:
+        data = None
+
+    if data is None:
+        params = httpx.QueryParams({
+            "q": query,
+            "restrict_sr": "on",
+            "sort": "top",
+            "t": "all",
+            "limit": str(min(limit * 2, 100)),
+        })
+        url = f"{_REDDIT_BASE}/r/{subreddit}/search.json?{params}"
+        r = await client.get(url)
+        if r.status_code == 429:
+            logger.warning("reddit_rate_limited: subreddit=%s", subreddit)
+            return []
+        if r.status_code == 404:
+            logger.warning("reddit_subreddit_404: %s", subreddit)
+            return []
+        r.raise_for_status()
+        data = r.json()
+        try:
+            await cache.put(
+                "reddit", f"sub-{subreddit.lower()}", gate_key,
+                json.dumps(data).encode("utf-8"),
+                ttl_seconds=settings.fetch_cache_ttl_default_seconds,
+            )
+        except Exception as exc:
+            logger.debug("reddit_cache_put_failed: %s", exc)
+
+    children = ((data or {}).get("data") or {}).get("children") or []
+    out: list[dict[str, Any]] = []
+    for child in children:
+        if len(out) >= limit:
+            break
+        post = (child or {}).get("data") or {}
+        if post.get("over_18"):
+            continue
+        score = int(post.get("score") or 0)
+        ncomments = int(post.get("num_comments") or 0)
+        if score < min_score or ncomments < min_comments:
+            continue
+        body = (post.get("selftext") or "").strip()
+        if not body:
+            continue  # link-only post, no ingestible content
+        title = post.get("title") or ""
+        post_id = post.get("id") or ""
+        permalink = post.get("permalink") or ""
+        body_text = _strip_pii(body)
+        out.append({
+            "path": f"reddit/{subreddit}/{post_id}",
+            "content": f"# r/{subreddit}: {title}\n\n{body_text}",
+            "source_type": "reddit_post",
+            "source_url": f"{_REDDIT_BASE}{permalink}" if permalink else "",
+            "source_ref": f"t3_{post_id}",
+            "quality_signal": {
+                "score": score,
+                "num_comments": ncomments,
+                "subreddit": subreddit,
+                "created_utc": post.get("created_utc"),
+            },
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Wikipedia
+# ---------------------------------------------------------------------------
+
+async def fetch_wiki_pages(query: str, limit: int) -> list[dict[str, Any]]:
+    """Search English Wikipedia for ``query`` and ingest the top pages.
+
+    Two-step:
+    1. ``?action=query&list=search&srsearch=<q>`` → list of matching page titles.
+    2. ``?action=query&prop=extracts|info&explaintext=true&titles=<batch>`` →
+       plain-text extracts + the current ``lastrevid`` (used as source_ref).
+
+    Each entry tagged ``source_type=wiki_article``. Search response cached
+    by query hash with the short TTL; revisions can land at any time.
+    """
+    if limit <= 0:
+        return []
+    client = get_generic_http_client()
+    cache = get_fetch_cache()
+
+    qhash = _query_hash(query)
+    cached = await cache.get("wiki", f"search-{qhash}", f"top{limit}")
+    titles: list[str] = []
+    if cached:
+        try:
+            titles = json.loads(cached)
+        except Exception:
+            titles = []
+
+    if not titles:
+        search_params = httpx.QueryParams({
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "srlimit": str(min(limit, 50)),
+            "format": "json",
+            "formatversion": "2",
+        })
+        r = await client.get(f"{_WIKI_BASE}?{search_params}")
+        r.raise_for_status()
+        results = ((r.json() or {}).get("query") or {}).get("search") or []
+        titles = [hit["title"] for hit in results if hit.get("title")]
+        try:
+            await cache.put(
+                "wiki", f"search-{qhash}", f"top{limit}",
+                json.dumps(titles).encode("utf-8"),
+                ttl_seconds=settings.fetch_cache_ttl_default_seconds,
+            )
+        except Exception as exc:
+            logger.debug("wiki_search_cache_put_failed: %s", exc)
+
+    if not titles:
+        return []
+
+    titles_param = "|".join(titles[:limit])
+    extract_params = httpx.QueryParams({
+        "action": "query",
+        "prop": "extracts|info",
+        "explaintext": "true",
+        "titles": titles_param,
+        "format": "json",
+        "formatversion": "2",
+    })
+    r = await client.get(f"{_WIKI_BASE}?{extract_params}")
+    r.raise_for_status()
+    pages = ((r.json() or {}).get("query") or {}).get("pages") or []
+    out: list[dict[str, Any]] = []
+    for p in pages:
+        title = p.get("title") or ""
+        extract = (p.get("extract") or "").strip()
+        if not extract:
+            continue
+        revid = str(p.get("lastrevid") or "")
+        # URL-safe title (Wikipedia uses underscores for spaces in URLs)
+        url_title = title.replace(" ", "_")
+        out.append({
+            "path": f"wiki/{title}",
+            "content": f"# {title}\n\n{extract}",
+            "source_type": "wiki_article",
+            "source_url": f"https://en.wikipedia.org/wiki/{url_title}",
+            "source_ref": revid or title,
+            "quality_signal": {
+                "lastrevid": revid,
+                "page_length": len(extract),
+            },
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -403,4 +590,13 @@ async def fetch_forum(prefix: str, value: str) -> list[dict[str, Any]]:
         from app.modules.research_extractors import _parse_arxiv_ref
         mode, val = _parse_arxiv_ref(f"arxiv:{value}")
         return await fetch_arxiv(mode, val, settings.arxiv_max_sections)
+    if prefix == "reddit":
+        # value packs `<subreddit>:<query>`
+        sub, q = value.split(":", 1)
+        return await fetch_reddit_posts(
+            sub, q, settings.reddit_max_posts,
+            settings.reddit_min_score, settings.reddit_min_comments,
+        )
+    if prefix == "wiki":
+        return await fetch_wiki_pages(value, settings.wiki_max_pages)
     raise ValueError(f"Unknown forum prefix: {prefix!r}")

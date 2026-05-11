@@ -4719,6 +4719,76 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.109 Reddit (allowlisted) + Wikipedia — community + foundational ingest (2026-05-10)
+
+Commit 7/8 of the phase-1 deep-search rollout. Two more producers built on the §17.108 forum-ingest plumbing:
+
+| Prefix | API | Trust mechanism | source_type |
+|---|---|---|---|
+| `reddit:<sub>:<query>` | reddit.com/r/<sub>/search.json | code-locked allowlist + dual gate | `reddit_post` |
+| `wiki:<topic>` | en.wikipedia.org/w/api.php | revision-id provenance | `wiki_article` |
+
+**Reddit allowlist — locked in code.** `app/modules/research_extractors.py:REDDIT_ALLOWLIST_LOWER = frozenset({"machinelearning", "localllama"})`. Anything else fails at `_parse_reddit_ref` with `"Subreddit <X> not in allowlist (...)"`. The allowlist sits in code rather than config so widening trust requires a code change (visible in diff/review) rather than an env-var override (silent). Case-insensitive comparison; original casing preserved in the returned tuple since Reddit URLs are case-sensitive for display.
+
+The phase-1 brief was your direct instruction — "only reliable and trustworthy sources." This is exactly two: `r/MachineLearning` (papers-required, strict mod) and `r/LocalLLaMA` (practitioner-heavy). Broader programming subs (r/Python, r/programming) deliberately excluded.
+
+**Reddit fetch flow.** Single GET on `/r/<sub>/search.json?q=<q>&restrict_sr=on&sort=top&t=all&limit=N` (Reddit's `.json` suffix works anonymously when the User-Agent header is set — `generic_http_client` already sends `User-Agent: scaffold-engine`). Each returned post:
+
+- Filtered: `score >= reddit_min_score` (default 50) AND `num_comments >= reddit_min_comments` (default 10) AND `over_18 == False`.
+- Link-only posts (`selftext == ""`) skipped — no ingestible body.
+- Body PII-stripped via §17.108's `_strip_pii`.
+- `source_ref = "t3_<post_id>"` (Reddit's stable post ID); `source_url` reconstructed from `permalink`.
+
+Search response cached at `fetchv1:reddit:sub-<lc-subreddit>:q-<hash>-s<score>-c<comments>` with the short TTL (1 h). Rankings drift but the cache holds for the duration of an iterative-research session.
+
+**Wikipedia fetch flow.** Two-step:
+
+1. `?action=query&list=search&srsearch=<q>&srlimit=<limit>&format=json&formatversion=2` → top page titles.
+2. `?action=query&prop=extracts|info&explaintext=true&titles=<title1>|<title2>|...&format=json&formatversion=2` → plain-text extracts + `lastrevid` per page.
+
+`lastrevid` lands in `source_ref` so each entry is anchored to the exact revision ingested. `source_url` uses the title with spaces→underscores (Wikipedia's URL convention). Empty extracts skipped. Search response cached by query hash with the short TTL.
+
+`source_type=wiki_article` → §17.103's TTL (180 d, "tech_docs tier; evolves") and §17.104's confidence 0.75 (reviewed but mutable).
+
+**Files.**
+
+- `app/config.py` — `reddit_min_score=50` + `reddit_min_comments=10`. `reddit_max_posts=20` / `wiki_max_pages=10` already declared in §17.105.
+- `app/modules/research_extractors.py` — `REDDIT_ALLOWLIST_LOWER` constant, `_is_reddit_ref` / `_parse_reddit_ref` (with allowlist check), `_is_wiki_ref` / `_parse_wiki_ref`.
+- `app/utils/forum_ingest.py` — `fetch_reddit_posts(subreddit, query, limit, min_score, min_comments)`, `fetch_wiki_pages(query, limit)`. `fetch_forum` dispatch extended for both.
+- `app/modules/research_agent.py` — mode detection (`reddit` / `wiki`), dispatch into the shared `_run_research_forum_mode` (reddit packs `<sub>:<query>` into the value string; wiki passes topic verbatim).
+- `tests/test_forum_ingest.py` — 13 new tests: Reddit parser (allowlist accept/reject, case insensitivity, malformed), Reddit fetcher (dual gate + NSFW filter + link-only skip + PII strip, 429, zero-limit), Wikipedia parser (topic, empty rejected), Wikipedia fetcher (two-step search + extract, empty-extract skip, zero-limit), dispatch.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_forum_ingest.py --timeout=30 -q
+34 passed in 3.09s
+
+$ docker exec scaffold-orchestrator pytest tests/ -k "research or github or hf_ or forum" --timeout=30 -q
+259 passed, 1309 deselected in 61.45s (0:01:01)
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1560 passed, 8 skipped in 608.40s (0:10:08)
+```
+
++13 vs §17.108 baseline (`1547 passed`) — all from new Reddit + Wikipedia tests. Same 8 skipped. **Zero warnings** (the `PytestUnhandledThreadExceptionWarning` was absent this run; it remains intermittent — investigate during §17.110).
+
+**Coverage check.** With §17.109 in, the phase-1 producer surface is:
+
+| Source | Status | source_type |
+|---|---|---|
+| GitHub (deep) | §17.106 | `tech_docs` / `release_notes` / `test_code` / `ci_config` / `community` |
+| Hugging Face | §17.107 | `model_card` / `dataset_card` / `paper_abstract` / `tech_docs` |
+| Stack Overflow | §17.108 | `so_answer` |
+| Hacker News | §17.108 | `hn_comment` |
+| arXiv | §17.108 | `paper_abstract` |
+| Reddit (allowlisted) | §17.109 | `reddit_post` |
+| Wikipedia | §17.109 | `wiki_article` |
+
+All 7 free + reliable sources from the phase-1 plan now ingest with provenance, confidence-by-source, and (where the ref is immutable) fetch-cache hits on re-runs.
+
+**Next.** §17.110 — two-tier routing extension + SSE event surface + the `PytestUnhandledThreadExceptionWarning` investigation. Skip the 7b distill for curated source_types (release_notes, test_code, model_card, accepted SO); emit new SSE events (`quality_gate_filtered`, `source_ref_resolved`, `cache_hit_upstream`); close phase 1.
+
 ### 17.108 Forum modes — SO + HN + arXiv with vote/score quality gates (2026-05-10)
 
 Commit 6/8 of the phase-1 deep-search rollout. Three new producers, each behind a quality gate so only community-validated material lands in the index:

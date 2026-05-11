@@ -235,6 +235,58 @@ def _parse_hn_ref(s: str) -> str:
     return s[len("hn:"):].strip()
 
 
+# Allowlist locked in code (not config) so widening trust requires a
+# code change, not an env-var override. Lowercased for case-insensitive
+# compare.
+REDDIT_ALLOWLIST_LOWER: frozenset[str] = frozenset({
+    "machinelearning",
+    "localllama",
+})
+
+
+def _is_reddit_ref(s: str) -> bool:
+    if not s.startswith("reddit:"):
+        return False
+    rest = s[len("reddit:"):].strip()
+    return ":" in rest and all(part.strip() for part in rest.split(":", 1))
+
+
+def _parse_reddit_ref(s: str) -> tuple[str, str]:
+    """Parse ``reddit:<subreddit>:<query>`` → ``(subreddit, query)``.
+
+    Subreddit is checked against ``REDDIT_ALLOWLIST_LOWER``; anything
+    outside is rejected at parse time. Case is preserved in the returned
+    tuple (Reddit URLs are case-sensitive for display) but matched
+    case-insensitively against the allowlist.
+    """
+    if not _is_reddit_ref(s):
+        raise ValueError(
+            f"Malformed Reddit ref: {s!r} (expected 'reddit:<subreddit>:<query>')"
+        )
+    rest = s[len("reddit:"):].strip()
+    sub, query = rest.split(":", 1)
+    sub = sub.strip()
+    query = query.strip()
+    if not query:
+        raise ValueError(f"Malformed Reddit ref: {s!r} (empty query)")
+    if sub.lower() not in REDDIT_ALLOWLIST_LOWER:
+        raise ValueError(
+            f"Subreddit {sub!r} not in allowlist "
+            f"({sorted(REDDIT_ALLOWLIST_LOWER)})"
+        )
+    return sub, query
+
+
+def _is_wiki_ref(s: str) -> bool:
+    return s.startswith("wiki:") and bool(s[len("wiki:"):].strip())
+
+
+def _parse_wiki_ref(s: str) -> str:
+    if not _is_wiki_ref(s):
+        raise ValueError(f"Malformed Wiki ref: {s!r} (expected 'wiki:<topic>')")
+    return s[len("wiki:"):].strip()
+
+
 def _is_arxiv_ref(s: str) -> bool:
     return s.startswith("arxiv:") and bool(s[len("arxiv:"):].strip())
 
