@@ -1053,9 +1053,21 @@ async def _run_research_github_mode(
     state: ResearchState,
     session_id: str,
     t0: float,
+    ref_hint: str | None = None,
 ) -> AsyncGenerator[str, None]:
-    """GitHub-mode: fetch README + docs + docstrings, ingest as tech_docs."""
-    from app.utils.github_ingest import fetch_repo_content
+    """GitHub-mode: deep fetch of repo content + release notes + issues/PRs.
+
+    ``ref_hint=None`` → default branch (back-compat). Any other value
+    (tag, branch, SHA) resolves to a commit SHA, locking every entry's
+    provenance to that immutable ref.
+    """
+    from app.utils.github_ingest import (
+        fetch_repo_content,
+        fetch_repo_issues_and_prs,
+        fetch_repo_releases,
+    )
+    from app.modules.provenance import build_provenance
+    from app.config import settings as _settings
 
     state.outline_facets = ["github_repo"]
     state.iteration = 1
@@ -1068,36 +1080,64 @@ async def _run_research_github_mode(
         "iteration": 1,
         "query_count": 0,
         "mode": "github",
+        "ref_hint": ref_hint,
     })
 
-    task = asyncio.create_task(fetch_repo_content(owner, repo))
+    task = asyncio.create_task(fetch_repo_content(owner, repo, ref_hint=ref_hint))
     async for hb in _await_with_heartbeat(
         task, {"status": "fetching_github", "iteration": 1}
     ):
         yield hb
     files = task.result()
 
-    if not files:
+    # Release notes + issues/PRs run after the main tree walk so a tree
+    # failure doesn't mask them, and so an empty tree result can still
+    # surface them as content.
+    releases: list[dict] = []
+    issues: list[dict] = []
+    try:
+        releases = await fetch_repo_releases(owner, repo, _settings.github_max_releases)
+    except Exception as exc:
+        logger.warning("github_releases_fetch_failed: %s/%s err=%s", owner, repo, exc)
+    try:
+        issues = await fetch_repo_issues_and_prs(
+            owner, repo,
+            _settings.github_max_issues,
+            _settings.github_min_issue_reactions,
+        )
+    except Exception as exc:
+        logger.warning("github_issues_fetch_failed: %s/%s err=%s", owner, repo, exc)
+
+    all_items = list(files) + releases + issues
+    if not all_items:
         raise RuntimeError(f"No ingestible content found in {owner}/{repo}")
 
     yield _sse("search_complete", {
         "iteration": 1,
-        "results_found": len(files),
-        "total_urls": len(files),
+        "results_found": len(all_items),
+        "total_urls": len(all_items),
         "mode": "github",
+        "files": len(files),
+        "releases": len(releases),
+        "issues": len(issues),
     })
 
     entries: list[dict] = []
-    for f in files:
-        source_url = f"https://github.com/{owner}/{repo}/blob/HEAD/{f['path']}"
-        state.url_history.add(source_url)
+    for f in all_items:
+        source_url = f.get("source_url", "")
+        if source_url:
+            state.url_history.add(source_url)
         entries.append({
             "title": f"{owner}/{repo}: {f['path']}",
             "content": f["content"],
             "source": source_url,
-            "source_type": "tech_docs",
-            "confidence_score": 0.9,
+            "source_type": f.get("source_type", "tech_docs"),
+            # No confidence_score key → §17.104 derives from source_type.
             "facet": "github_repo",
+            "provenance": build_provenance(
+                source_ref=f.get("source_ref", ""),
+                quality_signal=f.get("quality_signal", {}),
+            ),
         })
 
     yield _sse("extraction_complete", {
@@ -1594,9 +1634,9 @@ async def run_research(
                 ):
                     yield evt
             elif mode == "github":
-                owner, repo = _parse_github_ref(topic)
+                owner, repo, ref_hint = _parse_github_ref(topic)
                 async for evt in _run_research_github_mode(
-                    owner, repo, state, session_id, t0,
+                    owner, repo, state, session_id, t0, ref_hint=ref_hint,
                 ):
                     yield evt
             elif mode == "direct_url":

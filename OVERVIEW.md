@@ -4719,6 +4719,71 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.106 GitHub deep mode — tag/SHA pinning + releases + tests + workflows + issues/PRs (2026-05-10)
+
+Commit 4/8 of the phase-1 deep-search rollout. First real producer: extends `github:owner/repo` with tag/SHA pinning, source-type tagging on the tree walk, release-notes ingestion, test-file docstring ingestion, CI workflow ingestion, and a closed-issue + merged-PR fetcher with a reaction-count quality gate. Every entry now carries §17.104 provenance — anchored to a resolved commit SHA when the caller specifies a ref.
+
+**Syntax extension.** `github:owner/repo[@<tag|sha|branch>]`. `_parse_github_ref` now returns `(owner, repo, ref_hint)`. `ref_hint=None` keeps back-compat (default-branch path; branch name lands in `source_ref`, weakly immutable). An explicit `@<ref>` triggers `GET /repos/{o}/{r}/commits/{ref}` and propagates the resolved SHA into every entry's `source_ref`.
+
+**Source-type classification** (`_classify_path`, applied per file):
+
+| Path heuristic | source_type |
+|---|---|
+| basename ∈ {CHANGELOG, RELEASES, HISTORY, CHANGES, NEWS}`.md` (case-insensitive, any depth) | `release_notes` |
+| under `.github/workflows/` ending `.yml`/`.yaml` | `ci_config` |
+| `.py` under `tests/`/`test/`/`spec/` (one level deep) | `test_code` |
+| else | `tech_docs` |
+
+Release-notes classification wins over tech_docs even when a CHANGELOG lives in `docs/`.
+
+**Tree-walk extension** (`_select_tree_files`). Already picked docs/**/*.md + top-level *.md + top-level *.py. Now also picks `tests/*.py`, `test/*.py`, `spec/*.py` (one level only — deeper test trees explode token budgets) and `.github/workflows/*.{yml,yaml}` (raw YAML, no transform). `.py` files extract module docstring only; empty docstring → entry dropped.
+
+**Two new API fetchers**:
+
+- **`fetch_repo_releases(owner, repo, limit)`** — `GET /releases?per_page=N`. Drafts and bodyless releases skipped. Each kept release: `source_type=release_notes`, `source_ref=tag_name`, `quality_signal={prerelease, published_at}`. Capped by `github_max_releases` (default 10).
+- **`fetch_repo_issues_and_prs(owner, repo, limit, min_reactions)`** — `GET /issues?state=closed&sort=reactions-+1`. Over-fetches `limit*2`, filters on positive reactions (`+1` + `heart` + `hooray` ≥ `min_reactions`). PRs identified by the `pull_request` key — their merge state isn't on this payload, but the reaction gate is a strong proxy for "people found this valuable." Each kept entry: `source_type=community`, `source_ref=issue-N` or `pr-N`. Caps: `github_max_issues` (default 25), `github_min_issue_reactions` (default 2).
+
+**Provenance wiring.** `_run_research_github_mode` composes the three fetchers and, for each returned item, builds an ingest entry that **omits** `confidence_score` (so §17.104's `confidence_for(source_type)` derivation kicks in: `release_notes=0.95`, `tech_docs=0.80`, `test_code=1.0`, `ci_config=0.95`, `community=0.60`) and includes a `provenance` dict from `build_provenance(source_ref=..., quality_signal=...)`. `ingest_entries` batch-writes the provenance rows to Postgres after the Milvus flush.
+
+**§17.105 follow-up rolled in.** §17.105 introduced `gh_max_files` / `gh_max_issues` / `gh_max_releases` without noticing the pre-existing `github_max_files=50` / `github_blob_concurrency` / `github_timeout` / `github_api_base` block in `config.py`. Consolidated this commit:
+
+- `gh_max_files` → dropped (use existing `github_max_files=50`).
+- `gh_max_issues` → renamed to `github_max_issues=25`.
+- `gh_max_releases` → renamed to `github_max_releases=10`.
+- New: `github_min_issue_reactions=2`.
+
+`hf_max_files`, `so_max_answers`, `reddit_max_posts`, `hn_max_items`, `arxiv_max_sections`, `wiki_max_pages` retained — those producers don't ship until §17.107–§17.109 so there's no existing namespace to consolidate with.
+
+**Files.**
+
+- `app/config.py` — naming consolidation (above) + `github_min_issue_reactions`.
+- `app/modules/research_extractors.py` — `_parse_github_ref` returns 3-tuple; `_is_github_ref` accepts `@<ref>`; new `_GITHUB_REF_RE` (`[A-Za-z0-9._\-/]{1,128}`); rejects whitespace, semicolons, > 128 chars.
+- `app/utils/github_ingest.py` — `_classify_path`, `_resolve_ref_to_sha`, extended `_select_tree_files`, extended `fetch_repo_content(... ref_hint=None)`, new `fetch_repo_releases`, new `fetch_repo_issues_and_prs`.
+- `app/modules/research_agent.py` — `_run_research_github_mode(... ref_hint=None)` composes 3 fetchers, builds provenance dicts.
+- `tests/test_github_ingest.py` — parser tests updated for 3-tuple + new `@<ref>` cases + bad-ref rejection.
+- `tests/test_github_ingest_deep.py` (new) — 30 tests: `_classify_path` parametrized, `_select_tree_files` (test/CI inclusion + one-level-deep), `_resolve_ref_to_sha` (happy + 404), pinned-ref `fetch_repo_content` (SHA propagation + classification), `fetch_repo_releases` (happy, draft-skip, bodyless-skip, 0-limit, 404), `fetch_repo_issues_and_prs` (reaction gate, kind classification, limit-after-filter).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_github_ingest_deep.py tests/test_github_ingest.py tests/test_github_ingest_cache.py \
+    --timeout=30 -q
+47 passed in 4.29s
+
+$ docker exec scaffold-orchestrator pytest tests/ -k "research or github or ingest" --timeout=30 -q
+219 passed, 1296 deselected in 59.18s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1507 passed, 8 skipped, 1 warning in 619.87s (0:10:19)
+```
+
++33 vs §17.105 baseline (`1474 passed`) — all from new `test_github_ingest_deep.py` + new parser cases. Same 8 skipped. One `PytestUnhandledThreadExceptionWarning` surfaced — single warning at suite-summary level with no test attribution in the truncated output; not blocking (exit 0). Will investigate if it repeats on the next §17.107 run.
+
+**Known gap: fetch_cache not yet wired.** §17.105's `fetchv1:` cache exists but the GitHub mode doesn't read/write it yet. Every `/research github:...` re-fetches release notes + issues from the GitHub API on every call. Acceptable for now — GH rate limit is 5000/hr with `GITHUB_TOKEN`; a typical deep-fetch is ~10 calls. fetch_cache integration (SHA-pinned ref → immutable TTL) lands in a §17.106 follow-up once the API shape settles.
+
+**Next.** §17.107 — Hugging Face mode. `hf:model/<id>`, `hf:dataset/<id>`, `hf:paper/<arxiv-id>`, `hf:doc/<topic>`, `hf:space/<id>`. Structurally similar to §17.106 — `fetch_cache` integration mandatory there since HF revisions are immutable.
+
 ### 17.105 SHA-keyed upstream fetch cache + per-mode budget caps (2026-05-10)
 
 Commit 3/8 of the phase-1 deep-search rollout. Producer-shared infrastructure: a Redis-backed cache so SHA/revision-pinned upstream artifacts (GitHub at a tag, HF at a revision, arXiv post-id) are fetched once and reused across `/research` runs, plus Pydantic-bounded budget caps so each producer (§17.106–§17.109) has an explicit ceiling on what it pulls.

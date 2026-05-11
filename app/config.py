@@ -191,6 +191,9 @@ class Settings(BaseSettings):
     research_timeout: int = Field(default=3600, ge=1, le=86400)
     github_token: str = ""
     github_max_files: int = Field(default=50, ge=1, le=1000)
+    github_max_issues: int = Field(default=25, ge=0, le=200)
+    github_max_releases: int = Field(default=10, ge=0, le=100)
+    github_min_issue_reactions: int = Field(default=2, ge=0, le=1000)
     github_blob_concurrency: int = Field(default=8, ge=1, le=64)
     github_timeout: int = Field(default=30, ge=1, le=300)
     github_api_base: str = "https://api.github.com"
@@ -369,10 +372,8 @@ class Settings(BaseSettings):
     otel_otlp_endpoint: str = ""           # http://otel-collector:4318/v1/traces
 
     # Deep-search per-mode budget caps. Each producer caps how many
-    # artifacts it fetches per /research invocation.
-    gh_max_files: int = Field(default=50, ge=1, le=500)
-    gh_max_issues: int = Field(default=25, ge=0, le=200)
-    gh_max_releases: int = Field(default=10, ge=0, le=100)
+    # artifacts it fetches per /research invocation. GitHub budgets live
+    # in the github_* block above (consolidated with existing settings).
     hf_max_files: int = Field(default=30, ge=1, le=200)
     so_max_answers: int = Field(default=20, ge=1, le=100)
     reddit_max_posts: int = Field(default=20, ge=1, le=100)

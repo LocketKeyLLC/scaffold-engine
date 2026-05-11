@@ -161,6 +161,8 @@ def test_is_github_ref_matches_valid():
     from app.modules.research_agent import _is_github_ref
     assert _is_github_ref("github:owner/repo")
     assert _is_github_ref("github:anthropics/claude-code")
+    assert _is_github_ref("github:owner/repo@v1.2.3")
+    assert _is_github_ref("github:owner/repo@abc123def")
 
 
 def test_is_github_ref_rejects_invalid():
@@ -172,7 +174,29 @@ def test_is_github_ref_rejects_invalid():
     assert not _is_github_ref("regular topic")
 
 
-def test_parse_github_ref():
+def test_parse_github_ref_no_at():
     from app.modules.research_agent import _parse_github_ref
-    assert _parse_github_ref("github:owner/repo") == ("owner", "repo")
-    assert _parse_github_ref("github:  owner/repo  ") == ("owner", "repo")
+    assert _parse_github_ref("github:owner/repo") == ("owner", "repo", None)
+    assert _parse_github_ref("github:  owner/repo  ") == ("owner", "repo", None)
+
+
+def test_parse_github_ref_with_at():
+    from app.modules.research_agent import _parse_github_ref
+    assert _parse_github_ref("github:owner/repo@v1.2.3") == ("owner", "repo", "v1.2.3")
+    assert _parse_github_ref("github:owner/repo@abc123def") == ("owner", "repo", "abc123def")
+    assert _parse_github_ref("github:owner/repo@release/main") == ("owner", "repo", "release/main")
+
+
+def test_parse_github_ref_rejects_bad_ref():
+    import pytest
+    from app.modules.research_agent import _parse_github_ref
+    for bad in ["github:owner/repo@bad ref", "github:owner/repo@evil;rm",
+                "github:owner/repo@" + "x" * 129]:
+        with pytest.raises(ValueError, match="fails"):
+            _parse_github_ref(bad)
+
+
+def test_parse_github_ref_empty_at_becomes_none():
+    from app.modules.research_agent import _parse_github_ref
+    # `github:owner/repo@` (empty after @) — treat as "no ref hint".
+    assert _parse_github_ref("github:owner/repo@") == ("owner", "repo", None)

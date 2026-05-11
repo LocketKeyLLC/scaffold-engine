@@ -128,23 +128,45 @@ def _is_url(s: str) -> bool:
         return False
 
 
+_GITHUB_REF_RE = re.compile(r"^[A-Za-z0-9._\-/]{1,128}$")
+
+
 def _is_github_ref(s: str) -> bool:
     if not s.startswith("github:"):
         return False
     rest = s[len("github:"):].strip()
-    parts = rest.split("/")
+    # Strip optional @<ref> suffix before validating owner/repo shape.
+    repo_part = rest.split("@", 1)[0]
+    parts = repo_part.split("/")
     return len(parts) == 2 and all(parts) and "." not in parts[0]
 
 
-def _parse_github_ref(s: str) -> tuple[str, str]:
-    """Parse `github:owner/repo`. Raises ValueError on malformed input."""
+def _parse_github_ref(s: str) -> tuple[str, str, str | None]:
+    """Parse ``github:owner/repo[@<tag|sha>]``.
+
+    Returns ``(owner, repo, ref_hint)``. ``ref_hint`` is ``None`` when no
+    ``@<ref>`` is given (caller resolves to latest release / default
+    branch). Raises ``ValueError`` on malformed input.
+    """
     if not _is_github_ref(s):
-        raise ValueError(f"Malformed GitHub ref: {s!r} (expected 'github:owner/repo')")
-    owner, repo = s[len("github:"):].strip().split("/", 1)
+        raise ValueError(f"Malformed GitHub ref: {s!r} (expected 'github:owner/repo[@<ref>]')")
+    rest = s[len("github:"):].strip()
+    if "@" in rest:
+        repo_part, ref_hint = rest.split("@", 1)
+        ref_hint = ref_hint.strip() or None
+        if ref_hint is not None and not _GITHUB_REF_RE.match(ref_hint):
+            raise ValueError(
+                f"Malformed GitHub ref: {s!r} (ref_hint {ref_hint!r} fails "
+                f"{_GITHUB_REF_RE.pattern})"
+            )
+    else:
+        repo_part = rest
+        ref_hint = None
+    owner, repo = repo_part.split("/", 1)
     owner, repo = owner.strip(), repo.strip()
     if not owner or not repo:
         raise ValueError(f"Malformed GitHub ref: {s!r} (empty owner or repo)")
-    return owner, repo
+    return owner, repo, ref_hint
 
 
 def _is_openapi_ref(s: str) -> bool:

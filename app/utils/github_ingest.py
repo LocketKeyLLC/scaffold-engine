@@ -1,7 +1,12 @@
-"""GitHub repo ingestion for /research github:owner/repo.
+"""GitHub repo ingestion for /research github:owner/repo[@<ref>].
 
-Fetches README, docs/**/*.md, and top-level Python module docstrings,
-returning them as {path, content} dicts ready for TOON ingestion.
+Fetches README, docs/**/*.md, top-level Python module docstrings,
+tests/*.py docstrings, .github/workflows/*.yml, release notes, and
+closed-issue/merged-PR threads with a reaction-count quality gate.
+
+Each returned entry carries ``source_type``, ``source_url``,
+``source_ref`` (SHA or branch name), and ``quality_signal`` — callers
+pass these straight to ``ingest_entries`` for provenance recording.
 """
 import asyncio
 import ast
@@ -19,6 +24,11 @@ from app.utils.http_clients import get_github_client
 logger = logging.getLogger(__name__)
 
 _DOCS_PREFIX = "docs/"
+_TESTS_PREFIXES = ("tests/", "test/", "spec/")
+_CI_WORKFLOWS_PREFIX = ".github/workflows/"
+_RELEASE_NOTES_BASENAMES = frozenset({
+    "changelog.md", "releases.md", "history.md", "changes.md", "news.md",
+})
 
 # Audit M6 — versioned cache key prefix for the tree response cache. Bumping
 # the version invalidates every cached entry (use when the cached payload
@@ -146,6 +156,22 @@ async def _get_default_branch(client: httpx.AsyncClient, owner: str, repo: str) 
     return r.json().get("default_branch", "main")
 
 
+async def _resolve_ref_to_sha(
+    client: httpx.AsyncClient, owner: str, repo: str, ref: str,
+) -> str:
+    """Resolve a tag/branch/SHA to its commit SHA.
+
+    ``GET /repos/{o}/{r}/commits/{ref}`` accepts all three. Raises
+    ``GitHubRepoNotFoundError`` on 404 (unknown ref).
+    """
+    r = await client.get(f"/repos/{owner}/{repo}/commits/{ref}")
+    _check_rate_limit(r)
+    if r.status_code == 404:
+        raise GitHubRepoNotFoundError(f"{owner}/{repo}@{ref} not found")
+    r.raise_for_status()
+    return r.json().get("sha", "")
+
+
 async def _fetch_readme(client: httpx.AsyncClient, owner: str, repo: str) -> tuple[str, str]:
     """Returns (path, content) or ('', '') if no README."""
     r = await client.get(f"/repos/{owner}/{repo}/readme")
@@ -209,19 +235,49 @@ async def _get_tree(client: httpx.AsyncClient, owner: str, repo: str, branch: st
     return blobs, truncated
 
 
-def _select_tree_files(tree: list[dict], remaining_cap: int) -> list[dict]:
-    """Pick docs/**/*.md and top-level *.py, capped.
+def _classify_path(path: str) -> str:
+    """Map a repo path → source_type.
 
-    Design note: only *top-level* .py files are included (no `/` in path). This
-    is intentional — a repo's top-level modules are almost always the public
-    entry points whose docstrings summarize the package. Recursing into all
-    .py files tends to pull in tests, build scripts, and vendored code with
-    low signal-to-noise. If you need deeper coverage, prefer adding content
-    to docs/ so it is captured by the .md filter.
+    Heuristic order matters: ``CHANGELOG.md`` in ``docs/`` should still be
+    tagged ``release_notes``, not ``tech_docs``.
     """
-    docs = [e for e in tree if e["path"].endswith(".md") and (e["path"].startswith(_DOCS_PREFIX) or "/" not in e["path"])]
+    p = path.lower()
+    basename = path.rsplit("/", 1)[-1].lower()
+    if basename in _RELEASE_NOTES_BASENAMES:
+        return "release_notes"
+    if p.startswith(_CI_WORKFLOWS_PREFIX) and (p.endswith(".yml") or p.endswith(".yaml")):
+        return "ci_config"
+    if p.endswith(".py") and any(p.startswith(pre) for pre in _TESTS_PREFIXES):
+        return "test_code"
+    return "tech_docs"
+
+
+def _select_tree_files(tree: list[dict], remaining_cap: int) -> list[dict]:
+    """Pick docs/**/*.md, top-level *.md, top-level *.py, one-level tests/*.py,
+    and .github/workflows/*.yml — capped.
+
+    Top-level .py is the historic root-docstring path. tests/*.py (one level
+    deep only) extracts test-module docstrings — full test bodies are too
+    noisy for the embedding model. CI workflows go in as raw YAML.
+    """
+    docs = [
+        e for e in tree
+        if e["path"].endswith(".md")
+        and (e["path"].startswith(_DOCS_PREFIX) or "/" not in e["path"])
+    ]
     pyfiles = [e for e in tree if e["path"].endswith(".py") and "/" not in e["path"]]
-    selected = docs + pyfiles
+    test_py = [
+        e for e in tree
+        if e["path"].endswith(".py")
+        and any(e["path"].startswith(pre) for pre in _TESTS_PREFIXES)
+        and e["path"].count("/") == 1  # one level deep only
+    ]
+    ci_yaml = [
+        e for e in tree
+        if e["path"].startswith(_CI_WORKFLOWS_PREFIX)
+        and (e["path"].endswith(".yml") or e["path"].endswith(".yaml"))
+    ]
+    selected = docs + pyfiles + test_py + ci_yaml
     if len(selected) > remaining_cap:
         logger.warning("File count %d exceeds remaining cap %d — truncating", len(selected), remaining_cap)
         selected = selected[:remaining_cap]
@@ -252,35 +308,67 @@ def _extract_docstring(source: str) -> str:
         return ""
 
 
-async def fetch_repo_content(owner: str, repo: str) -> list[dict[str, Any]]:
-    """Fetch ingestible content from a GitHub repo.
+async def fetch_repo_content(
+    owner: str, repo: str, ref_hint: str | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch ingestible content from a GitHub repo at a ref.
 
-    Returns list of {path, content} dicts, capped at settings.github_max_files.
+    ``ref_hint=None`` → use the repo's default branch (back-compat path:
+    branch name lands in each entry's ``source_ref``, weakly immutable).
+    ``ref_hint=<tag|branch|sha>`` → resolve to commit SHA via
+    ``/repos/{o}/{r}/commits/{ref}`` and use the SHA as the tree ref and
+    in each entry's ``source_ref`` (strongly immutable — producers get
+    "this content lived at this SHA at fetch time" guarantee).
+
+    Returns list of entry dicts with: path, content, source_type,
+    source_url, source_ref, quality_signal. ``source_type`` is classified
+    per filename: CHANGELOG.md → ``release_notes``, tests/*.py →
+    ``test_code``, .github/workflows/*.yml → ``ci_config``, rest → ``tech_docs``.
 
     Raises:
-        GitHubRepoNotFoundError: repo 404
+        GitHubRepoNotFoundError: repo or ref 404
         GitHubRateLimitError: rate limit exhausted
     """
     client = get_github_client()
-    branch = await _get_default_branch(client, owner, repo)
+
+    if ref_hint is None:
+        # Back-compat path: branch name, no SHA pinning. Existing call
+        # sequence (default_branch → readme → tree) preserved.
+        branch = await _get_default_branch(client, owner, repo)
+        source_ref = branch
+        tree_ref = branch
+    else:
+        # Explicit pin: resolve to commit SHA for immutable provenance.
+        source_ref = await _resolve_ref_to_sha(client, owner, repo, ref_hint)
+        if not source_ref:
+            raise GitHubRepoNotFoundError(f"{owner}/{repo}@{ref_hint} sha unresolved")
+        tree_ref = source_ref
+
     results: list[dict[str, Any]] = []
 
     # 1. README (dedicated endpoint — handles case/extension automatically)
     readme_path, readme_content = await _fetch_readme(client, owner, repo)
     if readme_content.strip():
-        results.append({"path": readme_path, "content": readme_content})
+        results.append({
+            "path": readme_path,
+            "content": readme_content,
+            "source_type": _classify_path(readme_path),
+            "source_url": f"https://github.com/{owner}/{repo}/blob/{tree_ref}/{readme_path}",
+            "source_ref": source_ref,
+            "quality_signal": {},
+        })
     elif readme_path:  # README endpoint returned something but body is empty/whitespace
         logger.warning(
             "GitHub README is empty/whitespace-only, dropping: %s/%s path=%s",
             owner, repo, readme_path,
         )
 
-    # 2. docs/**/*.md + top-level *.py via tree
+    # 2. Tree walk (docs/**/*.md + top-level *.py + tests/*.py + .github/workflows/*.yml)
     tree_truncated = False
     attempted = 0
     remaining = settings.github_max_files - len(results)
     if remaining > 0:
-        tree, tree_truncated = await _get_tree(client, owner, repo, branch)
+        tree, tree_truncated = await _get_tree(client, owner, repo, tree_ref)
         selected = _select_tree_files(tree, remaining)
         attempted = len(selected)
 
@@ -294,12 +382,23 @@ async def fetch_repo_content(owner: str, repo: str) -> list[dict[str, Any]]:
                 content = await _fetch_blob(client, owner, repo, entry["sha"])
             if not content.strip():
                 return None
+            stype = _classify_path(path)
+            # *.py paths get docstring-only treatment: top-level for
+            # tech_docs (existing behavior), per-module for test_code
+            # (full bodies are too noisy for the embedder).
             if path.endswith(".py"):
                 docstring = _extract_docstring(content)
                 if not docstring:
                     return None
                 content = docstring
-            return {"path": path, "content": content}
+            return {
+                "path": path,
+                "content": content,
+                "source_type": stype,
+                "source_url": f"https://github.com/{owner}/{repo}/blob/{tree_ref}/{path}",
+                "source_ref": source_ref,
+                "quality_signal": {},
+            }
 
         fetched = await asyncio.gather(
             *(_fetch_one(e) for e in selected), return_exceptions=True,
@@ -326,7 +425,112 @@ async def fetch_repo_content(owner: str, repo: str) -> list[dict[str, Any]]:
                 results.append(item)
 
     logger.info(
-        "GitHub fetch: %s/%s branch=%s attempted=%d files=%d tree_truncated=%s",
-        owner, repo, branch, attempted, len(results), tree_truncated,
+        "GitHub fetch: %s/%s ref=%s attempted=%d files=%d tree_truncated=%s",
+        owner, repo, source_ref[:12], attempted, len(results), tree_truncated,
     )
     return results
+
+
+async def fetch_repo_releases(
+    owner: str, repo: str, limit: int,
+) -> list[dict[str, Any]]:
+    """Fetch up to ``limit`` release-note entries, newest first.
+
+    Each entry tagged ``source_type=release_notes`` with the release's
+    ``tag_name`` as the ``source_ref``. Drafts and bodyless releases skipped.
+    """
+    if limit <= 0:
+        return []
+    client = get_github_client()
+    r = await client.get(
+        f"/repos/{owner}/{repo}/releases",
+        params={"per_page": min(limit, 100)},
+    )
+    _check_rate_limit(r)
+    if r.status_code == 404:
+        return []
+    r.raise_for_status()
+    out: list[dict[str, Any]] = []
+    for rel in r.json()[:limit]:
+        if rel.get("draft"):
+            continue
+        body = (rel.get("body") or "").strip()
+        if not body:
+            continue
+        tag = rel.get("tag_name", "")
+        title = rel.get("name") or tag or "release"
+        out.append({
+            "path": f"release/{tag}",
+            "content": f"# {title}\n\n{body}",
+            "source_type": "release_notes",
+            "source_url": rel.get("html_url", ""),
+            "source_ref": tag,
+            "quality_signal": {
+                "prerelease": bool(rel.get("prerelease")),
+                "published_at": rel.get("published_at") or "",
+            },
+        })
+    return out
+
+
+async def fetch_repo_issues_and_prs(
+    owner: str, repo: str, limit: int, min_reactions: int,
+) -> list[dict[str, Any]]:
+    """Closed issues + merged-or-closed PRs, sorted by reactions, gated.
+
+    The ``/issues`` endpoint returns both issues and PRs (PRs identified
+    by ``pull_request`` key). We rank by positive reaction count
+    (``+1``, ``heart``, ``hooray``) and drop anything below
+    ``min_reactions``. Each kept entry tagged ``source_type=community``.
+
+    PR merge state isn't on the /issues payload — checking would cost a
+    second call per PR. The reaction gate is a strong-enough proxy:
+    closed-and-thumbs-upped means "people found this valuable" regardless
+    of merge.
+    """
+    if limit <= 0:
+        return []
+    client = get_github_client()
+    r = await client.get(
+        f"/repos/{owner}/{repo}/issues",
+        params={
+            "state": "closed",
+            "sort": "reactions-+1",
+            "per_page": min(limit * 2, 100),  # over-fetch then filter
+        },
+    )
+    _check_rate_limit(r)
+    if r.status_code == 404:
+        return []
+    r.raise_for_status()
+    out: list[dict[str, Any]] = []
+    for item in r.json():
+        if len(out) >= limit:
+            break
+        reactions = item.get("reactions") or {}
+        positive = (
+            int(reactions.get("+1", 0))
+            + int(reactions.get("heart", 0))
+            + int(reactions.get("hooray", 0))
+        )
+        if positive < min_reactions:
+            continue
+        body = (item.get("body") or "").strip()
+        if not body:
+            continue
+        kind = "pr" if "pull_request" in item else "issue"
+        number = item.get("number", 0)
+        title = item.get("title", "")
+        out.append({
+            "path": f"{kind}/{number}",
+            "content": f"# {kind.upper()} #{number}: {title}\n\n{body}",
+            "source_type": "community",
+            "source_url": item.get("html_url", ""),
+            "source_ref": f"{kind}-{number}",
+            "quality_signal": {
+                "positive_reactions": positive,
+                "kind": kind,
+                "closed_at": item.get("closed_at") or "",
+            },
+        })
+    return out
