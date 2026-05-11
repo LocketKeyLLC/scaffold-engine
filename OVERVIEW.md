@@ -4719,6 +4719,87 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.123 `arxiv:<id>:full` — full-PDF ingest opt-in (phase-5 deferral close 3/3, phase-5 close) (2026-05-11)
+
+Final phase-5 commit. Closes the §17.108 deferral about "arXiv abstract by default, full PDF opt-in." With this, both abstract mode and full-paper mode are reachable for any arXiv ID.
+
+**Syntax.** `arxiv:<id>:full` — the `:full` suffix on a valid arXiv ID triggers full-PDF ingest. Examples:
+
+- `arxiv:2310.06825:full` — modern format ID
+- `arxiv:2310.06825v2:full` — versioned ID
+- `arxiv:cs.CL/0501001:full` — legacy ID
+- `arxiv:2310.06825` — unchanged abstract mode
+- `arxiv:transformer architecture:full` — **rejected** at parse time (`:full` requires an ID, not a query)
+
+`_parse_arxiv_ref` returns `(mode, value)` with `mode ∈ {"id", "id_full", "query"}`.
+
+**Fetch flow** (`fetch_arxiv_full(arxiv_id)`):
+
+1. PDF URL: `https://arxiv.org/pdf/<id>.pdf`.
+2. Cache lookup at `fetchv1:arxiv:<id>:pdf` — immutable TTL (papers don't change post-publication; bytes are stable).
+3. On cache miss: GET with 60 s timeout, follow redirects. 404 → empty. Non-200 → warning + empty.
+4. Body-size guard: > `research_max_pdf_bytes` (20 MB default) → warning + empty. Same cap as `/research/pdf`.
+5. Extract via `pypdf.PdfReader` → join per-page text → strip.
+6. Chunk via `_chunk_text` (paragraph-aware, 1500-token chunks with overlap). Up to `arxiv_max_sections` chunks ingested.
+7. Each chunk → entry with `source_type=paper_abstract` (shares the §17.103/§17.104 TTL + confidence with abstract mode — no separate `paper_full` source_type needed, the chunk-level distinction lives in `quality_signal.full_pdf=True`).
+
+**Why no new source_type.** Adding `paper_full` would require migration 036 + TTL/confidence/§17.118 template entries — invasive for a chunk-level distinction. The `quality_signal.full_pdf` flag captures "this is from the full PDF, not the abstract" without schema churn. Retrieval-time consumers that want to filter ("only abstracts" vs "abstracts or full") can do so via the existing provenance dict.
+
+**Files.**
+
+- `app/modules/research_extractors.py` — `_parse_arxiv_ref` recognizes `:full` suffix, returns `id_full` mode for ID prefixes only. `:full` on a query value raises `ValueError`. Docstring updated.
+- `app/utils/forum_ingest.py` — new `fetch_arxiv_full(arxiv_id)`. `fetch_arxiv` dispatch handles `id_full` mode by delegating. Error message lists all three modes.
+- `tests/test_forum_ingest.py` — 2 new parser tests (`:full` IDs / `:full` rejected on queries) + 6 new fetcher tests (happy path with mocked pypdf, 404, oversized, cache hit, zero budget, dispatch routing). 45 total in the file now.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_forum_ingest.py --timeout=30 -q
+45 passed in 3.60s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1714 passed, 8 skipped in 593.48s (0:09:53)
+```
+
++8 vs §17.122 baseline (`1706 passed`). Same 8 skipped, 0 warnings (13 clean runs in a row).
+
+---
+
+## Phase 5 complete — all phase-1 and phase-2 deferrals now closed
+
+3 commits, dated 2026-05-11. Suite **1701 → 1714** (+13 net new tests across the three commits).
+
+| Commit | Hash | Title |
+|---|---|---|
+| §17.121 | `d16815e` | `/research/verify?recheck=true` upstream reachability |
+| §17.122 | `2278761` | `hf:doc/<topic>` HTML scrape |
+| §17.123 | (this) | `arxiv:<id>:full` full-PDF opt-in |
+
+**Deferral inventory at end of phase 5:**
+
+| # | Item | Status |
+|---|---|---|
+| 1 | §17.106 follow-up: GH fetch_cache | ✓ §17.111 |
+| 2 | §17.107 follow-up: `hf:doc/<topic>` | ✓ §17.122 |
+| 3 | §17.108 follow-up: thread-warning investigation | ✓ §17.116 (diagnostic) |
+| 4 | §17.110 follow-up: classifier integration | ✓ §17.112 + §17.113 |
+| 5 | §17.110 follow-up: `cache_hit_upstream` SSE | ✓ §17.117 |
+| 6 | §17.114 follow-up: verify upstream re-fetch | ✓ §17.121 (reachability; content-hash deferred) |
+| 7 | §17.114 follow-up: `test_auth.py` teardown | ✓ §17.115 |
+| 8 | §17.108 follow-up: arxiv full-PDF opt-in | ✓ §17.123 |
+
+**8 of 8 deferrals closed.** Only the §17.121 in-scope split (content-hash comparison via per-source-type re-normalize hooks) remains as a TRACKED follow-up — explicitly noted because it requires 7-producer plumbing.
+
+**Cumulative across all 5 phases:**
+
+- 21 dated entries (§17.103 → §17.123)
+- Suite **1417 → 1714** (+297 net tests)
+- Same 8 skipped throughout — no flakes introduced
+- Zero warnings in the last 13 consecutive full-suite runs
+- Producer surface: GH-deep + HF (5 kinds: model/dataset/paper/space/doc) + SO + HN + arXiv (abstract OR full-PDF) + Reddit (allowlisted) + Wikipedia. Every entry carries `source_ref` + `fetched_at` + `quality_signal` + derived `confidence_score`. LLM distill bypassed on classified curated URLs in URL + topic modes. `/research/verify/{session_id}` audits per-session Milvus state + optional upstream reachability. Intent-aware retrieval + kindwise chunking + quality-weighted rerank.
+
+The deep-search system is feature-complete against the original phase-1 plan plus all deferrals it accumulated.
+
 ### 17.122 `hf:doc/<topic>` — HF docs HTML scrape (phase-5 deferral close 2/3) (2026-05-11)
 
 Closes phase-1 deferral #2 from §17.107. Hugging Face docs at `huggingface.co/docs/<library>/<page>` are now ingestible via the `hf:doc/<topic>` prefix.

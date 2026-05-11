@@ -292,15 +292,33 @@ def _is_arxiv_ref(s: str) -> bool:
 
 
 def _parse_arxiv_ref(s: str) -> tuple[str, str]:
-    """Parse ``arxiv:<value>`` → ``(mode, value)``.
+    """Parse ``arxiv:<value>[:full]`` → ``(mode, value)``.
 
-    ``mode`` is ``"id"`` if value matches the arXiv ID format
-    (``YYYY.NNNNN`` with optional ``vN`` suffix, or the legacy
-    ``cat/0501001`` form), else ``"query"`` for free-text search.
+    ``mode`` ∈ ``{"id", "id_full", "query"}``:
+
+    - ``id``       — value matches the arXiv ID format (``YYYY.NNNNN``
+      with optional ``vN`` suffix, or legacy ``cat/0501001``). Abstract
+      only; existing default behavior.
+    - ``id_full``  — same as ``id`` but with a ``:full`` suffix.
+      Triggers the full-PDF ingest path (§17.123): fetches
+      ``arxiv.org/pdf/<id>.pdf``, extracts via pypdf, chunks, ingests.
+    - ``query``    — free-text search.
+
+    ``:full`` after a non-ID value is malformed.
     """
     if not _is_arxiv_ref(s):
-        raise ValueError(f"Malformed arXiv ref: {s!r} (expected 'arxiv:<id|query>')")
+        raise ValueError(f"Malformed arXiv ref: {s!r} (expected 'arxiv:<id|query>[:full]')")
     value = s[len("arxiv:"):].strip()
+
+    if value.endswith(":full"):
+        candidate = value[:-len(":full")].strip()
+        if _ARXIV_ID_RE.match(candidate):
+            return ("id_full", candidate)
+        raise ValueError(
+            f"Malformed arXiv ref: {s!r} "
+            "(`:full` suffix requires a valid arXiv ID prefix)"
+        )
+
     mode = "id" if _ARXIV_ID_RE.match(value) else "query"
     return mode, value
 

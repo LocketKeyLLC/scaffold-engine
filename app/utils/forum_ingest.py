@@ -354,14 +354,20 @@ def _parse_arxiv_atom(xml_text: str, limit: int) -> list[dict[str, Any]]:
 async def fetch_arxiv(mode: str, value: str, limit: int) -> list[dict[str, Any]]:
     """Fetch from arXiv API.
 
-    - ``mode="id"`` — single-paper lookup via ``?id_list=<value>``.
-    - ``mode="query"`` — search via ``?search_query=all:<value>``,
+    - ``mode="id"``      — single-paper lookup via ``?id_list=<value>``
+      (abstract only — Atom XML).
+    - ``mode="query"``   — search via ``?search_query=all:<value>``,
       capped at ``limit``.
+    - ``mode="id_full"`` — full-PDF ingest (§17.123). Delegates to
+      ``fetch_arxiv_full`` which fetches ``arxiv.org/pdf/<id>.pdf``,
+      extracts via pypdf, chunks, returns multiple entries.
 
     ID lookups cache the Atom body with immutable TTL (papers don't
     change post-publication). Search responses cache with short TTL
     (results drift as new papers index).
     """
+    if mode == "id_full":
+        return await fetch_arxiv_full(value)
     if limit <= 0:
         return []
     client = get_generic_http_client()
@@ -385,7 +391,7 @@ async def fetch_arxiv(mode: str, value: str, limit: int) -> list[dict[str, Any]]
         })
         url = f"{_ARXIV_BASE}?{params}"
     else:
-        raise ValueError(f"arxiv mode must be 'id' or 'query', got {mode!r}")
+        raise ValueError(f"arxiv mode must be 'id' / 'id_full' / 'query', got {mode!r}")
 
     r = await client.get(url)
     r.raise_for_status()
@@ -599,6 +605,91 @@ async def fetch_wiki_pages(query: str, limit: int) -> list[dict[str, Any]]:
                 "lastrevid": revid,
                 "page_length": len(extract),
             },
+        })
+    return out
+
+
+async def fetch_arxiv_full(arxiv_id: str) -> list[dict[str, Any]]:
+    """Fetch the full-PDF body of an arXiv paper (§17.123 — full-PDF opt-in).
+
+    URL: ``https://arxiv.org/pdf/<id>.pdf``. Bytes cached at the
+    immutable TTL (papers don't change post-publication). Text extracted
+    via ``pypdf`` (same library that ``/research/pdf`` uses), then
+    chunked with ``_chunk_text`` so each Milvus row stays within the
+    embedder's context. Up to ``arxiv_max_sections`` chunks ingested.
+
+    Each entry tagged ``source_type=paper_abstract`` (same TTL/confidence
+    bucket as the abstract — there's no separate ``paper_full`` source_type;
+    the chunk-level distinction lives in ``domain_tags``).
+    """
+    if settings.arxiv_max_sections <= 0:
+        return []
+    import io
+    import pypdf
+
+    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+    abs_url = f"https://arxiv.org/abs/{arxiv_id}"
+    cache = get_fetch_cache()
+    cached = await cache.get("arxiv", arxiv_id, "pdf")
+    if cached:
+        pdf_bytes = cached
+    else:
+        client = get_generic_http_client()
+        try:
+            r = await client.get(
+                pdf_url, follow_redirects=True, timeout=60.0,
+            )
+        except Exception as exc:
+            logger.warning("arxiv_full_fetch_failed: id=%s err=%s", arxiv_id, exc)
+            return []
+        if r.status_code == 404:
+            return []
+        if r.status_code != 200:
+            logger.warning(
+                "arxiv_full_unexpected_status: id=%s status=%d",
+                arxiv_id, r.status_code,
+            )
+            return []
+        pdf_bytes = r.content
+        cap = settings.research_max_pdf_bytes
+        if len(pdf_bytes) > cap:
+            logger.warning(
+                "arxiv_full_pdf_too_large: id=%s bytes=%d cap=%d",
+                arxiv_id, len(pdf_bytes), cap,
+            )
+            return []
+        try:
+            await cache.put(
+                "arxiv", arxiv_id, "pdf", pdf_bytes,
+                ttl_seconds=settings.fetch_cache_ttl_immutable_seconds,
+            )
+        except Exception as exc:
+            logger.debug("arxiv_full_cache_put_failed: %s", exc)
+
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        text_parts: list[str] = []
+        for page in reader.pages:
+            text_parts.append(page.extract_text() or "")
+        text = "\n\n".join(text_parts).strip()
+    except Exception as exc:
+        logger.warning("arxiv_full_pdf_extract_failed: id=%s err=%s", arxiv_id, exc)
+        return []
+    if not text:
+        return []
+
+    from app.modules.research_extractors import _chunk_text
+    chunks = _chunk_text(text)
+    total = len(chunks)
+    out: list[dict[str, Any]] = []
+    for i, chunk in enumerate(chunks[: settings.arxiv_max_sections]):
+        out.append({
+            "path": f"arxiv-full/{arxiv_id}#chunk-{i}",
+            "content": chunk,
+            "source_type": "paper_abstract",
+            "source_url": abs_url,
+            "source_ref": arxiv_id,
+            "quality_signal": {"full_pdf": True, "chunk_total": total},
         })
     return out
 

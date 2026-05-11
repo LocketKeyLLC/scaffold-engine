@@ -63,6 +63,18 @@ class TestForumParsers:
         assert _parse_arxiv_ref("arxiv:transformer architecture") == ("query", "transformer architecture")
         assert _parse_arxiv_ref("arxiv:llm agents")[0] == "query"
 
+    def test_arxiv_ref_full_pdf(self):
+        from app.modules.research_extractors import _parse_arxiv_ref
+        assert _parse_arxiv_ref("arxiv:2310.06825:full") == ("id_full", "2310.06825")
+        assert _parse_arxiv_ref("arxiv:2310.06825v2:full") == ("id_full", "2310.06825v2")
+        assert _parse_arxiv_ref("arxiv:cs.CL/0501001:full") == ("id_full", "cs.CL/0501001")
+
+    def test_arxiv_ref_full_rejects_non_id(self):
+        import pytest
+        from app.modules.research_extractors import _parse_arxiv_ref
+        with pytest.raises(ValueError, match="requires a valid arXiv ID"):
+            _parse_arxiv_ref("arxiv:transformer architecture:full")
+
 
 # ---------------------------------------------------------------------------
 # PII strip
@@ -301,6 +313,129 @@ async def test_fetch_arxiv_bad_mode_raises():
     from app.utils import forum_ingest
     with pytest.raises(ValueError, match="arxiv mode"):
         await forum_ingest.fetch_arxiv("nope", "value", limit=5)
+
+
+# ---------------------------------------------------------------------------
+# fetch_arxiv_full (§17.123)
+# ---------------------------------------------------------------------------
+
+def _make_minimal_pdf_bytes(text: str) -> bytes:
+    """Build a 1-page PDF containing ``text`` via pypdf."""
+    import io
+    import pypdf
+    writer = pypdf.PdfWriter()
+    # pypdf doesn't have a trivial "add page with text" API. Use a
+    # reportlab-free trick: synthesize a minimal PDF by hand for tests.
+    # Actually simplest — mock pypdf in the test instead of generating
+    # real PDF bytes. See test below.
+    raise NotImplementedError("use the mocked-pypdf approach")
+
+
+@pytest.mark.asyncio
+async def test_fetch_arxiv_full_happy_path(fake_cache_miss):
+    """Full-PDF mode → fetch bytes → pypdf extract → chunked entries."""
+    from app.utils import forum_ingest
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"%PDF-1.4 fake bytes"
+    client = MagicMock()
+    client.get = AsyncMock(return_value=mock_resp)
+
+    # Mock pypdf to return a known multi-page text.
+    fake_page1 = MagicMock()
+    fake_page1.extract_text = MagicMock(return_value="Abstract: This paper shows X.")
+    fake_page2 = MagicMock()
+    fake_page2.extract_text = MagicMock(return_value="Method: We do Y.")
+    fake_reader = MagicMock()
+    fake_reader.pages = [fake_page1, fake_page2]
+
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client), \
+         patch("pypdf.PdfReader", return_value=fake_reader):
+        out = await forum_ingest.fetch_arxiv_full("2310.06825")
+
+    assert len(out) >= 1
+    e = out[0]
+    assert e["source_type"] == "paper_abstract"
+    assert e["source_ref"] == "2310.06825"
+    assert e["source_url"] == "https://arxiv.org/abs/2310.06825"
+    assert e["quality_signal"]["full_pdf"] is True
+    # Combined text appears in some chunk
+    combined = " ".join(c["content"] for c in out)
+    assert "This paper shows X." in combined
+    assert "We do Y." in combined
+
+
+@pytest.mark.asyncio
+async def test_fetch_arxiv_full_404_returns_empty(fake_cache_miss):
+    from app.utils import forum_ingest
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    client = MagicMock()
+    client.get = AsyncMock(return_value=mock_resp)
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client):
+        out = await forum_ingest.fetch_arxiv_full("0000.0000")
+    assert out == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_arxiv_full_oversized_pdf_rejected(fake_cache_miss):
+    from app.utils import forum_ingest
+    from app.config import settings
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"X" * (settings.research_max_pdf_bytes + 1)
+    client = MagicMock()
+    client.get = AsyncMock(return_value=mock_resp)
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client):
+        out = await forum_ingest.fetch_arxiv_full("9999.9999")
+    assert out == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_arxiv_full_cache_hit_skips_network():
+    """Cached PDF bytes → skip HTTP, still run pypdf extract."""
+    from app.utils import forum_ingest
+
+    cache = MagicMock()
+    cache.get = AsyncMock(return_value=b"%PDF-1.4 cached bytes")
+    cache.put = AsyncMock(return_value=True)
+
+    fake_page = MagicMock()
+    fake_page.extract_text = MagicMock(return_value="From cache.")
+    fake_reader = MagicMock()
+    fake_reader.pages = [fake_page]
+
+    client = MagicMock()
+    client.get = AsyncMock()
+
+    with patch("app.utils.forum_ingest.get_fetch_cache", return_value=cache), \
+         patch("app.utils.forum_ingest.get_generic_http_client", return_value=client), \
+         patch("pypdf.PdfReader", return_value=fake_reader):
+        out = await forum_ingest.fetch_arxiv_full("2310.06825")
+
+    client.get.assert_not_called()
+    assert any("From cache." in c["content"] for c in out)
+
+
+@pytest.mark.asyncio
+async def test_fetch_arxiv_full_zero_budget_returns_empty(fake_cache_miss):
+    from app.utils import forum_ingest
+    from app.config import settings
+    with patch.object(settings, "arxiv_max_sections", 0):
+        out = await forum_ingest.fetch_arxiv_full("any")
+    assert out == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_arxiv_dispatches_id_full_to_full_fetcher():
+    """fetch_arxiv(mode='id_full', ...) routes to fetch_arxiv_full."""
+    from app.utils import forum_ingest
+    with patch("app.utils.forum_ingest.fetch_arxiv_full",
+               AsyncMock(return_value=[{"x": 99}])) as full_mock:
+        out = await forum_ingest.fetch_arxiv("id_full", "2310.06825", limit=5)
+    full_mock.assert_awaited_once_with("2310.06825")
+    assert out == [{"x": 99}]
 
 
 # ---------------------------------------------------------------------------
