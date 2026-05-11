@@ -387,6 +387,151 @@ async def test_fetch_repo_releases_cache_miss_then_write():
     assert "ttl_seconds" in kwargs
 
 
+# ---------------------------------------------------------------------------
+# §17.124 — GitHub Discussions (GraphQL)
+# ---------------------------------------------------------------------------
+
+def _gql_response(nodes, status_code=200, errors=None):
+    body = {"data": {"repository": {"discussions": {"nodes": nodes}}}}
+    if errors:
+        body["errors"] = errors
+    return _make_response(status_code=status_code, json_data=body)
+
+
+@pytest.mark.asyncio
+async def test_fetch_repo_discussions_happy_path():
+    """Answered discussions returned with answer body concatenated."""
+    from app.utils import github_ingest
+    from app.config import settings
+
+    nodes = [
+        {
+            "number": 42,
+            "title": "How do I X?",
+            "body": "I'm trying to do X. Has anyone done this?",
+            "url": "https://github.com/o/r/discussions/42",
+            "upvoteCount": 7,
+            "category": {"name": "Q&A"},
+            "answer": {"body": "Yes, you do X by calling Y."},
+        },
+        {
+            "number": 50,
+            "title": "Another thread",
+            "body": "Body here.",
+            "url": "https://github.com/o/r/discussions/50",
+            "upvoteCount": 2,
+            "category": {"name": "General"},
+            "answer": {"body": "Answer text."},
+        },
+    ]
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=_gql_response(nodes))
+    with patch.object(settings, "github_token", "fake-token"), \
+         patch("app.utils.github_ingest.get_github_client", return_value=mock_client):
+        out = await github_ingest.fetch_repo_discussions("o", "r", limit=10)
+
+    assert len(out) == 2
+    e = out[0]
+    assert e["source_type"] == "community"
+    assert e["source_ref"] == "discussion-42"
+    assert "How do I X?" in e["content"]
+    assert "Yes, you do X by calling Y." in e["content"]
+    assert e["quality_signal"]["kind"] == "discussion"
+    assert e["quality_signal"]["upvotes"] == 7
+    assert e["quality_signal"]["has_answer"] is True
+    assert e["quality_signal"]["category"] == "Q&A"
+
+
+@pytest.mark.asyncio
+async def test_fetch_repo_discussions_no_token_returns_empty():
+    """Anonymous GraphQL is rejected by GitHub — bail early on missing token."""
+    from app.utils import github_ingest
+    from app.config import settings
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock()
+    with patch.object(settings, "github_token", ""), \
+         patch("app.utils.github_ingest.get_github_client", return_value=mock_client):
+        out = await github_ingest.fetch_repo_discussions("o", "r", limit=10)
+    assert out == []
+    mock_client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fetch_repo_discussions_graphql_errors_returns_empty():
+    """GraphQL returns errors in body['errors'] with status=200. Treated as no-data."""
+    from app.utils import github_ingest
+    from app.config import settings
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=_gql_response(
+        nodes=[],
+        errors=[{"message": "Could not resolve to a Repository"}],
+    ))
+    with patch.object(settings, "github_token", "fake"), \
+         patch("app.utils.github_ingest.get_github_client", return_value=mock_client):
+        out = await github_ingest.fetch_repo_discussions("nope", "nope", limit=10)
+    assert out == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_repo_discussions_zero_limit_short_circuits():
+    from app.utils import github_ingest
+    from app.config import settings
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock()
+    with patch.object(settings, "github_token", "fake"), \
+         patch("app.utils.github_ingest.get_github_client", return_value=mock_client):
+        out = await github_ingest.fetch_repo_discussions("o", "r", limit=0)
+    assert out == []
+    mock_client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fetch_repo_discussions_skips_bodyless_and_answerless():
+    """Threads with neither body nor answer text are dropped."""
+    from app.utils import github_ingest
+    from app.config import settings
+    nodes = [
+        {"number": 1, "title": "Empty everything", "body": "", "answer": None,
+         "url": "x", "upvoteCount": 0, "category": {"name": "X"}},
+        {"number": 2, "title": "Body only", "body": "actual content",
+         "answer": None,
+         "url": "x", "upvoteCount": 0, "category": {"name": "X"}},
+    ]
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=_gql_response(nodes))
+    with patch.object(settings, "github_token", "fake"), \
+         patch("app.utils.github_ingest.get_github_client", return_value=mock_client):
+        out = await github_ingest.fetch_repo_discussions("o", "r", limit=10)
+    assert [e["source_ref"] for e in out] == ["discussion-2"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_repo_discussions_cache_hit_skips_graphql():
+    """Cached nodes → no /graphql POST."""
+    from app.utils import github_ingest
+    from app.config import settings
+
+    cached = json.dumps([
+        {"number": 99, "title": "Cached", "body": "cached body",
+         "url": "x", "upvoteCount": 1,
+         "category": {"name": "General"},
+         "answer": {"body": "cached answer"}},
+    ]).encode("utf-8")
+    cache = MagicMock()
+    cache.get = AsyncMock(return_value=cached)
+    cache.put = AsyncMock(return_value=True)
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock()
+
+    with patch.object(settings, "github_token", "fake"), \
+         patch("app.utils.github_ingest.get_fetch_cache", return_value=cache), \
+         patch("app.utils.github_ingest.get_github_client", return_value=mock_client):
+        out = await github_ingest.fetch_repo_discussions("o", "r", limit=5)
+    assert len(out) == 1
+    assert out[0]["source_ref"] == "discussion-99"
+    mock_client.post.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_fetch_repo_issues_cache_hit_skips_network():
     """Cached issues response → no HTTP call."""

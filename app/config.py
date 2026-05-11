@@ -193,6 +193,7 @@ class Settings(BaseSettings):
     github_max_files: int = Field(default=50, ge=1, le=1000)
     github_max_issues: int = Field(default=25, ge=0, le=200)
     github_max_releases: int = Field(default=10, ge=0, le=100)
+    github_max_discussions: int = Field(default=25, ge=0, le=200)
     github_min_issue_reactions: int = Field(default=2, ge=0, le=1000)
     github_blob_concurrency: int = Field(default=8, ge=1, le=64)
     github_timeout: int = Field(default=30, ge=1, le=300)

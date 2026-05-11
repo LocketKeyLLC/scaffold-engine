@@ -4719,6 +4719,57 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.124 GitHub Discussions API (GraphQL) — answered-only ingest (phase-6 quality 1/3) (2026-05-11)
+
+Closes the §17.106 plan item that was flagged but never picked up: "Discussions API for community-validated patterns. Only `is_answered=true` threads." Picked up here as the first phase-6 commit.
+
+**Why GraphQL.** GitHub Discussions are not exposed via REST. The `/repos/{o}/{r}/discussions` endpoint doesn't exist; only `/graphql` returns them. So this is the first GH client call that uses `client.post("/graphql", ...)` instead of REST GET. The existing GH client (`http_clients.py:_build_github`) already sends the `Authorization: Bearer <token>` header, so the same client works for GraphQL.
+
+**Query** — minimal field set:
+
+```graphql
+query($owner: String!, $repo: String!, $first: Int!) {
+  repository(owner: $owner, name: $repo) {
+    discussions(first: $first, orderBy: {field: UPDATED_AT, direction: DESC}, answered: true) {
+      nodes {
+        number title body url upvoteCount
+        category { name }
+        answer { body }
+      }
+    }
+  }
+}
+```
+
+`answered: true` is the server-side filter — only threads with a chosen answer come back. No client-side reaction-count gate (the original §17.106 plan suggested one, but answered-only is a sufficient quality bar; Discussions are less voted than Issues so a low gate would let almost everything through anyway).
+
+**`GITHUB_TOKEN` required.** GraphQL rejects anonymous requests with 401. Missing token → fetcher logs an info line and returns `[]`. Not a hard error — many use-cases don't need Discussions, and a repo may also simply not have Discussions enabled.
+
+**GraphQL error handling.** GraphQL returns a 200 status with `body.errors` populated when the query references an unknown repository, the user lacks read access, or Discussions are disabled on the repo. We treat all those as "no data" — log at info level, return `[]`. No exception propagates.
+
+**Entry shape.** Mirrors `fetch_repo_issues_and_prs`: `source_type=community`, `source_ref=discussion-<number>`. Content joins discussion body + chosen answer body with markdown headers (`# Discussion #N: title` + body + `## Accepted Answer`). `quality_signal` carries `{upvotes, kind="discussion", category, has_answer}`.
+
+**Cache.** Short TTL (`fetch_cache_ttl_default_seconds`, 1 h) at `fetchv1:gh:list-latest:discussions-…`. Discussion bodies + accepted answers can be edited; same pattern as issues/releases caching from §17.111.
+
+**Files.**
+
+- `app/config.py` — new `github_max_discussions: int = 25` (`ge=0..200`). `ge=0` lets it act as a kill switch when Discussions aren't wanted.
+- `app/utils/github_ingest.py` — `_DISCUSSIONS_GRAPHQL_QUERY` constant + `fetch_repo_discussions(owner, repo, limit)` async function. Token check, cache integration, error-tolerant GraphQL handling.
+- `app/modules/research_agent.py` — `_run_research_github_mode` imports `fetch_repo_discussions`, calls it alongside the existing 3 fetchers under its own `try/except` (a discussions failure shouldn't kill the rest of the github fetch), counts in `search_complete` payload.
+- `tests/test_github_ingest_deep.py` — 6 new tests: happy path (parses upvote/category/answer/has_answer), no-token-returns-empty (no POST made), graphql-errors-returns-empty, zero-limit short-circuit, body+answer-less-skipped, cache-hit skips POST.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_github_ingest_deep.py --timeout=30 -q
+39 passed in 2.41s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1720 passed, 8 skipped in 612.35s (0:10:12)
+```
+
++6 vs §17.123 baseline (`1714 passed`) — all from new discussions tests. Same 8 skipped, 0 warnings (14 clean runs in a row).
+
 ### 17.123 `arxiv:<id>:full` — full-PDF ingest opt-in (phase-5 deferral close 3/3, phase-5 close) (2026-05-11)
 
 Final phase-5 commit. Closes the §17.108 deferral about "arXiv abstract by default, full PDF opt-in." With this, both abstract mode and full-paper mode are reachable for any arXiv ID.

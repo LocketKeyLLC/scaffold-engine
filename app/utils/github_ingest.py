@@ -502,6 +502,138 @@ async def fetch_repo_releases(
     return out
 
 
+_DISCUSSIONS_GRAPHQL_QUERY = """
+query($owner: String!, $repo: String!, $first: Int!) {
+  repository(owner: $owner, name: $repo) {
+    discussions(first: $first, orderBy: {field: UPDATED_AT, direction: DESC}, answered: true) {
+      nodes {
+        number
+        title
+        body
+        url
+        upvoteCount
+        category { name }
+        answer {
+          body
+        }
+      }
+    }
+  }
+}
+"""
+
+
+async def fetch_repo_discussions(
+    owner: str, repo: str, limit: int,
+) -> list[dict[str, Any]]:
+    """Fetch answered GitHub Discussions via GraphQL (§17.124).
+
+    GitHub Discussions aren't exposed via REST — GraphQL is the only path.
+    Filter ``answered: true`` so we only ingest community-validated threads
+    that have a chosen answer. Each kept entry tagged ``source_type=community``,
+    ``source_ref=discussion-<number>``.
+
+    Requires ``GITHUB_TOKEN`` — anonymous GraphQL is rejected (401).
+    Returns empty list when no token configured (graceful degradation,
+    not a hard error: a repo may not have Discussions enabled either).
+
+    Response cached at ``fetchv1:gh:list-latest:discussions-…`` with the
+    short TTL — discussion bodies + answers can be edited, so this is
+    within-session dedup, not durable storage.
+    """
+    if limit <= 0:
+        return []
+    if not settings.github_token:
+        logger.info(
+            "github_discussions_skipped: GITHUB_TOKEN required for GraphQL"
+        )
+        return []
+
+    cache = get_fetch_cache()
+    cache_path = f"discussions:{owner}/{repo}:answered:limit-{min(limit, 100)}"
+
+    nodes: list | None = None
+    cached = await cache.get("gh", "list-latest", cache_path)
+    if cached:
+        try:
+            nodes = json.loads(cached)
+        except Exception as exc:
+            logger.debug("gh_discussions_cache_decode_failed: %s", exc)
+
+    if nodes is None:
+        client = get_github_client()
+        try:
+            r = await client.post(
+                "/graphql",
+                json={
+                    "query": _DISCUSSIONS_GRAPHQL_QUERY,
+                    "variables": {
+                        "owner": owner, "repo": repo, "first": min(limit, 100),
+                    },
+                },
+            )
+        except Exception as exc:
+            logger.warning("gh_discussions_fetch_failed: %s/%s err=%s", owner, repo, exc)
+            return []
+        _check_rate_limit(r)
+        if r.status_code != 200:
+            logger.warning(
+                "gh_discussions_unexpected_status: %s/%s status=%d",
+                owner, repo, r.status_code,
+            )
+            return []
+        body = r.json()
+        # GraphQL errors land in body["errors"] with a 200 status. Common
+        # cases: repository not found (404 equivalent), Discussions not
+        # enabled, or read scope missing on the token. All treated as
+        # "no data" rather than raising.
+        if body.get("errors"):
+            logger.info(
+                "gh_discussions_graphql_errors: %s/%s err=%s",
+                owner, repo, str(body["errors"])[:200],
+            )
+            return []
+        repo_data = (body.get("data") or {}).get("repository") or {}
+        nodes = (repo_data.get("discussions") or {}).get("nodes") or []
+        try:
+            await cache.put(
+                "gh", "list-latest", cache_path,
+                json.dumps(nodes).encode("utf-8"),
+                ttl_seconds=settings.fetch_cache_ttl_default_seconds,
+            )
+        except Exception as exc:
+            logger.debug("gh_discussions_cache_put_failed: %s", exc)
+
+    out: list[dict[str, Any]] = []
+    for d in nodes[:limit]:
+        body_text = (d.get("body") or "").strip()
+        answer = d.get("answer") or {}
+        answer_body = (answer.get("body") or "").strip()
+        if not body_text and not answer_body:
+            continue
+        number = d.get("number")
+        title = d.get("title", "")
+        content_parts = [f"# Discussion #{number}: {title}"]
+        if body_text:
+            content_parts.append(body_text)
+        if answer_body:
+            content_parts.append(f"## Accepted Answer\n\n{answer_body}")
+        out.append({
+            "path": f"discussion/{number}",
+            "content": "\n\n".join(content_parts),
+            "source_type": "community",
+            "source_url": d.get("url", ""),
+            "source_ref": f"discussion-{number}",
+            "quality_signal": {
+                "upvotes": int(d.get("upvoteCount") or 0),
+                "kind": "discussion",
+                "category": (d.get("category") or {}).get("name", ""),
+                "has_answer": bool(answer_body),
+            },
+        })
+    return out
+
+
 async def fetch_repo_issues_and_prs(
     owner: str, repo: str, limit: int, min_reactions: int,
 ) -> list[dict[str, Any]]:

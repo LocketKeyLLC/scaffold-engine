@@ -1113,6 +1113,7 @@ async def _run_research_github_mode(
     """
     from app.utils.github_ingest import (
         fetch_repo_content,
+        fetch_repo_discussions,
         fetch_repo_issues_and_prs,
         fetch_repo_releases,
     )
@@ -1164,6 +1165,7 @@ async def _run_research_github_mode(
     # surface them as content.
     releases: list[dict] = []
     issues: list[dict] = []
+    discussions: list[dict] = []
     try:
         releases = await fetch_repo_releases(owner, repo, _settings.github_max_releases)
     except Exception as exc:
@@ -1176,8 +1178,14 @@ async def _run_research_github_mode(
         )
     except Exception as exc:
         logger.warning("github_issues_fetch_failed: %s/%s err=%s", owner, repo, exc)
+    try:
+        discussions = await fetch_repo_discussions(
+            owner, repo, _settings.github_max_discussions,
+        )
+    except Exception as exc:
+        logger.warning("github_discussions_fetch_failed: %s/%s err=%s", owner, repo, exc)
 
-    all_items = list(files) + releases + issues
+    all_items = list(files) + releases + issues + discussions
     if not all_items:
         raise RuntimeError(f"No ingestible content found in {owner}/{repo}")
 
@@ -1199,6 +1207,7 @@ async def _run_research_github_mode(
         "files": len(files),
         "releases": len(releases),
         "issues": len(issues),
+        "discussions": len(discussions),
     })
 
     # §17.119 — for markdown-y source_types, split each item's body into
