@@ -4719,6 +4719,45 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.113 Topic-mode distill bypass — classifier-driven split in `_extract_entries` (phase-1 follow-up #4 — topic half) (2026-05-11)
+
+Completes the §17.110 classifier integration. Topic mode's per-iteration `_extract_entries` now classifies every fetched URL: curated source_types (SO/HF/arXiv/GH releases-CI-tests/etc., per §17.110's `CURATED_SOURCE_TYPES`) bypass the 7b LLM extract batch; everything else continues through the existing LLM tool_call path unchanged. Mixed batches split correctly — a single iteration can ingest some URLs via bypass and the rest via LLM.
+
+**The savings.** Topic mode fetches up to `research_max_urls_per_iteration` URLs per iteration (default 10). Pre-§17.113, every URL's chunks fed the 7b extract pass at `_EXTRACT_BATCH_FULL_PAGE` chunks/batch. Now any URL hitting a curated host (a typical "transformer architecture" query commonly pulls SO answers + HF model cards + arXiv abstracts mixed with general web pages) bypasses entirely. The 7b call count drops in proportion to the curated-URL fraction.
+
+**Implementation.** Split-and-route inside the existing function — no new mode dispatch:
+
+1. After `_fetch_and_extract` returns, iterate the original `results` list once.
+2. For each URL with a fetched body: call `classify_url(url)`.
+3. If classified to a curated source_type AND `should_distill(source_type)` is False AND a body was fetched: chunk the body, append entries directly to `all_entries` with the classified `source_type` + `build_provenance(source_ref=url)`. Skip adding to `expanded_results` (so the LLM batch loop never sees this URL).
+4. Otherwise (unclassified or no body): existing flow — chunk into `expanded_results` for the LLM extract batch, or pass through as a snippet result.
+
+The result is that `expanded_results` contains only URLs that genuinely benefit from LLM distillation. The downstream batch loop runs as before, just on fewer URLs.
+
+**Wikipedia stays in the distill pass.** §17.110's `CURATED_SOURCE_TYPES` deliberately excludes `wiki_article` — wiki content is mutable, paraphrased prose where the LLM can usefully extract atomic facts. Same with `hn_comment`, `reddit_post`, `community`. `should_distill` returns True for those; they continue through the LLM path. Only the 9 hard-curated types short-circuit.
+
+**Files.**
+
+- `app/modules/research_agent.py` — `_extract_entries` reworked at the post-fetch step: single pass over `results` that splits into bypass entries (appended to `all_entries`) and distill entries (appended to `expanded_results`). New log line `topic_classifier_bypass: bypassed_urls=N bypassed_entries=M distill_urls=K` so an operator inspecting an iteration sees the split.
+- `tests/test_research_topic_bypass.py` (new) — 4 tests: all-curated input → tool_call never invoked; uncurated → LLM still called; mixed batch → tool_call invoked exactly once and only the uncurated URL appears in its prompt; classified URL without a fetched body → falls through to snippet-fallback (no provenance synthesized).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_research_topic_bypass.py --timeout=30 -q
+4 passed in 2.11s
+
+$ docker exec scaffold-orchestrator pytest tests/ -k "research or topic or url_classifier or extract" --timeout=30 -q
+278 passed, 1351 deselected in 89.03s (0:01:29)
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1621 passed, 8 skipped in 610.05s (0:10:10)
+```
+
++4 vs §17.112 baseline (`1617 passed`). Same 8 skipped, 0 warnings.
+
+**Phase-1 follow-up #4 closed.** With §17.112 + §17.113 shipped, the URL classifier + `should_distill` helper that §17.110 staged are both wired end-to-end: every direct mode (`github:`, `hf:`, `so:`, `hn:`, `arxiv:`, `reddit:`, `wiki:`) avoids LLM distill by construction (curated by source); URL mode bypasses on classified URLs; topic mode bypasses on classified URLs in mid-iteration. The remaining phase-1 deferrals: `hf:doc/` (waiting on a public API), thread-warning investigation (heisenbug), `cache_hit_upstream` SSE (low-value plumbing).
+
 ### 17.112 URL-mode distill bypass — classifier-driven (phase-1 follow-up #4 — URL half) (2026-05-11)
 
 Closes the URL-mode half of §17.110's deferred classifier integration. When `_run_research_url_mode` receives a URL that `classify_url` maps to a curated source_type (SO answer, HF model card, arXiv abstract, GH release/CI/test, Wikipedia, etc.), the 7b LLM extract pass is skipped — chunks are ingested directly with the classified `source_type` and §17.104 provenance.

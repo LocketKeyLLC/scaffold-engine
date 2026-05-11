@@ -508,11 +508,43 @@ async def _extract_entries(
     else:
         logger.warning("research_fetch: trafilatura returned nothing; snippet fallback")
 
+    # §17.113 — classifier-driven distill bypass. URLs that classify_url
+    # recognizes as a curated source (SO answer, HF model card, arXiv, GH
+    # release/CI/test, Wikipedia, etc.) skip the 7b LLM extract pass:
+    # chunks of the fetched body are ingested directly with the classified
+    # source_type and §17.104 provenance. Non-curated URLs (and unfetched
+    # ones) fall through to the existing LLM batch loop unchanged.
+    from app.utils.url_classifier import classify_url, should_distill
+    from app.modules.provenance import build_provenance
+
+    all_entries: list[dict] = []
     expanded_results: list[dict] = []
+    bypass_url_count = 0
+    bypass_entry_count = 0
     for r in results:
         url = r.get("url", "")
         full = url_to_text.get(url)
-        if full:
+        classified = classify_url(url)
+        is_bypass = (
+            classified is not None
+            and not should_distill(classified)
+            and bool(full)
+        )
+        if is_bypass:
+            bypass_url_count += 1
+            for chunk in _chunk_text(full):
+                if len(chunk) > 50:
+                    all_entries.append({
+                        "title": r.get("title", "")[:100],
+                        "content": chunk,
+                        "tags": "",
+                        "source": url,
+                        "source_type": classified,
+                        "facet": r.get("facet", ""),
+                        "provenance": build_provenance(source_ref=url),
+                    })
+                    bypass_entry_count += 1
+        elif full:
             for chunk in _chunk_text(full):
                 expanded_results.append({
                     "title": r.get("title", ""),
@@ -523,8 +555,14 @@ async def _extract_entries(
         else:
             expanded_results.append(r)
 
+    if bypass_url_count > 0:
+        logger.info(
+            "topic_classifier_bypass: bypassed_urls=%d bypassed_entries=%d distill_urls=%d",
+            bypass_url_count, bypass_entry_count,
+            len({r.get("url") for r in expanded_results if r.get("url")}),
+        )
+
     batch_size = _EXTRACT_BATCH_FULL_PAGE if fetched else _EXTRACT_BATCH_SNIPPET
-    all_entries: list[dict] = []
 
     for i in range(0, len(expanded_results), batch_size):
         batch = expanded_results[i:i + batch_size]
