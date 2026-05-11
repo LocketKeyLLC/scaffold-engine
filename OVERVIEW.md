@@ -4719,6 +4719,67 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.105 SHA-keyed upstream fetch cache + per-mode budget caps (2026-05-10)
+
+Commit 3/8 of the phase-1 deep-search rollout. Producer-shared infrastructure: a Redis-backed cache so SHA/revision-pinned upstream artifacts (GitHub at a tag, HF at a revision, arXiv post-id) are fetched once and reused across `/research` runs, plus Pydantic-bounded budget caps so each producer (§17.106–§17.109) has an explicit ceiling on what it pulls.
+
+**Cache contract** — `app/utils/fetch_cache.py`:
+
+- Key format: `fetchv1:{source_type}:{ref}:{path_hash}` where `path_hash = SHA256(path)[:16]`.
+- `ALLOWED_SOURCE_TYPES`: `{gh, hf, so, hn, arxiv, reddit, wiki}` — anything else raises `ValueError` at `make_key`.
+- `ref` validated against `^[A-Za-z0-9._\-/:]{1,128}$` — accepts git tags, HF revisions, post IDs, "tag:v1.2.3" scheme-qualified refs; rejects spaces, semicolons, newlines, > 128 chars.
+- Bodies > `fetch_cache_max_body_bytes` (default 5 MB) dropped silently with WARNING log. A single huge response can't blow out Redis.
+- Empty bodies + non-positive TTLs rejected at `put()` (no silent zero-TTL writes).
+- All Redis errors caught — `get` returns None, `put` returns False. Never raises into the caller.
+- No L1 in-memory tier (bodies are KB–MB scale; LRU eviction churns more than it saves).
+
+**TTL strategy.** Two defaults; producers pick per call:
+
+- `fetch_cache_ttl_default_seconds` = 3600 (1 h). For mutable refs like `main` / `latest`.
+- `fetch_cache_ttl_immutable_seconds` = 30 × 86400 (30 d). For SHA/revision-pinned refs — content is provably immutable so a long TTL is safe.
+
+**Per-mode budgets** (Pydantic-bounded `Field(default=N, ge=…, le=…)` in `app/config.py`):
+
+| Setting | Default | Bounds | Producer |
+|---|---|---|---|
+| `gh_max_files` | 50 | 1..500 | §17.106 GitHub |
+| `gh_max_issues` | 25 | 0..200 | §17.106 GitHub |
+| `gh_max_releases` | 10 | 0..100 | §17.106 GitHub |
+| `hf_max_files` | 30 | 1..200 | §17.107 HF |
+| `so_max_answers` | 20 | 1..100 | §17.108 SO |
+| `hn_max_items` | 25 | 1..200 | §17.108 HN |
+| `arxiv_max_sections` | 10 | 1..50 | §17.108 arXiv |
+| `reddit_max_posts` | 20 | 1..100 | §17.109 Reddit |
+| `wiki_max_pages` | 10 | 1..50 | §17.109 Wikipedia |
+
+`gh_max_issues` / `gh_max_releases` allow `ge=0` as a kill switch ("skip these entirely"); the rest require ≥ 1 — no value in invoking a producer that fetches zero items.
+
+**Files.**
+
+- `app/utils/fetch_cache.py` (new) — `make_key`, `FetchCache.{get,put,stats}`, `get_fetch_cache()` singleton accessor. Mirrors the embedding cache's lazy-Redis-init pattern (`app/utils/embedding_cache.py:_get_redis`).
+- `app/config.py` — 12 new Pydantic fields (9 budgets + 3 cache controls), grouped before `model_config`.
+- `tests/test_fetch_cache.py` (new) — 32 tests: key construction (allowlist, ref regex, path hashing, determinism, ref/type/path-change sensitivity), Redis round-trip via AsyncMock, oversized rejection, empty / invalid-TTL rejection, Redis-error handling, real-world refs (git tags, HF revisions, arXiv IDs).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_fetch_cache.py --timeout=30 -q
+32 passed in 1.77s
+
+$ docker exec scaffold-orchestrator python -c \
+    "from app.config import settings; \
+     print(settings.gh_max_files, settings.fetch_cache_ttl_immutable_seconds, \
+           settings.fetch_cache_max_body_bytes)"
+50 2592000 5242880
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1474 passed, 8 skipped in 642.35s (0:10:42)
+```
+
+Net +32 vs §17.104 baseline (`1442 passed`) — all from `test_fetch_cache.py`. Same 8 skipped.
+
+**Next.** §17.106 — GitHub deep mode. First producer; wires both the fetch cache (`source_type="gh"`, ref = resolved tag/SHA) and the provenance writer (§17.104). Adds `github:owner/repo@<ref>` dispatch + ingest paths for `tests/`, `.github/workflows/`, release notes, CHANGELOG, closed-issue + merged-PR fetcher with quality gates.
+
 ### 17.104 Provenance + confidence-by-source — surface ground-truth signals at retrieval (2026-05-10)
 
 Commit 2/8 of the phase-1 deep-search rollout. Adds storage + helpers for per-entry provenance (`source_ref`, `fetched_at`, `quality_signal`) and derives `confidence_score` from `source_type` when callers don't supply one. The §17.106–§17.109 producers populate these; this commit wires the pipeline end-to-end so producers call one helper and have it round-trip through `query_rag`.

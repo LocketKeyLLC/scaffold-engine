@@ -368,6 +368,25 @@ class Settings(BaseSettings):
     otel_service_name: str = "scaffold-engine"
     otel_otlp_endpoint: str = ""           # http://otel-collector:4318/v1/traces
 
+    # Deep-search per-mode budget caps. Each producer caps how many
+    # artifacts it fetches per /research invocation.
+    gh_max_files: int = Field(default=50, ge=1, le=500)
+    gh_max_issues: int = Field(default=25, ge=0, le=200)
+    gh_max_releases: int = Field(default=10, ge=0, le=100)
+    hf_max_files: int = Field(default=30, ge=1, le=200)
+    so_max_answers: int = Field(default=20, ge=1, le=100)
+    reddit_max_posts: int = Field(default=20, ge=1, le=100)
+    hn_max_items: int = Field(default=25, ge=1, le=200)
+    arxiv_max_sections: int = Field(default=10, ge=1, le=50)
+    wiki_max_pages: int = Field(default=10, ge=1, le=50)
+
+    # Upstream HTTP cache (fetchv1: prefix in Redis). TTLs split by ref
+    # mutability: SHA/revision-pinned → long; mutable → short. Body cap
+    # mirrors the bounded-fetch limit (5 MB default).
+    fetch_cache_ttl_default_seconds: int = Field(default=3600, ge=60, le=2592000)
+    fetch_cache_ttl_immutable_seconds: int = Field(default=30 * 86400, ge=60, le=365 * 86400)
+    fetch_cache_max_body_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @model_validator(mode="after")
