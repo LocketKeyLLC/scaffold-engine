@@ -1119,6 +1119,7 @@ async def _run_research_github_mode(
     from app.modules.provenance import build_provenance
     from app.config import settings as _settings
     from app.utils.fetch_cache import get_fetch_cache
+    from app.utils.markdown_chunker import split_markdown_by_kind
 
     state.outline_facets = ["github_repo"]
     state.iteration = 1
@@ -1200,23 +1201,37 @@ async def _run_research_github_mode(
         "issues": len(issues),
     })
 
+    # §17.119 — for markdown-y source_types, split each item's body into
+    # (chunk, kind) tuples on triple-backtick fences. One file can yield
+    # multiple Milvus entries — each tagged ``kind`` in domain_tags so
+    # query-intent="code" can filter on it.
+    _MARKDOWN_SPLIT_SOURCE_TYPES = {"tech_docs", "release_notes", "community"}
     entries: list[dict] = []
     for f in all_items:
         source_url = f.get("source_url", "")
         if source_url:
             state.url_history.add(source_url)
-        entries.append({
-            "title": f"{owner}/{repo}: {f['path']}",
-            "content": f["content"],
-            "source": source_url,
-            "source_type": f.get("source_type", "tech_docs"),
-            # No confidence_score key → §17.104 derives from source_type.
-            "facet": "github_repo",
-            "provenance": build_provenance(
-                source_ref=f.get("source_ref", ""),
-                quality_signal=f.get("quality_signal", {}),
-            ),
-        })
+        source_type = f.get("source_type", "tech_docs")
+        body = f["content"]
+        if source_type in _MARKDOWN_SPLIT_SOURCE_TYPES:
+            parts = split_markdown_by_kind(body)
+        else:
+            parts = [(body, "prose")]
+        for i, (chunk_text, chunk_kind) in enumerate(parts):
+            suffix = f"#{chunk_kind}-{i}" if len(parts) > 1 else ""
+            entries.append({
+                "title": f"{owner}/{repo}: {f['path']}{suffix}",
+                "content": chunk_text,
+                "source": source_url,
+                "source_type": source_type,
+                # No confidence_score key → §17.104 derives from source_type.
+                "facet": "github_repo",
+                "domain_tags": ["github_repo", chunk_kind],
+                "provenance": build_provenance(
+                    source_ref=f.get("source_ref", ""),
+                    quality_signal=f.get("quality_signal", {}),
+                ),
+            })
 
     yield _sse("extraction_complete", {
         "iteration": 1,
@@ -1255,6 +1270,7 @@ async def _run_research_hf_mode(
     from app.utils.hf_ingest import fetch_hf, HFNotFoundError, HFRateLimitError
     from app.modules.provenance import build_provenance
     from app.utils.fetch_cache import get_fetch_cache
+    from app.utils.markdown_chunker import split_markdown_by_kind
 
     state.outline_facets = [f"hf_{kind}"]
     state.iteration = 1
@@ -1310,22 +1326,34 @@ async def _run_research_hf_mode(
         "hf_kind": kind,
     })
 
+    # §17.119 — split markdown bodies (model/dataset/space READMEs) on
+    # fenced code blocks. Structured "metadata" entries pass through unsplit.
+    _HF_MARKDOWN_SPLIT_TYPES = {"model_card", "dataset_card", "tech_docs"}
     entries: list[dict] = []
     for it in items:
         source_url = it.get("source_url", "")
         if source_url:
             state.url_history.add(source_url)
-        entries.append({
-            "title": f"hf:{kind}/{id_}: {it['path']}",
-            "content": it["content"],
-            "source": source_url,
-            "source_type": it.get("source_type", "tech_docs"),
-            "facet": f"hf_{kind}",
-            "provenance": build_provenance(
-                source_ref=it.get("source_ref", ""),
-                quality_signal=it.get("quality_signal", {}),
-            ),
-        })
+        item_source_type = it.get("source_type", "tech_docs")
+        body = it["content"]
+        if item_source_type in _HF_MARKDOWN_SPLIT_TYPES:
+            parts = split_markdown_by_kind(body)
+        else:
+            parts = [(body, "prose")]
+        for i, (chunk_text, chunk_kind) in enumerate(parts):
+            suffix = f"#{chunk_kind}-{i}" if len(parts) > 1 else ""
+            entries.append({
+                "title": f"hf:{kind}/{id_}: {it['path']}{suffix}",
+                "content": chunk_text,
+                "source": source_url,
+                "source_type": item_source_type,
+                "facet": f"hf_{kind}",
+                "domain_tags": [f"hf_{kind}", chunk_kind],
+                "provenance": build_provenance(
+                    source_ref=it.get("source_ref", ""),
+                    quality_signal=it.get("quality_signal", {}),
+                ),
+            })
 
     yield _sse("extraction_complete", {
         "iteration": 1,

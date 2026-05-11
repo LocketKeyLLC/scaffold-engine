@@ -4719,6 +4719,48 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.119 Code-block vs prose chunk split on markdown bodies (phase-4 quality 2/3) (2026-05-11)
+
+Pairs with §17.118. Markdown content from GitHub READMEs / CHANGELOGs / issue+PR bodies and HF model/dataset/space cards is now split on triple-backtick fences into separate `(chunk, kind)` entries — code blocks become standalone Milvus rows tagged `domain_tags=[..., "code"]`, prose becomes rows tagged `[..., "prose"]`. Combined with §17.118's `query_intent="code"` template, retrieval can preferentially surface code snippets for "how do I call X" queries.
+
+**Why split.** A typical README interleaves prose with fenced examples. Embedded as one chunk, the embedder produces a centroid that's neither cleanly "explanation of foo" nor "code that calls foo" — both regions of embedding space are diluted. Splitting on fences gives the embedder cleaner per-chunk topical signal: the code chunk's embedding sits in the "executable Python that does X" neighborhood; the prose chunk's sits in the "describes X" neighborhood. The §17.118 intent templates steer toward those neighborhoods at query time.
+
+**Split helper.** `app/utils/markdown_chunker.py:split_markdown_by_kind(text) -> list[tuple[str, str]]`:
+
+- Fenced code (`\`\`\`...\`\`\``) → `(code_body, "code")`. Language tag (`\`\`\`python`) dropped from the chunk.
+- Everything outside fences → `(text, "prose")`.
+- Whitespace-only segments dropped.
+- Empty input returns `[]`; no-fence input returns `[(text, "prose")]` so callers always get ≥1 chunk for non-empty content.
+
+**Where applied.**
+
+- `_run_research_github_mode`: splits items where `source_type ∈ {tech_docs, release_notes, community}` (README, docs/*.md, CHANGELOG, release notes, issues/PRs). Skips `test_code` (docstring-only), `ci_config` (YAML).
+- `_run_research_hf_mode`: splits where `source_type ∈ {model_card, dataset_card, tech_docs}` (HF READMEs + space READMEs). Structured metadata summaries (e.g., `hf:model/.../metadata`) pass through unsplit.
+- Forum modes (SO/HN/Reddit/Wiki) intentionally NOT split — their bodies are HTML-flattened by §17.108's `_strip_html` which drops `<pre>` tags entirely. No fences to find.
+
+Per-entry titles disambiguate with a `#<kind>-<i>` suffix when multiple chunks are emitted (e.g., `owner/repo: README.md#code-1`). Single-chunk items keep the original title.
+
+**Files.**
+
+- `app/utils/markdown_chunker.py` (new) — `_FENCE_RE` + `split_markdown_by_kind`.
+- `app/modules/research_agent.py` — GH + HF runners loop over `split_markdown_by_kind(body)` instead of emitting one entry per fetched item. Each chunk gets `domain_tags = [<facet>, <chunk_kind>]`.
+- `tests/test_markdown_chunker.py` (new) — 11 tests: empty/whitespace/no-fence/single-fence/leading-fence/trailing-fence/multiple-fences/lang-tag-dropped/empty-fence-dropped/consecutive-fences/real-world-README.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_markdown_chunker.py --timeout=30 -q
+11 passed in 0.64s
+
+$ docker exec scaffold-orchestrator pytest tests/ -k "research or github or hf_ or markdown" --timeout=30 -q
+259 passed, 1398 deselected in 66.84s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1649 passed, 8 skipped in 598.79s (0:09:58)
+```
+
++11 vs §17.118 baseline (`1638 passed`). Same 8 skipped, 0 warnings (9 clean runs in a row).
+
 ### 17.118 Per-intent embedder instruction templates (phase-4 quality 1/3) (2026-05-11)
 
 First quality-features commit. The query-embedding path now picks an instruction prefix per caller-supplied intent — letting retrieval steer toward different regions of embedding space depending on whether the user is hunting for code, Q&A, or papers.
