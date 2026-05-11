@@ -44,6 +44,12 @@ CONFIDENCE_BY_SOURCE: dict[str, float] = {
     "ai_generated": 0.55,
     "real_time": 0.50,
     "news": 0.50,
+    # §17.125 — disputed_claim ingest. LOW confidence so retrieval can
+    # warn callers that the content was downvoted / locked / withdrawn.
+    # Below the §17.108 quality gates' default acceptance threshold,
+    # not below it so far it's filtered before retrieval — that'd
+    # defeat the purpose of recording negative knowledge.
+    "disputed_claim": 0.30,
 }
 DEFAULT_CONFIDENCE: float = 0.60
 

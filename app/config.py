@@ -49,6 +49,10 @@ TTL_POLICY = {
     "reddit_post": 90 * 86400,
     "hn_comment": 90 * 86400,
     "wiki_article": 180 * 86400,
+    # §17.125 — disputed_claim: downvoted / locked / withdrawn forum
+    # content ingested as negative knowledge. Short-ish TTL since the
+    # underlying content may be edited/deleted by upstream moderation.
+    "disputed_claim": 60 * 86400,
 }
 DEFAULT_TTL_SECONDS = 180 * 86400
 
@@ -387,6 +391,10 @@ class Settings(BaseSettings):
     reddit_max_posts: int = Field(default=20, ge=1, le=100)
     reddit_min_score: int = Field(default=50, ge=0, le=100000)
     reddit_min_comments: int = Field(default=10, ge=0, le=10000)
+    # §17.125 — opt-in: when True, SO + Reddit forum modes also emit
+    # below-gate items tagged source_type=disputed_claim (low confidence)
+    # so retrieval can warn "commonly cited but disputed."
+    forum_ingest_disputed: bool = False
     hn_max_items: int = Field(default=25, ge=1, le=200)
     hn_min_points: int = Field(default=100, ge=0, le=10000)
     arxiv_max_sections: int = Field(default=10, ge=1, le=50)

@@ -89,6 +89,8 @@ def _query_hash(query: str) -> str:
 async def fetch_so_answers(
     query: str, limit: int, min_score: int,
     stats: dict | None = None,
+    *,
+    include_disputed: bool = False,
 ) -> list[dict[str, Any]]:
     """Search SO for questions matching ``query``, return the
     accepted-or-high-score answers as entries.
@@ -172,10 +174,14 @@ async def fetch_so_answers(
                     logger.debug("so_cache_put_failed: %s", exc)
 
     # 3. Compose entries (question title + answer body), gated.
+    # §17.125 — when include_disputed=True, also emit below-gate items
+    # tagged source_type=disputed_claim so retrieval can warn callers
+    # the content is "commonly cited but disputed."
     out: list[dict[str, Any]] = []
+    disputed_out: list[dict[str, Any]] = []
     filtered_score = 0
     for q in questions:
-        if len(out) >= limit:
+        if len(out) >= limit and not include_disputed:
             break
         aid = q.get("accepted_answer_id")
         if not aid:
@@ -185,30 +191,54 @@ async def fetch_so_answers(
             continue
         score = int(ans.get("score", 0))
         is_accepted = bool(ans.get("is_accepted"))
-        if not (is_accepted or score >= min_score):
-            filtered_score += 1
-            continue
         body_text = _strip_pii(_strip_html(ans.get("body", ""))).strip()
         if not body_text:
             continue
         q_title = q.get("title", "")
         link = ans.get("link", f"https://stackoverflow.com/a/{aid}")
-        out.append({
-            "path": f"so/answer-{aid}",
-            "content": f"# Q: {q_title}\n\n{body_text}",
-            "source_type": "so_answer",
-            "source_url": link,
-            "source_ref": f"answer-{aid}",
-            "quality_signal": {
-                "score": score,
-                "is_accepted": is_accepted,
-                "question_score": int(q.get("score", 0)),
-                "question_id": q.get("question_id", 0),
-                "tags": q.get("tags") or [],
-            },
-        })
+        passes_gate = is_accepted or score >= min_score
+        if passes_gate:
+            if len(out) < limit:
+                out.append({
+                    "path": f"so/answer-{aid}",
+                    "content": f"# Q: {q_title}\n\n{body_text}",
+                    "source_type": "so_answer",
+                    "source_url": link,
+                    "source_ref": f"answer-{aid}",
+                    "quality_signal": {
+                        "score": score,
+                        "is_accepted": is_accepted,
+                        "question_score": int(q.get("score", 0)),
+                        "question_id": q.get("question_id", 0),
+                        "tags": q.get("tags") or [],
+                    },
+                })
+        else:
+            filtered_score += 1
+            if include_disputed and len(disputed_out) < limit:
+                disputed_out.append({
+                    "path": f"so/disputed/answer-{aid}",
+                    "content": (
+                        f"# Q: {q_title}\n\n"
+                        f"[DISPUTED — score={score}, not accepted]\n\n{body_text}"
+                    ),
+                    "source_type": "disputed_claim",
+                    "source_url": link,
+                    "source_ref": f"answer-{aid}",
+                    "quality_signal": {
+                        "score": score,
+                        "is_accepted": is_accepted,
+                        "filter_reason": "below_min_score",
+                        "question_score": int(q.get("score", 0)),
+                        "question_id": q.get("question_id", 0),
+                        "tags": q.get("tags") or [],
+                    },
+                })
+
+    out.extend(disputed_out)
     if stats is not None:
-        stats["kept"] = len(out)
+        stats["kept"] = len(out) - len(disputed_out)
+        stats["kept_disputed"] = len(disputed_out)
         stats["filtered_low_score"] = filtered_score
     return out
 
@@ -417,6 +447,8 @@ async def fetch_arxiv(mode: str, value: str, limit: int) -> list[dict[str, Any]]
 async def fetch_reddit_posts(
     subreddit: str, query: str, limit: int, min_score: int, min_comments: int,
     stats: dict | None = None,
+    *,
+    include_disputed: bool = False,
 ) -> list[dict[str, Any]]:
     """Search a single allowlisted subreddit for top-scoring text posts.
 
@@ -476,21 +508,20 @@ async def fetch_reddit_posts(
     if stats is not None:
         stats["fetched"] = len(children)
     out: list[dict[str, Any]] = []
+    disputed_out: list[dict[str, Any]] = []
     filtered_nsfw = 0
     filtered_low_score = 0
     filtered_no_body = 0
     for child in children:
-        if len(out) >= limit:
+        if len(out) >= limit and not include_disputed:
             break
         post = (child or {}).get("data") or {}
         if post.get("over_18"):
+            # NSFW never ingested, not even as disputed.
             filtered_nsfw += 1
             continue
         score = int(post.get("score") or 0)
         ncomments = int(post.get("num_comments") or 0)
-        if score < min_score or ncomments < min_comments:
-            filtered_low_score += 1
-            continue
         body = (post.get("selftext") or "").strip()
         if not body:
             filtered_no_body += 1
@@ -499,21 +530,49 @@ async def fetch_reddit_posts(
         post_id = post.get("id") or ""
         permalink = post.get("permalink") or ""
         body_text = _strip_pii(body)
-        out.append({
-            "path": f"reddit/{subreddit}/{post_id}",
-            "content": f"# r/{subreddit}: {title}\n\n{body_text}",
-            "source_type": "reddit_post",
-            "source_url": f"{_REDDIT_BASE}{permalink}" if permalink else "",
-            "source_ref": f"t3_{post_id}",
-            "quality_signal": {
-                "score": score,
-                "num_comments": ncomments,
-                "subreddit": subreddit,
-                "created_utc": post.get("created_utc"),
-            },
-        })
+        passes_gate = score >= min_score and ncomments >= min_comments
+        if passes_gate:
+            if len(out) < limit:
+                out.append({
+                    "path": f"reddit/{subreddit}/{post_id}",
+                    "content": f"# r/{subreddit}: {title}\n\n{body_text}",
+                    "source_type": "reddit_post",
+                    "source_url": f"{_REDDIT_BASE}{permalink}" if permalink else "",
+                    "source_ref": f"t3_{post_id}",
+                    "quality_signal": {
+                        "score": score,
+                        "num_comments": ncomments,
+                        "subreddit": subreddit,
+                        "created_utc": post.get("created_utc"),
+                    },
+                })
+        else:
+            filtered_low_score += 1
+            # §17.125 — include locked-or-low-engagement posts as
+            # disputed_claim when opted in.
+            if include_disputed and len(disputed_out) < limit:
+                disputed_out.append({
+                    "path": f"reddit/{subreddit}/disputed/{post_id}",
+                    "content": (
+                        f"# r/{subreddit}: {title}\n\n"
+                        f"[DISPUTED — score={score}, comments={ncomments}]\n\n{body_text}"
+                    ),
+                    "source_type": "disputed_claim",
+                    "source_url": f"{_REDDIT_BASE}{permalink}" if permalink else "",
+                    "source_ref": f"t3_{post_id}",
+                    "quality_signal": {
+                        "score": score,
+                        "num_comments": ncomments,
+                        "subreddit": subreddit,
+                        "filter_reason": "below_gates",
+                        "created_utc": post.get("created_utc"),
+                    },
+                })
+
+    out.extend(disputed_out)
     if stats is not None:
-        stats["kept"] = len(out)
+        stats["kept"] = len(out) - len(disputed_out)
+        stats["kept_disputed"] = len(disputed_out)
         stats["filtered_nsfw"] = filtered_nsfw
         stats["filtered_low_score"] = filtered_low_score
         stats["filtered_no_body"] = filtered_no_body

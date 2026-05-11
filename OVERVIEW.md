@@ -4719,6 +4719,51 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.125 Negative-knowledge ingestion — `disputed_claim` source_type (phase-6 quality 2/3) (2026-05-11)
+
+Closes the original master-checklist section-4 item: "Negative-knowledge ingestion. When a SO answer is unaccepted/down-voted-below-threshold, optionally record a `source_type=disputed_claim` entry so retrieval can warn 'this is a commonly-cited but disputed pattern'." Never picked up in phases 1–5. Picked up here.
+
+**New source_type: `disputed_claim`.** Wired everywhere a source_type goes:
+
+- **TTL** = 60 days (shorter than `community`'s 90 because disputed content is more likely to be edited/withdrawn by upstream moderation).
+- **Confidence** = 0.30 — below community/Reddit's 0.60. Low enough that quality-weighted rerank (§17.120) won't surface disputed entries ahead of validated content at similar embedding similarity, BUT high enough that they still come back in retrieval results (≠ filtered out). The semantic is "include but de-prioritize" — exactly what "commonly cited but disputed" calls for.
+- **§17.118 templates** — disputed_claim is not in `CURATED_SOURCE_TYPES`, so URL/topic-mode classifier doesn't bypass distill on it. (No URL hostname classifies to disputed anyway — disputed is producer-emitted, not URL-classified.)
+
+**Opt-in via config.** New `forum_ingest_disputed: bool = False`. Default OFF — existing producers ship unchanged. When ON, SO + Reddit fetchers ALSO emit below-gate items tagged `disputed_claim` alongside their normal gated output. HN, arXiv, Wikipedia not extended — HN's `points` gate is single-signal and below-100 is genuinely noise; arXiv has peer-review gating which isn't recoverable; Wikipedia doesn't have a downvote mechanism.
+
+**Per-producer disputed semantics:**
+
+| Producer | Gate criterion | Disputed if | Content prefix |
+|---|---|---|---|
+| SO | `is_accepted OR score >= so_min_score` | accepted=False AND score < min | `[DISPUTED — score=N, not accepted]` |
+| Reddit | `score >= min AND num_comments >= min` | either gate fails | `[DISPUTED — score=N, comments=M]` |
+
+NSFW Reddit posts NEVER ingest even when `include_disputed=True` — moderation-safety constraint trumps negative-knowledge value. Bodyless posts always filtered (nothing to ingest as disputed either).
+
+**Stats tracking.** Existing `kept` / `filtered_low_score` counters preserved + new `kept_disputed` counter. Mid-§17.125 dev caught two existing stats-dict assertion tests (`test_so_stats_dict_populated`, `test_reddit_stats_dict_populated`) that did exact-dict comparison and needed `kept_disputed: 0` added — additive shape change, no semantic break.
+
+**Files.**
+
+- `app/config.py` — `TTL_POLICY["disputed_claim"] = 60 * 86400`; new `forum_ingest_disputed: bool = False`.
+- `app/modules/provenance.py` — `CONFIDENCE_BY_SOURCE["disputed_claim"] = 0.30`.
+- `app/utils/forum_ingest.py` — `fetch_so_answers` and `fetch_reddit_posts` gain `include_disputed: bool = False` kwarg (keyword-only). Body extraction moved before gate check (needed for both buckets). Disputed-bucket entries get distinct `path` prefix (`so/disputed/answer-N`, `reddit/<sub>/disputed/<id>`) and content prefix (`[DISPUTED — ...]`).
+- `app/modules/research_agent.py` — `_run_research_forum_mode` passes `include_disputed=_settings.forum_ingest_disputed` to SO + Reddit fetchers (no-op when default).
+- `tests/test_forum_ingest.py` — 5 new tests: SO include_disputed emits below-gate items (passes source_type=disputed_claim with `[DISPUTED ...]` content); SO disputed-off keeps existing drop behavior; SO stats split kept/kept_disputed; Reddit include_disputed routes low-engagement to disputed + NSFW never ingests; new TestDisputedSourceTypeWiring (TTL + confidence). Plus 2 existing exact-dict-assertion tests updated for the new `kept_disputed` key.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_forum_ingest.py --timeout=30 -q
+51 passed in 4.84s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1727 passed, 8 skipped in 627.01s (0:10:27)
+```
+
++7 vs §17.124 baseline (`1720 passed`). Same 8 skipped, 0 warnings (15 clean runs in a row).
+
+**Retrieval semantic.** With `forum_ingest_disputed=True` set in env, a user query `so:python lambda closure` would now ingest both the accepted high-vote answers AND below-threshold ones tagged disputed. At query time, both come back in retrieval results — the high-vote ones rank higher (confidence 0.85 + quality_bump up to 1.20); the disputed ones come back below (confidence 0.30, no bump available). Callers reading the result list see the disputed entries' `source_type=disputed_claim` and can render them with a warning badge / lower-confidence styling. Ground truth now includes "what doesn't work / what was rejected."
+
 ### 17.124 GitHub Discussions API (GraphQL) — answered-only ingest (phase-6 quality 1/3) (2026-05-11)
 
 Closes the §17.106 plan item that was flagged but never picked up: "Discussions API for community-validated patterns. Only `is_answered=true` threads." Picked up here as the first phase-6 commit.

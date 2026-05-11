@@ -1430,6 +1430,7 @@ async def _run_research_forum_mode(
             return await fetch_so_answers(
                 value, _settings.so_max_answers, _settings.so_min_score,
                 stats=fetch_stats,
+                include_disputed=_settings.forum_ingest_disputed,
             )
         if prefix == "hn":
             return await fetch_hn_items(
@@ -1445,6 +1446,7 @@ async def _run_research_forum_mode(
                 sub, q, _settings.reddit_max_posts,
                 _settings.reddit_min_score, _settings.reddit_min_comments,
                 stats=fetch_stats,
+                include_disputed=_settings.forum_ingest_disputed,
             )
         if prefix == "wiki":
             return await fetch_wiki_pages(value, _settings.wiki_max_pages)

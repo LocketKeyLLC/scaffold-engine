@@ -427,6 +427,153 @@ async def test_fetch_arxiv_full_zero_budget_returns_empty(fake_cache_miss):
     assert out == []
 
 
+# ---------------------------------------------------------------------------
+# §17.125 — disputed_claim ingest opt-in
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_so_include_disputed_emits_below_gate_items(fake_cache_miss):
+    """include_disputed=True → answers that fail the gate are still
+    ingested, tagged source_type=disputed_claim."""
+    from app.utils import forum_ingest
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=[
+        # 2 questions w/ accepted answer IDs
+        _make_response(json_data={"items": [
+            {"question_id": 1, "title": "Q1", "accepted_answer_id": 1,
+             "score": 50, "tags": ["python"]},
+            {"question_id": 2, "title": "Q2", "accepted_answer_id": 2,
+             "score": 1, "tags": ["python"]},
+        ]}),
+        # answer 1 passes gate (accepted), answer 2 fails (not accepted, low score)
+        _make_response(json_data={"items": [
+            {"answer_id": 1, "score": 30, "is_accepted": True,
+             "body": "<p>good answer</p>",
+             "link": "https://stackoverflow.com/a/1"},
+            {"answer_id": 2, "score": 3, "is_accepted": False,
+             "body": "<p>questionable advice</p>",
+             "link": "https://stackoverflow.com/a/2"},
+        ]}),
+    ])
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client):
+        out = await forum_ingest.fetch_so_answers(
+            "x", limit=10, min_score=10, include_disputed=True,
+        )
+
+    by_type = {e["source_type"]: e for e in out}
+    assert "so_answer" in by_type
+    assert "disputed_claim" in by_type
+    disputed = by_type["disputed_claim"]
+    assert "DISPUTED" in disputed["content"]
+    assert "questionable advice" in disputed["content"]
+    assert disputed["quality_signal"]["filter_reason"] == "below_min_score"
+    assert disputed["quality_signal"]["is_accepted"] is False
+
+
+@pytest.mark.asyncio
+async def test_so_disputed_off_drops_below_gate(fake_cache_miss):
+    """Default include_disputed=False keeps existing drop behavior."""
+    from app.utils import forum_ingest
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=[
+        _make_response(json_data={"items": [
+            {"question_id": 1, "title": "Q1", "accepted_answer_id": 1, "score": 1, "tags": []},
+        ]}),
+        _make_response(json_data={"items": [
+            {"answer_id": 1, "score": 3, "is_accepted": False,
+             "body": "<p>weak</p>",
+             "link": "https://stackoverflow.com/a/1"},
+        ]}),
+    ])
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client):
+        out = await forum_ingest.fetch_so_answers(
+            "x", limit=10, min_score=10,  # include_disputed defaults to False
+        )
+    assert out == []
+
+
+@pytest.mark.asyncio
+async def test_so_disputed_stats_split(fake_cache_miss):
+    """Stats dict separately reports kept + kept_disputed."""
+    from app.utils import forum_ingest
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=[
+        _make_response(json_data={"items": [
+            {"question_id": 1, "title": "Q1", "accepted_answer_id": 1,
+             "score": 50, "tags": []},
+            {"question_id": 2, "title": "Q2", "accepted_answer_id": 2,
+             "score": 1, "tags": []},
+        ]}),
+        _make_response(json_data={"items": [
+            {"answer_id": 1, "score": 30, "is_accepted": True,
+             "body": "<p>good</p>", "link": "x"},
+            {"answer_id": 2, "score": 3, "is_accepted": False,
+             "body": "<p>bad</p>", "link": "x"},
+        ]}),
+    ])
+    stats: dict = {}
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client):
+        out = await forum_ingest.fetch_so_answers(
+            "x", limit=10, min_score=10,
+            stats=stats, include_disputed=True,
+        )
+    assert len(out) == 2
+    assert stats["kept"] == 1
+    assert stats["kept_disputed"] == 1
+    assert stats["filtered_low_score"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reddit_include_disputed_emits_below_gate(fake_cache_miss):
+    """Reddit include_disputed: low-engagement posts go in tagged disputed_claim.
+    NSFW is still always filtered (never ingested even as disputed)."""
+    from app.utils import forum_ingest
+    client = MagicMock()
+    client.get = AsyncMock(return_value=_make_response(json_data={
+        "data": {"children": [
+            # Passes gate
+            {"data": {"id": "good", "title": "Good", "selftext": "ok",
+                      "score": 100, "num_comments": 20, "over_18": False,
+                      "permalink": "/r/x/comments/good/", "created_utc": 0}},
+            # Fails gate (low score) → disputed
+            {"data": {"id": "low", "title": "Low", "selftext": "controversial",
+                      "score": 5, "num_comments": 20, "over_18": False,
+                      "permalink": "/r/x/comments/low/", "created_utc": 0}},
+            # NSFW always dropped (no disputed)
+            {"data": {"id": "nsfw", "title": "NSFW", "selftext": "x",
+                      "score": 999, "num_comments": 999, "over_18": True,
+                      "permalink": "/r/x/comments/nsfw/", "created_utc": 0}},
+        ]},
+    }))
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client):
+        out = await forum_ingest.fetch_reddit_posts(
+            "MachineLearning", "x", limit=10,
+            min_score=50, min_comments=10, include_disputed=True,
+        )
+
+    refs = {e["source_ref"]: e for e in out}
+    assert "t3_good" in refs
+    assert refs["t3_good"]["source_type"] == "reddit_post"
+    assert "t3_low" in refs
+    assert refs["t3_low"]["source_type"] == "disputed_claim"
+    assert "DISPUTED" in refs["t3_low"]["content"]
+    assert refs["t3_low"]["quality_signal"]["filter_reason"] == "below_gates"
+    # NSFW post never appears.
+    assert "t3_nsfw" not in refs
+
+
+@pytest.mark.smoke
+class TestDisputedSourceTypeWiring:
+    def test_disputed_claim_has_ttl(self):
+        from app.utils.staleness import get_ttl_for_source
+        # 60 days per §17.125
+        assert get_ttl_for_source("disputed_claim") == 60 * 86400
+
+    def test_disputed_claim_confidence_is_low(self):
+        from app.modules.provenance import confidence_for
+        assert confidence_for("disputed_claim") == 0.3
+
+
 @pytest.mark.asyncio
 async def test_fetch_arxiv_dispatches_id_full_to_full_fetcher():
     """fetch_arxiv(mode='id_full', ...) routes to fetch_arxiv_full."""
@@ -690,7 +837,7 @@ async def test_so_stats_dict_populated(fake_cache_miss):
             "x", limit=10, min_score=10, stats=stats,
         )
     assert len(out) == 1
-    assert stats == {"fetched": 2, "kept": 1, "filtered_low_score": 1}
+    assert stats == {"fetched": 2, "kept": 1, "kept_disputed": 0, "filtered_low_score": 1}
 
 
 @pytest.mark.asyncio
@@ -744,7 +891,7 @@ async def test_reddit_stats_dict_populated(fake_cache_miss):
         )
     assert len(out) == 1
     assert stats == {
-        "fetched": 4, "kept": 1,
+        "fetched": 4, "kept": 1, "kept_disputed": 0,
         "filtered_low_score": 1, "filtered_nsfw": 1, "filtered_no_body": 1,
     }
 
