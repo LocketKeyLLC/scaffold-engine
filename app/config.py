@@ -13,7 +13,7 @@ _logger = logging.getLogger("scaffold.config")
 VALID_TASK_TYPES = frozenset({"research", "decision", "action", "validation", "output"})
 VALID_STRATEGIES = frozenset({"sequential", "parallel", "hybrid", "conditional"})
 VALID_TOOLS = frozenset({"LLM", "CodeGen", "SearXNG", "Milvus"})
-VALID_DOMAINS = frozenset({"prompt", "rag", "eng", "llm", "spec"})
+VALID_DOMAINS = frozenset({"prompt", "rag", "eng", "llm", "spec", "code", "qa"})
 
 # get_model() allowlist — prevents arbitrary attribute access via role string
 ROLE_FIELDS = frozenset({
@@ -39,6 +39,16 @@ TTL_POLICY = {
     "curated": 365 * 86400,
     "official_docs": 365 * 86400,
     "ai_generated": 180 * 86400,
+    "release_notes": 365 * 86400,
+    "test_code": 365 * 86400,
+    "ci_config": 365 * 86400,
+    "model_card": 365 * 86400,
+    "dataset_card": 365 * 86400,
+    "paper_abstract": 730 * 86400,
+    "so_answer": 90 * 86400,
+    "reddit_post": 90 * 86400,
+    "hn_comment": 90 * 86400,
+    "wiki_article": 180 * 86400,
 }
 DEFAULT_TTL_SECONDS = 180 * 86400
 

@@ -4719,6 +4719,50 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.103 Deep-search foundation — extend `source_type` vocabulary + `code`/`qa` domains (2026-05-10)
+
+Commit 1/8 of the phase-1 deep-search rollout (GitHub deep, Hugging Face, SO/HN/arXiv, Reddit-allowlisted, Wikipedia). Pre-creates the `source_type` vocabulary and partition set the later producers will write into.
+
+**Ground-truth check before writing the migration.** Grepped Postgres for any `source_type` column or CHECK constraint:
+
+```
+$ grep -rn "source_type" db/init.sql db/migrations/
+(no matches)
+```
+
+`source_type` lives only in the Milvus collection (free string at write-time, looked up against `TTL_POLICY` at ingest for `expires_at`). No migration needed — change is config-only.
+
+**Changes.**
+
+- **`app/config.py:16`** — `VALID_DOMAINS` += `"code"`, `"qa"`. Pre-creating empty partitions is the same pattern as `prompt`/`spec` today: fan-out skips empties silently.
+- **`app/config.py:34-50`** — `TTL_POLICY` += 10 entries:
+  - 365d (pinned to ref): `release_notes`, `test_code`, `ci_config`, `model_card`, `dataset_card`
+  - 730d (immutable post-publication): `paper_abstract`
+  - 90d (community tier): `so_answer`, `reddit_post`, `hn_comment`
+  - 180d (tech_docs tier; can evolve): `wiki_article`
+- **`tests/test_domain_filtering.py:89`** — assertion updated for 7-domain set.
+- **`tests/test_dag_generator.py:79,272`** — local copy + method rename (`test_all_five_domains_accepted` → `test_all_domains_accepted`; the count drifts again on every domain add).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_domain_filtering.py tests/test_dag_generator.py --timeout=30 -q
+45 passed in 2.17s
+
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_rag_pipeline.py tests/test_reindex.py tests/test_rag_entry.py --timeout=30 -q
+53 passed in 4.20s
+
+$ docker exec scaffold-orchestrator pytest tests/ -k "staleness or ttl" --timeout=30 -q
+14 passed, 1411 deselected in 5.14s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1417 passed, 8 skipped in 607.63s (0:10:07)
+```
+
+**Next.** §17.104 wires the provenance block (`source_ref`, `fetched_at`, `quality_signal`) and derives `confidence_score` from `source_type`. Then §17.105 (SHA-keyed upstream cache + per-mode budgets), then the producer modes (§17.106–§17.109), then routing + SSE (§17.110).
+
 ### 17.102 ci-smoke green — gated `collect_ignore`, batch-add 7 lightweight deps, fix one hard-coded `/code/` path (2026-05-10)
 
 Closes the follow-up promised at the end of §17.99. The first post-§17.99 push surfaced a `ModuleNotFoundError: No module named 'redis'` cascading through 35 collection errors. Three iterations brought the smoke tier from 130 → 32 → 1 → 0 failures.

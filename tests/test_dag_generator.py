@@ -76,7 +76,7 @@ pytestmark = pytest.mark.skipif(
 # ===========================================================================
 
 VALID_TOOLS = {"LLM", "CodeGen", "SearXNG", "Milvus"}
-VALID_DOMAINS = {"prompt", "rag", "eng", "llm", "spec"}
+VALID_DOMAINS = {"prompt", "rag", "eng", "llm", "spec", "code", "qa"}
 
 
 # ===========================================================================
@@ -269,8 +269,8 @@ class TestDomainValidation:
         result, _warnings = _dag_gen.validate_dag(dag)
         assert len(result) == 3
 
-    def test_all_five_domains_accepted(self):
-        """Each of the 5 valid domains passes validation."""
+    def test_all_domains_accepted(self):
+        """Each valid domain passes validation."""
         for domain in VALID_DOMAINS:
             dag = [
                 {"id": "T1", "title": "KB Lookup", "tool": "Milvus",
