@@ -228,6 +228,55 @@ class TestRunResearchUrlMode:
             assert complete["iterations"] == 1
 
     @pytest.mark.asyncio
+    async def test_url_mode_classifier_bypass_skips_llm(self):
+        """§17.112 — A URL that classifies to a curated source_type (e.g.,
+        a Stack Overflow answer) must NOT trigger the LLM extract loop.
+        Entries are built directly from chunks with the classified
+        source_type + §17.104 provenance.
+        """
+        tool_call_mock = AsyncMock(return_value=_llm_with_entries(
+            '[{"title":"X","content":"x","tags":"","source":"x","source_type":"x"}]'
+        ))
+        ingest_seen: list[list[dict]] = []
+
+        async def _capture_ingest(entries, **_):
+            ingest_seen.append(list(entries))
+            return {"new": len(entries), "versioned": 0, "rejected": 0, "skipped_hash": 0}
+
+        with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(101), None))), \
+             patch.object(ra, "_robots_allowed", AsyncMock(return_value=True)), \
+             patch.object(ra, "_fetch_url_bounded", AsyncMock(return_value="<html>x</html>")), \
+             patch("asyncio.to_thread", AsyncMock(return_value="Stack Overflow answer body " * 30)), \
+             patch.object(ra.model_router, "tool_call", tool_call_mock), \
+             patch.object(ra, "ingest_entries", AsyncMock(side_effect=_capture_ingest)), \
+             patch.object(ra, "_generate_summary", AsyncMock(return_value="summary")), \
+             patch.object(ra, "_update_session_iteration", AsyncMock()), \
+             patch.object(ra, "_finalize_session", AsyncMock()):
+
+            events = []
+            async for blob in ra.run_research("https://stackoverflow.com/a/12345", depth="medium"):
+                events.append(blob)
+
+        parsed = _parse_sse(events)
+        etypes = [e for e, _ in parsed]
+
+        # LLM extract was NOT called.
+        tool_call_mock.assert_not_called()
+
+        # distill_bypassed event emitted with the right classification.
+        assert "distill_bypassed" in etypes
+        bypass_evt = dict(parsed)["distill_bypassed"]
+        assert bypass_evt["source_type"] == "so_answer"
+        assert bypass_evt["url"] == "https://stackoverflow.com/a/12345"
+
+        # Ingested entries carry source_type=so_answer + provenance.
+        assert ingest_seen, "ingest_entries was never invoked"
+        entries = ingest_seen[0]
+        assert entries, "no entries produced via bypass path"
+        assert all(e["source_type"] == "so_answer" for e in entries)
+        assert all("provenance" in e for e in entries)
+
+    @pytest.mark.asyncio
     async def test_url_mode_robots_blocked(self):
         """Robots disallow -> error event, no ingestion."""
         ingest_mock = AsyncMock()

@@ -4719,6 +4719,35 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.112 URL-mode distill bypass — classifier-driven (phase-1 follow-up #4 — URL half) (2026-05-11)
+
+Closes the URL-mode half of §17.110's deferred classifier integration. When `_run_research_url_mode` receives a URL that `classify_url` maps to a curated source_type (SO answer, HF model card, arXiv abstract, GH release/CI/test, Wikipedia, etc.), the 7b LLM extract pass is skipped — chunks are ingested directly with the classified `source_type` and §17.104 provenance.
+
+**The savings.** A URL-mode fetch of a Stack Overflow answer page previously ran one 7b `tool_call` per chunk batch (typically 1–3 calls at ~1500-token system prompt + per-chunk results text). Today that work is wholly skipped — the answer body IS the structured content. For high-CPU loads the wall time drops from ~30–90 s (CPU 7b inference) to chunking-time only (sub-second).
+
+**Why the `continue`-guard pattern, not an `if/else` reindent.** The existing extract loop is 75 lines of audit-tracked logic (Audit Finding A + B with explicit batch-completion logs). Wrapping it in an `else:` block would force a full reindent — high diff churn for no semantic gain. Instead, the bypass block runs first (when classified-as-curated), then the loop runs as before but each iteration `continue`s when `distill_bypass=True`. Empty iterations are cheap; the audit logs at line `url_mode_extract_loop_start` get a new `bypass=True` field so an operator inspecting the loop sees what happened.
+
+**Files.**
+
+- `app/modules/research_agent.py` — `_run_research_url_mode` gains a bypass block after `_chunk_text` returns. Lazy-imports `classify_url` / `should_distill` / `build_provenance` (matching the existing in-function-import pattern). Emits a `distill_bypassed` SSE event with `{iteration, source_type, url, chunks}` payload. `url_mode_extract_loop_start` log line now includes `bypass=<bool>`.
+- `tests/test_research_url_mode.py` — new `test_url_mode_classifier_bypass_skips_llm`. Drives `run_research("https://stackoverflow.com/a/12345")` against a stubbed `tool_call` mock; asserts (a) mock never called, (b) `distill_bypassed` event emitted with `source_type=so_answer`, (c) ingested entries all carry `source_type=so_answer` + `provenance`.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_research_url_mode.py tests/test_url_classifier.py \
+    tests/test_research_agent_extract_no_entries.py --timeout=30 -q
+79 passed in 6.68s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1617 passed, 8 skipped in 619.84s (0:10:19)
+```
+
++1 vs §17.111 baseline (`1616 passed`). Same 8 skipped, 0 warnings.
+
+**Topic-mode bypass — §17.113 next.** Topic mode has a different extract structure (decompose → SearXNG fan-out → per-URL fetch loop). The integration point is the per-URL fetch loop, where each fetched URL would be classified before the chunks hit the LLM extract pass. Higher savings than URL mode since topic mode fetches many URLs per iteration, but a more invasive change.
+
 ### 17.111 GitHub releases + issues — wire fetch_cache (phase-1 follow-up #1) (2026-05-11)
 
 Closes the `fetch_cache not yet wired` gap flagged in §17.106's OVERVIEW. `fetch_repo_releases` and `fetch_repo_issues_and_prs` now read/write `fetchv1:gh:list-latest:<endpoint-hash>` with the short TTL (`fetch_cache_ttl_default_seconds`, 1 h default).

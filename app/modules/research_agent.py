@@ -1533,6 +1533,44 @@ async def _run_research_url_mode(
     prompt_topic = page_title if page_title != url[:200] else f"content at {url}"
     batch_size = _EXTRACT_BATCH_FULL_PAGE
     entries: list[dict] = []
+
+    # §17.112 — distill bypass. URLs that classify to a curated source_type
+    # (SO answer, HF model card, arXiv abstract, GH release notes/CI/tests,
+    # Wikipedia, etc.) are already structured; the 7b extract pass adds
+    # nothing. Build entries directly from chunks with the classified
+    # source_type + §17.104 provenance; guard the LLM loop below so each
+    # iteration is a cheap no-op when bypassed.
+    from app.utils.url_classifier import classify_url, should_distill
+    from app.modules.provenance import build_provenance
+
+    classified_source_type = classify_url(url)
+    distill_bypass = (
+        classified_source_type is not None
+        and not should_distill(classified_source_type)
+    )
+    if distill_bypass:
+        yield _sse("distill_bypassed", {
+            "iteration": 1,
+            "source_type": classified_source_type,
+            "url": url,
+            "chunks": len(chunks),
+        })
+        for c in chunks:
+            if len(c) > 50:
+                entries.append({
+                    "title": page_title,
+                    "content": c,
+                    "tags": "",
+                    "source": url,
+                    "source_type": classified_source_type,
+                    "facet": "direct_url",
+                    "provenance": build_provenance(source_ref=url),
+                })
+        logger.info(
+            "url_mode_distill_bypassed: source_type=%s entries=%d url=%s",
+            classified_source_type, len(entries), url,
+        )
+
     # Audit Finding B — explicit batch counters so a future hang can be
     # localized via `make logs-research`. The pre-fix code logged nothing
     # between the first batch's warning and `extraction_complete`, so an
@@ -1540,11 +1578,13 @@ async def _run_research_url_mode(
     # for which iteration was in flight.
     total_batches = (len(chunks) + batch_size - 1) // batch_size
     logger.info(
-        "url_mode_extract_loop_start: chunks=%d batches=%d batch_size=%d url=%s",
-        len(chunks), total_batches, batch_size, url,
+        "url_mode_extract_loop_start: chunks=%d batches=%d batch_size=%d url=%s bypass=%s",
+        len(chunks), total_batches, batch_size, url, distill_bypass,
     )
 
     for i in range(0, len(chunks), batch_size):
+        if distill_bypass:
+            continue  # §17.112 — entries already built above; skip the LLM
         batch_idx = i // batch_size
         batch_chunks = chunks[i:i + batch_size]
         logger.info(
