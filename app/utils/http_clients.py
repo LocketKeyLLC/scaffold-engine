@@ -64,6 +64,29 @@ def _build_github() -> httpx.AsyncClient:
     return client
 
 
+def _build_huggingface() -> httpx.AsyncClient:
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "scaffold-engine",
+    }
+    if settings.huggingface_token:
+        headers["Authorization"] = f"Bearer {settings.huggingface_token}"
+    client = httpx.AsyncClient(
+        base_url=settings.huggingface_api_base,
+        timeout=float(settings.huggingface_timeout),
+        headers=headers,
+        follow_redirects=True,
+        limits=httpx.Limits(
+            max_connections=10,
+            max_keepalive_connections=5,
+            keepalive_expiry=30,
+        ),
+    )
+    token_status = "authenticated" if settings.huggingface_token else "unauthenticated"
+    logger.info("HuggingFace client initialized: %s (%s)", settings.huggingface_api_base, token_status)
+    return client
+
+
 def _build_generic() -> httpx.AsyncClient:
     # Generic client fans out to arbitrary OpenAPI hosts during /research;
     # raise pool ceiling well above per-host clients.
@@ -130,6 +153,7 @@ def init_clients() -> None:
     """Eager-init all shared clients. Call once from app lifespan startup."""
     _get_or_create("searxng", _build_searxng)
     _get_or_create("github", _build_github)
+    _get_or_create("huggingface", _build_huggingface)
     _get_or_create("generic", _build_generic)
     _get_or_create("ollama", _build_ollama)
     _get_or_create("openai", _build_openai)
@@ -146,6 +170,13 @@ def get_github_client() -> httpx.AsyncClient:
     client = _clients.get("github")
     if client is None or client.is_closed:
         raise RuntimeError("GitHub client not initialized; call init_clients() at startup")
+    return client
+
+
+def get_huggingface_client() -> httpx.AsyncClient:
+    client = _clients.get("huggingface")
+    if client is None or client.is_closed:
+        raise RuntimeError("HuggingFace client not initialized; call init_clients() at startup")
     return client
 
 

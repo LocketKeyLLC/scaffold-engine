@@ -169,6 +169,44 @@ def _parse_github_ref(s: str) -> tuple[str, str, str | None]:
     return owner, repo, ref_hint
 
 
+_HF_KINDS: frozenset[str] = frozenset({"model", "dataset", "paper", "space"})
+_HF_ID_RE = re.compile(r"^[A-Za-z0-9._\-/]{1,128}$")
+
+
+def _is_hf_ref(s: str) -> bool:
+    if not s.startswith("hf:"):
+        return False
+    rest = s[len("hf:"):].strip()
+    if "/" not in rest:
+        return False
+    kind, _ = rest.split("/", 1)
+    return kind in _HF_KINDS
+
+
+def _parse_hf_ref(s: str) -> tuple[str, str]:
+    """Parse ``hf:<kind>/<id>`` → ``(kind, id_)``.
+
+    ``kind`` ∈ {model, dataset, paper, space}. ``id_`` may contain slashes
+    (e.g., ``microsoft/phi-2``) but is constrained to alphanumerics, `.`,
+    `_`, `-`, `/`, capped at 128 chars.
+
+    Raises ``ValueError`` on malformed input.
+    """
+    if not _is_hf_ref(s):
+        raise ValueError(
+            f"Malformed HF ref: {s!r} (expected 'hf:<kind>/<id>' where kind ∈ "
+            f"{sorted(_HF_KINDS)})"
+        )
+    rest = s[len("hf:"):].strip()
+    kind, id_ = rest.split("/", 1)
+    id_ = id_.strip()
+    if not id_:
+        raise ValueError(f"Malformed HF ref: {s!r} (empty id)")
+    if not _HF_ID_RE.match(id_):
+        raise ValueError(f"Malformed HF ref: {s!r} (id {id_!r} fails {_HF_ID_RE.pattern})")
+    return kind, id_
+
+
 def _is_openapi_ref(s: str) -> bool:
     if not s.startswith("openapi:"):
         return False

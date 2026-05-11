@@ -54,9 +54,11 @@ from app.modules.research_extractors import (
     _extract_threshold,
     _fetch_url_bounded,
     _is_github_ref,
+    _is_hf_ref,
     _is_openapi_ref,
     _is_url,
     _parse_github_ref,
+    _parse_hf_ref,
     _parse_openapi_ref,
     _resolve_confidence,
     _robots_allowed,
@@ -1164,6 +1166,86 @@ async def _run_research_github_mode(
         yield evt
 
 
+async def _run_research_hf_mode(
+    kind: str,
+    id_: str,
+    state: ResearchState,
+    session_id: str,
+    t0: float,
+) -> AsyncGenerator[str, None]:
+    """HF-mode: fetch model_card / dataset_card / paper_abstract / space
+    metadata, ingest with §17.104 provenance pinned to HF revision SHA.
+    """
+    from app.utils.hf_ingest import fetch_hf, HFNotFoundError, HFRateLimitError
+    from app.modules.provenance import build_provenance
+
+    state.outline_facets = [f"hf_{kind}"]
+    state.iteration = 1
+    yield _sse("decomposition_complete", {
+        "complexity": "direct",
+        "facets": state.outline_facets,
+        "query_count": 0,
+    })
+    yield _sse("iteration_started", {
+        "iteration": 1,
+        "query_count": 0,
+        "mode": "hf",
+        "hf_kind": kind,
+    })
+
+    task = asyncio.create_task(fetch_hf(kind, id_))
+    async for hb in _await_with_heartbeat(
+        task, {"status": "fetching_hf", "iteration": 1}
+    ):
+        yield hb
+    items = task.result()
+
+    if not items:
+        raise RuntimeError(f"No ingestible content found at hf:{kind}/{id_}")
+
+    yield _sse("search_complete", {
+        "iteration": 1,
+        "results_found": len(items),
+        "total_urls": len(items),
+        "mode": "hf",
+        "hf_kind": kind,
+    })
+
+    entries: list[dict] = []
+    for it in items:
+        source_url = it.get("source_url", "")
+        if source_url:
+            state.url_history.add(source_url)
+        entries.append({
+            "title": f"hf:{kind}/{id_}: {it['path']}",
+            "content": it["content"],
+            "source": source_url,
+            "source_type": it.get("source_type", "tech_docs"),
+            "facet": f"hf_{kind}",
+            "provenance": build_provenance(
+                source_ref=it.get("source_ref", ""),
+                quality_signal=it.get("quality_signal", {}),
+            ),
+        })
+
+    yield _sse("extraction_complete", {
+        "iteration": 1,
+        "entries_extracted": len(entries),
+        "mode": "hf",
+    })
+
+    async for evt in _ingest_and_finalize_direct(
+        state=state,
+        session_id=session_id,
+        entries=entries,
+        mode="hf",
+        topic=f"hf:{kind}/{id_}",
+        t0=t0,
+        extra_complete_fields={"hf_kind": kind, "items_fetched": len(items)},
+    ):
+        yield evt
+
+
 async def _unload_ollama_model(model: str) -> None:
     """Force-unload an Ollama model via ``keep_alive=0``.
 
@@ -1594,6 +1676,8 @@ async def run_research(
         mode, state_depth = "openapi", "direct_openapi"
     elif _is_github_ref(topic):
         mode, state_depth = "github", "direct_github"
+    elif _is_hf_ref(topic):
+        mode, state_depth = "hf", "direct_hf"
     elif _is_url(topic):
         mode, state_depth = "direct_url", "direct_url"
     else:
@@ -1637,6 +1721,12 @@ async def run_research(
                 owner, repo, ref_hint = _parse_github_ref(topic)
                 async for evt in _run_research_github_mode(
                     owner, repo, state, session_id, t0, ref_hint=ref_hint,
+                ):
+                    yield evt
+            elif mode == "hf":
+                kind, hf_id = _parse_hf_ref(topic)
+                async for evt in _run_research_hf_mode(
+                    kind, hf_id, state, session_id, t0,
                 ):
                     yield evt
             elif mode == "direct_url":

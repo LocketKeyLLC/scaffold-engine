@@ -101,11 +101,12 @@ async def test_getters_raise_when_not_initialized():
 async def test_close_clients_resets_registry():
     http_clients.get_searxng_client()
     http_clients.get_github_client()
+    http_clients.get_huggingface_client()
     http_clients.get_generic_http_client()
     http_clients.get_ollama_client()
     http_clients.get_openai_client()
     assert set(http_clients._clients.keys()) == {
-        "searxng", "github", "generic", "ollama", "openai",
+        "searxng", "github", "huggingface", "generic", "ollama", "openai",
     }
     await http_clients.close_clients()
     assert http_clients._clients == {}

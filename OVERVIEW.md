@@ -4719,6 +4719,66 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.107 Hugging Face mode — model/dataset/paper/space ingest pinned to HF revision (2026-05-10)
+
+Commit 5/8 of the phase-1 deep-search rollout. Second producer: `hf:<kind>/<id>` for model cards, dataset cards, paper abstracts, and space metadata. Each fetch resolves the HF commit SHA (or arXiv id for papers) and pins every entry's `source_ref` to that immutable value — pairs with §17.104's provenance writer. §17.105's `fetch_cache` is wired this commit (it wasn't in §17.106 — flagged then as a known gap).
+
+**Dispatch.** `hf:model/<id>`, `hf:dataset/<id>`, `hf:paper/<arxiv-id>`, `hf:space/<id>`. Parser (`_parse_hf_ref`) returns `(kind, id_)`. `kind` allowlisted to the four supported values — `hf:doc/` deliberately rejected (see deferral note). `id_` constrained to `[A-Za-z0-9._\-/]{1,128}` so injection-style inputs fail at parse time, not at the HF API.
+
+**Mode-to-source mapping**:
+
+| Mode | source_type | source_ref | Notes |
+|---|---|---|---|
+| `hf:model/<id>` | `model_card` | resolved HF commit SHA | README + structured metadata (pipeline_tag, library, license, eval results from `cardData.model-index`) |
+| `hf:dataset/<id>` | `dataset_card` | resolved HF commit SHA | README + features summary (license, language, task_categories, size_categories) |
+| `hf:paper/<arxiv-id>` | `paper_abstract` | arXiv id | title + authors + abstract + linked models/datasets surfaced by HF's `/api/papers/{id}` |
+| `hf:space/<id>` | `tech_docs` | resolved HF commit SHA | README + space metadata (sdk, runtime stage, license). App code NOT fetched — high token cost, marginal ground-truth value |
+
+`confidence_score` derived from `source_type` via §17.104's `confidence_for`: `model_card`/`dataset_card` → 0.90, `paper_abstract` → 0.85, `tech_docs` (spaces) → 0.80.
+
+**Cache wiring.** Each fetcher reads/writes `fetchv1:hf:<revision_or_arxiv_id>:<api_path|file_path>`:
+
+- **Cache miss**: live HF API call → store body with `fetch_cache_ttl_immutable_seconds` (default 30 d).
+- **Cache hit**: zero network. The `/api/models/{id}` *first* call can't cache (no SHA yet to key on); every downstream call at the resolved SHA caches.
+- Test `test_fetch_hf_model_uses_cache_on_hit` exercises this: only 1 HTTP call (the API metadata) is made when README is in cache.
+
+**Files.**
+
+- `app/config.py` — new `huggingface_token` (optional), `huggingface_api_base="https://huggingface.co"`, `huggingface_timeout=30`. The §17.105 `hf_max_files=30` already declared the budget.
+- `app/utils/http_clients.py` — `_build_huggingface`, `get_huggingface_client`, registered in `init_clients()`. Pattern mirrors `_build_github` (Bearer-Authorization when token set, unauthenticated otherwise).
+- `app/utils/hf_ingest.py` (new) — `_check_response` (404→`HFNotFoundError`, 429→`HFRateLimitError`); `_fetch_raw_file_cached` + `_fetch_api_json_cached` (SHA-keyed `fetch_cache` reads/writes); `fetch_hf_model`, `fetch_hf_dataset`, `fetch_hf_paper`, `fetch_hf_space`; `fetch_hf(kind, id_)` dispatch helper.
+- `app/modules/research_extractors.py` — `_is_hf_ref`, `_parse_hf_ref`. Allowlist on `kind`; regex on `id_`.
+- `app/modules/research_agent.py` — imports `_is_hf_ref`/`_parse_hf_ref`; mode detection (`elif _is_hf_ref(topic): mode = "hf"`); dispatch into new `_run_research_hf_mode(kind, id_, ...)` which composes `fetch_hf` + builds ingest entries with `build_provenance(source_ref, quality_signal)`. Confidence omitted so §17.104 derives.
+- `tests/test_hf_ingest.py` (new) — 19 tests: parser (allowlist + bad id), each fetcher (happy path + edge cases — empty README, 0 budget, cache hit, empty paper summary, etc.), dispatch helper, error mapping.
+- `tests/test_http_clients.py` — `test_close_clients_resets_registry` updated for the 6th client (`huggingface`). The post-§17.106 full suite caught this — a 1-line fix.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_hf_ingest.py --timeout=30 -q
+19 passed in 2.23s
+
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_github_ingest.py tests/test_github_ingest_deep.py \
+    tests/test_github_ingest_cache.py tests/test_hf_ingest.py --timeout=30 -q
+66 passed in 5.87s
+
+$ docker exec scaffold-orchestrator pytest tests/ -k "research or github or hf_" --timeout=30 -q
+225 passed, 1309 deselected, 1 warning in 66.03s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1526 passed, 8 skipped in 643.74s (0:10:43)
+```
+
++19 vs §17.106 baseline (`1507 passed`) — all from new `test_hf_ingest.py`. Same 8 skipped. **Zero warnings** in the final run (the prior PytestUnhandledThreadExceptionWarning didn't repeat — was a transient artifact, not §17.106-attributable).
+
+**Known deferrals.**
+
+- **`hf:doc/<topic>`** — HF docs (`huggingface.co/docs/transformers/...`) aren't exposed via a stable public JSON API; only the MCP-side `hf_doc_search` / `hf_doc_fetch` toolset can query them, and that's a Claude-side capability, not a server-side one. Fetching the docs HTML and parsing it is the path forward; deferred to a §17.107 follow-up to keep this commit focused.
+- **§17.106's `fetch_cache` gap closed for HF only.** GitHub deep mode still doesn't read/write `fetch_cache` (release notes + issues re-fetch every call). Tracker — a §17.106 follow-up commit.
+
+**Next.** §17.108 — Forum modes: `so:`, `hn:`, `arxiv:`. Stack Exchange API (accepted-OR-score≥10 gate), HN Algolia (points≥100 gate), arXiv API (abstract by default). PII strip pass (`@username`, emails) before ingest.
+
 ### 17.106 GitHub deep mode — tag/SHA pinning + releases + tests + workflows + issues/PRs (2026-05-10)
 
 Commit 4/8 of the phase-1 deep-search rollout. First real producer: extends `github:owner/repo` with tag/SHA pinning, source-type tagging on the tree walk, release-notes ingestion, test-file docstring ingestion, CI workflow ingestion, and a closed-issue + merged-PR fetcher with a reaction-count quality gate. Every entry now carries §17.104 provenance — anchored to a resolved commit SHA when the caller specifies a ref.

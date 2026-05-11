@@ -197,6 +197,12 @@ class Settings(BaseSettings):
     github_blob_concurrency: int = Field(default=8, ge=1, le=64)
     github_timeout: int = Field(default=30, ge=1, le=300)
     github_api_base: str = "https://api.github.com"
+
+    # Hugging Face Hub. Token optional — public model/dataset/paper/space
+    # access works unauthenticated; token raises the rate limit ceiling.
+    huggingface_token: str = ""
+    huggingface_timeout: int = Field(default=30, ge=1, le=300)
+    huggingface_api_base: str = "https://huggingface.co"
     # Audit M6 — Redis cache for /repos/{o}/{r}/git/trees/{b} responses.
     # Cache is keyed by (owner, repo, branch) and stores (etag, blobs,
     # truncated). On hit, an If-None-Match header is sent so GitHub can
