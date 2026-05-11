@@ -4719,6 +4719,81 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.117 `cache_hit_upstream` SSE event (phase-3 cleanup 3/3) (2026-05-11)
+
+Final phase-3 commit. Closes the last phase-1 deferral (#5). Emits a `cache_hit_upstream` SSE event from the GitHub / HF / forum mode runners reporting `{hits, misses, puts, oversized}` deltas across the per-iteration fetch.
+
+**Snapshot pattern, not per-fetcher plumbing.** The §17.110 OVERVIEW deferred this event because it "requires threading cache-hit counts through every fetcher" — every producer would gain a `stats: dict` param + populate it. That's a lot of API churn. Cleaner approach the snapshot trick: take `FetchCache.stats().copy()` before the fetch chain, take it again after, subtract. No fetcher signatures change.
+
+The `FetchCache` singleton's counters are process-global. The scaffold-engine has the "one running research per host" invariant (`uq_research_sessions_single_running` partial index, §17.97 audit note), so in practice the global counters don't interleave across sessions. If concurrent research ever becomes a real feature, the snapshot approach would need per-session cache scopes — acceptable cost for now.
+
+**Event payload.**
+
+```json
+{
+    "iteration": 1,
+    "mode": "github" | "hf" | "so" | "hn" | "arxiv" | "reddit" | "wiki",
+    "hf_kind": "model" | ... | null,   // only present for hf mode
+    "hits": <int>,
+    "misses": <int>,
+    "puts": <int>,
+    "oversized": <int>
+}
+```
+
+Event emitted only when at least one hit or miss happened — silent for sessions that didn't touch the cache, no UI noise.
+
+**Where it fires:**
+
+- `_run_research_github_mode`: snapshot around `fetch_repo_content + fetch_repo_releases + fetch_repo_issues_and_prs` (all 3 hit the cache via §17.111).
+- `_run_research_hf_mode`: snapshot around `fetch_hf(kind, id_)` which dispatches to the 4 HF fetchers, all of which hit `_fetch_api_json_cached` + `_fetch_raw_file_cached` (§17.107).
+- `_run_research_forum_mode`: snapshot around the `_do_fetch()` closure for SO / HN / arXiv / Reddit / Wiki (each hits the cache via per-fetcher logic from §17.108-§17.109).
+
+**Files.**
+
+- `app/modules/research_agent.py` — 3 runners each gain `from app.utils.fetch_cache import get_fetch_cache`, a `_cache_pre = get_fetch_cache().stats().copy()` snapshot before the fetch, and a `_cache_post - _cache_pre` delta + conditional `_sse("cache_hit_upstream", ...)` after.
+
+**No new tests.** The snapshot approach relies on `FetchCache.stats()` returning a coherent counter dict, which is already exercised by `test_fetch_cache.py::test_put_then_get_round_trip` (asserts `_puts == 1, _hits == 1` after put-then-get). The runners' delta math is one-line arithmetic; bug surface is shallow.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/ -k "research or forum or hf_ or github or fetch_cache" --timeout=30 -q
+314 passed, 1321 deselected in 68.42s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1627 passed, 8 skipped in 614.27s (0:10:14)
+```
+
+Unchanged vs §17.116 baseline — runtime instrumentation only, no new tests. Same 8 skipped, 0 warnings (7 clean runs in a row; thread-exception heisenbug remains absent).
+
+---
+
+## Phase 3 complete
+
+3 commits, dated 2026-05-11. All small, focused cleanups. Suite **1625 → 1627** (+2 from §17.116's excepthook tests).
+
+| Commit | Hash | Title |
+|---|---|---|
+| §17.115 | `d2a82cd` | test_auth.py teardown ordering — fix at source |
+| §17.116 | `89e1755` | Thread-exception diagnostic capture |
+| §17.117 | (this) | `cache_hit_upstream` SSE event |
+
+**Deferral inventory after phase 3:**
+
+| # | Item | Status |
+|---|---|---|
+| 1 | §17.106 follow-up: GH fetch_cache | ✓ §17.111 |
+| 2 | §17.107 follow-up: `hf:doc/<topic>` | ⏸ Needs public HF docs API or HTML scrape strategy |
+| 3 | §17.108 follow-up: `PytestUnhandledThreadExceptionWarning` | ✓ §17.116 (diagnostic-only; root-cause if it recurs) |
+| 4 | §17.110 follow-up: classifier integration | ✓ §17.112 + §17.113 |
+| 5 | §17.110 follow-up: `cache_hit_upstream` SSE | ✓ §17.117 |
+| 6 | §17.114 follow-up: verify endpoint upstream re-fetch | ⏸ Needs per-source-type re-verify hook |
+| 7 | §17.114 follow-up: `test_auth.py` teardown ordering | ✓ §17.115 |
+
+5 of 7 deferrals closed. Two open: `hf:doc/` (external dependency) and verify-endpoint upstream re-fetch (substantial cross-producer work).
+
 ### 17.116 PytestUnhandledThreadExceptionWarning — diagnostic capture installed (phase-3 cleanup 2/3) (2026-05-11)
 
 Investigation outcome + diagnostic infrastructure for the intermittent thread-exception warning flagged in §17.106 / §17.108 / §17.110.

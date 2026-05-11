@@ -1118,6 +1118,7 @@ async def _run_research_github_mode(
     )
     from app.modules.provenance import build_provenance
     from app.config import settings as _settings
+    from app.utils.fetch_cache import get_fetch_cache
 
     state.outline_facets = ["github_repo"]
     state.iteration = 1
@@ -1132,6 +1133,13 @@ async def _run_research_github_mode(
         "mode": "github",
         "ref_hint": ref_hint,
     })
+
+    # §17.117 — snapshot fetch_cache counters around all 3 GH fetches so the
+    # runner can emit a single cache_hit_upstream event at the end with the
+    # delta. The cache singleton's counters are process-global; the
+    # single-running-research-per-host invariant keeps them session-scoped
+    # in practice.
+    _cache_pre = get_fetch_cache().stats().copy()
 
     task = asyncio.create_task(fetch_repo_content(owner, repo, ref_hint=ref_hint))
     async for hb in _await_with_heartbeat(
@@ -1171,6 +1179,16 @@ async def _run_research_github_mode(
     all_items = list(files) + releases + issues
     if not all_items:
         raise RuntimeError(f"No ingestible content found in {owner}/{repo}")
+
+    # §17.117 — emit aggregate cache delta across the 3 GH fetches.
+    _cache_post = get_fetch_cache().stats()
+    _cache_delta = {k: _cache_post[k] - _cache_pre[k] for k in _cache_post}
+    if _cache_delta["hits"] > 0 or _cache_delta["misses"] > 0:
+        yield _sse("cache_hit_upstream", {
+            "iteration": 1,
+            "mode": "github",
+            **_cache_delta,
+        })
 
     yield _sse("search_complete", {
         "iteration": 1,
@@ -1236,6 +1254,7 @@ async def _run_research_hf_mode(
     """
     from app.utils.hf_ingest import fetch_hf, HFNotFoundError, HFRateLimitError
     from app.modules.provenance import build_provenance
+    from app.utils.fetch_cache import get_fetch_cache
 
     state.outline_facets = [f"hf_{kind}"]
     state.iteration = 1
@@ -1251,12 +1270,25 @@ async def _run_research_hf_mode(
         "hf_kind": kind,
     })
 
+    _cache_pre = get_fetch_cache().stats().copy()
+
     task = asyncio.create_task(fetch_hf(kind, id_))
     async for hb in _await_with_heartbeat(
         task, {"status": "fetching_hf", "iteration": 1}
     ):
         yield hb
     items = task.result()
+
+    # §17.117 — cache delta across all HF API + raw-file fetches.
+    _cache_post = get_fetch_cache().stats()
+    _cache_delta = {k: _cache_post[k] - _cache_pre[k] for k in _cache_post}
+    if _cache_delta["hits"] > 0 or _cache_delta["misses"] > 0:
+        yield _sse("cache_hit_upstream", {
+            "iteration": 1,
+            "mode": "hf",
+            "hf_kind": kind,
+            **_cache_delta,
+        })
 
     # §17.110 — emit resolved revision SHA / arXiv id for UI display.
     if items:
@@ -1336,6 +1368,7 @@ async def _run_research_forum_mode(
     )
     from app.modules.provenance import build_provenance
     from app.config import settings as _settings
+    from app.utils.fetch_cache import get_fetch_cache
 
     state.outline_facets = [f"forum_{prefix}"]
     state.iteration = 1
@@ -1380,12 +1413,24 @@ async def _run_research_forum_mode(
             return await fetch_wiki_pages(value, _settings.wiki_max_pages)
         raise ValueError(f"Unknown forum prefix: {prefix!r}")
 
+    _cache_pre = get_fetch_cache().stats().copy()
+
     task = asyncio.create_task(_do_fetch())
     async for hb in _await_with_heartbeat(
         task, {"status": f"fetching_{prefix}", "iteration": 1}
     ):
         yield hb
     items = task.result()
+
+    # §17.117 — cache delta across the forum fetch.
+    _cache_post = get_fetch_cache().stats()
+    _cache_delta = {k: _cache_post[k] - _cache_pre[k] for k in _cache_post}
+    if _cache_delta["hits"] > 0 or _cache_delta["misses"] > 0:
+        yield _sse("cache_hit_upstream", {
+            "iteration": 1,
+            "mode": prefix,
+            **_cache_delta,
+        })
 
     # Emit gate stats before checking emptiness so the UI sees the "why".
     if fetch_stats:
