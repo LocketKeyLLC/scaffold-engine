@@ -169,7 +169,7 @@ def _parse_github_ref(s: str) -> tuple[str, str, str | None]:
     return owner, repo, ref_hint
 
 
-_HF_KINDS: frozenset[str] = frozenset({"model", "dataset", "paper", "space"})
+_HF_KINDS: frozenset[str] = frozenset({"model", "dataset", "paper", "space", "doc"})
 _HF_ID_RE = re.compile(r"^[A-Za-z0-9._\-/]{1,128}$")
 
 

@@ -1,19 +1,22 @@
 """Hugging Face Hub ingestion for ``/research hf:<kind>/<id>``.
 
-Four kinds, each returning a list of entry dicts with ``path``,
+Five kinds, each returning a list of entry dicts with ``path``,
 ``content``, ``source_type``, ``source_url``, ``source_ref``,
 ``quality_signal`` — the shape the GitHub deep mode (§17.106) already
 emits, so the research-agent loop can ingest both uniformly.
 
-| kind     | source_type     | source_ref         |
-|----------|-----------------|--------------------|
-| model    | ``model_card``  | HF commit SHA      |
-| dataset  | ``dataset_card``| HF commit SHA      |
-| paper    | ``paper_abstract``| arXiv id         |
-| space    | ``tech_docs``   | HF commit SHA      |
+| kind     | source_type      | source_ref         |
+|----------|------------------|--------------------|
+| model    | ``model_card``   | HF commit SHA      |
+| dataset  | ``dataset_card`` | HF commit SHA      |
+| paper    | ``paper_abstract``| arXiv id          |
+| space    | ``tech_docs``    | HF commit SHA      |
+| doc      | ``official_docs``| topic (mutable)    |
 
-``hf:doc/`` (general docs search) is deferred — HF's docs aren't
-exposed via a stable public JSON API, only the MCP-side toolset.
+``hf:doc/<library>/<page>`` (§17.122) scrapes the rendered HTML at
+``huggingface.co/docs/<topic>`` with trafilatura — HF doesn't expose
+docs through a stable public JSON API. Short cache TTL (default 1 h)
+since docs can update between releases; no per-revision pin.
 
 The fetch cache (``app/utils/fetch_cache.py``) is consulted for raw
 README/card bodies keyed by the resolved commit SHA — immutable refs
@@ -367,6 +370,80 @@ async def fetch_hf_space(id_: str) -> list[dict[str, Any]]:
     return out[: settings.hf_max_files]
 
 
+async def fetch_hf_doc(topic: str) -> list[dict[str, Any]]:
+    """Fetch an HF docs page by topic.
+
+    ``topic`` is the post-``/docs/`` path, e.g.,
+    ``transformers/installation`` or ``transformers/v4.35.0/en/model_doc/llama``.
+    URL: ``{huggingface_api_base}/docs/{topic}``. Fetches the rendered
+    HTML and extracts main-content text via trafilatura.
+
+    ``source_type=official_docs``. ``source_ref`` is the topic string
+    (HF docs are mutable — there's no per-revision pin like for
+    model/dataset cards), so the cache uses the short TTL.
+
+    HF doesn't expose docs through a stable public JSON API; this is
+    HTML scraping. Trafilatura handles main-content extraction.
+    """
+    if settings.hf_max_files <= 0:
+        return []
+    if not topic or not topic.strip():
+        return []
+    import asyncio as _aio
+    import trafilatura
+
+    url = f"{settings.huggingface_api_base}/docs/{topic}"
+    cache = get_fetch_cache()
+    cache_path = f"docs/{topic}"
+
+    cached = await cache.get("hf", "docs-latest", cache_path)
+    if cached:
+        extracted = cached.decode("utf-8", errors="replace")
+    else:
+        from app.utils.http_clients import get_generic_http_client
+        client = get_generic_http_client()
+        try:
+            r = await client.get(
+                url, timeout=float(settings.huggingface_timeout),
+                follow_redirects=True,
+            )
+        except Exception as exc:
+            logger.warning("hf_doc_fetch_failed: topic=%s err=%s", topic, exc)
+            return []
+        if r.status_code == 404:
+            return []
+        if r.status_code != 200:
+            logger.warning(
+                "hf_doc_unexpected_status: topic=%s status=%d", topic, r.status_code,
+            )
+            return []
+        html = r.text
+        extracted = await _aio.to_thread(
+            trafilatura.extract, html,
+            output_format="txt", with_metadata=False,
+        )
+        if not extracted or not extracted.strip():
+            logger.warning("hf_doc_extract_empty: topic=%s", topic)
+            return []
+        try:
+            await cache.put(
+                "hf", "docs-latest", cache_path,
+                extracted.encode("utf-8"),
+                ttl_seconds=settings.fetch_cache_ttl_default_seconds,
+            )
+        except Exception as exc:
+            logger.debug("hf_doc_cache_put_failed: %s", exc)
+
+    return [{
+        "path": f"hf:doc/{topic}",
+        "content": extracted,
+        "source_type": "official_docs",
+        "source_url": url,
+        "source_ref": topic,
+        "quality_signal": {},
+    }]
+
+
 async def fetch_hf(kind: str, id_: str) -> list[dict[str, Any]]:
     """Dispatch helper: kind → fetcher. Used by the research agent."""
     if kind == "model":
@@ -377,4 +454,6 @@ async def fetch_hf(kind: str, id_: str) -> list[dict[str, Any]]:
         return await fetch_hf_paper(id_)
     if kind == "space":
         return await fetch_hf_space(id_)
+    if kind == "doc":
+        return await fetch_hf_doc(id_)
     raise ValueError(f"Unknown HF kind: {kind!r}")

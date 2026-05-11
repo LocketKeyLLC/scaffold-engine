@@ -53,7 +53,7 @@ class TestHfRefParser:
     def test_is_hf_ref_rejects_unknown_kind(self):
         from app.modules.research_extractors import _is_hf_ref
         assert not _is_hf_ref("hf:user/foo")
-        assert not _is_hf_ref("hf:doc/transformers")  # deferred
+        # §17.122 — hf:doc/ now accepted (shipped post-deferral)
         assert not _is_hf_ref("https://hf.co/x")
         assert not _is_hf_ref("hf:")
         assert not _is_hf_ref("hf:model")  # missing id
@@ -310,15 +310,114 @@ async def test_fetch_hf_dispatches_by_kind(fake_cache_miss):
     with patch("app.utils.hf_ingest.fetch_hf_model", AsyncMock(return_value=[{"x": 1}])) as m, \
          patch("app.utils.hf_ingest.fetch_hf_dataset", AsyncMock(return_value=[{"x": 2}])) as d, \
          patch("app.utils.hf_ingest.fetch_hf_paper", AsyncMock(return_value=[{"x": 3}])) as p, \
-         patch("app.utils.hf_ingest.fetch_hf_space", AsyncMock(return_value=[{"x": 4}])) as s:
+         patch("app.utils.hf_ingest.fetch_hf_space", AsyncMock(return_value=[{"x": 4}])) as s, \
+         patch("app.utils.hf_ingest.fetch_hf_doc", AsyncMock(return_value=[{"x": 5}])) as doc:
         assert await hf_ingest.fetch_hf("model", "a/b") == [{"x": 1}]
         assert await hf_ingest.fetch_hf("dataset", "a/b") == [{"x": 2}]
         assert await hf_ingest.fetch_hf("paper", "2310.0") == [{"x": 3}]
         assert await hf_ingest.fetch_hf("space", "a/b") == [{"x": 4}]
+        assert await hf_ingest.fetch_hf("doc", "transformers/install") == [{"x": 5}]
         m.assert_awaited_once()
         d.assert_awaited_once()
         p.assert_awaited_once()
         s.assert_awaited_once()
+        doc.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# fetch_hf_doc (§17.122)
+# ---------------------------------------------------------------------------
+
+_FAKE_HF_DOC_HTML = """
+<!DOCTYPE html>
+<html><body>
+<nav>Site nav noise</nav>
+<main>
+  <h1>Installation</h1>
+  <p>To install transformers, run pip install transformers.</p>
+  <pre><code>pip install transformers</code></pre>
+</main>
+<footer>Footer noise</footer>
+</body></html>
+"""
+
+
+@pytest.mark.asyncio
+async def test_fetch_hf_doc_happy_path(fake_cache_miss):
+    """Live HTML → trafilatura extract → one entry tagged official_docs."""
+    from app.utils import hf_ingest
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = _FAKE_HF_DOC_HTML
+    mock_resp.raise_for_status = MagicMock()
+    client = MagicMock()
+    client.get = AsyncMock(return_value=mock_resp)
+
+    with patch("app.utils.http_clients.get_generic_http_client", return_value=client):
+        out = await hf_ingest.fetch_hf_doc("transformers/installation")
+
+    assert len(out) == 1
+    e = out[0]
+    assert e["source_type"] == "official_docs"
+    assert e["source_ref"] == "transformers/installation"
+    assert e["source_url"].endswith("/docs/transformers/installation")
+    assert "Installation" in e["content"]
+    assert "pip install transformers" in e["content"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_hf_doc_404_returns_empty(fake_cache_miss):
+    from app.utils import hf_ingest
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    client = MagicMock()
+    client.get = AsyncMock(return_value=mock_resp)
+    with patch("app.utils.http_clients.get_generic_http_client", return_value=client):
+        out = await hf_ingest.fetch_hf_doc("nope/page")
+    assert out == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_hf_doc_empty_topic_returns_empty(fake_cache_miss):
+    from app.utils import hf_ingest
+    assert await hf_ingest.fetch_hf_doc("") == []
+    assert await hf_ingest.fetch_hf_doc("   ") == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_hf_doc_uses_cache_on_hit():
+    """Cached extract bytes → no HTTP call."""
+    from app.utils import hf_ingest
+
+    cache = MagicMock()
+    cache.get = AsyncMock(return_value=b"# Cached extract\nContent.")
+    cache.put = AsyncMock(return_value=True)
+    client = MagicMock()
+    client.get = AsyncMock()
+
+    with patch("app.utils.hf_ingest.get_fetch_cache", return_value=cache), \
+         patch("app.utils.http_clients.get_generic_http_client", return_value=client):
+        out = await hf_ingest.fetch_hf_doc("transformers/installation")
+
+    assert len(out) == 1
+    assert "Cached extract" in out[0]["content"]
+    client.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fetch_hf_doc_empty_extract_returns_empty(fake_cache_miss):
+    """trafilatura returning empty → entry dropped, no cache write."""
+    from app.utils import hf_ingest
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = "<html><body></body></html>"
+    mock_resp.raise_for_status = MagicMock()
+    client = MagicMock()
+    client.get = AsyncMock(return_value=mock_resp)
+    with patch("app.utils.http_clients.get_generic_http_client", return_value=client):
+        out = await hf_ingest.fetch_hf_doc("trans/empty")
+    assert out == []
 
 
 @pytest.mark.asyncio

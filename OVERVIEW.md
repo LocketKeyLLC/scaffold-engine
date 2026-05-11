@@ -4719,6 +4719,61 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.122 `hf:doc/<topic>` — HF docs HTML scrape (phase-5 deferral close 2/3) (2026-05-11)
+
+Closes phase-1 deferral #2 from §17.107. Hugging Face docs at `huggingface.co/docs/<library>/<page>` are now ingestible via the `hf:doc/<topic>` prefix.
+
+**Why now (and why HTML).** §17.107 deferred this because "HF docs aren't exposed via a stable public JSON API, only the MCP-side toolset." That's still true — the MCP `hf_doc_search` / `hf_doc_fetch` tools are Claude-side, not callable from the orchestrator. So the implementation is HTML scrape: GET the rendered HTML, run trafilatura's main-content extraction, ingest the resulting text. Mature path; the URL-mode flow has been doing the same thing since pre-§17.103.
+
+**Parser change.** `_HF_KINDS` allowlist (`app/modules/research_extractors.py:172`) gains `"doc"`. Topic shape mirrors model/dataset: `hf:doc/<library>/<page>` (e.g., `hf:doc/transformers/installation`, `hf:doc/diffusers/quicktour`). Topic can include version segments — `hf:doc/transformers/v4.35.0/en/model_doc/llama` passes through.
+
+**Fetcher** (`fetch_hf_doc(topic)` in `hf_ingest.py`):
+
+1. URL: `{huggingface_api_base}/docs/{topic}` (defaults to `https://huggingface.co/docs/{topic}`).
+2. Cache lookup by `fetchv1:hf:docs-latest:docs/<topic>` — short TTL (1 h). HF docs are mutable; no per-revision pin like model/dataset cards.
+3. On cache miss: GET via `generic_http_client` (follows redirects, 30 s timeout). 404 → empty list. Non-200 → warning + empty.
+4. `await asyncio.to_thread(trafilatura.extract, html, output_format="txt", with_metadata=False)` — same call shape as URL mode.
+5. Empty extract → warning + empty (some pages return only nav chrome).
+6. Cache the extracted plaintext; return one entry tagged `source_type=official_docs`, `source_ref=<topic>` (the topic IS the immutable identifier from the user's perspective — they pinned a specific page).
+
+**Entry shape.**
+
+```json
+{
+    "path": "hf:doc/transformers/installation",
+    "content": "<trafilatura-extracted plaintext>",
+    "source_type": "official_docs",
+    "source_url": "https://huggingface.co/docs/transformers/installation",
+    "source_ref": "transformers/installation",
+    "quality_signal": {}
+}
+```
+
+`source_type=official_docs` was already in the §17.103 TTL vocabulary (365 d, confidence 0.85). The §17.118 classifier already routes `huggingface.co/docs/` URLs to `official_docs` for distill bypass; topic-mode encounters of these URLs now naturally route through the bypass path.
+
+**Files.**
+
+- `app/modules/research_extractors.py` — `_HF_KINDS` += `"doc"`.
+- `app/utils/hf_ingest.py` — new `fetch_hf_doc(topic)`; `fetch_hf` dispatch extended; docstring kind-table updated.
+- `tests/test_hf_ingest.py` — `hf:doc/transformers` no longer asserted rejected (the §17.107 deferral comment removed). 5 new tests: happy path (HTML → trafilatura → official_docs entry), 404 → empty, empty topic → empty, cache hit short-circuits HTTP, empty extract → empty + no cache write. Dispatch test extended to cover the `doc` branch.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_hf_ingest.py --timeout=30 -q
+24 passed in 2.55s
+
+$ docker exec scaffold-orchestrator pytest tests/ -k "hf_ or research" --timeout=30 -q
+198 passed, 1516 deselected in 60.89s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1706 passed, 8 skipped in 626.08s (0:10:26)
+```
+
++5 vs §17.121 baseline (`1701 passed`). Same 8 skipped, 0 warnings (12 clean runs in a row).
+
+**Producer surface now genuinely complete.** With `hf:doc/` shipped, every kind originally listed in the §17.107 plan is wired: model_card, dataset_card, paper_abstract, tech_docs (spaces), official_docs (docs).
+
 ### 17.121 `/research/verify/{session_id}?recheck=true` — upstream reachability (phase-5 deferral close 1/3) (2026-05-11)
 
 Adds the opt-in upstream-reachability mode to the verify endpoint. Closes the phase-2 deferral about "re-fetch every source_ref and confirm it's still there" — the reachability half of it. Full content-hash comparison (re-fetch, re-normalize per source_type, re-hash, compare) is deliberately split off as a follow-up; that requires per-source-type re-normalization logic that doesn't exist generically.
