@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,6 +22,19 @@ import pytest
 
 def _b64(s: str) -> str:
     return base64.b64encode(s.encode()).decode()
+
+
+@pytest.fixture(autouse=True)
+def _stub_github_fetch_cache():
+    """§17.111 wired fetch_cache into fetch_repo_releases + fetch_repo_issues_and_prs.
+    Stub it for tests so they don't touch the real Redis (and so cache misses
+    don't pollute the test container with leftover entries between runs).
+    """
+    cache = MagicMock()
+    cache.get = AsyncMock(return_value=None)
+    cache.put = AsyncMock(return_value=True)
+    with patch("app.utils.github_ingest.get_fetch_cache", return_value=cache):
+        yield cache
 
 
 def _make_response(status_code: int = 200, json_data=None, headers=None) -> MagicMock:
@@ -321,3 +335,77 @@ async def test_fetch_repo_issues_and_prs_respects_limit_after_filter():
             "o", "r", limit=2, min_reactions=1,
         )
     assert len(items) == 2
+
+
+# ---------------------------------------------------------------------------
+# §17.111 — fetch_cache integration for releases + issues
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_fetch_repo_releases_cache_hit_skips_network():
+    """Cached releases response → no HTTP call."""
+    from app.utils import github_ingest
+    cached = json.dumps([
+        {"tag_name": "v9.9", "name": "9.9", "body": "from-cache",
+         "draft": False, "prerelease": False,
+         "html_url": "x", "published_at": ""},
+    ]).encode("utf-8")
+    cache = MagicMock()
+    cache.get = AsyncMock(return_value=cached)
+    cache.put = AsyncMock(return_value=True)
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock()
+    with patch("app.utils.github_ingest.get_fetch_cache", return_value=cache), \
+         patch("app.utils.github_ingest.get_github_client", return_value=mock_client):
+        rs = await github_ingest.fetch_repo_releases("o", "r", limit=5)
+    assert [r["source_ref"] for r in rs] == ["v9.9"]
+    assert "from-cache" in rs[0]["content"]
+    mock_client.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fetch_repo_releases_cache_miss_then_write():
+    """Cache miss → HTTP fetch → cache.put called with response body."""
+    from app.utils import github_ingest
+    cache = MagicMock()
+    cache.get = AsyncMock(return_value=None)
+    cache.put = AsyncMock(return_value=True)
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(return_value=_make_response(json_data=[
+        {"tag_name": "v1", "name": "1", "body": "fresh",
+         "draft": False, "prerelease": False,
+         "html_url": "x", "published_at": ""},
+    ]))
+    with patch("app.utils.github_ingest.get_fetch_cache", return_value=cache), \
+         patch("app.utils.github_ingest.get_github_client", return_value=mock_client):
+        rs = await github_ingest.fetch_repo_releases("o", "r", limit=5)
+    assert len(rs) == 1
+    mock_client.get.assert_called_once()
+    cache.put.assert_awaited_once()
+    # cache key shape: ttl is the short default
+    _, kwargs = cache.put.call_args
+    assert "ttl_seconds" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_fetch_repo_issues_cache_hit_skips_network():
+    """Cached issues response → no HTTP call."""
+    from app.utils import github_ingest
+    cached = json.dumps([
+        {"number": 1, "title": "cached issue", "body": "cached body",
+         "reactions": {"+1": 99, "heart": 0, "hooray": 0},
+         "state": "closed", "closed_at": "", "html_url": ""},
+    ]).encode("utf-8")
+    cache = MagicMock()
+    cache.get = AsyncMock(return_value=cached)
+    cache.put = AsyncMock(return_value=True)
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock()
+    with patch("app.utils.github_ingest.get_fetch_cache", return_value=cache), \
+         patch("app.utils.github_ingest.get_github_client", return_value=mock_client):
+        items = await github_ingest.fetch_repo_issues_and_prs(
+            "o", "r", limit=5, min_reactions=10,
+        )
+    assert len(items) == 1
+    assert items[0]["source_ref"] == "issue-1"
+    mock_client.get.assert_not_called()

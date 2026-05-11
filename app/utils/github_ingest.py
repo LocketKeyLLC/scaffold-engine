@@ -19,6 +19,7 @@ import httpx
 import redis.asyncio as aioredis
 
 from app.config import settings
+from app.utils.fetch_cache import get_fetch_cache
 from app.utils.http_clients import get_github_client
 
 logger = logging.getLogger(__name__)
@@ -438,20 +439,48 @@ async def fetch_repo_releases(
 
     Each entry tagged ``source_type=release_notes`` with the release's
     ``tag_name`` as the ``source_ref``. Drafts and bodyless releases skipped.
+
+    Response cached under ``fetchv1:gh:list-latest:releases-…`` with the
+    short TTL — release LIST grows as new versions ship, so the cache is
+    a within-session dedup, not a long-term store. Individual release
+    bodies for tagged versions are immutable; today they ride along
+    inside the list response.
     """
     if limit <= 0:
         return []
-    client = get_github_client()
-    r = await client.get(
-        f"/repos/{owner}/{repo}/releases",
-        params={"per_page": min(limit, 100)},
-    )
-    _check_rate_limit(r)
-    if r.status_code == 404:
-        return []
-    r.raise_for_status()
+    cache = get_fetch_cache()
+    cache_path = f"releases:{owner}/{repo}:limit-{min(limit, 100)}"
+
+    releases_json: list | None = None
+    cached = await cache.get("gh", "list-latest", cache_path)
+    if cached:
+        try:
+            releases_json = json.loads(cached)
+        except Exception as exc:
+            logger.debug("gh_releases_cache_decode_failed: %s", exc)
+
+    if releases_json is None:
+        client = get_github_client()
+        r = await client.get(
+            f"/repos/{owner}/{repo}/releases",
+            params={"per_page": min(limit, 100)},
+        )
+        _check_rate_limit(r)
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
+        releases_json = r.json()
+        try:
+            await cache.put(
+                "gh", "list-latest", cache_path,
+                json.dumps(releases_json).encode("utf-8"),
+                ttl_seconds=settings.fetch_cache_ttl_default_seconds,
+            )
+        except Exception as exc:
+            logger.debug("gh_releases_cache_put_failed: %s", exc)
+
     out: list[dict[str, Any]] = []
-    for rel in r.json()[:limit]:
+    for rel in releases_json[:limit]:
         if rel.get("draft"):
             continue
         body = (rel.get("body") or "").strip()
@@ -487,24 +516,51 @@ async def fetch_repo_issues_and_prs(
     second call per PR. The reaction gate is a strong-enough proxy:
     closed-and-thumbs-upped means "people found this valuable" regardless
     of merge.
+
+    Response cached under ``fetchv1:gh:list-latest:issues-…`` with the
+    short TTL. Issue bodies + reaction counts can drift (edits, new
+    reactions), so this is a within-session dedup, not durable storage.
     """
     if limit <= 0:
         return []
-    client = get_github_client()
-    r = await client.get(
-        f"/repos/{owner}/{repo}/issues",
-        params={
-            "state": "closed",
-            "sort": "reactions-+1",
-            "per_page": min(limit * 2, 100),  # over-fetch then filter
-        },
-    )
-    _check_rate_limit(r)
-    if r.status_code == 404:
-        return []
-    r.raise_for_status()
+    cache = get_fetch_cache()
+    per_page = min(limit * 2, 100)
+    cache_path = f"issues:{owner}/{repo}:state-closed:sort-reactions:per_page-{per_page}"
+
+    issues_json: list | None = None
+    cached = await cache.get("gh", "list-latest", cache_path)
+    if cached:
+        try:
+            issues_json = json.loads(cached)
+        except Exception as exc:
+            logger.debug("gh_issues_cache_decode_failed: %s", exc)
+
+    if issues_json is None:
+        client = get_github_client()
+        r = await client.get(
+            f"/repos/{owner}/{repo}/issues",
+            params={
+                "state": "closed",
+                "sort": "reactions-+1",
+                "per_page": per_page,
+            },
+        )
+        _check_rate_limit(r)
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
+        issues_json = r.json()
+        try:
+            await cache.put(
+                "gh", "list-latest", cache_path,
+                json.dumps(issues_json).encode("utf-8"),
+                ttl_seconds=settings.fetch_cache_ttl_default_seconds,
+            )
+        except Exception as exc:
+            logger.debug("gh_issues_cache_put_failed: %s", exc)
+
     out: list[dict[str, Any]] = []
-    for item in r.json():
+    for item in issues_json:
         if len(out) >= limit:
             break
         reactions = item.get("reactions") or {}

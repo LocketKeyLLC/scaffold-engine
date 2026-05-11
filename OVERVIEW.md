@@ -4719,6 +4719,40 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.111 GitHub releases + issues — wire fetch_cache (phase-1 follow-up #1) (2026-05-11)
+
+Closes the `fetch_cache not yet wired` gap flagged in §17.106's OVERVIEW. `fetch_repo_releases` and `fetch_repo_issues_and_prs` now read/write `fetchv1:gh:list-latest:<endpoint-hash>` with the short TTL (`fetch_cache_ttl_default_seconds`, 1 h default).
+
+**Why short TTL, not immutable.** Release notes for a specific tag are immutable post-publication, but the release **list** grows over time (new versions ship). Issue bodies + reaction counts also drift (edits, new reactions). So the cache is a within-session dedup — repeat `/research github:owner/repo[@<ref>]` calls in the same hour skip the API hits — rather than long-term storage. SHA-pinned file fetches (already covered by §17.106's tree+blob caching at the GitHub-side ETag layer) remain on their existing immutable-TTL path.
+
+**Cache key layout.** Same prefix as the rest of the deep-search cache, `ref=list-latest` as a sentinel for "non-SHA-anchored data":
+
+```
+fetchv1:gh:list-latest:<sha256("releases:{owner}/{repo}:limit-N")[:16]>
+fetchv1:gh:list-latest:<sha256("issues:{owner}/{repo}:state-closed:sort-reactions:per_page-N")[:16]>
+```
+
+Cache.get returns the raw JSON list bytes; fetcher json-decodes and iterates as before. All errors caught — bad cache reads fall back to live fetch.
+
+**Files.**
+
+- `app/utils/github_ingest.py` — `from app.utils.fetch_cache import get_fetch_cache`. Both fetchers gain a get→json.loads / miss→fetch+json.dumps→put wrapper.
+- `tests/test_github_ingest_deep.py` — new module-level `_stub_github_fetch_cache` autouse fixture (patches `get_fetch_cache` to a miss-only mock so existing tests don't pollute the test container's Redis). 3 new tests covering cache hit / cache miss-then-write for releases + issues.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_github_ingest_deep.py tests/test_github_ingest.py tests/test_github_ingest_cache.py --timeout=30 -q
+50 passed in 5.45s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1616 passed, 8 skipped in 630.22s (0:10:30)
+```
+
++3 vs §17.110 baseline (`1613 passed`). Same 8 skipped, 0 warnings.
+
+**Phase-1 deferral cleared.** This was follow-up #1 in the phase-1 closeout list; remaining four (hf:doc/, thread-warning investigation, classify_url integration, cache_hit_upstream SSE) sit at §17.112–§17.114 + phase-2 backlog.
+
 ### 17.110 Two-tier routing helper + SSE event extensions — phase-1 close (2026-05-11)
 
 Commit 8/8 of the phase-1 deep-search rollout. Closes the phase with a URL-→-source_type classifier (infrastructure for phase-2 topic-mode distill bypass) and two new SSE events that surface what the producers are doing: `quality_gate_filtered` (counts post-filter explanations) and `source_ref_resolved` (the tag/SHA the GH/HF mode actually pinned to).
