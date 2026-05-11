@@ -500,6 +500,10 @@ class RagInput(BaseModel):
     skip_rerank: bool = False
     include_history: bool = False
     domain: str | None = None
+    # §17.118 — per-intent embedder instruction. Validated against the
+    # EMBED_QUERY_TEMPLATES keys at the endpoint layer; pydantic Literal
+    # gives a clean 422 response shape for unknown intents.
+    query_intent: Literal["general", "code", "qa", "paper"] = "general"
 
 
 class GtInput(BaseModel):

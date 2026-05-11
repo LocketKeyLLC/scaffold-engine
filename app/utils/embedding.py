@@ -13,17 +13,44 @@ from app.utils.embedding_cache import get_cache, truncate_and_normalize
 
 logger = logging.getLogger(__name__)
 
-_QUERY_INSTRUCTION = (
-    "Instruct: Given a query, retrieve relevant knowledge entries\nQuery: "
-)
+# §17.118 — per-intent query instruction templates. Different retrieval
+# intents (code lookup, Q&A, research papers) benefit from instruction
+# prefixes that match the embedding-space neighborhood the caller wants.
+# Cache keys include the full prefixed text, so different intents map
+# to different cache entries — no cross-intent contamination.
+EMBED_QUERY_TEMPLATES: dict[str, str] = {
+    "general": "Instruct: Given a query, retrieve relevant knowledge entries\nQuery: ",
+    "code": "Instruct: Given a query, retrieve code examples and snippets demonstrating the API or behavior asked about\nQuery: ",
+    "qa": "Instruct: Given a question, retrieve community-validated answers and discussions\nQuery: ",
+    "paper": "Instruct: Given a research query, retrieve relevant paper abstracts and academic content\nQuery: ",
+}
+# Back-compat alias — pre-§17.118 callers (and the cache they populated)
+# used this name; new code should reference EMBED_QUERY_TEMPLATES["general"].
+_QUERY_INSTRUCTION = EMBED_QUERY_TEMPLATES["general"]
 
 
-async def embed_query(query: str) -> list[float] | None:
+async def embed_query(
+    query: str,
+    *,
+    query_intent: str = "general",
+) -> list[float] | None:
     """Embed a query with instruction prefix, MRL truncation, and cache.
+
+    ``query_intent`` selects the instruction template — see
+    ``EMBED_QUERY_TEMPLATES`` for the supported intents. Unknown intents
+    fall back to ``"general"`` with a debug log line (validation belongs
+    at the API boundary; ``embed_query`` stays permissive).
 
     Returns a 512d unit-norm vector, or None on embedder failure.
     """
-    query_text = f"{_QUERY_INSTRUCTION}{query}"
+    template = EMBED_QUERY_TEMPLATES.get(query_intent)
+    if template is None:
+        logger.debug(
+            "embed_query_unknown_intent: %r falling_back_to=general",
+            query_intent,
+        )
+        template = EMBED_QUERY_TEMPLATES["general"]
+    query_text = f"{template}{query}"
 
     cache = get_cache()
     cached = await cache.get(query_text)

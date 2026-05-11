@@ -854,6 +854,7 @@ async def query_rag(body: RagInput):
         skip_rerank=body.skip_rerank,
         include_history=body.include_history,
         domain=body.domain,
+        query_intent=body.query_intent,
     )
     if result.get("status") == "error":
         raise HTTPException(

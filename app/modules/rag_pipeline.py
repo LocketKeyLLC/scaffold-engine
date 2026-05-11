@@ -163,10 +163,12 @@ def _iter_search_domains(domain: str | None) -> list[str]:
 # Embedding helpers
 # ---------------------------------------------------------------------------
 
-async def _embed_query(query: str) -> list[float] | None:
+async def _embed_query(
+    query: str, *, query_intent: str = "general",
+) -> list[float] | None:
     """Embed query — delegates to app.utils.embedding.embed_query."""
     from app.utils.embedding import embed_query as _public_embed_query
-    return await _public_embed_query(query)
+    return await _public_embed_query(query, query_intent=query_intent)
 
 
 async def _embed_content(content: str) -> list[float] | None:
@@ -546,8 +548,14 @@ async def query_rag(
     confidence_threshold: float = CONFIDENCE_THRESHOLD,
     skip_rerank: bool = False,
     include_history: bool = False,
+    query_intent: str = "general",
 ) -> dict[str, Any]:
-    """Full RAG pipeline: embed → search → fuse → rerank → filter → supersede-sweep."""
+    """Full RAG pipeline: embed → search → fuse → rerank → filter → supersede-sweep.
+
+    ``query_intent`` selects the embedder instruction template (§17.118).
+    See ``EMBED_QUERY_TEMPLATES`` in ``app/utils/embedding.py`` for the
+    supported intents (``general`` / ``code`` / ``qa`` / ``paper``).
+    """
     top_k = max(1, min(top_k, MAX_TOP_K))
     t0 = time.monotonic()
 
@@ -563,7 +571,7 @@ async def query_rag(
             "metadata": {"warnings": ["collection_unavailable"], "reranker_backend": None},
         }
 
-    query_embedding = await _embed_query(query)
+    query_embedding = await _embed_query(query, query_intent=query_intent)
     if query_embedding is None:
         return {
             "status": "error",

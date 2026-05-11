@@ -4719,6 +4719,51 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.118 Per-intent embedder instruction templates (phase-4 quality 1/3) (2026-05-11)
+
+First quality-features commit. The query-embedding path now picks an instruction prefix per caller-supplied intent — letting retrieval steer toward different regions of embedding space depending on whether the user is hunting for code, Q&A, or papers.
+
+**Templates** (`app/utils/embedding.py:EMBED_QUERY_TEMPLATES`):
+
+| Intent | Prefix |
+|---|---|
+| `general` (default) | `Instruct: Given a query, retrieve relevant knowledge entries\nQuery: ` |
+| `code` | `Instruct: Given a query, retrieve code examples and snippets demonstrating the API or behavior asked about\nQuery: ` |
+| `qa` | `Instruct: Given a question, retrieve community-validated answers and discussions\nQuery: ` |
+| `paper` | `Instruct: Given a research query, retrieve relevant paper abstracts and academic content\nQuery: ` |
+
+**Cache divergence by design.** Different intents on the same query map to different cache keys — the cache key incorporates the full prefixed text. No cross-intent contamination, but also no cross-intent reuse (a `code` query and a `general` query on the same string each get their own embedding call). The `general` default preserves byte-equality with pre-§17.118 cache entries.
+
+**API surface.**
+
+- `embed_query(query, *, query_intent="general")` — public helper.
+- `query_rag(query, *, ..., query_intent="general")` — pipeline entry point.
+- `RagInput.query_intent: Literal["general", "code", "qa", "paper"] = "general"` — Pydantic-validated at the `/rag` endpoint; unknown intent → 422.
+- `embed_query` itself is permissive: unknown intent → debug log + fallback to `general`. Validation belongs at the API boundary, not the embedder.
+
+**Files.**
+
+- `app/utils/embedding.py` — `EMBED_QUERY_TEMPLATES` dict + `query_intent` kwarg on `embed_query`. `_QUERY_INSTRUCTION` kept as a back-compat alias pointing at `EMBED_QUERY_TEMPLATES["general"]`.
+- `app/modules/rag_pipeline.py` — `_embed_query` + `query_rag` thread `query_intent` through.
+- `app/schemas.py` — `RagInput.query_intent` Literal field.
+- `app/main.py` — `/rag` endpoint passes `body.query_intent` into `_query_rag`.
+- `sdk/scaffold_client/schemas.py` — byte-vendored copy refreshed via `make sync-schemas` (the SDK parity test would have caught this — and did, on the first full-suite run).
+- `tests/test_embed_query_intent.py` (new) — 11 tests: template registry shape, default behavior, per-intent template selection, cache-key divergence, unknown-intent fallback, cache-hit short-circuit, RagInput validation.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_embed_query_intent.py --timeout=30 -q
+11 passed in 1.10s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1638 passed, 8 skipped in 633.81s (0:10:33)
+```
+
++11 vs §17.117 baseline (`1627 passed`) — all from new intent tests. Same 8 skipped, 0 warnings (8 clean runs in a row; thread-warning heisenbug still absent).
+
+**SDK parity check caught a real footgun.** First full-suite run hit `test_schemas_byte_equal` failure because `sdk/scaffold_client/schemas.py` is a byte-vendored copy of `app/schemas.py`. `make sync-schemas` (single `cp` command) refreshed it. Good guardrail — kept the SDK from silently diverging.
+
 ### 17.117 `cache_hit_upstream` SSE event (phase-3 cleanup 3/3) (2026-05-11)
 
 Final phase-3 commit. Closes the last phase-1 deferral (#5). Emits a `cache_hit_upstream` SSE event from the GitHub / HF / forum mode runners reporting `{hits, misses, puts, oversized}` deltas across the per-iteration fetch.
