@@ -1125,6 +1125,7 @@ async def research_reply_endpoint(body: ResearchReplyInput, request: Request):
 async def research_verify_endpoint(
     session_id: str,
     recheck: bool = Query(False, description="If true, HEAD-request each entry's source_url to surface upstream reachability state."),
+    compare_hash: bool = Query(False, description="If true (§17.126), GET each URL and SHA256-compare against the stored raw_upstream_hash. Implies recheck=true."),
 ):
     """Session-scoped provenance audit (§17.114 + §17.121).
 
@@ -1153,7 +1154,11 @@ async def research_verify_endpoint(
         raise HTTPException(status_code=400, detail=f"Invalid session_id (must be UUID): {session_id!r}")
 
     async with async_session() as db_session:
-        return await verify_session(db_session, session_id, recheck_upstream=recheck)
+        return await verify_session(
+            db_session, session_id,
+            recheck_upstream=recheck,
+            compare_hash=compare_hash,
+        )
 
 
 @app.post("/research/pdf", tags=["Research"])

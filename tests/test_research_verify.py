@@ -153,7 +153,7 @@ async def test_recheck_one_url_reachable():
     with patch("app.modules.research_extractors._is_public_host",
                return_value=(True, "ok")):
         out = await rv._recheck_one_url(client, "https://example.com/a")
-    assert out == {"state": "reachable", "status": 200}
+    assert out["state"] == "reachable" and out["status"] == 200
 
 
 @pytest.mark.asyncio
@@ -166,7 +166,7 @@ async def test_recheck_one_url_missing_404():
     with patch("app.modules.research_extractors._is_public_host",
                return_value=(True, "ok")):
         out = await rv._recheck_one_url(client, "https://example.com/x")
-    assert out == {"state": "missing", "status": 404}
+    assert out["state"] == "missing" and out["status"] == 404
 
 
 @pytest.mark.asyncio
@@ -179,7 +179,7 @@ async def test_recheck_one_url_forbidden_403():
     with patch("app.modules.research_extractors._is_public_host",
                return_value=(True, "ok")):
         out = await rv._recheck_one_url(client, "https://example.com/x")
-    assert out == {"state": "forbidden", "status": 403}
+    assert out["state"] == "forbidden" and out["status"] == 403
 
 
 @pytest.mark.asyncio
@@ -196,7 +196,7 @@ async def test_recheck_one_url_head_405_falls_back_to_get():
     with patch("app.modules.research_extractors._is_public_host",
                return_value=(True, "ok")):
         out = await rv._recheck_one_url(client, "https://example.com/x")
-    assert out == {"state": "reachable", "status": 200}
+    assert out["state"] == "reachable" and out["status"] == 200
     client.get.assert_called_once()
 
 
@@ -209,7 +209,7 @@ async def test_recheck_one_url_ssrf_blocked():
     with patch("app.modules.research_extractors._is_public_host",
                return_value=(False, "private_ip")):
         out = await rv._recheck_one_url(client, "http://10.0.0.1/x")
-    assert out == {"state": "error", "status": None}
+    assert out["state"] == "error" and out["status"] is None
     client.head.assert_not_called()
 
 
@@ -218,7 +218,7 @@ async def test_recheck_one_url_empty_url_skipped():
     from app.modules import research_verify as rv
     client = MagicMock()
     out = await rv._recheck_one_url(client, "")
-    assert out == {"state": "skipped", "status": None}
+    assert out["state"] == "skipped" and out["status"] is None
 
 
 @pytest.mark.asyncio
@@ -230,7 +230,7 @@ async def test_recheck_one_url_timeout_returns_error():
     with patch("app.modules.research_extractors._is_public_host",
                return_value=(True, "ok")):
         out = await rv._recheck_one_url(client, "https://example.com/x")
-    assert out == {"state": "error", "status": None}
+    assert out["state"] == "error" and out["status"] is None
 
 
 @pytest.mark.asyncio
@@ -287,6 +287,151 @@ async def test_verify_session_without_recheck_omits_recheck_fields():
         report = await rv.verify_session(db, "55555555-5555-5555-5555-555555555555")
     assert "reachable" not in report["totals"]
     assert "upstream_missing" not in report["totals"]
+
+
+# ---------------------------------------------------------------------------
+# §17.126 — compare_hash mode
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_recheck_one_url_fetch_body_returns_body():
+    """When fetch_body=True, GET the URL and include body bytes in result."""
+    from app.modules import research_verify as rv
+    client = MagicMock()
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.content = b"hello body"
+    client.get = AsyncMock(return_value=resp)
+    with patch("app.modules.research_extractors._is_public_host",
+               return_value=(True, "ok")):
+        out = await rv._recheck_one_url(client, "https://example.com/x", fetch_body=True)
+    assert out["state"] == "reachable"
+    assert out["status"] == 200
+    assert out["body"] == b"hello body"
+    client.get.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_verify_session_compare_hash_matches():
+    """Stored hash == sha256 of re-fetched body → content_state=matches."""
+    from app.modules import research_verify as rv
+    import hashlib
+
+    body = b"atom xml fixture"
+    stored_hash = hashlib.sha256(body).hexdigest()
+    session_id = "77777777-7777-7777-7777-777777777777"
+
+    meta_rows = []
+    provenance_rows = [
+        {"entry_id": "e1", "source_ref": "ref1",
+         "fetched_at": 1, "quality_signal": {},
+         "raw_upstream_hash": stored_hash},
+    ]
+    db = _mock_db_session(meta_rows, provenance_rows)
+
+    milvus_rows = {
+        "e1": {"domain": "eng", "source_type": "paper_abstract",
+               "source_url": "https://arxiv.org/abs/2310.06825",
+               "content_hash": "h1", "version": 1, "supersedes_id": None},
+    }
+    recheck_results = {
+        "e1": {"state": "reachable", "status": 200, "body": body},
+    }
+    with patch.object(rv, "_milvus_lookup_entries", return_value=milvus_rows), \
+         patch.object(rv, "_milvus_lookup_supersedors", return_value={}), \
+         patch.object(rv, "_recheck_upstream",
+                      AsyncMock(return_value=recheck_results)):
+        report = await rv.verify_session(
+            db, session_id, recheck_upstream=True, compare_hash=True,
+        )
+
+    assert report["totals"]["content_matches"] == 1
+    assert report["totals"]["content_drifted"] == 0
+    e = report["entries"][0]
+    assert e["content_state"] == "matches"
+    assert e["raw_upstream_hash"] == stored_hash
+    assert e["current_upstream_hash"] == stored_hash
+
+
+@pytest.mark.asyncio
+async def test_verify_session_compare_hash_drifted():
+    """Stored hash != current → content_state=drifted."""
+    from app.modules import research_verify as rv
+    import hashlib
+
+    stored_hash = hashlib.sha256(b"original").hexdigest()
+    current_body = b"changed body"
+    session_id = "88888888-8888-8888-8888-888888888888"
+
+    provenance_rows = [
+        {"entry_id": "e1", "source_ref": "ref1",
+         "fetched_at": 1, "quality_signal": {},
+         "raw_upstream_hash": stored_hash},
+    ]
+    db = _mock_db_session([], provenance_rows)
+    milvus_rows = {
+        "e1": {"domain": "eng", "source_type": "paper_abstract",
+               "source_url": "https://example.com/x",
+               "content_hash": "h1", "version": 1, "supersedes_id": None},
+    }
+    recheck_results = {"e1": {"state": "reachable", "status": 200, "body": current_body}}
+    with patch.object(rv, "_milvus_lookup_entries", return_value=milvus_rows), \
+         patch.object(rv, "_milvus_lookup_supersedors", return_value={}), \
+         patch.object(rv, "_recheck_upstream",
+                      AsyncMock(return_value=recheck_results)):
+        report = await rv.verify_session(
+            db, session_id, recheck_upstream=True, compare_hash=True,
+        )
+    assert report["totals"]["content_drifted"] == 1
+    assert report["entries"][0]["content_state"] == "drifted"
+
+
+@pytest.mark.asyncio
+async def test_verify_session_compare_hash_unverifiable_no_stored_hash():
+    """Entry without raw_upstream_hash → content_state=unverifiable."""
+    from app.modules import research_verify as rv
+
+    provenance_rows = [
+        {"entry_id": "e1", "source_ref": "ref1",
+         "fetched_at": 1, "quality_signal": {},
+         "raw_upstream_hash": None},
+    ]
+    db = _mock_db_session([], provenance_rows)
+    milvus_rows = {
+        "e1": {"domain": "eng", "source_type": "so_answer",
+               "source_url": "https://example.com/x",
+               "content_hash": "h1", "version": 1, "supersedes_id": None},
+    }
+    recheck_results = {"e1": {"state": "reachable", "status": 200, "body": b"x"}}
+    with patch.object(rv, "_milvus_lookup_entries", return_value=milvus_rows), \
+         patch.object(rv, "_milvus_lookup_supersedors", return_value={}), \
+         patch.object(rv, "_recheck_upstream",
+                      AsyncMock(return_value=recheck_results)):
+        report = await rv.verify_session(
+            db, "99999999-9999-9999-9999-999999999999",
+            recheck_upstream=True, compare_hash=True,
+        )
+    assert report["totals"]["content_unverifiable"] == 1
+    assert report["entries"][0]["content_state"] == "unverifiable"
+
+
+@pytest.mark.asyncio
+async def test_verify_session_compare_hash_implies_recheck():
+    """compare_hash=True forces recheck_upstream=True (hash compare needs body)."""
+    from app.modules import research_verify as rv
+    db = _mock_db_session([], [])
+    with patch.object(rv, "_milvus_lookup_entries", return_value={}), \
+         patch.object(rv, "_milvus_lookup_supersedors", return_value={}), \
+         patch.object(rv, "_recheck_upstream",
+                      AsyncMock(return_value={})) as rec:
+        await rv.verify_session(
+            db, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            recheck_upstream=False, compare_hash=True,
+        )
+    rec.assert_awaited_once()
+    # Verify fetch_body=True was passed.
+    kwargs = rec.call_args.kwargs
+    assert kwargs.get("fetch_body") is True
 
 
 @pytest.mark.smoke

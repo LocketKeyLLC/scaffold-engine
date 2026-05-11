@@ -795,7 +795,7 @@ async def ingest_entries(
 
     now = int(time.time())
     safe_domain = _escape_literal(domain)
-    provenance_writes: list[tuple[str, dict]] = []
+    provenance_writes: list[tuple[str, dict, str | None]] = []
 
     # ---- Pass 1: normalize + exact-hash filter ----
     prepared: list[dict] = []
@@ -816,6 +816,7 @@ async def ingest_entries(
         explicit_confidence = entry.get("confidence", entry.get("confidence_score"))
         confidence = confidence_for(source_type, explicit_confidence)
         provenance = entry.get("provenance")
+        raw_upstream_hash = entry.get("raw_upstream_hash")
         ch = _content_hash(content)
 
         try:
@@ -844,6 +845,7 @@ async def ingest_entries(
             "source_url": source_url, "source_type": source_type,
             "confidence": confidence, "ch": ch, "embed_text": embed_text,
             "provenance": provenance,
+            "raw_upstream_hash": raw_upstream_hash,
         })
 
     if not prepared:
@@ -969,8 +971,11 @@ async def ingest_entries(
                 stats["versioned"] += 1
             else:
                 stats["new"] += 1
-            if p["provenance"]:
-                provenance_writes.append((entry_id, p["provenance"]))
+            # Provenance is written when EITHER the producer supplied a
+            # provenance dict OR a raw_upstream_hash. Either alone is
+            # enough to populate a row; both are common pairings.
+            if p["provenance"] or p["raw_upstream_hash"]:
+                provenance_writes.append((entry_id, p["provenance"] or {}, p["raw_upstream_hash"]))
         except Exception as e:
             logger.warning("ingest_upsert_failed: %s", e)
 
@@ -985,8 +990,12 @@ async def ingest_entries(
     if provenance_writes:
         try:
             async with async_session() as session:
-                for eid, prov in provenance_writes:
-                    await write_provenance(session, eid, prov, session_id=session_id)
+                for eid, prov, raw_hash in provenance_writes:
+                    await write_provenance(
+                        session, eid, prov,
+                        session_id=session_id,
+                        raw_upstream_hash=raw_hash,
+                    )
                 await session.commit()
         except Exception as e:
             logger.error("provenance_batch_write_failed: %s n=%d", e, len(provenance_writes))

@@ -144,12 +144,16 @@ def _milvus_lookup_supersedors(entry_ids: list[str]) -> dict[str, str]:
     return out
 
 
-async def _recheck_one_url(client, url: str) -> dict[str, Any]:
-    """HEAD (or GET on 405) the URL and classify the response.
+async def _recheck_one_url(
+    client, url: str, *, fetch_body: bool = False,
+) -> dict[str, Any]:
+    """HEAD (or GET on 405, or GET when ``fetch_body=True``) the URL and
+    classify the response.
 
-    Returns ``{state, status}``. ``state`` ∈ ``{reachable, missing,
-    forbidden, error, skipped}``. ``status`` is the HTTP code or None
-    on connection error. No body read — we only care about reachability.
+    Returns ``{state, status, body?}``. ``state`` ∈ ``{reachable, missing,
+    forbidden, error, skipped}``. ``status`` is the HTTP code or None on
+    connection error. ``body`` (bytes) included only when ``fetch_body=True``
+    and status is 2xx — used by §17.126's hash-compare mode.
     """
     if not url:
         return {"state": "skipped", "status": None}
@@ -160,24 +164,36 @@ async def _recheck_one_url(client, url: str) -> dict[str, Any]:
     ok, _reason = _is_public_host(url)
     if not ok:
         return {"state": "error", "status": None}
+    body: bytes | None = None
     try:
-        r = await client.head(
-            url, timeout=10.0,
-            headers={"User-Agent": "ScaffoldEngine/1.0 (verify)"},
-            follow_redirects=True,
-        )
-        if r.status_code == 405:
-            # Some servers (notably arxiv.org) don't support HEAD —
-            # fall back to a GET with the body discarded immediately.
+        if fetch_body:
+            # Body required for hash compare — GET unconditionally.
             r = await client.get(
+                url, timeout=15.0,
+                headers={"User-Agent": "ScaffoldEngine/1.0 (verify)"},
+                follow_redirects=True,
+            )
+            status = r.status_code
+            if 200 <= status < 300:
+                body = r.content
+        else:
+            r = await client.head(
                 url, timeout=10.0,
                 headers={"User-Agent": "ScaffoldEngine/1.0 (verify)"},
                 follow_redirects=True,
             )
-        status = r.status_code
+            if r.status_code == 405:
+                # Some servers (notably arxiv.org) don't support HEAD —
+                # fall back to a GET with the body discarded immediately.
+                r = await client.get(
+                    url, timeout=10.0,
+                    headers={"User-Agent": "ScaffoldEngine/1.0 (verify)"},
+                    follow_redirects=True,
+                )
+            status = r.status_code
     except Exception as e:
         logger.debug("verify_recheck_error: url=%s err=%s", url, e)
-        return {"state": "error", "status": None}
+        return {"state": "error", "status": None, "body": None}
 
     if 200 <= status < 300:
         state = "reachable"
@@ -187,16 +203,18 @@ async def _recheck_one_url(client, url: str) -> dict[str, Any]:
         state = "forbidden"
     else:
         state = "error"
-    return {"state": state, "status": status}
+    return {"state": state, "status": status, "body": body}
 
 
 async def _recheck_upstream(
     url_by_eid: dict[str, str], concurrency: int = 5,
+    *, fetch_body: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """Fan out HEAD requests with bounded concurrency.
+    """Fan out HEAD (or GET when ``fetch_body=True``) requests with bounded
+    concurrency.
 
-    Returns ``{entry_id: {state, status}}``. Entries with empty URLs
-    map to ``{"state": "skipped", "status": None}``.
+    Returns ``{entry_id: {state, status, body?}}``. Entries with empty
+    URLs map to ``{"state": "skipped", "status": None, "body": None}``.
     """
     from app.utils.http_clients import get_generic_http_client
     client = get_generic_http_client()
@@ -204,7 +222,7 @@ async def _recheck_upstream(
 
     async def _one(eid: str, url: str):
         async with sem:
-            return eid, await _recheck_one_url(client, url)
+            return eid, await _recheck_one_url(client, url, fetch_body=fetch_body)
 
     results = await asyncio.gather(*(
         _one(eid, url) for eid, url in url_by_eid.items()
@@ -217,6 +235,7 @@ async def verify_session(
     session_id: str,
     *,
     recheck_upstream: bool = False,
+    compare_hash: bool = False,
 ) -> dict[str, Any]:
     """Build a verify report for a research session. See module docstring
     for the returned shape.
@@ -225,9 +244,16 @@ async def verify_session(
     the report returns an empty ``entries`` list and ``provenance_rows=0``.
 
     ``recheck_upstream=True`` (§17.121) HEAD-requests each entry's
-    source_url and classifies the response. Adds ``upstream_state`` per
-    entry + ``reachable``/``upstream_missing``/``upstream_error`` totals.
+    source_url and classifies the response.
+
+    ``compare_hash=True`` (§17.126) extends recheck — GETs each URL,
+    SHA256s the body bytes, compares to ``raw_upstream_hash`` from the
+    provenance row. Reports ``content_state ∈ {matches, drifted,
+    unverifiable, fetch_failed}`` per entry. Forces ``recheck_upstream``
+    on (a hash compare needs the body).
     """
+    if compare_hash:
+        recheck_upstream = True
     meta_row = await db_session.execute(
         text(
             "SELECT topic, status, completed_at "
@@ -263,8 +289,11 @@ async def verify_session(
             prov["entry_id"]: (milvus_rows.get(prov["entry_id"], {}) or {}).get("source_url", "")
             for prov in provenance_rows
         }
-        recheck_results = await _recheck_upstream(url_by_eid)
+        recheck_results = await _recheck_upstream(
+            url_by_eid, fetch_body=compare_hash,
+        )
 
+    import hashlib as _hashlib
     entries: list[dict[str, Any]] = []
     n_present = 0
     n_superseded = 0
@@ -272,6 +301,9 @@ async def verify_session(
     n_reachable = 0
     n_upstream_missing = 0
     n_upstream_error = 0
+    n_matches = 0
+    n_drifted = 0
+    n_unverifiable = 0
     for prov in provenance_rows:
         eid = prov["entry_id"]
         milvus = milvus_rows.get(eid)
@@ -299,7 +331,7 @@ async def verify_session(
             "content_hash_at_ingest": (milvus or {}).get("content_hash", "") or None,
         }
         if recheck_upstream:
-            rc = recheck_results.get(eid) or {"state": "skipped", "status": None}
+            rc = recheck_results.get(eid) or {"state": "skipped", "status": None, "body": None}
             entry["upstream_state"] = rc["state"]
             entry["upstream_status"] = rc["status"]
             if rc["state"] == "reachable":
@@ -308,6 +340,26 @@ async def verify_session(
                 n_upstream_missing += 1
             elif rc["state"] in ("forbidden", "error"):
                 n_upstream_error += 1
+
+            if compare_hash:
+                stored_hash = prov.get("raw_upstream_hash")
+                if not stored_hash:
+                    entry["content_state"] = "unverifiable"
+                    n_unverifiable += 1
+                elif rc["state"] != "reachable" or rc.get("body") is None:
+                    entry["content_state"] = "fetch_failed"
+                    # Falls through to upstream_error count above, not
+                    # tracked separately at session level.
+                else:
+                    current_hash = _hashlib.sha256(rc["body"]).hexdigest()
+                    if current_hash == stored_hash:
+                        entry["content_state"] = "matches"
+                        n_matches += 1
+                    else:
+                        entry["content_state"] = "drifted"
+                        n_drifted += 1
+                    entry["current_upstream_hash"] = current_hash
+                entry["raw_upstream_hash"] = stored_hash
         entries.append(entry)
 
     totals: dict[str, Any] = {
@@ -320,6 +372,10 @@ async def verify_session(
         totals["reachable"] = n_reachable
         totals["upstream_missing"] = n_upstream_missing
         totals["upstream_error"] = n_upstream_error
+    if compare_hash:
+        totals["content_matches"] = n_matches
+        totals["content_drifted"] = n_drifted
+        totals["content_unverifiable"] = n_unverifiable
 
     return {
         "session_id": session_id,

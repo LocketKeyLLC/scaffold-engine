@@ -1497,7 +1497,7 @@ async def _run_research_forum_mode(
         source_url = it.get("source_url", "")
         if source_url:
             state.url_history.add(source_url)
-        entries.append({
+        entry = {
             "title": f"{prefix}: {it['path']}",
             "content": it["content"],
             "source": source_url,
@@ -1507,7 +1507,12 @@ async def _run_research_forum_mode(
                 source_ref=it.get("source_ref", ""),
                 quality_signal=it.get("quality_signal", {}),
             ),
-        })
+        }
+        # §17.126 — pass through raw_upstream_hash when the producer
+        # populated it (currently arxiv id-mode does).
+        if it.get("raw_upstream_hash"):
+            entry["raw_upstream_hash"] = it["raw_upstream_hash"]
+        entries.append(entry)
 
     yield _sse("extraction_complete", {
         "iteration": 1,

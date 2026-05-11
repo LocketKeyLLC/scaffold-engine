@@ -406,7 +406,14 @@ async def fetch_arxiv(mode: str, value: str, limit: int) -> list[dict[str, Any]]
     if mode == "id":
         cached = await cache.get("arxiv", value, "atom")
         if cached:
-            return _parse_arxiv_atom(cached.decode("utf-8", errors="replace"), limit)
+            entries = _parse_arxiv_atom(cached.decode("utf-8", errors="replace"), limit)
+            # §17.126 — stamp raw_upstream_hash on every entry derived
+            # from this Atom body. Same hash for all entries (they all
+            # share the source response).
+            raw_hash = hashlib.sha256(cached).hexdigest()
+            for e in entries:
+                e["raw_upstream_hash"] = raw_hash
+            return entries
         url = f"{_ARXIV_BASE}?id_list={value}"
     elif mode == "query":
         qhash = _query_hash(value)
@@ -437,7 +444,15 @@ async def fetch_arxiv(mode: str, value: str, limit: int) -> list[dict[str, Any]]
     except Exception as exc:
         logger.debug("arxiv_cache_put_failed: %s", exc)
 
-    return _parse_arxiv_atom(body.decode("utf-8", errors="replace"), limit)
+    entries = _parse_arxiv_atom(body.decode("utf-8", errors="replace"), limit)
+    if mode == "id":
+        # §17.126 — stamp the Atom-body hash on each entry. Query mode
+        # responses change as new papers are indexed, so hashing those
+        # would always drift; left unstamped.
+        raw_hash = hashlib.sha256(body).hexdigest()
+        for e in entries:
+            e["raw_upstream_hash"] = raw_hash
+    return entries
 
 
 # ---------------------------------------------------------------------------

@@ -95,6 +95,8 @@ async def write_provenance(
     entry_id: str,
     provenance: dict[str, Any],
     session_id: str | None = None,
+    *,
+    raw_upstream_hash: str | None = None,
 ) -> None:
     """Insert (or replace) the provenance row for a freshly-upserted entry.
 
@@ -102,20 +104,26 @@ async def write_provenance(
     the same entry overwrites the provenance row. Caller commits.
 
     ``session_id`` is optional — when set, the row is linked to a
-    research session (column added in migration 035, §17.114). Direct
-    ingest paths (``/rag/ingest``) leave it ``NULL``, which keeps those
-    entries correctly invisible to ``/research/verify/{session_id}``.
+    research session (migration 035, §17.114).
+
+    ``raw_upstream_hash`` is optional (§17.126, migration 036) — a
+    producer-chosen hash of the raw upstream payload (arXiv Atom bytes,
+    GH blob bytes, canonical-JSON of an API response, ...). When set,
+    ``/research/verify?compare_hash=true`` can re-compute the hash from
+    a current fetch and detect content drift. NULL → entry reports
+    ``content_state=unverifiable`` to that endpoint mode.
     """
     await session.execute(
         text(
             "INSERT INTO rag_entry_provenance "
-            "(entry_id, source_ref, fetched_at, quality_signal, session_id) "
-            "VALUES (:eid, :ref, :fa, CAST(:qs AS jsonb), CAST(:sid AS uuid)) "
+            "(entry_id, source_ref, fetched_at, quality_signal, session_id, raw_upstream_hash) "
+            "VALUES (:eid, :ref, :fa, CAST(:qs AS jsonb), CAST(:sid AS uuid), :rh) "
             "ON CONFLICT (entry_id) DO UPDATE SET "
             "source_ref = EXCLUDED.source_ref, "
             "fetched_at = EXCLUDED.fetched_at, "
             "quality_signal = EXCLUDED.quality_signal, "
-            "session_id = EXCLUDED.session_id"
+            "session_id = EXCLUDED.session_id, "
+            "raw_upstream_hash = EXCLUDED.raw_upstream_hash"
         ),
         {
             "eid": entry_id,
@@ -123,6 +131,7 @@ async def write_provenance(
             "fa": int(provenance.get("fetched_at", time.time())),
             "qs": json.dumps(provenance.get("quality_signal", {})),
             "sid": str(session_id) if session_id else None,
+            "rh": raw_upstream_hash,
         },
     )
 
@@ -141,7 +150,7 @@ async def get_provenance_for_session(
     """
     result = await session.execute(
         text(
-            "SELECT entry_id, source_ref, fetched_at, quality_signal "
+            "SELECT entry_id, source_ref, fetched_at, quality_signal, raw_upstream_hash "
             "FROM rag_entry_provenance "
             "WHERE session_id = CAST(:sid AS uuid) "
             "ORDER BY fetched_at"
@@ -151,11 +160,19 @@ async def get_provenance_for_session(
     out: list[dict[str, Any]] = []
     for row in result.mappings():
         qs = row["quality_signal"]
+        # ``.get`` semantics for the §17.126 column — older test fixtures
+        # may yield mappings that predate the schema add. Real Postgres
+        # rows always include the column (NULL when unpopulated).
+        try:
+            raw_hash = row["raw_upstream_hash"]
+        except KeyError:
+            raw_hash = None
         out.append({
             "entry_id": row["entry_id"],
             "source_ref": row["source_ref"],
             "fetched_at": int(row["fetched_at"]),
             "quality_signal": qs if isinstance(qs, dict) else (json.loads(qs) if qs else {}),
+            "raw_upstream_hash": raw_hash,
         })
     return out
 

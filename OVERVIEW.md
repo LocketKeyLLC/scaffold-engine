@@ -4719,6 +4719,113 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.126 Content-hash comparison for `/research/verify` (phase-6 quality 3/3, phase-6 close) (2026-05-11)
+
+Final phase-6 commit. Closes the §17.121 in-scope split tracked since phase-5: extending verify-mode beyond reachability checking to actually compare upstream content against the ingested state. Foundation + first producer wired (arXiv abstract); other producers pluggable as follow-ups.
+
+**Schema.** Migration 036 adds `raw_upstream_hash TEXT` (nullable) to `rag_entry_provenance`. Producers populate it when they have a stable hash domain; verify endpoint compares.
+
+**API surface.**
+
+- `write_provenance(... raw_upstream_hash=None)` — keyword-only kwarg, additive.
+- `get_provenance_for_session` returns the new field per row.
+- `ingest_entries` reads `entry.get("raw_upstream_hash")` and threads through (each producer optionally sets this on its returned entry dicts).
+- `/research/verify/{session_id}?compare_hash=true` — new query param. Implies `recheck=true` (hash compare needs the body). GETs each entry's source_url (instead of HEAD), SHA256-hashes the body bytes, compares to stored.
+
+**Per-entry response shape (compare_hash mode):**
+
+```json
+{
+    ...existing fields...,
+    "upstream_state": "reachable" | "missing" | ...,
+    "content_state": "matches" | "drifted" | "unverifiable" | "fetch_failed",
+    "raw_upstream_hash": "<stored>",
+    "current_upstream_hash": "<re-computed, only when fetched>"
+}
+```
+
+`content_state` semantics:
+
+- **`matches`** — fetched body's hash equals stored. Upstream content stable since ingest.
+- **`drifted`** — hashes differ. Upstream content changed.
+- **`unverifiable`** — no stored hash (entry ingested before §17.126 or by a producer that hasn't wired this).
+- **`fetch_failed`** — upstream unreachable, status≥400, or body unavailable.
+
+**Session-level totals** (compare_hash mode only): `content_matches`, `content_drifted`, `content_unverifiable`.
+
+**Per-producer wiring status:**
+
+| Producer | Hash domain | Wired? |
+|---|---|---|
+| arXiv (id mode, abstract Atom) | `sha256(atom_body_bytes)` | ✓ this commit |
+| arXiv (id_full, PDF) | could hash PDF bytes | follow-up |
+| arXiv (query mode) | response drifts as new papers index | intentionally NOT wired (would always drift) |
+| GitHub blob @ SHA | `sha256(blob_bytes)` | follow-up |
+| HF model/dataset @ revision | `sha256(api_response_bytes)` | follow-up |
+| HF paper, doc | possible (HTML drifts) | follow-up |
+| SO, HN, Reddit, Wiki | response semantics drift even for stable IDs | open question for follow-up |
+| GH releases/issues/discussions | mutable bodies | unlikely to wire |
+
+arXiv abstract is the canonical demo: Atom XML for a given arXiv ID + version is byte-stable post-publication. Hash computed in `fetch_arxiv` (id mode only), stamped on every chunk entry, written to provenance by `ingest_entries`. Operators running `/research/verify?compare_hash=true` against a session that ingested arxiv abstracts get real drift detection.
+
+**Defensive coding for older test fixtures.** `get_provenance_for_session` does `try: row["raw_upstream_hash"] except KeyError: None` — real Postgres rows always include the column (NULL when unpopulated), but test fixtures using plain dicts may predate the migration. Tolerates both. Five existing recheck-mode tests' exact-dict assertions loosened to per-field checks (the recheck-result dict now also carries `body`).
+
+**Files.**
+
+- `db/migrations/036_rag_entry_provenance_raw_hash.sql` (new) — idempotent ALTER TABLE.
+- `app/modules/provenance.py` — `write_provenance` kwarg, `get_provenance_for_session` reads new field.
+- `app/modules/rag_pipeline.py` — `ingest_entries` threads `raw_upstream_hash` through `prepared` list and into batched `write_provenance` calls. Tuple shape changed from `(eid, prov)` to `(eid, prov, raw_hash)`.
+- `app/utils/forum_ingest.py` — `fetch_arxiv` computes `sha256(atom_body)` for `mode="id"` (both fresh + cached paths) and stamps every returned entry.
+- `app/modules/research_agent.py` — forum runner pass-through of `raw_upstream_hash` from item dict into ingest entry.
+- `app/modules/research_verify.py` — `_recheck_one_url(fetch_body=False)` kwarg returns response body when set; `_recheck_upstream(fetch_body=False)`; `verify_session(compare_hash=False)` kwarg implies `recheck_upstream=True`, computes per-entry `content_state`, exposes per-entry + per-session totals.
+- `app/main.py` — `/research/verify/{session_id}` endpoint accepts `?compare_hash=true` query param.
+- `tests/test_research_verify.py` — 5 new tests (fetch_body returns body, compare-hash matches, compare-hash drifted, no-stored-hash unverifiable, compare_hash implies recheck), 5 existing recheck-result-shape assertions loosened.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_research_verify.py --timeout=30 -q
+19 passed in 12.65s
+
+$ docker exec scaffold-orchestrator pytest tests/ -k "verify or provenance or forum or research" --timeout=30 -q
+288 passed, 1452 deselected in 63.28s (0:01:03)
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1732 passed, 8 skipped in 623.86s (0:10:23)
+```
+
++5 vs §17.125 baseline (`1727 passed`). Same 8 skipped, 0 warnings (16 clean runs in a row).
+
+---
+
+## Phase 6 complete — all original-checklist items now closed
+
+3 commits. Suite **1714 → 1732** (+18 net new tests). Same 8 skipped throughout.
+
+| Commit | Hash | Title |
+|---|---|---|
+| §17.124 | `f910738` | GitHub Discussions API (GraphQL) |
+| §17.125 | `e31dde6` | Negative-knowledge ingestion (disputed_claim) |
+| §17.126 | (this) | Content-hash comparison for `/research/verify` |
+
+**Final inventory across 6 phases:**
+
+- 24 dated §-entries (§17.103 → §17.126) over 2 days
+- Suite **1417 → 1732** (+315 net tests). No flakes introduced.
+- 16 consecutive zero-warning runs
+- Producer surface (8 sources): GH-deep (files+releases+issues+discussions) · HF (model/dataset/paper/space/doc) · SO · HN · arXiv (abstract+full-PDF) · Reddit (allowlisted) · Wikipedia
+- Negative-knowledge ingestion: SO + Reddit emit disputed_claim on opt-in
+- `/research/verify/{session_id}` with three modes: bare audit (Milvus state) · `?recheck=true` (upstream reachability) · `?compare_hash=true` (content-drift detection where producers populate raw_upstream_hash)
+- Retrieval: intent-aware embedding · kindwise chunking · quality-weighted rerank
+- LLM distill bypassed on classified curated URLs in URL + topic modes
+
+**Open follow-ups** (all explicitly scoped, no surprise debt):
+
+- raw_upstream_hash wiring for GH blobs @ SHA + HF revisions + arXiv full-PDF (one commit each, easy)
+- `PytestUnhandledThreadExceptionWarning` if it ever recurs (diagnostic capture installed; absent in 16 runs)
+
+The deep-search system is genuinely complete against everything the user has asked for since phase 1.
+
 ### 17.125 Negative-knowledge ingestion — `disputed_claim` source_type (phase-6 quality 2/3) (2026-05-11)
 
 Closes the original master-checklist section-4 item: "Negative-knowledge ingestion. When a SO answer is unaccepted/down-voted-below-threshold, optionally record a `source_type=disputed_claim` entry so retrieval can warn 'this is a commonly-cited but disputed pattern'." Never picked up in phases 1–5. Picked up here.
