@@ -4719,6 +4719,62 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.115 `test_auth.py` teardown ordering — fix at the source (phase-3 cleanup 1/3) (2026-05-11)
+
+Replaces §17.114's `_sync_auth_key` workaround with the real fix in `test_auth.py`. Removes the cross-test leak that was breaking endpoint tests run after auth tests.
+
+**The bug, in one diagram.** Fixture teardown order with monkeypatch:
+
+```
+test_some_auth_thing runs
+    │
+    └─ fixture _api_key_set teardown body
+       │   importlib.reload(app.auth)            ← captures _RAW_KEY
+       │                                            from settings (still
+       │                                            patched to "testkey123")
+       └─ monkeypatch teardown
+           reverts settings.scaffold_api_key     ← settings goes back to
+                                                    "sk-scaffold-..."
+
+→ subsequent endpoint test
+   X-API-Key: settings.scaffold_api_key (real)   ≠   app.auth._RAW_KEY
+                                                     ("testkey123")
+   → 401 Unauthorized.
+```
+
+The fix isn't to inject another reload after monkeypatch reverts — that'd require depending on pytest's finalizer LIFO semantics interacting with monkeypatch's internal undo stack, which is fragile. Cleaner: drop monkeypatch for the `scaffold_api_key` patch specifically, do the save+restore manually in the fixture body. Order becomes explicit:
+
+```python
+original_key = app.config.settings.scaffold_api_key
+app.config.settings.scaffold_api_key = SecretStr("testkey123")
+importlib.reload(app.auth)
+yield app.auth
+# Order matters — restore settings FIRST, reload auth SECOND.
+app.config.settings.scaffold_api_key = original_key
+importlib.reload(app.auth)
+```
+
+`monkeypatch` is still used for `setenv`/`delenv` (those don't have the ordering problem; env-revert doesn't interact with `_RAW_KEY` capture). Same change applied to both `_api_key_set` and `_api_key_unset` (the latter also gains manual restore for `scaffold_auth_disabled`).
+
+**Files.**
+
+- `tests/test_auth.py` — manual save+restore on `scaffold_api_key` (+ `scaffold_auth_disabled` in `_api_key_unset`). Updated fixture docstrings explain WHY the ordering matters.
+- `tests/test_research_verify.py` — removed the `_sync_auth_key` defensive fixture and the two test functions' dependencies on it. The verify endpoint tests now pass regardless of which auth tests ran first, without local workaround.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_auth.py tests/test_research_verify.py --timeout=30 -q
+9 passed in 13.94s    # reproduces the pollution scenario; clean
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1625 passed, 8 skipped in 604.82s (0:10:04)
+```
+
+Unchanged vs §17.114 baseline (`1625 passed`) — workaround removed, real fix in place. Same 8 skipped, 0 warnings.
+
+**Phase-2 deferral #2 closed.**
+
 ### 17.114 `/research/verify/{session_id}` — provenance audit endpoint (phase-2 close) (2026-05-11)
 
 Final phase-2 commit. Adds the verify endpoint that closes the "ground truth that can be proven to work" promise made all the way back at §17.103: given a research session, enumerate every Milvus entry it produced and report each entry's current state — present, superseded, or missing. Surfaces drift between what was ingested and what's currently in the index.

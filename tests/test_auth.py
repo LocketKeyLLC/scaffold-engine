@@ -18,21 +18,25 @@ def _api_key_set(monkeypatch):
     in test_dag_generator and test_execution_agent_compile when this
     fixture ran earlier in the suite. Reloading only `app.auth` (which
     captures `_RAW_KEY` at import time) is sufficient and isolation-safe.
+
+    Settings revert is done MANUALLY (not via monkeypatch.setattr) so we
+    control ordering: revert settings FIRST, then reload app.auth so its
+    re-captured ``_RAW_KEY`` matches the restored settings value.
+    monkeypatch.setattr reverts AFTER the fixture's yield-body runs,
+    which would leave _RAW_KEY stuck at the patched ``testkey123`` and
+    break subsequent endpoint tests in the same suite run.
     """
     import importlib
     from pydantic import SecretStr
     import app.config
     import app.auth
     monkeypatch.setenv("SCAFFOLD_API_KEY", "testkey123")
-    monkeypatch.setattr(
-        app.config.settings, "scaffold_api_key", SecretStr("testkey123"),
-    )
+    original_key = app.config.settings.scaffold_api_key
+    app.config.settings.scaffold_api_key = SecretStr("testkey123")
     importlib.reload(app.auth)
     yield app.auth
-    # Teardown: monkeypatch restores settings.scaffold_api_key + env, but
-    # auth.py captured the OLD _RAW_KEY at the start of this fixture. Reload
-    # auth one more time so subsequent tests see a key consistent with the
-    # restored settings.scaffold_api_key.
+    # Order matters here — restore settings FIRST, reload auth SECOND.
+    app.config.settings.scaffold_api_key = original_key
     importlib.reload(app.auth)
 
 
@@ -44,8 +48,8 @@ def _api_key_unset(monkeypatch):
     import — that's the documented contract in app/auth.py:11-15. The
     "permissive" mode is only reachable via the explicit opt-out flag.
 
-    Same monkeypatch-in-place strategy as _api_key_set; see that fixture
-    for why we don't reload app.config.
+    Same manual-restore pattern as _api_key_set — see that fixture for
+    why monkeypatch.setattr would leave _RAW_KEY stale across tests.
     """
     import importlib
     from pydantic import SecretStr
@@ -53,10 +57,14 @@ def _api_key_unset(monkeypatch):
     import app.auth
     monkeypatch.delenv("SCAFFOLD_API_KEY", raising=False)
     monkeypatch.setenv("SCAFFOLD_AUTH_DISABLED", "1")
-    monkeypatch.setattr(app.config.settings, "scaffold_api_key", SecretStr(""))
-    monkeypatch.setattr(app.config.settings, "scaffold_auth_disabled", True)
+    original_key = app.config.settings.scaffold_api_key
+    original_disabled = app.config.settings.scaffold_auth_disabled
+    app.config.settings.scaffold_api_key = SecretStr("")
+    app.config.settings.scaffold_auth_disabled = True
     importlib.reload(app.auth)
     yield app.auth
+    app.config.settings.scaffold_api_key = original_key
+    app.config.settings.scaffold_auth_disabled = original_disabled
     importlib.reload(app.auth)
 
 

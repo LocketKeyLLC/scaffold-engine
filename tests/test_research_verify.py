@@ -123,29 +123,8 @@ def _auth_headers() -> dict:
     return {"X-API-Key": settings.scaffold_api_key.get_secret_value()}
 
 
-@pytest.fixture
-def _sync_auth_key(monkeypatch):
-    """Force ``app.auth._RAW_KEY`` to track the live settings key.
-
-    Background: ``test_auth.py``'s fixture teardown does
-    ``importlib.reload(app.auth)`` BEFORE its own monkeypatch reverts
-    ``settings.scaffold_api_key``. That re-captures the patched value
-    (``"testkey123"``) into ``app.auth._RAW_KEY`` and never resyncs.
-    Subsequent endpoint tests that pass the real settings key in
-    ``X-API-Key`` get 401 because auth still compares against the
-    leftover ``"testkey123"``. Patching ``_RAW_KEY`` here makes our
-    tests resilient to that leak — they pass regardless of which
-    auth-test fixtures ran first.
-    """
-    import app.auth
-    from app.config import settings
-    monkeypatch.setattr(
-        app.auth, "_RAW_KEY", settings.scaffold_api_key.get_secret_value(),
-    )
-
-
 @pytest.mark.smoke
-def test_verify_endpoint_rejects_non_uuid(_sync_auth_key):
+def test_verify_endpoint_rejects_non_uuid():
     """Endpoint validates session_id is a UUID; non-UUID → 400."""
     from fastapi.testclient import TestClient
     from app.main import app
@@ -156,7 +135,7 @@ def test_verify_endpoint_rejects_non_uuid(_sync_auth_key):
 
 
 @pytest.mark.smoke
-def test_verify_endpoint_calls_verify_session(_sync_auth_key):
+def test_verify_endpoint_calls_verify_session():
     """Endpoint dispatches to verify_session and returns its JSON shape."""
     from fastapi.testclient import TestClient
     from app.main import app
