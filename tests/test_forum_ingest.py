@@ -527,6 +527,93 @@ async def test_fetch_wiki_pages_zero_limit_short_circuits(fake_cache_miss):
 # Dispatch — reddit + wiki
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# §17.110 — stats-dict population on the gated fetchers
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_so_stats_dict_populated(fake_cache_miss):
+    from app.utils import forum_ingest
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=[
+        _make_response(json_data={"items": [
+            {"question_id": 1, "title": "t1", "accepted_answer_id": 1, "score": 5, "tags": []},
+            {"question_id": 2, "title": "t2", "accepted_answer_id": 2, "score": 5, "tags": []},
+        ]}),
+        _make_response(json_data={"items": [
+            # 1: accepted, low score — passes via is_accepted
+            {"answer_id": 1, "score": 2, "is_accepted": True, "body": "<p>x</p>",
+             "link": "https://stackoverflow.com/a/1"},
+            # 2: not accepted, low score — filtered
+            {"answer_id": 2, "score": 3, "is_accepted": False, "body": "<p>y</p>",
+             "link": "https://stackoverflow.com/a/2"},
+        ]}),
+    ])
+    stats: dict = {}
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client):
+        out = await forum_ingest.fetch_so_answers(
+            "x", limit=10, min_score=10, stats=stats,
+        )
+    assert len(out) == 1
+    assert stats == {"fetched": 2, "kept": 1, "filtered_low_score": 1}
+
+
+@pytest.mark.asyncio
+async def test_hn_stats_dict_populated(fake_cache_miss):
+    from app.utils import forum_ingest
+    client = MagicMock()
+    client.get = AsyncMock(return_value=_make_response(json_data={
+        "hits": [
+            {"objectID": "1", "title": "t", "points": 150,
+             "story_text": "ok", "num_comments": 10, "created_at": ""},
+            {"objectID": "2", "title": "t", "points": 5,
+             "story_text": "ok", "num_comments": 0, "created_at": ""},
+            {"objectID": "3", "title": "t", "points": 200,
+             "story_text": "ok2", "num_comments": 5, "created_at": ""},
+        ],
+    }))
+    stats: dict = {}
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client):
+        out = await forum_ingest.fetch_hn_items(
+            "x", limit=10, min_points=100, stats=stats,
+        )
+    assert len(out) == 2
+    assert stats == {"fetched": 3, "kept": 2, "filtered_low_score": 1}
+
+
+@pytest.mark.asyncio
+async def test_reddit_stats_dict_populated(fake_cache_miss):
+    from app.utils import forum_ingest
+    client = MagicMock()
+    client.get = AsyncMock(return_value=_make_response(json_data={
+        "data": {"children": [
+            {"data": {"id": "p1", "title": "t", "selftext": "x",
+                      "score": 100, "num_comments": 20, "over_18": False,
+                      "permalink": "/r/x/comments/p1/", "created_utc": 0}},
+            {"data": {"id": "p2", "title": "t", "selftext": "x",
+                      "score": 5, "num_comments": 20, "over_18": False,
+                      "permalink": "/r/x/comments/p2/", "created_utc": 0}},
+            {"data": {"id": "p3", "title": "t", "selftext": "x",
+                      "score": 999, "num_comments": 999, "over_18": True,
+                      "permalink": "/r/x/comments/p3/", "created_utc": 0}},
+            {"data": {"id": "p4", "title": "t", "selftext": "",
+                      "score": 999, "num_comments": 999, "over_18": False,
+                      "permalink": "/r/x/comments/p4/", "created_utc": 0}},
+        ]},
+    }))
+    stats: dict = {}
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client):
+        out = await forum_ingest.fetch_reddit_posts(
+            "MachineLearning", "x", limit=10,
+            min_score=50, min_comments=10, stats=stats,
+        )
+    assert len(out) == 1
+    assert stats == {
+        "fetched": 4, "kept": 1,
+        "filtered_low_score": 1, "filtered_nsfw": 1, "filtered_no_body": 1,
+    }
+
+
 @pytest.mark.asyncio
 async def test_fetch_forum_dispatches_reddit_and_wiki():
     from app.utils import forum_ingest

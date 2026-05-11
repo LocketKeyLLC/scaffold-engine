@@ -1102,6 +1102,16 @@ async def _run_research_github_mode(
         yield hb
     files = task.result()
 
+    # §17.110 — surface the resolved ref so the UI can show "v1.2.3 → abc123def…".
+    # For ref_hint=None this is the default-branch name (weakly immutable).
+    if files:
+        yield _sse("source_ref_resolved", {
+            "iteration": 1,
+            "mode": "github",
+            "ref_hint": ref_hint,
+            "resolved_ref": files[0].get("source_ref", ""),
+        })
+
     # Release notes + issues/PRs run after the main tree walk so a tree
     # failure doesn't mask them, and so an empty tree result can still
     # surface them as content.
@@ -1210,6 +1220,15 @@ async def _run_research_hf_mode(
         yield hb
     items = task.result()
 
+    # §17.110 — emit resolved revision SHA / arXiv id for UI display.
+    if items:
+        yield _sse("source_ref_resolved", {
+            "iteration": 1,
+            "mode": "hf",
+            "hf_kind": kind,
+            "resolved_ref": items[0].get("source_ref", ""),
+        })
+
     if not items:
         raise RuntimeError(f"No ingestible content found at hf:{kind}/{id_}")
 
@@ -1293,14 +1312,21 @@ async def _run_research_forum_mode(
         "mode": prefix,
     })
 
+    # §17.110 — stats dict is populated by the gated fetchers (SO/HN/Reddit)
+    # with fetched/kept/filtered_* counts. After fetch completes, emit a
+    # `quality_gate_filtered` SSE so the UI can show "20 of 50 passed gates".
+    fetch_stats: dict[str, int] = {}
+
     async def _do_fetch():
         if prefix == "so":
             return await fetch_so_answers(
                 value, _settings.so_max_answers, _settings.so_min_score,
+                stats=fetch_stats,
             )
         if prefix == "hn":
             return await fetch_hn_items(
                 value, _settings.hn_max_items, _settings.hn_min_points,
+                stats=fetch_stats,
             )
         if prefix == "arxiv":
             mode, val = value.split(":", 1)
@@ -1310,6 +1336,7 @@ async def _run_research_forum_mode(
             return await fetch_reddit_posts(
                 sub, q, _settings.reddit_max_posts,
                 _settings.reddit_min_score, _settings.reddit_min_comments,
+                stats=fetch_stats,
             )
         if prefix == "wiki":
             return await fetch_wiki_pages(value, _settings.wiki_max_pages)
@@ -1321,6 +1348,14 @@ async def _run_research_forum_mode(
     ):
         yield hb
     items = task.result()
+
+    # Emit gate stats before checking emptiness so the UI sees the "why".
+    if fetch_stats:
+        yield _sse("quality_gate_filtered", {
+            "iteration": 1,
+            "mode": prefix,
+            **fetch_stats,
+        })
 
     if not items:
         raise RuntimeError(

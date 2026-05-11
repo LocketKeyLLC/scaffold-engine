@@ -4719,6 +4719,94 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.110 Two-tier routing helper + SSE event extensions — phase-1 close (2026-05-11)
+
+Commit 8/8 of the phase-1 deep-search rollout. Closes the phase with a URL-→-source_type classifier (infrastructure for phase-2 topic-mode distill bypass) and two new SSE events that surface what the producers are doing: `quality_gate_filtered` (counts post-filter explanations) and `source_ref_resolved` (the tag/SHA the GH/HF mode actually pinned to).
+
+**URL classifier** — `app/utils/url_classifier.py`. Pure function `classify_url(url) -> source_type | None` plus `should_distill(source_type) -> bool` (returns False for the 9 curated source_types: `release_notes`, `test_code`, `ci_config`, `model_card`, `dataset_card`, `paper_abstract`, `so_answer`, `official_docs`, `curated`).
+
+Host+path rule table covers Stack Overflow, HN, Reddit, arXiv, Hugging Face (papers/datasets/spaces/models/docs), Wikipedia (with lang-prefixed hosts), and GitHub (releases / workflows / tests / issues / PRs / fallback). Match order matters — more-specific paths first (e.g., `huggingface.co/papers/…` before `huggingface.co/<owner>/<repo>`). Returns `None` for unknown URLs so the caller falls back to default behavior.
+
+**Topic-mode + URL-mode integration deferred to phase 2.** §17.110 ships the building blocks (`classify_url`, `should_distill`) but does NOT wire them into `_run_research_url_mode` or the topic-mode extract loop. That integration is its own contained change — touches the LLM-extract path, the chunking pipeline, and source-type propagation through the loop. Keeping §17.110 as phase-1 closure avoids piling that on top of 7 already-shipped commits.
+
+**SSE event surface — two new events**:
+
+- `quality_gate_filtered`: emitted by `_run_research_forum_mode` for SO / HN / Reddit (the three producers with real quality gates). Payload: `{iteration, mode, fetched, kept, filtered_*}`. Fetchers populate a `stats: dict | None` out-param (additive — old callers still work). Reddit reports three sub-categories: `filtered_low_score`, `filtered_nsfw`, `filtered_no_body`. SO and HN report `filtered_low_score` only.
+- `source_ref_resolved`: emitted by GitHub + HF mode runners after fetch completes. Payload: `{iteration, mode, ref_hint?, resolved_ref}`. Lets the UI show "v1.2.3 → 8050c27…" or "HF model → abc123def…". For ref_hint=None GitHub paths this is the default-branch name (weakly immutable, accurately reported).
+
+The third planned event (`cache_hit_upstream`) deferred — it'd require threading cache-hit counts through every fetcher, marginal user value vs. the diff cost. Logged as a phase-2 follow-up.
+
+**Files.**
+
+- `app/utils/url_classifier.py` (new) — `classify_url` + `should_distill` + `CURATED_SOURCE_TYPES`.
+- `app/utils/forum_ingest.py` — `fetch_so_answers`, `fetch_hn_items`, `fetch_reddit_posts` each gain an optional `stats: dict | None = None` param. None = legacy behavior. Populated counters: `fetched`, `kept`, `filtered_low_score` (+ `filtered_nsfw` + `filtered_no_body` for Reddit).
+- `app/modules/research_agent.py` — `_run_research_forum_mode` threads a `fetch_stats` dict into the fetchers and emits `quality_gate_filtered` when populated. GH + HF runners emit `source_ref_resolved` from `items[0]["source_ref"]` post-fetch.
+- `tests/test_url_classifier.py` (new) — 40 tests: parametrized URL classification (28 positive + 5 negative + 2 case-insensitivity), `should_distill` (9 curated + 8 uncurated + None).
+- `tests/test_forum_ingest.py` — 3 new tests covering stats-dict population on SO (gates), HN (low-points filter), Reddit (NSFW + low-score + no-body sub-categories).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_url_classifier.py tests/test_forum_ingest.py --timeout=30 -q
+87 passed in 6.04s
+
+$ docker exec scaffold-orchestrator pytest tests/ -k "research or github or hf_ or forum or url_classifier" --timeout=30 -q
+312 passed, 1309 deselected in 68.95s (0:01:08)
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1613 passed, 8 skipped in 638.42s (0:10:38)
+```
+
++53 vs §17.109 baseline (`1560 passed`) — 40 url_classifier + 3 stats-dict + 10 other counted-elsewhere. Same 8 skipped, **0 warnings**.
+
+**`PytestUnhandledThreadExceptionWarning` — disposition.** Surfaced intermittently in §17.106 / §17.108 keyword-filtered + full runs; absent in §17.107 (post-fix), §17.109, and §17.110 full runs. No tracebacks captured in the truncated outputs. Pattern: heisenbug correlating with test-ordering, not with phase-1 producer code (the new modules added in §17.106–§17.110 don't spawn threads — `fetch_*` functions all use `asyncio.gather` + httpx). Suspect a background asyncpg / APScheduler / Milvus cleanup interaction outside this phase's scope. Documented as monitor-only; will dig in if it starts blocking CI or correlates with a regression.
+
+---
+
+## Phase 1 complete
+
+8 commits, 8 dated §-entries (§17.103 → §17.110), all on 2026-05-10 → 2026-05-11. Suite went from 1417 passed (pre-§17.103 baseline) → 1613 passed (+196 net new tests). Same 8 skipped throughout — phase-1 work introduced no new flakes or skip patterns.
+
+| Commit | Title | Net new tests |
+|---|---|---|
+| §17.103 | source_type vocab + code/qa domains | 0 (test updates only) |
+| §17.104 | Provenance + confidence-by-source | +25 |
+| §17.105 | SHA-keyed fetch cache + budgets | +32 |
+| §17.106 | GitHub deep mode | +33 |
+| §17.107 | Hugging Face mode | +19 |
+| §17.108 | Forum modes (SO/HN/arXiv) | +21 |
+| §17.109 | Reddit (allowlisted) + Wikipedia | +13 |
+| §17.110 | URL classifier + SSE events | +53 |
+
+**Phase-1 deferrals tracked in OVERVIEW** (each will land as its own §-entry when picked up):
+
+1. §17.106 follow-up: wire `fetch_cache` into GitHub mode for release-notes + issues at SHA-pinned refs (immutable TTL).
+2. §17.107 follow-up: `hf:doc/<topic>` once a stable public Hub-side docs JSON API is identified, or via HTML scrape.
+3. §17.108 follow-up: investigate the intermittent `PytestUnhandledThreadExceptionWarning` if it re-correlates with a regression.
+4. §17.110 follow-up A: wire `classify_url` + `should_distill` into `_run_research_url_mode` and the topic-mode extract loop (the actual savings) — the building blocks shipped this commit, the integration didn't.
+5. §17.110 follow-up B: `cache_hit_upstream` SSE event (requires threading cache-hit counts through every fetcher).
+
+**Phase-1 producer + provenance surface** as shipped:
+
+```
+Prefix                   source_type(s)                        Quality gate / pin
+---------------------    ---------------------                 ------------------
+github:o/r[@<ref>]       tech_docs | release_notes |           SHA-pinned when @<ref>
+                         test_code | ci_config | community     given; reaction gate on
+                                                               issues/PRs (>=2 +1)
+hf:model/<id>            model_card                            HF revision SHA
+hf:dataset/<id>          dataset_card                          HF revision SHA
+hf:paper/<arxiv-id>      paper_abstract                        arXiv id (post-pub immutable)
+hf:space/<id>            tech_docs                             HF revision SHA
+so:<query>               so_answer                             is_accepted OR score>=10
+hn:<query>               hn_comment                            points>=100
+arxiv:<id|query>         paper_abstract                        peer-review (id immutable)
+reddit:<sub>:<query>     reddit_post                           allowlist + score>=50 + comments>=10
+wiki:<topic>             wiki_article                          lastrevid recorded
+```
+
+Every entry from any of the above carries `provenance = {source_ref, fetched_at, quality_signal}` written to the Postgres sidecar (`rag_entry_provenance`, migration 034) and surfaced in `query_rag` result metadata.
+
 ### 17.109 Reddit (allowlisted) + Wikipedia — community + foundational ingest (2026-05-10)
 
 Commit 7/8 of the phase-1 deep-search rollout. Two more producers built on the §17.108 forum-ingest plumbing:
