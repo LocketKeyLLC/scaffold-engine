@@ -643,6 +643,22 @@ async def query_rag(
                 # API shape whether it's "row absent" or "DB unreachable".
                 logger.warning("provenance_fetch_failed: %s", e)
 
+    # §17.120 — quality-signal-weighted rerank. Apply a per-result
+    # multiplicative bump based on quality_signal from provenance; re-sort
+    # by the bumped final_score. Bumps cap at ×1.20; embedding similarity
+    # remains the primary signal. Entries with no provenance row get 1.0.
+    quality_bumps: dict[str, float] = {}
+    if filtered:
+        from app.modules.quality_rerank import quality_bump
+        for r in filtered:
+            prov = prov_map.get(r.entry_id)
+            qs = (prov or {}).get("quality_signal")
+            bump = quality_bump(r.source_type, qs)
+            quality_bumps[r.entry_id] = bump
+            if bump != 1.0:
+                r.final_score = r.final_score * bump
+        filtered.sort(key=lambda r: r.final_score, reverse=True)
+
     latency_ms = round((time.monotonic() - t0) * 1000, 1)
     top_score = round(filtered[0].final_score, 4) if filtered else 0.0
     logger.info(
@@ -670,6 +686,7 @@ async def query_rag(
                 "rrf": round(r.rrf_score, 4),
                 "rerank": round(r.rerank_score, 4),
                 "final": round(r.final_score, 4),
+                "quality_bump": round(quality_bumps.get(r.entry_id, 1.0), 4),
             },
         })
 

@@ -4719,6 +4719,72 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.120 quality_signal-weighted rerank — phase-4 close (2026-05-11)
+
+Final phase-4 commit. `query_rag` now applies a per-result multiplicative bump to `final_score` based on the `quality_signal` recorded in §17.114's provenance sidecar — letting a Stack Overflow answer with 200 votes outrank a generic prose chunk at equal embedding similarity. Caps at ×1.20 so embedding similarity stays the primary signal.
+
+**Per-source bump tiers** (`app/modules/quality_rerank.py:quality_bump`):
+
+| source_type | signal field | tier 1 | tier 2 | extra |
+|---|---|---|---|---|
+| `so_answer` | `is_accepted` + `score` | accepted → +0.10 | `score ≥ 50` → +0.05 | `score ≥ 200` → +0.10 |
+| `hn_comment` | `points` | `≥ 100` → +0.05 | `≥ 500` → +0.10 | — |
+| `reddit_post` | `score` | `≥ 100` → +0.05 | `≥ 500` → +0.10 | — |
+| `community` (GH issues/PRs) | `positive_reactions` | `≥ 5` → +0.05 | `≥ 20` → +0.10 | — |
+| `model_card` / `dataset_card` | `likes` | `≥ 100` → +0.05 | `≥ 1000` → +0.10 | — |
+| `paper_abstract` | `upvotes` (HF) | `≥ 50` → +0.05 | — | — |
+| anything else | — | — | — | — |
+
+Bumps cap at ×1.20 (line: `min(bump, 1.20)`). The cap matters for SO entries where `accepted (+0.10) + score≥200 (+0.10)` already saturates; further hypothetical bumps don't compound. Empty `quality_signal` or unknown `source_type` → 1.0 (no rerank). Entries with no provenance row get 1.0 too — the rerank is opt-in, not punitive.
+
+**Why this works.** Combined with §17.118's `query_intent` templates, a `query_intent="qa"` query embeds into the Q&A neighborhood — top-K vector hits are likely SO answers / community / HN. Within those, the §17.120 bump nudges high-upvote content above low-upvote content. So at equal embedding sim, a 200-vote accepted answer ranks above a 3-vote unaccepted one. Embedding sim still dominates: a vector match of 0.85 + bump 1.0 (= 0.85) ranks below a 0.80 + bump 1.20 (= 0.96) only when the gap is ≥ 17%. Vote signal doesn't override genuine semantic match.
+
+**Per-result transparency.** Every `result_dict["scores"]` now includes `quality_bump: float` so callers can see exactly which entries got bumped and by how much. Useful for debugging ranking surprises ("why did this old answer outrank a newer one?").
+
+**Rerank position.** Applied AFTER the supersedes sweep and AFTER provenance batch-fetch, BEFORE result_dicts construction. The supersedes sweep filters stale ancestors first; bump applies only to live entries; results re-sorted by the bumped `final_score`.
+
+**Files.**
+
+- `app/modules/quality_rerank.py` (new) — `quality_bump(source_type, quality_signal) -> float` pure function. `_BUMP_CAP = 1.20`.
+- `app/modules/rag_pipeline.py:query_rag` — after `prov_map` populated: iterate `filtered`, compute `bump = quality_bump(r.source_type, qs)`, update `r.final_score *= bump`, re-sort, record per-result bump for the response dict. `scores.quality_bump` added.
+- `tests/test_quality_rerank.py` (new) — 42 tests: no-signal/unknown defaults (3), SO tiers (5), HN tiers (6 parametrized), Reddit (6), community (6), HF cards (12 parametrized over 2 types × 6 tiers), paper (2), cap + neutral source_types (2).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_quality_rerank.py tests/test_rag_pipeline.py --timeout=30 -q
+67 passed in 4.99s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1691 passed, 8 skipped in 608.50s (0:10:08)
+```
+
++42 vs §17.119 baseline (`1649 passed`) — all from new quality_rerank tests. Same 8 skipped, 0 warnings (10 clean runs in a row).
+
+**Float-precision lesson learned.** Initial tests used `== 1.15` which fails on `1.0 + 0.10 + 0.05 = 1.1500000000000001`. Switched to `pytest.approx(...)` throughout — the standard idiom for float assertions in pytest.
+
+---
+
+## Phase 4 complete
+
+3 commits, dated 2026-05-11. Retrieval quality directly improved. Suite **1627 → 1691** (+64 net new tests).
+
+| Commit | Hash | Title |
+|---|---|---|
+| §17.118 | `45aee8d` | Per-intent embedder templates |
+| §17.119 | `deda46a` | Markdown code/prose chunk split |
+| §17.120 | (this) | quality_signal-weighted rerank |
+
+**Retrieval improvements stacking:**
+
+1. §17.118 routes queries into intent-shaped embedding neighborhoods (code / qa / paper / general).
+2. §17.119 splits markdown into separate code/prose chunks, each embedded in its own neighborhood.
+3. §17.120 bumps high-signal entries within each neighborhood.
+
+A `query_intent="code"` query against a GH README now: embeds in the code-search neighborhood (§17.118), top-K hits include the standalone code chunks from §17.119, those with high-reaction issue/PR provenance get bumped by §17.120. Three independent quality levers, each verifiable in isolation.
+
+**Cumulative work across all 4 phases**: 18 dated entries (§17.103 → §17.120), suite 1417 → 1691 (+274 net tests), same 8 skipped throughout. Deep-search system end-to-end shipped with deep producers, classifier integration, audit endpoint, intent-aware retrieval, kindwise chunking, and quality-weighted rerank.
+
 ### 17.119 Code-block vs prose chunk split on markdown bodies (phase-4 quality 2/3) (2026-05-11)
 
 Pairs with §17.118. Markdown content from GitHub READMEs / CHANGELOGs / issue+PR bodies and HF model/dataset/space cards is now split on triple-backtick fences into separate `(chunk, kind)` entries — code blocks become standalone Milvus rows tagged `domain_tags=[..., "code"]`, prose becomes rows tagged `[..., "prose"]`. Combined with §17.118's `query_intent="code"` template, retrieval can preferentially surface code snippets for "how do I call X" queries.
