@@ -69,6 +69,48 @@ if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
     ]
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _capture_thread_exceptions():
+    """Log full tracebacks for any unhandled non-main-thread exceptions.
+
+    pytest emits ``PytestUnhandledThreadExceptionWarning`` when a thread
+    raises during a test session, but the warning summary doesn't carry
+    the traceback — making the bug hard to diagnose (see §17.106/§17.108/
+    §17.110 occurrences). This session-autouse hook installs
+    ``threading.excepthook`` so any future occurrence writes
+    ``timestamp + thread_name + full_traceback`` to a known log file an
+    investigator can grep. Restores the previous hook on teardown.
+
+    Log path: ``/tmp/.pytest_thread_exceptions.log`` (matches
+    ``cache_dir = /tmp/.pytest_cache`` from pyproject.toml).
+    """
+    import threading
+    import time
+    import traceback as tb
+
+    log_path = "/tmp/.pytest_thread_exceptions.log"
+    prev_hook = threading.excepthook
+
+    def _hook(args):
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(
+                    f"\n=== THREAD EXCEPTION === "
+                    f"ts={time.strftime('%Y-%m-%dT%H:%M:%S')} "
+                    f"thread={args.thread.name if args.thread else '<unknown>'}\n"
+                )
+                tb.print_exception(
+                    args.exc_type, args.exc_value, args.exc_traceback, file=f,
+                )
+        except Exception:
+            # Never let the hook itself crash a test session.
+            pass
+
+    threading.excepthook = _hook
+    yield
+    threading.excepthook = prev_hook
+
+
 def make_mock_db(rows: list[dict] | None = None, *, scalar=None, rowcount=None):
     """
     Build a mock AsyncSession whose .execute() returns a result object

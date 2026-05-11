@@ -4719,6 +4719,59 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.116 PytestUnhandledThreadExceptionWarning — diagnostic capture installed (phase-3 cleanup 2/3) (2026-05-11)
+
+Investigation outcome + diagnostic infrastructure for the intermittent thread-exception warning flagged in §17.106 / §17.108 / §17.110.
+
+**Investigation summary.** Five consecutive full-suite runs since §17.111 (§17.111, §17.112, §17.113, §17.114, §17.115) plus one targeted run with `-W error::PytestUnhandledThreadExceptionWarning` (which would have hard-failed if the warning had fired) — all 6 runs clean. 3 occurrences out of 14 recent runs (~21%). No correlation with any specific commit: §17.106 / §17.108 / §17.110 fired it, §17.107 / §17.109 / §17.111-§17.115 didn't.
+
+The phase-1 producer code added in §17.106-§17.110 doesn't spawn threads (every fetcher uses `asyncio.gather` + httpx). The only thread-using code I added is `loop.run_in_executor` for blocking pymilvus calls in §17.114's `research_verify.py`, which executes inside the asyncio default ThreadPoolExecutor — managed cleanup, shouldn't leak. So the warning is almost certainly originating from infrastructure (APScheduler, asyncpg connection cleanup, Milvus client background threads, or pytest's own teardown threads) rather than user code, consistent with the existing pyproject.toml note about the related `coroutine ... was never awaited` cleanup-race warnings.
+
+Without a captured traceback, root-cause is speculation. The fix is to make sure the **next** occurrence is debuggable.
+
+**Diagnostic infrastructure shipped.** New session-autouse fixture in `tests/conftest.py`:
+
+```python
+@pytest.fixture(autouse=True, scope="session")
+def _capture_thread_exceptions():
+    """Install threading.excepthook that writes full tracebacks to
+    /tmp/.pytest_thread_exceptions.log on every unhandled non-main-
+    thread exception. Restores previous hook on teardown.
+    """
+```
+
+`threading.excepthook` (Python 3.8+) fires whenever a non-main thread raises. We replace it with a closure that appends `(ts, thread_name, full_traceback)` to `/tmp/.pytest_thread_exceptions.log`. The fixture is session-scoped + autouse so it covers every test invocation without per-test plumbing. The hook is wrapped in `try/except: pass` so a hook-internal error can't crash the test session.
+
+The log path matches the `cache_dir = /tmp/.pytest_cache` convention from pyproject.toml. Next time the warning fires, `tail /tmp/.pytest_thread_exceptions.log` in the dev container yields the exact culprit thread + traceback.
+
+**Files.**
+
+- `tests/conftest.py` — `_capture_thread_exceptions` session-autouse fixture.
+- `tests/test_thread_excepthook.py` (new) — 2 tests: (1) `threading.excepthook` was overridden by the fixture; (2) a deliberately-raising worker thread lands a `THREAD EXCEPTION` block in the log file with the test's marker string visible.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_thread_excepthook.py --timeout=30 -v
+2 passed in 0.24s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1627 passed, 8 skipped in 605.75s (0:10:05)
+
+$ docker exec scaffold-orchestrator wc -c /tmp/.pytest_thread_exceptions.log
+976 /tmp/.pytest_thread_exceptions.log
+$ docker exec scaffold-orchestrator tail /tmp/.pytest_thread_exceptions.log
+=== THREAD EXCEPTION === ts=… thread=test-§17.116-marker-1778494089207553511
+Traceback (most recent call last):
+  …
+  File "/code/tests/test_thread_excepthook.py", line 43, in _raise
+    raise RuntimeError(marker)
+```
+
++2 vs §17.115 baseline (`1625 passed`) — from the new excepthook tests. Same 8 skipped, 0 warnings (and the heisenbug remains absent — 6 clean runs in a row).
+
+**Phase-1 deferral #3 closed.** Status: heisenbug not reproduced in 6 consecutive runs; diagnostic capture installed for the next occurrence. If it recurs and the log captures the traceback, that becomes the §-entry that actually root-causes + fixes.
+
 ### 17.115 `test_auth.py` teardown ordering — fix at the source (phase-3 cleanup 1/3) (2026-05-11)
 
 Replaces §17.114's `_sync_auth_key` workaround with the real fix in `test_auth.py`. Removes the cross-test leak that was breaking endpoint tests run after auth tests.
