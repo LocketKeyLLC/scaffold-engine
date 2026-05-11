@@ -2,6 +2,7 @@
 # ──────────────────────────────────────────────────────────
 # Tier 1 (ci-smoke)  → every push & PR   → GitHub cloud runners  → no live services
 # Tier 2 (validate)  → main merges only  → self-hosted / local   → full Docker stack
+# Tier 1 budget: 10 min wall (~681 smoke tests post-§17.102; ~8 min local).
 # ──────────────────────────────────────────────────────────
 # See docs/CI.md for the full tier breakdown and local testing with `act`.
 
@@ -24,7 +25,7 @@ jobs:
   smoke:
     name: "Tier 1 · Smoke (unit tests)"
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
