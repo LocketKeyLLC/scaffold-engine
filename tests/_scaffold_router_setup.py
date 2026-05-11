@@ -14,6 +14,7 @@ Not a conftest — pytest shouldn't collect it (leading underscore).
 """
 import importlib.util
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -41,6 +42,16 @@ spec = importlib.util.spec_from_file_location("scaffold_router", _router_path)
 _mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(_mod)
 Pipeline = _mod.Pipeline
+
+# Cloud-CI smoke runners can't route to 172.18.0.1 (the Docker bridge gateway
+# that Pipeline.__init__ probes for embedder-dim verification). Local hosts
+# happen to route to it. Without this stub, Pipeline() hangs the full
+# request_timeout (300s) — capped at 30s per-test by pytest-timeout, but
+# even that adds up to a workflow-budget kill across the 15+ tests that
+# instantiate Pipeline. The stub is scoped to SCAFFOLD_CI_SMOKE_MODE so
+# `make test` / `make ci` (dev image, has working Ollama) is unaffected.
+if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
+    Pipeline._probe_embedder_dim = lambda self, model=None: (True, "ci-smoke stub")
 
 sys.modules["scaffold_router"] = _mod
 _pkg = types.ModuleType("pipelines")

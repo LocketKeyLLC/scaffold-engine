@@ -75,6 +75,11 @@ _router_mod = importlib.util.module_from_spec(_router_spec)
 _router_spec.loader.exec_module(_router_mod)
 Pipeline = _router_mod.Pipeline
 
+# See note in tests/_scaffold_router_setup.py — Pipeline.__init__ probes
+# Ollama at 172.18.0.1 which is unroutable on cloud CI runners.
+if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
+    Pipeline._probe_embedder_dim = lambda self, model=None: (True, "ci-smoke stub")
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
