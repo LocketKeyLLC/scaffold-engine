@@ -88,29 +88,70 @@ async def write_provenance(
     session: AsyncSession,
     entry_id: str,
     provenance: dict[str, Any],
+    session_id: str | None = None,
 ) -> None:
     """Insert (or replace) the provenance row for a freshly-upserted entry.
 
     Mirrors Milvus's ``upsert(keys=[entry_id])`` semantic — re-ingest of
     the same entry overwrites the provenance row. Caller commits.
+
+    ``session_id`` is optional — when set, the row is linked to a
+    research session (column added in migration 035, §17.114). Direct
+    ingest paths (``/rag/ingest``) leave it ``NULL``, which keeps those
+    entries correctly invisible to ``/research/verify/{session_id}``.
     """
     await session.execute(
         text(
             "INSERT INTO rag_entry_provenance "
-            "(entry_id, source_ref, fetched_at, quality_signal) "
-            "VALUES (:eid, :ref, :fa, CAST(:qs AS jsonb)) "
+            "(entry_id, source_ref, fetched_at, quality_signal, session_id) "
+            "VALUES (:eid, :ref, :fa, CAST(:qs AS jsonb), CAST(:sid AS uuid)) "
             "ON CONFLICT (entry_id) DO UPDATE SET "
             "source_ref = EXCLUDED.source_ref, "
             "fetched_at = EXCLUDED.fetched_at, "
-            "quality_signal = EXCLUDED.quality_signal"
+            "quality_signal = EXCLUDED.quality_signal, "
+            "session_id = EXCLUDED.session_id"
         ),
         {
             "eid": entry_id,
             "ref": str(provenance.get("source_ref", "")),
             "fa": int(provenance.get("fetched_at", time.time())),
             "qs": json.dumps(provenance.get("quality_signal", {})),
+            "sid": str(session_id) if session_id else None,
         },
     )
+
+
+async def get_provenance_for_session(
+    session: AsyncSession,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    """Return every provenance row for a research session.
+
+    Used by ``/research/verify/{session_id}`` to enumerate the entries
+    ingested by a session and re-fetch their upstream content.
+    Returns a list of dicts: ``{entry_id, source_ref, fetched_at,
+    quality_signal}`` — same shape as ``get_provenance_batch`` per-entry.
+    Empty list when no rows match (unknown session OR session predated §17.114).
+    """
+    result = await session.execute(
+        text(
+            "SELECT entry_id, source_ref, fetched_at, quality_signal "
+            "FROM rag_entry_provenance "
+            "WHERE session_id = CAST(:sid AS uuid) "
+            "ORDER BY fetched_at"
+        ),
+        {"sid": str(session_id)},
+    )
+    out: list[dict[str, Any]] = []
+    for row in result.mappings():
+        qs = row["quality_signal"]
+        out.append({
+            "entry_id": row["entry_id"],
+            "source_ref": row["source_ref"],
+            "fetched_at": int(row["fetched_at"]),
+            "quality_signal": qs if isinstance(qs, dict) else (json.loads(qs) if qs else {}),
+        })
+    return out
 
 
 async def get_provenance_batch(

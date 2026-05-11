@@ -823,7 +823,7 @@ async def _execute_iteration_loop(
         ingested = 0
         if entries:
             state.all_entries.extend(entries)
-            stats = await ingest_entries(entries, domain=state.domain)
+            stats = await ingest_entries(entries, domain=state.domain, session_id=session_id)
             ingested = stats["new"] + stats["versioned"]
             state.total_new += stats["new"]
             state.total_versioned += stats["versioned"]
@@ -950,7 +950,7 @@ async def _ingest_and_finalize_direct(
     ingested = 0
     if entries:
         ingest_task = asyncio.create_task(
-            ingest_entries(entries, domain=state.domain)
+            ingest_entries(entries, domain=state.domain, session_id=session_id)
         )
         async for hb in _await_with_heartbeat(
             ingest_task,

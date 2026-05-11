@@ -131,7 +131,7 @@ class TestIngestPhaseHeartbeats:
         # Simulate a slow ingest_entries (takes ~1s; heartbeats fire at
         # interval=0 so we get many). The patch returns a stats-shaped
         # dict so the post-ingest yields work normally.
-        async def _slow_ingest(entries, domain):
+        async def _slow_ingest(entries, domain, **_):
             await asyncio.sleep(0.5)
             return {"new": len(entries), "versioned": 0, "rejected": 0,
                     "skipped_hash": 0, "skipped_empty": 0}
@@ -180,7 +180,7 @@ class TestIngestPhaseHeartbeats:
             _ingest_and_finalize_direct, ResearchState,
         )
 
-        async def _slow(entries, domain):
+        async def _slow(entries, domain, **_):
             await asyncio.sleep(0.3)
             return {"new": 0, "versioned": 0, "rejected": 0,
                     "skipped_hash": 0, "skipped_empty": 0}

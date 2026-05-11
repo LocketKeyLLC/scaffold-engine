@@ -1120,6 +1120,33 @@ async def research_reply_endpoint(body: ResearchReplyInput, request: Request):
     )
 
 
+@app.get("/research/verify/{session_id}", tags=["Research"])
+async def research_verify_endpoint(session_id: str):
+    """Session-scoped provenance audit (§17.114).
+
+    Lists every Milvus entry produced by the given research session and
+    reports its current state — present, superseded, or missing. Used to
+    surface drift between what was ingested and what's currently in the
+    index, without re-fetching upstream content. See
+    ``app/modules/research_verify.py`` for the returned-shape contract.
+
+    Pre-§17.114 sessions have no provenance rows linked by session_id
+    and return an empty ``entries`` list — that's expected, not an error.
+    """
+    from uuid import UUID
+    from app.database import async_session
+    from app.modules.research_verify import verify_session
+
+    try:
+        UUID(session_id)
+    except (ValueError, TypeError):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"Invalid session_id (must be UUID): {session_id!r}")
+
+    async with async_session() as db_session:
+        return await verify_session(db_session, session_id)
+
+
 @app.post("/research/pdf", tags=["Research"])
 async def research_pdf_endpoint(
     request: Request,

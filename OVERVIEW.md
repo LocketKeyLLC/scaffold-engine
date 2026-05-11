@@ -4719,6 +4719,90 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.114 `/research/verify/{session_id}` — provenance audit endpoint (phase-2 close) (2026-05-11)
+
+Final phase-2 commit. Adds the verify endpoint that closes the "ground truth that can be proven to work" promise made all the way back at §17.103: given a research session, enumerate every Milvus entry it produced and report each entry's current state — present, superseded, or missing. Surfaces drift between what was ingested and what's currently in the index.
+
+**Schema change.** `rag_entry_provenance` gains a nullable `session_id UUID` column (migration 035) + a partial index on `WHERE session_id IS NOT NULL`. Producers thread `session_id` from the research runners through `ingest_entries` → `write_provenance`. NULL on rows from pre-§17.114 sessions or non-research ingest paths (e.g., `/rag/ingest`); the endpoint scopes by exact match, so NULL rows are correctly invisible.
+
+**Endpoint contract.** `GET /research/verify/{session_id}` →
+
+```
+{
+    "session_id": "<uuid>",
+    "session_meta": {"topic", "status", "completed_at"} | None,
+    "totals": {"provenance_rows", "in_milvus", "superseded", "missing"},
+    "entries": [
+        {"entry_id", "source_ref", "source_url", "source_type",
+         "fetched_at", "quality_signal",
+         "in_milvus", "milvus_state",     # present | superseded | missing
+         "current_version", "superseded_by", "content_hash_at_ingest"},
+        ...
+    ]
+}
+```
+
+Pre-§17.114 sessions return an empty `entries` list (no rows linked); endpoint returns 200 with that shape so callers can render uniformly. Non-UUID session_id returns 400.
+
+**Scope explicitly does NOT include upstream content-hash re-fetching.** The original phase-2 brief called for "re-fetch every source_ref and confirm content still matches." That requires a generic per-source-type re-fetch interface; each producer (GitHub, HF, SO, Reddit, Wiki, etc.) has its own auth + caching + paging dance. Wiring a uniform re-verify hook across all 7 producers is a §17.115+ follow-up. §17.114 ships the AUDIT layer — "did the entries survive in Milvus" — which is the more immediately useful signal anyway, since most drift in practice comes from supersede chains and TTL sweeps, not upstream content changes.
+
+**Milvus partition-key isolation.** The verify lookup needs `entry_id in [...]` over many entries, but Milvus 2.5's partition-key isolation rejects `IN` exprs over the partition key (`domain`). `_milvus_lookup_entries` fans out one `entry_id in [...]` query per `VALID_DOMAINS`, merges results. Same pattern as `_iter_search_domains` in rag_pipeline. Wraps in `loop.run_in_executor` since pymilvus is blocking.
+
+**Files.**
+
+- `db/migrations/035_rag_entry_provenance_session_id.sql` (new) — idempotent `ADD COLUMN` + partial index.
+- `app/modules/provenance.py` — `write_provenance(... session_id=None)` (additive kwarg); new `get_provenance_for_session(db_session, session_id)` returns the full list of provenance rows.
+- `app/modules/rag_pipeline.py` — `ingest_entries(... session_id=None)` (additive kwarg); threads to `write_provenance`.
+- `app/modules/research_agent.py` — 2 call sites in the research runners (`_execute_iteration_loop` topic-mode ingest + `_ingest_and_finalize_direct` direct-mode ingest) now pass `session_id=session_id`. Topic and direct modes both inherit it.
+- `app/modules/research_verify.py` (new) — `verify_session(db_session, session_id)`, `_milvus_lookup_entries`, `_milvus_lookup_supersedors`.
+- `app/main.py` — `GET /research/verify/{session_id}` endpoint. Validates UUID at the route layer, dispatches to `verify_session`.
+- `tests/test_research_verify.py` (new) — 4 tests: classifies present/superseded/missing correctly; unknown-session returns empty; endpoint rejects non-UUID with 400; endpoint dispatches with 200.
+
+**Test-pollution fix folded in.** During §17.114 dev, the verify endpoint tests passed in isolation but failed in the full suite. Root cause: `test_auth.py`'s fixture teardown calls `importlib.reload(app.auth)` BEFORE its monkeypatch reverts `settings.scaffold_api_key`, so `app.auth._RAW_KEY` gets stuck at the patched `"testkey123"` while settings goes back to the real key. Subsequent endpoint tests passing the real settings key in `X-API-Key` get 401. A `_sync_auth_key` fixture on the verify endpoint tests patches `_RAW_KEY` to current settings — defensive workaround. The real fix (re-order teardown so `_RAW_KEY` resyncs against the post-revert settings value) belongs in `test_auth.py` and is a separate change.
+
+**Two unrelated tests in `test_finding_b_root_cause.py` also needed updating** — they mocked `ingest_entries` with `(entries, domain)` signatures that don't accept the new `session_id` kwarg. Added `**_` so the mocks tolerate forward-compatible kwargs.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_research_verify.py tests/test_provenance.py --timeout=30 -q
+29 passed in 12.59s
+
+$ docker exec scaffold-orchestrator pytest tests/test_auth.py tests/test_research_verify.py --timeout=30 -q
+9 passed in 11.59s  # reproduces the pollution scenario; now clean
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1625 passed, 8 skipped in 606.22s (0:10:06)
+```
+
++4 vs §17.113 baseline (`1621 passed`). Same 8 skipped, 0 warnings.
+
+---
+
+## Phase 2 complete
+
+4 commits, dated 2026-05-11. Suite went **1613 → 1625 passing** (+12 net new tests). Same 8 skipped throughout — phase-2 work introduced no new flakes.
+
+| Commit | Hash | Title |
+|---|---|---|
+| §17.111 | `fbe4e3f` | Wire fetch_cache into GitHub releases + issues |
+| §17.112 | `800d900` | URL-mode distill bypass |
+| §17.113 | `3afa1c6` | Topic-mode distill bypass |
+| §17.114 | (this) | `/research/verify/{session_id}` audit endpoint |
+
+**Phase-1 deferrals status after phase 2:**
+
+1. ~~§17.106 follow-up: GH fetch_cache wiring~~ → closed by §17.111.
+2. `hf:doc/<topic>` — still deferred (needs public Hub docs API).
+3. `PytestUnhandledThreadExceptionWarning` — still deferred (intermittent; not blocking).
+4. ~~Classifier integration (URL + topic mode)~~ → closed by §17.112 + §17.113.
+5. `cache_hit_upstream` SSE event — still deferred (low value).
+
+**New phase-2 deferrals tracked:**
+
+- `/research/verify` upstream re-fetch — needs generic per-source-type re-verify hook across all 7 producers; not in §17.114 scope.
+- `test_auth.py` teardown ordering — real fix for the `_RAW_KEY` leak that §17.114 papered over with a local fixture.
+
 ### 17.113 Topic-mode distill bypass — classifier-driven split in `_extract_entries` (phase-1 follow-up #4 — topic half) (2026-05-11)
 
 Completes the §17.110 classifier integration. Topic mode's per-iteration `_extract_entries` now classifies every fetched URL: curated source_types (SO/HF/arXiv/GH releases-CI-tests/etc., per §17.110's `CURATED_SOURCE_TYPES`) bypass the 7b LLM extract batch; everything else continues through the existing LLM tool_call path unchanged. Mixed batches split correctly — a single iteration can ingest some URLs via bypass and the rest via LLM.

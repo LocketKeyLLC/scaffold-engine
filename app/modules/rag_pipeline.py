@@ -746,7 +746,10 @@ async def _walk_to_latest_version(
     return current_eid, current_version
 
 
-async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
+async def ingest_entries(
+    entries: list[dict], domain: str = "eng",
+    *, session_id: str | None = None,
+) -> dict:
     """Embed and upsert knowledge entries into toon_v2.
 
     Returns: {new, versioned, rejected, skipped_hash, skipped_empty}.
@@ -958,7 +961,7 @@ async def ingest_entries(entries: list[dict], domain: str = "eng") -> dict:
         try:
             async with async_session() as session:
                 for eid, prov in provenance_writes:
-                    await write_provenance(session, eid, prov)
+                    await write_provenance(session, eid, prov, session_id=session_id)
                 await session.commit()
         except Exception as e:
             logger.error("provenance_batch_write_failed: %s n=%d", e, len(provenance_writes))
