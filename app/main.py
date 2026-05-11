@@ -1122,14 +1122,22 @@ async def research_reply_endpoint(body: ResearchReplyInput, request: Request):
 
 
 @app.get("/research/verify/{session_id}", tags=["Research"])
-async def research_verify_endpoint(session_id: str):
-    """Session-scoped provenance audit (§17.114).
+async def research_verify_endpoint(
+    session_id: str,
+    recheck: bool = Query(False, description="If true, HEAD-request each entry's source_url to surface upstream reachability state."),
+):
+    """Session-scoped provenance audit (§17.114 + §17.121).
 
     Lists every Milvus entry produced by the given research session and
     reports its current state — present, superseded, or missing. Used to
     surface drift between what was ingested and what's currently in the
     index, without re-fetching upstream content. See
     ``app/modules/research_verify.py`` for the returned-shape contract.
+
+    ``?recheck=true`` (§17.121) additionally HEAD-requests each entry's
+    ``source_url`` and reports ``upstream_state`` (reachable / missing /
+    forbidden / error / skipped) per entry plus rollup totals. Bounded
+    concurrency (5). SSRF re-checked on every URL.
 
     Pre-§17.114 sessions have no provenance rows linked by session_id
     and return an empty ``entries`` list — that's expected, not an error.
@@ -1145,7 +1153,7 @@ async def research_verify_endpoint(session_id: str):
         raise HTTPException(status_code=400, detail=f"Invalid session_id (must be UUID): {session_id!r}")
 
     async with async_session() as db_session:
-        return await verify_session(db_session, session_id)
+        return await verify_session(db_session, session_id, recheck_upstream=recheck)
 
 
 @app.post("/research/pdf", tags=["Research"])

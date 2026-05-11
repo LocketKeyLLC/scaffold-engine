@@ -4719,6 +4719,59 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.121 `/research/verify/{session_id}?recheck=true` — upstream reachability (phase-5 deferral close 1/3) (2026-05-11)
+
+Adds the opt-in upstream-reachability mode to the verify endpoint. Closes the phase-2 deferral about "re-fetch every source_ref and confirm it's still there" — the reachability half of it. Full content-hash comparison (re-fetch, re-normalize per source_type, re-hash, compare) is deliberately split off as a follow-up; that requires per-source-type re-normalization logic that doesn't exist generically.
+
+**What it does.** `?recheck=true` on the endpoint, or `recheck_upstream=True` on `verify_session`, fans out HEAD requests to each entry's `source_url` with bounded concurrency (5) and classifies each response:
+
+| HTTP status / outcome | `upstream_state` |
+|---|---|
+| 200–299 | `reachable` |
+| 404 / 410 | `missing` |
+| 400–499 (else) | `forbidden` |
+| 5xx, timeout, connection error | `error` |
+| Empty source_url | `skipped` |
+| SSRF-rebound URL | `error` (rejected without network call) |
+
+405 (Method Not Allowed on HEAD — arxiv.org does this) falls back to GET with the body discarded. SSRF re-checked per URL via `_is_public_host` — same contract as `_fetch_url_bounded` in §17.93. Bounded concurrency keeps a session with 100+ entries from saturating outbound connections.
+
+**Returned shape additions** (only when `recheck_upstream=True`):
+
+```diff
+ "totals": {
+     "provenance_rows": N, "in_milvus": M, "superseded": S, "missing": X,
++    "reachable": R, "upstream_missing": Um, "upstream_error": Ue
+ },
+ "entries": [{
+     ..., "milvus_state": ..., "content_hash_at_ingest": ...,
++    "upstream_state": "reachable" | "missing" | "forbidden" | "error" | "skipped",
++    "upstream_status": <int> | None
+ }]
+```
+
+Default (`recheck=false`) is unchanged — pre-§17.121 callers see byte-identical output.
+
+**Files.**
+
+- `app/modules/research_verify.py` — new `_recheck_one_url(client, url)` does the per-URL HEAD/GET + classification; new `_recheck_upstream(url_by_eid, concurrency=5)` fans out via `asyncio.gather` + `Semaphore`; `verify_session` gains `recheck_upstream: bool = False` kwarg.
+- `app/main.py` — `/research/verify/{session_id}` endpoint accepts `?recheck=true` query param via `Query(False, description="...")`.
+- `tests/test_research_verify.py` — 10 new tests: per-state classification (reachable / 404 / 403 / 405-fallback / SSRF-blocked / empty-URL / timeout), session-level recheck integration (totals + per-entry fields populated), backward-compat (default omits recheck fields), endpoint `?recheck=true` propagation.
+
+**Content-hash comparison deferred.** Why: the stored `content_hash` is computed on the post-normalization `canonical_text` (trafilatura-extracted for URL-mode, HTML-stripped + PII-redacted for forum modes, base64-decoded blob for GH, etc.). Re-fetching raw bytes and comparing to this hash would always mismatch. Doing it properly requires routing each `source_type` back through its producer's normalization pipeline, which means exposing those pipelines as composable hooks. Real cost: ~150 lines per producer × 7 producers + a registry, plus integration tests. Not worth bundling here; reachability is the more useful first signal.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_research_verify.py --timeout=30 -q
+14 passed in 14.64s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1701 passed, 8 skipped in 648.98s (0:10:48)
+```
+
++10 vs §17.120 baseline (`1691 passed`) — all from new recheck tests. Same 8 skipped, 0 warnings (11 clean runs in a row).
+
 ### 17.120 quality_signal-weighted rerank — phase-4 close (2026-05-11)
 
 Final phase-4 commit. `query_rag` now applies a per-result multiplicative bump to `final_score` based on the `quality_signal` recorded in §17.114's provenance sidecar — letting a Stack Overflow answer with 200 votes outrank a generic prose chunk at equal embedding similarity. Caps at ×1.20 so embedding similarity stays the primary signal.

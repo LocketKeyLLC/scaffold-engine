@@ -1,20 +1,27 @@
-"""Session-scoped provenance audit (§17.114 — /research/verify/<session_id>).
+"""Session-scoped provenance audit (§17.114 + §17.121 —
+/research/verify/<session_id>[?recheck=true]).
 
 Given a research session_id, enumerate every Milvus entry it produced
 (via the §17.104 + §17.114 ``rag_entry_provenance`` sidecar) and report
 their current Milvus state: still present, superseded, or missing.
 
-Does NOT re-fetch upstream content. True content-drift detection (re-hash
-the upstream body and compare to the ingested ``content_hash``) is a
-follow-up — each source_type would need a back-pointer into its
-producer's fetcher, which doesn't exist as a generic API yet.
+§17.121 adds an opt-in ``recheck_upstream`` mode: HEAD/GET each entry's
+``source_url`` and classify the response as ``reachable``, ``missing``
+(404), ``forbidden`` (4xx other than 404), or ``error`` (5xx / timeout /
+connection failure). Surfaces "did the source vanish from upstream"
+without re-hashing content (full content-drift detection still requires
+per-source-type re-normalize and is a §17.121 follow-up).
 
 Returned shape:
 
     {
         "session_id": "<uuid>",
         "session_meta": {"topic", "status", "completed_at"} | None,
-        "totals": {"provenance_rows": N, "in_milvus": M, "superseded": S, "missing": X},
+        "totals": {
+            "provenance_rows": N, "in_milvus": M, "superseded": S, "missing": X,
+            # only when recheck_upstream=True:
+            "reachable": R, "upstream_missing": Um, "upstream_error": Ue,
+        },
         "entries": [
             {
                 "entry_id": "...",
@@ -28,6 +35,9 @@ Returned shape:
                 "current_version": int | None,
                 "superseded_by": str | None,
                 "content_hash_at_ingest": str | None,
+                # only when recheck_upstream=True:
+                "upstream_state": "reachable" | "missing" | "forbidden" | "error" | "skipped",
+                "upstream_status": <int> | None,
             },
             ...
         ],
@@ -134,15 +144,89 @@ def _milvus_lookup_supersedors(entry_ids: list[str]) -> dict[str, str]:
     return out
 
 
+async def _recheck_one_url(client, url: str) -> dict[str, Any]:
+    """HEAD (or GET on 405) the URL and classify the response.
+
+    Returns ``{state, status}``. ``state`` ∈ ``{reachable, missing,
+    forbidden, error, skipped}``. ``status`` is the HTTP code or None
+    on connection error. No body read — we only care about reachability.
+    """
+    if not url:
+        return {"state": "skipped", "status": None}
+    # SSRF re-check — the stored source_url could in principle have been
+    # tampered with; rejecting private-IP rebinds here matches the
+    # original §17.93 contract on _fetch_url_bounded.
+    from app.modules.research_extractors import _is_public_host
+    ok, _reason = _is_public_host(url)
+    if not ok:
+        return {"state": "error", "status": None}
+    try:
+        r = await client.head(
+            url, timeout=10.0,
+            headers={"User-Agent": "ScaffoldEngine/1.0 (verify)"},
+            follow_redirects=True,
+        )
+        if r.status_code == 405:
+            # Some servers (notably arxiv.org) don't support HEAD —
+            # fall back to a GET with the body discarded immediately.
+            r = await client.get(
+                url, timeout=10.0,
+                headers={"User-Agent": "ScaffoldEngine/1.0 (verify)"},
+                follow_redirects=True,
+            )
+        status = r.status_code
+    except Exception as e:
+        logger.debug("verify_recheck_error: url=%s err=%s", url, e)
+        return {"state": "error", "status": None}
+
+    if 200 <= status < 300:
+        state = "reachable"
+    elif status == 404 or status == 410:
+        state = "missing"
+    elif 400 <= status < 500:
+        state = "forbidden"
+    else:
+        state = "error"
+    return {"state": state, "status": status}
+
+
+async def _recheck_upstream(
+    url_by_eid: dict[str, str], concurrency: int = 5,
+) -> dict[str, dict[str, Any]]:
+    """Fan out HEAD requests with bounded concurrency.
+
+    Returns ``{entry_id: {state, status}}``. Entries with empty URLs
+    map to ``{"state": "skipped", "status": None}``.
+    """
+    from app.utils.http_clients import get_generic_http_client
+    client = get_generic_http_client()
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _one(eid: str, url: str):
+        async with sem:
+            return eid, await _recheck_one_url(client, url)
+
+    results = await asyncio.gather(*(
+        _one(eid, url) for eid, url in url_by_eid.items()
+    ))
+    return dict(results)
+
+
 async def verify_session(
     db_session: AsyncSession,
     session_id: str,
+    *,
+    recheck_upstream: bool = False,
 ) -> dict[str, Any]:
     """Build a verify report for a research session. See module docstring
     for the returned shape.
 
     Pre-§17.114 sessions have no provenance rows linked by session_id —
     the report returns an empty ``entries`` list and ``provenance_rows=0``.
+
+    ``recheck_upstream=True`` (§17.121) HEAD-requests each entry's
+    source_url and classifies the response. Adds ``upstream_state`` per
+    entry + ``reachable``/``upstream_missing``/``upstream_error`` totals.
     """
     meta_row = await db_session.execute(
         text(
@@ -170,10 +254,24 @@ async def verify_session(
     milvus_rows = await loop.run_in_executor(None, _milvus_lookup_entries, entry_ids)
     supersedors = await loop.run_in_executor(None, _milvus_lookup_supersedors, entry_ids)
 
+    # §17.121 — optional upstream reachability recheck. Fan out HEAD
+    # requests with bounded concurrency BEFORE building the per-entry
+    # dicts so we can merge results into each entry in one pass.
+    recheck_results: dict[str, dict[str, Any]] = {}
+    if recheck_upstream:
+        url_by_eid = {
+            prov["entry_id"]: (milvus_rows.get(prov["entry_id"], {}) or {}).get("source_url", "")
+            for prov in provenance_rows
+        }
+        recheck_results = await _recheck_upstream(url_by_eid)
+
     entries: list[dict[str, Any]] = []
     n_present = 0
     n_superseded = 0
     n_missing = 0
+    n_reachable = 0
+    n_upstream_missing = 0
+    n_upstream_error = 0
     for prov in provenance_rows:
         eid = prov["entry_id"]
         milvus = milvus_rows.get(eid)
@@ -187,7 +285,7 @@ async def verify_session(
         else:
             state = "present"
             n_present += 1
-        entries.append({
+        entry = {
             "entry_id": eid,
             "source_ref": prov["source_ref"],
             "source_url": (milvus or {}).get("source_url", ""),
@@ -199,16 +297,33 @@ async def verify_session(
             "current_version": (milvus or {}).get("version"),
             "superseded_by": superseded_by,
             "content_hash_at_ingest": (milvus or {}).get("content_hash", "") or None,
-        })
+        }
+        if recheck_upstream:
+            rc = recheck_results.get(eid) or {"state": "skipped", "status": None}
+            entry["upstream_state"] = rc["state"]
+            entry["upstream_status"] = rc["status"]
+            if rc["state"] == "reachable":
+                n_reachable += 1
+            elif rc["state"] == "missing":
+                n_upstream_missing += 1
+            elif rc["state"] in ("forbidden", "error"):
+                n_upstream_error += 1
+        entries.append(entry)
+
+    totals: dict[str, Any] = {
+        "provenance_rows": len(provenance_rows),
+        "in_milvus": n_present,
+        "superseded": n_superseded,
+        "missing": n_missing,
+    }
+    if recheck_upstream:
+        totals["reachable"] = n_reachable
+        totals["upstream_missing"] = n_upstream_missing
+        totals["upstream_error"] = n_upstream_error
 
     return {
         "session_id": session_id,
         "session_meta": session_meta,
-        "totals": {
-            "provenance_rows": len(provenance_rows),
-            "in_milvus": n_present,
-            "superseded": n_superseded,
-            "missing": n_missing,
-        },
+        "totals": totals,
         "entries": entries,
     }

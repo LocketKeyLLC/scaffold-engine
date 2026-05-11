@@ -134,6 +134,181 @@ def test_verify_endpoint_rejects_non_uuid():
     assert "Invalid session_id" in r.json()["detail"]
 
 
+# ---------------------------------------------------------------------------
+# §17.121 — recheck_upstream
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_recheck_one_url_reachable():
+    """200 → reachable."""
+    from app.modules import research_verify as rv
+    client = MagicMock()
+    resp = MagicMock()
+    resp.status_code = 200
+    client.head = AsyncMock(return_value=resp)
+    with patch.object(rv, "_is_public_host", create=True, return_value=(True, "ok")):
+        # _is_public_host is imported INSIDE _recheck_one_url, so patch
+        # at the import site instead.
+        pass
+    with patch("app.modules.research_extractors._is_public_host",
+               return_value=(True, "ok")):
+        out = await rv._recheck_one_url(client, "https://example.com/a")
+    assert out == {"state": "reachable", "status": 200}
+
+
+@pytest.mark.asyncio
+async def test_recheck_one_url_missing_404():
+    from app.modules import research_verify as rv
+    client = MagicMock()
+    resp = MagicMock()
+    resp.status_code = 404
+    client.head = AsyncMock(return_value=resp)
+    with patch("app.modules.research_extractors._is_public_host",
+               return_value=(True, "ok")):
+        out = await rv._recheck_one_url(client, "https://example.com/x")
+    assert out == {"state": "missing", "status": 404}
+
+
+@pytest.mark.asyncio
+async def test_recheck_one_url_forbidden_403():
+    from app.modules import research_verify as rv
+    client = MagicMock()
+    resp = MagicMock()
+    resp.status_code = 403
+    client.head = AsyncMock(return_value=resp)
+    with patch("app.modules.research_extractors._is_public_host",
+               return_value=(True, "ok")):
+        out = await rv._recheck_one_url(client, "https://example.com/x")
+    assert out == {"state": "forbidden", "status": 403}
+
+
+@pytest.mark.asyncio
+async def test_recheck_one_url_head_405_falls_back_to_get():
+    """405 Method Not Allowed → fall back to GET. arxiv.org does this."""
+    from app.modules import research_verify as rv
+    client = MagicMock()
+    head_resp = MagicMock()
+    head_resp.status_code = 405
+    get_resp = MagicMock()
+    get_resp.status_code = 200
+    client.head = AsyncMock(return_value=head_resp)
+    client.get = AsyncMock(return_value=get_resp)
+    with patch("app.modules.research_extractors._is_public_host",
+               return_value=(True, "ok")):
+        out = await rv._recheck_one_url(client, "https://example.com/x")
+    assert out == {"state": "reachable", "status": 200}
+    client.get.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_recheck_one_url_ssrf_blocked():
+    """Private-IP URL → error state, no HTTP call."""
+    from app.modules import research_verify as rv
+    client = MagicMock()
+    client.head = AsyncMock()
+    with patch("app.modules.research_extractors._is_public_host",
+               return_value=(False, "private_ip")):
+        out = await rv._recheck_one_url(client, "http://10.0.0.1/x")
+    assert out == {"state": "error", "status": None}
+    client.head.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_recheck_one_url_empty_url_skipped():
+    from app.modules import research_verify as rv
+    client = MagicMock()
+    out = await rv._recheck_one_url(client, "")
+    assert out == {"state": "skipped", "status": None}
+
+
+@pytest.mark.asyncio
+async def test_recheck_one_url_timeout_returns_error():
+    from app.modules import research_verify as rv
+    import httpx
+    client = MagicMock()
+    client.head = AsyncMock(side_effect=httpx.TimeoutException("slow"))
+    with patch("app.modules.research_extractors._is_public_host",
+               return_value=(True, "ok")):
+        out = await rv._recheck_one_url(client, "https://example.com/x")
+    assert out == {"state": "error", "status": None}
+
+
+@pytest.mark.asyncio
+async def test_verify_session_with_recheck_populates_totals():
+    """verify_session(... recheck_upstream=True) calls _recheck_upstream
+    and adds the recheck fields to entries + totals."""
+    from app.modules import research_verify as rv
+
+    session_id = "44444444-4444-4444-4444-444444444444"
+    meta_rows = []
+    provenance_rows = [
+        {"entry_id": "ok-1", "source_ref": "x", "fetched_at": 1, "quality_signal": {}},
+        {"entry_id": "404-1", "source_ref": "y", "fetched_at": 2, "quality_signal": {}},
+    ]
+    db = _mock_db_session(meta_rows, provenance_rows)
+
+    milvus_rows = {
+        "ok-1": {"domain": "eng", "source_type": "tech_docs",
+                 "source_url": "https://example.com/ok", "content_hash": "h1",
+                 "version": 1, "supersedes_id": None},
+        "404-1": {"domain": "eng", "source_type": "tech_docs",
+                  "source_url": "https://example.com/gone", "content_hash": "h2",
+                  "version": 1, "supersedes_id": None},
+    }
+    recheck_results = {
+        "ok-1": {"state": "reachable", "status": 200},
+        "404-1": {"state": "missing", "status": 404},
+    }
+    with patch.object(rv, "_milvus_lookup_entries", return_value=milvus_rows), \
+         patch.object(rv, "_milvus_lookup_supersedors", return_value={}), \
+         patch.object(rv, "_recheck_upstream",
+                      AsyncMock(return_value=recheck_results)) as rec:
+        report = await rv.verify_session(db, session_id, recheck_upstream=True)
+
+    rec.assert_awaited_once()
+    assert report["totals"]["reachable"] == 1
+    assert report["totals"]["upstream_missing"] == 1
+    assert report["totals"]["upstream_error"] == 0
+    by_id = {e["entry_id"]: e for e in report["entries"]}
+    assert by_id["ok-1"]["upstream_state"] == "reachable"
+    assert by_id["ok-1"]["upstream_status"] == 200
+    assert by_id["404-1"]["upstream_state"] == "missing"
+
+
+@pytest.mark.asyncio
+async def test_verify_session_without_recheck_omits_recheck_fields():
+    """Default recheck_upstream=False leaves recheck fields out — preserves
+    backward-compat with pre-§17.121 callers."""
+    from app.modules import research_verify as rv
+
+    db = _mock_db_session([], [])
+    with patch.object(rv, "_milvus_lookup_entries", return_value={}), \
+         patch.object(rv, "_milvus_lookup_supersedors", return_value={}):
+        report = await rv.verify_session(db, "55555555-5555-5555-5555-555555555555")
+    assert "reachable" not in report["totals"]
+    assert "upstream_missing" not in report["totals"]
+
+
+@pytest.mark.smoke
+def test_verify_endpoint_accepts_recheck_query_param():
+    """Endpoint passes ?recheck=true → verify_session(recheck_upstream=True)."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    fake_report = {"session_id": "x", "session_meta": None, "totals": {}, "entries": []}
+    with patch("app.modules.research_verify.verify_session",
+               AsyncMock(return_value=fake_report)) as verify_mock:
+        with TestClient(app) as client:
+            r = client.get(
+                "/research/verify/66666666-6666-6666-6666-666666666666?recheck=true",
+                headers=_auth_headers(),
+            )
+    assert r.status_code == 200
+    # Kwarg propagated.
+    kwargs = verify_mock.call_args.kwargs
+    assert kwargs.get("recheck_upstream") is True
+
+
 @pytest.mark.smoke
 def test_verify_endpoint_calls_verify_session():
     """Endpoint dispatches to verify_session and returns its JSON shape."""
