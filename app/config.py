@@ -382,8 +382,10 @@ class Settings(BaseSettings):
     # in the github_* block above (consolidated with existing settings).
     hf_max_files: int = Field(default=30, ge=1, le=200)
     so_max_answers: int = Field(default=20, ge=1, le=100)
+    so_min_score: int = Field(default=10, ge=0, le=10000)
     reddit_max_posts: int = Field(default=20, ge=1, le=100)
     hn_max_items: int = Field(default=25, ge=1, le=200)
+    hn_min_points: int = Field(default=100, ge=0, le=10000)
     arxiv_max_sections: int = Field(default=10, ge=1, le=50)
     wiki_max_pages: int = Field(default=10, ge=1, le=50)
 

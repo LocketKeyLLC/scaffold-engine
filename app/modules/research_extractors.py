@@ -207,6 +207,52 @@ def _parse_hf_ref(s: str) -> tuple[str, str]:
     return kind, id_
 
 
+# Forum prefixes — value after the prefix is a free-form query string.
+# We allow spaces / mixed case so users can write `so:list comprehension python`.
+
+_ARXIV_ID_RE = re.compile(
+    r"^[0-9]{4}\.[0-9]{4,5}(v[0-9]+)?$|^[a-z\-]+(\.[A-Za-z\-]+)?/[0-9]{7}$"
+)
+
+
+def _is_so_ref(s: str) -> bool:
+    return s.startswith("so:") and bool(s[len("so:"):].strip())
+
+
+def _parse_so_ref(s: str) -> str:
+    if not _is_so_ref(s):
+        raise ValueError(f"Malformed SO ref: {s!r} (expected 'so:<query>')")
+    return s[len("so:"):].strip()
+
+
+def _is_hn_ref(s: str) -> bool:
+    return s.startswith("hn:") and bool(s[len("hn:"):].strip())
+
+
+def _parse_hn_ref(s: str) -> str:
+    if not _is_hn_ref(s):
+        raise ValueError(f"Malformed HN ref: {s!r} (expected 'hn:<query>')")
+    return s[len("hn:"):].strip()
+
+
+def _is_arxiv_ref(s: str) -> bool:
+    return s.startswith("arxiv:") and bool(s[len("arxiv:"):].strip())
+
+
+def _parse_arxiv_ref(s: str) -> tuple[str, str]:
+    """Parse ``arxiv:<value>`` → ``(mode, value)``.
+
+    ``mode`` is ``"id"`` if value matches the arXiv ID format
+    (``YYYY.NNNNN`` with optional ``vN`` suffix, or the legacy
+    ``cat/0501001`` form), else ``"query"`` for free-text search.
+    """
+    if not _is_arxiv_ref(s):
+        raise ValueError(f"Malformed arXiv ref: {s!r} (expected 'arxiv:<id|query>')")
+    value = s[len("arxiv:"):].strip()
+    mode = "id" if _ARXIV_ID_RE.match(value) else "query"
+    return mode, value
+
+
 def _is_openapi_ref(s: str) -> bool:
     if not s.startswith("openapi:"):
         return False

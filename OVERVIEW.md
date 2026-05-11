@@ -4719,6 +4719,71 @@ Caught during the fresh-eyes review. `scaffold_router._execute_and_stream` mappe
 
 **Verification:** `python3 -m ast pipelines/scaffold_router.py` parses clean. No new tests — the drift-hint contract is already covered by the existing pipeline test surface; this is a one-call-site parity fix, not a new behavior.
 
+### 17.108 Forum modes — SO + HN + arXiv with vote/score quality gates (2026-05-10)
+
+Commit 6/8 of the phase-1 deep-search rollout. Three new producers, each behind a quality gate so only community-validated material lands in the index:
+
+| Prefix | API | Quality gate | source_type |
+|---|---|---|---|
+| `so:<query>` | api.stackexchange.com 2.3 | `is_accepted=True` OR `score ≥ so_min_score` (10) | `so_answer` |
+| `hn:<query>` | hn.algolia.com /api/v1 | `points ≥ hn_min_points` (100) | `hn_comment` |
+| `arxiv:<id\|query>` | export.arxiv.org/api/query (Atom XML) | none (papers are gated by peer review) | `paper_abstract` |
+
+All three sources are public and unauthenticated. SE has a 300 req/day anon quota (10k with an app key); HN Algolia and arXiv are unmetered.
+
+**Stack Overflow flow.** Two-step:
+
+1. `/search/advanced?q=<query>&accepted=True&sort=votes&filter=withbody` → top N questions with accepted answers.
+2. Batch `/answers/{id1;id2;...}?filter=withbody` for the accepted answer bodies.
+
+Individual answer bodies cached at `fetchv1:so:answer-<id>:body` with the immutable TTL (30 d) — accepted SO answers don't change. Repeat queries that overlap on top answers skip step 2's network entirely. Test `test_fetch_so_answers_uses_answer_cache` exercises this — only one HTTP call when the answer is cached.
+
+**HN flow.** Single search call to `/search?query=<q>&numericFilters=points>=<N>&hitsPerPage=<M>`. Algolia returns full bodies in the search response, so there's nothing extra to fetch. Search response cached by query hash with the **short** TTL (1 h) since Algolia rankings drift as new posts get votes.
+
+**arXiv flow.** Single GET on `/api/query`. Two modes selected at parse time:
+
+- `arxiv:2310.06825` or legacy `arxiv:cs.CL/0501001` → `?id_list=<id>` (immutable TTL).
+- `arxiv:transformer architecture` → `?search_query=all:<q>&sortBy=relevance` (short TTL).
+
+Atom XML parsed via stdlib `xml.etree.ElementTree`; no new dependency.
+
+**PII strip** (`_strip_pii`): every body passes through `_EMAIL_RE` → `email@redacted`, then `_AT_USER_RE` → `@user`. The username regex uses `(?<!\w)@` so the email placeholder's `@redacted` isn't re-matched. Plus `_strip_html`: drops tags + decodes the common entities (`&amp;`/`&lt;`/`&gt;`/`&quot;`/`&#39;`/`&nbsp;`), which SE bodies need (they arrive as HTML).
+
+**Provenance per entry** (uniform with §17.106 / §17.107):
+
+- SO: `source_ref=answer-<id>`, `quality_signal={score, is_accepted, question_score, question_id, tags}`.
+- HN: `source_ref=<objectID>`, `quality_signal={points, num_comments, kind, created_at}`.
+- arXiv: `source_ref=<arxiv_id>` (including version suffix), `quality_signal={published, author_count}`.
+
+`confidence_score` derives from `source_type` via §17.104: `so_answer=0.85`, `hn_comment=0.65`, `paper_abstract=0.85`.
+
+**Files.**
+
+- `app/config.py` — added `so_min_score=10` (`ge=0..10000`) + `hn_min_points=100` (`ge=0..10000`). The §17.105 `so_max_answers=20` / `hn_max_items=25` / `arxiv_max_sections=10` budgets already in place.
+- `app/modules/research_extractors.py` — `_is_so_ref` / `_parse_so_ref`, `_is_hn_ref` / `_parse_hn_ref`, `_is_arxiv_ref` / `_parse_arxiv_ref` (returns `(mode, value)` for ID vs free-text). Updated `_ARXIV_ID_RE` to handle legacy `cs.CL/0501001` format (initial regex didn't cover the dotted subject-class subform — caught by tests during dev).
+- `app/utils/forum_ingest.py` (new) — `_strip_pii`, `_strip_html`, `fetch_so_answers`, `fetch_hn_items`, `fetch_arxiv`, `fetch_forum(prefix, value)` dispatch helper.
+- `app/modules/research_agent.py` — 3 new mode detections (`so` / `hn` / `arxiv`); shared `_run_research_forum_mode(prefix, value, ...)` runner; arXiv's two-arg `(mode, value)` packed into a single `mode:value` string crossing the dispatch boundary so all three forum modes share one runner.
+- `tests/test_forum_ingest.py` (new) — 21 tests: parsers, PII strip (`@username` + emails + interaction), HTML strip, SO (accepted-passes-gate, low-score-filtered, cache hit, 429 → empty), HN (min-points gate, zero-limit short-circuit), arXiv (Atom parse, ID cache hit, zero-limit, bad-mode), dispatch + unknown-prefix.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_forum_ingest.py --timeout=30 -q
+21 passed in 2.16s
+
+$ docker exec scaffold-orchestrator pytest tests/ -k "research or github or hf_ or forum" --timeout=30 -q
+246 passed, 1309 deselected, 1 warning in 73.40s (0:01:13)
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+1547 passed, 8 skipped, 1 warning in 616.92s (0:10:16)
+```
+
++21 vs §17.107 baseline (`1526 passed`) — all from new `test_forum_ingest.py`. Same 8 skipped.
+
+**The `PytestUnhandledThreadExceptionWarning` is back** — first surfaced in §17.106, was absent in the §17.107 full-suite re-run after the `test_close_clients_resets_registry` fix, surfaced again in §17.108. Suite still exits 0. Likely a background-thread artifact in one of the existing tests, not §17.108-attributable (the keyword-filtered §17.107 broader sweep also showed 1 warning). Will dig into the thread origin during §17.110 when there's no parallel feature work.
+
+**Next.** §17.109 — Reddit (allowlisted to r/MachineLearning + r/LocalLLaMA per the phase-1 brief) + Wikipedia (foundational concept anchoring). PII strip already exists from §17.108; reused. Reddit's `.json` API works anonymously with a UA header.
+
 ### 17.107 Hugging Face mode — model/dataset/paper/space ingest pinned to HF revision (2026-05-10)
 
 Commit 5/8 of the phase-1 deep-search rollout. Second producer: `hf:<kind>/<id>` for model cards, dataset cards, paper abstracts, and space metadata. Each fetch resolves the HF commit SHA (or arXiv id for papers) and pins every entry's `source_ref` to that immutable value — pairs with §17.104's provenance writer. §17.105's `fetch_cache` is wired this commit (it wasn't in §17.106 — flagged then as a known gap).

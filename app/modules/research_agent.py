@@ -53,13 +53,19 @@ from app.modules.research_extractors import (
     _extract_pypdf,
     _extract_threshold,
     _fetch_url_bounded,
+    _is_arxiv_ref,
     _is_github_ref,
     _is_hf_ref,
+    _is_hn_ref,
     _is_openapi_ref,
+    _is_so_ref,
     _is_url,
+    _parse_arxiv_ref,
     _parse_github_ref,
     _parse_hf_ref,
+    _parse_hn_ref,
     _parse_openapi_ref,
+    _parse_so_ref,
     _resolve_confidence,
     _robots_allowed,
     _score_source,
@@ -1246,6 +1252,110 @@ async def _run_research_hf_mode(
         yield evt
 
 
+async def _run_research_forum_mode(
+    prefix: str,
+    value: str,
+    state: ResearchState,
+    session_id: str,
+    t0: float,
+) -> AsyncGenerator[str, None]:
+    """Forum-mode: SO / HN / arXiv. ``value`` is the post-prefix query.
+
+    For arXiv we pack ``<mode>:<value>`` (e.g., ``id:2310.06825`` or
+    ``query:transformer architecture``) into the ``value`` arg — the
+    runner unpacks before dispatch. This avoids leaking a 3-arg dispatch
+    through ResearchState.
+    """
+    from app.utils.forum_ingest import (
+        fetch_arxiv,
+        fetch_hn_items,
+        fetch_so_answers,
+    )
+    from app.modules.provenance import build_provenance
+    from app.config import settings as _settings
+
+    state.outline_facets = [f"forum_{prefix}"]
+    state.iteration = 1
+    yield _sse("decomposition_complete", {
+        "complexity": "direct",
+        "facets": state.outline_facets,
+        "query_count": 0,
+    })
+    yield _sse("iteration_started", {
+        "iteration": 1,
+        "query_count": 0,
+        "mode": prefix,
+    })
+
+    async def _do_fetch():
+        if prefix == "so":
+            return await fetch_so_answers(
+                value, _settings.so_max_answers, _settings.so_min_score,
+            )
+        if prefix == "hn":
+            return await fetch_hn_items(
+                value, _settings.hn_max_items, _settings.hn_min_points,
+            )
+        if prefix == "arxiv":
+            mode, val = value.split(":", 1)
+            return await fetch_arxiv(mode, val, _settings.arxiv_max_sections)
+        raise ValueError(f"Unknown forum prefix: {prefix!r}")
+
+    task = asyncio.create_task(_do_fetch())
+    async for hb in _await_with_heartbeat(
+        task, {"status": f"fetching_{prefix}", "iteration": 1}
+    ):
+        yield hb
+    items = task.result()
+
+    if not items:
+        raise RuntimeError(
+            f"No ingestible content found for {prefix}:{value!r} "
+            f"(quality gates may have filtered everything)"
+        )
+
+    yield _sse("search_complete", {
+        "iteration": 1,
+        "results_found": len(items),
+        "total_urls": len(items),
+        "mode": prefix,
+    })
+
+    entries: list[dict] = []
+    for it in items:
+        source_url = it.get("source_url", "")
+        if source_url:
+            state.url_history.add(source_url)
+        entries.append({
+            "title": f"{prefix}: {it['path']}",
+            "content": it["content"],
+            "source": source_url,
+            "source_type": it.get("source_type", "tech_docs"),
+            "facet": f"forum_{prefix}",
+            "provenance": build_provenance(
+                source_ref=it.get("source_ref", ""),
+                quality_signal=it.get("quality_signal", {}),
+            ),
+        })
+
+    yield _sse("extraction_complete", {
+        "iteration": 1,
+        "entries_extracted": len(entries),
+        "mode": prefix,
+    })
+
+    async for evt in _ingest_and_finalize_direct(
+        state=state,
+        session_id=session_id,
+        entries=entries,
+        mode=prefix,
+        topic=f"{prefix}:{value}",
+        t0=t0,
+        extra_complete_fields={"items_fetched": len(items)},
+    ):
+        yield evt
+
+
 async def _unload_ollama_model(model: str) -> None:
     """Force-unload an Ollama model via ``keep_alive=0``.
 
@@ -1678,6 +1788,12 @@ async def run_research(
         mode, state_depth = "github", "direct_github"
     elif _is_hf_ref(topic):
         mode, state_depth = "hf", "direct_hf"
+    elif _is_so_ref(topic):
+        mode, state_depth = "so", "direct_so"
+    elif _is_hn_ref(topic):
+        mode, state_depth = "hn", "direct_hn"
+    elif _is_arxiv_ref(topic):
+        mode, state_depth = "arxiv", "direct_arxiv"
     elif _is_url(topic):
         mode, state_depth = "direct_url", "direct_url"
     else:
@@ -1727,6 +1843,20 @@ async def run_research(
                 kind, hf_id = _parse_hf_ref(topic)
                 async for evt in _run_research_hf_mode(
                     kind, hf_id, state, session_id, t0,
+                ):
+                    yield evt
+            elif mode in ("so", "hn", "arxiv"):
+                if mode == "so":
+                    value = _parse_so_ref(topic)
+                elif mode == "hn":
+                    value = _parse_hn_ref(topic)
+                else:
+                    # arxiv keeps an (id|query) tuple — pack into a single string
+                    # for the forum-mode runner; the runner re-parses to dispatch.
+                    arx_mode, arx_val = _parse_arxiv_ref(topic)
+                    value = f"{arx_mode}:{arx_val}"
+                async for evt in _run_research_forum_mode(
+                    mode, value, state, session_id, t0,
                 ):
                     yield evt
             elif mode == "direct_url":
