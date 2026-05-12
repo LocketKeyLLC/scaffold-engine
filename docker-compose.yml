@@ -386,6 +386,40 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+  # §17.142 — SymbiYosys sidecar. Third ground-truth oracle (after
+  # ngspice §17.140 + verilator §17.141). Formal verification: SV
+  # assertions → SMT → PASS / FAIL / UNKNOWN. Toolchain comes from
+  # the OSS CAD Suite pinned-tag tarball (yosys + sby + z3 + others,
+  # all tested together by YosysHQ).
+  scaffold-symbiyosys:
+    image: scaffold-symbiyosys:${SCAFFOLD_SYMBIYOSYS_IMAGE_TAG:-local}
+    build:
+      context: ./docker/symbiyosys
+      dockerfile: Dockerfile
+    container_name: scaffold-symbiyosys
+    logging: *default-logging
+    ports:
+      - "127.0.0.1:8003:8003"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    # sby spawns yosys + the SMT solver as subprocesses and writes a
+    # work/ tree of intermediate files. Tmpfs explicitly `exec` per
+    # the §17.141 noexec-default lesson (and because some of those
+    # solvers may exec helper binaries from /tmp).
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,exec,size=512m
+    restart: always
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys;sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8003/health\",timeout=2).status==200 else 1)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 networks:
   ai-network:

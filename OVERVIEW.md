@@ -5520,6 +5520,84 @@ Per-run timing on the host: build ~1.7 s warm (ccache hit), ~5 s cold; run ~8 ms
 
 **Next from the engineering-design checklist:** SymbiYosys sidecar (formal verification via SVA / PSL → SAT / SMT) — same template, ``tool='symbiyosys'`` in sim_runs, but the output shape is binary "proven / counterexample-found / unknown" rather than KPIs.
 
+### 17.142 SymbiYosys sidecar — third oracle, this time for formal verification (2026-05-12)
+
+Third oracle on the engineering-design track (after ngspice §17.140 and verilator §17.141). Closes the trio of ground-truth tools the design pipeline will lean on: ngspice for analog, verilator for digital simulation, symbiyosys for formal proof. Same isolated-sidecar template; the meaningful differences are (a) toolchain delivery (OSS CAD Suite tarball, not a build-from-source) and (b) the output shape (a *verdict* — PASS / FAIL / UNKNOWN / TIMEOUT / ERROR — instead of numeric KPIs), which earns a new ``verdict TEXT`` column on ``sim_runs``.
+
+**OSS CAD Suite over a bespoke yosys+sby+z3 install.** Symbiyosys depends on three orthogonal tools (yosys for elaboration, sby for the formal-flow driver, and at least one SMT solver) whose versions must move in lockstep. YosysHQ publishes a coordinated daily build — ``oss-cad-suite-build`` — that ships all of them already tested against each other. Pinning a release tag (``2026-05-12``, asset ``oss-cad-suite-linux-x64-20260512.tgz``) and extracting under ``/opt/oss-cad-suite`` is the single source of truth; the runtime stage just prepends ``/opt/oss-cad-suite/bin`` to ``PATH``. Image is heavy (~2 GB extracted) but the alternative — building yosys from source while pinning compatible sby + solver tags — is a maintenance trap that's already burned the SymbiYosys docs page.
+
+**Tag verified before pinning** per [[feedback_verify_before_claim]]. Hit ``https://api.github.com/repos/YosysHQ/oss-cad-suite-build/releases/latest`` → ``tag_name=2026-05-12``, asset name as above; ``curl -sIL`` on the resolved download URL returned ``200``. The §17.141 fabricated-digest lesson was fresh.
+
+**Verdict-column migration.** sby's primary output is a *verdict*, not numbers. Three options were considered: encode the verdict numerically inside ``measurements`` (ugly), stash it in stderr and parse client-side (opaque), or add a column. Picked the column: ``ALTER TABLE sim_runs ADD COLUMN IF NOT EXISTS verdict TEXT`` plus a partial index ``WHERE verdict IS NOT NULL``. Nullable — ngspice / verilator still leave it NULL because their primary contract remains ``measurements``. The persistence helper in ``app/sim/symbiyosys.py`` writes the verdict atomically with the rest of the row; ``measurements`` carries only the one genuine number we get from sby (``depth_reached``) when present.
+
+**.sby config generation.** sby is driven by an INI-style config that references the design file. The wrapper synthesizes it from the request:
+
+```
+[options]
+mode bmc      # or prove / cover / live
+depth 20
+timeout 120
+
+[engines]
+smtbmc z3
+
+[script]
+read -formal design.sv
+prep -top counter
+
+[files]
+design.sv
+```
+
+Five knobs are exposed on ``run_symbiyosys`` (mode, depth, engine, timeout, seed); the rest of the .sby surface is intentionally not exposed in v1 — we add knobs when a caller needs them rather than carrying every flag sby has ever shipped.
+
+**Verdict mapping: exit code is authoritative.** sby's documented exit codes are stable: 0=PASS, 2=FAIL, 4=UNKNOWN, 8=TIMEOUT, 16=ERROR. The sidecar maps those directly. A regex over the ``DONE (PASS|FAIL|…)`` stdout summary line is kept as a fallback — only used if sby short-circuits before emitting a summary (e.g. an internal Python traceback exits with code 1 instead of one of the documented codes). The client wrapper validates the response verdict against ``VALID_VERDICTS`` and falls back to ``ERROR`` if the sidecar returns something unexpected — opaque-fail is always ERROR by convention.
+
+**Counterexample VCD.** When ``verdict == FAIL``, sby writes a ``.vcd`` trace under ``work/engine_0/``. The sidecar locates it and returns its bytes base64-encoded in ``counterexample_vcd_b64``. The wrapper carries it through ``SymbiYosysResult`` for downstream consumers (e.g. the future ``/results <job>`` waveform viewer) but does NOT persist it to ``sim_runs`` in v1 — same waveform-artifact deferral as §17.140 / §17.141.
+
+**Audit row contract** is identical to the prior two oracles: every ``run_symbiyosys`` call writes one row *before* returning, including the sidecar-unreachable path. ``verdict`` is always populated — even the unreachable path stores ``verdict='ERROR'`` rather than NULL, so an auditor querying ``WHERE verdict IS NULL`` only ever sees the sidecars that don't emit categorical verdicts (ngspice, verilator today).
+
+**Files.**
+
+- ``docker/symbiyosys/Dockerfile`` (new). Two-stage: fetcher downloads the pinned OSS CAD Suite tarball + extracts to ``/opt/oss-cad-suite``; runtime stage carries that tree, ``libgomp1`` (yosys parallel-pass dep), ``tini`` (clean PID-1 signal handling for sby's subprocess fan-out), and FastAPI. ``ENV PATH="/opt/oss-cad-suite/bin:$VIRTUAL_ENV/bin:$PATH"`` is image-intrinsic.
+- ``docker/symbiyosys/server.py`` (new, ~205 lines). ``POST /run`` accepts ``{sv_source, top_module, mode?, depth?, engine?, timeout_s?, seed?}``; generates the .sby config in a tempdir; runs ``sby -f -d work config.sby``; maps exit-code → verdict; extracts ``depth_reached`` and the VCD if any. ``tool_version`` probed once at startup.
+- ``docker/symbiyosys/requirements.txt`` (new). Same pins as the other sidecars.
+- ``docker-compose.yml`` (+34 lines). New ``scaffold-symbiyosys`` service: bind ``127.0.0.1:8003:8003``, ``read_only: true``, ``cap_drop ALL``, ``no-new-privileges``, tmpfs ``/tmp:rw,nosuid,nodev,exec,size=512m`` (per §17.141 noexec-default lesson; 512m up from 256m because sby's intermediate yosys + SMT files are larger than verilator's obj_dir).
+- ``db/migrations/039_sim_runs_verdict.sql`` (new). ``ALTER TABLE … ADD COLUMN IF NOT EXISTS verdict TEXT`` plus partial index, wrapped in a DO block per the asyncpg multi-statement rule (§17.140 / 032).
+- ``app/sim/symbiyosys.py`` (new, ~220 lines). ``SymbiYosysResult`` dataclass with verdict + depth_reached + counterexample_vcd_b64; async ``run_symbiyosys(sv_source, *, top_module, db, mode='bmc', depth=20, engine='smtbmc z3', timeout_s=None, seed=None, job_id=None, dag_node_id=None)``. Exports ``VERDICT_PASS`` / ``VERDICT_FAIL`` / etc. as module-level constants so call sites pattern-match against the same set the sidecar uses.
+- ``app/utils/http_clients.py`` (+25 lines). ``_build_symbiyosys`` / ``get_symbiyosys_client``, wired into ``init_clients`` + ``close_clients``.
+- ``app/config.py`` (+8 lines). ``symbiyosys_url``, ``symbiyosys_run_timeout_s``, ``symbiyosys_http_timeout_s``.
+- ``tests/integration/test_sim_symbiyosys_db.py`` (new, 2 cases marked ``@pytest.mark.smoke``). 2-bit counter with ``assert (count < 4)`` proven via BMC depth 10; sidecar-unreachable case asserting ``verdict='ERROR'`` in the persisted row.
+- ``tests/conftest.py`` (+1 line). CI-smoke ``collect_ignore`` for the new integration test.
+- ``tests/test_http_clients.py`` (+2 lines). Bumps the registry-count assertion from 8 to 9 clients.
+
+**Verification.**
+
+```
+# Sidecar healthy.
+$ curl -s http://127.0.0.1:8003/health
+{"ok":true,"tool_version":"sby-v0.64-2-gf57802a"}
+
+# Migration applied on orchestrator restart.
+$ docker logs scaffold-orchestrator --since 30s | grep -E "migration|symbiyosys"
+migration_applied: file=039_sim_runs_verdict.sql
+migrations_complete: applied_count=1 total_files=38
+migrations_applied_at_startup: count=1 files=['039_sim_runs_verdict.sql']
+symbiyosys client initialized: http://scaffold-symbiyosys:8003
+
+# §17.142 integration smoke (both cases).
+$ docker exec scaffold-orchestrator pytest tests/integration/test_sim_symbiyosys_db.py -v
+tests/integration/test_sim_symbiyosys_db.py::test_symbiyosys_counter_bmc_passes PASSED [ 50%]
+tests/integration/test_sim_symbiyosys_db.py::test_symbiyosys_sidecar_unreachable_returns_failure_row PASSED [100%]
+============================== 2 passed in 0.82s ===============================
+```
+
+The BMC pass at depth 10 against a 2-bit-value-always-<-4 property completes in ~600 ms; the round-trip including the audit row persistence and verification is under 1 s.
+
+**Engineering-design track end-state (after §17.140 → §17.142):** three independent isolated sidecars on ``ai-network`` (ngspice :8001, verilator :8002, symbiyosys :8003), all writing into the same ``sim_runs`` table with the only-tool-specific differences being ``tool``, the contents of ``measurements``, and whether ``verdict`` is populated. Any downstream design-report code can query ``sim_runs.id`` once and have a join point to all three oracles without knowing which one produced the row.
+
+**Next from the engineering-design checklist:** spec-capture JSON schema + ``design_circuit`` job type, so the orchestrator can chain ``spec_capture → topology_select → device_sizing → simulate → verify → report`` end-to-end with the three oracles as verification leaves.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

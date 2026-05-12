@@ -208,6 +208,15 @@ class Settings(BaseSettings):
     verilator_build_timeout_s: float = Field(default=120.0, gt=0.0, le=1800.0)
     verilator_http_timeout_s: float = Field(default=2000.0, gt=0.0, le=7200.0)
 
+    # §17.142 — SymbiYosys sidecar. Single timeout — sby's pipeline is
+    # one synchronous run that internally drives yosys + the SMT solver.
+    # HTTP timeout must exceed run_timeout_s (sby's own timeout)
+    # comfortably so the sidecar's typed TIMEOUT verdict wins over
+    # httpx ReadTimeout.
+    symbiyosys_url: str = "http://scaffold-symbiyosys:8003"
+    symbiyosys_run_timeout_s: float = Field(default=120.0, gt=0.0, le=3600.0)
+    symbiyosys_http_timeout_s: float = Field(default=3700.0, gt=0.0, le=7200.0)
+
     # Research agent
     research_max_iterations: int = Field(default=3, ge=1, le=20)
     research_max_queries: int = Field(default=8, ge=1, le=50)

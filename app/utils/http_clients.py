@@ -159,6 +159,21 @@ def _build_verilator() -> httpx.AsyncClient:
     return client
 
 
+def _build_symbiyosys() -> httpx.AsyncClient:
+    # §17.142 — SymbiYosys sidecar client. Same safety-net rule.
+    client = httpx.AsyncClient(
+        base_url=settings.symbiyosys_url,
+        timeout=settings.symbiyosys_http_timeout_s,
+        limits=httpx.Limits(
+            max_connections=4,
+            max_keepalive_connections=2,
+            keepalive_expiry=30,
+        ),
+    )
+    logger.info("symbiyosys client initialized: %s", settings.symbiyosys_url)
+    return client
+
+
 def _build_openai() -> httpx.AsyncClient:
     """OpenAI-compatible client. ``openai_base_url`` defaults to api.openai.com
     but can point at any OpenAI-compatible endpoint (vLLM, LocalAI, Ollama in
@@ -196,6 +211,7 @@ def init_clients() -> None:
     _get_or_create("openai", _build_openai)
     _get_or_create("ngspice", _build_ngspice)
     _get_or_create("verilator", _build_verilator)
+    _get_or_create("symbiyosys", _build_symbiyosys)
 
 
 def get_searxng_client() -> httpx.AsyncClient:
@@ -251,6 +267,13 @@ def get_verilator_client() -> httpx.AsyncClient:
     client = _clients.get("verilator")
     if client is None or client.is_closed:
         raise RuntimeError("verilator client not initialized; call init_clients() at startup")
+    return client
+
+
+def get_symbiyosys_client() -> httpx.AsyncClient:
+    client = _clients.get("symbiyosys")
+    if client is None or client.is_closed:
+        raise RuntimeError("symbiyosys client not initialized; call init_clients() at startup")
     return client
 
 
