@@ -106,9 +106,10 @@ async def test_close_clients_resets_registry():
     http_clients.get_ollama_client()
     http_clients.get_openai_client()
     http_clients.get_ngspice_client()
+    http_clients.get_verilator_client()
     assert set(http_clients._clients.keys()) == {
         "searxng", "github", "huggingface", "generic", "ollama", "openai",
-        "ngspice",
+        "ngspice", "verilator",
     }
     await http_clients.close_clients()
     assert http_clients._clients == {}

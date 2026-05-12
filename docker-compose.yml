@@ -352,6 +352,40 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+  # §17.141 — Verilator sidecar. Same isolation posture as ngspice; the
+  # difference is that Verilator additionally needs to compile generated
+  # C++ on every /run call (so g++/make are baked into the runtime image
+  # and /tmp tmpfs is sized larger to hold obj_dir build artifacts).
+  scaffold-verilator:
+    image: scaffold-verilator:${SCAFFOLD_VERILATOR_IMAGE_TAG:-local}
+    build:
+      context: ./docker/verilator
+      dockerfile: Dockerfile
+    container_name: scaffold-verilator
+    logging: *default-logging
+    ports:
+      - "127.0.0.1:8002:8002"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    # Docker's tmpfs defaults to `noexec` — but the verilator pipeline
+    # builds and then EXECUTES a fresh binary in /tmp every /run call,
+    # so we have to opt out. nosuid+nodev are still enforced; the only
+    # privilege we restore is the ability to exec a freshly-compiled
+    # binary owned by the same uid that compiled it.
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,exec,size=256m
+    restart: always
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys;sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8002/health\",timeout=2).status==200 else 1)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 networks:
   ai-network:

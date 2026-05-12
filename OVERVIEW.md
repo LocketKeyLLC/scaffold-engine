@@ -5462,6 +5462,64 @@ tests/integration/test_sim_ngspice_db.py::test_ngspice_sidecar_unreachable_retur
 
 **Next from the engineering-design checklist:** add the Verilator sidecar (digital HDL ground truth) using the same template, then the spec-capture JSON schema + `design_circuit` job type so the orchestrator can chain through to verification end-to-end.
 
+### 17.141 Verilator sidecar — second ground-truth oracle, this time for HDL (2026-05-12)
+
+Second oracle on the engineering-design track (§17.140 was ngspice). Pattern: same isolated sidecar shape, same `sim_runs` audit table, same "failures are data, not exceptions" contract. The differences are all from Verilator's two-phase pipeline (compile SV → C++, build C++ binary, *then* run the binary) and the SystemVerilog testbench-vs-DUT timing model.
+
+**Build from upstream source.** Verilator's apt-packaged version on Debian bookworm is several point releases behind upstream and lacks ``--binary --timing`` polish. The Dockerfile pins ``VERILATOR_VERSION=v5.024`` and clones / configures / builds in a builder stage; the runtime stage carries only the resulting binaries (``verilator``, ``verilator_bin``, ``verilator_coverage``), ``share/verilator/`` includes, and the runtime toolchain Verilator's generated C++ needs at every ``/run`` (g++, make, perl). First build is ~5 min cold; subsequent rebuilds reuse the layer cache.
+
+**Five rough edges resolved in succession during smoke.**
+
+1. **Fabricated digest, caught.** First draft pinned ``debian:bookworm-slim`` by an SHA256 I invented. ``docker buildx`` rejected it with ``not found``. Replaced both stages with the same ``python:3.12.13-slim`` pin the orchestrator already uses — the project's one image digest now serves three roles (orchestrator, ngspice, verilator). Per [[feedback_verify_before_claim]], this is exactly the failure mode the rule is designed to catch.
+2. **Final ``strip`` step failed.** Verilator 5.024's ``make install`` doesn't produce an ELF at ``/usr/local/bin/verilator_bin`` — it's a Perl wrapper. Dropped the optimization; the few MB of unstripped debug info aren't worth a strip step that can't reliably target the binary.
+3. **ccache missing.** Verilator's generated Makefile calls ``ccache g++`` unconditionally. The slim runtime image didn't have ccache, so every build failed with ``ccache: No such file or directory``. Installing it in the runtime apt layer fixed the build *and* turns into a real per-container warm-cache for repeat ``/run`` calls.
+4. **ccache itself wanted ``$HOME/.ccache``** on the ``read_only`` rootfs. Pointed ``CCACHE_DIR=/tmp/ccache`` so it writes into the tmpfs.
+5. **Docker tmpfs is ``noexec`` by default.** The Verilator pipeline *executes* a freshly-compiled binary in the tmpfs on every ``/run``; the default mount option blocks that with ``PermissionError: [Errno 13] Permission denied`` from inside ``uvloop.subprocess_exec``. Explicit ``rw,nosuid,nodev,exec,size=256m`` opts out of ``noexec`` only; the rest of the hardening posture (cap_drop ALL, no-new-privileges, read_only rootfs, nosuid, nodev) is preserved.
+
+**SystemVerilog testbench-vs-DUT timing race — the FIFO smoke discovery.** First draft drove ``wr_en`` / ``din`` and then waited ``@(posedge clk)``. In Verilator's event ordering, after the posedge fires both the testbench process *and* the FIFO's ``always_ff`` become eligible to run. If the testbench resumes first, it updates ``wr_en`` / ``din`` to the *next* iteration's value before the ``always_ff`` samples — so the FIFO samples the wrong value at every posedge. Symptom: ``mem[0]`` came out ``A1`` instead of ``A0``; reads were off by one for three iterations and coincidentally matched on the fourth (because the trailing ``wr_en=1`` after the loop ended caused mem[3] to be written with the still-stable ``A3``). The fix is the standard SV stimulus discipline: drive at negedge, let the DUT sample at posedge. The testbench comment now spells this out so a future reader doesn't try the obvious-looking ``@(posedge clk)`` pattern again.
+
+**KPI protocol: ``$display("KPI name=value", ...)``.** Mirrors ngspice's ``.meas`` parser shape from §17.140. Sidecar regex extracts ``^KPI ([A-Za-z_]\w*)=([-+0-9.eE]+)`` from the run's stdout; lines without the prefix are ignored. The FIFO smoke emits ``writes`` / ``reads`` / ``errors`` and the test asserts ``errors==0`` and ``writes==reads==4`` against the persisted ``sim_runs.measurements`` payload, not just the in-memory result — closing the audit round-trip.
+
+**Audit row contract** is identical to §17.140's: every ``run_verilator`` call writes one ``sim_runs`` row with ``tool='verilator'`` *before* returning, including the sidecar-unreachable path. The row's ``stderr`` column carries the build phase's stderr when ``build_failed=True`` and the run phase's stderr otherwise — so an auditor opening a failed row sees the phase that actually broke first instead of having to dig into the response's separate ``build_stderr`` / ``run_stderr`` fields.
+
+**Files.**
+
+- ``docker/verilator/Dockerfile`` (new). Two-stage: builder clones + builds Verilator from source on the same ``python:3.12.13-slim`` pin as the orchestrator; runtime stage carries the install + g++/make/perl/ccache + the FastAPI server. Image tag ``scaffold-verilator:${SCAFFOLD_VERILATOR_IMAGE_TAG:-local}``. ``CCACHE_DIR=/tmp/ccache`` is image-intrinsic.
+- ``docker/verilator/server.py`` (new, ~205 lines). FastAPI ``POST /run`` accepts ``{sv_source, top_module, timeout_s, build_timeout_s, seed}``; two-phase pipeline with separate timeouts for build vs run; KPI regex; ``tool_version`` probed once at startup.
+- ``docker/verilator/requirements.txt`` (new). Same pins as ngspice sidecar.
+- ``docker-compose.yml`` (+32 lines). New ``scaffold-verilator`` service: bind ``127.0.0.1:8002:8002``, ``read_only: true``, ``cap_drop ALL``, ``no-new-privileges``, tmpfs ``/tmp:rw,nosuid,nodev,exec,size=256m`` (note the explicit ``exec`` — see rough edge #5), healthcheck via inline Python.
+- ``app/sim/verilator.py`` (new, ~210 lines). ``VerilatorResult`` dataclass with both build + run fields; async ``run_verilator(sv_source, *, top_module, db, run_timeout_s=None, build_timeout_s=None, seed=None, job_id=None, dag_node_id=None)``. Reuses the ``sim_runs`` schema unchanged — ``tool='verilator'`` is the only new value.
+- ``app/utils/http_clients.py`` (+30 lines). Adds ``_build_verilator`` / ``get_verilator_client``, wired into ``init_clients()`` and ``close_clients()``. ``verilator_http_timeout_s`` (default 2000 s) strictly larger than build_timeout_s + run_timeout_s so the sidecar's typed timed_out always wins.
+- ``app/config.py`` (+9 lines). ``verilator_url``, ``verilator_run_timeout_s``, ``verilator_build_timeout_s``, ``verilator_http_timeout_s``.
+- ``tests/integration/test_sim_verilator_db.py`` (new, 2 cases marked ``@pytest.mark.smoke``). Depth-4 synchronous FIFO testbench (DUT + tb in one .sv file); KPI-driven assertions; sidecar-unreachable case.
+- ``tests/conftest.py`` (+1 line). CI-smoke ``collect_ignore`` for the new integration test.
+- ``tests/test_http_clients.py`` (+2 lines). Bumps the registry-count assertion from 7 to 8 clients.
+
+**Verification.**
+
+```
+# Sidecar healthy.
+$ curl -s http://127.0.0.1:8002/health
+{"ok":true,"tool_version":"verilator-5.024"}
+
+# §17.141 integration smoke (both cases).
+$ docker exec scaffold-orchestrator pytest tests/integration/test_sim_verilator_db.py -v
+tests/integration/test_sim_verilator_db.py::test_verilator_fifo_depth4_passes PASSED [ 50%]
+tests/integration/test_sim_verilator_db.py::test_verilator_sidecar_unreachable_returns_failure_row PASSED [100%]
+============================== 2 passed in 2.29s ===============================
+```
+
+Per-run timing on the host: build ~1.7 s warm (ccache hit), ~5 s cold; run ~8 ms for the FIFO. The build dominates per-call latency — appropriate for a v1 where every ``/run`` is a one-shot. A future ``run_verilator_replay`` taking an already-built binary path is the obvious optimization for iterating-on-stimulus workflows; out of scope here.
+
+**Deferred — explicitly out of scope for §17.141.**
+
+- Waveform dump (``--trace`` → ``.vcd`` / ``.fst``). Same deferral as ngspice's ``.raw`` artifact storage; will land when a UI / replay flow asks for it.
+- Multi-file design ingest. v1 takes a single SystemVerilog blob with both DUT and testbench. Real designs have file hierarchies; we'll add a ``files: {path: content}`` field on ``RunRequest`` when the design pipeline needs it.
+- Coverage (``--coverage``). Verilator emits coverage as ``.dat`` files; not useful without the report tool wired up. Add when we need quantitative test-quality metrics.
+- DAG integration. ``run_verilator`` is callable from any module / test today; the design pipeline (``spec_capture → topology_select → simulate → verify → report``) is still ahead on the checklist.
+
+**Next from the engineering-design checklist:** SymbiYosys sidecar (formal verification via SVA / PSL → SAT / SMT) — same template, ``tool='symbiyosys'`` in sim_runs, but the output shape is binary "proven / counterexample-found / unknown" rather than KPIs.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

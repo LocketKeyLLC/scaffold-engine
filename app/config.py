@@ -198,6 +198,16 @@ class Settings(BaseSettings):
     ngspice_run_timeout_s: float = Field(default=30.0, gt=0.0, le=600.0)
     ngspice_http_timeout_s: float = Field(default=620.0, gt=0.0, le=3600.0)
 
+    # §17.141 — Verilator sidecar (scaffold-verilator). Two timeouts:
+    # one for the build phase (verilator + g++ compile) and one for the
+    # simulation run. HTTP timeout must exceed (build + run) so the
+    # sidecar always wins the timeout race and returns a typed result
+    # rather than letting httpx raise ReadTimeout out from under us.
+    verilator_url: str = "http://scaffold-verilator:8002"
+    verilator_run_timeout_s: float = Field(default=60.0, gt=0.0, le=1800.0)
+    verilator_build_timeout_s: float = Field(default=120.0, gt=0.0, le=1800.0)
+    verilator_http_timeout_s: float = Field(default=2000.0, gt=0.0, le=7200.0)
+
     # Research agent
     research_max_iterations: int = Field(default=3, ge=1, le=20)
     research_max_queries: int = Field(default=8, ge=1, le=50)
