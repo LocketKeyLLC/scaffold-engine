@@ -407,6 +407,16 @@ class Settings(BaseSettings):
     fetch_cache_ttl_immutable_seconds: int = Field(default=30 * 86400, ge=60, le=365 * 86400)
     fetch_cache_max_body_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
 
+    # Verifier-verdict cache (llmverifyv1: prefix in Redis). Default OFF
+    # because the verifier path is fail-closed and a stale cache hit could
+    # mask a real regression. When ON, deterministic verifier calls
+    # (temperature=0.0) skip the LLM when an identical (messages,
+    # tool_schema, model) tuple was seen within the TTL window. Only
+    # ``pass`` verdicts are cached — fails must re-run because W.1
+    # feedback injection changes the retry prompt.
+    cache_llm_responses: bool = False
+    llm_response_cache_ttl_s: int = Field(default=3600, ge=60, le=30 * 86400)
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @model_validator(mode="after")

@@ -4804,6 +4804,50 @@ Top hit: **a closed issue thread (§17.106), chunk-split into `#code-3` (§17.11
 
 - `OVERVIEW.md` only — this entry. No code changes; everything worked.
 
+### 17.128 Verifier-verdict cache — opt-in LLM response cache (2026-05-12)
+
+Closes the orchestration-checklist gap: "LLM response cache for verifier + retry path." `_verify_output` calls `model_router.tool_call` at `temperature=0.0` with the same `(task_title, output, tool_schema, model)` tuple on every retry attempt. Pre-§17.128 every retry burned another verifier inference (~5–60 s on CPU) even though the inputs were byte-identical to the prior successful pass. The new cache short-circuits the second-and-later identical lookup.
+
+**Scope — verifier only, not a general LLM cache.** Three constraints make the verifier the right (and only) safe place to start:
+
+1. **Deterministic input.** `temperature=0.0` plus a structured-output tool call means the same input deterministically produces the same verdict — no Monte-Carlo variance to hide.
+2. **Fail-closed contract already exists.** `_verify_output` returns `(status, reason, confidence)` and every error path returns `("fail", ...)`. The cache returns the same tuple shape or `None`; a Redis error degrades to "miss → call the LLM," matching the existing fail-open posture of `FetchCache` / `EmbeddingCache`.
+3. **No retry-prompt drift.** Only `pass` verdicts are cached. A `fail` on attempt N gets the W.1 feedback block injected into attempt N+1's prompt, so retry inputs are *not* identical — caching a `fail` would mask the W.1 retry-context behavior introduced in §17.53 and earlier.
+
+**Files.**
+
+- `app/utils/llm_response_cache.py` (new, 165 lines). `VerifierCache` class: Redis-only (no L1 — verdicts are 3 small fields, LRU wouldn't pay off), key `llmverifyv1:{model}:{sha256(canonical_payload)}` with payload = `json.dumps({messages, tool_schema, model, temperature}, sort_keys=True)`. Stats: `hits / misses / puts / skipped` (the last counts gate-off calls so it stays distinct from real misses).
+- `app/modules/execution_verify.py` — 4-line cache lookup before `model_router.tool_call`, single-line `put` after parsing the verdict tuple. Resolves `role → model` via `get_model(role, overrides)` so the cache key uses the concrete tag (overrides aware).
+- `app/config.py` — two new knobs: `cache_llm_responses: bool = False` (gate, default OFF) and `llm_response_cache_ttl_s: int = 3600` (Pydantic-bounded 60..30*86400). Placed alongside the existing `fetch_cache_*` block.
+- `app/main.py:/health` — surfaces `verifier_cache` stats next to `embedding_cache` in the Redis branch.
+- `tests/test_llm_response_cache.py` (new, 18 cases) — key shape + determinism + per-field invalidation + dict-ordering normalization, get/put round-trip, miss path, corrupt-payload drop, bad-status drop, Redis-error fail-open on both get and put, fail-verdict-not-cached, gate-off short-circuit on both get and put.
+- `tests/test_execution_verify_cache.py` (new, 5 cases) — second identical call short-circuits the LLM, fail verdict re-evaluates on every call, different output → different key → miss, gate-off touches neither Redis nor cache, Redis failure falls through to LLM.
+
+**Why default OFF.** Verifier responses already drive job state machine transitions (`pass` → node `done`, `fail` → retry up to `max_retries`). A stale `pass` cached against a prompt-template change could mask a real regression. The flag exists for cost-sensitive deployments where verifier latency is the bottleneck and the operator has explicit policy on cache invalidation (e.g., bump `llmverifyv1` to `llmverifyv2` on template-change rollouts). The §17.117 deep-search cache uses the same posture — fail-open, snapshot stats, no behavior change when off.
+
+**Why no L1 in-memory tier.** The embedding cache's L1 LRU pays off because the same query text is embedded thousands of times per `/research`. Verifier verdicts are looked up at most once per node-attempt — typical job has 5–10 nodes × 1–3 attempts = 5–30 lookups. A 50-entry per-process map doesn't earn its complexity. If load profile changes (e.g., scheduled re-verification jobs), adding L1 is mechanical.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_llm_response_cache.py tests/test_execution_verify_cache.py --timeout=30 -v
+23 passed in 1.58s
+
+$ docker exec scaffold-orchestrator pytest tests/test_verify_extraction.py tests/test_execution_agent_feedback.py tests/test_execution_agent_retry.py --timeout=30 -q
+33 passed in 3.63s   # adjacent verifier-path regression check, all green
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+4 failed, 1756 passed, 3 skipped in 846.09s (0:14:06)
+```
+
++23 new tests. The 4 failures are all in `tests/test_retrieval_golden.py` (live-Milvus retrieval-quality test against the curated golden set) — pre-existing, unrelated to verifier code, documented in §17.86 / §17.92 / X.25 / X.26 as a known flaky live test that drifts with corpus growth. Same 3 skips as the §17.118 baseline (`prompt`-partition `function-calling`, `rag`-partition `hybrid`, `spec`-partition `TOON`).
+
+**Operator notes.**
+
+- To enable: `SCAFFOLD_CACHE_LLM_RESPONSES=true` in `.env`, then restart `scaffold-orchestrator` (cache singleton initializes at first call; the env flips at process start).
+- `GET /health` → `checks.verifier_cache.hits / misses / puts / skipped`. `skipped` counts gate-off calls; if you flip the gate on and `skipped` stops climbing, the new code path is live.
+- Stale cache after prompt-template change: bump `_KEY_PREFIX` in `llm_response_cache.py` from `llmverifyv1` to `llmverifyv2`. Old `llmverifyv1:*` keys decay via the configured TTL (default 1 h).
+
 ---
 
 ## Phase 7 wrap — deep-search rollout complete

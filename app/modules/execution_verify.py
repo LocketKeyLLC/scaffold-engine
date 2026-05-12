@@ -17,8 +17,9 @@ import logging
 from typing import Literal
 
 from app import model_router
-from app.config import settings
+from app.config import get_model, settings
 from app.providers.base import Tool
+from app.utils.llm_response_cache import get_verifier_cache
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +94,17 @@ async def _verify_output(
         {"role": "system", "content": VERIFY_SYSTEM},
         {"role": "user", "content": f"TASK: {task_title}\n\nOUTPUT:\n{output}"},
     ]
+    # Cache lookup key needs a concrete model tag, not a role — the same role
+    # can resolve to different tags via overrides. Resolution is cheap (dict
+    # lookup) and the result is stable for the call.
+    resolved_model = get_model(role, overrides)
+    cache = get_verifier_cache()
+    cache_args = (messages, VERIFY_TOOL.input_schema, resolved_model, 0.0)
 
     async def _body() -> tuple[Literal["pass", "fail"], str, float]:
+        cached = await cache.get(*cache_args)
+        if cached is not None:
+            return cached
         try:
             resp = await model_router.tool_call(
                 messages=messages, tools=[VERIFY_TOOL],
@@ -127,11 +137,12 @@ async def _verify_output(
             confidence = float(args.get("confidence", 0.0))
         except (TypeError, ValueError):
             confidence = 0.0
-        return (
-            "pass" if bool(args.get("pass", False)) else "fail",
-            str(args.get("reason", "")),
-            confidence,
+        status: Literal["pass", "fail"] = (
+            "pass" if bool(args.get("pass", False)) else "fail"
         )
+        reason = str(args.get("reason", ""))
+        await cache.put(*cache_args, status, reason, confidence)
+        return status, reason, confidence
 
     try:
         return await asyncio.wait_for(_body(), timeout=settings.verify_timeout_seconds)

@@ -37,6 +37,7 @@ if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
         "test_cost_rollup.py",
         "test_embedding.py",
         "test_embedding_cache.py",
+        "test_execution_verify_cache.py",
         "test_execution_agent_concurrency.py",
         "test_execution_agent_feedback.py",
         "test_execution_agent_retry.py",
