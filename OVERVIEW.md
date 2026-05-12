@@ -5140,6 +5140,61 @@ $ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
 - To force-correlate a reaper kill back to its cause from psql: `SELECT id, status, error_summary, updated_at FROM jobs WHERE error_summary IS NOT NULL ORDER BY updated_at DESC LIMIT 20;` — the strings match the patterns in `_REAPER_REASON_PATTERNS` for grep-friendly correlation against the reaper's log lines (`stale_jobs_reaped …`).
 - Adding a new reaper variant: edit `cleanup.py` to set the new `error_summary`, then add the `(substring, reason_kind)` tuple to `_REAPER_REASON_PATTERNS` AND a `REAPER_REASON_ACTIONS[reason_kind]` entry. The `test_every_pattern_has_a_reason_actions_entry` parity guard ensures you can't ship one without the other.
 
+### 17.135 Embedder-identity drift detection (2026-05-12)
+
+Closes the orchestration-checklist gap: "Cache invalidation on embedder valve drift." The 512-dim Milvus collection geometry is locked at schema creation — but the IDENTITY of the embedder model that produced those vectors is not. Pre-§17.135 the only guard was `_assert_schema_invariants` in `app/utils/milvus_utils.py:112`, which checks dim but not model. Swapping `MODEL_EMBEDDER_PIPELINE` to a same-dim-but-different model (e.g. nomic-embed-text → qwen3-embedding:8b, both MRL-truncated to 512d) passes the dim check and starts producing vectors that live in a different semantic space than the historical corpus. Cosine similarity goes from "meaningful" to "noise" with zero alerts. §17.135 detects this on startup and emits a critical alert.
+
+**Why drift isn't auto-fixed.** Three options were considered:
+
+1. **Refuse startup on drift.** Heavy-handed: an operator who just finished a `scripts/reindex.py` run AND updated `.env` legitimately wants the new embedder to be active. Refusing startup would prevent the intended flow.
+2. **Auto-reindex on drift.** Destructive: a reindex re-embeds every entry in the collection, ~30–90 min on this hardware. Doing it implicitly on startup would lock the orchestrator at boot in a way that's surprising and hard to abort.
+3. **Detect + alert + persist + leave the reindex to the operator** — the shipped behavior. Aligned with the existing pattern in `scripts/reindex.py`'s operator workflow ("update env → restart → run reindex") which now gets a loud diagnostic when the env changes without a reindex.
+
+**Why Postgres, not Redis.** The marker needs durability across restarts and across `redis-cli FLUSHDB`. Postgres survives both. Migration 037 adds `cache_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ)` — a generic key/value table designed to accept future cache-versioning concerns without per-feature migrations. First user: `active_embedder_id`. Likely future users: `last_known_milvus_dim`, `rag_result_cache_prefix_version`, etc.
+
+**Four outcomes.** `check_embedder_drift` classifies into:
+
+1. `first_run` — `cache_metadata.active_embedder_id` is empty. Insert the current id; no alert (normal first boot or first boot after migration 037).
+2. `unchanged` — stored == configured. Touch `updated_at` so the operator can grep "last boot that saw embedder X" against historical logs; no alert.
+3. `drift` — stored != configured. Emit `cache.embedder_drift` (severity=critical) with payload `{stored_embedder_id, configured_embedder_id, reindex_command, embedding_dim}`. Log at CRITICAL. Upsert the new id so subsequent boots don't re-fire (`alert_cooldown_seconds` is the same 1 h dedup window as other alerts, but the upsert guarantees no repeat even if cooldown expires).
+4. `skipped` — DB hiccup on the initial SELECT or the INSERT. Log a warning, return outcome=skipped, let lifespan proceed. Drift just goes unnoticed until next boot. Choice rationale: a DB hiccup is not a drift breach, and crashing startup on a transient DB blip would be strictly worse.
+
+**Alert is fail-soft, upsert is mandatory.** The `drift` path emits the alert in a try/except, then upserts in a SEPARATE try/except. If the alert fires but the upsert fails, the function returns `outcome=drift, upsert_failed=True` so the caller can log. If the alert raises but the upsert succeeds, the function still returns `outcome=drift` and lifespan logs at CRITICAL. The intent: never page the operator twice for the same drift, even if alerting infrastructure is also broken.
+
+**Dedup key embeds the value pair.** `dedup_key=f"cache.embedder_drift:{stored}->{current}"` — so two distinct drifts (e.g. operator briefly toggled back) both fire, but the same drift across restarts is rate-limited. The existing `_is_in_cooldown` check (§X.26 alerts.py) handles the time-window dedup.
+
+**Reindex hint surfaces in payload.** The alert payload includes the exact `docker exec` command the operator should run, parameterized with the configured embedder id. Examples in OWUI / CLI / SDK consumers can render this verbatim; no shell-quoting required.
+
+**Files.**
+
+- `db/migrations/037_cache_metadata.sql` (new). Idempotent `CREATE TABLE IF NOT EXISTS cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`.
+- `app/utils/embedder_drift.py` (new, ~135 lines). `check_embedder_drift(db)` with the four-outcome branch logic; `_METADATA_KEY = "active_embedder_id"`; alert emit through `app.observability.alerts.emit`.
+- `app/main.py` — `lifespan` hook between the migration runner and the HTTP-client init. Wraps `check_embedder_drift` in try/except so a hook failure logs (`embedder_drift_hook_failed`) but does not crash startup. Logs the outcome at INFO (`embedder_identity_check`) or CRITICAL (`lifespan_embedder_drift`) for grep-friendly correlation.
+- `tests/test_embedder_drift.py` (new, 7 cases). first_run insert + no alert; unchanged touches `updated_at` + no alert; drift emits critical alert with correct payload + dedup_key + reindex_command, then upserts; drift with broken alert.emit still upserts; drift with broken upsert returns `upsert_failed=True`; DB read failure → `skipped` (db_read_failed); first_run + DB write failure → `skipped` (db_write_failed).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_embedder_drift.py --timeout=30 -v
+7 passed in 0.71s
+
+$ docker exec scaffold-orchestrator pytest tests/test_main.py tests/test_pre_migration_sweep.py --timeout=30 -q
+17 passed in 4.37s   # main.lifespan-adjacent regression, all green
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+3 failed, 1860 passed, 3 skipped in 771.89s (0:12:51)
+```
+
++7 vs the §17.134 baseline (`1853 passed`) — all from `test_embedder_drift.py`. Same 3 pre-existing `test_retrieval_golden` failures. Migration 037 applied during the lifespan migration runner without incident (the suite imports `app.main` indirectly via many tests; a broken migration would have crashed startup and surfaced as collection-error noise, which is absent).
+
+**Operator notes.**
+
+- Intentional embedder swap: `(1)` run `scripts/reindex.py --new-embedder <new>` while the orchestrator is still on the old embedder (or stopped). `(2)` update `.env` to set `MODEL_EMBEDDER_PIPELINE=<new>`. `(3)` `make restart`. The drift check will see the SAME embedder id stored as the value the reindex used to populate Milvus, and emit `unchanged`. (The reindex script doesn't currently update `cache_metadata.active_embedder_id` — that's a follow-up. For now, on first boot after a reindex, you'll see one drift alert that you can ignore.)
+- Accidental embedder swap: drift alert fires on the next boot. Two recovery paths: `(a)` revert `.env` to the old embedder and restart — no reindex needed, retrieval recovers immediately; `(b)` accept the new embedder + run `scripts/reindex.py`. Either path leaves `cache_metadata.active_embedder_id` correctly aligned after the operator's chosen action.
+- The marker is queryable from psql: `SELECT key, value, updated_at FROM cache_metadata WHERE key='active_embedder_id';` Time-correlate `updated_at` against deploy logs to confirm the boot that recorded the value.
+- Forcing the drift check to re-run without restart: `UPDATE cache_metadata SET value='intentional-mismatch' WHERE key='active_embedder_id';` then restart. (No HTTP endpoint exposed yet — the check only runs at lifespan startup. Acceptable: drift detection is a "did the operator change env without telling me" guard, not a runtime concern.)
+- Future cache-versioning use cases (rag_result_cache prefix bumps, fetch_cache schema bumps) can share `cache_metadata` by picking unique `key` strings. No new migration needed.
+
 ---
 
 ## Phase 7 wrap — deep-search rollout complete

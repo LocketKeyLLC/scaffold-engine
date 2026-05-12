@@ -290,6 +290,30 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("migrations_skipped_by_env: SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=%s", _run_migs)
 
+    # §17.135 — Embedder-identity drift detection. Must run AFTER the
+    # migration runner (we need the cache_metadata table) but BEFORE any
+    # path that exercises the embedder. Fail-soft: a DB hiccup logs but
+    # does not crash startup; the drift just goes unnoticed until next
+    # boot.
+    try:
+        from app.database import async_session
+        from app.utils.embedder_drift import check_embedder_drift
+        async with async_session() as _drift_db:
+            drift_result = await check_embedder_drift(_drift_db)
+        if drift_result.get("outcome") == "drift":
+            logger.critical(
+                "lifespan_embedder_drift: stored=%s configured=%s",
+                drift_result.get("stored"), drift_result.get("current"),
+            )
+        elif drift_result.get("outcome") != "skipped":
+            logger.info(
+                "embedder_identity_check: outcome=%s model=%s",
+                drift_result.get("outcome"),
+                drift_result.get("current"),
+            )
+    except Exception as exc:
+        logger.warning("embedder_drift_hook_failed: err=%s", exc)
+
     logger.info("engine_started: log_level=%s", settings.log_level)
     # Eager-init shared HTTP clients (searxng, github, generic) — no lazy path
     from app.utils.http_clients import init_clients
