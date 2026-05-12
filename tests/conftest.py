@@ -37,6 +37,7 @@ if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
         "integration/test_sim_symbiyosys_db.py",
         "integration/test_spec_extractor_live.py",
         "integration/test_specs_router_db.py",
+        "integration/test_topology_select_db.py",
         "test_assist_session_map.py",
         "test_config_endpoint.py",
         "test_cost_rollup.py",

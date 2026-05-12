@@ -30,13 +30,19 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.schemas import SpecPendingListResponse, SpecRead
+from app.schemas import (
+    SpecPendingListResponse,
+    SpecRead,
+    TopologyCandidateRead,
+    TopologySelectionRead,
+)
 from app.sim.spec_store import (
     SpecNotFoundError,
     confirm_spec,
     list_pending_confirmations,
     unconfirm_spec,
 )
+from app.sim.topology_select import select_topologies
 
 router = APIRouter(tags=["Specs"], prefix="/specs")
 
@@ -111,3 +117,75 @@ async def get_pending(
     rows = await list_pending_confirmations(db, job_id=job_id, limit=limit)
     items = [_to_read(r) for r in rows]
     return SpecPendingListResponse(pending=items, count=len(items))
+
+
+@router.post(
+    "/{spec_id}/topology-select",
+    response_model=TopologySelectionRead,
+)
+async def post_topology_select(
+    spec_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> TopologySelectionRead:
+    """Run the topology-selection stage against a confirmed spec.
+
+    The stage retrieves engineering-domain reference chunks, asks the
+    configured model to propose 2–4 candidate topologies with
+    citations into the retrieval set, hard-rejects any hallucinated
+    citation, and persists one ``topology_selections`` row on success.
+
+    Status mapping:
+      * 200 — selection persisted; response carries the candidates +
+              retrieval audit columns.
+      * 404 — spec_id has no row in ``specs``.
+      * 409 — spec exists but is not confirmed (or any other
+              ``ok=False`` path: RAG empty, LLM failure, hallucinated
+              citation, etc.). The body carries ``errors`` so the
+              caller can surface the specific reason.
+    """
+    try:
+        result = await select_topologies(spec_id, db=db)
+    except SpecNotFoundError:
+        raise HTTPException(status_code=404, detail=f"spec {spec_id} not found")
+
+    if not result.ok:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "errors": result.errors,
+                "rag_chunk_ids": result.rag_chunk_ids,
+                "rag_query": result.rag_query,
+            },
+        )
+
+    assert result.selection_id is not None
+    return TopologySelectionRead(
+        id=result.selection_id,
+        spec_id=result.spec_id,  # type: ignore[arg-type]
+        candidates=[
+            TopologyCandidateRead(
+                name=c.name,
+                description=c.description,
+                rationale=c.rationale,
+                citations=list(c.citations),
+            )
+            for c in result.candidates
+        ],
+        rag_chunk_ids=list(result.rag_chunk_ids),
+        rag_query=result.rag_query,
+        rag_domain=result.rag_domain,
+        model_used=result.model_used,
+        # The router doesn't have created_at on the result; fetch from
+        # the freshly-inserted row. Cheap single-row lookup; keeps the
+        # stage module response-shape-agnostic.
+        created_at=await _fetch_created_at(db, result.selection_id),
+    )
+
+
+async def _fetch_created_at(db: AsyncSession, selection_id: uuid.UUID):
+    from sqlalchemy import text as _text  # local to avoid leaking
+    row = await db.execute(
+        _text("SELECT created_at FROM topology_selections WHERE id = :id"),
+        {"id": str(selection_id)},
+    )
+    return row.scalar_one()

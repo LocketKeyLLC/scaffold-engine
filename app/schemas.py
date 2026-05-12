@@ -743,3 +743,31 @@ class SpecPendingListResponse(BaseModel):
     operator confirmation."""
     pending: list[SpecRead]
     count: int
+
+
+# §17.146 — Topology-selection stage (first reasoning step in the
+# engineering-design pipeline).
+
+class TopologyCandidateRead(BaseModel):
+    """One LLM-proposed topology, with citations into the RAG
+    retrieval set. ``citations`` are entry_ids the wrapper has already
+    validated against the retrieval set — a response carrying this
+    type is guaranteed not to contain hallucinated citations."""
+    name: str
+    description: str
+    rationale: str
+    citations: list[str]
+
+
+class TopologySelectionRead(BaseModel):
+    """Response for POST /specs/{spec_id}/topology-select. Carries
+    both the candidates and the retrieval-audit columns so a client
+    can render the citations as live links into the corpus."""
+    id: UUID
+    spec_id: UUID
+    candidates: list[TopologyCandidateRead]
+    rag_chunk_ids: list[str]
+    rag_query: str
+    rag_domain: str | None = None
+    model_used: str
+    created_at: datetime
