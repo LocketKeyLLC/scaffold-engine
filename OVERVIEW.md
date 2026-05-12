@@ -5358,6 +5358,53 @@ $ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
 - The SCAN cost is bounded: for an L2 with 1M total keys but only 10k matching the current model, the budget+early-break still completes in tens of milliseconds. On the operator's reference T480 (CPU-only, Redis 7.4 local) a 10k-key warmup costs ~50 ms wall time — invisible against the rest of lifespan startup (Milvus connect ~200 ms, reranker prewarm ~13 s).
 - Pairing with §17.132 (embedding-cache pressure alert): a healthy steady-state is `evictions=0 + hit_rate>=0.5`. If you enable warmup AND see the pressure alert fire shortly after restart, the warmup loaded the keys but live traffic is still evicting them — `embedding_cache_memory_size` is the bottleneck, not warmup.
 
+### 17.139 `scripts/redis_drop_stale_prefixes.py` — cache-key version-bump cleanup (2026-05-12)
+
+Closes the final orchestration-checklist item: "Cache key version bumps need an explicit migration script." The repo's cache modules version their key prefixes (`embedv2` → `embedv3`, `ragv1`, `llmverifyv1`, `fetchv1`) so a contract change auto-invalidates reads. But the stale-prefix keys keep occupying Redis memory until natural TTL expiry — which is 30 d for the embedding cache, 90 d-plus for the version-chain retention. §17.139 turns that "wait for TTL" pattern into a one-command cleanup.
+
+**Allowlist is the safety net.** The single argument is the cache-key prefix. The allowlist (`embedv1` / `embedv2` / `embedv3` / `fetchv1` / `llmverifyv1` / `ragv1`) is checked BEFORE any SCAN runs. A typo like `embed` (missing version segment) or an unrelated prefix like `sessions` returns exit code **2** with the allowed list printed — distinct from exit 1 (bad flags) and exit 3 (Redis error) so CI / operator scripts can react differently. Old prefixes stay on the allowlist forever so post-upgrade cleanups remain possible months after the migration.
+
+**SCAN+UNLINK, not KEYS+DEL.** `KEYS pattern:*` would block Redis O(N) on the keyspace — fine for a tiny dev DB, catastrophic on a 1 M-key production. The script uses `SCAN_ITER` (cooperative, ~1000 keys per cursor step) and batches deletes via `UNLINK` (asynchronous Redis-side deletion). On the off chance the server is too old for UNLINK (Redis < 4.0 — well before our 7.4 pin), the per-batch `try/except` falls back to `DELETE`. Progress is logged every 10× batch_size so a long-running cleanup is observable in `docker logs`.
+
+**Discovered a real cleanup win during smoke.** Running `--dry-run embedv2` against the live `scaffold-redis` surfaced **116 `embedv2:*` keys** still sitting in the cache, leftover from before §9.25's `embedv3` rollout. They've been wasting Redis memory ever since — the natural TTL is 30 d for embedding entries, but the keys had been re-written enough times to keep extending. The script is exactly the cleanup tool for this kind of long-tail residue.
+
+**Files.**
+
+- `scripts/redis_drop_stale_prefixes.py` (new, ~150 lines). argparse-driven, mirrors the existing `scripts/reindex.py` shape. Exit codes: 0 success / 1 bad flags / 2 unknown prefix / 3 Redis error. Functions: `_validate_prefixes` (allowlist gate), `_scan_count_and_delete` (per-prefix walk with batching), `_drop_prefixes` (multi-prefix coordinator), `main(argv=None)`.
+- `tests/test_redis_drop_stale_prefixes.py` (new, 14 cases). Allowlist parity guard (every cache prefix this repo ships must be in `ALLOWED_PREFIXES`), partition allowed/unknown, exit-2 on unknown, exit-1 on bad batch, happy-path single batch, batches when batch_size < key count, dry-run doesn't delete, empty prefix yields zero, UNLINK-falls-back-to-DELETE, Redis-unreachable returns 3, SCAN failure returns 3, multi-prefix accumulates summary, `main` dry-run exit 0, `main` happy-path exit 0.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_redis_drop_stale_prefixes.py --timeout=30 -v
+14 passed in 1.05s
+
+# Live smoke against the running scaffold-redis:
+$ docker exec scaffold-orchestrator python scripts/redis_drop_stale_prefixes.py embedv2 --dry-run
+... redis_drop_done: prefix=embedv2 scanned=116 deleted=0 dry_run=True
+... redis_drop_summary: prefixes=1 total_scanned=116 total_deleted=0 dry_run=True
+
+# Exit-code path (unknown prefix):
+$ docker exec scaffold-orchestrator python scripts/redis_drop_stale_prefixes.py sessions; echo $?
+... unknown prefix(es) not in allowlist: ['sessions']
+2
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+3 failed, 1898 passed, 3 skipped in 758.37s (0:12:38)
+```
+
++14 vs the §17.138 baseline (`1884 passed`) — all from `test_redis_drop_stale_prefixes.py`. Same 3 pre-existing `test_retrieval_golden` failures.
+
+**Operator notes.**
+
+- Standard cleanup flow after shipping a new cache version (e.g. you bump `embedv3` to `embedv4`):
+  1. Ship the code change, deploy, restart `scaffold-orchestrator`. The new version starts writing `embedv4:*` keys immediately.
+  2. (Optional) `docker exec -it scaffold-orchestrator python scripts/redis_drop_stale_prefixes.py embedv3 --dry-run` to count the stale keyspace.
+  3. `docker exec -it scaffold-orchestrator python scripts/redis_drop_stale_prefixes.py embedv3` to drop them.
+- This is INTENTIONALLY a separate ops tool, not a lifespan hook. Auto-dropping on version bump would coincide with the operator's deploy — exactly when a typo'd prefix constant would silently nuke the new keyspace. Forcing a manual `python scripts/...` step gives the operator a chance to read the prefix and the count before committing.
+- Adding a new cache module's prefix: extend `ALLOWED_PREFIXES`. The `test_allowlist_contains_every_shipped_prefix` parity guard ensures you can't ship a new cache module without making it cleanable.
+- The script is safe to run mid-traffic: SCAN is cooperative, UNLINK is asynchronous on the Redis side, and prefix-scoped — a `embedv2`-targeted run can't touch `embedv3` reads/writes happening concurrently. The only contention is on the Redis CPU itself (one extra cursor stream); on a quiet host it costs ~5 ms per 1k keys.
+
 ---
 
 ## Phase 7 wrap — deep-search rollout complete
