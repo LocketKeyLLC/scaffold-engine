@@ -4949,6 +4949,55 @@ $ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
 - The `execution_global_concurrency=1` cap (§17.65 X.24) still applies: a resume that arrives while another `/execute/all` is running gets queued or 503's, same as a fresh execute would.
 - Cron-driven resumes are a natural follow-up but not shipped here — `/schedule` doesn't take a resume action yet. Workaround: a downstream consumer can poll `/jobs?status=cancelled` and POST `/jobs/{id}/resume`.
 
+### 17.131 Concurrent-execution guard 409 ergonomics (2026-05-12)
+
+Closes the orchestration-checklist gap: "Concurrent-execution guard error semantics." When `POST /execute/all` collides with an already-running job, the guard at `execution_agent.py:1325` (Session 1) used to emit an SSE error of just `{"message": "Job is already executing", "http_status": 409}`. That was actionable only if the operator already knew about the orphan-node reap path — which most don't. Pre-§17.131 they had to grep `references/debugging.md`, run a SQL select against `dag_nodes`, mentally subtract from the threshold, and decide whether to wait or call `/jobs/cleanup`. The 409 now does that math server-side.
+
+**What's enriched.** Only the "already executing" branch — not "already completed" (which has a different remediation, see below). New fields appended to the SSE error event:
+
+| Field | Meaning |
+|---|---|
+| `node_orphan_threshold_minutes` | When Stage 0 of `reap_stale_jobs` will reset a stuck `running` node back to `pending` (default 30). |
+| `cleanup_interval_seconds` | How often the reaper loop fires (default 900 = 15 min). Bounds the "I might still wait" window. |
+| `running_nodes` | List of `{node_key, started_at, seconds_until_reap}` for every `running` dag_node belonging to the job, sorted ASC by `started_at`. `seconds_until_reap` is negative when past threshold. |
+| `oldest_started_at` | ISO timestamp of the longest-running node (or `None` if none). |
+| `suggested_action` | One of: `wait_for_reaper` (a node is past threshold — reaper catches on next cycle), `call_cleanup_or_wait` (threshold passes within the next reaper interval — operator can force or wait), `wait_or_inspect` (genuinely live run). |
+| `cleanup_endpoint` | `"POST /jobs/cleanup"` — the force-reap path that bypasses the 15-min loop. |
+
+**Why not enrich the "already completed" 409.** Different recipe: a completed job's recourse is either (a) treat it as done and read `compiled_output`, or (b) `DELETE /jobs/{id}` and start fresh. Neither maps to the orphan-reap diagnostic, so adding fields there would be noise. The completed-job 409 stays minimal by design — its message already says everything an operator needs.
+
+**Fail-soft.** A DB error inside `_orphan_diagnostic` does NOT mask the 409. The guard wraps the helper in `try/except`, logs `orphan_diagnostic_failed`, and falls back to a minimal payload carrying just the settings constants + `running_nodes: []` + `suggested_action: "wait_or_inspect"`. The 409 message itself is invariant.
+
+**Why a single-query diagnostic.** The temptation was to also fold in the reaper's last-tick timestamp + the next-scheduled-tick wall-clock, so the operator can compute exactly when the auto-reset happens. Skipped: the reaper interval drift is small (asyncio.sleep is monotonic, not wall-clock), and `seconds_until_reap` + `cleanup_interval_seconds` together let the operator do the math (or just call `/jobs/cleanup` if seconds_until_reap is negative). One SQL roundtrip vs three is a meaningful difference on the 409 hot path.
+
+**Files.**
+
+- `app/modules/execution_agent.py` — new `_orphan_diagnostic(db, job_id)` helper near `_get_job` (~80 lines). Uses `EXTRACT(EPOCH FROM (started_at + make_interval(mins => :thresh) - NOW()))` for the per-node countdown so the math is in Postgres, not Python (no clock-skew risk between the orchestrator and the DB). Session-1 guard branch enriched with diagnostic + fail-soft fallback.
+- `tests/test_execute_all_concurrent_guard.py` (new, 9 cases). Unit (6): no-running-nodes → wait_or_inspect, past-due → wait_for_reaper, near-due (within cleanup_interval) → call_cleanup_or_wait, fresh → wait_or_inspect, multi-node ASC-sort → oldest_started_at, SQL parameterization. Integration (3): full SSE chunk drain through `execute_all_nodes` showing the enrichment lands, diagnostic-DB-error falls back to minimal payload, completed-job 409 stays unenriched.
+- `tests/conftest.py` — gates the new test out of CI smoke (imports `execution_agent`, mirrors the existing `test_execution_agent_concurrency.py` precedent).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_execute_all_concurrent_guard.py --timeout=30 -v
+9 passed in 2.14s
+
+$ docker exec scaffold-orchestrator pytest tests/test_execution_agent_concurrency.py tests/test_execution_agent_feedback.py tests/test_execution_agent_retry.py --timeout=30 -q
+29 passed in 7.04s   # adjacent execution_agent paths, all green
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+4 failed, 1809 passed, 3 skipped in 772.24s (0:12:52)
+```
+
++9 vs the §17.130 baseline (`1800 passed`) — all from `test_execute_all_concurrent_guard.py`. Same 4 pre-existing `test_retrieval_golden` failures. Same 3 skips.
+
+**Operator notes.**
+
+- Hitting a 409 with `suggested_action: "wait_for_reaper"` means the orphan is already past threshold. The next reaper cycle (within `cleanup_interval_seconds`) will reset the node to `pending`. To skip the wait: `curl -X POST :8000/jobs/cleanup -H "X-API-Key: $SCAFFOLD_API_KEY"`.
+- `suggested_action: "call_cleanup_or_wait"` means the threshold passes within the next reaper interval. Force-cleanup if you don't want to wait; otherwise the reaper handles it autonomously.
+- `suggested_action: "wait_or_inspect"` means the node is genuinely running (fresh `started_at`). Check `oldest_started_at`: if it lines up with an `/execute/all` you fired recently, you're racing yourself — the execution_global_concurrency=1 cap is doing its job.
+- The `running_nodes` array is empty when the job's `status='running'` but no `dag_nodes` rows match. That's the rare "guard fired on stale parent row but no child nodes are stuck" case — usually means a fresh `/execute/all` has the job locked between Session 1 and Session 3. Wait 5 s and retry.
+
 ---
 
 ## Phase 7 wrap — deep-search rollout complete

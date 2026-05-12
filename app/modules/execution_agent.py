@@ -157,6 +157,85 @@ async def _get_job(db: AsyncSession, job_id: str) -> dict | None:
     return dict(r) if r else None
 
 
+async def _orphan_diagnostic(db: AsyncSession, job_id: str) -> dict:
+    """Build the diagnostic payload for an "already executing" 409.
+
+    Returns a dict that callers (the concurrent-execution guard) embed
+    into the SSE error event so the operator can decide between
+    "wait for the reaper" and "call ``POST /jobs/cleanup`` now."
+
+    Fields:
+      - ``node_orphan_threshold_minutes``: how long a ``running`` node
+        can sit before Stage-0 of ``reap_stale_jobs`` resets it.
+      - ``cleanup_interval_seconds``: how often the reaper loop fires.
+      - ``running_nodes``: list of ``{node_key, started_at,
+        seconds_until_reap}`` for every ``status='running'`` dag_node
+        belonging to this job, sorted by ``started_at`` ASC.
+        ``seconds_until_reap`` is negative if the node is already past
+        its threshold (next reaper cycle will reset it).
+      - ``oldest_started_at``: ISO timestamp of the longest-running
+        node, or ``None`` if no running nodes exist.
+      - ``suggested_action``: ``"wait_for_reaper"`` if any node is past
+        due, ``"call_cleanup_or_wait"`` if any node is approaching
+        threshold (within ``cleanup_interval_seconds``), else
+        ``"wait_or_inspect"`` (a legit run in progress).
+      - ``cleanup_endpoint``: ``"POST /jobs/cleanup"`` — the force-reap
+        path that bypasses the loop interval.
+
+    Fail-soft: a DB error here must not mask the 409 itself, so
+    callers wrap this in try/except and fall back to a minimal payload.
+    """
+    threshold_min = settings.node_orphan_threshold_minutes
+    interval_s = settings.cleanup_interval_seconds
+
+    rows = await db.execute(
+        text(
+            "SELECT node_key, started_at, "
+            "       EXTRACT(EPOCH FROM (started_at + make_interval(mins => :thresh) - NOW())) "
+            "         AS seconds_until_reap "
+            "  FROM dag_nodes "
+            " WHERE job_id = :jid AND status = 'running' "
+            " ORDER BY started_at ASC NULLS FIRST"
+        ),
+        {"jid": job_id, "thresh": threshold_min},
+    )
+    running = []
+    oldest_started_at = None
+    any_past_due = False
+    any_near_due = False
+    for r in rows.mappings():
+        sec = r["seconds_until_reap"]
+        sec_int = int(sec) if sec is not None else None
+        running.append({
+            "node_key": r["node_key"],
+            "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+            "seconds_until_reap": sec_int,
+        })
+        if oldest_started_at is None and r["started_at"]:
+            oldest_started_at = r["started_at"].isoformat()
+        if sec_int is not None:
+            if sec_int <= 0:
+                any_past_due = True
+            elif sec_int <= interval_s:
+                any_near_due = True
+
+    if any_past_due:
+        suggested = "wait_for_reaper"
+    elif any_near_due:
+        suggested = "call_cleanup_or_wait"
+    else:
+        suggested = "wait_or_inspect"
+
+    return {
+        "node_orphan_threshold_minutes": threshold_min,
+        "cleanup_interval_seconds": interval_s,
+        "running_nodes": running,
+        "oldest_started_at": oldest_started_at,
+        "suggested_action": suggested,
+        "cleanup_endpoint": "POST /jobs/cleanup",
+    }
+
+
 async def _get_next_node(db: AsyncSession, job_id: str) -> dict | None:
     """Atomically claim the next dep-satisfied pending node.
 
@@ -1344,10 +1423,29 @@ async def execute_all_nodes(
                         "http_status": 409,
                     })
                 else:
+                    # Enrich the 409 with orphan-reap diagnostics so the
+                    # operator can decide between waiting for the reaper
+                    # (Stage 0 of reap_stale_jobs auto-resets a running
+                    # node past node_orphan_threshold_minutes) and
+                    # forcing it via POST /jobs/cleanup. Fail-soft: any
+                    # diagnostic-query failure must not mask the 409.
+                    try:
+                        diag = await _orphan_diagnostic(db, job_id)
+                    except Exception as e:
+                        logger.warning("orphan_diagnostic_failed: job=%s err=%s", job_id, e)
+                        diag = {
+                            "node_orphan_threshold_minutes": settings.node_orphan_threshold_minutes,
+                            "cleanup_interval_seconds": settings.cleanup_interval_seconds,
+                            "running_nodes": [],
+                            "oldest_started_at": None,
+                            "suggested_action": "wait_or_inspect",
+                            "cleanup_endpoint": "POST /jobs/cleanup",
+                        }
                     yield _sse("error", {
                         "message": "Job is already executing",
                         "job_id": job_id,
                         "http_status": 409,
+                        **diag,
                     })
                 return  # finally releases slot; _owns_job_running=False skips DB cleanup
             await db.commit()
