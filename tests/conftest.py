@@ -48,6 +48,7 @@ if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
         "test_ideation_phase2_cancel.py",
         "test_integration.py",
         "test_main.py",
+        "test_resume_endpoint.py",
         "test_observability_alerts.py",
         "test_observability_metrics.py",
         "test_observability_rollups.py",

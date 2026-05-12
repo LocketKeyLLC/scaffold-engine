@@ -384,6 +384,13 @@ class ExecuteNextInput(BaseModel):
     skip_verify: bool = False
     model_overrides: dict | None = None
 
+class ResumeJobInput(BaseModel):
+    """Body for POST /jobs/{job_id}/resume. ``job_id`` comes from the path."""
+    model_config = ConfigDict(protected_namespaces=())
+    skip_optimize: bool = False
+    skip_verify: bool = False
+    model_overrides: dict | None = None
+
 class SkipNodeInput(BaseModel):
     job_id: str
     node_key: str

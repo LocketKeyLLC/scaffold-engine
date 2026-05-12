@@ -32,7 +32,7 @@ from app.middleware.request_id import RequestIdMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.modules.dag_generator import generate_dag as _generate_dag
 from app.modules.execution_agent import execute_next_node, skip_node, retry_failed_node, execute_all_nodes
-from app.modules.execution_handler import execution_status
+from app.modules.execution_handler import execution_status, resume_cancelled_job
 from app.modules.gt_browser import gt_list, gt_search, gt_detail, gt_stats
 from app.modules.gt_extractor import extract_ground_truths
 from app.modules.idea_refinement import refine_idea
@@ -62,6 +62,7 @@ from app.schemas import (
     RagInput,
     ResearchInput,
     ResearchReplyInput,
+    ResumeJobInput,
     ScheduleCreate,
     ScheduleResponse,
     SkipNodeInput,
@@ -1091,6 +1092,54 @@ async def execute_all_endpoint(body: ExecuteNextInput):
         execute_all_nodes(body.job_id, model_overrides=body.model_overrides),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},  # disable nginx buffering
+    )
+
+
+@app.post("/jobs/{job_id}/resume", tags=["Management"])
+async def resume_job_endpoint(
+    job_id: str,
+    body: ResumeJobInput,
+    db: AsyncSession = Depends(get_db),
+):
+    """Resume a cancelled job and stream its execution.
+
+    Atomically flips the job from ``cancelled`` back to ``executing`` and
+    re-fires ``/execute/all``-equivalent execution. Replaces the manual
+    SQL-then-curl recipe in debugging.md. ``execute_all_nodes`` is
+    idempotent over completed nodes — execution picks up from the last
+    pending node, with done-node outputs serving as upstream context.
+
+    Status codes:
+      - 200 + SSE stream on successful resume
+      - 404 if no job with that ID exists
+      - 409 if the job exists but isn't in ``cancelled`` (current status
+        returned in detail for client-side dispatch)
+      - 400 on malformed UUID
+    """
+    try:
+        parsed_id = UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
+
+    await _require_valid_models(body.model_overrides)
+    outcome = await resume_cancelled_job(parsed_id, db)
+
+    if outcome["outcome"] == "not_found":
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if outcome["outcome"] == "wrong_status":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "job not resumable",
+                "current_status": outcome["current_status"],
+                "expected_status": "cancelled",
+            },
+        )
+    # outcome == "resumed" — start streaming.
+    return StreamingResponse(
+        execute_all_nodes(job_id, model_overrides=body.model_overrides),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no"},
     )
 
 @app.post("/research", tags=["Research"])

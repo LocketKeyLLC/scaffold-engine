@@ -1,9 +1,10 @@
 """
 Step 21: Execution Handler Module
-Interactive execution control — status, next-node identification, retry.
+Interactive execution control — status, next-node identification, retry, resume.
 """
 
 import logging
+from typing import Literal
 from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -128,4 +129,69 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         "next_actions": actions,
         "nodes": nodes,
         "costs": cost_totals,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Resume — cancelled → executing
+# ---------------------------------------------------------------------------
+
+ResumeOutcome = Literal["resumed", "not_found", "wrong_status"]
+
+
+async def resume_cancelled_job(
+    job_id: UUID, db: AsyncSession,
+) -> dict:
+    """Atomically transition a cancelled job back to ``executing``.
+
+    The UPDATE is gated on ``status = 'cancelled'``; two concurrent
+    callers cannot both win because the WHERE clause matches at most
+    one row state. Returns:
+
+    - ``{"outcome": "resumed", "job_id": str, "prior_status": "cancelled"}`` on success
+    - ``{"outcome": "wrong_status", "job_id": str, "current_status": str}`` when the
+      job exists but is not cancelled (already executing, completed,
+      failed, etc.)
+    - ``{"outcome": "not_found", "job_id": str}`` when no row matches the ID
+
+    Resumption is intentionally idempotent at the data layer:
+    ``execute_all_nodes`` is already idempotent over completed nodes (it
+    uses their outputs as upstream context for downstream nodes), so the
+    caller can re-fire ``/execute/all`` after this returns ``resumed``
+    and pick up from the last pending node.
+    """
+    result = await db.execute(
+        text(
+            "UPDATE jobs "
+            "SET status = 'executing', updated_at = NOW() "
+            "WHERE id = :job_id AND status = 'cancelled' "
+            "RETURNING id"
+        ),
+        {"job_id": str(job_id)},
+    )
+    row = result.fetchone()
+    if row is not None:
+        await db.commit()
+        logger.info("job_resumed job_id=%s", job_id)
+        return {
+            "outcome": "resumed",
+            "job_id": str(job_id),
+            "prior_status": "cancelled",
+        }
+
+    # No row updated. Two reasons: (a) job doesn't exist, (b) job exists
+    # but isn't cancelled. Distinguish so the caller can emit the right
+    # HTTP status.
+    await db.rollback()
+    status_result = await db.execute(
+        text("SELECT status FROM jobs WHERE id = :job_id"),
+        {"job_id": str(job_id)},
+    )
+    current = status_result.fetchone()
+    if current is None:
+        return {"outcome": "not_found", "job_id": str(job_id)}
+    return {
+        "outcome": "wrong_status",
+        "job_id": str(job_id),
+        "current_status": current.status,
     }

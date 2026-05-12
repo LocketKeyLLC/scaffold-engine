@@ -8,6 +8,7 @@ helpers for the four SSE-based endpoints:
 - ``aiter_research_reply(session_id, reply)`` → ``POST /research/reply``
 - ``aiter_research_pdf(pdf, ...)``       → ``POST /research/pdf`` (multipart)
 - ``aiter_execute_all(job_id, ...)``     → ``POST /execute/all``
+- ``aiter_resume_job(job_id, ...)``      → ``POST /jobs/{job_id}/resume``
 
 Each yields ``{"event": str, "data": Any}`` dicts. Heartbeat comments
 (``: keepalive``) are filtered by default; pass ``include_heartbeats=True``
@@ -293,6 +294,31 @@ class AsyncClient:
         }
         async for event in self._stream(
             "POST", "/execute/all", json=body, include_heartbeats=include_heartbeats,
+        ):
+            yield event
+
+    async def aiter_resume_job(
+        self,
+        job_id: str,
+        *,
+        skip_optimize: bool = False,
+        skip_verify: bool = False,
+        include_heartbeats: bool = False,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream ``POST /jobs/{job_id}/resume`` — resume a cancelled job.
+
+        Atomically transitions the job from ``cancelled`` back to
+        ``executing`` server-side, then streams the same SSE event shape
+        as ``aiter_execute_all``. Raises ``ConflictError`` if the job is
+        not currently cancelled, ``NotFoundError`` if the ID is unknown.
+        """
+        body = {
+            "skip_optimize": skip_optimize,
+            "skip_verify": skip_verify,
+        }
+        async for event in self._stream(
+            "POST", f"/jobs/{job_id}/resume",
+            json=body, include_heartbeats=include_heartbeats,
         ):
             yield event
 

@@ -4896,6 +4896,59 @@ $ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
 - Per-domain invalidation after targeted ingest: `redis-cli --scan --pattern 'ragv1:eng:*' | xargs -r redis-cli del` (replace `eng` with the affected domain). Whole-cache flush: `redis-cli --scan --pattern 'ragv1:*' | xargs -r redis-cli del`.
 - Stale cache after embedder/reranker swap: bump `_KEY_PREFIX` in `rag_result_cache.py` from `ragv1` to `ragv2`. The 120 s default TTL means a full natural decay only takes 2 min, so the bump is mostly belt-and-suspenders.
 
+### 17.130 `POST /jobs/{job_id}/resume` — cancelled-job resume contract (2026-05-12)
+
+Closes the orchestration-checklist gap: "Cancelled-job resume contract." Pre-§17.130 the recipe in `references/debugging.md` was a two-step manual ritual — `UPDATE jobs SET status='executing' WHERE id='<uuid>'` in psql, then re-POST `/execute/all`. Two problems: (a) operators had to drive raw SQL against prod, (b) the SDK couldn't expose a job-resume primitive without the orchestrator's blessing. The new endpoint folds both steps behind one HTTP call and gives the SDK a first-class `aiter_resume_job()` to mirror `aiter_execute_all()`.
+
+**Why a dedicated endpoint, not a `force=true` flag on `/execute/all`.** Conflating the two paths would force `/execute/all` to grow status-transition logic (and the corresponding 409 path) for a niche flow. Keeping resume separate means `/execute/all`'s contract stays "execute the next pending node(s) of an already-active job" — no implicit status mutation. The state-machine assertion lives in one place (the WHERE-gated UPDATE in `resume_cancelled_job`), and `/execute/all` doesn't need to know cancelled jobs exist.
+
+**Atomic state transition.** The handler runs a single `UPDATE jobs SET status='executing', updated_at=NOW() WHERE id=$1 AND status='cancelled' RETURNING id`. Two concurrent callers compete on the WHERE clause; one wins (1 row updated → commits, streams), the other loses (0 rows → rollback, runs the status SELECT to distinguish "wrong status" from "not found"). No advisory lock, no SELECT FOR UPDATE — the partial-state WHERE is the lock. This is the same idempotency pattern §17.97 documented for `uq_research_sessions_single_running`: the data layer enforces the invariant, the handler doesn't try to.
+
+**Resume picks up where cancellation stopped.** `execute_all_nodes` is already idempotent over completed nodes — it uses each done node's `output_text` as upstream context for downstream nodes, skipping anything already in a terminal state. So after the status flip, the SSE stream begins at the first pending node and treats the rest of the DAG as if execution were never interrupted. Validated end-to-end in §17.X (debugging.md "Cancelled job — resume from where it stopped" runbook entry).
+
+**Scope — cancelled only.** `failed` jobs use the existing per-node `/exec/retry` endpoint (`retry_failed_node` resets one node + cascades downstream to pending — Sprint W.8). A whole-job "retry" has different semantics (which failed nodes do you retry? which done nodes do you trust?) and isn't blocked on this work. If a real use case emerges, extending the WHERE clause to `status IN ('cancelled','failed')` is one line — but designing that without a concrete user story is the kind of speculative scope this repo avoids.
+
+**HTTP contract.**
+
+| Outcome | Status | Body |
+|---|---|---|
+| Successful resume | 200 | SSE stream (same event shape as `/execute/all`) |
+| Job not in `cancelled` state | 409 | `{"detail": {"error": "job not resumable", "current_status": "<x>", "expected_status": "cancelled"}}` |
+| Job ID not in DB | 404 | `{"detail": "Job <uuid> not found"}` |
+| Malformed UUID | 400 | `{"detail": "Invalid job_id format"}` |
+| `model_overrides` references unknown Ollama model | 422 | `{"detail": {"error": "model_validation_failed", "missing_models": [...]}}` (raised by `_require_valid_models` before any DB mutation) |
+
+**Files.**
+
+- `app/schemas.py` — new `ResumeJobInput` (skip_optimize, skip_verify, model_overrides; `job_id` lives in the path). Vendored to `sdk/scaffold_client/schemas.py` via `make sync-schemas` so the SDK byte-parity test stays green.
+- `app/modules/execution_handler.py` — new `resume_cancelled_job(job_id, db)` handler with three outcome branches (`resumed` / `wrong_status` / `not_found`). Atomic UPDATE-then-rollback-and-lookup; commits only when the UPDATE actually transitions a row.
+- `app/main.py` — new `POST /jobs/{job_id}/resume` endpoint under `tags=["Management"]`. Calls `_require_valid_models` first (no DB mutation on validation failure), then handler, then maps outcomes to HTTP, then `StreamingResponse(execute_all_nodes(...))` on success.
+- `sdk/scaffold_client/async_client.py` — new `aiter_resume_job(job_id, ...)` mirroring `aiter_execute_all`. Same SSE event shape so existing handlers work unchanged; module docstring updated.
+- `tests/test_resume_endpoint.py` (new, 11 cases). Unit (5): happy path returns `resumed`+commits, not-found rolls back, wrong-status (completed) + wrong-status (executing) both return `wrong_status` outcome, UPDATE SQL targets `status='cancelled'` only. Integration (6): 404 / 409 / 400 mappings, SSE streamed on success, `model_overrides` forwarded to `execute_all_nodes`, validation runs before DB.
+- `tests/conftest.py` — gates `test_resume_endpoint.py` out of CI smoke (imports `app.main`, mirrors the `test_main.py` precedent).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_resume_endpoint.py --timeout=30 -v
+11 passed in 3.91s
+
+$ docker exec scaffold-orchestrator pytest tests/test_execution_handler_module.py tests/test_main.py tests/test_sdk_schema_parity.py --timeout=30 -q
+20 passed in 3.90s   # adjacent regression + SDK byte-parity, all green
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+4 failed, 1800 passed, 3 skipped in 755.63s (0:12:35)
+```
+
++11 vs the §17.129 baseline (`1789 passed`) — all from `test_resume_endpoint.py`. Same 4 pre-existing `test_retrieval_golden` failures (live-Milvus retrieval drift, documented §17.86/§17.92/X.25/§17.128/§17.129). Same 3 skips.
+
+**Operator notes.**
+
+- Cancellation is recorded with no `error_summary` change — resume preserves any prior error context for forensics. Read it back via `GET /exec/status/{job_id}`.
+- Resume does NOT regenerate the DAG, re-run research, or re-optimize prompts. It picks up at the first pending node with done-node outputs as upstream context. If you need a clean redo, use `DELETE /jobs/{job_id}` + start over.
+- The `execution_global_concurrency=1` cap (§17.65 X.24) still applies: a resume that arrives while another `/execute/all` is running gets queued or 503's, same as a fresh execute would.
+- Cron-driven resumes are a natural follow-up but not shipped here — `/schedule` doesn't take a resume action yet. Workaround: a downstream consumer can poll `/jobs?status=cancelled` and POST `/jobs/{id}/resume`.
+
 ---
 
 ## Phase 7 wrap — deep-search rollout complete
