@@ -153,6 +153,12 @@ class Settings(BaseSettings):
     # #6.1 default, slower on CPU). "model_general" = cloud 235b (faster,
     # network required). Override: IDEATION_MODEL_ROLE.
     ideation_model_role: str = "model_general"
+    # §17.144 — Spec-capture extractor role. Default model_general
+    # because the extractor must follow the spec_schema.json contract
+    # strictly (full JSON schema in the prompt, ~150 lines); smaller
+    # local models tend to drift. Operators with strict offline
+    # requirements can override to model_router or model_verifier.
+    spec_extractor_model_role: str = "model_general"
     model_verifier: str = "qwen2.5:7b"
     model_cloud_heavy: str = "qwen3-vl:235b-instruct-cloud"
     model_cloud_alt: str = "qwen3.5:397b-cloud"

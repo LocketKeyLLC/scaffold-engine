@@ -5658,6 +5658,59 @@ $ docker exec scaffold-postgres psql -U scaffold -d scaffold_engine -c "\d specs
 
 **Next from the engineering-design checklist:** wire the LLM extractor + ``/confirm`` gate so an operator can post a spec in natural language, see it validated against the schema, confirm it, and have the design pipeline pick it up as the entry condition for everything downstream.
 
+### 17.144 NL → spec extractor — first LLM in the engineering-design pipeline (2026-05-12)
+
+Wires the §17.143 spec schema to natural language. ``extract_spec(nl_text, *, db, …)`` takes an engineering brief, prompts the configured model to emit JSON matching ``spec_schema.json``, validates it, and INSERTs the row into ``specs`` (with ``confirmed_*=NULL`` — the ``/confirm`` gate hook still belongs to the next commit). Inherits the trio of oracle wrappers' "failures are data, not exceptions" posture (§17.140 / 141 / 142) and tightens the discipline one notch: when the brief is *ambiguous* — relative terms like "fast" or "low power" with no numeric anchor — the extractor refuses to guess and returns a structured rejection instead.
+
+**One-shot strict envelope.** The LLM is constrained to emit exactly one of two JSON shapes:
+
+```
+Success:    {"spec": <object matching spec_schema.json>}
+Ambiguity:  {"ambiguities": [{"field": "<json-path>", "reason": "...", "question": "..."}, ...]}
+```
+
+The two paths are mutually exclusive and carry distinct downstream semantics: ``ok=False, ambiguities=[...]`` means "ask the human to clarify"; ``ok=False, errors=[...]`` means "the extractor itself broke (LLM failed, parse failed, schema violated)". A UI layer renders the two differently — questions vs error banners — and the dataclass keeps them separable on purpose. The third intermediate option (best-effort, mark-uncertain) was rejected because it would smuggle hallucinated numbers past the §17.143 schema's at-least-one-of-target-min-max rule.
+
+**Schema in the prompt, verbatim.** The system prompt embeds the entire ``spec_schema.json`` file as a fenced JSON block, the way §17.143's "single source of truth" decision intended. The prompt also carries two few-shot examples — one success (RC LPF with concrete numbers), one ambiguity ("Make a fast filter" → two-question rejection). Cost: the prompt header weighs in around 4 KB but it's static and prompt-cached on cloud providers that support it. Inline approach beats fetching the schema by URL (would couple every extraction to a live HTTP round-trip).
+
+**Temperature = 0; ambiguities are not vibes.** ``model_router.chat(..., temperature=0.0)`` — for an unambiguous brief, the same input through the same model produces the same JSON, which means the same ``spec_sha256``. That's the §17.143-defined dedup key and we want it to actually dedupe. (Some providers ignore temperature=0 at the sampling layer; for those, the deterministic-extraction guarantee is "best effort" rather than absolute.)
+
+**Configurable model role.** ``settings.spec_extractor_model_role`` defaults to ``"model_general"`` (the cloud-routed 235b on this host — accurate, JSON-strict). Mirrors the ``ideation_model_role`` pattern. Operators with strict offline requirements can override to ``model_router`` (local 4b) or ``model_verifier``; the prompt is long enough that smaller models tend to drift on the schema, so the default is unapologetically the heaviest local-host-can-reach option.
+
+**Three JSON-recovery layers via the existing parser.** ``parse_json_object`` (from ``app/utils/llm_parsing.py``) handles strip-think-tags, markdown-fence stripping, ``json_repair`` recovery, and brace-extract fallback — same chain every other LLM-structured-output module in the repo uses. We do NOT define our own parser. ``test_extract_spec_strips_markdown_fences`` and ``test_extract_spec_json_repair_recovers`` are the explicit guards: a ```` ```json `` fenced reply and a trailing-comma-after-array glitch both round-trip cleanly to a persisted row.
+
+**No DB write on any failure path.** ``test_extract_spec_*_no_db_write`` asserts ``db.execute.await_count == 0`` for the LLM-failure, ambiguity, unparseable-JSON, wrong-envelope, and invalid-spec paths. Spec rows are an *audit* artefact — a row should mean "this exact JSON was a valid spec at insertion time," not "we tried to extract and something went wrong." Failed extractions surface in the LLM call log (``llm_call_logs`` via ``_record_call`` inside ``model_router.chat``) so failures are still auditable, just not in ``specs``.
+
+**Files.**
+
+- ``app/sim/spec_extractor.py`` (new, ~245 lines). ``extract_spec(nl_text, *, db, job_id=None, model_role=None)``. ``ExtractionResult`` dataclass with ``{ok, spec, spec_id, ambiguities[], errors[], llm_raw_text, model_used}``. Embeds the spec_schema.json file at module import time so per-call latency is just the LLM round-trip.
+- ``app/config.py`` (+6 lines). ``spec_extractor_model_role: str = "model_general"`` with a comment explaining the default's rationale.
+- ``tests/test_spec_extractor.py`` (new, 14 ``@pytest.mark.smoke`` cases, mocked router). Happy path with and without job_id, markdown-fence handling, json_repair recovery, ambiguity rejection (asserts no DB write), empty-ambiguities-array falls through to error, LLM transport failure, empty LLM response, unparseable JSON, wrong envelope shape, validator-error propagation, empty-input ValueError, default-role resolution from settings, explicit-role override.
+- ``tests/integration/test_spec_extractor_live.py`` (new, 1 case). Real ``model_router`` call against the configured role for an unambiguous RC LPF brief. Asserts ``ok=True``, spec re-validates, ``fc_3db`` target within 1 Hz of 1000, persisted row has ``confirmed_at IS NULL``. Skipped cleanly when Ollama is unreachable (probes ``/api/tags``) or ``SCAFFOLD_SKIP_LIVE_LLM=1`` is set.
+- ``tests/conftest.py`` (+1 line). CI-smoke ``collect_ignore`` for the live integration test.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_spec_extractor.py -v
+============================== 14 passed in 1.62s ==============================
+
+$ docker exec scaffold-orchestrator pytest tests/integration/test_spec_extractor_live.py -v
+tests/integration/test_spec_extractor_live.py::test_extract_spec_live_unambiguous_brief PASSED [100%]
+============================== 1 passed in 9.75s ===============================
+```
+
+The live extraction round-trip — LLM call, JSON parse, schema validation, DB INSERT, row read-back, ``fc_3db`` numeric check, row cleanup — completes in ~10 s against the cloud-routed 235b model. Mocked-suite latency is sub-2-second total.
+
+**Deferred — explicitly out of scope for §17.144.**
+
+- ``/confirm`` gate handler. The ``confirmed_by`` / ``confirmed_at`` columns sit there waiting for it; the next commit lands the endpoint + the design-pipeline state that refuses to advance past spec_capture without confirmation.
+- ``design_circuit`` job type + state-machine entries. Same follow-up commit — once /confirm exists, there's something for a job to wait on.
+- Re-prompting loop: ambiguity → human answers → second extraction call. v1 surfaces ambiguities; UI/CLI layer decides how to round-trip them.
+- Per-kind unit/sign sub-schemas — still on §17.143's deferred list.
+
+**Next from the engineering-design checklist:** ``/confirm`` gate + ``design_circuit`` job state. After that the pipeline can actually chain ``spec_capture → topology_select → device_sizing → simulate → verify → report`` with §17.140–§17.142's oracles as verification leaves.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
