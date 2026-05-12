@@ -5711,6 +5711,82 @@ The live extraction round-trip — LLM call, JSON parse, schema validation, DB I
 
 **Next from the engineering-design checklist:** ``/confirm`` gate + ``design_circuit`` job state. After that the pipeline can actually chain ``spec_capture → topology_select → device_sizing → simulate → verify → report`` with §17.140–§17.142's oracles as verification leaves.
 
+### 17.145 /confirm gate — operator acknowledgement for extracted specs (2026-05-12)
+
+Half of the gate the §17.143 schema and §17.144 extractor were waiting on: an HTTP surface for flipping ``specs.confirmed_by`` / ``confirmed_at`` and a strict ``require_confirmed_spec`` helper every downstream design-pipeline stage will call as its first line. The other half — wiring the design pipeline itself to actually *call* the helper at stage boundaries — needs a ``design_circuit`` job type, which still belongs to the next commit.
+
+**Dedicated endpoint, not /ideate/confirm overload.** The pre-existing ``/ideate/confirm`` advances a job from ``awaiting_confirmation`` to ``researching`` — that's the ideation pipeline's transition, semantically unrelated to "an operator acknowledged a separately-extracted spec." Coupling the two would mean ``/confirm`` does different things depending on hidden job state, which is exactly the kind of surprise the §17.144 strict-envelope design is meant to avoid. The new endpoint lives under a dedicated prefix:
+
+```
+POST   /specs/{spec_id}/confirm    — set confirmed_by + confirmed_at = NOW()
+POST   /specs/{spec_id}/unconfirm  — clear both columns
+GET    /specs/pending?job_id=…     — list pending, oldest first
+```
+
+All three routes inherit the global ``Depends(require_api_key)`` (mirroring the assist router). ``confirmed_by`` is stored as the literal ``"api_key"`` since SCAFFOLD_API_KEY auth is anonymous; a future commit can plug in proper operator identity (X-User header, token subject) and backfill the column without a migration.
+
+**Re-confirm allowed, un-confirm allowed.** Per the §17.145 design choice, both flows are supported. Re-confirming an already-confirmed spec refreshes ``confirmed_at`` to NOW() and overwrites ``confirmed_by`` with the latest caller. Un-confirming is idempotent — calling on an already-unconfirmed spec is a no-op but still returns the row so the caller can read the current state without a separate GET. Audit of who-confirmed-when over time lives in the future ``/audit`` surface; for v1 the columns only carry the most recent confirmer.
+
+**Four helpers, two-and-a-half error contracts.** ``app/sim/spec_store.py`` keeps DB access in one module so the validator (``app/sim/spec.py``) stays schema-only. Helpers:
+
+- ``get_spec(db, spec_id)`` — fetches the row. Raises ``SpecNotFoundError`` on absent.
+- ``confirm_spec(db, spec_id, *, confirmed_by)`` / ``unconfirm_spec(db, spec_id)`` — the column-flippers, both ``RETURNING`` so the caller gets the post-update row in one round trip.
+- ``is_spec_confirmed(db, spec_id) -> bool`` — quiet probe (False on missing OR unconfirmed). Use for "should I show the confirm button?" UI logic.
+- ``require_confirmed_spec(db, spec_id) -> SpecRow`` — the strict gate. Raises ``SpecNotFoundError`` (404 territory) OR ``SpecNotConfirmedError`` (409 / "tell the operator to confirm"). The two exception types are distinct so call sites can render the failure cleanly.
+- ``list_pending_confirmations(db, *, job_id=None, limit=100)`` — returns the rows the UI / scaffold_router will surface as "specs awaiting your attention." ``job_id`` filter optional; the global list is what a multi-job operator sees in their dashboard.
+
+**Test-mock surface widened.** ``app/sim/spec_store.py`` uses ``result.mappings().first()`` — a real SQLAlchemy access pattern that ten other files in the repo also use (``app/scheduler.py``, ``app/modules/execution_agent.py``, etc.) but that ``tests/conftest.py``'s ``make_mock_db`` fixture didn't expose. Added two strictly-additive lines: ``mappings_obj.first.return_value`` and ``mappings_obj.one.return_value`` both mirror ``rows[0] if rows else None``. No existing test sees a behavior change; the new unit tests now match production code shape.
+
+**Files.**
+
+- ``app/sim/spec_store.py`` (new, ~210 lines). ``SpecRow`` dataclass, two exception types, six async helpers as above. SQL hand-written via ``sqlalchemy.text`` — no ORM models for a 1-table feature.
+- ``app/routers/specs.py`` (new, ~95 lines). FastAPI APIRouter with the three routes. ``CONFIRMED_BY_API_KEY = "api_key"`` is hoisted as a module-level constant so the integration tests can assert against it directly rather than re-deriving the string.
+- ``app/schemas.py`` (+18 lines). ``SpecRead`` Pydantic model (used as ``response_model`` on the two POSTs and inside ``SpecPendingListResponse``).
+- ``app/main.py`` (+2 lines). ``include_router(specs_router)`` alongside the other four.
+- ``tests/conftest.py`` (+7 lines). ``mappings_obj.first.return_value`` + ``mappings_obj.one.return_value`` additions.
+- ``tests/test_spec_store.py`` (new, 15 ``@pytest.mark.smoke`` cases, mocked DB). Every helper × every contract path.
+- ``tests/integration/test_specs_router_db.py`` (new, 6 ``@pytest.mark.smoke`` cases, real Postgres). Confirm sets columns, re-confirm updates timestamp, unconfirm clears, 404 on missing (both endpoints), pending list filters confirmed.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_spec_store.py -v
+============================== 15 passed in 1.66s ==============================
+
+$ docker exec scaffold-orchestrator pytest tests/integration/test_specs_router_db.py -v
+tests/integration/test_specs_router_db.py::test_confirm_endpoint_sets_columns PASSED
+tests/integration/test_specs_router_db.py::test_confirm_is_idempotent_reconfirm_updates_timestamp PASSED
+tests/integration/test_specs_router_db.py::test_unconfirm_endpoint_clears_columns PASSED
+tests/integration/test_specs_router_db.py::test_confirm_404_when_spec_missing PASSED
+tests/integration/test_specs_router_db.py::test_unconfirm_404_when_spec_missing PASSED
+tests/integration/test_specs_router_db.py::test_pending_list_returns_unconfirmed_rows PASSED
+============================== 6 passed in 1.41s ===============================
+```
+
+**Engineering-design pipeline state after §17.145.** The gate exists; the helpers exist; the strict ``require_confirmed_spec`` is ready to be called from every downstream stage. What's still missing is a downstream stage that calls it — that's the ``design_circuit`` job type and the topology-selection stage that follow. The complete flow on paper:
+
+```
+NL brief
+  ↓ §17.144 extract_spec (LLM, model_general @ temperature 0)
+specs row (confirmed_at = NULL)
+  ↓ POST /specs/{id}/confirm   ← §17.145
+specs row (confirmed_at populated)
+  ↓ require_confirmed_spec()   ← §17.145 (called from next commit's pipeline stage)
+[ topology_select / device_sizing — future ]
+  ↓
+§17.140 ngspice / §17.141 verilator / §17.142 symbiyosys
+sim_runs rows
+```
+
+**Deferred — explicitly out of scope for §17.145.**
+
+- ``design_circuit`` job type + state-machine entries. The gate has nothing to gate against until a stage calls ``require_confirmed_spec``; that's the next commit.
+- OWUI ``/confirm`` command integration. Adding a chat-command path that calls the new endpoint is a follow-up — the HTTP surface stabilises first.
+- Per-confirmer audit trail (who-confirmed-when over time). v1 carries only the latest confirmer in the columns; an ``audit_log`` sibling table can land when needed.
+- Pagination on /specs/pending beyond ``limit=100``. The expected pending count is small per operator; cursor pagination is overkill until something proves otherwise.
+
+**Next from the engineering-design checklist:** ``design_circuit`` job type + the topology-select stage that calls ``require_confirmed_spec`` as its first action. After that the pipeline has its first end-to-end "spec → topology recommendation" demo working, which is what unblocks the rest of the design-stage chain.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

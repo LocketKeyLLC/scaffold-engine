@@ -720,3 +720,26 @@ class ResearchSessionListResponse(BaseModel):
 class DeleteResponse(BaseModel):
     deleted: bool
     id: str
+
+
+# §17.145 — Spec confirmation gate (engineering-design pipeline).
+
+class SpecRead(BaseModel):
+    """Serializable view of a row from the ``specs`` table. Used by
+    the /specs/* endpoints and by any caller that needs to hand a
+    confirmation state to a client."""
+    id: UUID
+    job_id: UUID | None = None
+    schema_version: str
+    spec_json: dict[str, Any]
+    spec_sha256: str
+    confirmed_by: str | None = None
+    confirmed_at: datetime | None = None
+    created_at: datetime
+
+
+class SpecPendingListResponse(BaseModel):
+    """Response for GET /specs/pending — list of specs awaiting
+    operator confirmation."""
+    pending: list[SpecRead]
+    count: int

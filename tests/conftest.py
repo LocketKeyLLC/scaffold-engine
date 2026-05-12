@@ -36,6 +36,7 @@ if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
         "integration/test_sim_verilator_db.py",
         "integration/test_sim_symbiyosys_db.py",
         "integration/test_spec_extractor_live.py",
+        "integration/test_specs_router_db.py",
         "test_assist_session_map.py",
         "test_config_endpoint.py",
         "test_cost_rollup.py",
@@ -141,6 +142,14 @@ def make_mock_db(rows: list[dict] | None = None, *, scalar=None, rowcount=None):
 
     mappings_obj = MagicMock()
     mappings_obj.all.return_value = rows
+    # §17.145 — many modules use ``result.mappings().first()`` (e.g.
+    # app/scheduler.py, app/modules/execution_agent.py, app/sim/spec_store.py).
+    # Mirror the existing ``result.first()`` semantics: first row or None.
+    # ``one()`` mirrors SQLAlchemy's "exactly one row" — returns rows[0]
+    # when present (we don't raise here; tests use empty-list mocks to
+    # exercise the not-found branch via the caller's own check).
+    mappings_obj.first.return_value = rows[0] if rows else None
+    mappings_obj.one.return_value = rows[0] if rows else None
 
     result_obj = MagicMock()
     result_obj.mappings.return_value = mappings_obj
