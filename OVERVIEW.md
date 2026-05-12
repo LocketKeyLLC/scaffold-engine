@@ -5195,6 +5195,51 @@ $ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
 - Forcing the drift check to re-run without restart: `UPDATE cache_metadata SET value='intentional-mismatch' WHERE key='active_embedder_id';` then restart. (No HTTP endpoint exposed yet — the check only runs at lifespan startup. Acceptable: drift detection is a "did the operator change env without telling me" guard, not a runtime concern.)
 - Future cache-versioning use cases (rag_result_cache prefix bumps, fetch_cache schema bumps) can share `cache_metadata` by picking unique `key` strings. No new migration needed.
 
+### 17.136 `_get_next_node` atomic-claim concurrency test (2026-05-12)
+
+Closes the audit gap recorded at §17.53: "Live concurrency tests for `_get_next_node`'s atomic claim under simultaneous /execute calls (require real Postgres; integration suite)." The audit flagged this as "out of W.19 scope but unmeasured" — the row-locked compound UPDATE was exercised only by production traffic and unit tests against mocked sessions. §17.136 adds the proof under real Postgres row-lock semantics.
+
+**The earlier flake was a fixture bug, not a production bug.** A pre-§17.136 attempt was abandoned with the inline note "second claimer's UPDATE blocks behind the first's row lock within one loop" — the abandonment was correct given the harness in use (both claimers shared the same `db_session` fixture, i.e. one asyncpg connection, so the second UPDATE deadlocked inside SQLAlchemy rather than racing at Postgres). The fix is structural: each claimer opens its own `async_session()` so the asyncpg connections are independent and arbitration happens at the Postgres layer where it belongs. The earlier comment in `tests/integration/test_execution_db.py` is updated to point at §17.136 for the now-passing race.
+
+**Two classes of invariant, exercised by five test cases:**
+
+1. **Deterministic single-row arbitration.** Postgres's row lock makes N-claimer-1-row the cleanest case: exactly one winner, the rest return None, final DB has `status='running'` for the single seeded row. Tested with N=2 and N=5.
+2. **Non-deterministic multi-row arbitration with a hard invariant.** N claimers + M pending rows: `_get_next_node` is NOT work-conserving — every claimer races for the lowest-`execution_order` candidate, so most pile up on the same target. Outcomes range from 1 winner (all raced for T1) to min(N, M) distinct winners (lucky scheduling: later claimers' SELECTs landed after earlier claimers' COMMITs). The invariant — verified across many scheduling orders — is that **no row is ever double-claimed**, the row-locking guarantee that prevents double execution under any timing.
+
+**The non-work-conserving behavior is a real product characteristic, not a test artifact.** `_get_next_node`'s loop picks the first dep-satisfied candidate, attempts the atomic claim, and returns None on collision. The caller (`execute_all_nodes`) handles that with a retry on the next iteration — the loop is the work-conservation mechanism, not the claim. Documenting this in the test docstring so future readers don't misread "1 winner out of 2 rows" as a bug.
+
+**Stability proof.** Ran the new test file five consecutive times — 25/25 passed. The "deterministic" 1-row cases never produced more than 1 winner; the "non-deterministic" multi-row cases produced 1 or 2 winners in proportion to scheduling luck (no double-claims observed).
+
+**Files.**
+
+- `tests/integration/test_execution_concurrency_db.py` (new, 5 cases). 2-claimers / 1-row → exactly 1 winner. 5-claimers / 1-row → exactly 1 winner. 2-claimers / 2-rows → 1..2 winners, no double-claim. 5-claimers / 2-rows → 1..2 winners, no double-claim. winners_carry_started_at: side-effect coherence (the atomic UPDATE flips status + sets started_at in one statement, both visible to the winner's row from any fresh session). Uses the existing `insert_job` fixture from `tests/integration/conftest.py`; each claimer opens its own `async_session()`.
+- `tests/integration/test_execution_db.py` — updated the inline "we tried this and it was flaky" comment to point at the §17.136 file and explain WHY the earlier attempt failed (shared `db_session` fixture → one connection → SQLAlchemy-level deadlock, not Postgres-level race).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/integration/test_execution_concurrency_db.py --timeout=60 -v
+5 passed in 1.94s
+
+$ for i in 1 2 3 4 5; do docker exec scaffold-orchestrator pytest tests/integration/test_execution_concurrency_db.py --timeout=60 -q | tail -2 | head -1; done
+.....                                                                    [100%]
+.....                                                                    [100%]
+.....                                                                    [100%]
+.....                                                                    [100%]
+.....                                                                    [100%]
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+3 failed, 1865 passed, 3 skipped in 744.80s (0:12:24)
+```
+
++5 vs the §17.135 baseline (`1860 passed`) — all from `test_execution_concurrency_db.py`. Same 3 pre-existing `test_retrieval_golden` failures. The concurrency tests are deterministic against the dev image's `scaffold-postgres` container; if a CI environment runs without a live DB, the integration suite's own conftest skips them via the existing `tests/integration/conftest.py` plumbing.
+
+**Operator notes.**
+
+- If a future change to `_get_next_node` adds a fallback (claim the next candidate when the first collides), update `test_two_claimers_two_pending_rows_no_double_claim` and `test_five_claimers_two_pending_rows_no_double_claim` to assert `len(winners) == min(N, M)` rather than `1 <= len(winners) <= min(N, M)`. The test docstrings explicitly call out that the loose upper bound mirrors current behavior, not an aspiration.
+- The integration tests run against the real `scaffold-postgres` container. They're already gated out of CI smoke (the `tests/integration/` directory has its own fixtures requiring a live DB) but run under `make test` in the dev image. CI parity tooling (`make ci-smoke`) won't pick these up — that's by design.
+- `_get_next_node` is the single point of truth for "claim the next node." Don't bypass it in production code paths — any code that touches `dag_nodes.status = 'running'` outside the orchestrator's lifecycle invalidates §17.136's invariants.
+
 ---
 
 ## Phase 7 wrap — deep-search rollout complete

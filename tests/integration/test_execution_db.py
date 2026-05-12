@@ -57,10 +57,16 @@ async def test_get_next_node_returns_none_when_deps_unsatisfied(db_session, inse
 
 # The atomic-claim guarantee of _get_next_node (compound UPDATE … WHERE
 # status='pending' RETURNING) is exercised in production under concurrent
-# /execute calls. A pytest-level asyncio.gather race proved flaky under
-# the shared-engine setup (the second claimer's UPDATE blocks behind the
-# first's row lock within one loop). The single-claim/dep-not-satisfied
-# tests above cover the behavioral contract.
+# /execute calls. An earlier pytest-level asyncio.gather race proved flaky
+# under the shared-fixture setup (the second claimer's UPDATE blocked
+# behind the first's row lock within one loop because both claimers
+# reused the same ``db_session`` connection). §17.136 re-introduced the
+# race in tests/integration/test_execution_concurrency_db.py by giving
+# each claimer its own ``async_session()`` (separate asyncpg connection),
+# so row-lock arbitration happens at the Postgres layer where it
+# belongs. The single-claim / dep-not-satisfied tests above cover the
+# per-call behavior; the §17.136 file covers the concurrent-claim
+# invariants (no double-claim under any scheduling).
 
 
 async def _seed_nodes(db_session, job_id, nodes):
