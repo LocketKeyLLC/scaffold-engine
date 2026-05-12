@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     milvus_num_partitions: int = Field(default=64, ge=1, le=4096)
     embedding_cache_memory_size: int = Field(default=10_000, ge=0, le=1_000_000)
     embedding_cache_ttl_s: int = Field(default=30 * 86400, ge=0, le=365 * 86400)
+    # §17.138 — On lifespan startup, SCAN up to N keys from Redis matching
+    # the current embedder identity (model_id + dim) and populate the L1
+    # LRU. Saves a Redis round-trip on every warm-cache query during the
+    # first few minutes after restart. 0 disables. Capped per-call at
+    # embedding_cache_memory_size regardless of the configured N.
+    embedding_cache_warmup_n: int = Field(default=0, ge=0, le=100_000)
 
     # Reranker prompt template
     reranker_prompt_system: str = (

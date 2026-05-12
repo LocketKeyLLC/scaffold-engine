@@ -314,6 +314,23 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("embedder_drift_hook_failed: err=%s", exc)
 
+    # §17.138 — Embedding-cache L1 warmup from L2 (Redis). Runs after the
+    # drift check so we never warm L1 with keys for a model we're about
+    # to invalidate. Fail-soft: a Redis hiccup logs but doesn't block
+    # startup; the cache just starts cold (the prior behavior).
+    if settings.embedding_cache_warmup_n > 0:
+        try:
+            from app.utils.embedding_cache import get_cache
+            warmup_result = await get_cache().warmup()
+            logger.info(
+                "embedding_cache_warmup_done: loaded=%d skipped=%d scanned=%d",
+                warmup_result["loaded"],
+                warmup_result["skipped"],
+                warmup_result["scanned"],
+            )
+        except Exception as exc:
+            logger.warning("embedding_cache_warmup_hook_failed: err=%s", exc)
+
     logger.info("engine_started: log_level=%s", settings.log_level)
     # Eager-init shared HTTP clients (searxng, github, generic) — no lazy path
     from app.utils.http_clients import init_clients

@@ -64,6 +64,12 @@ class EmbeddingCache:
         self._evictions = 0
         self._redis_failures = 0
         self._dim_mismatches = 0
+        # §17.138 — warmup stats. Filled once per `warmup()` call (which
+        # the lifespan hook calls at most once). Stays at 0 when the
+        # warmup knob is disabled, distinguishing a "warmup didn't run"
+        # state from "warmup ran and found nothing."
+        self._warmup_loaded = 0
+        self._warmup_skipped = 0
         # Surface dim+model_id at construction so a mismatch with stored
         # keys produces a one-line diagnostic in startup logs rather than
         # silent miss-storms after a config change.
@@ -193,7 +199,97 @@ class EmbeddingCache:
             "memory_size": len(self._memory),
             "evictions": self._evictions,
             "dim_mismatches": self._dim_mismatches,
+            "warmup_loaded": self._warmup_loaded,
+            "warmup_skipped": self._warmup_skipped,
         }
+
+    async def warmup(self, n: int | None = None) -> dict[str, int]:
+        """§17.138 — Pre-populate the L1 LRU from L2 (Redis) at startup.
+
+        SCANs for keys matching the current ``{model_id}:d{dim}`` prefix
+        only — stale-model keys from a prior embedder identity (see
+        §17.135) are ignored. Up to ``n`` keys (default
+        ``settings.embedding_cache_warmup_n``, hard-capped at
+        ``embedding_cache_memory_size``) are fetched in a single MGET,
+        validated, and inserted into ``_memory``.
+
+        Fail-soft: any Redis error logs and returns whatever was loaded
+        so far. Startup is never blocked by warmup failure.
+
+        Returns ``{"loaded": int, "skipped": int, "scanned": int}``.
+        ``skipped`` counts dim-mismatch / decode failures encountered
+        during MGET — those keys are deleted server-side so they don't
+        re-appear on the next boot.
+        """
+        if n is None:
+            n = settings.embedding_cache_warmup_n
+        if n <= 0:
+            return {"loaded": 0, "skipped": 0, "scanned": 0}
+        cap = settings.embedding_cache_memory_size
+        if cap <= 0:
+            return {"loaded": 0, "skipped": 0, "scanned": 0}
+        budget = min(n, cap)
+
+        pattern = f"{_KEY_PREFIX}:{self.model_id}:d{self.dim}:*"
+        try:
+            r = await self._get_redis()
+        except Exception as e:
+            logger.warning("embedding_cache_warmup_redis_init_failed: err=%s", e)
+            return {"loaded": 0, "skipped": 0, "scanned": 0}
+
+        keys: list[bytes] = []
+        try:
+            async for k in r.scan_iter(match=pattern, count=1000):
+                keys.append(k)
+                if len(keys) >= budget:
+                    break
+        except Exception as e:
+            logger.warning("embedding_cache_warmup_scan_failed: err=%s", e)
+            return {"loaded": 0, "skipped": 0, "scanned": 0}
+        scanned = len(keys)
+        if scanned == 0:
+            return {"loaded": 0, "skipped": 0, "scanned": 0}
+
+        try:
+            values = await r.mget(keys)
+        except Exception as e:
+            logger.warning("embedding_cache_warmup_mget_failed: err=%s", e)
+            return {"loaded": 0, "skipped": 0, "scanned": scanned}
+
+        loaded = 0
+        stale: list[bytes] = []
+        for key, blob in zip(keys, values):
+            if not blob:
+                # Key expired between SCAN and MGET. Not an error; not loaded.
+                continue
+            try:
+                key_str = key.decode("utf-8")
+            except Exception:
+                continue
+            emb = self._decode_validated(blob, key_str)
+            if emb is None:
+                stale.append(key)
+                continue
+            self._memory[key_str] = emb
+            self._evict_memory()
+            loaded += 1
+
+        # Drop dim-mismatched / corrupt keys so the next boot doesn't see
+        # them again. Best-effort; a failure here doesn't change what's
+        # been loaded into L1.
+        if stale:
+            try:
+                await r.delete(*stale)
+            except Exception as e:
+                logger.debug("embedding_cache_warmup_stale_delete_failed: err=%s", e)
+
+        self._warmup_loaded += loaded
+        self._warmup_skipped += len(stale)
+        logger.info(
+            "embedding_cache_warmup: scanned=%d loaded=%d skipped=%d pattern=%s",
+            scanned, loaded, len(stale), pattern,
+        )
+        return {"loaded": loaded, "skipped": len(stale), "scanned": scanned}
 
     async def close(self) -> None:
         if self._redis:

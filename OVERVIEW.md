@@ -5306,6 +5306,58 @@ $ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
 - The `_execute_research_job` `finally` block still only finalizes `research_sessions` rows on `timed_out=True`. A drain-cancelled job leaves the row in `running` for the reaper to catch. That's the next gap — extending the `finally` to handle `CancelledError` independently of timeout — and is its own ticket.
 - The static-code lifespan-ordering test will fail if anyone reorders the cleanup steps so `engine.dispose()` precedes `shutdown_scheduler`. Don't suppress that test on flake; the order is load-bearing.
 
+### 17.138 Embedding-cache L1 lifespan warmup from L2 (Redis) (2026-05-12)
+
+Closes the orchestration-checklist gap: "`embedding_cache` warmup on lifespan." The two-tier cache (§9.25) already persists across restarts at L2 — Redis-backed, TTL = 30 d default — but L1 starts empty on every boot. Until L1 fills via live traffic the cache pays a Redis round-trip (~1 ms each) on every query. For the first few minutes of post-restart traffic that's a measurable retrieval-latency tax that vanishes once L1 is hot.
+
+§17.138 adds `EmbeddingCache.warmup(n=...)` that, at lifespan startup, SCANs up to N keys matching the **current** `{model_id}:d{dim}` prefix from L2, MGETs them in one batch, validates each, and inserts them into L1. The hook is opt-in (`embedding_cache_warmup_n=0` default disables) and fail-soft — every Redis error path returns whatever was loaded so far without blocking startup.
+
+**Scope to current identity.** The SCAN MATCH is `embedv3:{current_model_id}:d{current_dim}:*`, not `embedv3:*`. Two reasons:
+
+1. **Don't warm dead keys.** A §17.135 drift event leaves old-model keys in L2 (their TTLs decay naturally). Without scoping, warmup would happily load them into L1, occupying budget the operator actually wants for the new model.
+2. **Dim correctness.** The dim segment in the key already protects against cross-dim contamination (§9.25's design), but explicit pattern scoping makes the budget calculation correct: 100 keys budgeted, 100 keys of THE CURRENT MODEL loaded, not a mix.
+
+**Order of operations in lifespan.** Warmup must run AFTER the §17.135 embedder-drift check. The drift check writes the configured model id to `cache_metadata.active_embedder_id`; warmup reads the same configured value via `settings.model_embedder_id`. If a drift was just detected, the operator's next action is likely `scripts/reindex.py` — warming L1 with the (now-correct) post-reindex model's keys is the desired behavior, and the SCAN's pattern scoping means we won't pollute it with pre-reindex keys.
+
+**Conservative caps.** `embedding_cache_warmup_n` is hard-capped at `embedding_cache_memory_size` regardless of the configured value — warming more than the LRU can hold would just thrash. The default `embedding_cache_memory_size` is 10_000; even with `warmup_n=100_000` (the max bound) only 10_000 would actually load. The SCAN breaks early once the budget is reached, so we never pay to enumerate the full keyspace.
+
+**MGET in one batch, not N gets.** The SCAN collects keys; a single MGET fetches all values. On a healthy Redis MGET of 10_000 keys runs in ~10 ms vs. ~10_000 ms for individual gets. The trade is memory: each blob is ~2 KB at 512d float32, so 10_000 keys is ~20 MB transient — fine for a one-shot warmup.
+
+**Dim-mismatched keys are deleted, not retained.** If a key in L2 decodes to the wrong dim (corruption, leftover from a swap that bypassed the §17.135 check, or a manual `redis-cli SET`), `_decode_validated` returns None. Warmup tracks these in `warmup_skipped`, counts them in the loop's "scanned but not loaded," and DELETEs them server-side so the next boot's SCAN doesn't see them again. Best-effort: a DELETE failure logs but doesn't roll back what's been loaded.
+
+**Stats split.** `EmbeddingCache.stats` gains `warmup_loaded` and `warmup_skipped` (additive: if the operator calls `warmup()` manually after the lifespan hook, those numbers accumulate). The pre-existing `dim_mismatches` counter is reserved for runtime decode failures via `get`; `warmup_skipped` is reserved for the one-shot SCAN-and-validate path so the two pressure signals stay distinct.
+
+**Files.**
+
+- `app/utils/embedding_cache.py` — added `_warmup_loaded` + `_warmup_skipped` counters to `__init__`, exposed them in `stats`, and added the `async warmup(n=None)` method (~90 lines). The implementation reuses `_decode_validated` + `_evict_memory` so the LRU eviction policy applies during warmup exactly as it would for live puts.
+- `app/config.py` — `embedding_cache_warmup_n: int = Field(default=0, ge=0, le=100_000)` placed next to the existing `embedding_cache_*` block.
+- `app/main.py:lifespan` — calls `get_cache().warmup()` after the §17.135 drift check, guarded by `if settings.embedding_cache_warmup_n > 0`. Wrapped in try/except logging `embedding_cache_warmup_hook_failed`.
+- `tests/test_embedding_cache_warmup.py` (new, 12 cases). Disabled by knob=0; disabled by memory_size=0; empty Redis; happy 5-key load; cap respects memory_size with early SCAN break; dim-mismatched entries skipped + deleted; MGET-missing values (TTL race) silently dropped; SCAN failure returns 0 + logs; MGET failure returns scanned=N + loaded=0; stale DELETE failure doesn't roll back loaded count; SCAN pattern is scoped to current model+dim; stats surface warmup_loaded + warmup_skipped.
+- `tests/conftest.py` — gates the new test out of CI smoke (mirrors the existing `test_embedding_cache.py` precedent — heavy embedding_cache import chain).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_embedding_cache_warmup.py --timeout=30 -v
+12 passed in 1.12s
+
+$ docker exec scaffold-orchestrator pytest tests/test_embedding_cache.py tests/test_main.py --timeout=30 -q
+28 passed in 4.98s   # adjacent regression check, no warnings
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+3 failed, 1884 passed, 3 skipped in 789.43s (0:13:09)
+```
+
++12 vs the §17.137 baseline (`1872 passed`) — all from `test_embedding_cache_warmup.py`. Same 3 pre-existing `test_retrieval_golden` failures. Existing `test_embedding_cache.py` ran clean against the new counters in `stats`, so the warmup-loaded / warmup-skipped additions preserved every previously-tested contract.
+
+**Operator notes.**
+
+- To enable: `SCAFFOLD_EMBEDDING_CACHE_WARMUP_N=5000` in `.env` (pick a value ≤ `embedding_cache_memory_size`), restart `scaffold-orchestrator`. The lifespan log shows `embedding_cache_warmup_done: loaded=N skipped=M scanned=K` when it runs.
+- `GET /health.checks.embedding_cache.warmup_loaded` / `warmup_skipped` exposes the one-shot warmup outcome alongside the live `hit_rate` / `evictions` stats. A high `warmup_skipped` is the operator's signal that L2 contains corrupt or stale-dim entries — usually transient (post-§17.135 drift cleanup), but worth a `redis-cli --scan --pattern 'embedv3:*'` audit if it persists.
+- The warmup runs ONCE per process lifecycle (lifespan startup). If you want to refresh L1 mid-run (e.g. after a reindex with the orchestrator still running — not the normal flow), `python -c "import asyncio; from app.utils.embedding_cache import get_cache; print(asyncio.run(get_cache().warmup(n=5000)))"`. The stats `warmup_loaded` / `warmup_skipped` accumulate across calls so you can tell apart "ran at boot" from "ran at boot + ran manually."
+- The SCAN cost is bounded: for an L2 with 1M total keys but only 10k matching the current model, the budget+early-break still completes in tens of milliseconds. On the operator's reference T480 (CPU-only, Redis 7.4 local) a 10k-key warmup costs ~50 ms wall time — invisible against the rest of lifespan startup (Milvus connect ~200 ms, reranker prewarm ~13 s).
+- Pairing with §17.132 (embedding-cache pressure alert): a healthy steady-state is `evictions=0 + hit_rate>=0.5`. If you enable warmup AND see the pressure alert fire shortly after restart, the warmup loaded the keys but live traffic is still evicting them — `embedding_cache_memory_size` is the bottleneck, not warmup.
+
 ---
 
 ## Phase 7 wrap — deep-search rollout complete
