@@ -120,7 +120,29 @@ def _register_observability_jobs() -> None:
 
 
 async def shutdown_scheduler() -> None:
-    """Graceful shutdown with bounded wait (#155)."""
+    """Graceful shutdown with an explicit async drain of in-flight jobs.
+
+    §17.137 — APScheduler 3.10's ``AsyncIOExecutor.shutdown(wait=True)``
+    is documented as not honoring wait:
+
+        # There is no way to honor wait=True without converting this
+        # method into a coroutine method
+        for f in self._pending_futures:
+            if not f.done():
+                f.cancel()
+
+    So calling ``sched.shutdown(wait=True)`` would CANCEL every
+    ``_execute_research_job`` mid-flight, leaving its ``research_sessions``
+    row stranded in ``running``. We bypass that by collecting each
+    executor's pending futures ourselves and awaiting them with
+    ``asyncio.wait_for`` (bounded by ``settings.scheduler_shutdown_timeout``).
+    Only after the drain completes — or its timeout fires + we cancel
+    explicitly — do we call ``sched.shutdown(wait=False)`` to tear down
+    the scheduler bookkeeping.
+
+    The singleton guard is flipped to None FIRST so a re-entrant caller
+    (e.g. a second SIGTERM) sees a no-op rather than racing the drain.
+    """
     global _scheduler
     if _scheduler is None:
         return
@@ -128,25 +150,70 @@ async def shutdown_scheduler() -> None:
     sched = _scheduler
     _scheduler = None  # flip the guard first so re-entrant callers see None
 
-    # APScheduler's shutdown(wait=True) is blocking; run in executor
-    # and bound it with asyncio.wait_for.
-    loop = asyncio.get_running_loop()
+    # Pause so no NEW jobs fire while we drain — the cron tick may still
+    # try to dispatch during shutdown without this.
     try:
-        await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: sched.shutdown(wait=True)),
-            timeout=settings.scheduler_shutdown_timeout,
-        )
-        logger.info('event="scheduler_stopped" graceful=true')
-    except asyncio.TimeoutError:
-        logger.warning(
-            'event="scheduler_stopped" graceful=false timeout=%ds — forcing',
-            settings.scheduler_shutdown_timeout,
-        )
-        # Force non-waiting shutdown; in-flight jobs are abandoned.
+        sched.pause()
+    except Exception as exc:
+        logger.debug("scheduler_pause_failed: err=%s", exc)
+
+    # Snapshot pending async futures across every executor. We list()
+    # the set because the executor's done-callbacks mutate it as tasks
+    # complete during our drain.
+    pending: list = []
+    for executor in getattr(sched, "_executors", {}).values():
+        futs = getattr(executor, "_pending_futures", None)
+        if not futs:
+            continue
+        pending.extend(f for f in list(futs) if not f.done())
+
+    drained_graceful = True
+    if pending:
         try:
-            sched.shutdown(wait=False)
-        except Exception:
-            logger.debug("scheduler_force_shutdown_failed", exc_info=True)
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True),
+                timeout=settings.scheduler_shutdown_timeout,
+            )
+            logger.info(
+                'event="scheduler_drained" pending=%d', len(pending),
+            )
+        except asyncio.TimeoutError:
+            drained_graceful = False
+            logger.warning(
+                'event="scheduler_drain_timeout" pending=%d timeout=%ds — cancelling',
+                len(pending), settings.scheduler_shutdown_timeout,
+            )
+            for f in pending:
+                if not f.done():
+                    f.cancel()
+            # Give cancelled tasks a brief moment to run their finally blocks.
+            # 2 s is enough for any reasonable cleanup; we don't want to
+            # extend the total shutdown budget materially past the
+            # configured timeout.
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    'event="scheduler_drain_cancel_unfinished" pending=%d',
+                    sum(1 for f in pending if not f.done()),
+                )
+
+    # APScheduler bookkeeping. wait=False is now safe because we already
+    # drained (or cancelled) the asyncio tasks ourselves; AsyncIOExecutor's
+    # shutdown is a no-op since _pending_futures is empty.
+    try:
+        sched.shutdown(wait=False)
+    except Exception as exc:
+        logger.debug("scheduler_shutdown_failed: err=%s", exc)
+
+    logger.info(
+        'event="scheduler_stopped" graceful=%s pending=%d',
+        "true" if drained_graceful else "false",
+        len(pending),
+    )
 
 
 async def _rehydrate() -> None:

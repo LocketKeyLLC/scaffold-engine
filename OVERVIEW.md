@@ -5240,6 +5240,72 @@ $ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
 - The integration tests run against the real `scaffold-postgres` container. They're already gated out of CI smoke (the `tests/integration/` directory has its own fixtures requiring a live DB) but run under `make test` in the dev image. CI parity tooling (`make ci-smoke`) won't pick these up — that's by design.
 - `_get_next_node` is the single point of truth for "claim the next node." Don't bypass it in production code paths — any code that touches `dag_nodes.status = 'running'` outside the orchestrator's lifecycle invalidates §17.136's invariants.
 
+### 17.137 Scheduler graceful-shutdown drain — actually draining now (2026-05-12)
+
+Closes the orchestration-checklist gap: "Scheduler shutdown ordering." Pre-§17.137 `shutdown_scheduler` looked correct on paper — it called `sched.shutdown(wait=True)` inside `asyncio.wait_for(run_in_executor(...), timeout=settings.scheduler_shutdown_timeout)`. Reading the actual APScheduler 3.10 source surfaced that this was a lie.
+
+**The upstream "lie."** `apscheduler/executors/asyncio.py::AsyncIOExecutor.shutdown`:
+
+```python
+def shutdown(self, wait=True):
+    # There is no way to honor wait=True without converting this method
+    # into a coroutine method
+    for f in self._pending_futures:
+        if not f.done():
+            f.cancel()
+    self._pending_futures.clear()
+```
+
+So `wait=True` on an `AsyncIOScheduler` doesn't drain async tasks — it **cancels** them. Every `_execute_research_job` in flight at shutdown hit `CancelledError` mid-`run_research`. The job's `finally` block only finalizes the `research_sessions` row when `timed_out=True`; on `CancelledError` the row stays `running` and waits ~30 min for the reaper. The visible symptom (occasional stranded research sessions after lifecycle restarts) had been blamed on client disconnects since §17.85 — this entry corrects that attribution and ships the actual fix.
+
+**The fix.** Replace `sched.shutdown(wait=True)` with an explicit async drain that we own:
+
+1. Pause the scheduler so no NEW jobs start during shutdown.
+2. Snapshot the union of `_pending_futures` across every executor (a list, because the executor's done-callbacks mutate the set as tasks complete during our drain).
+3. `await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=settings.scheduler_shutdown_timeout)` — this is the actual drain, run on the event loop where the asyncio tasks live.
+4. On timeout, cancel the remaining tasks explicitly and give them a 2 s grace window to run their `finally` blocks.
+5. Call `sched.shutdown(wait=False)` for APScheduler's bookkeeping (job-store close, executor teardown). `wait=False` is correct now: we already drained the asyncio tasks ourselves; passing `wait=True` would re-fire the same cancellation logic on a now-empty pending set.
+
+**Singleton-flip ordering preserved.** `_scheduler = None` still happens BEFORE any blocking call so a re-entrant caller (concurrent SIGTERM, second lifespan signal) sees the documented no-op branch instead of racing the drain. The `test_shutdown_singleton_flipped_before_drain` test pins this.
+
+**What "graceful=true" means now.** The shutdown log line reports `graceful=true pending=N` when the gather completed within the timeout, `graceful=false pending=N` otherwise. A `graceful=false` line is the operator's signal that an in-flight scheduled job exceeded `scheduler_shutdown_timeout` and got cancelled — usually means raising the timeout or investigating why the job is slow. The pre-§17.137 logs always said `graceful=true` (because `sched.shutdown(wait=True)` always returned cleanly — it just lied about what it did).
+
+**Lifespan ordering is unchanged but now verified.** `app/main.py:lifespan` already called `shutdown_scheduler` before `engine.dispose()`. The new `test_lifespan_calls_shutdown_scheduler_before_engine_dispose` is a static-code guard so a future refactor doesn't reverse the order and produce "cannot operate on a closed connection" tracebacks during in-flight DB writes from the drain's finally blocks.
+
+**Files.**
+
+- `app/scheduler.py::shutdown_scheduler` — rewritten ~75 lines. Pauses + snapshots `_pending_futures` + drains via `asyncio.gather` + falls back to cancel-with-2s-grace on timeout + final `sched.shutdown(wait=False)`. Module docstring at the function preserved + extended.
+- `tests/test_scheduler_shutdown.py` (new, 7 cases). Integration with real `AsyncIOScheduler + MemoryJobStore`: drain awaits real in-flight task, drain timeout cancels remaining + logs `scheduler_drain_timeout`, empty pending-set completes instantly. Behavioral with mocked scheduler: singleton flipped before drain, `sched.shutdown(wait=False)` is the underlying call (not wait=True), idempotent re-call. Static: lifespan ordering pin.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_scheduler_shutdown.py --timeout=60 -v
+7 passed in 2.24s
+
+$ for i in 1 2 3 4 5; do docker exec scaffold-orchestrator pytest tests/test_scheduler_shutdown.py --timeout=60 -q | tail -2 | head -1; done
+.......                                                                  [100%]
+.......                                                                  [100%]
+.......                                                                  [100%]
+.......                                                                  [100%]
+.......                                                                  [100%]
+
+$ docker exec scaffold-orchestrator pytest tests/test_scheduler.py --timeout=30 -q
+14 passed in 4.26s   # pre-existing scheduler suite, no regressions
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+3 failed, 1872 passed, 3 skipped in 770.48s (0:12:50)
+```
+
++7 vs the §17.136 baseline (`1865 passed`) — all from `test_scheduler_shutdown.py`. Same 3 pre-existing `test_retrieval_golden` failures. The pre-existing `test_scheduler.py` (14 cases) ran clean against the new shutdown body, so the rewrite preserved every previously-tested contract.
+
+**Operator notes.**
+
+- Default `scheduler_shutdown_timeout` is 30 s. Most `_execute_research_job` runs need much longer (research is 10–25 min on CPU). The cap is intentional: it bounds total lifespan-shutdown time so a stuck job doesn't block container restart indefinitely. Raise via `SCAFFOLD_SCHEDULER_SHUTDOWN_TIMEOUT=300` if you have schedules that should be allowed to finish.
+- Watching for the drain-timeout signal: `docker logs scaffold-orchestrator | grep -E "scheduler_drain_timeout|scheduler_stopped"`. A clean shutdown is `graceful=true pending=0`; a drained shutdown is `graceful=true pending=N` (N tasks completed within the timeout); a stuck shutdown is `scheduler_drain_timeout pending=M` followed by `graceful=false pending=M`.
+- The `_execute_research_job` `finally` block still only finalizes `research_sessions` rows on `timed_out=True`. A drain-cancelled job leaves the row in `running` for the reaper to catch. That's the next gap — extending the `finally` to handle `CancelledError` independently of timeout — and is its own ticket.
+- The static-code lifespan-ordering test will fail if anyone reorders the cleanup steps so `engine.dispose()` precedes `shutdown_scheduler`. Don't suppress that test on flake; the order is load-bearing.
+
 ---
 
 ## Phase 7 wrap — deep-search rollout complete
