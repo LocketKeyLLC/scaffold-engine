@@ -4998,6 +4998,50 @@ $ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
 - `suggested_action: "wait_or_inspect"` means the node is genuinely running (fresh `started_at`). Check `oldest_started_at`: if it lines up with an `/execute/all` you fired recently, you're racing yourself — the execution_global_concurrency=1 cap is doing its job.
 - The `running_nodes` array is empty when the job's `status='running'` but no `dag_nodes` rows match. That's the rare "guard fired on stale parent row but no child nodes are stuck" case — usually means a fresh `/execute/all` has the job locked between Session 1 and Session 3. Wait 5 s and retry.
 
+### 17.132 Embedding-cache pressure alert (2026-05-12)
+
+Closes the orchestration-checklist gap: "Embedding cache memory eviction metric." The cache's `stats` already exposed an `evictions` counter (§17.X `EmbeddingCache._evict_memory`), but nothing watched it. A slowly-undersized cache produced no operator signal — `hit_rate` drifts down, evictions climb, retrieval latency creeps up, no alert. §17.132 adds the watcher to the existing §17.X (X.26) threshold-eval tick so the operator sees a `cache.embedding_pressure` row in `system_alerts` as soon as the symptom appears.
+
+**Two-condition firing.** The naive design (alert on `evictions > N`) false-positives during cold start (cache fills past memory_size on legitimate working-set growth) and during a one-off ingest burst. The naive alternative (alert on `hit_rate < floor`) false-positives during the first minute after restart (cache is empty, all lookups miss). §17.132 fires only when BOTH conditions hold over a tick interval:
+
+1. `delta_evictions ≥ alert_embedding_evictions_threshold` (default 500 per 5-min tick) — proves the cache is actively churning, not just filling.
+2. `interval_hit_rate < alert_embedding_hit_rate_floor` (default 0.50) — proves the churn is hurting, not benign (a hot, larger-than-memory working set still earns its keep at 80% hit-rate even with constant evictions).
+
+A baseline tick on process start records the current monotonic counters and emits nothing. Every subsequent tick subtracts to get interval deltas. The snapshot updates every tick regardless of whether the alert fires, so a slow leak still gets caught when it eventually crosses threshold.
+
+**Alert kind + dedup.** Kind is `cache.embedding_pressure` (matches the dotted-segment naming of the other §X.26 alerts — `oncall.errors_unresolved`, `cost.window_exceeded`, `latency.p95_exceeded`). Dedup_key is the bare kind string (no window suffix, because the alert isn't window-parameterized like cost/latency are — it's an "is the cache healthy right now" signal). A sustained breach therefore fires once per `alert_cooldown_seconds` (default 1 h).
+
+**Why a separate helper, not inline.** The existing three checks in `evaluate_thresholds` are all DB-driven — they share the same eval window + the same connection. The cache check is stateful (needs the prior-tick snapshot) and orthogonal (no DB query for its primary metric). Splitting it out keeps the inline path readable and gives the test seam (`_reset_embedding_snapshot()`) a clean place to live.
+
+**Files.**
+
+- `app/observability/thresholds.py` — added `_prev_embedding_snapshot` module-level dict + `_reset_embedding_snapshot()` test seam + `_check_embedding_cache_pressure(db, summary, window_min)` async helper. `evaluate_thresholds` calls the helper after the p95-latency block and folds its return into `summary["embedding_cache"]`.
+- `app/config.py` — two new knobs: `alert_embedding_evictions_threshold: int = 500` (0..1M; 0 disables the check entirely) and `alert_embedding_hit_rate_floor: float = 0.5` (0..1). Placed in the existing alert-eval block.
+- `tests/test_threshold_embedding_cache.py` (new, 7 cases). First-tick baseline silent, both-conditions-met fires + audit fields correct, evictions-below-threshold quiet, hit-rate-above-floor quiet, threshold=0 disables, alert payload carries dedup_key + delta fields, snapshot advances on every tick (including quiet ones).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_threshold_embedding_cache.py --timeout=30 -v
+7 passed in 1.38s
+
+$ docker exec scaffold-orchestrator pytest tests/test_observability_thresholds.py tests/test_observability_alerts.py tests/test_observability_metrics.py --timeout=30 -q
+19 passed in 4.01s   # adjacent observability paths, all green
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+4 failed, 1816 passed, 3 skipped in 741.85s (0:12:21)
+```
+
++7 vs the §17.131 baseline (`1809 passed`) — all from `test_threshold_embedding_cache.py`. Same 4 pre-existing `test_retrieval_golden` failures. Same 3 skips.
+
+**Operator notes.**
+
+- The alert message is self-describing: `embedding cache: <N> evictions / interval, hit_rate=<X>% below floor <Y>% — consider raising embedding_cache_memory_size (currently <Z>)`. Read it back via `GET /observability/alerts?kind=cache.embedding_pressure`.
+- To raise the cap: set `SCAFFOLD_EMBEDDING_CACHE_MEMORY_SIZE` higher in `.env` (current default 10_000), restart the orchestrator. Per-entry ~2 KB at 512d float32, so 10k entries ≈ 20 MB resident.
+- To silence the alert without raising the cap (e.g., during a known-ingest-heavy operator session): set `SCAFFOLD_ALERT_EMBEDDING_EVICTIONS_THRESHOLD=0`. The helper short-circuits at the top with `{"disabled": True}` — no Redis traffic, no baseline drift.
+- The check uses `EmbeddingCache.stats["hits"]` (sum of L1 + L2). Separate L1/L2 trends are still visible in `GET /health.checks.embedding_cache` if you need to disambiguate "Redis is slow" from "the cache is too small."
+- Pairing with the §17.117 fetch-cache stats: if BOTH caches are under pressure simultaneously, the underlying signal is "fresh ingest from /research is faster than retrieval can consume it" — a temporary state, not a sizing bug.
+
 ---
 
 ## Phase 7 wrap — deep-search rollout complete

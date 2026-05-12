@@ -32,6 +32,23 @@ from app.observability import metrics as _metrics
 logger = logging.getLogger("scaffold.thresholds")
 
 
+# ── Embedding-cache pressure: prior-tick snapshot ───────────────────
+#
+# §17.132 — the embedding cache's hit / miss / eviction counters are
+# monotonic over the process lifetime, so a single read tells us
+# nothing about *recent* pressure. This dict holds the previous tick's
+# values; each tick subtracts to get the interval rate. Reset on
+# orchestrator restart (the cache itself resets too, so the dance is
+# consistent). The first tick after restart writes the baseline + emits
+# nothing.
+_prev_embedding_snapshot: dict[str, int] = {}
+
+
+def _reset_embedding_snapshot() -> None:
+    """Test seam: clear the baseline so the next tick re-establishes it."""
+    _prev_embedding_snapshot.clear()
+
+
 async def refresh_gauges(db) -> None:
     """Read snapshot counts and push them to Prometheus gauges.
 
@@ -170,7 +187,109 @@ async def evaluate_thresholds(db) -> dict[str, Any]:
                 )
                 summary["fired"].append((f"latency.p95_exceeded:{provider}:{model}", result))
     summary["p95_breaches"] = p95_breaches
+
+    # 4. Embedding-cache pressure. Fires only when BOTH:
+    #    (a) interval evictions ≥ alert_embedding_evictions_threshold
+    #    (b) interval hit-rate < alert_embedding_hit_rate_floor
+    # so cold-start (low hit rate, zero evictions) and steady-state
+    # (high hit rate, occasional evictions) both stay silent.
+    cache_summary = await _check_embedding_cache_pressure(
+        db=db, summary=summary, window_min=window,
+    )
+    if cache_summary is not None:
+        summary["embedding_cache"] = cache_summary
+
     return summary
+
+
+async def _check_embedding_cache_pressure(
+    *, db, summary: dict[str, Any], window_min: int,
+) -> dict[str, Any] | None:
+    """Compute interval cache deltas + maybe emit the pressure alert.
+
+    Returns a small audit dict that the caller folds into the tick
+    summary, or None when the check is disabled by configuration. Never
+    raises — cache stats are best-effort and must never break the tick.
+    """
+    evict_threshold = settings.alert_embedding_evictions_threshold
+    hit_floor = settings.alert_embedding_hit_rate_floor
+    if evict_threshold <= 0:
+        # Operator disabled the alert. Don't even compute deltas — also
+        # do NOT update the snapshot so re-enabling later doesn't carry
+        # a stale baseline forward.
+        return {"disabled": True}
+
+    try:
+        from app.utils.embedding_cache import get_cache
+        stats = get_cache().stats
+    except Exception as exc:
+        logger.debug("threshold_embedding_stats_failed: err=%s", exc)
+        return None
+
+    cur = {
+        "hits": int(stats.get("hits") or 0),
+        "misses": int(stats.get("misses") or 0),
+        "evictions": int(stats.get("evictions") or 0),
+    }
+
+    if not _prev_embedding_snapshot:
+        # First tick of this process. Establish baseline + skip emit.
+        _prev_embedding_snapshot.update(cur)
+        return {"baseline_established": True, **cur}
+
+    d_hits = max(0, cur["hits"] - _prev_embedding_snapshot.get("hits", 0))
+    d_misses = max(0, cur["misses"] - _prev_embedding_snapshot.get("misses", 0))
+    d_evictions = max(0, cur["evictions"] - _prev_embedding_snapshot.get("evictions", 0))
+    d_total = d_hits + d_misses
+    interval_hit_rate = (d_hits / d_total) if d_total > 0 else None
+
+    audit = {
+        "delta_hits": d_hits,
+        "delta_misses": d_misses,
+        "delta_evictions": d_evictions,
+        "interval_hit_rate": (
+            round(interval_hit_rate, 4) if interval_hit_rate is not None else None
+        ),
+        "memory_size": int(stats.get("memory_size") or 0),
+        "fired": False,
+    }
+
+    pressure = (
+        d_evictions >= evict_threshold
+        and interval_hit_rate is not None
+        and interval_hit_rate < hit_floor
+    )
+    if pressure:
+        result = await _alerts.emit(
+            kind="cache.embedding_pressure",
+            severity="warning",
+            message=(
+                f"embedding cache: {d_evictions} evictions / interval, "
+                f"hit_rate={interval_hit_rate:.2%} below floor "
+                f"{hit_floor:.0%} — consider raising "
+                f"embedding_cache_memory_size (currently "
+                f"{settings.embedding_cache_memory_size})"
+            ),
+            payload={
+                "delta_hits": d_hits, "delta_misses": d_misses,
+                "delta_evictions": d_evictions,
+                "interval_hit_rate": round(interval_hit_rate, 4),
+                "evictions_threshold": evict_threshold,
+                "hit_rate_floor": hit_floor,
+                "memory_size_current": int(stats.get("memory_size") or 0),
+                "memory_size_setting": settings.embedding_cache_memory_size,
+                "window_minutes": window_min,
+            },
+            dedup_key="cache.embedding_pressure",
+            db=db,
+        )
+        audit["fired"] = True
+        summary["fired"].append(("cache.embedding_pressure", result))
+
+    # Always update snapshot after eval so the next tick has the latest
+    # baseline regardless of whether the alert fired.
+    _prev_embedding_snapshot.update(cur)
+    return audit
 
 
 async def tick() -> None:

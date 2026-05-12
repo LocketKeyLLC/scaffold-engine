@@ -374,6 +374,12 @@ class Settings(BaseSettings):
     alert_cost_window_usd_threshold: float = Field(default=5.0, ge=0.0, le=100000.0)
     alert_p95_latency_ms_threshold: int = Field(default=120000, ge=0, le=3600000)
 
+    # Embedding-cache pressure alert. Fires only when BOTH conditions hold
+    # over a tick interval, so cold-start churn (high miss rate, zero
+    # evictions) does not false-positive. Set either to 0 to disable.
+    alert_embedding_evictions_threshold: int = Field(default=500, ge=0, le=1_000_000)
+    alert_embedding_hit_rate_floor: float = Field(default=0.5, ge=0.0, le=1.0)
+
     calibration_watchdog_enabled: bool = True
     calibration_watchdog_interval_seconds: int = Field(default=900, ge=60, le=86400)
     calibration_grace_minutes: int = Field(default=120, ge=10, le=1440)
