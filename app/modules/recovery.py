@@ -266,6 +266,187 @@ NEXT_ACTIONS: dict[str, list[dict[str, Any]]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Reaper-driven outcomes (§17.134)
+# ---------------------------------------------------------------------------
+#
+# Reaper-killed jobs land in ``failed`` or ``cancelled`` with one of a small
+# set of error_summary strings — see ``app/modules/cleanup.py``. The base
+# NEXT_ACTIONS registry treats those statuses generically; this layer lets
+# us prepend more-specific guidance (e.g. "use POST /jobs/{id}/resume"
+# instead of "rerun /idea from scratch") when the error_summary matches a
+# known reaper pattern.
+#
+# Substring matching keeps the patterns robust to the dynamic-N strings the
+# reaper emits ("Job timed out after 30 minutes of inactivity" varies with
+# the configured threshold). Order doesn't matter — each pattern's prefix
+# is unambiguous.
+
+_REAPER_REASON_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("Awaiting confirmation gate timeout", "reaper_awaiting_confirmation"),
+    ("Stale planning state",                "reaper_planning_stale"),
+    ("Assist session abandoned",            "reaper_assist_abandoned"),
+    ("Long-phase job timed out",            "reaper_long_phase_timeout"),
+    ("Research session timed out",          "reaper_research_session_timeout"),
+    ("Pause expired before user reply",     "reaper_paused_research_expired"),
+    ("Job timed out after",                 "reaper_execution_timeout"),
+    ("client_disconnect",                   "phase2_client_disconnect"),
+)
+
+
+def classify_error_summary(error_summary: str | None) -> str | None:
+    """Map a job's ``error_summary`` to a ``reason_kind`` tag, or None.
+
+    Recognized patterns mirror the strings emitted by
+    ``app/modules/cleanup.py`` (each reap-stage SQL block sets a distinct
+    error_summary). Unknown summaries — including user-supplied ones
+    from explicit failure paths — return None so the caller falls back
+    to the generic NEXT_ACTIONS entries for the job's status.
+    """
+    if not error_summary:
+        return None
+    for substring, kind in _REAPER_REASON_PATTERNS:
+        if substring in error_summary:
+            return kind
+    return None
+
+
+# Reason-specific actions prepended to the base NEXT_ACTIONS list when
+# classify_error_summary returns a hit. Each entry carries a `reason_kind`
+# annotation so renderers can flag "killed by reaper" without re-running
+# the classifier.
+
+REAPER_REASON_ACTIONS: dict[str, list[dict[str, Any]]] = {
+    # Reaped from awaiting_confirmation timeout — the refined brief is
+    # intact but the user never sent /confirm. Resume picks up at DAG
+    # generation; execute_all_nodes auto-generates the DAG.
+    "reaper_awaiting_confirmation": [
+        {
+            "action": "resume",
+            "command": None,
+            "endpoint": "/jobs/{job_id}/resume",
+            "method": "POST",
+            "description": (
+                "Confirmation timed out before you replied. Resume re-uses the "
+                "refined brief and runs the rest of the pipeline."
+            ),
+            "node_specific": False,
+        },
+    ],
+    # Planning sat past threshold without progress. Same recovery as
+    # awaiting_confirmation: resume into execute_all_nodes which will
+    # auto-generate the DAG.
+    "reaper_planning_stale": [
+        {
+            "action": "resume",
+            "command": None,
+            "endpoint": "/jobs/{job_id}/resume",
+            "method": "POST",
+            "description": (
+                "Planning stalled past threshold and was cancelled. Resume "
+                "re-runs DAG generation + execution."
+            ),
+            "node_specific": False,
+        },
+    ],
+    # Assist session abandoned (idle > assist_idle_threshold_days). The
+    # owning job is `cancelled`; the assist_sessions row is `abandoned`.
+    # Resume would skip Assist Mode — usually not what the user wants,
+    # so the hint is to start fresh.
+    "reaper_assist_abandoned": [
+        {
+            "action": "restart_assist",
+            "command": "/idea <re-state the original idea>",
+            "endpoint": "/ideate",
+            "method": "POST",
+            "description": (
+                "Assist session abandoned past idle threshold. Start a fresh "
+                "/ideate, then /assist start on the new job."
+            ),
+            "node_specific": False,
+        },
+    ],
+    # Job was running/executing and the reaper killed it. The stuck
+    # node is the right target for /exec/retry; downstream cascades
+    # back to pending automatically.
+    "reaper_execution_timeout": [
+        {
+            "action": "retry_node",
+            "command": "/exec retry {job_id} {node_key}",
+            "endpoint": "/exec/retry",
+            "method": "POST",
+            "description": (
+                "Reaper killed a node stuck past the inactivity threshold. "
+                "Retry the offending node — done nodes are preserved."
+            ),
+            "node_specific": True,
+        },
+    ],
+    # Long-phase reap — researching / refining / planning past
+    # long_phase_stale_minutes. Job is `failed`; if a refined_brief
+    # exists, /jobs/resume is wrong (status != cancelled). User can
+    # delete and /ideate again.
+    "reaper_long_phase_timeout": [
+        {
+            "action": "rerun",
+            "command": "/idea <re-state the original idea>",
+            "endpoint": "/ideate",
+            "method": "POST",
+            "description": (
+                "Long-phase activity timed out. Start a fresh /ideate — "
+                "any ingested KB entries from the prior run are re-usable."
+            ),
+            "node_specific": False,
+        },
+    ],
+    # Research session reaped (separate from the parent job's status).
+    # The research_session row is failed; the job carries no remediation
+    # action of its own. Hint user toward the research surface.
+    "reaper_research_session_timeout": [
+        {
+            "action": "restart_research",
+            "command": "/research <topic>",
+            "endpoint": "/research",
+            "method": "POST",
+            "description": (
+                "Research session timed out before completion. Re-fire "
+                "/research — any partially-ingested entries are reusable."
+            ),
+            "node_specific": False,
+        },
+    ],
+    # Pause-resume timed out. User missed the window to /research/reply.
+    "reaper_paused_research_expired": [
+        {
+            "action": "restart_research",
+            "command": "/research <topic>",
+            "endpoint": "/research",
+            "method": "POST",
+            "description": (
+                "Pause expired before you replied. Re-fire /research from "
+                "the start — the prior session is unrecoverable."
+            ),
+            "node_specific": False,
+        },
+    ],
+    # Phase 2 client disconnect (Round 7 fix). Job sits in `failed` with
+    # the legacy `client_disconnect` summary. User can re-/confirm.
+    "phase2_client_disconnect": [
+        {
+            "action": "reconfirm",
+            "command": "/confirm {job_id}",
+            "endpoint": "/ideate/confirm",
+            "method": "POST",
+            "description": (
+                "Phase 2 was cut short by a client disconnect. Re-fire /confirm "
+                "to resume research + planning."
+            ),
+            "node_specific": False,
+        },
+    ],
+}
+
+
 def next_actions_for(
     status: str,
     job_id: str,
@@ -273,6 +454,7 @@ def next_actions_for(
     failed_node_key: str | None = None,
     blocked_node_key: str | None = None,
     running_node_key: str | None = None,
+    error_summary: str | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve the registry into concrete actions for one job's current state.
 
@@ -282,6 +464,15 @@ def next_actions_for(
     for in-flight skip suggestions, etc. When no node context is
     available, node-specific entries are returned with ``{node_key}``
     left in place — the caller can render the placeholder verbatim.
+
+    ``error_summary`` (§17.134): when supplied and matching a known
+    reaper / failure pattern (see ``classify_error_summary``), the
+    matching entries from ``REAPER_REASON_ACTIONS`` are PREPENDED to
+    the base status actions. Each prepended entry carries a
+    ``reason_kind`` field so renderers can flag "killed by reaper" or
+    "client disconnect" without re-running the classifier. The base
+    actions still follow, so generic remediation (delete, retry-node,
+    skip) remains discoverable as a fallback.
 
     Returns ``[]`` for unknown status values; logs a warning so an
     out-of-band status surfaces in monitoring.
@@ -296,8 +487,18 @@ def next_actions_for(
     # primary target for retry/skip; blocked next, then running).
     node_key = failed_node_key or blocked_node_key or running_node_key or "{node_key}"
 
+    # §17.134 — classify error_summary and prepend reason-specific actions.
+    prepend: list[dict[str, Any]] = []
+    reason_kind = classify_error_summary(error_summary)
+    if reason_kind is not None:
+        reason_template = REAPER_REASON_ACTIONS.get(reason_kind, [])
+        for entry in reason_template:
+            action = dict(entry)
+            action["reason_kind"] = reason_kind
+            prepend.append(action)
+
     resolved: list[dict[str, Any]] = []
-    for entry in template:
+    for entry in (*prepend, *template):
         action = dict(entry)  # copy so we don't mutate the registry
         if action.get("command"):
             action["command"] = action["command"].format(

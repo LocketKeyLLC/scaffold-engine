@@ -24,6 +24,10 @@ def _job_row(**kw):
     """
     kw.setdefault("compiled_output_synthesized", False)
     kw.setdefault("compile_synthesis_override", None)
+    # §17.134 — execution_status now SELECTs + passes error_summary into
+    # next_actions_for. Default None so pre-existing fixtures continue
+    # to exercise the generic (non-reaper) next-action paths.
+    kw.setdefault("error_summary", None)
     return SimpleNamespace(**kw)
 
 

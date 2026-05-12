@@ -30,7 +30,8 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         text(
             "SELECT id, title, status, compiled_output, "
             "       compiled_output_synthesized, "
-            "       compile_synthesis_override "
+            "       compile_synthesis_override, "
+            "       error_summary "
             "FROM jobs WHERE id = :job_id"
         ),
         {"job_id": str(job_id)}
@@ -105,6 +106,7 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         failed_node_key=failed_node,
         blocked_node_key=blocked_node,
         running_node_key=running_node,
+        error_summary=getattr(job, "error_summary", None),
     )
 
     # Sprint J.3.b — surface a lightweight cost/latency totals block.
@@ -120,6 +122,7 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         "job_id": str(job_id),
         "job_title": job.title,
         "job_status": job.status,
+        "error_summary": getattr(job, "error_summary", None),
         "compiled_output": job.compiled_output,
         "synthesized": bool(job.compiled_output_synthesized),
         "synthesis_override": job.compile_synthesis_override,

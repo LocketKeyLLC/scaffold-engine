@@ -5089,6 +5089,57 @@ $ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
 - Force a recount on demand: `await get_fetch_cache()._key_count(force=True)`. Useful from an admin console after bulk-deleting keys to skip the 30 s wait for the cache to reflect reality. (`_key_count` is internal but the singleton accessor is public; we'll expose this on a `/jobs/cleanup`-style endpoint if real demand emerges.)
 - `GET /health.checks.fetch_cache.last_count` is the most recent sample, not real-time. Refresh by waiting for the interval or by triggering any put (which consumes the cached count and may re-sample if the interval has elapsed).
 
+### 17.134 Reaper-driven `next_actions` hints (2026-05-12)
+
+Closes the orchestration-checklist gap: "Reaper-driven jobs lack `next_actions` hints." Pre-§17.134 the `NEXT_ACTIONS` registry only keyed on `status`. A job killed by the reaper (e.g. `awaiting_confirmation` past 72 h) landed in `cancelled` with `error_summary="Awaiting confirmation gate timeout (no user reply)"` — and `next_actions_for("cancelled", job_id)` told the user "rerun via fresh /idea or DELETE." Both work, but they're not the optimal recovery: §17.130's `POST /jobs/{job_id}/resume` re-uses the refined brief and runs the rest of the pipeline. §17.134 makes the orchestrator surface the optimal recovery first.
+
+**Why a layered prepend, not a new registry.** The naive design — split `NEXT_ACTIONS` into per-`(status, error_summary)` keys — would duplicate the generic remediation entries across every reaper variant and force every renderer to retain the "if not in detailed map, fall back to generic" logic. §17.134 keeps the base registry status-keyed and adds a thin `REAPER_REASON_ACTIONS` dict that gets **prepended** to the base list when the error_summary matches a known reaper pattern. Renderers don't change behavior; they just see better entries at the top.
+
+**Classification by substring.** The reaper's error_summary strings carry dynamic numbers ("Job timed out after **30** minutes") so exact-match keys would break on threshold changes. `classify_error_summary` does substring lookup against an ordered tuple of `(pattern, reason_kind)` pairs. Order is significant only for one ambiguous pair: "Long-phase job timed out after ..." contains "Job timed out after"; the long-phase pattern is listed first so the more-specific match wins. The test `test_long_phase_pattern_disambiguates_from_execution` pins this invariant.
+
+**Eight recognized reasons.** All sourced from the actual SQL in `app/modules/cleanup.py`:
+
+| reason_kind | Status | error_summary pattern | First-line action |
+|---|---|---|---|
+| `reaper_awaiting_confirmation` | `cancelled` | "Awaiting confirmation gate timeout" | `POST /jobs/{id}/resume` (re-uses refined brief) |
+| `reaper_planning_stale` | `cancelled` | "Stale planning state" | `POST /jobs/{id}/resume` (re-runs DAG generation) |
+| `reaper_assist_abandoned` | `cancelled` | "Assist session abandoned" | Fresh `/ideate` + new `/assist start` |
+| `reaper_execution_timeout` | `failed` | "Job timed out after" | `POST /exec/retry` on the stuck node |
+| `reaper_long_phase_timeout` | `failed` | "Long-phase job timed out" | Fresh `/ideate` (KB entries from prior run reusable) |
+| `reaper_research_session_timeout` | `failed` | "Research session timed out" | Fresh `/research <topic>` |
+| `reaper_paused_research_expired` | `failed` | "Pause expired before user reply" | Fresh `/research <topic>` |
+| `phase2_client_disconnect` | `failed` | "client_disconnect" | `/confirm` re-fire (Round 7 legacy fix path) |
+
+**reason_kind annotation.** Each prepended action carries a `reason_kind` field so renderers can flag "killed by reaper" in chat/CLI/SDK without re-running the classifier. Base actions don't pick up the field — it's specifically a marker for the diagnostic-first entries. The test `test_reason_kind_only_on_prepended_entries` pins this so a future refactor doesn't leak the field everywhere.
+
+**Where the wiring lands.** `execution_handler.execution_status` now SELECTs `error_summary` from the `jobs` row, passes it into `next_actions_for`, and exposes it in the JSON response. Every consumer that reads `/exec/status/{job_id}` — OWUI `_handle_results`, CLI `scaffold jobs status`, the SDK — gets the enrichment for free. Backward compat: `error_summary=None` (or omitted) preserves the prior behavior byte-for-byte; the existing test suite catches any regression.
+
+**Files.**
+
+- `app/modules/recovery.py` — added `_REAPER_REASON_PATTERNS` tuple, `classify_error_summary(error_summary) -> reason_kind | None`, `REAPER_REASON_ACTIONS` dict (8 reason kinds), and an `error_summary=None` kwarg on `next_actions_for` that prepends + annotates when classified.
+- `app/modules/execution_handler.py` — `execution_status` SELECT now includes `error_summary`; passes it to `next_actions_for`; surfaces it as `response["error_summary"]` so SDK clients can render the reason text alongside the structured actions.
+- `tests/test_recovery_reaper_hints.py` (new, 19 cases). Classifier: None/empty/unknown → None; each of 8 reaper patterns → expected reason_kind; long-phase-vs-execution disambiguation pinned; every classified reason_kind has a REAPER_REASON_ACTIONS entry (parity guard). Prepend behavior: no error_summary preserves base output exactly; unknown summary doesn't prepend; each reaper class prepends the right first-line action with correct command/endpoint substitution and reason_kind annotation; base actions still follow the prepended ones; reason_kind doesn't leak to base actions; unknown-status still returns [] regardless of error_summary.
+- `tests/test_execution_handler_module.py` — `_job_row` helper picks up `error_summary=None` default so legacy fixtures don't trip the new column.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_recovery_reaper_hints.py tests/test_recovery.py tests/test_execution_handler_module.py --timeout=30 -v
+59 passed in 3.82s
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+3 failed, 1853 passed, 3 skipped in 761.86s (0:12:41)
+```
+
++25 vs the §17.133 baseline (`1828 passed`) — 19 from `test_recovery_reaper_hints.py` plus 6 from parametrize-expansion in adjacent tests that now also exercise the new `error_summary` field. The 3 failures are still pre-existing `test_retrieval_golden` flakes (one query passed this run, the other three still fail — same live-retrieval drift documented since §17.86).
+
+**Operator notes.**
+
+- The OWUI `_handle_results` flow (chat-side `/results`) renders the first action's `description` as the primary recovery hint. Pre-§17.134 a reaped `awaiting_confirmation` job showed "Resubmit the idea — fresh /ideate is ~30 s"; post-§17.134 it shows "Confirmation timed out before you replied. Resume re-uses the refined brief and runs the rest of the pipeline." Same UX path, better suggestion.
+- SDK callers reading `Client.jobs.status(job_id)`: the response gains `error_summary` (string or null) and the `next_actions[*]` may now carry `reason_kind`. Both are additive — existing consumers ignoring unknown keys continue to work.
+- To force-correlate a reaper kill back to its cause from psql: `SELECT id, status, error_summary, updated_at FROM jobs WHERE error_summary IS NOT NULL ORDER BY updated_at DESC LIMIT 20;` — the strings match the patterns in `_REAPER_REASON_PATTERNS` for grep-friendly correlation against the reaper's log lines (`stale_jobs_reaped …`).
+- Adding a new reaper variant: edit `cleanup.py` to set the new `error_summary`, then add the `(substring, reason_kind)` tuple to `_REAPER_REASON_PATTERNS` AND a `REAPER_REASON_ACTIONS[reason_kind]` entry. The `test_every_pattern_has_a_reason_actions_entry` parity guard ensures you can't ship one without the other.
+
 ---
 
 ## Phase 7 wrap — deep-search rollout complete
