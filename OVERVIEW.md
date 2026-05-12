@@ -6039,6 +6039,78 @@ The pipeline produces an end-to-end auditable deliverable. Every numeric claim i
 
 **Next on the engineering-design checklist:** there are no more *stages* to add — the chain is complete. What remains is operator-side work the stage code can't do for itself: seeding the engineering corpus (§17.146 unblock), refining the LLM prompts for reliable ngspice 44.x SPICE emission (§17.147 unblock), and gluing the four stages into a single ``design_circuit`` job type with state transitions. That last item is also on the deferred list of every stage commit since §17.146, and is the obvious next checkpoint.
 
+### 17.149 Eng RAG corpus seeded — §17.146 integration test transitions SKIPPED → PASSED (2026-05-12)
+
+First of the three operator-side items §17.148 named: the engineering corpus was carrying only anthropic-SDK leftovers from prior /research runs, so §17.146's topology-select stage was correctly refusing to fabricate topology candidates from irrelevant content (the test SKIPPED with that diagnostic on every run). §17.149 ships ``scripts/seed_eng_topologies.py`` — 13 hand-curated filter-topology references — and runs it live to populate the ``eng`` partition. The §17.146 integration test now **PASSES** rather than skipping.
+
+**13 entries covering analog filter LPF / HPF / BPF families.** Hand-written summaries (666–810 chars each), every one with a citation back to a canonical public reference (Wikipedia or equivalent). Coverage:
+
+  * Low-pass: RC passive, RL passive, Sallen-Key 2-pole active, multiple-feedback (MFB) 2-pole, LC ladder higher-order.
+  * High-pass: CR passive, Sallen-Key 2-pole active, multiple-feedback 2-pole, LC ladder higher-order.
+  * Band-pass: cascaded RC, multiple-feedback, state-variable (3-output: LP/BP/HP), Twin-T notch.
+
+Each entry's content covers transfer function, key formulas, component selection guidance, and (for analog filters where applicable) the ngspice .meas form the §17.147 sizing-stage LLM would emit. The intent is for retrieval to ground topology proposals; entries are deliberately short enough that 4-8 of them fit comfortably in §17.146's prompt context.
+
+**Idempotent re-runs via the existing dedup pipeline.** Second invocation of the script: ``new=0, skipped_hash=13``. The §9.x exact-hash dedup short-circuits before re-embedding, so re-running is a sub-second operation. ``test_re_run_yields_same_entries`` is the explicit unit guard — ``build_entries()`` output must be byte-identical across calls so the content hashes the dedup pipeline compares can't drift.
+
+**``--with-urls`` augmentation flag (deferred until called).** The script ships a second ingest path that POSTs canonical reference URLs (Wikipedia LPF/HPF/BPF, Sallen-Key, MFB, state-variable filter) to the existing ``run_research`` pipeline. Slower (network-dependent, ~30-60s per URL) and skipped by default; operators wanting deeper corpus coverage can pass the flag. The curated baseline alone is sufficient for §17.146's first-converging integration run, so the URL augmentation stays out of the standard workflow.
+
+**Standalone-script init lesson.** First live attempt failed with ``Ollama client not initialized; call init_clients() at startup`` from inside ``model_router.embed``. Root cause: ``app.utils.http_clients.init_clients()`` runs in the orchestrator's lifespan handler, not at module import — a CLI script that drives the embedder directly has to bring up the registry itself and tear it down at end. The fix is one helper ``_with_http_clients(coro)`` that wraps the asyncio.run target. Worth recording as a pattern: any future script that touches model_router / RAG must do the same.
+
+**Validation — the headline finding.** Before §17.149, ``tests/integration/test_topology_select_db.py`` skipped with:
+
+```
+SKIPPED — stage returned 409 (likely citation/coverage issue):
+  'errors': ['LLM produced no well-formed candidates'],
+  'rag_chunk_ids': ['scaffold-anthropics-anthropic-sdk-python-issue-...'],
+```
+
+After:
+
+```
+$ docker exec scaffold-orchestrator pytest tests/integration/test_topology_select_db.py -v
+tests/integration/test_topology_select_db.py::test_topology_select_live_end_to_end PASSED
+======================== 1 passed in 180.14s (0:03:00) =========================
+```
+
+The 3-minute runtime is the cloud LLM round-trip; the stage itself runs in seconds. The fact that this test now passes means the §17.144 → §17.148 chain has its first live end-to-end demonstration on the current host — an unblocking transition for the rest of the engineering-design track.
+
+**Files.**
+
+- ``scripts/seed_eng_topologies.py`` (new, ~430 lines including content). 13 ``SEEDS`` entries + 6 ``URLS_FOR_RESEARCH`` references. ``build_entries``, ``ingest_curated``, ``ingest_urls`` helpers each individually unit-testable. ``main(argv)`` returns an int exit code, mirrors the §17.139 scripts/redis_drop_stale_prefixes shape (argparse-driven, 0/1/2 exit codes).
+- ``tests/test_seed_eng_topologies.py`` (new, 11 ``@pytest.mark.smoke`` cases). Entry-shape parity (required fields, min content length, valid source_url, ≥2 tags), family-coverage (lpf+hpf+bpf tags all present), title-uniqueness, ``build_entries`` round-trips to the ingest_entries shape, dry-run is a no-op (no ingest mock call), dry-run with URLs lists them, live calls ingest_curated once, ``--with-urls`` calls ingest_urls with the verbatim URL list, ingest failure → exit 2, bad flag → non-zero, idempotency-equivalent ``test_re_run_yields_same_entries``.
+
+**Verification.**
+
+```
+# Unit tests.
+$ docker exec scaffold-orchestrator pytest tests/test_seed_eng_topologies.py -v
+============================== 11 passed in 0.97s ==============================
+
+# Live first ingest.
+$ docker exec scaffold-orchestrator python scripts/seed_eng_topologies.py
+curated_ingest_done: stats={'new': 13, 'versioned': 0, 'rejected': 0,
+                            'skipped_hash': 0, 'skipped_empty': 0}
+
+# Idempotency — second run dedups all 13.
+$ docker exec scaffold-orchestrator python scripts/seed_eng_topologies.py
+curated_ingest_done: stats={'new': 0, 'versioned': 0, 'rejected': 0,
+                            'skipped_hash': 13, 'skipped_empty': 0}
+
+# §17.146 integration test now passes end-to-end against live RAG + LLM.
+$ docker exec scaffold-orchestrator pytest tests/integration/test_topology_select_db.py -v
+PASSED                                                          [100%]
+============================== 1 passed in 180.14s (0:03:00) ===============================
+```
+
+**Deferred — explicitly out of scope for §17.149.**
+
+- General-purpose analog building blocks (differential pair, cascode, current mirror, instrumentation amp). Today's §17.147 sizing stage targets analog filters; broader coverage is for when device-sizing handles more topology families.
+- Digital corpus (Verilator / SymbiYosys reference material for cycle-counter / FIFO / RAM / state-machine designs). The §17.141 / §17.142 sidecars are wired but no design-pipeline stage uses them yet; corpus seeding for those follows when a digital sizing stage lands.
+- Per-component datasheet ingest (op-amp datasheets — LM358, TL072, OPA series). Required for the §17.148 deferred "BOM section with datasheet links"; out of scope while device-sizing emits abstract R/C values rather than specific part numbers.
+
+**Two operator-side items remain** (after §17.146 was unblocked by this commit): refining LLM prompts for reliable ngspice 44.x SPICE emission (§17.147 unblock) and gluing the four stages into a single ``design_circuit`` job type. Either is a sensible next checkpoint.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
