@@ -320,6 +320,38 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+  # §17.140 — ngspice sidecar. Isolates the ngspice CLI behind a small
+  # FastAPI surface so untrusted SPICE input never executes inside the
+  # orchestrator's process tree. The orchestrator reaches this service
+  # over the ai-network bridge at http://scaffold-ngspice:8001; port
+  # 8001 is bound to loopback for operator probing only.
+  scaffold-ngspice:
+    # Deterministic local tag — same pattern as scaffold-orchestrator.
+    # `docker compose up -d` only rebuilds on missing tag or --build.
+    image: scaffold-ngspice:${SCAFFOLD_NGSPICE_IMAGE_TAG:-local}
+    build:
+      context: ./docker/ngspice
+      dockerfile: Dockerfile
+    container_name: scaffold-ngspice
+    logging: *default-logging
+    ports:
+      - "127.0.0.1:8001:8001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    restart: always
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys;sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8001/health\",timeout=2).status==200 else 1)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 networks:
   ai-network:

@@ -122,6 +122,25 @@ def _build_ollama() -> httpx.AsyncClient:
     return client
 
 
+def _build_ngspice() -> httpx.AsyncClient:
+    # §17.140 — ngspice sidecar client. The sidecar enforces a per-run
+    # timeout that caps the ngspice subprocess; this client's read
+    # timeout is a safety net that must be strictly larger so the
+    # sidecar gets the chance to return its own timed_out=True response
+    # instead of httpx raising ReadTimeout under it.
+    client = httpx.AsyncClient(
+        base_url=settings.ngspice_url,
+        timeout=settings.ngspice_http_timeout_s,
+        limits=httpx.Limits(
+            max_connections=4,
+            max_keepalive_connections=2,
+            keepalive_expiry=30,
+        ),
+    )
+    logger.info("ngspice client initialized: %s", settings.ngspice_url)
+    return client
+
+
 def _build_openai() -> httpx.AsyncClient:
     """OpenAI-compatible client. ``openai_base_url`` defaults to api.openai.com
     but can point at any OpenAI-compatible endpoint (vLLM, LocalAI, Ollama in
@@ -157,6 +176,7 @@ def init_clients() -> None:
     _get_or_create("generic", _build_generic)
     _get_or_create("ollama", _build_ollama)
     _get_or_create("openai", _build_openai)
+    _get_or_create("ngspice", _build_ngspice)
 
 
 def get_searxng_client() -> httpx.AsyncClient:
@@ -198,6 +218,13 @@ def get_openai_client() -> httpx.AsyncClient:
     client = _clients.get("openai")
     if client is None or client.is_closed:
         raise RuntimeError("OpenAI client not initialized; call init_clients() at startup")
+    return client
+
+
+def get_ngspice_client() -> httpx.AsyncClient:
+    client = _clients.get("ngspice")
+    if client is None or client.is_closed:
+        raise RuntimeError("ngspice client not initialized; call init_clients() at startup")
     return client
 
 

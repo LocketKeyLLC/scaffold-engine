@@ -190,6 +190,14 @@ class Settings(BaseSettings):
     verify_timeout_seconds: int = Field(default=120, ge=1, le=3600)
     max_retries: int = Field(default=3, ge=0, le=20)
 
+    # §17.140 — ngspice sidecar (scaffold-ngspice). Reachable over the
+    # ai-network bridge. The sidecar enforces its own per-run timeout
+    # (caps the ngspice subprocess); the client timeout below is the
+    # HTTP read-timeout safety net and must exceed the per-run cap.
+    ngspice_url: str = "http://scaffold-ngspice:8001"
+    ngspice_run_timeout_s: float = Field(default=30.0, gt=0.0, le=600.0)
+    ngspice_http_timeout_s: float = Field(default=620.0, gt=0.0, le=3600.0)
+
     # Research agent
     research_max_iterations: int = Field(default=3, ge=1, le=20)
     research_max_queries: int = Field(default=8, ge=1, le=50)

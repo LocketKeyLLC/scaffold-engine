@@ -32,6 +32,7 @@ from unittest.mock import AsyncMock, MagicMock
 if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
     collect_ignore = [
         "integration/test_execution_db.py",
+        "integration/test_sim_ngspice_db.py",
         "test_assist_session_map.py",
         "test_config_endpoint.py",
         "test_cost_rollup.py",

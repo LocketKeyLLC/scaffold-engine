@@ -5405,6 +5405,63 @@ $ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
 - Adding a new cache module's prefix: extend `ALLOWED_PREFIXES`. The `test_allowlist_contains_every_shipped_prefix` parity guard ensures you can't ship a new cache module without making it cleanable.
 - The script is safe to run mid-traffic: SCAN is cooperative, UNLINK is asynchronous on the Redis side, and prefix-scoped — a `embedv2`-targeted run can't touch `embedv3` reads/writes happening concurrently. The only contention is on the Redis CPU itself (one extra cursor stream); on a quiet host it costs ~5 ms per 1k keys.
 
+### 17.140 ngspice sidecar — first ground-truth oracle for circuit design (2026-05-12)
+
+Opens a new track: extend the orchestrator with **verifiable engineering oracles** so circuit / hardware design work can be grounded in measurements instead of LLM intuition. The track's checklist (drafted earlier this session) requires that every numeric claim a future design pipeline emits be backed by a `sim_runs.id` — i.e. a row recording the exact tool, version, netlist hash, seed, and measurements that produced the number. §17.140 lands the first such oracle: ngspice, behind an HTTP sidecar, with the `sim_runs` table that downstream oracles (Verilator, SymbiYosys, KiCad DRC) will also write into.
+
+**Sidecar over in-process subprocess.** SPICE input comes from LLMs and possibly from user research — running it inside the orchestrator's process tree would put untrusted CLI invocations next to the auth-keyed API surface and the embedder/reranker singletons. The sidecar (`scaffold-ngspice` on `ai-network`) gives ngspice a `read_only` rootfs, `cap_drop: ALL`, `no-new-privileges`, and a 64 MB `/tmp` tmpfs — and lets us pin the ngspice version independently of the orchestrator image. The HTTP contract is narrow: `POST /run {netlist, timeout_s, seed?}`, `GET /health`. Bound to `127.0.0.1:8001` for operator probing; orchestrator reaches it via the bridge at `http://scaffold-ngspice:8001`.
+
+**Two ngspice 44 quirks discovered during smoke.**
+
+1. **`.meas` cards need a `.control / .endc` wrapper.** ngspice 44.2's batch-mode top-level `.meas` parser bails on the `vdb(out)=-3` expression with `Warning: can't parse 'vd': ignored` and then refuses to run the `.ac` analysis at all. Moving the same line inside a `.control` block makes the interactive `meas` form take over, which parses correctly and returns `fc_3db = 158.7775` for an RC low-pass (R=1k, C=1µ, analytical fc=159.155 Hz — **0.24 % error**, well inside the 1 % gate). The smoke test now writes its netlist in `.control / .endc` form; future callers should mirror that.
+2. **Measurement parser has to stop at the batch-mode stats footer.** ngspice prints a per-run resource summary that includes lines like `Stack = 0 bytes.` and `Maximum ngspice program size = 21.777 MB.` — both of which match a naive `identifier = number` regex. The fix has two halves: (a) the regex requires the line to end after the number OR continue with a known measurement-suffix keyword (`targ` / `trig` / `from` / `to` / `fall` / `rise` / `cross` / `at`), (b) parsing stops as soon as any of nine footer-marker prefixes appears. The first half alone would still let pathological footer lines slip through; the second half is the belt to the regex's suspenders.
+
+**Migration runner trip-hazard re-confirmed.** First draft of `038_sim_runs.sql` was four bare statements (one `CREATE TABLE`, three `CREATE INDEX`). asyncpg's prepared-statement protocol rejected it with `cannot insert multiple commands into a prepared statement` — the same gotcha already called out in `032_system_alerts.sql`'s header comment. Rewrote the body inside a single `DO $$ … $$;` block; the runner accepted it on the next orchestrator restart (`migrations_complete: applied_count=1`).
+
+**Error contract: failures are data, not exceptions.** `run_ngspice` never raises on simulator failure. Transport error, HTTP error, sidecar timeout, and non-zero exit all surface as `NgspiceResult(ok=False, …)`. Crucially, the audit row is written **even when the sidecar is unreachable** — the test `test_ngspice_sidecar_unreachable_returns_failure_row` is the explicit guard, because a missing row would let a downstream report cite a sim run that never happened. Verification loops therefore treat ngspice the same way they treat any other typed result: branch on `.ok`, not on `try/except`.
+
+**Files.**
+
+- `docker/ngspice/Dockerfile` (new). `python:3.12.13-slim@sha256:…` base (same pin as orchestrator), `apt-get install ngspice`, runs as uid 10002. Image tag `scaffold-ngspice:${SCAFFOLD_NGSPICE_IMAGE_TAG:-local}` so `docker compose up` doesn't silently rebuild.
+- `docker/ngspice/server.py` (new, ~165 lines). FastAPI app: `POST /run`, `GET /health`. Async `_run_ngspice` via `asyncio.create_subprocess_exec` (no shell), per-run `tempfile.mkdtemp` workdir, timeout enforced at the sidecar (kills the ngspice process), measurement parser as described above. `tool_version` probed once at startup via the version regex.
+- `docker/ngspice/requirements.txt` (new). `fastapi==0.115.6`, `uvicorn[standard]==0.34.0`, `pydantic==2.10.3` — same pins as the orchestrator.
+- `docker-compose.yml` (+33 lines). New `scaffold-ngspice` service: bind `127.0.0.1:8001:8001`, `read_only: true`, `tmpfs: /tmp 64m`, `cap_drop: ALL`, `no-new-privileges:true`, healthcheck via inline Python (no curl needed in the slim image).
+- `db/migrations/038_sim_runs.sql` (new). `sim_runs(id, tool, tool_version, netlist_sha256, seed, exit_code, stdout, stderr, measurements JSONB, duration_ms, timed_out, job_id FK, dag_node_id FK, created_at)`. Three indexes (`netlist_sha256`, `job_id` partial, `created_at DESC`). `job_id` / `dag_node_id` nullable so smoke / ad-hoc runs still record an audit row.
+- `app/sim/ngspice.py` (new, ~190 lines). `NgspiceResult` dataclass + async `run_ngspice(netlist, *, db, timeout_s=None, seed=None, job_id=None, dag_node_id=None)`. SHA-256 over the exact bytes sent to the sidecar; row inserted *before* the function returns; result carries the resulting `sim_run_id`.
+- `app/sim/__init__.py` (new, empty). Marks `app/sim` as a package.
+- `app/utils/http_clients.py` (+30 lines). Adds `_build_ngspice` / `get_ngspice_client`, wired into `init_clients()` and the `close_clients()` loop. Read timeout (`ngspice_http_timeout_s`, default 620 s) is strictly larger than the sidecar's per-run cap (`ngspice_run_timeout_s`, default 30 s) so httpx never raises `ReadTimeout` before the sidecar gets the chance to return its own `timed_out=True` response.
+- `app/config.py` (+9 lines). `ngspice_url`, `ngspice_run_timeout_s`, `ngspice_http_timeout_s`.
+- `tests/integration/test_sim_ngspice_db.py` (new, 2 cases marked `@pytest.mark.smoke`). RC-low-pass-within-1 % closes the "no numeric claim without a sim_run_id" invariant; sidecar-unreachable closes the "no verification attempt goes unrecorded" invariant.
+- `tests/conftest.py` (+1 line). Adds the new integration test to the CI-smoke `collect_ignore` list (its `app.sim.ngspice` import chain pulls in asyncpg / SQLAlchemy which the smoke tier doesn't install).
+
+**Verification.**
+
+```
+# Sidecar healthy.
+$ curl -s http://127.0.0.1:8001/health
+{"ok":true,"tool_version":"ngspice-44.2"}
+
+# Migration applied on orchestrator restart.
+$ docker logs scaffold-orchestrator --since 30s | grep migration
+migration_applied: file=038_sim_runs.sql
+migrations_complete: applied_count=1 total_files=37
+
+# Full integration smoke for §17.140.
+$ docker exec scaffold-orchestrator pytest tests/integration/test_sim_ngspice_db.py -v
+tests/integration/test_sim_ngspice_db.py::test_ngspice_rc_lowpass_fc_within_1pct PASSED [ 50%]
+tests/integration/test_sim_ngspice_db.py::test_ngspice_sidecar_unreachable_returns_failure_row PASSED [100%]
+============================== 2 passed in 0.44s ===============================
+```
+
+**Deferred — explicitly out of scope for §17.140.**
+
+- Waveform / `.raw` artifact storage. `measurements JSONB` covers `.meas` results; raw vectors will get a sibling table when the design pipeline starts asking for them.
+- `testbench_hash` column. In v1 the testbench IS the netlist, so its hash equals `netlist_sha256`. The column will split out when DAG-generated designs auto-emit separate testbench files.
+- DAG integration. No `design_circuit` job type yet — the wrapper is intentionally callable directly from any module / test; the larger reasoning pipeline (`spec_capture → topology_select → device_sizing → simulate → verify → report`) is the next item on the engineering-design checklist.
+- Verilator + SymbiYosys sidecars. Same pattern — separate services on `ai-network` writing into `sim_runs` with different `tool` values.
+
+**Next from the engineering-design checklist:** add the Verilator sidecar (digital HDL ground truth) using the same template, then the spec-capture JSON schema + `design_circuit` job type so the orchestrator can chain through to verification end-to-end.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
