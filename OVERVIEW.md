@@ -5956,6 +5956,89 @@ The non-convergence on the live test is informative, not a regression: the cloud
 
 **Next from the engineering-design checklist:** the report stage. It joins a converged ``device_sizings`` row to its ``spec_id`` + ``topology_selection_id`` + ``sim_run_ids[]``, renders a complete deliverable (spec table, topology rationale, sized parameters, measurement vs target table, citation list), and lands the design pipeline's first end-to-end verified output. After that the trio of oracles, the spec/topology/sizing chain, and the operator gate are all wired into one observable surface.
 
+### 17.148 Report stage — pure projection of the audit tables, no LLM (2026-05-12)
+
+Terminal stage of the engineering-design pipeline. Joins ``device_sizings`` ⨝ ``topology_selections`` ⨝ ``specs`` ⨝ ``sim_runs[]`` for a single sizing attempt and renders a complete deliverable. **Defining invariant:** the report is regenerable from the audit tables alone — no LLM, no new data, no judgement calls beyond "classify this measurement against this constraint." Same rows through the same code produce byte-identical output. That's what makes the report an *attestation* rather than another LLM artefact: it's a projection, not a synthesis.
+
+**Format negotiation: JSON canonical + Markdown render.** Single endpoint, ``?format=`` query param. Default JSON; ``?format=markdown`` returns ``Content-Type: text/markdown``. The JSON is the canonical artefact — typed, queryable, schema-versioned (``report_schema_version``). The Markdown is a deterministic projection of the same data, suitable for ``cat``ing or pasting into a PR description.
+
+**Non-converged sizings ARE renderable** — per the §17.148 design choice, the report is the post-mortem artefact, not the success surface. A non-converged report carries:
+
+  * A prominent ``⚠ NOT CONVERGED`` banner at the top of the Markdown.
+  * The constraint table with ``out_of_tolerance`` / ``violated_min`` / ``violated_max`` / ``not_measured`` statuses for each row that wasn't met.
+  * An ``## Audit — Diagnostics`` section with the sizing's ``errors[]``.
+  * The full ``sim_run_ids[]`` manifest so an operator can drill into every iteration's measurements.
+
+Hiding the failure trail behind a "convergence required" gate would defeat the audit-table-per-stage pattern: the rows are *attempts*, and a report that refused to render non-converged attempts would split the engineering-debug workflow across the API surface and ``psql``.
+
+**Constraint-status classifier mirrors §17.147's gap-checker** but returns a per-row enum (``ok`` / ``out_of_tolerance`` / ``violated_min`` / ``violated_max`` / ``not_measured`` / ``skipped``) rather than a list of gap descriptions. The two views — gap descriptions for the sizing loop's feedback, status enums for the report's table — are derived from the same rule, so a re-read of the report always agrees with the convergence verdict the sizing produced. The §17.147 ``not_measured`` discovery (LLM forgot ``.meas`` for a required electrical constraint → status ``not_measured`` rather than silent ``ok``) is preserved here, so a report on an LLM-misbehaviour iteration shows the exact missing-measurement pattern an operator needs.
+
+**Milvus chunk fetch is best-effort.** The topology candidate's ``citations[]`` carry entry_ids; the report fetches the chunk content (title, content snippet, source_url) from Milvus and embeds it inline so the report stands alone without forcing the reader to query the corpus separately. *But* — Milvus may be unreachable, or entry_ids may be stale, or the corpus may have been re-indexed. In any of those cases the report renders the citation with ``available=false`` and a ``[content unavailable]`` marker rather than failing. The report is regenerable from the DB alone; the chunk content is a nice-to-have side-effect of generation.
+
+**Determinism guard test.** ``test_render_markdown_is_deterministic`` calls ``render_markdown`` twice on the same doc and asserts byte equality of the result. ``_fmt_num`` uses fixed-precision float formatting (``f"{v:.6g}"``) so the same float never renders two different ways. Citation snippets newline-escaped before insertion. The clock-injected field (``generated_at``) is the *only* non-deterministic input, and it's part of the doc rather than read inside the renderer — so a fixed-time doc round-trips byte-identically.
+
+**Status mapping:**
+
+  * **200** — report rendered. Body shape depends on ``format``.
+  * **400** — unknown ``format`` value (only ``json`` / ``markdown`` / ``md``).
+  * **404** — ``sizing_id`` has no row, OR a referenced spec / topology_selection has been deleted (data-integrity error; the report can't be assembled).
+
+**Files.**
+
+- ``app/sim/report.py`` (new, ~390 lines). ``ReportDocument`` / ``ReportConstraint`` / ``ReportCitation`` / ``ReportSimRun`` dataclasses. ``build_report(sizing_id, *, db, generated_at=None)`` does four DB fetches + one Milvus best-effort fetch. ``render_markdown(doc) -> str`` is pure-functional. ``_classify_constraint`` is the status enum's source of truth. ``ReportNotAvailableError`` distinguished from other LookupErrors so the router maps it cleanly to 404.
+- ``app/schemas.py`` (+~50 lines). Pydantic ``ReportRead`` + ``ReportConstraintRead`` + ``ReportCitationRead`` + ``ReportSimRunRead``.
+- ``app/routers/specs.py`` (+~80 lines). New ``report_router`` (prefix ``/device-sizings``) with ``GET /{sizing_id}/report?format=json|markdown``. PlainTextResponse for the Markdown path; ``ReportRead`` for JSON.
+- ``app/main.py`` (+2 lines). ``include_router(report_router)``.
+- ``tests/test_report.py`` (new, 16 ``@pytest.mark.smoke`` cases, mocked DB + Milvus). Coverage: classifier × 6 status paths; ``build_report`` happy path / non-converged / missing-chunk graceful degradation / sizing-not-found / unmeasured-required-as-not_measured; ``render_markdown`` deterministic-byte-equal / carries-all-sections / banner-on-non-converged / no-banner-on-converged / unavailable-citation-marker.
+- ``tests/integration/test_report_db.py`` (new, 5 ``@pytest.mark.smoke`` cases, real Postgres). JSON converged / Markdown converged / non-converged Markdown w/ banner / 404 on missing / 400 on unknown format.
+- ``tests/conftest.py`` (+1 line). CI-smoke ``collect_ignore`` for the new integration test.
+
+**Verification.**
+
+```
+# 16/16 unit cases.
+$ docker exec scaffold-orchestrator pytest tests/test_report.py -v
+============================== 16 passed in 2.30s ==============================
+
+# 5/5 integration cases against real Postgres (seeded chain).
+$ docker exec scaffold-orchestrator pytest tests/integration/test_report_db.py -v
+tests/integration/test_report_db.py::test_get_report_json_converged PASSED
+tests/integration/test_report_db.py::test_get_report_markdown_format PASSED
+tests/integration/test_report_db.py::test_get_report_non_converged_renders_with_banner PASSED
+tests/integration/test_report_db.py::test_get_report_404_when_sizing_missing PASSED
+tests/integration/test_report_db.py::test_get_report_400_on_unknown_format PASSED
+============================== 5 passed in 0.92s ===============================
+```
+
+The integration tests seed a full pipeline state via SQL (avoiding LLM / RAG / sidecar dependencies) and confirm the join shape end-to-end. The cited chunk ID (``chunk-A-report-test``) doesn't exist in the corpus → the citation renders with ``available=false``, which is the graceful-degradation path working as designed.
+
+**Engineering-design pipeline state after §17.148 — every stage now wired end-to-end:**
+
+```
+NL brief
+  ↓ §17.144 extract_spec                               [LLM, T=0]
+specs row (confirmed_at=NULL)
+  ↓ §17.145 POST /specs/{id}/confirm                   [operator]
+specs row (confirmed_at populated)
+  ↓ §17.146 POST /specs/{id}/topology-select           [RAG + LLM, citation invariant]
+topology_selections row
+  ↓ §17.147 POST /topology-selections/{id}/size        [LLM ↔ ngspice closed loop]
+device_sizings row (converged + sim_run_ids[])
+  ↓ §17.148 GET /device-sizings/{id}/report            [pure projection]
+ReportDocument (JSON + Markdown)
+```
+
+The pipeline produces an end-to-end auditable deliverable. Every numeric claim in the report ties back through ``sim_run_ids[]`` to a ``sim_runs.id`` (the §17.140–142 oracles' attestations); every topology candidate's citation ties back to a Milvus entry_id from the §17.146 retrieval set; every spec row carries operator confirmation provenance (``confirmed_by`` / ``confirmed_at``); every extraction step has a ``llm_call_logs`` audit row from ``model_router._record_call``. The "100% verifiable ground truth" goal the engineering-design checklist opened with — every numeric claim attestable, every reasoning step citable — is materially achieved.
+
+**Deferred — explicitly out of scope for §17.148.**
+
+- Persisted ``reports`` table. Per the regenerable-from-artifacts design, snapshots aren't needed; if an operator wants a frozen copy, they save the response. A ``reports`` table would make sense once we need to attribute report deliveries to specific operators / timestamps for compliance, not before.
+- Waveform plot in the Markdown. The §17.140 wrapper doesn't dump ``.raw`` yet (deferred since the ngspice sidecar landed); when it does, ``ReportSimRun`` will carry an artefact reference and the renderer will surface it as a ``![waveform](...)`` link.
+- BOM section with datasheet links. The original checklist names "BOM with datasheet links" — that needs a components-library table the pipeline doesn't have yet. Adds when device-sizing starts emitting concrete part numbers rather than just R/C component values.
+- HTML / PDF export. Markdown is the human-readable surface for now; an external renderer (pandoc, etc.) can promote.
+
+**Next on the engineering-design checklist:** there are no more *stages* to add — the chain is complete. What remains is operator-side work the stage code can't do for itself: seeding the engineering corpus (§17.146 unblock), refining the LLM prompts for reliable ngspice 44.x SPICE emission (§17.147 unblock), and gluing the four stages into a single ``design_circuit`` job type with state transitions. That last item is also on the deferred list of every stage commit since §17.146, and is the obvious next checkpoint.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

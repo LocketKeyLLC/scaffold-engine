@@ -795,3 +795,68 @@ class DeviceSizingRead(BaseModel):
     model_used: str
     errors: list[str]
     created_at: datetime
+
+
+# §17.148 — Terminal report stage (regenerable-from-artifacts).
+
+class ReportConstraintRead(BaseModel):
+    id: str
+    kind: str
+    description: str
+    target: float | None = None
+    min: float | None = None
+    max: float | None = None
+    tolerance_pct: float | None = None
+    unit: str
+    criticality: str
+    measured: float | None = None
+    status: str  # ok | out_of_tolerance | violated_min | violated_max | not_measured | skipped
+
+
+class ReportCitationRead(BaseModel):
+    entry_id: str
+    title: str = ""
+    snippet: str = ""
+    source_url: str = ""
+    available: bool = False
+
+
+class ReportSimRunRead(BaseModel):
+    sim_run_id: UUID
+    iteration: int
+    tool: str
+    tool_version: str
+    exit_code: int
+    timed_out: bool
+    duration_ms: int
+    measurements: dict[str, float]
+    verdict: str | None = None
+
+
+class ReportRead(BaseModel):
+    """Structured report — a deterministic projection of the audit
+    tables for a single device_sizings row. No LLM content, no new
+    data beyond what's already attested in the underlying rows."""
+    report_schema_version: str
+    generated_at: datetime
+    sizing_id: UUID
+    spec_id: UUID
+    topology_selection_id: UUID
+    candidate_idx: int
+    converged: bool
+    iterations: int
+    design_name: str
+    design_kind: str
+    design_description: str
+    spec_schema_version: str
+    constraints: list[ReportConstraintRead]
+    interfaces: list[dict[str, Any]]
+    environment: dict[str, Any]
+    selected_topology: dict[str, str]
+    citations: list[ReportCitationRead]
+    final_params: dict[str, str]
+    final_netlist: str
+    final_measurements: dict[str, float]
+    sim_runs: list[ReportSimRunRead]
+    errors: list[str]
+    model_used: str

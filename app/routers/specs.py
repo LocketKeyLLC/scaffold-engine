@@ -30,8 +30,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from fastapi.responses import PlainTextResponse
+
 from app.schemas import (
     DeviceSizingRead,
+    ReportCitationRead,
+    ReportConstraintRead,
+    ReportRead,
+    ReportSimRunRead,
     SpecPendingListResponse,
     SpecRead,
     TopologyCandidateRead,
@@ -41,6 +47,11 @@ from app.sim.device_sizing import (
     CandidateIndexError,
     TopologySelectionNotFoundError,
     size_device,
+)
+from app.sim.report import (
+    ReportNotAvailableError,
+    build_report,
+    render_markdown,
 )
 from app.sim.spec_store import (
     SpecNotFoundError,
@@ -270,3 +281,107 @@ async def _fetch_sizing_created_at(db: AsyncSession, sizing_id: uuid.UUID):
         {"id": str(sizing_id)},
     )
     return row.scalar_one()
+
+
+# §17.148 — Report stage. GET-only; pure read-side projection of the
+# audit tables. ``?format=markdown`` returns text/markdown; the
+# default is structured JSON.
+
+report_router = APIRouter(tags=["Specs"], prefix="/device-sizings")
+
+
+@report_router.get(
+    "/{sizing_id}/report",
+    responses={
+        200: {
+            "content": {
+                "application/json": {},
+                "text/markdown": {},
+            }
+        }
+    },
+)
+async def get_report(
+    sizing_id: uuid.UUID,
+    format: str = "json",
+    db: AsyncSession = Depends(get_db),
+):
+    """Render the terminal report for a sizing attempt.
+
+    Non-converged sizings are renderable (with a banner) — the report
+    is the post-mortem artefact for "why did this attempt fail?",
+    not just the success surface.
+
+    Status:
+      * 200 — report rendered.
+      * 400 — unknown ``format`` (only ``json`` / ``markdown``).
+      * 404 — sizing_id (or any of the rows it references) not found.
+    """
+    fmt = format.lower()
+    if fmt not in ("json", "markdown", "md"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported format {format!r}; use 'json' or 'markdown'",
+        )
+    try:
+        doc = await build_report(sizing_id, db=db)
+    except ReportNotAvailableError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    if fmt in ("markdown", "md"):
+        return PlainTextResponse(
+            content=render_markdown(doc),
+            media_type="text/markdown",
+        )
+
+    return ReportRead(
+        report_schema_version=doc.report_schema_version,
+        generated_at=doc.generated_at,
+        sizing_id=doc.sizing_id,
+        spec_id=doc.spec_id,
+        topology_selection_id=doc.topology_selection_id,
+        candidate_idx=doc.candidate_idx,
+        converged=doc.converged,
+        iterations=doc.iterations,
+        design_name=doc.design_name,
+        design_kind=doc.design_kind,
+        design_description=doc.design_description,
+        spec_schema_version=doc.spec_schema_version,
+        constraints=[
+            ReportConstraintRead(
+                id=c.id, kind=c.kind, description=c.description,
+                target=c.target, min=c.min, max=c.max,
+                tolerance_pct=c.tolerance_pct, unit=c.unit,
+                criticality=c.criticality, measured=c.measured,
+                status=c.status,
+            )
+            for c in doc.constraints
+        ],
+        interfaces=list(doc.interfaces),
+        environment=dict(doc.environment),
+        selected_topology=dict(doc.selected_topology),
+        citations=[
+            ReportCitationRead(
+                entry_id=cite.entry_id, title=cite.title,
+                snippet=cite.snippet, source_url=cite.source_url,
+                available=cite.available,
+            )
+            for cite in doc.citations
+        ],
+        final_params=dict(doc.final_params),
+        final_netlist=doc.final_netlist,
+        final_measurements=dict(doc.final_measurements),
+        sim_runs=[
+            ReportSimRunRead(
+                sim_run_id=r.sim_run_id, iteration=r.iteration,
+                tool=r.tool, tool_version=r.tool_version,
+                exit_code=r.exit_code, timed_out=r.timed_out,
+                duration_ms=r.duration_ms,
+                measurements=dict(r.measurements),
+                verdict=r.verdict,
+            )
+            for r in doc.sim_runs
+        ],
+        errors=list(doc.errors),
+        model_used=doc.model_used,
+    )
