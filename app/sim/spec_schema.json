@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaffold-engine.local/schemas/spec/v1.json",
+  "title": "Scaffold Engine — Engineering Design Specification",
+  "description": "Machine-checkable specification for an engineering design (analog circuit, digital logic, mixed-signal, PCB, or system). Every constraint must be quantitative — units mandatory, at least one of target/min/max present — so downstream sizing, simulation, and verification stages have something they can numerically check.",
+  "type": "object",
+  "required": ["schema_version", "design", "constraints"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "description": "Semver of this spec schema. Bumped only on incompatible changes.",
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "design": {
+      "description": "Top-level identity of the design under specification.",
+      "type": "object",
+      "required": ["name", "kind", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Short human-readable name. Used in reports and filenames.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "kind": {
+          "description": "Top-level discipline. Picks which oracles apply.",
+          "type": "string",
+          "enum": [
+            "analog_circuit",
+            "digital_logic",
+            "mixed_signal",
+            "pcb",
+            "system"
+          ]
+        },
+        "description": {
+          "description": "One-paragraph natural-language summary of intent. Read by humans; not parsed by downstream stages.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        }
+      }
+    },
+    "constraints": {
+      "description": "Quantitative requirements the design must satisfy. At least one is required — a spec with no constraints has nothing to verify.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/constraint" }
+    },
+    "interfaces": {
+      "description": "External boundary signals / ports. Optional — pure-internal designs may omit.",
+      "type": "array",
+      "default": [],
+      "items": { "$ref": "#/$defs/interface" }
+    },
+    "environment": {
+      "description": "Ambient operating envelope. Each range is [min, max] in the named unit.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "temperature_c": { "$ref": "#/$defs/range_pair" },
+        "supply_v":      { "$ref": "#/$defs/range_pair" },
+        "humidity_pct":  { "$ref": "#/$defs/range_pair" }
+      }
+    }
+  },
+  "$defs": {
+    "constraint": {
+      "type": "object",
+      "required": ["id", "kind", "description", "unit"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Short slug, unique within the spec. Used by simulation testbenches as the KPI name.",
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]*$",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "kind": {
+          "description": "Dotted category. The leading segment names the oracle most likely to verify it.",
+          "type": "string",
+          "enum": [
+            "electrical.voltage",
+            "electrical.current",
+            "electrical.power",
+            "electrical.frequency",
+            "electrical.impedance",
+            "electrical.gain",
+            "electrical.capacitance",
+            "electrical.inductance",
+            "electrical.resistance",
+            "electrical.charge",
+            "timing.frequency",
+            "timing.period",
+            "timing.setup",
+            "timing.hold",
+            "timing.latency",
+            "timing.jitter",
+            "timing.rise_time",
+            "timing.fall_time",
+            "thermal.max_temp",
+            "thermal.ambient_temp",
+            "thermal.dissipation",
+            "signal.thd",
+            "signal.snr",
+            "signal.sndr",
+            "signal.enob",
+            "signal.sfdr",
+            "signal.noise_floor",
+            "physical.area",
+            "physical.weight",
+            "physical.height",
+            "physical.width",
+            "physical.length",
+            "cost.bom_usd",
+            "cost.manufacturing_usd"
+          ]
+        },
+        "description": {
+          "description": "Short human-readable explanation of WHY this constraint exists.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "target": {
+          "description": "Nominal target value. Use with `tolerance_pct` for a symmetric tolerance band.",
+          "type": "number"
+        },
+        "min": {
+          "description": "Lower bound. Inclusive.",
+          "type": "number"
+        },
+        "max": {
+          "description": "Upper bound. Inclusive.",
+          "type": "number"
+        },
+        "tolerance_pct": {
+          "description": "Symmetric tolerance around `target`, in percent. Ignored when `target` is absent.",
+          "type": "number",
+          "minimum": 0.0,
+          "exclusiveMaximum": 100.0
+        },
+        "unit": {
+          "description": "Unit string. Free-form, but stable across constraints of the same kind (e.g. Hz/V/dB/ohm/W/C/mm2/USD).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "criticality": {
+          "description": "Hard requirement vs nice-to-have. Verification stages may downgrade non-required constraints to warnings.",
+          "type": "string",
+          "enum": ["required", "preferred", "best_effort"],
+          "default": "required"
+        }
+      },
+      "anyOf": [
+        { "required": ["target"] },
+        { "required": ["min"] },
+        { "required": ["max"] }
+      ]
+    },
+    "interface": {
+      "type": "object",
+      "required": ["id", "direction", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]*$",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["input", "output", "inout"]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "analog_voltage",
+            "analog_current",
+            "digital_logic",
+            "clock",
+            "reset",
+            "power",
+            "ground",
+            "bus"
+          ]
+        },
+        "voltage_range_v": { "$ref": "#/$defs/range_pair" },
+        "current_range_a": { "$ref": "#/$defs/range_pair" },
+        "width_bits": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        }
+      }
+    },
+    "range_pair": {
+      "description": "[min, max] pair, inclusive on both ends. min must not exceed max.",
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 2,
+      "maxItems": 2
+    }
+  }
+}

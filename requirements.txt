@@ -1,6 +1,10 @@
 apscheduler==3.10.4
 asyncpg==0.30.0
 fastapi==0.115.6
+# §17.143 — JSON Schema validation for spec-capture (engineering-design track).
+# Pure-Python, validates app/sim/spec_schema.json against incoming spec
+# payloads. No optional deps pulled in.
+jsonschema==4.26.0
 httpx==0.28.1
 json_repair==0.58.7
 pydantic==2.10.3

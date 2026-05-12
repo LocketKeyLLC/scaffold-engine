@@ -5598,6 +5598,66 @@ The BMC pass at depth 10 against a 2-bit-value-always-<-4 property completes in 
 
 **Next from the engineering-design checklist:** spec-capture JSON schema + ``design_circuit`` job type, so the orchestrator can chain ``spec_capture → topology_select → device_sizing → simulate → verify → report`` end-to-end with the three oracles as verification leaves.
 
+### 17.143 Spec-capture schema — machine-checkable design requirements (2026-05-12)
+
+Front end of the engineering-design pipeline. The §17.140 → §17.142 sidecars produce verifiable *evidence* (sim_runs rows); §17.143 locks down what the design pipeline accepts as its *requirements*. Three artefacts ship: a JSON Schema describing what a valid spec looks like, a thin Python validator over it, and a ``specs`` table to persist validated instances. Intentionally **not** in scope this commit: the NL → spec extractor (LLM call) and the ``/confirm`` gate hook — both will iterate against a stable schema rather than be co-developed with one.
+
+**Flexible envelope, not pre-enumerated fields.** A spec is ``{schema_version, design, constraints[], interfaces[], environment}``. Every constraint is one of a generic envelope: ``{id, kind, description, target?, min?, max?, tolerance_pct?, unit, criticality}``. ``kind`` is a dotted enum naming the discipline-and-quantity (``electrical.frequency`` / ``timing.setup`` / ``thermal.max_temp`` / ``signal.thd`` / …); the leading segment doubles as a hint about *which* oracle will probably verify the constraint. The alternative — top-level pre-enumerated fields (``voltage_min``, ``frequency_target_hz``, …) — would catch typos but force a schema bump on every new constraint type. The envelope catches typos differently: every constraint kind is validated against a closed enum, every constraint *id* against a snake-case pattern, and ``additionalProperties: false`` is set on every object so the extractor can't sneak unvalidated fields past validation.
+
+**At least one of target / min / max — JSON Schema's ``anyOf`` does this.** A constraint that names a unit but provides no numeric anchor has nothing for verification to numerically check, so it's a structural error. Hardcoded in the schema as:
+
+```json
+"anyOf": [
+  {"required": ["target"]},
+  {"required": ["min"]},
+  {"required": ["max"]}
+]
+```
+
+Three cross-field rules JSON Schema can't express cleanly are checked semantically in ``app/sim/spec.py`` *after* the schema pass (so structural errors surface first): constraint ``min <= max``, constraint ``id`` uniqueness, interface ``id`` uniqueness, and environment range ordering. ``validate_spec`` never raises — failures surface as ``SpecValidationResult(ok=False, errors=[...])`` with a JSON-pointer-style path per error. Same posture as the simulator wrappers (§17.140 / 141 / 142): failures are data, not exceptions.
+
+**``jsonschema`` lib (new dep, ``4.26.0``) over Pydantic-only.** The JSON Schema file is the *single source of truth* — same file the future extractor will paste into the LLM prompt as a fragment, so what's accepted on the wire and what's described to the model are bit-identical. A Pydantic-mirror approach would mean keeping the model and the prompt fragment in sync (or generating the fragment from the model on every prompt build); ``jsonschema`` validating the source file directly removes the drift surface entirely. Cost: one pure-Python dep ~200 KB, in both ``requirements.txt`` and ``requirements-ci.txt``. (The dev image already had it pulled in as a transitive dep of one of the existing pins, so this commit just promotes it to an explicit dependency.)
+
+**Parity guard test.** ``app/sim/spec.py`` re-exports the constraint-kind / criticality / interface-direction / interface-kind enums as Python ``frozenset`` constants so call sites can pattern-match without re-parsing the JSON. ``test_python_enums_mirror_schema_file`` reads the JSON Schema file at test time and asserts every set in the Python module equals the corresponding enum in the file — if a future commit adds a kind to the JSON but forgets the Python frozenset, the test fails loudly instead of silently dropping the new kind in call sites.
+
+**``spec_sha256`` for dedup / cache.** ``spec_sha256(d)`` hashes the canonical JSON form (sorted keys, no whitespace, ``allow_nan=False``). Two semantically-equal specs that differ only in dict-key ordering hash identically — which is what ``specs.spec_sha256`` needs for the future dedup / cache. ``test_spec_sha256_stable_across_key_order`` is the explicit guard.
+
+**``specs`` table (migration 040).** ``(id, job_id FK nullable, schema_version, spec_json JSONB, spec_sha256, confirmed_by, confirmed_at, created_at)``. ``confirmed_by`` / ``confirmed_at`` stay NULL on initial INSERT; the ``/confirm`` gate handler will populate them in a follow-up commit, and the design pipeline will refuse to advance past spec_capture without a confirmed row. ``job_id`` is nullable so a spec can be drafted before it's bound to a job. Four indexes: ``job_id`` partial, ``spec_sha256`` full, ``created_at DESC`` full, ``confirmed_at DESC`` partial. Wrapped in a DO block per the asyncpg multi-statement rule (§17.140 / 032).
+
+**Files.**
+
+- ``app/sim/spec_schema.json`` (new, ~155 lines). The single source of truth. Draft 2020-12. ``$id`` points at a notional ``scaffold-engine.local`` namespace; we don't publish it, but having one makes future ``$ref``-able sub-schemas clean. Heavy use of ``description:`` fields at every property so the file reads as documentation when handed to the LLM extractor.
+- ``app/sim/spec.py`` (new, ~190 lines). Schema loaded once at import time and pre-compiled into a ``Draft202012Validator`` (per-call validation is zero-allocation other than result objects). Exports ``validate_spec`` / ``spec_sha256`` / ``SpecValidationResult`` / ``SpecValidationError`` and the enum re-exports.
+- ``db/migrations/040_specs.sql`` (new). Schema as above.
+- ``tests/test_spec.py`` (new, 25 ``@pytest.mark.smoke`` cases). Minimal + full happy paths, every structural failure path, every semantic cross-field rule, ``spec_sha256`` stability, ``additionalProperties: false`` rejection, snake-case ``id`` pattern enforcement.
+- ``requirements.txt`` (+4 lines). Pins ``jsonschema==4.26.0`` with a ``§17.143`` reason comment.
+- ``requirements-ci.txt`` (+1 line). Mirror pin for the ci-smoke tier.
+
+**Verification.**
+
+```
+# 25 cases pass — all schema + semantic + spec_sha256 + parity-guard.
+$ docker exec scaffold-orchestrator pytest tests/test_spec.py -v
+============================== 25 passed in 2.20s ==============================
+
+# Migration applied + table + 4 indexes + FK.
+$ docker logs scaffold-orchestrator --since 30s | grep migration
+migration_applied: file=040_specs.sql
+migrations_complete: applied_count=1 total_files=39
+
+$ docker exec scaffold-postgres psql -U scaffold -d scaffold_engine -c "\d specs"
+... 8 columns, 5 indexes (incl. spec_sha256 + partial confirmed_at), FK to jobs ...
+```
+
+**Deferred — explicitly out of scope for §17.143.**
+
+- NL → spec extractor (LLM call). Lands in a follow-up commit once the schema has shipped and stabilised; the extractor prompt will paste ``spec_schema.json`` verbatim and emit JSON which round-trips through ``validate_spec``.
+- ``/confirm`` gate hook. The columns are there (``confirmed_by`` / ``confirmed_at``); the handler isn't wired yet. Same follow-up commit.
+- ``design_circuit`` job type + state-machine entries. Will arrive when the spec_capture stage starts actually advancing a job.
+- Per-kind unit/sign sub-schemas (e.g. ``electrical.frequency`` must have ``unit ∈ {Hz, kHz, MHz}``, ``target > 0``). Defensible second iteration; out of scope while the envelope shape settles.
+
+**Next from the engineering-design checklist:** wire the LLM extractor + ``/confirm`` gate so an operator can post a spec in natural language, see it validated against the schema, confirm it, and have the design pipeline pick it up as the entry condition for everything downstream.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
