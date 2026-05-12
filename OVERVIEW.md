@@ -6111,6 +6111,81 @@ PASSED                                                          [100%]
 
 **Two operator-side items remain** (after §17.146 was unblocked by this commit): refining LLM prompts for reliable ngspice 44.x SPICE emission (§17.147 unblock) and gluing the four stages into a single ``design_circuit`` job type. Either is a sensible next checkpoint.
 
+### 17.150 §17.147 device-sizing prompt refined — closed loop now converges on iter 1 (2026-05-12)
+
+Second of §17.148's three deferred operator-side items. §17.147's live integration test had been recording 3-iter budget-exhausted attempts with ``ngspice exit=1`` on every iteration — the LLM was emitting SPICE that ngspice's parser rejected. The audit trail held (``sim_run_ids[]`` captured the failed attempts, the verdict was honest), but the closed loop wasn't actually closing.
+
+**Root cause was in the prompt, not the model.** First refinement attempt added a "WORKED EXAMPLE" section to the prompt with the canonical correct netlist. The example used Python-style multi-line string concatenation to make the .cir text readable in the prompt source:
+
+```
+"netlist": "* RC low-pass — fc=1000Hz\n"
+           "V1 in 0 AC 1\n"
+           ...
+```
+
+The cloud 235b **faithfully copied this Python-source pattern into its JSON output** — which is not valid JSON. ``parse_json_object`` (via ``json_repair``) salvaged only the first fragment (``{"netlist": "* RC low-pass — fc=1000Hz\n"}``), the orchestrator sent ngspice a netlist with only the title line, and ngspice answered ``Warning: Empty netlist!``. The fix: stop showing the example in source-code style. Two-part presentation works:
+
+  1. A literal-text code block showing what ngspice will read (each line on its own indented line, no quotes, no escapes).
+  2. A separate "Your JSON output for the above example" block showing a SINGLE-LINE JSON object with embedded ``\n`` escapes — the form the LLM should emit.
+
+Plus an explicit hard rule: ``DO NOT use Python-style concatenated string literals like "line1\n" "line2\n" — that is not valid JSON and the orchestrator will fail to parse it.``
+
+**Before / after on the same live integration test:**
+
+```
+BEFORE (§17.147 baseline):
+  iterations=3, converged=False,
+  errors=["budget exhausted after 3 iterations;
+          final gaps: ['ngspice exit=1 timed_out=False']"]
+  sim_runs: all 3 with exit_code=1, "Warning: Empty netlist!"
+
+AFTER (§17.150):
+  iterations=1, converged=True,
+  measurements={"fc_3db": 997.6278},   # target 1000 Hz, tol ±10%, 0.24% off
+  sim_runs[0]: exit_code=0, real .meas hit, 14ms ngspice duration
+  Full live integration test runtime: 5.33s (was 180s/timeout)
+```
+
+**Prompt also picked up other concrete failure-mode callouts** that the §17.147 audit rows had surfaced (and which the bare prose-rules version of the prompt didn't address):
+
+  * PITFALL 1: ``meas`` outside ``.control`` → ``Error: measure limited to tran, dc, sp, or ac analysis``. Fix: keep ``meas`` inside the block AND start the line with the analysis token (``meas ac fc_3db ...``).
+  * PITFALL 2: ``mag(v(out))=0.7071`` for finding the -3 dB corner → ``meas ... failed!``. Fix: use ``vdb(out)=-3`` (dB form, well-defined crossings).
+  * PITFALL 3: omitting ``fall=1`` / ``rise=1`` in ``when`` clauses → ambiguous crossing → measure failure.
+  * PITFALL 4: forgetting ``AC 1`` on the voltage source → AC analysis runs with zero signal → all measurements degenerate.
+  * PITFALL 5: using ``.meas`` as a top-level card (leading dot, outside ``.control``) — same failure as PITFALL 1, called out separately because the leading-dot form is what the LLM kept reaching for from generic SPICE training data.
+
+The "ITERATIVE REFINEMENT" section gives the LLM a recipe for what to do when prior feedback shows specific failures — e.g. ``"ngspice exit=1 + 'Error: measure limited to ...' in stderr"`` → ``"you put meas outside .control; fix the placement, keep the params"``. This means the loop's feedback signal is now actionable rather than just informational.
+
+**``test_system_prompt_includes_worked_example_and_pitfalls``** is the explicit unit guard: future edits that drop the worked example or the pitfall callouts fail loudly rather than silently regressing live-LLM convergence rate. The prompt asserts include the exact-form canonical ``meas`` line, the ``mag()`` anti-pattern string, the ``ngspice 44.x`` dialect reference, and the PITFALL section headers.
+
+**The §17.147 audit trail was the diagnostic.** Re-running the failed live test in isolation, querying the latest 3 ``sim_runs`` rows by ``ORDER BY created_at DESC``, and reading ``stderr`` is what surfaced the actual ngspice complaints. Then a one-shot ``model_router.chat(messages=[…], role="model_general")`` probe captured the LLM's raw response and revealed the Python-source-concatenation pattern. Both were possible only because the §17.140 wrapper writes ``sim_runs`` even on failure (the "audit-the-attempt" invariant from §17.147). Without persisted failed attempts the diagnostic loop would have been "re-run the live test and hope to catch the failure mode" — much slower and non-deterministic.
+
+**Files.**
+
+- ``app/sim/device_sizing.py`` (prompt rewrite, +50 lines, -23 lines). The ``_SYSTEM_PROMPT`` string is now ~4900 chars (was ~1800); the additional surface is one worked example, the five pitfalls section, and the iterative-refinement recipe. No behavior change to the surrounding control flow.
+- ``tests/test_device_sizing.py`` (+15 lines). One new unit test ``test_system_prompt_includes_worked_example_and_pitfalls`` locking the prompt invariants.
+
+**Verification.**
+
+```
+# Unit suite still green; new guard test passes.
+$ docker exec scaffold-orchestrator pytest tests/test_device_sizing.py -v
+============================== 17 passed in 1.7s ==============================
+
+# Live closed-loop integration test: converges on iter 1.
+$ docker exec scaffold-orchestrator pytest tests/integration/test_device_sizing_db.py -v
+PASSED [100%]
+============================== 1 passed in 5.33s ===============================
+
+# Sim_runs audit row shows the real ngspice measurement.
+$ psql -c "SELECT exit_code, measurements FROM sim_runs ORDER BY created_at DESC LIMIT 1"
+ exit_code | measurements
+-----------+----------------------
+         0 | {"fc_3db": 997.6278}
+```
+
+**One operator-side item remains:** glue the four stages (extract → confirm → topology-select → size) into a single ``design_circuit`` job_type with state-machine transitions, so an operator can drive the whole chain from one ``/design <brief>`` invocation rather than chaining HTTP calls. After that, the engineering-design track is fully wrapped.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

@@ -445,6 +445,26 @@ def test_check_constraints_skips_non_measurable_kinds():
 
 
 @pytest.mark.smoke
+def test_system_prompt_includes_worked_example_and_pitfalls():
+    """§17.150 — the prompt MUST carry a worked example and explicit
+    pitfall callouts. The §17.147 live-test convergence depended on
+    these; a future edit that drops them could silently regress
+    cloud-LLM convergence rate without breaking any other test."""
+    prompt = ds_mod._SYSTEM_PROMPT
+    # Worked example markers.
+    assert "WORKED EXAMPLE" in prompt
+    assert "RC low-pass" in prompt
+    # The canonical correct `meas` form.
+    assert "meas ac fc_3db when vdb(out)=-3 fall=1" in prompt
+    # Specific failure-mode callouts tied to actual sim_runs we saw.
+    assert "PITFALL 1" in prompt and "measure limited to" in prompt
+    assert "mag(v(node))=0.7071" in prompt  # PITFALL 2: wrong expr form
+    assert "fall=1" in prompt and "rise=1" in prompt  # PITFALL 3
+    # ngspice 44.x reference so the LLM knows the dialect.
+    assert "ngspice 44.x" in prompt
+
+
+@pytest.mark.smoke
 def test_check_constraints_skips_unmeasured_non_required():
     """preferred / best_effort constraints with no measurement don't
     block convergence — only required ones do."""
