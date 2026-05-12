@@ -31,10 +31,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.schemas import (
+    DeviceSizingRead,
     SpecPendingListResponse,
     SpecRead,
     TopologyCandidateRead,
     TopologySelectionRead,
+)
+from app.sim.device_sizing import (
+    CandidateIndexError,
+    TopologySelectionNotFoundError,
+    size_device,
 )
 from app.sim.spec_store import (
     SpecNotFoundError,
@@ -187,5 +193,80 @@ async def _fetch_created_at(db: AsyncSession, selection_id: uuid.UUID):
     row = await db.execute(
         _text("SELECT created_at FROM topology_selections WHERE id = :id"),
         {"id": str(selection_id)},
+    )
+    return row.scalar_one()
+
+
+# §17.147 — Device-sizing stage. Mounted under /topology-selections/
+# because the unit of work is a chosen (spec, topology_candidate)
+# pair, not a bare spec.
+
+sizing_router = APIRouter(tags=["Specs"], prefix="/topology-selections")
+
+
+@sizing_router.post(
+    "/{topology_selection_id}/size",
+    response_model=DeviceSizingRead,
+)
+async def post_size_device(
+    topology_selection_id: uuid.UUID,
+    candidate_idx: int = 0,
+    max_iterations: int | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> DeviceSizingRead:
+    """Run the closed-loop sizing stage against a topology candidate.
+
+    Always persists a ``device_sizings`` row when the stage gets past
+    the gate checks (confirmed spec, analog_circuit kind, valid
+    candidate_idx). The persisted row records the attempt — a
+    non-converged sizing carries ``converged=False`` and an
+    ``errors`` list explaining why; the wider pipeline accepts it
+    as ready only when ``converged=True``.
+
+    Status mapping:
+      * 200 — row persisted (caller checks ``converged`` for outcome).
+      * 400 — candidate_idx out of bounds for this selection.
+      * 404 — topology_selection_id not found.
+    """
+    try:
+        result = await size_device(
+            topology_selection_id,
+            db=db,
+            candidate_idx=candidate_idx,
+            max_iterations=max_iterations,
+        )
+    except TopologySelectionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"topology_selection {topology_selection_id} not found",
+        )
+    except CandidateIndexError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    assert result.sizing_id is not None
+    created_at = await _fetch_sizing_created_at(db, result.sizing_id)
+
+    return DeviceSizingRead(
+        id=result.sizing_id,
+        spec_id=result.spec_id,  # type: ignore[arg-type]
+        topology_selection_id=result.topology_selection_id,  # type: ignore[arg-type]
+        candidate_idx=result.candidate_idx,
+        converged=result.converged,
+        iterations=result.iterations,
+        final_params=result.final_params,
+        final_netlist=result.final_netlist,
+        final_measurements=result.final_measurements,
+        sim_run_ids=result.sim_run_ids,
+        model_used=result.model_used,
+        errors=result.errors,
+        created_at=created_at,
+    )
+
+
+async def _fetch_sizing_created_at(db: AsyncSession, sizing_id: uuid.UUID):
+    from sqlalchemy import text as _text
+    row = await db.execute(
+        _text("SELECT created_at FROM device_sizings WHERE id = :id"),
+        {"id": str(sizing_id)},
     )
     return row.scalar_one()

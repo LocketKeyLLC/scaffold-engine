@@ -159,6 +159,14 @@ class Settings(BaseSettings):
     # local models tend to drift. Operators with strict offline
     # requirements can override to model_router or model_verifier.
     spec_extractor_model_role: str = "model_general"
+    # §17.147 — Closed-loop device-sizing budget. The stage proposes
+    # parameters, runs ngspice, feeds the measurement gap back to the
+    # LLM, and repeats until convergence or the budget is exhausted.
+    # Each iteration is one ngspice subprocess + one LLM round trip.
+    # Default 3 is the working compromise: enough for analytical →
+    # one refinement → safety net, without making a non-convergent
+    # design wait for an expensive 10-iter futile loop.
+    device_sizing_max_iterations: int = Field(default=3, ge=1, le=10)
     model_verifier: str = "qwen2.5:7b"
     model_cloud_heavy: str = "qwen3-vl:235b-instruct-cloud"
     model_cloud_alt: str = "qwen3.5:397b-cloud"

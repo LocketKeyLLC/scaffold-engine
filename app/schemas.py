@@ -771,3 +771,27 @@ class TopologySelectionRead(BaseModel):
     rag_domain: str | None = None
     model_used: str
     created_at: datetime
+
+
+# §17.147 — Device-sizing stage (first closed-loop stage of the
+# engineering-design pipeline).
+
+class DeviceSizingRead(BaseModel):
+    """Response for POST /topology-selections/{id}/size. Returns the
+    persisted device_sizings row whether or not the loop converged —
+    ``converged`` is the outcome flag, ``errors`` carries the loop's
+    diagnostic. The wider pipeline accepts a sizing as ready only
+    when ``converged == True``."""
+    id: UUID
+    spec_id: UUID
+    topology_selection_id: UUID
+    candidate_idx: int
+    converged: bool
+    iterations: int
+    final_params: dict[str, str]
+    final_netlist: str
+    final_measurements: dict[str, float]
+    sim_run_ids: list[UUID]
+    model_used: str
+    errors: list[str]
+    created_at: datetime

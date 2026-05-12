@@ -5884,6 +5884,78 @@ report
 
 **Next from the engineering-design checklist:** the device-sizing stage. It takes a confirmed spec + a chosen topology candidate (from the persisted ``topology_selections`` row) and emits a parameter sweep that gets fed into the §17.140 ngspice oracle for closed-loop "did it meet the spec?" verification. After device-sizing, the chain runs end-to-end and the design pipeline produces its first verified deliverable.
 
+### 17.147 Device-sizing stage — first CLOSED-LOOP stage, LLM ↔ ngspice (2026-05-12)
+
+The pipeline's first closed loop. Takes a confirmed spec + a topology candidate, drives an LLM/SPICE iteration: the model proposes parameter values + a netlist, the §17.140 ngspice wrapper runs it, the measurements get compared to the spec's constraints, and if there's a gap the LLM gets fed the params + measurements + gap descriptions back as context for the next iteration. Bounded by ``settings.device_sizing_max_iterations`` (default 3); persists one ``device_sizings`` row whether or not the loop converged.
+
+**Persistence-on-attempt, not persistence-on-success.** §17.144 (extractor) and §17.146 (topology-select) wrote rows only on full success. §17.147 inverts the rule: the ``device_sizings`` row is the *attempt*, and ``converged BOOL`` distinguishes the outcome. Rationale: an operator looking at "why is this spec stuck?" needs to see what was tried — what params the LLM chose, what ngspice measured, what the gap was — even when nothing converged. Hiding that information in logs would defeat the audit-table-per-stage pattern. The API layer's ``ok`` mirrors ``converged`` so callers that only care about ready-for-next-stage still get a clean True/False.
+
+**Every iteration's sim_run is captured.** ``sim_run_ids UUID[]`` records the chain of §17.140 sim_runs row UUIDs the loop produced — typically 1–3 entries depending on convergence. Querying ``SELECT * FROM sim_runs WHERE id = ANY(sizing.sim_run_ids)`` reconstructs the full parameter trajectory for any sizing attempt; this is what the §17.143-and-on "every numeric claim ties to a sim_run_id" invariant requires for the pipeline's closing report.
+
+**Discovered + fixed a real convergence bug via the live integration test.** First draft of ``_check_constraints`` skipped any constraint that lacked a matching measurement key. Logic: "if not measured, can't compare, skip." Consequence: when the LLM emitted a netlist that *forgot to emit the .meas line* for the spec's required ``fc_3db``, ``measurements`` came back empty, ``gaps`` came back empty, and the loop happily reported ``converged = True`` with ``final_measurements = {}``. The live integration test caught it immediately (``assert "fc_3db" in body["final_measurements"]`` → ``KeyError``). The fix tightens the rule: a constraint that's both ``criticality = required`` and a measurable kind (``electrical.*``, ``timing.*``, ``thermal.*``, ``signal.*``) is a *gap* when unmeasured — the LLM's next iteration sees ``"fc_3db: required electrical.frequency constraint not measured — LLM must emit \`.meas\` with name 'fc_3db'"`` in its feedback and corrects on the retry. Two new unit tests (``test_check_constraints_required_measurable_unmeasured_is_gap``, ``test_check_constraints_skips_non_measurable_kinds``) lock the new behavior. The "verifiability ground truth" rule the trio of oracles enforces would have been hollow without this fix — a stage can't claim it met a spec it never measured.
+
+**Analog-only refusal at the gate.** ``design.kind != "analog_circuit"`` is rejected at the stage entry with a clear error. Digital sizing wants Verilator-in-the-loop with cycle-count measurements rather than ngspice over voltages; that's a separate stage. Refusal happens *before* any LLM or ngspice call, so a misrouted digital spec doesn't burn budget.
+
+**Loop control flow.** A degenerate iteration (LLM emitted unparseable JSON OR missing ``params``/``netlist`` fields) still counts toward the iteration budget — recorded with empty params/netlist + the raw LLM output tail in the feedback — so a chronically malforming LLM doesn't infinite-loop. ``test_llm_proposal_failure_continues_loop_and_persists`` is the explicit guard. ngspice failure (broken SPICE syntax) is *not* terminal either: ``sim.sim_run_id`` is still recorded (the §17.140 wrapper persists a row on every attempt, including failures), the ``stderr`` tail is folded into the next-iter context, and the LLM gets a chance to fix its syntax. ``test_ngspice_failure_in_iter_feeds_back_to_llm`` covers this.
+
+**Pipeline state, finally end-to-end.**
+
+```
+NL brief
+  ↓ §17.144 extract_spec                       [LLM, T=0]
+specs row (confirmed_at=NULL)
+  ↓ §17.145 POST /specs/{id}/confirm           [operator]
+specs row (confirmed_at populated)
+  ↓ §17.146 POST /specs/{id}/topology-select   [RAG + LLM, citation invariant]
+topology_selections row (candidates + citations)
+  ↓ §17.147 POST /topology-selections/{id}/size?candidate_idx=N
+  │     1-3 iter LLM ↔ §17.140 ngspice closed loop
+device_sizings row (converged BOOL, sim_run_ids[], final_params, final_measurements)
+  ↓ [ report — future commit ]
+```
+
+**Files.**
+
+- ``db/migrations/042_device_sizings.sql`` (new). Audit table with ``candidates`` ``final_params JSONB``, ``final_netlist TEXT``, ``sim_run_ids UUID[]``, ``converged BOOL``, ``iterations INT``, ``measurements_final JSONB``, ``errors TEXT[]``. CASCADE from spec_id AND topology_selection_id. Indexed on spec_id, topology_selection_id, created_at; partial index ``WHERE converged = TRUE`` for "give me ready sizings" lookups. DO-block wrapped.
+- ``app/sim/device_sizing.py`` (new, ~370 lines). ``size_device(topology_selection_id, *, db, candidate_idx=0, max_iterations=None, model_role=None)``. Closed loop, never raises on LLM/ngspice failure (lookup errors do raise for HTTP-404 / 400 mapping). Helpers ``_is_measurable_kind``, ``_check_constraints``, ``_call_llm_propose`` individually unit-tested. ``IterationRecord`` dataclass on the result so callers can render the trajectory.
+- ``app/schemas.py`` (+21 lines). ``DeviceSizingRead`` Pydantic model.
+- ``app/routers/specs.py`` (+~80 lines). New ``sizing_router`` (separate APIRouter with prefix ``/topology-selections``) so we can mount under a different URL space without colliding with the existing ``/specs`` prefix. Includes ``POST /topology-selections/{id}/size?candidate_idx=N&max_iterations=N``.
+- ``app/main.py`` (+2 lines). ``include_router(sizing_router)``.
+- ``app/config.py`` (+9 lines). ``device_sizing_max_iterations: int = Field(default=3, ge=1, le=10)`` with rationale comment.
+- ``tests/test_device_sizing.py`` (new, 16 ``@pytest.mark.smoke`` cases, mocked LLM + mocked ``run_ngspice``). Coverage: converge iter 1; converge iter 2 with first-iter gap feedback; budget exhausted (3 misses, row persisted with ``converged=False``); LLM malformed JSON on iter 1 then recovers iter 2; ngspice failure feeds stderr to LLM next iter; unconfirmed-spec refusal; non-analog-kind refusal; topology_selection missing raises ``TopologySelectionNotFoundError``; candidate_idx OOB raises ``CandidateIndexError``; ``_check_constraints`` direct: target-in-tolerance / target-out / max-violated / min-violated / required-measurable-unmeasured-is-gap / non-measurable-kinds-skipped / non-required-unmeasured-skipped.
+- ``tests/integration/test_device_sizing_db.py`` (new, 1 case). Real Postgres + real ngspice sidecar + real LLM. Inserts a confirmed RC LPF spec AND a hand-crafted ``topology_selections`` row (avoids the §17.146 corpus dependency), hits the endpoint with ``max_iterations=3``, asserts a row is persisted regardless of convergence outcome. Skips on sidecar / Ollama / ``SCAFFOLD_SKIP_LIVE_LLM=1``.
+- ``tests/conftest.py`` (+1 line). CI-smoke ``collect_ignore`` for the new integration test.
+
+**Verification.**
+
+```
+# 16/16 unit cases (mocked LLM + ngspice).
+$ docker exec scaffold-orchestrator pytest tests/test_device_sizing.py -v
+============================== 16 passed in 1.64s ==============================
+
+# Live closed loop against cloud 235b + real ngspice sidecar.
+# Three iterations; LLM emitted SPICE the wrapper rejected as syntactically
+# broken on all three attempts. The §17.147 audit-the-attempt invariant
+# fired correctly — device_sizings row persisted with converged=False.
+$ docker exec scaffold-orchestrator pytest tests/integration/test_device_sizing_db.py -v
+WARNING: live sizing did not converge (iterations=3, errors=[budget exhausted
+  after 3 iterations; final gaps: ['ngspice exit=1 timed_out=False']]) —
+  audit row persisted at id=c0fb4a9d-e31e-40b2-9555-a3ee9569baaf
+PASSED [100%]
+============================== 1 passed in 17.53s ==============================
+```
+
+The non-convergence on the live test is informative, not a regression: the cloud 235b's first attempt at emitting valid ngspice 44.x batch-mode SPICE for an RC low-pass didn't survive ngspice's parser, the wrapper logged that, the loop fed the stderr back, and the next two attempts didn't get it right either. The audit row carries the full ``sim_run_ids`` chain — three sim_runs entries with the LLM's broken netlists and ngspice's specific complaints, exactly the diagnostic data an operator needs to refine the prompt. Tightening the SPICE-emission prompt to converge reliably is a follow-up; the *stage logic* is correct.
+
+**Deferred — explicitly out of scope for §17.147.**
+
+- Prompt-tuning for reliable ngspice 44.x batch-mode emission. The §17.140 wrapper's ``.control/.endc`` lesson is in the prompt, but cloud 235b's adherence is imperfect; a refinement pass (worked examples + stricter error-feedback formatting) is its own commit.
+- Digital sizing via verilator. Same loop shape but `tool='verilator'` in sim_runs, KPI assertions instead of measurements. Branch the stage on ``design.kind`` in a future commit.
+- Multi-candidate parallel sweep. v1 sizes one ``candidate_idx`` at a time; an operator wanting to compare candidates A/B/C must invoke three times. A future ``POST /topology-selections/{id}/size-all`` could parallelize.
+- ``design_circuit`` job type. The stage chain (extract → confirm → topology → size) now runs end-to-end via HTTP endpoints; gluing it into a single job_type with state transitions follows.
+
+**Next from the engineering-design checklist:** the report stage. It joins a converged ``device_sizings`` row to its ``spec_id`` + ``topology_selection_id`` + ``sim_run_ids[]``, renders a complete deliverable (spec table, topology rationale, sized parameters, measurement vs target table, citation list), and lands the design pipeline's first end-to-end verified output. After that the trio of oracles, the spec/topology/sizing chain, and the operator gate are all wired into one observable surface.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
