@@ -118,6 +118,12 @@ async def test_put_then_get_round_trip():
 
     mock_redis.set = AsyncMock(side_effect=fake_set)
     mock_redis.get = AsyncMock(side_effect=fake_get)
+    # §17.133 — put consults SCAN; benign empty iterator keeps the
+    # cardinality cap a no-op for this round-trip test.
+    async def _empty_scan(match=None, count=None):
+        return
+        yield  # unreachable
+    mock_redis.scan_iter = _empty_scan
     cache._redis = mock_redis
 
     assert await cache.put("gh", "v1", "README.md", b"# README", ttl_seconds=3600) is True
@@ -168,6 +174,13 @@ async def test_put_redis_error_returns_false():
     cache = FetchCache()
     mock_redis = AsyncMock()
     mock_redis.set = AsyncMock(side_effect=ConnectionError("redis down"))
+    # §17.133 — put now consults SCAN for the cardinality cap. Wire a
+    # benign empty scan so the test continues to exercise the set() error
+    # path rather than tripping the (fail-open) SCAN-error path.
+    async def _empty_scan(match=None, count=None):
+        return
+        yield  # unreachable; needed to make this an async generator
+    mock_redis.scan_iter = _empty_scan
     cache._redis = mock_redis
 
     assert await cache.put("gh", "v1", "x", b"data", ttl_seconds=60) is False
@@ -190,4 +203,7 @@ async def test_put_bad_key_returns_false():
 
 def test_stats_counters_start_at_zero():
     cache = FetchCache()
-    assert cache.stats() == {"hits": 0, "misses": 0, "puts": 0, "oversized": 0}
+    assert cache.stats() == {
+        "hits": 0, "misses": 0, "puts": 0, "oversized": 0,
+        "capped": 0, "last_count": 0,
+    }

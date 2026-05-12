@@ -524,22 +524,27 @@ async def health():
         cache_stats: dict = {}
         verifier_cache_stats: dict = {}
         rag_cache_stats: dict = {}
+        fetch_cache_stats: dict = {}
         try:
             from app.utils.embedding_cache import get_cache
+            from app.utils.fetch_cache import get_fetch_cache
             from app.utils.llm_response_cache import get_verifier_cache
             from app.utils.rag_result_cache import get_rag_result_cache
             cache = get_cache()
             cache_stats = cache.stats
             verifier_cache_stats = get_verifier_cache().stats()
             rag_cache_stats = get_rag_result_cache().stats()
+            fetch_cache_stats = get_fetch_cache().stats()
             redis_conn = await cache._get_redis()
             await asyncio.wait_for(redis_conn.ping(), timeout=2.0)
             key_count = await asyncio.wait_for(redis_conn.dbsize(), timeout=2.0)
             return ({"status": "up", "keys": key_count},
-                    cache_stats, verifier_cache_stats, rag_cache_stats)
+                    cache_stats, verifier_cache_stats,
+                    rag_cache_stats, fetch_cache_stats)
         except Exception:
             return ({"status": "down", "keys": 0},
-                    cache_stats, verifier_cache_stats, rag_cache_stats)
+                    cache_stats, verifier_cache_stats,
+                    rag_cache_stats, fetch_cache_stats)
 
     # Each _check_* wraps its body in try/except Exception and returns a
     # dict on failure, so gather() cannot surface Exception objects from
@@ -550,13 +555,14 @@ async def health():
         _check_pg(), _check_ollama(), _check_milvus(), _check_redis(),
         return_exceptions=True,
     )
-    redis_info, cache_stats, verifier_cache_stats, rag_cache_stats = redis_pair
+    redis_info, cache_stats, verifier_cache_stats, rag_cache_stats, fetch_cache_stats = redis_pair
     reranker = _check_reranker_state(getattr(app, "state", None))
     checks = {
         "postgresql": pg, "ollama": ollama, "milvus": milvus,
         "redis": redis_info, "embedding_cache": cache_stats,
         "verifier_cache": verifier_cache_stats,
         "rag_result_cache": rag_cache_stats,
+        "fetch_cache": fetch_cache_stats,
         "reranker": reranker,
     }
     pg_up = pg["status"] == "up"

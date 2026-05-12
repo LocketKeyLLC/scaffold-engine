@@ -16,9 +16,11 @@ WARNING log — a single huge response can't blow out Redis.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
+import time
 
 import redis.asyncio as aioredis
 
@@ -69,6 +71,16 @@ class FetchCache:
         self._misses = 0
         self._puts = 0
         self._oversized = 0
+        # §17.133 — cardinality cap. _last_count is the most recent SCAN
+        # result for fetchv1:* keys; _last_count_ts is its monotonic
+        # capture time. Concurrent puts serialize on _count_lock so only
+        # one SCAN runs per refresh interval. _capped tracks puts
+        # rejected by the cap (distinct from _oversized, which counts
+        # by-body-size rejections).
+        self._last_count = 0
+        self._last_count_ts = 0.0
+        self._capped = 0
+        self._count_lock = asyncio.Lock()
 
     async def _get_redis(self) -> aioredis.Redis:
         if self._redis is None:
@@ -94,6 +106,39 @@ class FetchCache:
         self._misses += 1
         return None
 
+    async def _key_count(self, force: bool = False) -> int:
+        """Return an estimate of fetchv1:* keys in Redis.
+
+        Result is cached for ``settings.fetch_cache_count_interval_s``
+        seconds; only one concurrent caller actually runs SCAN (others
+        await the lock and read the refreshed value). Pass ``force=True``
+        to bypass the time cache.
+
+        Returns ``-1`` on SCAN failure — callers must treat that as
+        "unknown" and NOT block puts on a Redis hiccup (a hiccup is not
+        a cardinality breach; blocking would be strictly worse).
+        """
+        now = time.monotonic()
+        interval = settings.fetch_cache_count_interval_s
+        if not force and (now - self._last_count_ts) < interval:
+            return self._last_count
+        async with self._count_lock:
+            # Re-check under the lock — a peer may have just refreshed.
+            now = time.monotonic()
+            if not force and (now - self._last_count_ts) < interval:
+                return self._last_count
+            try:
+                r = await self._get_redis()
+                count = 0
+                async for _ in r.scan_iter(match=f"{_KEY_PREFIX}:*", count=1000):
+                    count += 1
+                self._last_count = count
+                self._last_count_ts = now
+                return count
+            except Exception as e:
+                logger.warning("fetch_cache_count_failed: err=%s", e)
+                return -1
+
     async def put(
         self,
         source_type: str,
@@ -104,7 +149,10 @@ class FetchCache:
     ) -> bool:
         """Store body. Returns True on write, False on rejection/error.
 
-        Rejects empty bodies, oversized bodies, and non-positive TTLs.
+        Rejects empty bodies, oversized bodies, non-positive TTLs, and
+        (when ``fetch_cache_max_keys > 0``) writes that would push the
+        key count above the configured cap. Cardinality is sampled at
+        most once per ``fetch_cache_count_interval_s``.
         """
         try:
             key = make_key(source_type, ref, path)
@@ -124,6 +172,18 @@ class FetchCache:
         if ttl_seconds <= 0:
             logger.warning("fetch_cache_invalid_ttl: %d", ttl_seconds)
             return False
+        # §17.133 — cardinality cap. 0 disables. SCAN failure returns -1,
+        # which we ignore (fail open: a Redis hiccup must not block puts).
+        max_keys = settings.fetch_cache_max_keys
+        if max_keys > 0:
+            count = await self._key_count()
+            if count >= max_keys:
+                self._capped += 1
+                logger.warning(
+                    "fetch_cache_cardinality_capped: key=%s count=%d cap=%d",
+                    key, count, max_keys,
+                )
+                return False
         try:
             r = await self._get_redis()
             await r.set(key, body, ex=ttl_seconds)
@@ -139,6 +199,8 @@ class FetchCache:
             "misses": self._misses,
             "puts": self._puts,
             "oversized": self._oversized,
+            "capped": self._capped,
+            "last_count": self._last_count,
         }
 
 

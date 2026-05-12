@@ -412,6 +412,15 @@ class Settings(BaseSettings):
     fetch_cache_ttl_default_seconds: int = Field(default=3600, ge=60, le=2592000)
     fetch_cache_ttl_immutable_seconds: int = Field(default=30 * 86400, ge=60, le=365 * 86400)
     fetch_cache_max_body_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
+    # Cardinality cap. The body-bytes cap above bounds individual entry
+    # size; this bounds the key COUNT to prevent a /research over a
+    # monorepo (e.g. github:huge/repo walking 50k files) from blowing
+    # out Redis. 0 disables the check entirely. The count is sampled
+    # via SCAN MATCH fetchv1:* at most once per fetch_cache_count_interval_s
+    # — the cached count gates puts in between samples, so a burst at
+    # most exceeds the cap by one interval's worth of writes.
+    fetch_cache_max_keys: int = Field(default=50_000, ge=0, le=10_000_000)
+    fetch_cache_count_interval_s: int = Field(default=30, ge=5, le=3600)
 
     # Verifier-verdict cache (llmverifyv1: prefix in Redis). Default OFF
     # because the verifier path is fail-closed and a stale cache hit could

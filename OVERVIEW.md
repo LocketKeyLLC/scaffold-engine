@@ -5042,6 +5042,53 @@ $ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
 - The check uses `EmbeddingCache.stats["hits"]` (sum of L1 + L2). Separate L1/L2 trends are still visible in `GET /health.checks.embedding_cache` if you need to disambiguate "Redis is slow" from "the cache is too small."
 - Pairing with the §17.117 fetch-cache stats: if BOTH caches are under pressure simultaneously, the underlying signal is "fresh ingest from /research is faster than retrieval can consume it" — a temporary state, not a sizing bug.
 
+### 17.133 Fetch-cache cardinality cap — circuit breaker on Redis blow-out (2026-05-12)
+
+Closes the orchestration-checklist gap: "Fetch cache cardinality cap." Pre-§17.133 `FetchCache.put` capped individual entry size (`fetch_cache_max_body_bytes`, default 5 MB) but NOT the total entry count. A `/research github:<huge>/<monorepo>` walking 50 k files would push 50 k keys into Redis in seconds; the TTL would eventually decay them, but in the meantime Redis is sitting on tens of GB of body bodies, the host swaps, the orchestrator + Milvus + Postgres slow to a crawl. §17.133 adds the missing circuit breaker.
+
+**Why a count cap, not a memory cap.** Redis has `maxmemory` + an eviction policy, but the project's compose doesn't set either (and shouldn't — the cache mixes prefixes that have different value-cost profiles: embeddings are small + numerous, fetched bodies are large + few). Counting keys we own (`fetchv1:*` only) keeps the cap local to the cache that's prone to blow-out, doesn't accidentally evict embeddings or verifier-cache entries, and gives an operator-tunable knob distinct from the body-bytes cap.
+
+**Sampled, not synchronous.** Counting Redis keys is `O(N)` via SCAN. Doing it on every put would add a 5–50 ms tax per write on a saturated Redis. The check runs at most once per `fetch_cache_count_interval_s` (default 30 s) — concurrent puts within the interval read the cached count; the first put after the interval expires re-samples. Concurrent samples serialize on `asyncio.Lock` so a 10-way fanout doesn't trigger 10 SCANs. Cost: 1 SCAN per 30 s + lock-contention bounded by interval, not by put rate.
+
+**Drift bound.** Between samples a burst can push the actual count above the cap by at most "puts in one interval." At default settings (30 s interval, 50 k cap) a 1 kHz put burst exceeds the cap by 30 k → 80 k entries. At average ingest sizes (~10 KB body) that's still well under 1 GB of Redis memory before the next sample re-clamps. The interval is operator-tunable (5 s..1 h) for tighter or looser bounds.
+
+**Fail-open on SCAN error.** A Redis hiccup on the count path returns `-1`, and `put` ignores `-1` (treats it as "unknown — proceed"). Rationale: a hiccup is NOT a cardinality breach, and blocking puts because the count is unknown would be strictly worse than the breach itself — a flaky Redis would turn into a no-write cache. The cap is a tripwire, not a hard guarantee.
+
+**The body-bytes cap still fires first.** Existing order of checks (`empty body → oversized body → invalid TTL → cardinality → write`) preserves the distinct meaning of the two rejection paths: `oversized` counts by-body rejections (single huge response), `capped` counts by-count rejections (too many small responses). One has remediation "fetch the smaller artifact"; the other has remediation "let TTL decay" or "raise the cap." Don't conflate them.
+
+**Bonus: fetch-cache stats now on `/health`.** Pre-§17.133 `verifier_cache` / `rag_result_cache` / `embedding_cache` were exposed but `fetch_cache` wasn't (§17.117 added stats but didn't wire them). Folded in alongside the others so the operator gets `hits / misses / puts / oversized / capped / last_count` from one curl.
+
+**Files.**
+
+- `app/utils/fetch_cache.py` — added `asyncio.Lock` + `time` import, `_last_count`/`_last_count_ts`/`_capped`/`_count_lock` fields, `_key_count(force=False)` helper (SCAN with prefix MATCH + time cache + lock), cardinality gate inside `put` (after size + TTL checks, before set), `capped` + `last_count` in `stats()`. Module docstring unchanged — the gate is internal.
+- `app/config.py` — `fetch_cache_max_keys: int = 50_000` (0..10M; 0 disables) + `fetch_cache_count_interval_s: int = 30` (5..3600). Placed in the existing fetch-cache block.
+- `app/main.py:/health` — added `fetch_cache` stats to the Redis branch return tuple + `checks` dict.
+- `tests/test_fetch_cache_cardinality.py` (new, 12 cases). `_key_count`: returns SCAN total, caches within interval, force bypasses cache, SCAN failure returns -1. `put`: below cap writes, at cap rejected, above cap rejected, cap disabled writes (assert SCAN never called), SCAN failure fails open, 5 puts in succession SCAN once, stats expose new fields. Regression: oversized-body rejection happens before cardinality check (asserts SCAN never called).
+- `tests/test_fetch_cache.py` — touched two pre-existing tests to add a benign `scan_iter` mock so the new code path doesn't emit `RuntimeWarning: coroutine never awaited`. `test_stats_counters_start_at_zero` updated for the new `capped` + `last_count` fields.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_fetch_cache_cardinality.py --timeout=30 -v
+12 passed in 0.94s
+
+$ docker exec scaffold-orchestrator pytest tests/test_fetch_cache.py tests/test_fetch_cache_cardinality.py tests/test_main.py --timeout=30 -q
+53 passed in 6.05s   # adjacent regression + new tests, no warnings
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+4 failed, 1828 passed, 3 skipped in 745.25s (0:12:25)
+```
+
++12 vs the §17.132 baseline (`1816 passed`) — all from `test_fetch_cache_cardinality.py`. Same 4 pre-existing `test_retrieval_golden` failures. Same 3 skips.
+
+**Operator notes.**
+
+- Raise the cap if your normal workload sustainably writes >50 k fetch-cache entries: set `SCAFFOLD_FETCH_CACHE_MAX_KEYS=200000` in `.env`, restart the orchestrator. The TTL halves the operator's job — at the default 1 h TTL (mutable refs) or 30 d TTL (immutable refs), even a 200 k cap fits in a few GB at typical body sizes.
+- Tighten the sample interval if you're seeing capped writes coincide with a known burst: set `SCAFFOLD_FETCH_CACHE_COUNT_INTERVAL_S=10`. Costs one extra SCAN every 10 s instead of every 30 s — fine on a quiet Redis, mildly visible on a hot one.
+- Disable the check entirely (e.g. during a one-off ingest of a known-huge corpus where you'd rather accept the memory pressure than rebuild the cache): `SCAFFOLD_FETCH_CACHE_MAX_KEYS=0`. The check short-circuits at the top of `put` — no SCAN cost, no log spam.
+- Force a recount on demand: `await get_fetch_cache()._key_count(force=True)`. Useful from an admin console after bulk-deleting keys to skip the 30 s wait for the cache to reflect reality. (`_key_count` is internal but the singleton accessor is public; we'll expose this on a `/jobs/cleanup`-style endpoint if real demand emerges.)
+- `GET /health.checks.fetch_cache.last_count` is the most recent sample, not real-time. Refresh by waiting for the interval or by triggering any put (which consumes the cached count and may re-sample if the interval has elapsed).
+
 ---
 
 ## Phase 7 wrap — deep-search rollout complete
