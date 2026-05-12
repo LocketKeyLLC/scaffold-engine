@@ -4848,6 +4848,54 @@ $ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
 - `GET /health` → `checks.verifier_cache.hits / misses / puts / skipped`. `skipped` counts gate-off calls; if you flip the gate on and `skipped` stops climbing, the new code path is live.
 - Stale cache after prompt-template change: bump `_KEY_PREFIX` in `llm_response_cache.py` from `llmverifyv1` to `llmverifyv2`. Old `llmverifyv1:*` keys decay via the configured TTL (default 1 h).
 
+### 17.129 RAG retrieval-result cache — opt-in `query_rag` short-circuit (2026-05-12)
+
+Closes the orchestration-checklist gap: "RAG retrieval result cache." `query_rag` re-runs embed → vector + keyword → RRF → CrossEncoder rerank → supersede sweep → provenance batch-fetch on every call. The reranker dominates wall time (~50 s for 12 candidates on the reference T480) — repeating it for byte-identical `(query, domain, top_k, …)` calls within a job is pure waste. The new cache short-circuits the second-and-later identical lookup.
+
+**Why short TTL.** The fetch-cache pattern at §17.117 uses 1 hour for mutable refs; this cache uses 120 s by default. Justification: a freshly-ingested entry should reach retrieval within a couple of minutes (the user is the operator and is often iterating on /research → /rag in close succession). Longer TTLs would mask the ingest → retrieve loop the user is actively watching. 120 s still covers the common multi-node-references-same-query pattern within one `/execute/all` cycle (typical job is 5–10 nodes spread over 5–30 min, but the same upstream-context retrieval often hits within the same minute).
+
+**What's not cached.** Conservatively, `_is_cacheable` rejects:
+
+1. `status != "ok"` — error responses (collection unavailable, embed failed). Caching errors masks real failures.
+2. `metadata.warnings` non-empty — anomalous path (reranker timeout, supersede glitch). Re-run on the next call so the operator sees the warning.
+3. `metadata.below_threshold == True` — confidence filter relaxed. The fallback-to-top-3 result is deliberately marginal; serving stale-fallback from cache hides retrieval-quality drift.
+4. Value size > `rag_result_cache_max_value_bytes` (default 256 KB) — guards Redis against a pathological 50-chunk response.
+
+These rules mean the cache's hit rate may look low in dev (small KB, many edge cases) but tracks closely with the hot-path "same upstream context query fired again" scenario it's designed for.
+
+**Cache-hit signal.** On a hit, `metadata.cache_hit = True` is set so callers (latency dashboards, the upcoming `cache_hit_rag` SSE event analog) can distinguish cached from fresh. `metadata.latency_ms` carries the ORIGINAL retrieval's latency, not the sub-millisecond hit time — the original number is what observability cares about.
+
+**Files.**
+
+- `app/utils/rag_result_cache.py` (new, 220 lines). `RagResultCache` class: Redis-only, fail-open, key `ragv1:{domain_or_all}:{sha256(canonical)}` with payload = `json.dumps({query, domain, top_k, confidence_threshold, skip_rerank, include_history, query_intent}, sort_keys=True)`. The `domain` segment is lifted into the key path so an operator can `SCAN MATCH ragv1:eng:*` to drop one partition's cache after a targeted ingest. Stats: `hits / misses / puts / skipped / uncacheable / oversized`.
+- `app/modules/rag_pipeline.py` — 8-line lookup near the top of `query_rag` (between arg normalization and `_get_collection`), single-line `put` before the final `return`. Cached responses return early with `metadata.cache_hit=True` injected.
+- `app/config.py` — three new knobs: `cache_rag_results: bool = False` (gate), `rag_result_cache_ttl_s: int = 120` (10..86400), `rag_result_cache_max_value_bytes: int = 256 KB` (4 KB..5 MB). Placed in the existing cache config block.
+- `app/main.py:/health` — `rag_result_cache` stats exposed alongside `embedding_cache` and `verifier_cache`.
+- `tests/test_rag_result_cache.py` (new, 28 cases) — key shape + per-field invalidation + None-domain segment, `_is_cacheable` decision rules, get/put round-trip, corrupt-payload drop, Redis-error fail-open, error/warnings/below_threshold-rejection, oversized rejection, gate-off short-circuit.
+- `tests/test_rag_pipeline_cache.py` (new, 5 cases) — second identical call short-circuits the pipeline (asserts `_embed_query`/`_vector_search`/`_keyword_search`/`_rerank` awaited exactly once), different domain → miss, error response not cached, gate-off keeps Redis untouched, Redis-error falls through to live pipeline.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_rag_result_cache.py tests/test_rag_pipeline_cache.py --timeout=30 -v
+33 passed in 3.42s
+
+$ docker exec scaffold-orchestrator pytest tests/test_rag_pipeline.py tests/test_main.py --timeout=30 -q
+34 passed in 4.90s   # rag_pipeline + /health regression check, all green
+
+$ docker exec scaffold-orchestrator pytest tests/ --timeout=30 -q
+4 failed, 1789 passed, 3 skipped in 801.15s (0:13:21)
+```
+
++33 vs the §17.128 baseline (`1756 passed`). Same 4 pre-existing `test_retrieval_golden` failures (live-Milvus retrieval-quality drift, documented §17.86/§17.92/X.25/§17.128). Same 3 skips.
+
+**Operator notes.**
+
+- To enable: `SCAFFOLD_CACHE_RAG_RESULTS=true` in `.env`, then restart `scaffold-orchestrator`.
+- `GET /health` → `checks.rag_result_cache.hits / misses / puts / skipped / uncacheable / oversized`. `uncacheable` counts responses rejected by `_is_cacheable` (errors, warnings, below_threshold); a climbing `uncacheable` count means a real retrieval-quality issue worth investigating, not a cache config problem.
+- Per-domain invalidation after targeted ingest: `redis-cli --scan --pattern 'ragv1:eng:*' | xargs -r redis-cli del` (replace `eng` with the affected domain). Whole-cache flush: `redis-cli --scan --pattern 'ragv1:*' | xargs -r redis-cli del`.
+- Stale cache after embedder/reranker swap: bump `_KEY_PREFIX` in `rag_result_cache.py` from `ragv1` to `ragv2`. The 120 s default TTL means a full natural decay only takes 2 min, so the bump is mostly belt-and-suspenders.
+
 ---
 
 ## Phase 7 wrap — deep-search rollout complete

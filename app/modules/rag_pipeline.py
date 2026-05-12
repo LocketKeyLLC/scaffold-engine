@@ -38,6 +38,7 @@ from typing import Any
 
 from pymilvus import Collection
 from app.utils.milvus_utils import get_collection
+from app.utils.rag_result_cache import get_rag_result_cache
 from app.rerankers import rerank as cross_encoder_rerank
 
 from app import model_router
@@ -561,6 +562,22 @@ async def query_rag(
 
     warnings: list[str] = []
 
+    # Result-cache lookup. Skipped when settings.cache_rag_results is False.
+    # On hit, the response is returned with metadata.cache_hit=True so
+    # callers can distinguish cached from fresh retrievals (e.g. for
+    # latency dashboards). The cached metadata.latency_ms is the ORIGINAL
+    # retrieval's latency, not the cache-hit time — cache-hit time is sub-
+    # millisecond and not interesting to track.
+    rag_cache = get_rag_result_cache()
+    cached = await rag_cache.get(
+        query, domain, top_k, confidence_threshold,
+        skip_rerank, include_history, query_intent,
+    )
+    if cached is not None:
+        meta = cached.setdefault("metadata", {})
+        meta["cache_hit"] = True
+        return cached
+
     loop = asyncio.get_running_loop()
     collection = await loop.run_in_executor(None, _get_collection)
     if collection is None:
@@ -690,7 +707,7 @@ async def query_rag(
             },
         })
 
-    return {
+    response = {
         "status": "ok",
         "query": query,
         "result_count": len(result_dicts),
@@ -710,6 +727,12 @@ async def query_rag(
             "latency_ms": latency_ms,
         },
     }
+    await rag_cache.put(
+        query, domain, top_k, confidence_threshold,
+        skip_rerank, include_history, query_intent,
+        response,
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------

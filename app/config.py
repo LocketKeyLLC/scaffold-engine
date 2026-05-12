@@ -417,6 +417,18 @@ class Settings(BaseSettings):
     cache_llm_responses: bool = False
     llm_response_cache_ttl_s: int = Field(default=3600, ge=60, le=30 * 86400)
 
+    # RAG retrieval-result cache (ragv1: prefix in Redis). Default OFF
+    # because retrieval-quality regressions are most visible on fresh
+    # runs — a stale cache hit could mask a real drop. Short TTL (120 s)
+    # when enabled, scoped to cover multi-node references to the same
+    # query within a single job. Only ``status=ok`` responses without
+    # warnings or below_threshold are cached.
+    cache_rag_results: bool = False
+    rag_result_cache_ttl_s: int = Field(default=120, ge=10, le=86400)
+    rag_result_cache_max_value_bytes: int = Field(
+        default=256 * 1024, ge=4 * 1024, le=5 * 1024 * 1024,
+    )
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @model_validator(mode="after")
