@@ -1,0 +1,50 @@
+# §17.161 — host-side OOM event watcher for scaffold-engine.
+#
+# Install:
+#   sudo cp scripts/scaffold-oom-watcher.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now scaffold-oom-watcher
+#
+# Verify:
+#   systemctl status scaffold-oom-watcher
+#   journalctl -u scaffold-oom-watcher -f
+#
+# Adjust User= / WorkingDirectory= / ExecStart= for any deploy where
+# the operator user is not "aedefruscio" or the repo lives elsewhere.
+
+[Unit]
+Description=Scaffold Engine OOM event watcher
+Documentation=https://github.com/LocketKeyLLC/scaffold-engine OVERVIEW.md §17.161
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=aedefruscio
+Group=docker
+WorkingDirectory=/mnt/adamssd/scaffold-engine
+ExecStart=/usr/bin/python3 /mnt/adamssd/scaffold-engine/scripts/oom_watcher.py
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+# Lock down the unit per systemd-hardening best practices. The watcher
+# only needs: docker CLI access (via the docker group) + python3 stdlib
+# + read access to the repo dir + write access to journald.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

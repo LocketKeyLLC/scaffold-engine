@@ -6870,6 +6870,74 @@ open-webui at 45% is the live-data correction to the audit's "1 GiB" recommendat
 
 **Documentation cross-refs.** Companion to §17.97 (log-rotation, the other "stop one container from starving the host" cap), §17.132 (embedding-cache pressure alert — the in-process analog of mem_limit), §17.133 (fetch-cache cardinality cap — the Redis-side analog). Together these four cover the four ways a single subsystem can exhaust shared host resources.
 
+### 17.161 OOM event alert sink — host-side watcher + systemd unit (2026-05-13)
+
+Closes the §17.160 operational followup. ``mem_limit`` will SIGKILL a container if it hits the cap; ``restart: always`` then revives it. The operator-visible symptom in that loop is a brief health blip — ``GET /health`` checks if the orchestrator is up *right now*, not "have you been OOMKilled 6 times this hour." Without a dedicated signal the cap behaves silently. §17.161 wires the missing signal: every Docker OOM event on a compose-managed scaffold-engine container becomes a ``system_alerts`` row.
+
+**Architecture decision — host-side Python + systemd, no socket exposure.** Three options were considered:
+
+1. **Host-side Python script run by systemd.** Reads ``docker events --filter event=oom``, emits via ``docker exec scaffold-orchestrator python -m app.observability.alerts emit ...``. Zero Docker-socket exposure inside any container. Adds a host-side service unit.
+2. **Sidecar container in compose.** Cleaner UX (``docker compose up`` brings it up) but requires ``/var/run/docker.sock`` mounted into the sidecar — root-equivalent even with ``:ro``, and at odds with the §17.64 hardening posture.
+3. **In-orchestrator polling.** Would need the socket mounted into the orchestrator itself — strictly the worst, exposes the most-attacked surface.
+
+Option 1 ships. The §17.64 / §17.93 trend across this codebase is consistently "no Docker socket in any container"; the cost of host-side ops (a systemd unit and a one-time ``cp + systemctl enable``) is small relative to that invariant.
+
+**Watcher behavior.** ``scripts/oom_watcher.py`` (stdlib-only Python, ~200 lines) does five things:
+
+1. Subprocess: ``docker events --filter type=container --filter event=oom --format '{{json .}}'``.
+2. ``parse_event`` JSON-parses each line, drops blank / malformed.
+3. ``is_compose_managed_oom`` filters to events with ``Type=container``, ``Action=oom``, and the compose label ``com.docker.compose.project=scaffold-engine``. Drops one-off ``docker run`` containers that happen to OOM on the same host.
+4. ``build_emit_argv`` composes the ``docker exec scaffold-orchestrator python -m app.observability.alerts emit ...`` argv with kind ``container.oom_killed``, severity ``critical``, payload ``{container_name, container_id (12 char), image, event_time_utc}``, dedup_key ``container.oom_killed:<name>`` (name, not ID — so dedup survives the restart-on-OOM cycle that issues a new container ID).
+5. ``_run_emit_with_retry`` shells out with bounded exponential backoff (1 s → 30 s, max 4 attempts). Necessary because the orchestrator can itself be the OOM victim — during its ~5 s restart window the ``docker exec`` will fail; the retry catches the event once the container is back. After 4 attempts the event is dropped and logged to journald; the operator can correlate via ``docker events`` retrospectively.
+
+**Dedup behavior.** ``alert_cooldown_seconds`` defaults to 3600 s (1 h). A container OOMing repeatedly within the window fires one ``system_alerts`` row, not N. Once the cooldown expires the next OOM fires again. This matches the "this container is sized wrong, raise its cap" remediation cadence — operator doesn't need 50 paged alerts in 10 minutes, one is enough to surface the sizing call.
+
+**The watcher does NOT cover host-OS OOMs.** Ollama runs on the host (not in a container) — if the host kernel OOM-kills Ollama itself, no Docker event fires and the watcher is silent. Detecting host OOMs would require ``/dev/kmsg`` or ``dmesg`` access, which expands the watcher's privilege footprint substantially. Out of scope; documented here so future expansion has a starting point.
+
+**systemd unit.** ``scripts/scaffold-oom-watcher.service`` runs the script as ``User=aedefruscio``, ``Group=docker`` — operator user must be in the ``docker`` group (already true on this host: ``id`` shows ``121(docker)``). Unit applies standard systemd hardening (``NoNewPrivileges``, ``ProtectSystem=strict``, ``ProtectHome=read-only``, ``RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6``, ``MemoryDenyWriteExecute``). ``Restart=always`` with 5 s backoff so a transient ``docker events`` stream interruption recovers automatically. Standard install: ``sudo cp + daemon-reload + enable --now``.
+
+**Files.**
+
+- ``scripts/oom_watcher.py`` (new) — the watcher. ``--test-event`` flag injects one JSON line and exits; ``--dry-run`` prints the emit argv instead of executing it. Both flags used by the unit tests + the live probe.
+- ``scripts/scaffold-oom-watcher.service`` (new) — systemd unit template. Install instructions in the file header.
+- ``tests/test_oom_watcher.py`` (new, 18 cases). ``parse_event``: valid JSON / blank / malformed / non-object. ``is_compose_managed_oom``: accepts the canonical event; rejects non-container types, non-oom actions, unlabelled containers, wrong-project labels, missing actor. ``build_emit_argv``: carries kind/severity/message/dedup_key, payload-JSON fields correct, dedup_key stable across container-ID changes (proves the restart-on-OOM dedup invariant), orchestrator target configurable, missing-attributes fallback. ``_event_time_iso``: epoch→UTC ISO, fallback to now on missing/non-numeric time.
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_oom_watcher.py -v
+18 passed in 1.52s
+
+$ SYNTH='{"Type":"container","Action":"oom","Actor":{"ID":"deadbeef0123",
+  "Attributes":{"name":"oom-watcher-live-probe",
+  "com.docker.compose.project":"scaffold-engine","image":"test/image:probe"}},
+  "time":1747177200}'
+
+$ python3 scripts/oom_watcher.py --test-event "$SYNTH"
+... oom_observed container=oom-watcher-live-probe
+... emit_ok attempt=1 stdout={"emitted": true, "suppressed": false, "id": "a93d42b1-...",
+  "reason": null}
+... watcher_exit seen=1 emitted=1
+
+$ docker exec scaffold-postgres psql -U scaffold -d scaffold_engine -t -c "
+    SELECT kind, severity, dedup_key, payload FROM system_alerts
+    WHERE kind='container.oom_killed' ORDER BY created_at DESC LIMIT 1;"
+ container.oom_killed | critical | container.oom_killed:oom-watcher-live-probe |
+ {"image": "test/image:probe", "container_id": "deadbeef0123",
+  "container_name": "oom-watcher-live-probe", "event_time_utc": "2025-05-13T23:00:00+00:00"}
+```
+
+Synthetic event flowed end-to-end: watcher parsed it, filtered correctly, shelled the CLI, CLI returned ``emitted=true``, row landed in ``system_alerts`` with all four payload fields intact. Test debris cleaned up after the probe (``DELETE FROM system_alerts WHERE dedup_key='container.oom_killed:oom-watcher-live-probe'``).
+
+**Not in this commit (deliberate).** The systemd unit is not installed by this commit — the operator runs ``sudo cp + systemctl enable --now`` on their schedule. The script and unit are repo artifacts, not auto-applied. This mirrors the §17.64 ``scripts/chown_named_volumes.sh`` pattern: ship the operator-facing operational tool in the repo, leave the system-state change as an explicit operator action.
+
+**Operational followups.**
+
+- ``GET /health`` could grow a ``recent_oom_alerts`` summary (count + most-recent timestamp per container) so the operator sees the signal without grepping ``system_alerts`` directly. Out of scope for §17.161; same pattern as §17.132's embedding-cache stats on ``/health``.
+- Dedup window is currently the global ``alert_cooldown_seconds``. A per-kind override (e.g., ``alert_cooldown_oom_seconds`` shorter at 10 min) would surface a noisy thrashing container faster. Defer until the global window proves wrong for OOM specifically.
+- Host-OS OOM coverage (Ollama process killed by host kernel, not container kernel) — would need ``dmesg`` access. Documented above, deferred.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
