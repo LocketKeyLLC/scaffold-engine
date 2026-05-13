@@ -7017,6 +7017,78 @@ $ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-d
 - If real-traffic ``error_logs`` rows start showing redacted-shape false-positives or persistent leaks past the regex, tighten or extend the pattern set. The ``test_handles_multiple_secrets_in_one_message`` multi-secret case is the contract for what's covered today.
 - If the operator wants the wire response to carry a stable error-code instead of a redacted message (so consumers can switch on ``error_type`` without parsing the message), restructure the JSON to ``{"error", "error_type", "request_id"}`` and drop ``message`` entirely from the wire. Out of scope for §17.162.
 
+### 17.163 `_record_call` comment-only swallow → observable contract guard (2026-05-13)
+
+Closes the fourth and final concrete audit-tail item from the 2026-05-13 sweep. Trivial code change; the value is in the test coverage that pins the contract.
+
+**The audit verdict.** Pre-§17.163 ``_record_call`` in ``app/model_router.py`` had:
+
+```python
+try:
+    from app.utils.cost_tracking import record_llm_call
+    await record_llm_call(resp)
+except Exception:
+    pass  # already logged inside record_llm_call's try/except
+```
+
+Two latent risks:
+
+1. **The "already logged" claim is documentation, not enforced.** ``record_llm_call`` does in fact have three internal try/except layers (the lazy import on line 134-141 of ``app/utils/cost_tracking.py``, the DB write on 154-191, the Prometheus emit on 196-203). The comment is accurate TODAY. But if a future refactor strips one of those try/except layers, the silent ``pass`` here hides the regression — telemetry rows stop appearing and nobody notices.
+2. **Two distinct failure modes collapse to one.** ``ImportError`` (cost_tracking module deleted / refactored) and ``RuntimeError`` (contract violation despite the module being present) both go through the same ``pass``. An operator debugging "why are llm_call_logs rows missing?" has no way to tell which one is happening.
+
+**The fix.** Split the two failure modes, log each loudly, swallow neither silently:
+
+```python
+try:
+    from app.utils.cost_tracking import record_llm_call
+except ImportError:
+    logger.warning("record_call_import_failed: cost_tracking unavailable")
+    return resp
+try:
+    await record_llm_call(resp)
+except Exception:
+    logger.exception("record_call_unexpected_escape")
+return resp
+```
+
+Both paths still return the ``resp`` so the LLM call path never breaks — the §J.3.a invariant ("telemetry must never break the call path") is preserved. But the failure-mode disambiguation now reaches the journal: ``record_call_import_failed`` is a deployment / refactor problem; ``record_call_unexpected_escape`` is a contract bug in cost_tracking. The two log keys grep cleanly into different remediations.
+
+**Tests pin the contract.** Three new cases at the bottom of ``tests/test_model_router.py``:
+
+| Test | Asserts |
+|---|---|
+| ``test_record_call_returns_resp_unchanged_on_success`` | Happy path: ``record_llm_call`` awaited with the resp; ``_record_call`` returns the same resp object |
+| ``test_record_call_swallows_unexpected_exception_and_logs`` | If ``record_llm_call`` raises (contract violation), ``_record_call`` does NOT propagate AND emits ``record_call_unexpected_escape`` via ``logger.exception`` |
+| ``test_record_call_swallows_import_error_and_logs`` | If ``cost_tracking`` import fails, ``_record_call`` does NOT propagate AND emits ``record_call_import_failed`` via ``logger.warning`` |
+
+The first two pins the load-bearing invariant: no matter what telemetry does, the LLM call response object reaches the caller. The third asserts the log-key disambiguation — if a future refactor merges the two paths back into one, this test fails and explains why.
+
+**Why not also tighten the contract upstream.** ``record_llm_call`` already has the contract pinned by ``tests/test_cost_tracking.py::test_db_failure_swallowed`` (line 147) — "If the DB write itself raises, record_llm_call must NOT propagate." That covers the most likely contract violation (DB write path). The two-layer test posture (cost_tracking pins the no-raise promise; model_router pins the swallow-and-log behavior IF the promise breaks) means a single-test regression at either layer is loud, not silent.
+
+**Files.**
+
+- ``app/model_router.py`` (L220-247) — ``_record_call`` rewritten as two distinct try blocks with logger.warning + logger.exception. Docstring updated to reference §17.163 and explain why the except paths should never fire under normal operation.
+- ``tests/test_model_router.py`` — three new tests at the bottom, scoped to ``test_record_call_*`` so ``pytest -k record_call`` runs just this contract suite.
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_model_router.py
+70 passed in 8.16s
+```
+
+Three new tests + 67 pre-existing, all green. No regression on the existing surface.
+
+**Audit-tail bookkeeping.** With §17.163, the four concrete audit items the 2026-05-13 sweep flagged as "highest-leverage next moves" are all closed:
+
+1. ✅ §17.159 — Logger-identity drift in ``app/routers/status.py``
+2. ✅ §17.160 — Per-service ``mem_limit`` caps on docker-compose.yml + §17.161 OOM event watcher
+3. ✅ §17.162 — Wire-500 + log-line secret redaction in ErrorLoggingMiddleware
+4. ✅ §17.163 — ``_record_call`` comment-only swallow → observable contract guard
+
+Remaining audit-tail items are heavier and explicitly deferred: §17.158 corpus regression remediation (5-80 min ingest work, three documented options), §17.161 followups (oom-history surfacing on ``/health``, per-kind cooldown, dmesg host-OOM coverage), Milvus 64-partition fan-out architectural concern.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

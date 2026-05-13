@@ -777,3 +777,65 @@ async def test_role_path_does_not_enrich_on_success():
     assert resp.success is True
     assert resp.error is None
     assert resp.text == "hi"
+
+
+# ---------------------------------------------------------------------------
+# §17.163 — _record_call contract: telemetry NEVER breaks the LLM call path
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_record_call_returns_resp_unchanged_on_success():
+    """Happy path — _record_call wraps record_llm_call and returns the resp."""
+    resp = model_router.ModelResponse(
+        text="hi", model="m", success=True, provider="ollama",
+    )
+    fake_record = AsyncMock(return_value=None)
+    with patch("app.utils.cost_tracking.record_llm_call", new=fake_record):
+        out = await model_router._record_call(resp)
+    assert out is resp
+    fake_record.assert_awaited_once_with(resp)
+
+
+@pytest.mark.asyncio
+async def test_record_call_swallows_unexpected_exception_and_logs(caplog):
+    """If record_llm_call raises despite its no-raise contract, _record_call
+    must log the contract violation AND return the resp unchanged. The
+    LLM call path must never break on a telemetry bug."""
+    resp = model_router.ModelResponse(
+        text="hi", model="m", success=True, provider="ollama",
+    )
+    fake_record = AsyncMock(side_effect=RuntimeError("contract violation"))
+    with patch("app.utils.cost_tracking.record_llm_call", new=fake_record), \
+         caplog.at_level("ERROR", logger="scaffold.router"):
+        out = await model_router._record_call(resp)
+    assert out is resp
+    assert any(
+        "record_call_unexpected_escape" in r.message
+        for r in caplog.records
+    ), "contract violation should produce a logger.exception line"
+
+
+@pytest.mark.asyncio
+async def test_record_call_swallows_import_error_and_logs(caplog):
+    """If cost_tracking can't be imported (deployment / refactor breakage),
+    _record_call logs a distinct WARNING and returns the resp. The two
+    failure modes (missing module vs. contract violation) emit different
+    log keys so the operator can disambiguate."""
+    resp = model_router.ModelResponse(
+        text="hi", model="m", success=True, provider="ollama",
+    )
+    import builtins
+    real_import = builtins.__import__
+
+    def _raising_import(name, *args, **kwargs):
+        if name == "app.utils.cost_tracking":
+            raise ImportError("module gone")
+        return real_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=_raising_import), \
+         caplog.at_level("WARNING", logger="scaffold.router"):
+        out = await model_router._record_call(resp)
+    assert out is resp
+    assert any(
+        "record_call_import_failed" in r.message
+        for r in caplog.records
+    ), "missing cost_tracking should produce a distinct WARNING"

@@ -220,17 +220,30 @@ async def _sleep_for_attempt(attempt: int) -> None:
 async def _record_call(resp: ModelResponse) -> ModelResponse:
     """Sprint J.3.a — fire-and-forget cost/latency telemetry hook.
 
-    Imports the recorder lazily and swallows any failure: telemetry must
-    never break the LLM call path. Returns the input untouched so this
-    can be inlined as ``return await _record_call(resp)`` at every
-    public-method exit. The recorder reads job/node ContextVars set by
-    ``execute_next_node`` and writes one ``llm_call_logs`` row.
+    Imports the recorder lazily and never lets a failure break the LLM
+    call path. Returns the input untouched so callers can inline this as
+    ``return await _record_call(resp)``. The recorder reads job/node
+    ContextVars set by ``execute_next_node`` and writes one
+    ``llm_call_logs`` row.
+
+    §17.163 — ``record_llm_call`` promises not to raise (three internal
+    try/except layers around the import, the DB write, and the metrics
+    emit). Under normal operation neither except path here fires; if
+    one does, that's a contract bug in cost_tracking worth
+    investigating, not silent telemetry loss. The two failure modes
+    are split + logged so the journal distinguishes "deployment
+    missing cost_tracking" from "cost_tracking raised despite its
+    contract."
     """
     try:
         from app.utils.cost_tracking import record_llm_call
+    except ImportError:
+        logger.warning("record_call_import_failed: cost_tracking unavailable")
+        return resp
+    try:
         await record_llm_call(resp)
     except Exception:
-        pass  # already logged inside record_llm_call's try/except
+        logger.exception("record_call_unexpected_escape")
     return resp
 
 
