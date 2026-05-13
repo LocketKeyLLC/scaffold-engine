@@ -6485,6 +6485,81 @@ The trio of post-pipeline iteration items §17.151 named is now down to **two**:
 - **HTML output format**. ``?format=html`` could trivially be implemented via a Markdown → HTML pass; deferred until something needs it.
 - **Per-sim-run trace artefacts**. ``ReportSimRun.tool='verilator'`` carries the run-level summary; full waveform / VCD inclusion would require a §17.140/141 sidecar enhancement to dump traces. Same deferral as §17.148.
 
+### 17.154 Digital RAG corpus seeded — 25 building-block references (2026-05-13)
+
+Resolves the remaining major item from §17.152's deferred list. The §17.149 ``seed_eng_topologies.py`` covered analog filter topologies; §17.146 topology-select against a ``design.kind = digital_logic`` brief was therefore retrieving from a corpus that didn't carry digital content. §17.154 ships ``scripts/seed_eng_digital.py`` with 25 curated digital building-block references covering the surface §17.152's sizing stage is expected to be asked to size.
+
+**Coverage — 25 entries in 7 families.** Counters (5: synchronous binary, ring, Johnson, BCD, Gray-code), storage (5: synchronous FIFO, asynchronous FIFO, single-port SRAM, dual-port SRAM, shift register), state machines (3: Moore, Mealy, one-hot encoded), arithmetic (4: ripple-carry adder, carry-lookahead adder, Booth multiplier, magnitude comparator), decoders/encoders (3: binary decoder, priority encoder, multiplexer), clock/CDC (3: 2-FF synchronizer, edge detector, integer clock divider), error correction (2: parity, Hamming SECDED). Each entry 600–1100 chars with a citation back to a canonical reference (Wikipedia digital-design pages).
+
+**Parallel script structure, shared partition.** ``scripts/seed_eng_digital.py`` mirrors ``seed_eng_topologies.py``'s shape — same CLI (``--dry-run``, ``--with-urls``), same idempotent ingest via the §9.x dedup pipeline, same ``_with_http_clients`` helper for the standalone-script init dance §17.149 documented. Both populate the same ``eng`` Milvus partition; retrieval bias toward the right kind comes from tags (every digital entry carries ``digital`` + ``digital_logic`` plus family-specific tags like ``counter`` / ``fifo`` / ``fsm`` / ``adder``). The §17.146 ``_build_rag_query`` carries ``design.kind`` in the natural-language search string, so a digital_logic query ranks digital chunks higher.
+
+**Three new tests beyond the §17.149 parity test set.** ``test_seeds_cover_digital_families`` asserts the four major families (counter, storage, fsm, arithmetic) are all represented — without this, retrieval for any of them would whiff. ``test_every_entry_tagged_digital`` is the cross-cutting tag guard: every entry MUST carry ``digital`` or ``digital_logic`` so the §17.146 query string biases retrieval correctly. The rest of the test set (required-fields, build_entries shape, CLI dry-run no-op, idempotency byte-equality) mirrors §17.149.
+
+**Live retrieval probe confirms partitioning works.** After seeding, three test queries against the corpus:
+
+```
+QUERY: 'design kind: digital_logic counter wrap'
+  → Synchronous N-bit binary counter, BCD counter, Ring counter
+
+QUERY: 'design kind: digital_logic FIFO synchronizer'
+  → Async FIFO (CDC), 2-FF synchronizer, Sync FIFO
+
+QUERY: 'design kind: analog_circuit RC low-pass filter'
+  → RC passive low-pass, Cascaded RC band-pass, RL passive low-pass
+```
+
+Both kinds' queries return on-topic chunks; the digital seeds don't pollute analog retrieval and vice-versa. The score-ranking (cosine + reranker) handles the kind-discrimination automatically because each entry's title + content + tags carry strong kind signal.
+
+**§17.146 topology-select for digital is now retrievable.** With the corpus populated, a hand-crafted ``design.kind=digital_logic`` spec posted through ``POST /design`` → ``/specs/{id}/confirm`` → ``/design/{job_id}/advance?stage=topology`` should now produce candidates with citations into the digital seeds — closing the loop §17.152's integration-test fixture had been bypassing by hand-crafting the ``topology_selections`` row.
+
+**Files.**
+
+- ``scripts/seed_eng_digital.py`` (new, ~440 lines including content). 25 SEEDS entries + 9 ``URLS_FOR_RESEARCH`` references. Same ``build_entries`` / ``ingest_curated`` / ``ingest_urls`` shape as §17.149.
+- ``tests/test_seed_eng_digital.py`` (new, 12 ``@pytest.mark.smoke`` cases). Mirror of ``test_seed_eng_topologies.py``: required-fields parity, four-family coverage, every-entry-tagged-digital cross-cut, unique titles, build_entries round-trip, CLI dry-run no-op, dry-run with URLs lists them, live calls ingest once, --with-urls calls url ingest, ingest failure → exit 2, bad flag → non-zero, idempotency byte-equality.
+
+**Verification.**
+
+```
+# Unit tests.
+$ docker exec scaffold-orchestrator pytest tests/test_seed_eng_digital.py -v
+============================== 12 passed in 1.07s ==============================
+
+# Live first ingest.
+$ docker exec scaffold-orchestrator python scripts/seed_eng_digital.py
+curated_ingest_done: stats={'new': 25, 'versioned': 0, 'rejected': 0,
+                            'skipped_hash': 0, 'skipped_empty': 0}
+
+# Idempotency — second run dedups all 25.
+$ docker exec scaffold-orchestrator python scripts/seed_eng_digital.py
+curated_ingest_done: stats={'new': 0, 'versioned': 0, 'rejected': 0,
+                            'skipped_hash': 25, 'skipped_empty': 0}
+
+# Retrieval probe shows the corpus partitions cleanly between kinds.
+$ ... (3 queries shown above)
+```
+
+**Engineering-design pipeline state after §17.154 — both kinds end-to-end with live retrieval:**
+
+```
+NL brief (any kind)
+  ↓ §17.144 extract
+  ↓ §17.145 /confirm
+  ↓ §17.146 topology-select  ← RAG over BOTH analog + digital seeds
+topology_selections row (with citations into the right seed family)
+  ↓ §17.147 size_device (analog)  ──┐ dispatch
+  ↓ §17.152 size_digital_device (digital) ──┘
+  ↓ §17.148 + §17.153 build_report (kind-aware)
+ReportDocument (analog or digital)
+```
+
+**Deferred — out of scope for §17.154.**
+
+- **Broader digital coverage**. Additional families (PLLs, SerDes, USB / Ethernet MAC blocks, AXI/AMBA interconnect primitives, AES/SHA hashing blocks) would extend the corpus further. The 25-entry baseline covers the §17.152 sizing stage's expected inputs; future additions are additive seed-script edits.
+- **Live §17.146 integration test against digital spec**. The §17.149 unblock turned the analog topology-select integration test from SKIPPED to PASSED; the analogous digital integration test would require seeding a digital_logic spec and exercising the full §17.144 → §17.146 → §17.152 → §17.153 chain end-to-end. Defer to its own commit so the retrieval-quality observation is isolated.
+- **Per-family granularity tags**. The ``counter`` / ``fifo`` / ``fsm`` etc. tags exist but the orchestrator doesn't yet use them as filter hints in ``query_rag``. A future enhancement could parse design.kind for sub-family signals and add Milvus expression filters; not needed for v1 retrieval quality.
+
+The one remaining post-pipeline iteration item from §17.151 is the §17.152 wrap-detection prompt refinement — analogous to §17.150's analog prompt fix, surface available in the §17.152 audit trail.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
