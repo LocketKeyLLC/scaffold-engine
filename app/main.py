@@ -44,6 +44,7 @@ from app.modules.rag_pipeline import query_rag as _query_rag
 from app.routers.alerts import router as alerts_router
 from app.routers.assist import router as assist_router
 from app.routers.observability import router as observability_router
+from app.routers.design import router as design_router
 from app.routers.specs import router as specs_router, sizing_router, report_router
 from app.routers.status import router as status_router
 from app.schemas import (
@@ -468,6 +469,7 @@ app.include_router(alerts_router)
 app.include_router(specs_router)
 app.include_router(sizing_router)
 app.include_router(report_router)
+app.include_router(design_router)
 
 
 # Sprint X.26 — Prometheus exposition. No auth (Prometheus scrapers

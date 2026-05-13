@@ -6186,6 +6186,134 @@ $ psql -c "SELECT exit_code, measurements FROM sim_runs ORDER BY created_at DESC
 
 **One operator-side item remains:** glue the four stages (extract → confirm → topology-select → size) into a single ``design_circuit`` job_type with state-machine transitions, so an operator can drive the whole chain from one ``/design <brief>`` invocation rather than chaining HTTP calls. After that, the engineering-design track is fully wrapped.
 
+### 17.151 design_circuit job type — engineering-design pipeline wrapped (2026-05-12)
+
+Last of §17.148's three deferred operator-side items. Pipeline stages (§17.144 extract, §17.146 topology-select, §17.147 device-size, §17.148 report) all existed as standalone HTTP endpoints; an operator wanting the full chain had to chain four POSTs by hand. §17.151 introduces the ``design_circuit`` job type and the ``/design`` router that hosts the pipeline behind one entry point.
+
+**Three new HTTP surfaces.**
+
+  * ``POST /design`` — body ``{brief: str, model_role?: str}``. Runs the §17.144 extractor; on success creates a ``jobs`` row with ``job_type='design_circuit'`` in ``awaiting_confirmation`` status, backfills ``specs.job_id``, and returns ``{job_id, spec_id}``. On ambiguity OR extractor error, returns 200 with structured ``{ambiguities[]}`` or ``{errors[]}`` and **does not write any rows** — per the §17.151 design choice, failed extractions stay out of the job lifecycle so an operator re-trying a brief doesn't accumulate ``failed`` jobs.
+  * ``POST /design/{job_id}/advance?stage=topology|size|report`` — SSE-streaming per-stage advance. Each call drives exactly one stage and emits ``stage_start`` / ``stage_done`` / ``stage_error`` / ``done`` events. Per-stage granularity is intentional — the operator can inspect persisted audit rows (specs / topology_selections / device_sizings) between stages and correct course (un-confirm and re-extract, or re-run sizing with a different ``candidate_idx``) without re-running the whole chain.
+  * ``GET /design/{job_id}`` — aggregated state. Joins jobs ⨝ specs ⨝ topology_selections ⨝ device_sizings and returns the cross-stage refs (spec_id, spec_confirmed_at, topology_selection_id, device_sizing_id, device_sizing_converged) in one read. Nullable fields reflect the furthest-completed stage. The polling surface for "is my spec confirmed yet?" / "did sizing converge?".
+
+**Schema migration 043: a new column on jobs.** ``ALTER TABLE jobs ADD COLUMN job_type TEXT NOT NULL DEFAULT 'legacy'`` plus a CHECK constraint allowing ``('legacy', 'design_circuit')``. All pre-§17.151 rows tag as ``legacy`` so existing flows (ideation, research, execution) keep their semantics. A partial index ``WHERE job_type <> 'legacy'`` keeps the "give me every design_circuit job" lookup cheap regardless of legacy population size. Per the §17.94 evolving-constraints pattern, the migration drops + re-adds the CHECK so re-applying on a hand-altered DB is safe.
+
+**Status lifecycle reuses the existing 14-state set** rather than introducing design-specific statuses. The design_circuit interpretation:
+
+```
+(no row)
+ │ POST /design (extract succeeds)
+ ▼
+awaiting_confirmation       — spec extracted, waiting for /specs/{id}/confirm
+ │ POST /design/{id}/advance?stage=topology
+ ▼
+planning                    — topology-select in flight, succeeded
+ │ POST /design/{id}/advance?stage=size
+ ▼
+executing                   — device-sizing in flight, attempt persisted
+ │ POST /design/{id}/advance?stage=report
+ ▼
+completed                   — sizing converged, report renderable
+```
+
+On terminal stage failure, the job lands in ``failed`` with diagnostic in the SSE event payload; the operator can read ``GET /device-sizings/{id}/report`` for the non-converged-but-renderable post-mortem (§17.148 supports that path).
+
+**SSE event format mirrors ``/execute/all``'s.** ``event: <name>\ndata: <json>\n\n`` — clients with the existing scaffold SSE plumbing don't need a second parser. The event types are:
+
+  * ``stage_start`` — ``{stage, job_id}``. First event.
+  * ``stage_done`` — stage-specific payload: topology selection_id + candidates; size sizing_id + converged + iterations; report sizing_id + converged + markdown.
+  * ``stage_error`` — ``{stage, errors[]}``. Terminal failure for the stage; no further events.
+  * ``done`` — ``{ok: bool}``. Last event, always.
+
+The ``X-Accel-Buffering: no`` header is set on the StreamingResponse so nginx (if present) doesn't buffer the events.
+
+**Ambiguity-no-row contract on extract.** §17.144's extractor already enforced no-row-on-failure for the ``specs`` table; §17.151 extends that to the ``jobs`` table for the design_circuit flow. The reasoning: a job whose only state is "operator typed a vague brief" provides no audit value (the extractor's ``llm_call_logs`` row already records the attempt), and accumulating ``failed`` jobs from typos / brief iterations would clutter the operator's pending-jobs view. Decided differently from the §17.147 device-sizing rule (which DOES persist a row even on non-convergence) because non-converged sizings carry real diagnostic value — the operator can see what was tried; an ambiguous brief carries no such payload until the LLM has done meaningful work.
+
+**Files.**
+
+- ``db/migrations/043_jobs_job_type.sql`` (new). The column + CHECK + partial index, in a DO block. Drop-if-exists pattern on the CHECK for re-apply safety.
+- ``app/sim/design_pipeline.py`` (new, ~390 lines). ``DesignCreateResult`` / ``DesignState`` dataclasses; ``create_design_job`` (extract + INSERT + link); ``advance_design_stage`` async generator emitting SSE strings; ``get_design_state`` aggregator. ``DesignJobNotFoundError`` distinguishes "job missing" vs "job_type not design_circuit" — both map to 404 at the HTTP layer but the message differs.
+- ``app/routers/design.py`` (new, ~135 lines). Three endpoints under prefix ``/design``. Mounted in ``app/main.py`` alongside the existing specs / sizing / report routers.
+- ``app/schemas.py`` (+39 lines). ``DesignCreateInput`` / ``DesignAmbiguityRead`` / ``DesignCreateResponse`` / ``DesignStateRead`` Pydantic models.
+- ``tests/test_design_pipeline.py`` (new, 14 ``@pytest.mark.smoke`` cases). Mocked-chain coverage: create success / ambiguity-no-rows / extractor-error-no-rows / empty-brief ValueError; advance topology success / unconfirmed-spec error event; advance size success / no-topology-yet error; advance report success; advance unknown-stage / missing-job error events; get_design_state full-chain / extract-only / 404. ``_parse_sse`` helper turns the generator's output back into ``(event, data)`` tuples for assertion.
+- ``tests/integration/test_design_db.py`` (new, 6 ``@pytest.mark.smoke`` cases). Real Postgres against the orchestrator: GET 404 missing / 404 legacy-type / advance 400 bad-stage / advance 404 missing / GET aggregates seeded chain / POST ambiguity inline (real cloud LLM round-trip against a vague brief).
+- ``tests/conftest.py`` (+1 line). CI-smoke ``collect_ignore`` for the new integration file.
+- ``app/main.py`` (+2 lines). ``include_router(design_router)``.
+
+**Verification.**
+
+```
+# Unit suite.
+$ docker exec scaffold-orchestrator pytest tests/test_design_pipeline.py -v
+============================== 14 passed in 2.50s ==============================
+
+# Integration tests — includes a real cloud-235b round-trip for the
+# ambiguous-brief case ("Make a fast filter."), completes in 4.51s.
+$ docker exec scaffold-orchestrator pytest tests/integration/test_design_db.py -v
+test_get_design_404_when_missing PASSED
+test_get_design_404_when_job_type_legacy PASSED
+test_advance_400_on_unknown_stage PASSED
+test_advance_404_when_job_missing PASSED
+test_get_design_aggregates_chain PASSED
+test_post_design_ambiguity_returns_inline PASSED
+============================== 6 passed in 4.51s ===============================
+
+# Migration applied.
+$ docker logs scaffold-orchestrator --since 30s | grep migration_applied
+migration_applied: file=043_jobs_job_type.sql
+```
+
+**Engineering-design pipeline — fully wrapped end-to-end:**
+
+```
+POST /design {brief}                                 — §17.144 extract
+  │ → DesignCreateResponse {job_id, spec_id}  OR  {ambiguities[]}  OR  {errors[]}
+  ▼
+POST /specs/{spec_id}/confirm                        — §17.145 gate
+  │
+  ▼
+POST /design/{job_id}/advance?stage=topology         — §17.146 topology + RAG + citation invariant
+  │ → SSE stream {stage_done, selection_id, candidates[]}
+  ▼
+POST /design/{job_id}/advance?stage=size             — §17.147 closed-loop sizing
+  │ → SSE stream {stage_done, sizing_id, converged, iterations}
+  ▼
+POST /design/{job_id}/advance?stage=report           — §17.148 pure-projection report
+  │ → SSE stream {stage_done, markdown}
+  ▼
+GET /design/{job_id}                                  — aggregated state
+GET /device-sizings/{sizing_id}/report               — report (JSON or Markdown)
+```
+
+The full chain produces an auditable verified deliverable from a natural-language brief. The "100% verifiable ground truth" goal of the original engineering-design checklist is now reachable from a single ``POST /design`` invocation; every numeric claim in the final report ties back through ``sim_run_ids[]`` to a ``sim_runs.id`` (§17.140–142 oracle attestations), and the SSE event surface lets a UI render per-stage progress as the chain runs.
+
+**Engineering-design track summary (§17.140 → §17.151):**
+
+| § | Date | Scope |
+|---|---|---|
+| 17.140 | 2026-05-12 | ngspice sidecar — first ground-truth oracle |
+| 17.141 | 2026-05-12 | Verilator sidecar — second oracle (HDL) |
+| 17.142 | 2026-05-12 | SymbiYosys sidecar — third oracle (formal) |
+| 17.143 | 2026-05-12 | Spec-capture schema (JSON Schema, flexible envelope) |
+| 17.144 | 2026-05-12 | NL → spec extractor (first LLM in pipeline) |
+| 17.145 | 2026-05-12 | /confirm gate (operator acknowledgement) |
+| 17.146 | 2026-05-12 | Topology-select stage (RAG + citation invariant) |
+| 17.147 | 2026-05-12 | Device-sizing stage (first closed-loop) |
+| 17.148 | 2026-05-12 | Report stage (regenerable from artifacts) |
+| 17.149 | 2026-05-12 | Eng corpus seeded (§17.146 unblock) |
+| 17.150 | 2026-05-12 | Sizing prompt refined (§17.147 unblock) |
+| 17.151 | 2026-05-12 | **design_circuit job type — pipeline wrapped** |
+
+**Twelve entries, one day, one complete pipeline.** Every stage has its own dedicated audit table (``specs`` / ``topology_selections`` / ``device_sizings`` / ``sim_runs``), its own ``@pytest.mark.smoke`` unit suite, its own integration test against the live stack, and now a single ``POST /design`` front door. The engineering-design checklist as originally drafted is materially complete.
+
+**What lands next is a research / iteration concern, not a stage-code concern:**
+
+- Broaden the eng RAG corpus past the LPF/HPF/BPF families seeded in §17.149 (op-amp building blocks, oscillators, ADC/DAC, power conversion). Each new family is an additive seed-script change.
+- Add the digital-sizing stage (verilator-in-the-loop) — parallel to §17.147 but with the §17.141 sidecar and ``design.kind == "digital_logic"`` gating. Reuses the existing ``device_sizings`` schema; same ``sim_runs`` audit path.
+- Iterate on the §17.147 sizing prompt as new topology families surface their own ngspice quirks.
+
+The track itself is done. No more checkpoints remain on the original checklist.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

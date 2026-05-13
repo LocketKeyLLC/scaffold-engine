@@ -833,6 +833,47 @@ class ReportSimRunRead(BaseModel):
     verdict: str | None = None
 
 
+# §17.151 — design_circuit job type (orchestrator front door).
+
+class DesignCreateInput(BaseModel):
+    """POST /design body. ``brief`` is the natural-language design
+    intent. Optional ``model_role`` lets operators override the
+    extractor model (e.g. for offline-only deployments)."""
+    brief: str = Field(..., min_length=1, max_length=10000)
+    model_role: str | None = None
+
+
+class DesignAmbiguityRead(BaseModel):
+    field: str
+    reason: str
+    question: str
+
+
+class DesignCreateResponse(BaseModel):
+    """POST /design response. Exactly one of the three result groups
+    is non-empty: success (``job_id`` + ``spec_id``), ambiguity
+    (``ambiguities`` populated), or extractor error (``errors``)."""
+    job_id: UUID | None = None
+    spec_id: UUID | None = None
+    ambiguities: list[DesignAmbiguityRead] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    model_used: str = ""
+
+
+class DesignStateRead(BaseModel):
+    """GET /design/{job_id} response — aggregated pipeline state."""
+    job_id: UUID
+    job_type: str
+    status: str
+    brief: str
+    created_at: datetime
+    spec_id: UUID | None = None
+    spec_confirmed_at: datetime | None = None
+    topology_selection_id: UUID | None = None
+    device_sizing_id: UUID | None = None
+    device_sizing_converged: bool | None = None
+
+
 class ReportRead(BaseModel):
     """Structured report — a deterministic projection of the audit
     tables for a single device_sizings row. No LLM content, no new
