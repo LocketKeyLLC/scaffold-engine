@@ -354,14 +354,22 @@ async def lifespan(app: FastAPI):
     app.state.reranker_prewarm_skipped = False
     if os.getenv("SCAFFOLD_PREWARM_RERANKER", "true").strip().lower() not in ("0", "false", "no", "off"):
         try:
-            import asyncio
-            import time as _time
-            from datetime import datetime, timezone
+            # §17.164 — these used to be function-level imports here.
+            # `import asyncio` inside lifespan() shadowed the module-level
+            # binding at line 3, making `asyncio` local to the whole
+            # function and turning the earlier reference at line 244
+            # (Milvus connect) into an UnboundLocalError. That error was
+            # caught + swallowed by the surrounding try/except, but it
+            # also meant the Milvus connect handshake never completed —
+            # downstream code then took the auto-create-empty-collection
+            # path and orphaned the existing data on every restart.
+            # asyncio / time / datetime are all imported at module level
+            # (lines 3, 7, 9) so the function-local rebinds were redundant.
             from app.rerankers import _get_cross_encoder
             loop = asyncio.get_running_loop()
-            _t0 = _time.monotonic()
+            _t0 = time.monotonic()
             await loop.run_in_executor(None, _get_cross_encoder)
-            elapsed = round(_time.monotonic() - _t0, 2)
+            elapsed = round(time.monotonic() - _t0, 2)
             app.state.reranker_prewarmed_at = datetime.now(timezone.utc).isoformat()
             app.state.reranker_prewarm_elapsed_s = elapsed
             logger.info("reranker_prewarmed")

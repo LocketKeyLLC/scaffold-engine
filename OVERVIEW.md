@@ -7089,6 +7089,76 @@ Three new tests + 67 pre-existing, all green. No regression on the existing surf
 
 Remaining audit-tail items are heavier and explicitly deferred: §17.158 corpus regression remediation (5-80 min ingest work, three documented options), §17.161 followups (oom-history surfacing on ``/health``, per-kind cooldown, dmesg host-OOM coverage), Milvus 64-partition fan-out architectural concern.
 
+### 17.164 Lifespan `import asyncio` shadow — silent data-loss bug behind §17.63 + §17.158 orphans (2026-05-13)
+
+Discovery while tackling the §17.158 corpus regression. Initial state probe showed ``milvus.entry_count=0`` — a regression FROM the §17.158-documented 255 entries. The §17.160 mem_limit rollout's container-recreate cascade had triggered the loss. Investigation found the root cause is a long-standing bug in ``app/main.py::lifespan``, not the rollout itself.
+
+**The bug.** Pre-§17.164 ``lifespan`` had ``import asyncio`` inside its body (line 357, inside the reranker-prewarm block):
+
+```python
+async def lifespan(app):
+    ...
+    # Line 244 — first reference, runs DURING Milvus connect:
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, lambda: milvus_connections.connect(...))
+    ...
+    # Line 357 — function-LOCAL re-import, runs LATER:
+    import asyncio
+    import time as _time
+    from datetime import datetime, timezone
+    loop = asyncio.get_running_loop()
+    ...
+```
+
+Python's scoping rule: **if any binding occurs anywhere in a function body, the name is local for the entire function unless declared global/nonlocal.** The `import asyncio` at line 357 makes ``asyncio`` LOCAL to the whole ``lifespan`` function, including the reference at line 244 — which executes BEFORE line 357. Result: line 244 raises ``UnboundLocalError: cannot access local variable 'asyncio' where it is not associated with a value``, the surrounding try/except swallows it, the Milvus connect handshake never completes, and downstream code takes the auto-create-empty-collection path:
+
+```
+milvus_connection_failed: uri=http://milvus-standalone:19530
+  error=cannot access local variable 'asyncio' where it is not associated with a value
+Collection 'toon_v2' not found — attempting auto-create
+Auto-created collection 'toon_v2' with HNSW_SQ8 + partition key isolation
+```
+
+The auto-created empty collection then orphans the existing data segments under ``milvus-data-v2/data/delta_log/<old_collection_id>/`` — the segments stay on disk but etcd no longer maps the ``toon_v2`` name to them. Every restart silently loses the corpus.
+
+**Historical reach.** This bug almost certainly caused the §17.63 SSD-migration orphan (the log line "Collection 'toon_v2' not found — attempting auto-create" in §17.63 matches verbatim) and the §17.158 ``~409 entries gone`` discovery. The §17.63 walk-away decision and the §17.158 deferred remediation were both downstream symptoms of this single bug, not independent incidents. The repeated rebuilds of repopulate_kb.sh after every restart were chasing a corruption pattern produced by the lifespan code itself.
+
+**The fix.** Remove the redundant function-level imports — ``asyncio`` (line 3), ``time`` (line 7), and ``datetime`` / ``timezone`` (line 9) are already imported at module level. Update ``_t0 = _time.monotonic()`` to ``_t0 = time.monotonic()`` since the ``_time`` alias is no longer needed. The reranker-prewarm block keeps its semantic isolation via the surrounding try/except, but the imports come from module scope instead of shadowing it.
+
+**Static guard against future re-introduction.** Added ``tests/test_no_shadow_imports.py`` — an AST scan over every ``app/**/*.py`` that detects function-local imports binding a name that is ALSO imported at module level AND referenced in the same function at a lineno before the local import. That triple is the active-bug shape. The scan correctly identifies the pre-fix ``lifespan`` as a hit and ignores inactive shadows (function-local imports where the name is only referenced after its local bind point — legal Python, just hygiene-bad).
+
+Other findings from the scan: 7 inactive shadows exist (``from app.database import async_session`` inside two endpoints; ``from uuid import UUID``; ``from fastapi import HTTPException``; ``from app.providers.base import ModelResponse``; ``from app import model_router`` + ``from app.config import settings`` inside ``research_agent``). None are active bugs because in each case the function does NOT reference the same name at an earlier lineno. They're hygiene-bad but the test does not flag them — the test catches the precise bug shape, not generic shadow-hygiene.
+
+**Files.**
+
+- ``app/main.py`` — lifespan reranker-prewarm block (L355-372): removed three redundant function-local imports, replaced ``_time`` with ``time``, added inline §17.164 comment explaining the failure mode.
+- ``tests/test_no_shadow_imports.py`` (new) — AST regression guard. One test, parameterless, scans every ``.py`` under ``app/``. Fails loudly with the offending file/function/lineno if a future change re-introduces the bug shape.
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_no_shadow_imports.py -v
+1 passed in 0.68s
+
+$ docker compose up -d --build scaffold-orchestrator
+... Container scaffold-orchestrator Started
+
+$ curl -sS http://localhost:8000/health | jq '{status, milvus: .checks.milvus.status}'
+{"status": "healthy", "milvus": "up"}
+
+$ docker logs scaffold-orchestrator 2>&1 | grep -E "milvus_conn|asyncio"
+milvus_connected: uri=http://milvus-standalone:19530    # ← clean, no asyncio error
+```
+
+Pre-fix lifespan: ``milvus_connection_failed: ... cannot access local variable 'asyncio'`` on every startup, followed by auto-create-empty-collection. Post-fix: ``milvus_connected`` on the first try, no auto-create path taken, existing collection retained.
+
+**Orphan walk-away decision (consistent with §17.63).** The 482 MB of data segments at ``milvus-data-v2/data/delta_log/466181795512530820/`` (the §17.158 corpus, 255 entries pre-§17.160-rollout) stay on disk but unreferenced by etcd. Direct recovery would require manually re-binding the collection name in Milvus's embedded etcd — risky, undocumented, and the corpus shape (eng-only, missing the 3 goldens flagged by §17.158) isn't worth the recovery effort versus a fresh repopulate that intentionally covers the gap. Documented as walk-away here so a future audit knows the disk-resident orphan is intentional.
+
+**Followup.** §17.158's corpus-regression remediation is now unblocked. Three documented paths from §17.158 still apply but the choice is operationally simpler now: with ``entry_count=0``, the question is "how much corpus to re-establish," not "how to recover from a partial state." Separate §-entry will record the chosen path and the resulting baseline.
+
+**Audit-tail bookkeeping (updated).** §17.164 closes a Tier-1 latent bug whose impact spans every prior post-§17.63 entry that touched the corpus (§17.84, §17.85, §17.86, §17.92, §17.149, §17.154, §17.158). Future operators reading those entries should know: the loss patterns documented there were not coincidental — they were one bug firing repeatedly. The §-history retains the original narratives; this entry is the unified retrospective.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
