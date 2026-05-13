@@ -6836,10 +6836,35 @@ $ docker compose config 2>&1 | grep -E "container_name|mem_limit" | head -20
 
 All 10 services parse with the expected byte values. Compose schema accepts ``mem_limit`` cleanly under the v2-CLI.
 
-**Not in this commit (deliberate).** The change is config-only — no ``docker compose up -d`` was run as part of this commit. Caps don't take effect until the next operator-scheduled restart of each service. Two practical paths:
+**Rollout cascades along ``depends_on``.** First-draft guidance in this entry said "``docker compose up -d scaffold-orchestrator`` recreates just that container, no other service touched" — that was wrong, and the live rollout (below) caught it. Because every service in the compose got a new ``mem_limit`` value in this commit, Compose sees them all as changed, and rolling any service ALSO rolls its ``depends_on`` services whose config has likewise changed. Concretely:
 
-1. **Roll one at a time:** ``docker compose up -d scaffold-orchestrator`` recreates just that container with its new limit, no other service touched. Repeat per service. Lowest blast radius if any cap is sized wrong.
-2. **Full restart:** ``docker compose down && docker compose up -d`` on a maintenance window. Faster, but every service hits the new cap at once — if any one is undersized, the diagnostic is noisier.
+- ``docker compose up -d scaffold-orchestrator`` → recreates orchestrator **plus** postgres + milvus + redis (the three services orchestrator ``depends_on``, all also mem_limit-changed in this commit). 4 containers, not 1.
+- ``docker compose up -d open-webui`` → recreates open-webui plus open-webui-pipelines (its ``depends_on``).
+- ``docker compose up -d`` (no service named) → recreates every service whose config is stale. After the orchestrator-rooted roll above, this finishes the remaining 6 (open-webui, pipelines, searxng, ngspice, verilator, symbiyosys).
+
+The "isolate the blast radius per service" framing only works **on subsequent operations** once every service has been rolled to its new mem_limit baseline. After that, a future raise of ``scaffold-orchestrator``'s cap alone touches only orchestrator (because postgres/milvus/redis are already on their target caps and Compose sees no diff). For the initial commit-to-running rollout — when every service is diff-ing for the first time — the cascade is unavoidable. Plan around it.
+
+**Live rollout record (2026-05-13).** Applied in two cascades on the same day as the commit:
+
+1. ``docker compose up -d scaffold-orchestrator`` — recreated 4 containers (orchestrator + postgres + milvus + redis). All four came up healthy in ~5 s end-to-end. ``GET /health`` green for all five subsystems on first probe.
+2. ``docker compose up -d`` — recreated the remaining 6 (open-webui, pipelines, searxng, ngspice, verilator, symbiyosys). All six healthy in ~8 s end-to-end.
+
+Post-roll ``docker stats --no-stream`` snapshot (warm but no user traffic yet):
+
+| Service | Cap | Live use | % | Notes |
+|---|---|---|---|---|
+| orchestrator | 3 GiB | 162 MiB | 5% | cold caches, embedder/reranker not yet warm |
+| milvus | 3 GiB | 255 MiB | 8% | collection re-attached cleanly |
+| redis | 2.5 GiB | 45 MiB | 2% | persistence file loaded |
+| postgres | 1 GiB | 16 MiB | 2% | |
+| symbiyosys | 1 GiB | 19 MiB | 2% | |
+| open-webui | 512 MiB | 231 MiB | **45%** | tightest headroom — fresh start, will grow with chat history |
+| ngspice | 512 MiB | 49 MiB | 10% | |
+| verilator | 512 MiB | 8 MiB | 2% | |
+| pipelines | 256 MiB | 73 MiB | 29% | recreate baseline higher than idle measurement |
+| searxng | 256 MiB | 68 MiB | 26% | same — fresh start higher than idle |
+
+open-webui at 45% is the live-data correction to the audit's "1 GiB" recommendation — measured idle was 45 MiB but the post-recreate fresh-start baseline is 231 MiB, and chat history accumulates. If open-webui crosses 70–80% sustained, raise its cap to 768m. Pipelines (29%) and searxng (26%) have thinner headroom than the idle measurements predicted, but neither has a known mechanism for sustained growth so the existing caps stay.
 
 **Operational followups.** Watch for ``OOMKilled`` events on the first week of real workload: ``docker inspect <container> --format '{{.State.OOMKilled}}'`` or, more usefully, ``docker events --filter event=oom``. A SIGKILL on a service with a 3g cap, paired with a ``restart: always``, manifests as a quiet restart loop in operator-facing health unless the events stream is being watched — the existing ``GET /health`` won't surface "your milvus has been OOMKilled 6 times this hour." Adding an alert sink for ``oom`` events (analogous to the §17.132 embedding-cache-pressure alert) is the natural follow-up; logged here, not implemented.
 
