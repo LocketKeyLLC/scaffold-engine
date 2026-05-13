@@ -6777,6 +6777,74 @@ scaffold.routers.status
 
 **Audit-state delta.** §16.2 Pattern A's "✅ FIXED" verdict was accurate as of the original 2026-05-07 verification pass — but the audit's coverage was the modules listed there, not a recurring grep gate. Future-proofing: a one-line CI check (``! grep -rn "structlog.get_logger" app/`` excluding ``logging_config.py``) would catch the next regression at PR time. Logged but not implemented in this commit — out of scope for a single-file invariant fix.
 
+### 17.160 Per-service `mem_limit` caps on docker-compose.yml (2026-05-13)
+
+Same audit pass (2026-05-13, programming/security/memory/hardware sweep) flagged the largest open operational risk: ``docker-compose.yml`` declared zero ``mem_limit`` / ``deploy.resources.limits.memory`` on any service. The host is 15 GiB with Ollama on the host (4b ~3 GiB, 7b ~5 GiB when warm); a runaway container — Milvus partition explosion, orchestrator embedder leak, Redis cardinality blow-out before §17.133 — could push the host through swap into hard OOM. Only Redis self-capped via ``--maxmemory 2gb`` (line 307). Nothing else.
+
+**Sized off measured usage, not guesses.** ``docker stats --no-stream`` at idle showed orchestrator 1.9 GiB, milvus 452 MiB, postgres 73 MiB, everything else <50 MiB. Peak headroom adds: PDF dual-extraction (§17.97 path, 20 MB × 2 parsers held concurrently), partition fan-out (64 partitions × HNSW indices in Milvus's buffer on first touch), embedder + reranker singletons in the orchestrator. The final caps:
+
+| Service | Cap | Idle | Why |
+|---|---|---|---|
+| ``scaffold-orchestrator`` | 3g | 1.9 GiB | embedder + reranker + RAG buffers; ~1 GiB peak headroom |
+| ``milvus-standalone`` | 3g | 452 MiB | partition fan-out scales with collection; large headroom intentional |
+| ``scaffold-redis`` | 2560m | 5 MiB | ``--maxmemory 2gb`` payload + 512 MiB for Redis process overhead |
+| ``scaffold-postgres`` | 1g | 73 MiB | shared_buffers + work_mem × pool (default ~200 MiB warm) |
+| ``scaffold-symbiyosys`` | 1g | 6 MiB | SMT solvers spike on hard formal-verification jobs |
+| ``open-webui`` | 512m | 45 MiB | light web UI |
+| ``scaffold-ngspice`` | 512m | 6 MiB | CLI sim, transient working set |
+| ``scaffold-verilator`` | 512m | 9 MiB | compiles + execs in 256 MiB tmpfs |
+| ``open-webui-pipelines`` | 256m | 7 MiB | I/O-only pipeline runner |
+| ``searxng`` | 256m | 2 MiB | metasearch query proxy |
+
+Total: **12.5 GiB**. Leaves ~2.5 GiB on the 15 GiB host for Ollama (uses ~3–5 GiB when a model is hot, but only one model at a time on this CPU-only path) + OS + buff/cache slack.
+
+**Hard caps, not reservations.** ``mem_limit`` (legacy compose-v2 key, supported by the modern compose CLI without swarm) issues SIGKILL on breach. Each service's ``restart: always`` / ``restart: unless-stopped`` brings it back. The alternative — ``deploy.resources.limits.memory`` in v3 syntax — adds no behavior on non-swarm and complicates the file for no gain.
+
+**No ``memswap_limit``.** Docker defaults ``memswap`` to 2× ``mem_limit`` when only ``mem_limit`` is set, which means a service can spill into swap before getting killed. On this host swap is 19 GiB (well over the 12.5 GiB total cap), so swap is the deliberate last-resort overflow before OOM. Pinning ``memswap_limit == mem_limit`` would disable swap per-container and turn transient bursts into instant kills; not desirable.
+
+**Why 3 GiB for orchestrator, not 4 GiB.** The audit-suggested 4 GiB would total 13.5 GiB and leave only 1.5 GiB for Ollama. 3 GiB is 1.6× the measured idle (1.9 GiB) and 2× the largest measured peak in any prior live workload. If real traffic shows the orchestrator pressing the 3g ceiling, raise this one cap — don't lift them all in lockstep. The point of per-service caps is to localize the OOM, not to push the OOM back onto the host.
+
+**Files.**
+
+- ``docker-compose.yml`` — 10 ``mem_limit`` lines + a top-of-file comment block anchoring the policy (placed next to the §17.97 log-rotation comment so the two operational caps live together).
+
+**Verification.**
+
+```
+$ docker compose config 2>&1 | grep -E "container_name|mem_limit" | head -20
+    container_name: milvus-standalone
+    mem_limit: "3221225472"   # 3 GiB
+    container_name: open-webui
+    mem_limit: "536870912"    # 512 MiB
+    container_name: open-webui-pipelines
+    mem_limit: "268435456"    # 256 MiB
+    container_name: scaffold-ngspice
+    mem_limit: "536870912"
+    container_name: scaffold-orchestrator
+    mem_limit: "3221225472"   # 3 GiB
+    container_name: scaffold-postgres
+    mem_limit: "1073741824"   # 1 GiB
+    container_name: scaffold-redis
+    mem_limit: "2684354560"   # 2.5 GiB
+    container_name: scaffold-symbiyosys
+    mem_limit: "1073741824"
+    container_name: scaffold-verilator
+    mem_limit: "536870912"
+    container_name: searxng
+    mem_limit: "268435456"
+```
+
+All 10 services parse with the expected byte values. Compose schema accepts ``mem_limit`` cleanly under the v2-CLI.
+
+**Not in this commit (deliberate).** The change is config-only — no ``docker compose up -d`` was run as part of this commit. Caps don't take effect until the next operator-scheduled restart of each service. Two practical paths:
+
+1. **Roll one at a time:** ``docker compose up -d scaffold-orchestrator`` recreates just that container with its new limit, no other service touched. Repeat per service. Lowest blast radius if any cap is sized wrong.
+2. **Full restart:** ``docker compose down && docker compose up -d`` on a maintenance window. Faster, but every service hits the new cap at once — if any one is undersized, the diagnostic is noisier.
+
+**Operational followups.** Watch for ``OOMKilled`` events on the first week of real workload: ``docker inspect <container> --format '{{.State.OOMKilled}}'`` or, more usefully, ``docker events --filter event=oom``. A SIGKILL on a service with a 3g cap, paired with a ``restart: always``, manifests as a quiet restart loop in operator-facing health unless the events stream is being watched — the existing ``GET /health`` won't surface "your milvus has been OOMKilled 6 times this hour." Adding an alert sink for ``oom`` events (analogous to the §17.132 embedding-cache-pressure alert) is the natural follow-up; logged here, not implemented.
+
+**Documentation cross-refs.** Companion to §17.97 (log-rotation, the other "stop one container from starving the host" cap), §17.132 (embedding-cache pressure alert — the in-process analog of mem_limit), §17.133 (fetch-cache cardinality cap — the Redis-side analog). Together these four cover the four ways a single subsystem can exhaust shared host resources.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

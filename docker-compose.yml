@@ -23,6 +23,17 @@
 # lines can fill /var/lib/docker over weeks. The anchor below caps each
 # container at 30 MB × 5 files = 150 MB total per service before rolling.
 # Apply per-service via `<<: *default-logging`.
+# §17.160 — per-service memory caps.
+# Host is 15 GiB RAM with Ollama on the host; one runaway container can
+# OOM the whole stack. Hard caps via mem_limit (SIGKILL on breach;
+# restart policy revives). No memswap_limit — swap stays as the
+# last-resort overflow. Totals ~12.5 GiB, leaving ~2.5 GiB for Ollama +
+# host OS. Sized off measured idle usage (docker stats) plus peak
+# headroom: PDF dual-extraction, partition fan-out, embedder/reranker
+# singletons. Raise a single cap if /health or restart-loop logs
+# indicate a real workload genuinely exceeds it; don't raise all of
+# them in lockstep — the point is to localize OOMs, not push them
+# back onto the host.
 x-default-logging: &default-logging
   driver: json-file
   options:
@@ -34,6 +45,7 @@ services:
     image: ghcr.io/open-webui/open-webui@sha256:b80a96e14bb15ea79aec96fbdad4aeab6b3ee7b61520d83b5dbc8c4f47d433a9
     container_name: open-webui
     logging: *default-logging
+    mem_limit: 512m
     # §17.93 — bind to loopback only. Internal container traffic still
     # reaches OWUI via the ai-network bridge DNS (`open-webui:8080`);
     # external access is operator-only via http://127.0.0.1:3000 or an
@@ -61,6 +73,7 @@ services:
     image: ghcr.io/open-webui/pipelines@sha256:b48e9bc338ce2be0acfbeff01810db72408a12f07739f9e3879c1f2b00952d6e
     container_name: open-webui-pipelines
     logging: *default-logging
+    mem_limit: 256m
     # §17.93 — bind to loopback only. OWUI reaches pipelines via the
     # bridge (`http://pipelines:9099` in OWUI's OPENAI_API_BASE_URLS).
     ports:
@@ -114,6 +127,7 @@ services:
     image: searxng/searxng@sha256:b6db575bb821d35279474090270db9e53e92432a66d19e7da51c0ef1b5ddb806
     container_name: searxng
     logging: *default-logging
+    mem_limit: 256m
     # §17.93 — bind to loopback only. The orchestrator reaches SearXNG
     # via the bridge (`http://searxng:8080`).
     ports:
@@ -142,6 +156,7 @@ services:
     image: postgres:16@sha256:2586e2a95d1c9b31cb2967feb562948f7d364854453d703039b6efa45fe48417
     container_name: scaffold-postgres
     logging: *default-logging
+    mem_limit: 1g
     ports:
       - "127.0.0.1:5432:5432"
     # 999 is the postgres uid/gid baked into the image and matches the
@@ -183,6 +198,7 @@ services:
       target: runtime
     container_name: scaffold-orchestrator
     logging: *default-logging
+    mem_limit: 3g
     # §17.93 — bind to loopback only. The API surface is operator-only;
     # `/web/*`, `/health`, `/metrics`, `/` are auth-exempt and shouldn't
     # be reachable from the LAN. Other containers reach the orchestrator
@@ -267,6 +283,7 @@ services:
     image: milvusdb/milvus:v2.5.27@sha256:ea3b924dfb2129fa2daca569eab657b4fcebc4baaed5706cf30d51e19d99b0c9
     container_name: milvus-standalone
     logging: *default-logging
+    mem_limit: 3g
     command: milvus run standalone
     environment:
       - ETCD_USE_EMBED=true
@@ -299,6 +316,7 @@ services:
     image: redis:8-alpine@sha256:81b6f81d6a6c5b9019231a2e8eb10085e3a139a34f833dcc965a8a959b040b72
     container_name: scaffold-redis
     logging: *default-logging
+    mem_limit: 2560m
     # 999:1000 is the redis user/group baked into redis:8-alpine.
     # /data is already chowned redis:redis in the existing volume.
     user: "999:1000"
@@ -334,6 +352,7 @@ services:
       dockerfile: Dockerfile
     container_name: scaffold-ngspice
     logging: *default-logging
+    mem_limit: 512m
     ports:
       - "127.0.0.1:8001:8001"
     security_opt:
@@ -363,6 +382,7 @@ services:
       dockerfile: Dockerfile
     container_name: scaffold-verilator
     logging: *default-logging
+    mem_limit: 512m
     ports:
       - "127.0.0.1:8002:8002"
     security_opt:
@@ -398,6 +418,7 @@ services:
       dockerfile: Dockerfile
     container_name: scaffold-symbiyosys
     logging: *default-logging
+    mem_limit: 1g
     ports:
       - "127.0.0.1:8003:8003"
     security_opt:
