@@ -6716,6 +6716,44 @@ Mechanical fix: ``cp app/schemas.py sdk/scaffold_client/schemas.py``. Parity tes
 
 **Operational note.** The drift was invisible to anyone running ``make test`` only against the suite-baseline (no per-commit schema-parity gate). Future engineering-design commits that touch ``app/schemas.py`` should run ``make sync-schemas`` in the same commit — or wire a pre-commit hook that fails on drift. Logged but not implemented here.
 
+### 17.158 Corpus regression — post-§17.63 rebuild only repopulated the ``eng`` partition (2026-05-13)
+
+Investigation triggered by three failing ``test_golden_retrieval`` cases in §17.156's ``make test`` run. Read-only audit; no corpus changes in this commit (per operator decision to log first, remediate separately).
+
+**State of ``toon_v2`` today.** 255 entries, **all in ``domain=eng``**. Pre-§17.63 baseline (per the test_retrieval_golden header comment dated 2026-04-28) was 664 entries split eng=261 / llm=218 / rag=175 / spec=8 / prompt=0. **~409 entries are gone** — every non-eng partition.
+
+**Timeline (all surviving entries created in May 2026 with the new ``nomic-embed-text-mrl512`` embedder):**
+
+| Date       | Entries added | What ran                                            |
+|------------|---------------|-----------------------------------------------------|
+| 2026-05-11 | 184           | Bulk post-§17.63 repopulation, **eng-only**         |
+| 2026-05-12 | 46            | §17.149 seed_eng_topologies (13) + research runs    |
+| 2026-05-13 | 25            | §17.154 seed_eng_digital                            |
+
+**Root cause.** §17.63 switched the embedder from ``qwen3-embedding:8b`` (768d) to ``nomic-embed-text-mrl512`` (512d via MRL truncation). Pre-migration vectors were unusable in the new dim, so the collection was rebuilt from empty. The §17.85 / §17.84 / §17.86 follow-ups stabilised ``repopulate_kb.sh`` as the canonical runbook to restore all partitions — but on this host only its eng-tagged rows have been executed against the rebuilt collection. The non-eng rows in the runbook (TDD ✓, Software_design_pattern ✗, Vector_database ✗, Retrieval-augmented_generation ✗, function calling ✗, hybrid search ✗, quantization ✗) never landed.
+
+**Effect on the goldens.** Three failing tests map to three specifically missing docs:
+
+| Failing test                                  | Needs                                                     | Why it fails                                    |
+|-----------------------------------------------|-----------------------------------------------------------|-------------------------------------------------|
+| ``[chain of thought-prompt-prompt engineering]`` | ``Chain-of-thought_prompting`` (Wikipedia, prompt)        | ``prompt`` partition entirely empty             |
+| ``[quantization-llm-quantiz]``                | ``Quantization_(signal_processing)`` (Wikipedia, llm)     | ``llm`` partition entirely empty                |
+| ``[singleton/factory-eng-pattern]``           | ``Software_design_pattern`` (Wikipedia, eng)              | not ingested; only ``URLPattern: test()`` has 'pattern' in title — wrong domain meaning |
+
+The TDD eng-test golden passes because ``Test-driven_development`` *was* ingested in the May 11 batch. So this isn't a global eng-partition regression — it's per-doc.
+
+**Reranker-noise signature on the eng failure.** ``CrossEncoder`` returns ``top_score=0.0001, score_spread=0.0001`` on the singleton/factory query — i.e. all three top-3 hits (WebGL best practices, terramate-io/agent-skills, anthropic-sdk-python) are equally non-relevant, and ranking collapses to noise because there's no real signal. The reranker is doing its job; the corpus just doesn't carry the answer.
+
+**Open work item (logged, deferred).** Remediation options recorded for the next session:
+
+1. **Targeted 3-URL ingest** (~5–10 min): just the three Wikipedia articles the goldens want. Closes the three failing tests without re-running the heavy autonomous-research entries in ``repopulate_kb.sh``.
+2. **Full ``repopulate_kb.sh --apply``** (~30–80 min): restore llm/rag/spec partition shape close to the pre-migration baseline. Most of the runbook rows are autonomous-topic research (slow).
+3. **Skip-mark the affected goldens** (~1 min, no corpus change): follow the pattern of the existing ``_NEEDS_FUNCTION_CALLING_DOC`` / ``_NEEDS_HYBRID_SEARCH_DOC`` / ``_NEEDS_SPEC_TOON`` marks. Honest about the corpus state; doesn't fix retrieval quality though.
+
+**Why not fix here.** The user explicitly elected "investigate-only — don't fix" so the discovery record stays isolated from the remediation choice. Next §17.x will pick the path.
+
+**Operational lesson.** The post-§17.63 rebuild plus the §17.149 / §17.154 seeds left ``eng`` looking healthy by entry count (255) while the other partitions stayed silently empty. ``test_golden_retrieval`` was the first signal — and it has been red for ~2 days. The retrieval-baseline section of OVERVIEW lists "664 entries" as the reference; that figure should be updated to "255 entries, eng-only" with a pointer here so future operators don't chase a phantom baseline.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
