@@ -777,12 +777,14 @@ class TopologySelectionRead(BaseModel):
 # engineering-design pipeline).
 
 class DeviceSizingRead(BaseModel):
-    """Response for POST /topology-selections/{id}/size. Returns the
-    persisted device_sizings row whether or not the loop converged —
+    """Response for POST /topology-selections/{id}/size when
+    ``design.kind == 'analog_circuit'``. Returns the persisted
+    device_sizings row whether or not the loop converged —
     ``converged`` is the outcome flag, ``errors`` carries the loop's
     diagnostic. The wider pipeline accepts a sizing as ready only
     when ``converged == True``."""
     id: UUID
+    kind: Literal["analog"] = "analog"
     spec_id: UUID
     topology_selection_id: UUID
     candidate_idx: int
@@ -790,6 +792,30 @@ class DeviceSizingRead(BaseModel):
     iterations: int
     final_params: dict[str, str]
     final_netlist: str
+    final_measurements: dict[str, float]
+    sim_run_ids: list[UUID]
+    model_used: str
+    errors: list[str]
+    created_at: datetime
+
+
+class DigitalSizingRead(BaseModel):
+    """§17.152 — Response for POST /topology-selections/{id}/size
+    when ``design.kind == 'digital_logic'``. Mirror of
+    ``DeviceSizingRead`` with ``final_sv_source`` + ``top_module``
+    instead of ``final_netlist``. The ``kind`` discriminator field
+    lets clients distinguish the two response shapes without parsing
+    the ``id`` table provenance."""
+    id: UUID
+    kind: Literal["digital"] = "digital"
+    spec_id: UUID
+    topology_selection_id: UUID
+    candidate_idx: int
+    converged: bool
+    iterations: int
+    final_params: dict[str, str]
+    final_sv_source: str
+    top_module: str
     final_measurements: dict[str, float]
     sim_run_ids: list[UUID]
     model_used: str

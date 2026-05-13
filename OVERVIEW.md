@@ -6314,6 +6314,97 @@ The full chain produces an auditable verified deliverable from a natural-languag
 
 The track itself is done. No more checkpoints remain on the original checklist.
 
+### 17.152 Digital sizing stage — Verilator-in-the-loop counterpart to §17.147 (2026-05-13)
+
+The first of the three iteration items §17.151 listed as the post-pipeline work: a Verilator-in-the-loop sizing stage for ``design.kind == 'digital_logic'``. Mirrors §17.147's analog ngspice loop in shape — LLM proposes (params + source), oracle runs, constraint check, feedback loop, persist — but uses the §17.141 Verilator sidecar and the §17.143 SystemVerilog testbench shape.
+
+**Where it differs from the analog sizer:**
+
+  * **Source format**: SystemVerilog, not SPICE. The LLM emits ``sv_source`` (a single JSON string with ``\n`` escapes — same Python-source-concatenation pitfall as §17.150 explicitly avoided in the prompt).
+  * **Oracle call**: ``run_verilator(sv_source, top_module=top_module, db=db)`` instead of ``run_ngspice(netlist, db=db)``. Verilator's two-phase pipeline (compile + build + run) is wrapped opaquely by §17.141; the sizer doesn't care about the internal phases.
+  * **Top-module name**: Verilator requires explicit ``--top-module`` so we fix it to ``tb`` by convention. The prompt rule "wrap your testbench in ``module tb; ... endmodule``" enforces this on the LLM side.
+  * **KPI protocol**: ``$display("KPI <constraint_id>=<value>")`` lines parsed by §17.141's sidecar, not ngspice ``.meas`` results. Same one-name-per-constraint mapping, different mechanism.
+  * **Persistence**: separate ``digital_sizings`` table (migration 044) so the operator's ``SELECT * FROM device_sizings`` doesn't have to filter by tool. Schema is a near-mirror of ``device_sizings`` with ``final_sv_source`` + ``top_module`` instead of ``final_netlist``.
+
+**Endpoint dispatch on ``spec.design.kind``.** The HTTP surface stays a single URL — ``POST /topology-selections/{id}/size`` reads the joined ``specs.spec_json->'design'->>'kind'`` discriminator and routes to ``size_device`` (analog) or ``size_digital_device`` (digital). Response shape is the Pydantic union ``DeviceSizingRead | DigitalSizingRead`` with a ``kind`` discriminator field — clients distinguish the two by reading ``body["kind"]`` rather than parsing payload shape. The §17.151 design-pipeline ``stage=size`` advancer dispatches the same way.
+
+**Verilator-specific pitfalls in the prompt.** The §17.150 lessons (worked example as code block + separate single-line JSON; no Python-style string concatenation) carry over verbatim. New pitfalls specific to Verilator 5.024:
+
+  * **PITFALL 1: drive at ``@(posedge clk)``** — the §17.141 testbench-vs-DUT timing-race discovery. Verilator's event order resumes the testbench before the DUT's ``always_ff`` samples, so stimulus driven on a posedge gets sampled on the *following* posedge with the next iteration's value. Fix: drive at negedge.
+  * **PITFALL 2: width mismatch** — Verilator 5.024 fails WIDTHEXPAND/WIDTHTRUNC as errors, not warnings. ``din = 8'hA0 + i`` where ``i`` is ``int`` fails. Fix: cast loop counters explicitly (``8'(8'hA0 + i[7:0])``).
+  * **PITFALL 3: missing ``$finish``** — build succeeds, run hangs until the sidecar timeout. Fix: every ``initial`` block ends with ``$finish``.
+  * **PITFALL 4: top module not named ``tb``** — Verilator's ``--top-module tb`` is hard-coded in the wrapper. Fix: wrap whatever the DUT is in a ``module tb; ... endmodule``.
+  * **PITFALL 5: Verilog-1995 ``wire/reg``** — the ``--binary --timing`` flow rejects these. Fix: SystemVerilog ``logic`` everywhere.
+
+**Live integration test exercises the full chain.** Seeded a confirmed ``digital_logic`` spec + a hand-crafted ``topology_selections`` row (bypasses the §17.146 RAG dependency since the eng corpus doesn't carry digital-design references yet), hit ``POST /topology-selections/{id}/size``, and let the loop run for up to 3 iterations against the real cloud 235b + real Verilator sidecar. Outcome on the first run:
+
+```
+WARNING: live digital sizing did not converge (iterations=3,
+  errors=["budget exhausted after 3 iterations;
+          final gaps: ['wrap_count: measured 15 cycles,
+                       target 16 cycles ±5% — out of tolerance']"])
+  — audit row persisted at id=3637dc18-a0e8-4ecd-a12c-25eb8cc5e1e7
+```
+
+The LLM emitted valid SV, Verilator built and ran it three times, every iteration measured ``wrap_count=15`` (an off-by-one in the testbench's wrap-detection logic — the LLM is using "did count hit 0 again?" as the wrap criterion, which fires one cycle before the full N=16 cycle count). The constraint checker correctly identified the 15 < 15.2 lower bound and refused to converge. ``digital_sizings`` row persisted with the full diagnostic chain. **Full audit-the-attempt invariant from §17.147 carries over to the digital flow.**
+
+The off-by-one is a prompt-iteration concern (a §17.150-style refinement), not a sizing-stage bug. Same situation §17.147 was in before §17.150 — the audit table is what makes the diagnostic loop tractable.
+
+**Files.**
+
+- ``db/migrations/044_digital_sizings.sql`` (new). Mirror of 042 with ``final_sv_source TEXT`` + ``top_module TEXT NOT NULL DEFAULT 'tb'`` columns. CASCADE from spec_id + topology_selection_id. Same 4 indexes (spec_id, topology_selection_id, created_at, partial WHERE converged).
+- ``app/sim/digital_sizing.py`` (new, ~360 lines). ``size_digital_device(topology_selection_id, *, db, candidate_idx=0, max_iterations=None, model_role=None, top_module="tb")`` with ``DigitalSizingResult`` / ``DigitalIterationRecord`` dataclasses. Reuses ``_check_constraints``, ``_fetch_topology_selection``, ``_candidate_to_dict``, ``CandidateIndexError``, ``TopologySelectionNotFoundError`` from ``app.sim.device_sizing`` so the analog/digital codepaths share the gap-checking and lookup primitives.
+- ``app/schemas.py`` (+22 lines). ``DigitalSizingRead`` Pydantic model with ``kind: Literal["digital"]`` discriminator. ``DeviceSizingRead`` picks up ``kind: Literal["analog"]`` so the union response type carries a tagged field.
+- ``app/routers/specs.py`` (+90 lines). ``post_size_device`` becomes polymorphic: fetches the spec's ``design.kind`` discriminator, branches to ``size_device`` (analog) or ``size_digital_device`` (digital), constructs the matching response. 400 on unsupported kinds. Two helpers ``_fetch_device_sizing_created_at`` + ``_fetch_digital_sizing_created_at`` for the post-INSERT created_at lookup.
+- ``app/sim/design_pipeline.py`` (+~35 lines). ``advance_design_stage`` size branch fetches the spec's ``design.kind`` and dispatches. ``stage_done`` event carries a ``kind`` field so SSE clients distinguish.
+- ``tests/test_digital_sizing.py`` (new, 9 ``@pytest.mark.smoke`` cases, mocked LLM + Verilator). Mirror of ``test_device_sizing.py`` shape — converge iter 1; converge iter 2 after gap; budget exhausted persists row; verilator failure feeds back; LLM proposal failure continues loop; unconfirmed spec refused; non-digital kind refused; topology missing raises; candidate_idx OOB raises.
+- ``tests/integration/test_digital_sizing_db.py`` (new, 1 case, real Postgres + sidecar + LLM). Counter spec, 3-iter cloud round-trip, asserts row persisted regardless of convergence outcome.
+- ``tests/conftest.py`` (+1 line). CI-smoke ``collect_ignore`` for the new integration test.
+
+**Verification.**
+
+```
+# Unit tests.
+$ docker exec scaffold-orchestrator pytest tests/test_digital_sizing.py -v
+============================== 9 passed in 1.02s ===============================
+
+# Migration applied.
+$ docker logs scaffold-orchestrator --since 30s | grep migration_applied
+migration_applied: file=044_digital_sizings.sql
+
+# Live integration — non-converged but row persisted with full diagnostic.
+$ docker exec scaffold-orchestrator pytest tests/integration/test_digital_sizing_db.py -v
+WARNING: live digital sizing did not converge ...
+  — audit row persisted at id=3637dc18-a0e8-4ecd-a12c-25eb8cc5e1e7
+PASSED [100%]
+============================== 1 passed in 31.77s ==============================
+```
+
+**Engineering-design pipeline state after §17.152:**
+
+```
+NL brief
+  ↓ §17.144 extract_spec
+specs row
+  ↓ §17.145 /confirm
+specs row (confirmed)
+  ↓ §17.146 topology-select
+topology_selections row
+  ↓ §17.147 size_device (analog_circuit)  ──┐
+  │                                          ├─ dispatch on design.kind
+  ↓ §17.152 size_digital_device (digital_logic) ──┘
+device_sizings row  OR  digital_sizings row
+  ↓ §17.148 report (analog only — see deferred)
+ReportDocument
+```
+
+**Deferred — explicitly out of scope for §17.152.**
+
+- **Digital report renderer**. The §17.148 ``build_report`` joins ``device_sizings`` only. Adding a parallel ``build_digital_report`` (joins ``digital_sizings``) or generalizing ``build_report`` to look in either table is the natural follow-up. For now, GET /device-sizings/{id}/report on a digital sizing returns 404; the digital row is still queryable via SQL.
+- **Digital RAG corpus**. The eng partition currently carries analog filter references (§17.149). Digital seed entries (counters, FIFOs, RAM, state machines, common SystemVerilog idioms) would let §17.146 topology-select produce candidates the digital sizer can ground itself on. Additive seed-script change.
+- **Prompt iteration on the off-by-one**. The integration-test wrap-count off-by-one (LLM reads "wrap" as "count hit 0 again" instead of "count incremented N times") is a §17.150-style prompt refinement. Surface available — the live test's audit trail is the diagnostic input.
+- **GET /digital-sizings/{id}** endpoint for symmetric retrieval. Not blocking the pipeline; the orchestrator's ``SELECT * FROM digital_sizings WHERE id=...`` is the v1 query path.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

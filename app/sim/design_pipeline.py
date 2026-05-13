@@ -53,6 +53,7 @@ from app.sim.device_sizing import (
     TopologySelectionNotFoundError,
     size_device,
 )
+from app.sim.digital_sizing import size_digital_device
 from app.sim.report import (
     ReportDocument,
     ReportNotAvailableError,
@@ -409,8 +410,50 @@ async def advance_design_stage(
             yield _sse("done", {"ok": False})
             return
         await _set_job_status(db, job_id, "executing")
+        # §17.152 — dispatch on the spec's design.kind. Read directly
+        # from the already-fetched spec_row so we don't round-trip
+        # back to the DB just for the discriminator.
+        spec_full = await db.execute(
+            text(
+                "SELECT spec_json FROM specs WHERE id = :id"
+            ),
+            {"id": str(spec_id)},
+        )
+        spec_full_row = spec_full.mappings().first()
+        design_kind = None
+        if spec_full_row is not None:
+            design_kind = (
+                (spec_full_row["spec_json"] or {})
+                .get("design", {})
+                .get("kind")
+            )
         try:
-            result = await size_device(sel["id"], db=db)
+            if design_kind == "digital_logic":
+                d_result = await size_digital_device(sel["id"], db=db)
+                sizing_dict = {
+                    "stage": stage,
+                    "kind": "digital",
+                    "sizing_id": str(d_result.sizing_id),
+                    "converged": d_result.converged,
+                    "iterations": d_result.iterations,
+                    "errors": d_result.errors,
+                }
+                converged_flag = d_result.converged
+            else:
+                # Default to the analog ngspice sizer for
+                # 'analog_circuit' or unset/unknown kinds. The sizer's
+                # own gate will refuse non-analog kinds with a clear
+                # error message.
+                a_result = await size_device(sel["id"], db=db)
+                sizing_dict = {
+                    "stage": stage,
+                    "kind": "analog",
+                    "sizing_id": str(a_result.sizing_id),
+                    "converged": a_result.converged,
+                    "iterations": a_result.iterations,
+                    "errors": a_result.errors,
+                }
+                converged_flag = a_result.converged
         except (TopologySelectionNotFoundError, CandidateIndexError) as exc:
             await _set_job_status(db, job_id, "failed")
             yield _sse(
@@ -419,20 +462,8 @@ async def advance_design_stage(
             )
             yield _sse("done", {"ok": False})
             return
-        # Converged is the actual success bit; non-convergence still
-        # persists a row, which means stage_done carries the sizing_id
-        # but the wider chain isn't ready for report.
-        yield _sse(
-            "stage_done",
-            {
-                "stage": stage,
-                "sizing_id": str(result.sizing_id),
-                "converged": result.converged,
-                "iterations": result.iterations,
-                "errors": result.errors,
-            },
-        )
-        if not result.converged:
+        yield _sse("stage_done", sizing_dict)
+        if not converged_flag:
             # Job stays in ``executing`` — operator can re-run size
             # (perhaps with a different candidate_idx) without first
             # transitioning out of failed.

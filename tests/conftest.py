@@ -41,6 +41,7 @@ if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
         "integration/test_device_sizing_db.py",
         "integration/test_report_db.py",
         "integration/test_design_db.py",
+        "integration/test_digital_sizing_db.py",
         "test_assist_session_map.py",
         "test_config_endpoint.py",
         "test_cost_rollup.py",

@@ -34,6 +34,7 @@ from fastapi.responses import PlainTextResponse
 
 from app.schemas import (
     DeviceSizingRead,
+    DigitalSizingRead,
     ReportCitationRead,
     ReportConstraintRead,
     ReportRead,
@@ -48,6 +49,7 @@ from app.sim.device_sizing import (
     TopologySelectionNotFoundError,
     size_device,
 )
+from app.sim.digital_sizing import size_digital_device
 from app.sim.report import (
     ReportNotAvailableError,
     build_report,
@@ -215,69 +217,159 @@ async def _fetch_created_at(db: AsyncSession, selection_id: uuid.UUID):
 sizing_router = APIRouter(tags=["Specs"], prefix="/topology-selections")
 
 
+async def _fetch_design_kind_for_selection(
+    db: AsyncSession, topology_selection_id: uuid.UUID
+) -> str | None:
+    """Return the design.kind for the spec referenced by a topology
+    selection. Used by the polymorphic size endpoint to dispatch
+    between analog and digital sizers. Returns None on missing rows
+    so the caller can surface the 404."""
+    from sqlalchemy import text as _text
+    row = await db.execute(
+        _text(
+            """
+            SELECT spec_json->'design'->>'kind' AS kind
+            FROM topology_selections ts
+            JOIN specs s ON s.id = ts.spec_id
+            WHERE ts.id = :id
+            """
+        ),
+        {"id": str(topology_selection_id)},
+    )
+    return row.scalar_one_or_none()
+
+
 @sizing_router.post(
     "/{topology_selection_id}/size",
-    response_model=DeviceSizingRead,
+    response_model=DeviceSizingRead | DigitalSizingRead,
 )
 async def post_size_device(
     topology_selection_id: uuid.UUID,
     candidate_idx: int = 0,
     max_iterations: int | None = None,
     db: AsyncSession = Depends(get_db),
-) -> DeviceSizingRead:
+):
     """Run the closed-loop sizing stage against a topology candidate.
 
-    Always persists a ``device_sizings`` row when the stage gets past
-    the gate checks (confirmed spec, analog_circuit kind, valid
-    candidate_idx). The persisted row records the attempt — a
-    non-converged sizing carries ``converged=False`` and an
-    ``errors`` list explaining why; the wider pipeline accepts it
-    as ready only when ``converged=True``.
+    Dispatches on ``spec.design.kind`` (§17.152):
+      * ``analog_circuit`` → §17.147 ngspice-in-the-loop sizer,
+        returns ``DeviceSizingRead``.
+      * ``digital_logic`` → §17.152 Verilator-in-the-loop sizer,
+        returns ``DigitalSizingRead``.
+      * any other kind → 400.
+
+    Always persists an audit row (device_sizings or digital_sizings)
+    when the stage gets past the gate checks. The persisted row
+    records the attempt — a non-converged sizing carries
+    ``converged=False`` and an ``errors`` list explaining why; the
+    wider pipeline accepts it as ready only when ``converged=True``.
 
     Status mapping:
-      * 200 — row persisted (caller checks ``converged`` for outcome).
-      * 400 — candidate_idx out of bounds for this selection.
+      * 200 — row persisted (caller checks ``converged`` for outcome
+              and reads ``kind`` to know which response shape arrived).
+      * 400 — candidate_idx out of bounds, or unsupported design.kind.
       * 404 — topology_selection_id not found.
     """
-    try:
-        result = await size_device(
-            topology_selection_id,
-            db=db,
-            candidate_idx=candidate_idx,
-            max_iterations=max_iterations,
-        )
-    except TopologySelectionNotFoundError:
+    kind = await _fetch_design_kind_for_selection(db, topology_selection_id)
+    if kind is None:
         raise HTTPException(
             status_code=404,
             detail=f"topology_selection {topology_selection_id} not found",
         )
-    except CandidateIndexError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
-    assert result.sizing_id is not None
-    created_at = await _fetch_sizing_created_at(db, result.sizing_id)
+    if kind == "analog_circuit":
+        try:
+            result = await size_device(
+                topology_selection_id,
+                db=db,
+                candidate_idx=candidate_idx,
+                max_iterations=max_iterations,
+            )
+        except TopologySelectionNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail=f"topology_selection {topology_selection_id} not found",
+            )
+        except CandidateIndexError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        assert result.sizing_id is not None
+        created_at = await _fetch_device_sizing_created_at(db, result.sizing_id)
+        return DeviceSizingRead(
+            id=result.sizing_id,
+            spec_id=result.spec_id,  # type: ignore[arg-type]
+            topology_selection_id=result.topology_selection_id,  # type: ignore[arg-type]
+            candidate_idx=result.candidate_idx,
+            converged=result.converged,
+            iterations=result.iterations,
+            final_params=result.final_params,
+            final_netlist=result.final_netlist,
+            final_measurements=result.final_measurements,
+            sim_run_ids=result.sim_run_ids,
+            model_used=result.model_used,
+            errors=result.errors,
+            created_at=created_at,
+        )
 
-    return DeviceSizingRead(
-        id=result.sizing_id,
-        spec_id=result.spec_id,  # type: ignore[arg-type]
-        topology_selection_id=result.topology_selection_id,  # type: ignore[arg-type]
-        candidate_idx=result.candidate_idx,
-        converged=result.converged,
-        iterations=result.iterations,
-        final_params=result.final_params,
-        final_netlist=result.final_netlist,
-        final_measurements=result.final_measurements,
-        sim_run_ids=result.sim_run_ids,
-        model_used=result.model_used,
-        errors=result.errors,
-        created_at=created_at,
+    if kind == "digital_logic":
+        try:
+            d_result = await size_digital_device(
+                topology_selection_id,
+                db=db,
+                candidate_idx=candidate_idx,
+                max_iterations=max_iterations,
+            )
+        except TopologySelectionNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail=f"topology_selection {topology_selection_id} not found",
+            )
+        except CandidateIndexError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        assert d_result.sizing_id is not None
+        created_at = await _fetch_digital_sizing_created_at(db, d_result.sizing_id)
+        return DigitalSizingRead(
+            id=d_result.sizing_id,
+            spec_id=d_result.spec_id,  # type: ignore[arg-type]
+            topology_selection_id=d_result.topology_selection_id,  # type: ignore[arg-type]
+            candidate_idx=d_result.candidate_idx,
+            converged=d_result.converged,
+            iterations=d_result.iterations,
+            final_params=d_result.final_params,
+            final_sv_source=d_result.final_sv_source,
+            top_module=d_result.top_module,
+            final_measurements=d_result.final_measurements,
+            sim_run_ids=d_result.sim_run_ids,
+            model_used=d_result.model_used,
+            errors=d_result.errors,
+            created_at=created_at,
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"sizing not supported for design.kind={kind!r}; "
+            f"expected 'analog_circuit' or 'digital_logic'"
+        ),
     )
 
 
-async def _fetch_sizing_created_at(db: AsyncSession, sizing_id: uuid.UUID):
+async def _fetch_device_sizing_created_at(
+    db: AsyncSession, sizing_id: uuid.UUID,
+):
     from sqlalchemy import text as _text
     row = await db.execute(
         _text("SELECT created_at FROM device_sizings WHERE id = :id"),
+        {"id": str(sizing_id)},
+    )
+    return row.scalar_one()
+
+
+async def _fetch_digital_sizing_created_at(
+    db: AsyncSession, sizing_id: uuid.UUID,
+):
+    from sqlalchemy import text as _text
+    row = await db.execute(
+        _text("SELECT created_at FROM digital_sizings WHERE id = :id"),
         {"id": str(sizing_id)},
     )
     return row.scalar_one()
