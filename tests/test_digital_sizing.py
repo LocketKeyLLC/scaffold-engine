@@ -354,3 +354,24 @@ async def test_candidate_idx_oob_raises(monkeypatch):
     db = make_mock_db()
     with pytest.raises(CandidateIndexError):
         await size_digital_device(SEL_ID, db=db, candidate_idx=5)
+
+
+@pytest.mark.smoke
+def test_system_prompt_includes_canonical_wrap_pattern():
+    """§17.155 — the prompt MUST carry the canonical wrap-detection
+    pattern (negedge sampling, increment-then-check order, count-from-
+    zero init). The live integration test convergence rate depends on
+    these; a future edit that drops them could silently regress."""
+    prompt = ds_mod._SYSTEM_PROMPT
+    # Canonical pattern markers from the worked example.
+    assert "@(negedge clk)" in prompt
+    assert "wrap_count = wrap_count + 1" in prompt
+    assert "if (count == 0) break" in prompt
+    # PITFALL 6 — sampling-after-posedge race (NBA region).
+    assert "PITFALL 6" in prompt
+    assert "NBA" in prompt or "non-blocking assignment" in prompt
+    # PITFALL 7 — off-by-one at loop boundary.
+    assert "PITFALL 7" in prompt
+    # MEASUREMENT SEMANTICS block — disambiguates same-id-different-meaning.
+    assert "MEASUREMENT SEMANTICS" in prompt
+    assert "wrap_count" in prompt

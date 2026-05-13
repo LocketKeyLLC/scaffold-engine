@@ -6560,6 +6560,85 @@ ReportDocument (analog or digital)
 
 The one remaining post-pipeline iteration item from §17.151 is the §17.152 wrap-detection prompt refinement — analogous to §17.150's analog prompt fix, surface available in the §17.152 audit trail.
 
+### 17.155 §17.152 wrap-detection prompt refined — digital sizing converges iter 1 (2026-05-13)
+
+Last of §17.151's iteration items. §17.152's live integration had been recording 3-iter budget-exhausted attempts with ``wrap_count: measured 15 cycles, target 16 cycles`` — the LLM was emitting valid SystemVerilog that compiled and ran, but the testbench measured an off-by-one. The audit trail held (``digital_sizings`` row persisted with the diagnostic); §17.155 mines that trail and tightens the prompt the same way §17.150 tightened the analog one.
+
+**Root cause was a SystemVerilog event-region race in the worked example.** The original §17.152 prompt's worked example sampled the counter at ``@(negedge clk)`` after an awkward init phase, producing an under-count by 1. First refinement attempt switched to ``@(posedge clk)`` then read ``count`` immediately — and produced a different off-by-one (over-count → 1), because in SV scheduling the testbench's ``initial`` resumes in the **active region** (after the clock-edge event) but BEFORE the **NBA region** has fired. So ``count`` read at this point is the PRE-edge value, not the post-edge one. The first iteration sees ``count == 0`` (the post-reset pre-first-increment value) and breaks immediately — measured wrap_count is 1, target is 2^N.
+
+The canonical correct pattern: **sample at the next negedge.** By the time the negedge fires, a half-cycle has passed and the prior posedge's NBA updates have settled — ``count`` reads the post-edge value. With ``wrap_count`` initialised to 0 and the increment-then-check order, an N-bit counter produces exactly 2^N negedges before ``count == 0`` is observed.
+
+**Three iterations of the prompt, three different measurement results — same audit-driven diagnostic loop §17.150 used.**
+
+| Prompt version | LLM emitted pattern | wrap_count measured |
+|---|---|---|
+| Original §17.152 | negedge sampling, awkward init | **15** (under-count by 1) |
+| §17.155 first attempt | posedge sampling + immediate read | **1** (NBA region race) |
+| §17.155 final | negedge sampling + increment-then-check + init=0 | **16 ✓** |
+
+The §17.155 final pattern is the prompt's worked example now. PITFALL 6 explicitly calls out the NBA-region race (sampling-after-posedge sees pre-edge value); PITFALL 7 covers the loop-boundary off-by-one (init=1 vs check-then-increment). A new "MEASUREMENT SEMANTICS" block disambiguates same-id-different-meaning cases (``wrap_count`` vs ``latency_cycles`` vs ``clk_period_ns`` vs ``errors``) so the LLM doesn't substitute a "close enough" definition for the operator's stated one.
+
+**Before / after on the same live integration test:**
+
+```
+BEFORE (§17.152 baseline):
+  iterations=3, converged=False, wrap_count=15 (out of 16 ±5%)
+  test runtime ~32s
+
+AFTER (§17.155):
+  iterations=1, converged=True, wrap_count=16 (exact)
+  test runtime 23.15s
+```
+
+**The §17.152 audit trail was the diagnostic** — same pattern §17.150 used for analog. ``digital_sizings.errors[]`` carried the specific gap message ("wrap_count: measured 15 cycles, target 16 cycles ±5% — out of tolerance"), sim_runs.measurements carried the exact measured value, and the LLM's emitted SV was reproducible by directly probing ``model_router.chat`` with the spec + prompt. The audit-the-attempt invariant from §17.147 / §17.152 paid off again.
+
+**Files.**
+
+- ``app/sim/digital_sizing.py`` (prompt rewrite, +50 lines, -10 lines). Worked-example testbench loop replaced; PITFALL 6 rewritten around the NBA race; PITFALL 7 added for the loop-boundary off-by-one; new "MEASUREMENT SEMANTICS" block. The ``_SYSTEM_PROMPT`` string grew from ~4900 to ~8100 chars; the additional surface is one tightened example, two pitfalls, and the semantics disambiguation.
+- ``tests/test_digital_sizing.py`` (+18 lines). One new unit test ``test_system_prompt_includes_canonical_wrap_pattern`` locking the prompt invariants — future edits that drop the canonical negedge-sampling pattern or the NBA / off-by-one pitfall callouts fail loudly rather than silently regressing live-LLM convergence rate.
+
+**Verification.**
+
+```
+# Unit suite — 9 existing + 1 new prompt-invariant guard.
+$ docker exec scaffold-orchestrator pytest tests/test_digital_sizing.py -v
+============================== 10 passed in 1.22s ==============================
+
+# Live closed-loop integration test: converges on iter 1.
+$ docker exec scaffold-orchestrator pytest tests/integration/test_digital_sizing_db.py -v
+PASSED [100%]
+============================== 1 passed in 23.15s ==============================
+
+# Latest sim_run shows the exact measurement.
+$ psql -c "SELECT exit_code, measurements FROM sim_runs ORDER BY created_at DESC LIMIT 1"
+ exit_code | measurements
+-----------+---------------------------------------------
+         0 | {"wrap_count": 16.0, "clk_period_ns": 10.0}
+```
+
+**Engineering-design pipeline state after §17.155 — both kinds converge live, end-to-end:**
+
+```
+analog brief         digital brief
+  ↓                     ↓
+§17.144 extract       §17.144 extract
+  ↓                     ↓
+§17.145 /confirm      §17.145 /confirm
+  ↓                     ↓
+§17.146 topology      §17.146 topology
+  (analog seeds)        (§17.154 digital seeds)
+  ↓                     ↓
+§17.147 ngspice loop  §17.152 verilator loop
+  fc_3db 0.24% off       wrap_count exact
+  iter 1 converge        iter 1 converge
+  ↓                     ↓
+§17.148 report        §17.153 digital report
+```
+
+**Both kinds now reach iter-1 convergence on the canonical RC-LPF / 4-bit-counter smoke tests.** That closes the §17.151 iteration list entirely — the original engineering-design checklist is materially done end-to-end, with the §17.140–§17.155 chain of 16 commits producing two working live-end-to-end demonstrations on this host.
+
+**What might land next is architectural or scope-broadening, not gap-closing:** adding more design kinds (mixed_signal via both sidecars, PCB via §17.142 SymbiYosys for formal-style attestation), broadening the corpus to PLL / SerDes / interconnect families, integrating the design pipeline with the existing ideation flow, or pulling the four-stage chain into the OWUI ``scaffold_router`` so chat users can invoke it conversationally. All optional; none gap-closing against the original checklist.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
