@@ -6708,6 +6708,14 @@ All four constraints measured; persisted ``errors[]`` is empty. Digital re-smoke
 
 **Engineering-design pipeline state after §17.156.** Both kinds converge end-to-end on operator-faithful multi-constraint briefs. The §17.151 iteration list is genuinely closed for prompt-quality. Three open items remain — all tracked, none gap-closing against the original §17.151 checklist: (a) infeasibility-recognition in the iterative-refinement section (so the LLM can surface unachievable specs instead of exhausting the budget); (b) Finding 3 spec_extractor encoding for signed dB constraints; (c) extending the MEASUREMENT SEMANTICS coverage to constraint kinds not yet seen in smoke (transient settling, output-impedance under load).
 
+### 17.157 SDK schema parity catch-up — `make sync-schemas` (2026-05-13)
+
+Post-§17.156 ``make test`` flagged ``test_schemas_byte_equal`` red: the vendored ``sdk/scaffold_client/schemas.py`` had drifted from ``app/schemas.py`` by +217 lines. Drift was not introduced by §17.156 — it accumulated across earlier engineering-design commits (§17.143 ``specs`` table schemas, §17.146 ``TopologySelectionRead``, §17.147 ``DeviceSizingRead``, §17.151 ``DesignCreateInput`` / ``DesignStateRead``, §17.152 ``DigitalSizingRead``, §17.153 ``ReportRead`` dual-kind fields). Each of those commits should have bundled the sync; none did.
+
+Mechanical fix: ``cp app/schemas.py sdk/scaffold_client/schemas.py``. Parity test green after.
+
+**Operational note.** The drift was invisible to anyone running ``make test`` only against the suite-baseline (no per-commit schema-parity gate). Future engineering-design commits that touch ``app/schemas.py`` should run ``make sync-schemas`` in the same commit — or wire a pre-commit hook that fails on drift. Logged but not implemented here.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

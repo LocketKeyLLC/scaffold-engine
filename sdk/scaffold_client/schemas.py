@@ -720,3 +720,220 @@ class ResearchSessionListResponse(BaseModel):
 class DeleteResponse(BaseModel):
     deleted: bool
     id: str
+
+
+# §17.145 — Spec confirmation gate (engineering-design pipeline).
+
+class SpecRead(BaseModel):
+    """Serializable view of a row from the ``specs`` table. Used by
+    the /specs/* endpoints and by any caller that needs to hand a
+    confirmation state to a client."""
+    id: UUID
+    job_id: UUID | None = None
+    schema_version: str
+    spec_json: dict[str, Any]
+    spec_sha256: str
+    confirmed_by: str | None = None
+    confirmed_at: datetime | None = None
+    created_at: datetime
+
+
+class SpecPendingListResponse(BaseModel):
+    """Response for GET /specs/pending — list of specs awaiting
+    operator confirmation."""
+    pending: list[SpecRead]
+    count: int
+
+
+# §17.146 — Topology-selection stage (first reasoning step in the
+# engineering-design pipeline).
+
+class TopologyCandidateRead(BaseModel):
+    """One LLM-proposed topology, with citations into the RAG
+    retrieval set. ``citations`` are entry_ids the wrapper has already
+    validated against the retrieval set — a response carrying this
+    type is guaranteed not to contain hallucinated citations."""
+    name: str
+    description: str
+    rationale: str
+    citations: list[str]
+
+
+class TopologySelectionRead(BaseModel):
+    """Response for POST /specs/{spec_id}/topology-select. Carries
+    both the candidates and the retrieval-audit columns so a client
+    can render the citations as live links into the corpus."""
+    id: UUID
+    spec_id: UUID
+    candidates: list[TopologyCandidateRead]
+    rag_chunk_ids: list[str]
+    rag_query: str
+    rag_domain: str | None = None
+    model_used: str
+    created_at: datetime
+
+
+# §17.147 — Device-sizing stage (first closed-loop stage of the
+# engineering-design pipeline).
+
+class DeviceSizingRead(BaseModel):
+    """Response for POST /topology-selections/{id}/size when
+    ``design.kind == 'analog_circuit'``. Returns the persisted
+    device_sizings row whether or not the loop converged —
+    ``converged`` is the outcome flag, ``errors`` carries the loop's
+    diagnostic. The wider pipeline accepts a sizing as ready only
+    when ``converged == True``."""
+    id: UUID
+    kind: Literal["analog"] = "analog"
+    spec_id: UUID
+    topology_selection_id: UUID
+    candidate_idx: int
+    converged: bool
+    iterations: int
+    final_params: dict[str, str]
+    final_netlist: str
+    final_measurements: dict[str, float]
+    sim_run_ids: list[UUID]
+    model_used: str
+    errors: list[str]
+    created_at: datetime
+
+
+class DigitalSizingRead(BaseModel):
+    """§17.152 — Response for POST /topology-selections/{id}/size
+    when ``design.kind == 'digital_logic'``. Mirror of
+    ``DeviceSizingRead`` with ``final_sv_source`` + ``top_module``
+    instead of ``final_netlist``. The ``kind`` discriminator field
+    lets clients distinguish the two response shapes without parsing
+    the ``id`` table provenance."""
+    id: UUID
+    kind: Literal["digital"] = "digital"
+    spec_id: UUID
+    topology_selection_id: UUID
+    candidate_idx: int
+    converged: bool
+    iterations: int
+    final_params: dict[str, str]
+    final_sv_source: str
+    top_module: str
+    final_measurements: dict[str, float]
+    sim_run_ids: list[UUID]
+    model_used: str
+    errors: list[str]
+    created_at: datetime
+
+
+# §17.148 — Terminal report stage (regenerable-from-artifacts).
+
+class ReportConstraintRead(BaseModel):
+    id: str
+    kind: str
+    description: str
+    target: float | None = None
+    min: float | None = None
+    max: float | None = None
+    tolerance_pct: float | None = None
+    unit: str
+    criticality: str
+    measured: float | None = None
+    status: str  # ok | out_of_tolerance | violated_min | violated_max | not_measured | skipped
+
+
+class ReportCitationRead(BaseModel):
+    entry_id: str
+    title: str = ""
+    snippet: str = ""
+    source_url: str = ""
+    available: bool = False
+
+
+class ReportSimRunRead(BaseModel):
+    sim_run_id: UUID
+    iteration: int
+    tool: str
+    tool_version: str
+    exit_code: int
+    timed_out: bool
+    duration_ms: int
+    measurements: dict[str, float]
+    verdict: str | None = None
+
+
+# §17.151 — design_circuit job type (orchestrator front door).
+
+class DesignCreateInput(BaseModel):
+    """POST /design body. ``brief`` is the natural-language design
+    intent. Optional ``model_role`` lets operators override the
+    extractor model (e.g. for offline-only deployments)."""
+    brief: str = Field(..., min_length=1, max_length=10000)
+    model_role: str | None = None
+
+
+class DesignAmbiguityRead(BaseModel):
+    field: str
+    reason: str
+    question: str
+
+
+class DesignCreateResponse(BaseModel):
+    """POST /design response. Exactly one of the three result groups
+    is non-empty: success (``job_id`` + ``spec_id``), ambiguity
+    (``ambiguities`` populated), or extractor error (``errors``)."""
+    job_id: UUID | None = None
+    spec_id: UUID | None = None
+    ambiguities: list[DesignAmbiguityRead] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    model_used: str = ""
+
+
+class DesignStateRead(BaseModel):
+    """GET /design/{job_id} response — aggregated pipeline state."""
+    job_id: UUID
+    job_type: str
+    status: str
+    brief: str
+    created_at: datetime
+    spec_id: UUID | None = None
+    spec_confirmed_at: datetime | None = None
+    topology_selection_id: UUID | None = None
+    device_sizing_id: UUID | None = None
+    device_sizing_converged: bool | None = None
+
+
+class ReportRead(BaseModel):
+    """Structured report — a deterministic projection of the audit
+    tables for a single device_sizings OR digital_sizings row. No LLM
+    content, no new data beyond what's already attested in the
+    underlying rows.
+
+    §17.153: the ``kind`` discriminator (``'analog'`` / ``'digital'``)
+    tells clients which source-text field to read. Analog populates
+    ``final_netlist`` (SPICE); digital populates ``final_sv_source``
+    + ``top_module`` (SystemVerilog). The unused field for each kind
+    stays as the empty default."""
+    report_schema_version: str
+    generated_at: datetime
+    sizing_id: UUID
+    spec_id: UUID
+    topology_selection_id: UUID
+    candidate_idx: int
+    converged: bool
+    iterations: int
+    design_name: str
+    design_kind: str
+    design_description: str
+    spec_schema_version: str
+    constraints: list[ReportConstraintRead]
+    interfaces: list[dict[str, Any]]
+    environment: dict[str, Any]
+    selected_topology: dict[str, str]
+    citations: list[ReportCitationRead]
+    final_params: dict[str, str]
+    kind: str = "analog"
+    final_netlist: str = ""
+    final_sv_source: str = ""
+    top_module: str = ""
+    final_measurements: dict[str, float]
+    sim_runs: list[ReportSimRunRead]
+    errors: list[str]
+    model_used: str
