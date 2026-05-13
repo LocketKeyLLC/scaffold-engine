@@ -6930,6 +6930,18 @@ $ docker exec scaffold-postgres psql -U scaffold -d scaffold_engine -t -c "
 
 Synthetic event flowed end-to-end: watcher parsed it, filtered correctly, shelled the CLI, CLI returned ``emitted=true``, row landed in ``system_alerts`` with all four payload fields intact. Test debris cleaned up after the probe (``DELETE FROM system_alerts WHERE dedup_key='container.oom_killed:oom-watcher-live-probe'``).
 
+**Live install + real-OOM probe (2026-05-13).** Unit installed via ``sudo cp + daemon-reload + enable --now``; ``systemctl status`` reported ``active (running)`` with main PID 2833436 (python3) + child PID 2833439 (``docker events --filter type=container --filter event=oom``). Steady-state memory 16.6 MB resident — small enough that the watcher itself never threatens the host. First two OOM-trigger attempts were instructive failures: an alpine ``ash`` shell-variable balloon (``a=$a$a$a``) ran for 4 minutes without OOMing because ash's string-concat doesn't grow aggressively enough to trip the 8 MB cgroup; a Python loop allocating 2 MB at a time also didn't fire (Python's small-alloc path + GC reclaim kept memory under the cap). The deterministic OOM trigger is a **single-shot large allocation** that exceeds the cgroup cap in one call: ``python3 -c "data=[bytearray(64*1024*1024)]"`` inside a ``--memory=16m --memory-swap=16m`` container. Kernel OOM-killed the container in <1 s; watcher journal:
+
+```
+17:30:02 oom_observed container=oom-live-probe2
+17:30:03 emit_ok attempt=1 stdout={"emitted": true, "suppressed": false,
+  "id": "1b858dc3-28f0-4307-a0ec-e57f8ce8e9d0", "reason": null}
+```
+
+``system_alerts`` row landed with ``kind=container.oom_killed``, ``severity=critical``, ``dedup_key=container.oom_killed:oom-live-probe2``, payload carrying ``container_name``, ``image=python:3-alpine``, ``container_id``, ``event_time_utc``. End-to-end latency ~1 s from kernel-kill to DB row. Probe debris cleaned.
+
+**Operational note from the install (cosmetic).** systemd's ``Documentation=`` directive accepts a space-separated URI list, not free text. The first-draft unit had ``Documentation=https://… OVERVIEW.md §17.161`` — every daemon-reload logged ``Invalid URL, ignoring: OVERVIEW.md`` + ``Invalid URL, ignoring: §17.161`` to the journal. Fixed in the same commit to a single GitHub URL pointing at OVERVIEW.md. The fix is repo-only — it lands on the host the next time the operator runs ``sudo cp scripts/scaffold-oom-watcher.service /etc/systemd/system/ && sudo systemctl daemon-reload``.
+
 **Not in this commit (deliberate).** The systemd unit is not installed by this commit — the operator runs ``sudo cp + systemctl enable --now`` on their schedule. The script and unit are repo artifacts, not auto-applied. This mirrors the §17.64 ``scripts/chown_named_volumes.sh`` pattern: ship the operator-facing operational tool in the repo, leave the system-state change as an explicit operator action.
 
 **Operational followups.**

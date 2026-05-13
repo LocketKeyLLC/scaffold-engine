@@ -14,7 +14,10 @@
 
 [Unit]
 Description=Scaffold Engine OOM event watcher
-Documentation=https://github.com/LocketKeyLLC/scaffold-engine OVERVIEW.md §17.161
+# Documentation= takes a space-separated URI list, not free text — keep
+# it to one URL so systemd doesn't log "Invalid URL, ignoring: …" on every
+# daemon-reload. §17.161 has the design notes; OVERVIEW.md renders inline.
+Documentation=https://github.com/LocketKeyLLC/scaffold-engine/blob/main/OVERVIEW.md
 After=docker.service
 Requires=docker.service
 
