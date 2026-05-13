@@ -6639,6 +6639,75 @@ analog brief         digital brief
 
 **What might land next is architectural or scope-broadening, not gap-closing:** adding more design kinds (mixed_signal via both sidecars, PCB via §17.142 SymbiYosys for formal-style attestation), broadening the corpus to PLL / SerDes / interconnect families, integrating the design pipeline with the existing ideation flow, or pulling the four-stage chain into the OWUI ``scaffold_router`` so chat users can invoke it conversationally. All optional; none gap-closing against the original checklist.
 
+### 17.156 §17.147 analog sizer prompt refined — multi-constraint operator-faithful briefs converge; first-pass patch had wrong ngspice syntax, live re-smoke caught it (2026-05-13)
+
+Counterpart to §17.155 on the analog side. Today's smoke (``scripts/smoke_design_pipeline.sh --kind analog``) drove ``/design`` → confirm → topology-select → size → report end-to-end through the persisted-job surface for the first time. Three findings — two prompt-quality (fixed here, after one revision) and one spec-extraction (deferred).
+
+**§17.155's "iter-1 convergence" claim held only for the minimal fixture** — a single ``fc_3db`` constraint. The operator-faithful brief extracts to four required constraints (``fc_3db``, ``insertion_loss_dc``, ``source_impedance``, ``load_impedance``). Initial smoke against the §17.155 prompt:
+
+| Iter | fc_3db (target 1000 Hz ±5%) | insertion_loss_dc | source_impedance | load_impedance |
+|------|------------------------------|-------------------|------------------|----------------|
+| 1    | 997.6 Hz ✓                   | not_measured      | not_measured     | not_measured   |
+| 2    | 997.6 Hz ✓                   | not_measured      | not_measured     | not_measured   |
+| 3    | 775.6 Hz ✗                   | not_measured (param syntax) | not_measured | not_measured |
+
+The pipeline persisted the row + 3 ``sim_runs`` + a 4-element ``errors[]`` naming each unmet constraint — same audit-driven loop §17.150 / §17.155 used.
+
+**Finding 1: four prompt-quality defects in the analog sizer.**
+
+1. Worked example shows ONLY ONE ``meas`` line. LLM sees a 1-constraint example, generalises by emitting one meas line and stopping. Cardinality mirror of §17.155's PITFALL 7.
+2. No idiomatic ngspice forms for non-frequency constraint kinds. Iter 3 finally tried impedance lines but used ``param '<expr>' at=...`` — ``param`` is the parameter-declaration keyword, not a measurement directive, so ngspice silently produced no row for it.
+3. The LLM didn't recompute fc after adding ``R_source`` / ``R_load`` components in iter 3 (the effective pole resistance changed from ``R1`` to ``(R_source+R1)‖R_load`` — fc regressed from 997.6 Hz to 775.6 Hz).
+4. AC sweep range (``ac dec 100 10 100k``) starts at 10 Hz — ``meas ... at=1`` for DC-equivalent insertion-loss is then out-of-range.
+
+**Finding 2 (caught only by live re-smoke after the v1 patch): ngspice's ``meas ... find`` rejects arbitrary expressions.** The first patch attempt mirrored §17.155's digital MEASUREMENT SEMANTICS block by writing impedance constraints as ``meas ac <id> find 'abs((v(a)-v(b))/i(<source>))' at=1``. Direct sidecar probe of the LLM-emitted netlist revealed three of four meas lines silently failed:
+
+```
+fc_3db              =  8.349525e+02
+insertion_loss_dc   = -1.251643e+00
+meas ac source_impedance find abs((v(src)-v(in))/i(v1)) at=1 failed!
+meas ac load_impedance find abs(v(out)/i(R_load)) at=1 failed!
+```
+
+ngspice's ``meas`` ``find`` directive only accepts simple node-voltage forms (``v(<node>)``, ``vdb(<node>)``, ``vm(<node>)``, etc.). Arbitrary expressions, including ``abs(...)`` and ``(v-v)/i``, are silently rejected. Separately, ``i(<resistor>)`` is not exposed in AC analysis — only ``i(<voltage_source>)`` works.
+
+The fix is the ``let + print`` pattern inside ``.control``:
+
+```
+let source_impedance = abs((v(src)-v(in))/i(v1))[1]
+let load_impedance = abs(v(out)/i(vload))[1]
+print source_impedance load_impedance
+```
+
+ngspice's ``print`` outputs scalar values in the same ``<name> = <value>`` format ``meas`` uses, so the orchestrator's measurement parser captures them transparently. For the load-current branch, the LLM is instructed to insert a 0-V voltage source (``Vload lprobe 0 DC 0``) as an ammeter — i(vload) gives the branch current.
+
+**The meta-lesson: a prompt patch is not finished until the live audit confirms it.** §17.155's pattern of "draft → smoke → audit" was followed for §17.156 too; the first draft of the patch landed without live verification of the impedance forms, and the re-smoke caught it before commit. The §17.150 / §17.155 audit-driven loop is exactly what surfaced this — the prior smoke's ``errors[]`` was misleading ("LLM must emit `.meas` with name 'source_impedance'") because the LLM HAD emitted it; ngspice refused it. Reading the sidecar's stdout directly was the necessary additional step.
+
+**Resolution — patch to ``app/sim/device_sizing.py``:**
+
+- **Worked example** now uses the verified ``let + print`` pattern for impedance constraints, the Vload ammeter for load-branch current, and ``ac dec 100 1 100k`` so ``at=1`` lookups stay in range.
+- **MEASUREMENT SEMANTICS block** maps each analog constraint kind to its idiomatic working form:
+  - ``electrical.frequency`` → ``meas ac <id> when vdb(out)=-3 fall=1``
+  - ``electrical.impedance`` → ``let <id> = <expr>[<idx>]; print <id>`` with explicit note that ``i(<resistor>)`` does NOT work in ngspice AC (use a 0-V ammeter source).
+  - ``signal.snr`` → ``meas ac <id> find vdb(<node>) at=<low_freq>``, with the AC range starting at 1 Hz.
+  - ``electrical.voltage`` / ``timing.delay`` covered for completeness.
+- **PITFALL 6** — multi-constraint dropping: emit one measurement-emitting line per required constraint id.
+- **PITFALL 7** — analytical drift with source/load resistors: pole resistance is the Thévenin equivalent, not R1 alone.
+- **PITFALL 8** — replaced. The new form: ``meas ... find '<arbitrary_expression>'`` is rejected by ngspice; use ``let + print`` instead. Also warn against ``param`` (the old wrong syntax) and ``i(<resistor>)`` (unsupported in AC).
+- **PITFALL 9** — new. ``at=<f>`` must be inside the AC sweep range; same for ``[idx]`` indices.
+
+**Verification (live, post-revision).** Re-smoke against the patched prompt, operator's R_load=10 kΩ brief:
+
+| Iter | fc_3db | insertion_loss_dc | source_impedance | load_impedance | converged |
+|------|--------|-------------------|------------------|------------------|-----------|
+| 3    | 991.3 Hz ✓ | -1.10 dB | 50.0 Ω ✓ | 10000 Ω ✓ | **true** |
+
+All four constraints measured; persisted ``errors[]`` is empty. Digital re-smoke unchanged (still PASS from §17.155).
+
+**Finding 3 (deferred — spec extractor encoding, NOT in §17.156):** the smoke's encoded spec has ``insertion_loss_dc`` as ``max: 1.0`` (signed dB). For a passive filter, insertion loss is always negative, so this bound is trivially satisfied (-1.10 dB ≤ 1.0). The operator's natural reading of "insertion loss less than 1 dB" is a magnitude bound — equivalent to ``min: -1.0``. The §17.144 spec_extractor encoded it as the signed bound, which is technically a valid interpretation but not what an operator would mean. Logged separately; out of scope for §17.156 because the fix is in the extractor's signal.snr encoding, not the sizer prompt.
+
+**Engineering-design pipeline state after §17.156.** Both kinds converge end-to-end on operator-faithful multi-constraint briefs. The §17.151 iteration list is genuinely closed for prompt-quality. Three open items remain — all tracked, none gap-closing against the original §17.151 checklist: (a) infeasibility-recognition in the iterative-refinement section (so the LLM can surface unachievable specs instead of exhausting the budget); (b) Finding 3 spec_extractor encoding for signed dB constraints; (c) extending the MEASUREMENT SEMANTICS coverage to constraint kinds not yet seen in smoke (transient settling, output-impedance under load).
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
