@@ -424,3 +424,130 @@ def test_render_markdown_citation_unavailable_renders_marker():
     md = render_markdown(doc)
     assert "`missing-chunk`" in md
     assert "[content unavailable]" in md
+
+
+# ---------------------------------------------------------------------------
+# §17.153 — digital sizing reports
+# ---------------------------------------------------------------------------
+
+def _digital_sizing_row(*, sizing_id, spec_id, sel_id, sim_id):
+    return {
+        "id": sizing_id,
+        "kind": "digital",  # synthesized by _fetch_sizing on digital hit
+        "spec_id": spec_id,
+        "topology_selection_id": sel_id,
+        "candidate_idx": 0,
+        "final_params": {"WIDTH": "4", "CLK_PERIOD_NS": "10"},
+        "final_netlist": "",  # not applicable to digital
+        "final_sv_source": "module tb;\n  // counter testbench\n  initial begin $finish; end\nendmodule\n",
+        "top_module": "tb",
+        "sim_run_ids": [sim_id],
+        "converged": True,
+        "iterations": 1,
+        "model_used": "qwen3-vl:235b-instruct-cloud",
+        "measurements_final": {"wrap_count": 16.0},
+        "errors": [],
+        "created_at": FIXED_TIME,
+    }
+
+
+@pytest.mark.smoke
+async def test_build_report_digital_full_join(monkeypatch):
+    """A digital sizing row joins through to a kind='digital'
+    ReportDocument with final_sv_source + top_module populated and
+    final_netlist empty."""
+    sizing_id = uuid.uuid4()
+    spec_id = uuid.uuid4()
+    sel_id = uuid.uuid4()
+    sim_id = uuid.uuid4()
+
+    sizing = _digital_sizing_row(
+        sizing_id=sizing_id, spec_id=spec_id, sel_id=sel_id, sim_id=sim_id,
+    )
+    spec = {
+        "id": spec_id,
+        "schema_version": "1.0.0",
+        "spec_json": {
+            "schema_version": "1.0.0",
+            "design": {
+                "name": "Counter",
+                "kind": "digital_logic",
+                "description": "N-bit counter.",
+            },
+            "constraints": [
+                {
+                    "id": "wrap_count", "kind": "timing.latency",
+                    "description": "Cycles to wrap.",
+                    "target": 16.0, "tolerance_pct": 5.0,
+                    "unit": "cycles", "criticality": "required",
+                }
+            ],
+        },
+    }
+    selection = {
+        "id": sel_id,
+        "spec_id": spec_id,
+        "candidates": [
+            {
+                "name": "Synchronous counter", "description": ".",
+                "rationale": ".", "citations": ["chunk-D"],
+            }
+        ],
+        "rag_chunk_ids": ["chunk-D"],
+        "model_used": "test",
+    }
+    sim_run_map = {
+        sim_id: {
+            "id": sim_id,
+            "tool": "verilator", "tool_version": "verilator-5.024",
+            "exit_code": 0, "timed_out": False, "duration_ms": 200,
+            "measurements": {"wrap_count": 16.0},
+            "verdict": None,
+        }
+    }
+
+    _patch_fetches(
+        monkeypatch,
+        sizing=sizing, spec=spec, selection=selection,
+        sim_run_map=sim_run_map, chunk_map={},
+    )
+    db = make_mock_db()
+    doc = await build_report(sizing_id, db=db, generated_at=FIXED_TIME)
+
+    assert doc.kind == "digital"
+    assert doc.final_sv_source.startswith("module tb;")
+    assert doc.top_module == "tb"
+    assert doc.final_netlist == ""
+    assert doc.constraints[0].id == "wrap_count"
+    assert doc.constraints[0].status == "ok"
+
+
+@pytest.mark.smoke
+def test_render_markdown_digital_uses_systemverilog_fence():
+    """Digital reports render the source as a `systemverilog`
+    fenced block with the top-module name in the section title."""
+    doc = _baseline_doc()
+    doc.kind = "digital"
+    doc.final_netlist = ""
+    doc.final_sv_source = "module tb;\n  initial $finish;\nendmodule\n"
+    doc.top_module = "tb"
+
+    md = render_markdown(doc)
+    assert "## Final SystemVerilog Source (top: `tb`)" in md
+    assert "```systemverilog" in md
+    # Analog "Final Netlist" header MUST NOT appear on a digital report.
+    assert "## Final Netlist" not in md
+    # Kind line in header surfaces the discriminator.
+    assert "- **Kind:** digital" in md
+
+
+@pytest.mark.smoke
+def test_render_markdown_analog_still_uses_spice_fence():
+    """Sanity check that the analog path is untouched by the digital
+    branching — same expectations as the §17.148 unit suite."""
+    doc = _baseline_doc()
+    md = render_markdown(doc)
+    assert "## Final Netlist" in md
+    assert "```spice" in md
+    assert "## Final SystemVerilog Source" not in md
+    assert "- **Kind:** analog" in md

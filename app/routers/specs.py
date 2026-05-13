@@ -379,53 +379,10 @@ async def _fetch_digital_sizing_created_at(
 # audit tables. ``?format=markdown`` returns text/markdown; the
 # default is structured JSON.
 
-report_router = APIRouter(tags=["Specs"], prefix="/device-sizings")
-
-
-@report_router.get(
-    "/{sizing_id}/report",
-    responses={
-        200: {
-            "content": {
-                "application/json": {},
-                "text/markdown": {},
-            }
-        }
-    },
-)
-async def get_report(
-    sizing_id: uuid.UUID,
-    format: str = "json",
-    db: AsyncSession = Depends(get_db),
-):
-    """Render the terminal report for a sizing attempt.
-
-    Non-converged sizings are renderable (with a banner) — the report
-    is the post-mortem artefact for "why did this attempt fail?",
-    not just the success surface.
-
-    Status:
-      * 200 — report rendered.
-      * 400 — unknown ``format`` (only ``json`` / ``markdown``).
-      * 404 — sizing_id (or any of the rows it references) not found.
-    """
-    fmt = format.lower()
-    if fmt not in ("json", "markdown", "md"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"unsupported format {format!r}; use 'json' or 'markdown'",
-        )
-    try:
-        doc = await build_report(sizing_id, db=db)
-    except ReportNotAvailableError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-
-    if fmt in ("markdown", "md"):
-        return PlainTextResponse(
-            content=render_markdown(doc),
-            media_type="text/markdown",
-        )
-
+def _doc_to_report_read(doc) -> ReportRead:
+    """Lift a ReportDocument into the wire-format Pydantic model.
+    Extracted so the analog and digital endpoints share the
+    conversion code — DRY guard against drift between the two."""
     return ReportRead(
         report_schema_version=doc.report_schema_version,
         generated_at=doc.generated_at,
@@ -461,7 +418,10 @@ async def get_report(
             for cite in doc.citations
         ],
         final_params=dict(doc.final_params),
+        kind=doc.kind,
         final_netlist=doc.final_netlist,
+        final_sv_source=doc.final_sv_source,
+        top_module=doc.top_module,
         final_measurements=dict(doc.final_measurements),
         sim_runs=[
             ReportSimRunRead(
@@ -476,4 +436,125 @@ async def get_report(
         ],
         errors=list(doc.errors),
         model_used=doc.model_used,
+    )
+
+
+async def _render_report(
+    sizing_id: uuid.UUID,
+    fmt: str,
+    expected_kind: str,
+    db: AsyncSession,
+):
+    """Shared handler body for both /device-sizings/{id}/report and
+    /digital-sizings/{id}/report. ``expected_kind`` enforces URL ↔ row
+    consistency: a request to /device-sizings/{X}/report where X is
+    actually in digital_sizings returns 404, and vice-versa."""
+    if fmt not in ("json", "markdown", "md"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported format {fmt!r}; use 'json' or 'markdown'",
+        )
+    try:
+        doc = await build_report(sizing_id, db=db)
+    except ReportNotAvailableError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    if doc.kind != expected_kind:
+        # Caller used the wrong URL prefix for this id. 404 rather
+        # than 409 — from the URL's perspective the resource doesn't
+        # exist (different table).
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"sizing {sizing_id} is a {doc.kind!r} row; use the "
+                f"matching report endpoint"
+            ),
+        )
+
+    if fmt in ("markdown", "md"):
+        return PlainTextResponse(
+            content=render_markdown(doc),
+            media_type="text/markdown",
+        )
+
+    return _doc_to_report_read(doc)
+
+
+report_router = APIRouter(tags=["Specs"], prefix="/device-sizings")
+
+
+@report_router.get(
+    "/{sizing_id}/report",
+    responses={
+        200: {
+            "content": {
+                "application/json": {},
+                "text/markdown": {},
+            }
+        }
+    },
+)
+async def get_report(
+    sizing_id: uuid.UUID,
+    format: str = "json",
+    db: AsyncSession = Depends(get_db),
+):
+    """Render the terminal report for an ANALOG sizing attempt.
+
+    Non-converged sizings are renderable (with a banner) — the report
+    is the post-mortem artefact for "why did this attempt fail?",
+    not just the success surface.
+
+    Status:
+      * 200 — report rendered.
+      * 400 — unknown ``format`` (only ``json`` / ``markdown``).
+      * 404 — sizing_id missing OR is in ``digital_sizings``
+              (use /digital-sizings/{id}/report instead).
+    """
+    return await _render_report(
+        sizing_id, format.lower(), expected_kind="analog", db=db,
+    )
+
+
+# §17.153 — parallel endpoint for digital sizings. Same handler body,
+# different URL prefix + kind enforcement. Operators reach the digital
+# report by the table the row lives in, not by trial-and-error on the
+# analog URL.
+
+digital_report_router = APIRouter(
+    tags=["Specs"], prefix="/digital-sizings",
+)
+
+
+@digital_report_router.get(
+    "/{sizing_id}/report",
+    responses={
+        200: {
+            "content": {
+                "application/json": {},
+                "text/markdown": {},
+            }
+        }
+    },
+)
+async def get_digital_report(
+    sizing_id: uuid.UUID,
+    format: str = "json",
+    db: AsyncSession = Depends(get_db),
+):
+    """Render the terminal report for a DIGITAL sizing attempt.
+
+    Same contract as ``/device-sizings/{id}/report`` but for rows
+    living in ``digital_sizings``. The response carries
+    ``kind='digital'`` and populates ``final_sv_source`` + ``top_module``
+    instead of ``final_netlist``.
+
+    Status:
+      * 200 — report rendered.
+      * 400 — unknown ``format``.
+      * 404 — sizing_id missing OR is in ``device_sizings``
+              (use /device-sizings/{id}/report instead).
+    """
+    return await _render_report(
+        sizing_id, format.lower(), expected_kind="digital", db=db,
     )

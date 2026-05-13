@@ -6405,6 +6405,86 @@ ReportDocument
 - **Prompt iteration on the off-by-one**. The integration-test wrap-count off-by-one (LLM reads "wrap" as "count hit 0 again" instead of "count incremented N times") is a §17.150-style prompt refinement. Surface available — the live test's audit trail is the diagnostic input.
 - **GET /digital-sizings/{id}** endpoint for symmetric retrieval. Not blocking the pipeline; the orchestrator's ``SELECT * FROM digital_sizings WHERE id=...`` is the v1 query path.
 
+### 17.153 Digital report renderer — §17.148 extended for the digital sizing path (2026-05-13)
+
+Resolves the first deferred item from §17.152. The §17.148 ``build_report`` joined ``device_sizings`` only, so an operator running a digital design through the §17.152 chain could query the structured row via SQL but got a 404 on ``GET /device-sizings/{id}/report``. §17.153 wires the missing renderer.
+
+**Unified ``ReportDocument`` with a ``kind`` discriminator** rather than two parallel document types. The dataclass picks up three new fields (``kind: 'analog' | 'digital'``, ``final_sv_source: str``, ``top_module: str``) with empty defaults so existing analog code paths see the same shape. ``Pydantic ReportRead`` adds the same fields with safe defaults — clients reading ``final_netlist`` on an analog report keep working; new clients read ``body["kind"]`` to decide which source field to consume.
+
+**``_fetch_sizing`` is now dual-table.** Tries ``device_sizings`` first (the §17.147 table that existed since this work started), falls back to ``digital_sizings`` (§17.152). On hit, it synthesises the ``kind`` discriminator and normalises the row into a superset shape with both source columns populated (the unused one as empty string). ``ReportNotAvailableError`` fires only when the id is missing from BOTH tables — same contract semantics as §17.148.
+
+**Two parallel HTTP endpoints with strict URL-kind enforcement.** ``GET /device-sizings/{id}/report`` and ``GET /digital-sizings/{id}/report`` share the same handler body but each refuses cross-kind ids with 404:
+
+  * ``GET /device-sizings/{digital_id}/report`` → 404 ``"sizing X is a 'digital' row; use the matching report endpoint"``.
+  * ``GET /digital-sizings/{analog_id}/report`` → 404 with the analog hint.
+
+The cross-URL guard tests (``test_device_url_rejects_digital_id`` / ``test_digital_url_rejects_analog_id``) lock this behaviour — without them, a polymorphic ``build_report`` would silently serve a digital report at the analog URL, breaking the operator's mental model of "the URL prefix matches the table."
+
+**``render_markdown`` branches on ``doc.kind``** for the final-source section. Analog renders ``## Final Netlist`` + ```spice` fence; digital renders ``## Final SystemVerilog Source (top: `tb`)`` + ```systemverilog` fence. The section title carries the ``top_module`` name so an operator reading the rendered report sees which module Verilator built. ``- **Kind:** {analog|digital}`` line in the header surfaces the discriminator without making the reader page to find the source section.
+
+**``design_pipeline.advance_design_stage(stage="report")`` is now kind-agnostic.** New ``_fetch_latest_sizing_any_kind`` helper UNIONs ``device_sizings`` and ``digital_sizings`` and picks the most recent by ``created_at DESC``. The stage delegates to ``build_report``, which handles the polymorphism internally. A digital design now flows ``POST /design`` → ``/specs/{id}/confirm`` → ``/design/{job_id}/advance?stage=topology`` → ``stage=size`` (Verilator) → ``stage=report`` (digital report) end-to-end via one chain of HTTP calls.
+
+**Determinism guard preserved.** ``test_render_markdown_is_deterministic`` from §17.148 still passes — the new branching is on a doc field, not on a clock read, so the same doc still renders byte-identical Markdown on repeated calls. ``test_render_markdown_analog_still_uses_spice_fence`` is the explicit guard that the digital branching didn't accidentally regress the analog rendering.
+
+**Files.**
+
+- ``app/sim/report.py`` (+~50 lines). ``ReportDocument`` picks up ``kind`` / ``final_sv_source`` / ``top_module``. ``_fetch_sizing`` becomes dual-table with synthesised ``kind``. ``build_report`` populates the new fields. ``render_markdown`` branches on ``doc.kind``.
+- ``app/schemas.py`` (+~3 lines). ``ReportRead`` picks up the same three fields with defaults.
+- ``app/routers/specs.py`` (+~75 lines). Extracted ``_doc_to_report_read`` + ``_render_report`` shared helpers; existing ``/device-sizings`` endpoint becomes a thin wrapper that enforces ``expected_kind='analog'``. New ``digital_report_router`` with prefix ``/digital-sizings`` and ``expected_kind='digital'``. Cross-URL guard lives in the shared helper.
+- ``app/main.py`` (+2 lines). ``include_router(digital_report_router)``.
+- ``app/sim/design_pipeline.py`` (+~25 lines). ``_fetch_latest_sizing_any_kind`` UNION query; ``stage=report`` uses it. Error message tweaked from "device_sizing" to "sizing" to match the broader semantics.
+- ``tests/test_report.py`` (+~120 lines, 3 new ``@pytest.mark.smoke`` cases). Digital ``build_report`` full-join; ``render_markdown`` systemverilog fence + top_module title; analog still spice fence (regression guard).
+- ``tests/test_design_pipeline.py`` (+1 line). Patch ``_fetch_latest_sizing_any_kind`` alongside the existing ``_fetch_latest_device_sizing`` so the report-stage test fixture covers both lookup paths.
+- ``tests/integration/test_report_db.py`` (+~180 lines, 5 new ``@pytest.mark.smoke`` cases). Digital seed fixture; ``/digital-sizings/{id}/report`` JSON and Markdown; cross-URL guards in both directions; 404 on missing digital id.
+
+**Verification.**
+
+```
+# Unit suite — 16 analog + 3 digital = 19 cases.
+$ docker exec scaffold-orchestrator pytest tests/test_report.py -v
+============================== 19 passed in 2.50s ==============================
+
+# Integration suite — 5 analog + 5 digital (including 2 cross-URL guards).
+$ docker exec scaffold-orchestrator pytest tests/integration/test_report_db.py -v
+test_get_report_json_converged PASSED
+test_get_report_markdown_format PASSED
+test_get_report_non_converged_renders_with_banner PASSED
+test_get_report_404_when_sizing_missing PASSED
+test_get_report_400_on_unknown_format PASSED
+test_get_digital_report_json_converged PASSED
+test_get_digital_report_markdown_format PASSED
+test_device_url_rejects_digital_id PASSED
+test_digital_url_rejects_analog_id PASSED
+test_get_digital_report_404_when_missing PASSED
+============================== 10 passed in 1.81s ===============================
+```
+
+**Engineering-design pipeline state after §17.153:**
+
+```
+NL brief
+  ↓ §17.144 extract
+specs row
+  ↓ §17.145 /confirm
+  ↓ §17.146 topology-select
+topology_selections row
+  ↓ §17.147 size_device (analog)  ──┐ dispatch on
+  ↓ §17.152 size_digital_device (digital) ──┘  design.kind
+device_sizings  OR  digital_sizings
+  ↓ §17.148 build_report  ──┐ dispatch on
+  ↓ §17.153 (digital branch) ──┘  sizing row kind
+ReportDocument (analog or digital)
+GET /device-sizings/{id}/report  OR  /digital-sizings/{id}/report
+```
+
+The trio of post-pipeline iteration items §17.151 named is now down to **two**: digital RAG corpus seed (additive seed-script work) and prompt refinement on the §17.152 wrap off-by-one (audit-driven §17.150-style fix).
+
+**Deferred — out of scope for §17.153.**
+
+- **Source-side syntax validation**. The renderer trusts whatever ``final_sv_source`` is in the row; if a future bug persists corrupted SV, the renderer would emit it verbatim inside the ```systemverilog` fence. Markdown viewers tolerate this, but a stricter pre-render lint would surface bad rows earlier. Defer until a real bug surfaces it.
+- **HTML output format**. ``?format=html`` could trivially be implemented via a Markdown → HTML pass; deferred until something needs it.
+- **Per-sim-run trace artefacts**. ``ReportSimRun.tool='verilator'`` carries the run-level summary; full waveform / VCD inclusion would require a §17.140/141 sidecar enhancement to dump traces. Same deferral as §17.148.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

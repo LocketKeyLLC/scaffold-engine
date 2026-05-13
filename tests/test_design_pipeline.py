@@ -177,6 +177,10 @@ def _patch_chain(
     monkeypatch.setattr("app.sim.design_pipeline._fetch_spec_for_job", fake_fetch_spec)
     monkeypatch.setattr("app.sim.design_pipeline._fetch_latest_topology_selection", fake_fetch_sel)
     monkeypatch.setattr("app.sim.design_pipeline._fetch_latest_device_sizing", fake_fetch_sizing)
+    # §17.153 — report stage now uses _fetch_latest_sizing_any_kind.
+    # Patch it to the same fake so the test fixtures unify across the
+    # old (device-only) and new (device+digital) lookup paths.
+    monkeypatch.setattr("app.sim.design_pipeline._fetch_latest_sizing_any_kind", fake_fetch_sizing)
     monkeypatch.setattr("app.sim.design_pipeline._set_job_status", fake_set_status)
 
 

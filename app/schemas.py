@@ -902,8 +902,15 @@ class DesignStateRead(BaseModel):
 
 class ReportRead(BaseModel):
     """Structured report — a deterministic projection of the audit
-    tables for a single device_sizings row. No LLM content, no new
-    data beyond what's already attested in the underlying rows."""
+    tables for a single device_sizings OR digital_sizings row. No LLM
+    content, no new data beyond what's already attested in the
+    underlying rows.
+
+    §17.153: the ``kind`` discriminator (``'analog'`` / ``'digital'``)
+    tells clients which source-text field to read. Analog populates
+    ``final_netlist`` (SPICE); digital populates ``final_sv_source``
+    + ``top_module`` (SystemVerilog). The unused field for each kind
+    stays as the empty default."""
     report_schema_version: str
     generated_at: datetime
     sizing_id: UUID
@@ -922,7 +929,10 @@ class ReportRead(BaseModel):
     selected_topology: dict[str, str]
     citations: list[ReportCitationRead]
     final_params: dict[str, str]
-    final_netlist: str
+    kind: str = "analog"
+    final_netlist: str = ""
+    final_sv_source: str = ""
+    top_module: str = ""
     final_measurements: dict[str, float]
     sim_runs: list[ReportSimRunRead]
     errors: list[str]

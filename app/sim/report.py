@@ -134,7 +134,14 @@ class ReportDocument:
     selected_topology: dict[str, str] = field(default_factory=dict)
     citations: list[ReportCitation] = field(default_factory=list)
     final_params: dict[str, str] = field(default_factory=dict)
+    # §17.153 — kind discriminator + per-kind source fields. Analog
+    # designs populate ``final_netlist`` (SPICE); digital designs
+    # populate ``final_sv_source`` + ``top_module`` (SystemVerilog).
+    # The unused field for each kind stays as the empty default.
+    kind: str = "analog"
     final_netlist: str = ""
+    final_sv_source: str = ""
+    top_module: str = ""
     final_measurements: dict[str, float] = field(default_factory=dict)
     sim_runs: list[ReportSimRun] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -146,6 +153,16 @@ class ReportDocument:
 # ---------------------------------------------------------------------------
 
 async def _fetch_sizing(db: AsyncSession, sizing_id: uuid.UUID) -> dict[str, Any]:
+    """Fetch sizing row from device_sizings, falling back to
+    digital_sizings (§17.153). Returns a dict with a synthesized
+    ``kind`` field — ``'analog'`` or ``'digital'`` — so the caller can
+    branch rendering without a second DB round-trip.
+
+    Both tables carry the same column set except for the source-text
+    column (``final_netlist`` for analog, ``final_sv_source`` + ``top_module``
+    for digital). The returned dict normalises into a superset shape
+    with both source columns populated for the relevant kind."""
+    # Try analog first — the table that existed since §17.147.
     row = await db.execute(
         text(
             """
@@ -160,9 +177,37 @@ async def _fetch_sizing(db: AsyncSession, sizing_id: uuid.UUID) -> dict[str, Any
         {"id": str(sizing_id)},
     )
     r = row.mappings().first()
-    if r is None:
-        raise ReportNotAvailableError(f"device_sizings {sizing_id} not found")
-    return dict(r)
+    if r is not None:
+        d = dict(r)
+        d["kind"] = "analog"
+        d["final_sv_source"] = ""
+        d["top_module"] = ""
+        return d
+
+    # §17.152 — fall back to digital_sizings.
+    row = await db.execute(
+        text(
+            """
+            SELECT id, spec_id, topology_selection_id, candidate_idx,
+                   final_params, final_sv_source, top_module,
+                   sim_run_ids, converged, iterations, model_used,
+                   measurements_final, errors, created_at
+            FROM digital_sizings
+            WHERE id = :id
+            """
+        ),
+        {"id": str(sizing_id)},
+    )
+    r = row.mappings().first()
+    if r is not None:
+        d = dict(r)
+        d["kind"] = "digital"
+        d["final_netlist"] = ""  # not applicable
+        return d
+
+    raise ReportNotAvailableError(
+        f"sizing {sizing_id} not found in device_sizings or digital_sizings"
+    )
 
 
 async def _fetch_spec(db: AsyncSession, spec_id: uuid.UUID) -> dict[str, Any]:
@@ -460,7 +505,10 @@ async def build_report(
         },
         citations=citations,
         final_params=dict(sizing["final_params"] or {}),
-        final_netlist=str(sizing["final_netlist"] or ""),
+        kind=str(sizing.get("kind", "analog")),
+        final_netlist=str(sizing.get("final_netlist") or ""),
+        final_sv_source=str(sizing.get("final_sv_source") or ""),
+        top_module=str(sizing.get("top_module") or ""),
         final_measurements=measurements_final,
         sim_runs=sim_runs_list,
         errors=list(sizing["errors"] or []),
@@ -500,6 +548,7 @@ def render_markdown(doc: ReportDocument) -> str:
         lines.append("")
 
     lines.append(f"- **Report schema:** {doc.report_schema_version}")
+    lines.append(f"- **Kind:** {doc.kind}")
     lines.append(f"- **Sizing ID:** `{doc.sizing_id}`")
     lines.append(f"- **Spec ID:** `{doc.spec_id}`")
     lines.append(f"- **Topology selection ID:** `{doc.topology_selection_id}`")
@@ -650,7 +699,17 @@ def render_markdown(doc: ReportDocument) -> str:
             lines.append(f"- {e}")
         lines.append("")
 
-    if doc.final_netlist:
+    # §17.153 — kind-aware source section. Analog renders the SPICE
+    # netlist; digital renders the SystemVerilog source with the
+    # testbench module name in the section title.
+    if doc.kind == "digital" and doc.final_sv_source:
+        top = doc.top_module or "tb"
+        lines.append(f"## Final SystemVerilog Source (top: `{top}`)")
+        lines.append("```systemverilog")
+        lines.append(doc.final_sv_source.rstrip())
+        lines.append("```")
+        lines.append("")
+    elif doc.final_netlist:
         lines.append("## Final Netlist")
         lines.append("```spice")
         lines.append(doc.final_netlist.rstrip())

@@ -225,6 +225,31 @@ async def _fetch_latest_device_sizing(
     return dict(r) if r else None
 
 
+async def _fetch_latest_sizing_any_kind(
+    db: AsyncSession, topology_selection_id: uuid.UUID
+) -> dict[str, Any] | None:
+    """§17.153 — pick the most recent sizing attempt across BOTH
+    ``device_sizings`` (analog) and ``digital_sizings`` (digital).
+    The design pipeline's stage=report needs this so it can render
+    either kind from the same advance call."""
+    row = await db.execute(
+        text(
+            """
+            SELECT id, converged, 'analog' AS kind, created_at
+            FROM device_sizings WHERE topology_selection_id = :sid
+            UNION ALL
+            SELECT id, converged, 'digital' AS kind, created_at
+            FROM digital_sizings WHERE topology_selection_id = :sid
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"sid": str(topology_selection_id)},
+    )
+    r = row.mappings().first()
+    return dict(r) if r else None
+
+
 # ---------------------------------------------------------------------------
 # Public — create
 # ---------------------------------------------------------------------------
@@ -487,14 +512,16 @@ async def advance_design_stage(
             )
             yield _sse("done", {"ok": False})
             return
-        sizing = await _fetch_latest_device_sizing(db, sel["id"])
+        # §17.153 — accept either analog (device_sizings) or digital
+        # (digital_sizings) sizing; build_report dispatches internally.
+        sizing = await _fetch_latest_sizing_any_kind(db, sel["id"])
         if sizing is None:
             yield _sse(
                 "stage_error",
                 {
                     "stage": stage,
                     "errors": [
-                        "no device_sizing for this job — run stage=size "
+                        "no sizing for this job — run stage=size "
                         "first"
                     ],
                 },
