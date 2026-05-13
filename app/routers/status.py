@@ -4,7 +4,7 @@ GET /status            — status counts + recent jobs with node counts
 GET /logs/{job_id}     — per-node execution history for a single job
 """
 
-import structlog
+import logging
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 from uuid import UUID
@@ -16,7 +16,7 @@ from sqlalchemy import text
 from app.database import get_db
 from app.modules.recovery import next_actions_for
 
-logger = structlog.get_logger()
+logger = logging.getLogger("scaffold.routers.status")
 router = APIRouter()
 
 
@@ -156,10 +156,8 @@ async def get_status(
 
     total = sum(counts.values())
     logger.info(
-        "status_queried",
-        total_jobs=total,
-        recent_returned=len(recent_jobs),
-        status_filter=status_filter,
+        "status_queried total_jobs=%d recent_returned=%d status_filter=%s",
+        total, len(recent_jobs), status_filter,
     )
     return StatusResponse(
         status_counts=status_counts,
@@ -238,13 +236,8 @@ async def get_logs(
         )
 
     logger.info(
-        "logs_queried",
-        job_id=job_id,
-        job_status=job_row.status,
-        node_count=total_nodes,
-        returned=len(nodes),
-        limit=limit,
-        offset=offset,
+        "logs_queried job_id=%s job_status=%s node_count=%d returned=%d limit=%d offset=%d",
+        job_id, job_row.status, total_nodes, len(nodes), limit, offset,
     )
     return LogsResponse(
         job_id=job_id,

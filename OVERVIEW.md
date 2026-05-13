@@ -6754,6 +6754,29 @@ The TDD eng-test golden passes because ``Test-driven_development`` *was* ingeste
 
 **Operational lesson.** The post-§17.63 rebuild plus the §17.149 / §17.154 seeds left ``eng`` looking healthy by entry count (255) while the other partitions stayed silently empty. ``test_golden_retrieval`` was the first signal — and it has been red for ~2 days. The retrieval-baseline section of OVERVIEW lists "664 entries" as the reference; that figure should be updated to "255 entries, eng-only" with a pointer here so future operators don't chase a phantom baseline.
 
+### 17.159 Logger-identity drift fix — `app/routers/status.py` → stdlib (2026-05-13)
+
+Multi-agent audit on 2026-05-13 (programming-quality sweep) surfaced a missed instance of the §16.2 Pattern A logger-identity invariant. ``app/routers/status.py`` imported ``structlog`` directly at module level and bound ``logger = structlog.get_logger()`` — same shape as the four modules §16.2 Pattern A closed (``ideation_workflow``, ``execution_handler``, ``prompt_optimizer``, ``prompt_inspector``, ``prompt_assembly``). The router was added after the original audit pass, so it predated the Pattern A sweep and slipped through.
+
+**Why this matters.** §15 invariant #1 fixes ``logging.getLogger("scaffold")`` as the single runtime logger. ``structlog`` is wired only as the formatter via ``app/logging_config.py``; any module that calls ``structlog.get_logger()`` itself bypasses the unified formatter chain, producing log records that don't carry the ``scaffold`` namespace, don't pick up the middleware-bound ``request_id`` contextvar cleanly, and don't honour the JSON / text format toggle set by ``LOG_JSON_FORMAT``. ``request_id`` middleware (``app/middleware/request_id.py``) is the only legitimate consumer of ``structlog.contextvars.bind_contextvars`` — it's boundary code, not module code, and it's documented inline.
+
+**Fix.** Three edits in one file:
+
+- ``app/routers/status.py:7`` — ``import structlog`` → ``import logging``.
+- ``app/routers/status.py:19`` — ``logger = structlog.get_logger()`` → ``logger = logging.getLogger("scaffold.routers.status")``. Matches the ``scaffold.<sub>`` namespacing already used by ``scaffold.execution_handler``, ``scaffold.prompt_optimizer``, etc.
+- ``app/routers/status.py:158, 240`` — converted the two ``logger.info("event", k=v, ...)`` structlog-kwarg calls to the local ``"event k=%s k=%s"`` positional-format convention used elsewhere in ``app/modules/`` (``cleanup.py:252``, ``assist_agent.py:124``, ``idea_refinement.py:156``). Same fields, same field names, %-formatted instead of kwarg-formatted.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator python -c "from app.routers import status; print(status.logger.name)"
+scaffold.routers.status
+```
+
+``grep -rn "import structlog\|from structlog" app/`` returns exactly two hits post-fix: ``app/logging_config.py`` (the formatter wiring — correct) and ``app/middleware/request_id.py`` (contextvars binding — correct boundary use). Module code is structlog-free, restoring the §16.2 Pattern A invariant across the codebase.
+
+**Audit-state delta.** §16.2 Pattern A's "✅ FIXED" verdict was accurate as of the original 2026-05-07 verification pass — but the audit's coverage was the modules listed there, not a recurring grep gate. Future-proofing: a one-line CI check (``! grep -rn "structlog.get_logger" app/`` excluding ``logging_config.py``) would catch the next regression at PR time. Logged but not implemented in this commit — out of scope for a single-file invariant fix.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
