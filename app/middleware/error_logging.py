@@ -9,6 +9,7 @@ Step 8 of 23-step build plan.
 from __future__ import annotations
 
 import logging
+import re
 import traceback
 import httpx
 
@@ -22,6 +23,41 @@ from app.database import async_session
 logger = logging.getLogger("scaffold.errors")
 
 
+# §17.162 — secret-shape redaction for wire 500 + log emission.
+# FastAPI's built-in handlers catch ValidationError and HTTPException
+# before this middleware sees them, so the residual exception surface
+# is programming bugs + httpx/asyncpg transport errors. Those rarely
+# contain credential VALUES — but defense-in-depth says we should not
+# blindly echo str(exc) to either the wire or the log. The DB record
+# stays raw because /observability/errors is auth-gated.
+_REDACT_SK = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")
+_REDACT_BEARER = re.compile(r"\b(?:Bearer|Basic)\s+[A-Za-z0-9._\-=]+", re.IGNORECASE)
+_REDACT_URL_CREDS = re.compile(r"://[^:@/\s]+:[^@/\s]+@")
+# Match secret-shaped key=value pairs in JSON / dict / query-string form.
+# group(1) is the key + separator (preserved); group(2) is the value (redacted).
+_REDACT_KV = re.compile(
+    r"(?i)(['\"]?(?:api[_-]?key|password|secret|token|auth(?:orization)?)['\"]?\s*[:=]\s*)"
+    r"['\"]?([^'\",\s}\]]+)",
+)
+
+
+def _redact_secrets(text_in: str) -> str:
+    """Scrub common credential-shaped patterns from a string.
+
+    Applied to wire 500 responses and to log lines. The DB record keeps
+    the raw exception text — error_logs is operator-gated via
+    /observability/errors, so the raw signal stays available for
+    debugging while the broader-surface wire echo gets redacted.
+    """
+    if not text_in:
+        return text_in
+    out = _REDACT_SK.sub("[REDACTED]", text_in)
+    out = _REDACT_BEARER.sub("[REDACTED]", out)
+    out = _REDACT_URL_CREDS.sub("://[REDACTED]@", out)
+    out = _REDACT_KV.sub(lambda m: m.group(1) + "[REDACTED]", out)
+    return out
+
+
 class ErrorLoggingMiddleware(BaseHTTPMiddleware):
     """Intercept unhandled exceptions → write to error_logs → return 500."""
 
@@ -32,16 +68,20 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         except Exception as exc:
             tb = traceback.format_exc()
-            error_msg = str(exc)[:1000]
+            error_msg_raw = str(exc)[:1000]
+            error_msg_safe = _redact_secrets(error_msg_raw)
             logger.error(
                 "http_request_failed: exception=%s method=%s path=%s error=%s",
-                type(exc).__name__, request.method, request.url.path, error_msg,
+                type(exc).__name__, request.method, request.url.path, error_msg_safe,
             )
 
             # Classify error type
             error_type = _classify_error(exc)
 
-            # Persist to error_logs (fire-and-forget, don't let logging fail the response)
+            # Persist to error_logs (fire-and-forget, don't let logging fail
+            # the response). DB record keeps the raw message + raw traceback —
+            # /observability/errors is auth-gated, so operator debugging
+            # retains full fidelity while wire + journald see redacted form.
             try:
                 async with async_session() as session:
                     await session.execute(
@@ -53,7 +93,7 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
                         """),
                         {
                             "error_type": error_type,
-                            "error_message": error_msg,
+                            "error_message": error_msg_raw,
                             "stack_trace": tb[:4000],
                         },
                     )
@@ -65,7 +105,7 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
                 status_code=500,
                 content={
                     "error": type(exc).__name__,
-                    "message": error_msg,
+                    "message": error_msg_safe,
                     "path": request.url.path,
                 },
             )

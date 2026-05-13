@@ -6950,6 +6950,73 @@ Synthetic event flowed end-to-end: watcher parsed it, filtered correctly, shelle
 - Dedup window is currently the global ``alert_cooldown_seconds``. A per-kind override (e.g., ``alert_cooldown_oom_seconds`` shorter at 10 min) would surface a noisy thrashing container faster. Defer until the global window proves wrong for OOM specifically.
 - Host-OS OOM coverage (Ollama process killed by host kernel, not container kernel) — would need ``dmesg`` access. Documented above, deferred.
 
+### 17.162 Wire-500 + log-line secret redaction in ErrorLoggingMiddleware (2026-05-13)
+
+Closes the third item from the 2026-05-13 audit's "highest-leverage next moves" list (after §17.159 structlog drift and §17.160 mem_limit caps). Defense-in-depth, not closing a known live leak.
+
+**The audit verdict.** ``ErrorLoggingMiddleware`` is the innermost middleware (runtime order: ``RequestId → Performance → BodySizeLimit → ErrorLogging → app``); it catches unhandled exceptions from the app and emits a structured 500 response, a journald log line, and an ``error_logs`` DB row. Pre-§17.162 the wire response echoed ``str(exc)[:1000]`` verbatim and the log line emitted the same raw text. The verdict on the residual risk:
+
+- **FastAPI's built-in handlers catch ``ValidationError`` and ``HTTPException`` BEFORE this middleware sees them** — confirmed by reading the FastAPI exception ordering. So Pydantic input echoes from validation errors never reach the wire 500 path. Other validation errors get 422 responses through FastAPI's own structured handler.
+- **No body field in ``app/schemas.py`` carries a credential** — ``grep`` for ``api_key|password|secret|token`` returns only token-count telemetry fields (``tokens_prompt``, ``tokens_completion``). A Pydantic ValidationError echoing a value-field can't surface a secret because no value field IS a secret.
+- **Residual surface**: programming bugs (TypeError, AttributeError), httpx transport errors, asyncpg errors. None of these typically contain credentials — httpx uses Authorization headers (not URL embedding), asyncpg parameterizes via ``$1``/``$2``. But an app-code-constructed exception that happens to include user input (e.g. ``ValueError(f"unknown model {user_input}")``) could in principle echo it.
+- **Information disclosure** (not strictly secret leakage) is a real concern even without secrets: raw exception text can leak DB schema details, internal file paths, internal URLs. The wire 500 had no reason to be the channel for that.
+
+**Defense-in-depth fix.** A regex-based redaction helper applied to **wire response** and **log line**; the **DB record stays raw** because ``/observability/errors`` is auth-gated and operators need full-fidelity text for debugging.
+
+Patterns covered:
+
+| Pattern | Matches | Substitution |
+|---|---|---|
+| OpenAI-style keys | ``\bsk-[A-Za-z0-9_-]{16,}\b`` | ``[REDACTED]`` |
+| Bearer / Basic auth | ``\b(?:Bearer\|Basic)\s+[A-Za-z0-9._\-=]+`` (case-insensitive) | ``[REDACTED]`` |
+| URL-embedded creds | ``://[^:@/\s]+:[^@/\s]+@`` | ``://[REDACTED]@`` |
+| JSON/form key=value with secret-shaped key | ``(?i)['\"]?(api[_-]?key\|password\|secret\|token\|auth(?:orization)?)['\"]?\s*[:=]\s*['\"]?<value>`` | ``<key>=[REDACTED]`` (key preserved) |
+
+**False-positive guards** — the regex is deliberately tight:
+
+- ``tokens_prompt`` / ``tokens_completion`` are NOT redacted. The KV pattern requires the literal key ``token`` to be immediately followed by ``:`` or ``=`` (after optional whitespace and quotes). For ``"tokens_prompt": 100`` the chars after ``token`` are ``s_prompt"`` — not ``:`` or ``=``, so no match. Pinned by ``test_does_not_redact_token_count_field``.
+- ``KeyError: 'api_key' missing`` is NOT redacted. The key name appears but isn't followed by ``:`` or ``=`` (the next chars are ``' missing``). Pinned by ``test_does_not_false_positive_on_key_error_message``.
+- Short ``sk-`` prefixes below the 16-char tail threshold pass through. ``sk-short`` stays as-is. Pinned by ``test_short_sk_below_threshold_not_redacted``.
+
+**Wire-vs-DB parity invariant.** The load-bearing test ``test_wire_500_redacts_secret_but_db_keeps_raw`` mounts the middleware on a stub endpoint that raises ``ValueError(f"upstream rejected key sk-A…A")`` and asserts:
+
+```python
+wire_msg = r.json()["message"]
+assert leaked not in wire_msg               # wire is sanitized
+assert "[REDACTED]" in wire_msg             # ... visibly
+
+bind = mock_session.execute.await_args.args[1]
+assert leaked in bind["error_message"]      # DB record is RAW
+```
+
+If a future refactor accidentally pipes the redacted text into the DB INSERT, this test fails loudly.
+
+**Files.**
+
+- ``app/middleware/error_logging.py`` — added 4 module-level compiled regexes + ``_redact_secrets`` helper. ``dispatch`` now derives both ``error_msg_raw`` (for the DB INSERT) and ``error_msg_safe`` (for the log line + wire response); the variables make the wire-vs-DB distinction explicit at the call site.
+- ``tests/test_error_logging_middleware.py`` — added 14 ``TestRedactSecrets`` unit tests + 1 wire-vs-DB parity test. The existing 12 tests still pass without changes (``"kaboom"`` is not a secret pattern, so the existing message-echo assertions are unaffected).
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_error_logging_middleware.py -v
+27 passed in 3.30s
+```
+
+12 pre-existing + 15 new. No regression in the existing 12 (which assert ``"kaboom"`` is echoed; the redactor doesn't touch arbitrary words).
+
+**What this does NOT do** (deliberate):
+
+- **Does not redact ``stack_trace``.** Tracebacks go only to the DB record (operator-gated). The log line emits ``error=<msg>`` but not the traceback. Adding traceback redaction would be cheap but the surface is much larger (frame locals can include any variable name) and the operator-gated DB scope already bounds the risk.
+- **Does not unify with the ``/config`` endpoint's redaction logic** (``app/main.py:660-687``). That helper redacts by KEY (filters which fields to expose); this one redacts by VALUE pattern (scrubs known-shape strings). They solve different problems. A future audit could factor a shared module if more redaction sites emerge.
+- **Does not address logging in OTHER middlewares**. ``PerformanceMiddleware`` was audited — only logs ``method``, ``path`` (literal, no query string), ``status``, ``duration``. No body, no headers, no query. Clean. ``RequestIdMiddleware`` only reads/writes the request-id header. ``BodySizeLimitMiddleware`` reads only ``Content-Length``. ``SecurityHeadersMiddleware`` only mutates response headers. All clean — no redaction needed elsewhere in the middleware stack.
+
+**Followups** (logged, not implemented):
+
+- If real-traffic ``error_logs`` rows start showing redacted-shape false-positives or persistent leaks past the regex, tighten or extend the pattern set. The ``test_handles_multiple_secrets_in_one_message`` multi-secret case is the contract for what's covered today.
+- If the operator wants the wire response to carry a stable error-code instead of a redacted message (so consumers can switch on ``error_type`` without parsing the message), restructure the JSON to ``{"error", "error_type", "request_id"}`` and drop ``message`` entirely from the wire. Out of scope for §17.162.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

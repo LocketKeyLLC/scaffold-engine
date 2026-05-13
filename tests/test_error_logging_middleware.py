@@ -18,7 +18,9 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from app.middleware.error_logging import ErrorLoggingMiddleware, _classify_error
+from app.middleware.error_logging import (
+    ErrorLoggingMiddleware, _classify_error, _redact_secrets,
+)
 
 
 # ---------- _classify_error pure-function tests ----------
@@ -154,3 +156,109 @@ def test_persistence_failure_does_not_break_response(app_with_endpoints):
 
     assert r.status_code == 500
     assert r.json()["error"] == "ValueError"
+
+
+# ---------- _redact_secrets unit tests (§17.162) ----------
+
+class TestRedactSecrets:
+    def test_empty_input_passes_through(self):
+        assert _redact_secrets("") == ""
+        assert _redact_secrets(None) is None  # noqa: type-check intentional
+
+    def test_no_secrets_pass_through_unchanged(self):
+        msg = "ValueError: expected int, got str"
+        assert _redact_secrets(msg) == msg
+
+    def test_redacts_openai_style_sk_key(self):
+        out = _redact_secrets("error: sk-abc123def456ghi789jklmnop failed")
+        assert "sk-abc123def456ghi789jklmnop" not in out
+        assert "[REDACTED]" in out
+
+    def test_short_sk_below_threshold_not_redacted(self):
+        # 16-char tail minimum — shorter strings like "sk-short" are
+        # unlikely to be real keys, don't false-positive on test data.
+        out = _redact_secrets("sk-short")
+        assert out == "sk-short"
+
+    def test_redacts_bearer_token(self):
+        out = _redact_secrets("Authorization: Bearer eyJhbGc.foo.bar")
+        assert "eyJhbGc.foo.bar" not in out
+        assert "[REDACTED]" in out
+
+    def test_redacts_basic_auth_token(self):
+        out = _redact_secrets("Authorization: Basic dXNlcjpwYXNz")
+        assert "dXNlcjpwYXNz" not in out
+
+    def test_bearer_is_case_insensitive(self):
+        for prefix in ("Bearer", "bearer", "BEARER"):
+            out = _redact_secrets(f"{prefix} abc123def456")
+            assert "abc123def456" not in out
+
+    def test_redacts_url_embedded_credentials(self):
+        out = _redact_secrets("connecting to https://user:hunter2@db.example.com/foo failed")
+        assert "user:hunter2" not in out
+        assert "://[REDACTED]@db.example.com" in out
+
+    def test_redacts_json_api_key_field(self):
+        out = _redact_secrets('payload was {"api_key": "sk-secret-123-pasted-in-body"}')
+        assert "sk-secret-123-pasted-in-body" not in out
+        assert "api_key" in out  # key name preserved for debuggability
+        assert "[REDACTED]" in out
+
+    def test_redacts_form_encoded_api_key(self):
+        out = _redact_secrets("api_key=hunter2 in body")
+        assert "hunter2" not in out
+        assert "api_key=" in out
+
+    def test_redacts_password_token_secret_keys(self):
+        for key in ("password", "secret", "token", "authorization"):
+            out = _redact_secrets(f'"{key}": "leaked-value-here"')
+            assert "leaked-value-here" not in out, f"failed for key={key}"
+
+    def test_does_not_redact_token_count_field(self):
+        # tokens_prompt / tokens_completion are token COUNTS (telemetry),
+        # not credentials. The regex requires the key to be followed by
+        # `:` or `=` with the literal name `token`, so `tokens_prompt: 100`
+        # has the `s_prompt` between `token` and `:` — no match.
+        msg = '{"tokens_prompt": 100, "tokens_completion": 50}'
+        assert _redact_secrets(msg) == msg
+
+    def test_does_not_false_positive_on_key_error_message(self):
+        # KeyError messages mention key names but don't have key=value form.
+        msg = "KeyError: 'api_key' missing from request"
+        assert _redact_secrets(msg) == msg
+
+    def test_handles_multiple_secrets_in_one_message(self):
+        msg = ("upstream error: Bearer eyJabc.def.ghi at "
+               "https://user:pw@svc:8080/x with sk-AAAAAAAAAAAAAAAAAAAA")
+        out = _redact_secrets(msg)
+        assert "eyJabc.def.ghi" not in out
+        assert "user:pw" not in out
+        assert "sk-AAAAAAAAAAAAAAAAAAAA" not in out
+
+
+# ---------- wire-vs-DB redaction parity (§17.162) ----------
+
+def test_wire_500_redacts_secret_but_db_keeps_raw(mock_session):
+    """The wire echo gets sanitized while the DB record keeps the raw text
+    for operator debugging via /observability/errors."""
+    leaked = "sk-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    app = FastAPI()
+    app.add_middleware(ErrorLoggingMiddleware)
+
+    @app.get("/leak")
+    async def leak():
+        raise ValueError(f"upstream rejected key {leaked}")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    r = client.get("/leak")
+
+    assert r.status_code == 500
+    wire_msg = r.json()["message"]
+    assert leaked not in wire_msg, "wire response must not echo the secret"
+    assert "[REDACTED]" in wire_msg
+
+    # DB binding for the INSERT — error_message should be RAW
+    mock_session.execute.assert_awaited_once()
+    bind = mock_session.execute.await_args.args[1]
+    assert leaked in bind["error_message"], "DB record should retain raw text for operator debug"
