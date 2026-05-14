@@ -7333,6 +7333,94 @@ $ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-d
 
 **Why ship §17.167 standalone instead of waiting for the full cluster.** Item 2 is a small additive change with no risk to existing behavior (default ``session_id=None`` preserves backwards compat; the new touch is fail-soft). Items 1 and 3 are larger investigations. Shipping the small operational guard now means the reaper stops false-positiving on slow-but-alive sessions IMMEDIATELY — a real operator improvement — while the bigger investigations proceed at their own pace. The §17.166 cluster-rationale ("fix all three together so one doesn't mask another") still applies, but the masking concern there was about fixing item 3 BEFORE item 1 (better disconnect handling could hide a still-broken topic stall). Shipping item 2 first does not mask either; it only changes WHEN the reaper kills a session, not WHETHER.
 
+### 17.168 Lifecycle-finalize survives disconnect via `asyncio.shield` (2026-05-13)
+
+Closes item 3 of the §17.166 followup cluster. Item 1 (topic-mode autonomous-research stalls) still open — call it out at the end.
+
+**The bug.** ``_run_with_session_lifecycle`` (``app/modules/research_state.py:409``) had a ``finally`` block that called ``await _ra()._finalize_session(session_id, "cancelled", ...)`` to transition disconnected sessions to ``cancelled`` status. Live evidence from §17.165 + §17.166 showed it didn't work: rows stayed ``status='running'``, ``updated_at = created_at``, no error logs. The only way to release the single-running-session guard was manual psql.
+
+**Live diagnosis.** Triggered a deliberate disconnect: ``curl --max-time 4`` against /research. Immediately checked orchestrator logs:
+
+```
+research_cancelled: session=76eb136f-... elapsed_ms=3996    # ← finally ran
+(no finalize_failed_during_cancel)                            # ← except branch didn't fire
+```
+
+And the session row:
+
+```
+status='running'  error_message=NULL  last_activity_at = created_at
+```
+
+So the finally block DID reach ``logger.warning("research_cancelled: ...")``, the ``await _finalize_session(...)`` was called, but neither succeeded nor produced a caught exception. The DB UPDATE simply did not happen.
+
+**Root cause.** ``await _finalize_session(...)`` was raising ``asyncio.CancelledError``. Python 3.8+ made ``CancelledError`` a subclass of ``BaseException``, NOT ``Exception``. The wrapping ``except Exception`` therefore did not catch it. The CancelledError propagated silently out of the ``finally`` block, out of the generator, into Starlette's disconnect-handler — which catches it for its own cleanup purposes. The session row was left untouched because the DB UPDATE was interrupted before it could commit.
+
+The cancellation chain: Starlette's StreamingResponse detects the client disconnect, cancels the response task; ``_sse_with_disconnect_watch`` (``app/main.py:778``) calls ``aclose()`` on the inner generator, which is ``_run_with_session_lifecycle``; ``aclose()`` injects ``GeneratorExit`` (also a BaseException — also not caught by ``except Exception``) at the current ``yield`` point; the generator falls through to ``finally``; the ``finally`` runs ``logger.warning`` synchronously (no await, no cancellation), then hits the ``await _finalize_session(...)`` — and THAT await raises CancelledError because the surrounding task is still in cancelling-state.
+
+**The fix — ``asyncio.shield``.** Wrap the finalize-call coroutine in ``asyncio.shield``. The shielded coroutine runs as its own independent task on the event loop; the OUTER await still raises CancelledError on the caller side when the surrounding task is cancelled, but the inner coroutine continues running to completion. The DB UPDATE commits even though we never see its return value.
+
+```python
+try:
+    await asyncio.shield(
+        _ra()._finalize_session(
+            session_id, "cancelled", elapsed_ms,
+            error_message="client_disconnect",
+        )
+    )
+except asyncio.CancelledError:
+    logger.warning(
+        "finalize_cancel_propagated_but_shielded: session=%s — UPDATE continues on loop",
+        session_id,
+    )
+    raise   # let cancellation continue propagating
+except Exception:
+    logger.exception("finalize_failed_during_cancel: session=%s", session_id)
+```
+
+Explicit ``except asyncio.CancelledError`` so the operator-visible log shows the shield's expected behavior; the ``raise`` after that log preserves correct cancellation semantics (CancelledError should NOT be silently swallowed by intermediate frames — it must reach the task root). The DB UPDATE has already been kicked off on the event loop and continues on its own.
+
+**Live verification.** Same deliberate-disconnect test, this time post-fix:
+
+```
+research_cancelled: session=84c72ddc-... elapsed_ms=3996
+finalize_cancel_propagated_but_shielded: session=84c72ddc-... — UPDATE continues on loop
+
+$ psql -c "SELECT status, error_message FROM research_sessions WHERE id='84c72ddc-...';"
+ status    | error_message
+-----------+--------------------
+ cancelled | client_disconnect
+```
+
+Both expected log lines fired; session row correctly transitioned to ``cancelled`` with the diagnostic ``error_message``. Repeated test runs (same shape) consistently produce the same result — the shield is making it deterministic.
+
+**Files.**
+
+- ``app/modules/research_state.py`` — ``_run_with_session_lifecycle.finally`` block: wrap ``_finalize_session`` in ``asyncio.shield``, add explicit ``except asyncio.CancelledError`` with a distinct log key + ``raise``. Inline §17.168 comment block documents the failure-mode reasoning so a future refactor doesn't accidentally remove the shield.
+- ``tests/test_research_state_lifecycle.py`` (new, 4 cases). ``test_finalizes_completed_session_via_inner_path`` pins the happy-path semantics (wrapper does NOT finalize when inner reaches return — inner's responsibility). ``test_finalizes_failed_on_inner_exception`` pins the ``except Exception`` branch — typed error message + ``failed`` terminal status. ``test_finalize_completes_despite_outer_cancellation`` is the load-bearing §17.168 contract: aclose() injects GeneratorExit; the shielded finalize must complete; the inner ``_finalize_session`` IS called with ``("cancelled", "client_disconnect")``. Pre-§17.168 this assert failed because the await raised CancelledError before reaching the inner stub. ``test_logs_cancel_propagated_warning`` smoke-tests the distinct log line so the operator can grep for it during stuck-session recovery.
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_research_state_lifecycle.py -v
+4 passed in 0.82s
+```
+
+4/4 new cases. Adjacent suites unchanged.
+
+**Operational impact.** Combined with §17.167's sub-step ``last_activity_at`` touch:
+
+- **Slow-but-progressing sessions** stay visible to the reaper (§17.167 — last_activity_at advances per sub-step completion).
+- **Wedged sub-steps** still age out via the reaper after 30 min (§17.167 — touch only on real-progress signals).
+- **Disconnected clients** transition to ``cancelled`` within seconds (§17.168 — shield protects the finalize UPDATE).
+
+The three failure modes the §17.166 cluster identified are now individually addressed. Topic-mode autonomous-research stalls (cluster item 1) remain — call out below.
+
+**Still open: cluster item 1 — topic-mode stalls.** The iteration loop in ``_execute_iteration_loop`` (``app/modules/research_agent.py:760``-ish) drives ``_decompose_topic``, extract batches, ``_analyze_gaps``, and the inline summary block. Each of these LLM calls has the same shape as the §17.166 summary path: an ``asyncio.create_task(model_router.*)`` await wrapped in ``_await_with_heartbeat``, no per-call timeout, prompts that can blow context on content-heavy iterations. Fix: apply the §17.166 char-budget + ``asyncio.wait_for`` pattern to those LLM calls. Multiple touchpoints; not in scope for §17.168.
+
+Post-§17.167+§17.168, the operational impact of leaving item 1 open is bounded: a topic-mode stall now self-recovers via the reaper after 30 min instead of permanently wedging the single-running-session guard. The topic tier from §17.165 is still effectively unusable on CPU until item 1 is fixed, but the SYSTEM stays operational. Cluster effectively closed for operator-experience purposes; fix item 1 when topic-mode workloads return.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

@@ -464,11 +464,34 @@ async def _run_with_session_lifecycle(
                 "research_cancelled: session=%s elapsed_ms=%d",
                 session_id, elapsed_ms,
             )
+            # §17.168 — wrap the finalize UPDATE in asyncio.shield so it
+            # completes even when our surrounding generator is being
+            # cancelled. Without shield, the cancellation propagated by
+            # the SSE disconnect-watch wrapper bubbles into this await
+            # and raises CancelledError before _finalize_session commits;
+            # since CancelledError is a BaseException (not Exception)
+            # the prior ``except Exception`` did not catch it, and the
+            # session row stayed ``status='running'`` forever. Shield
+            # lets the inner coroutine continue running on the event
+            # loop independently of the caller's cancellation.
             try:
-                await _ra()._finalize_session(
-                    session_id, "cancelled", elapsed_ms,
-                    error_message="client_disconnect",
+                await asyncio.shield(
+                    _ra()._finalize_session(
+                        session_id, "cancelled", elapsed_ms,
+                        error_message="client_disconnect",
+                    )
                 )
+            except asyncio.CancelledError:
+                # Caller-side cancellation hit while waiting for the
+                # shielded finalize. The DB UPDATE is still in flight
+                # on the event loop and will commit. Log + re-raise so
+                # the cancellation continues to propagate correctly.
+                logger.warning(
+                    "finalize_cancel_propagated_but_shielded: session=%s "
+                    "— UPDATE continues on loop",
+                    session_id,
+                )
+                raise
             except Exception:
                 logger.exception(
                     "finalize_failed_during_cancel: session=%s", session_id,
