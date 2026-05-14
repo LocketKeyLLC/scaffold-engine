@@ -80,10 +80,45 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
+async def _touch_last_activity(session_id: str) -> None:
+    """§17.167 — tickle ``research_sessions.last_activity_at`` after a
+    forward-progress event (an LLM task in the heartbeat loop returned).
+
+    Called ONLY after a task actually completes — never on the
+    fixed-interval heartbeat tick. This preserves the §17.85 reaper's
+    "no real progress = dead" semantics: a session wedged inside a
+    single ``model_router.generate`` / ``tool_call`` await still ages
+    out after ``stale_threshold_minutes`` because the wedged call
+    never returns and the touch never fires. A slow-but-progressing
+    session (e.g. topic-mode iteration with multiple LLM sub-steps,
+    each taking 5-10 min on the CPU embedder, total >30 min) gets
+    its activity stamp bumped after each sub-step and stays visible
+    to the reaper as legitimately alive.
+
+    Fail-soft — a transient DB hiccup must never break the SSE flow.
+    """
+    try:
+        async with _ra().async_session() as db:
+            await db.execute(
+                text(
+                    "UPDATE research_sessions SET last_activity_at = NOW() "
+                    "WHERE id = :sid"
+                ),
+                {"sid": session_id},
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.warning(
+            "touch_last_activity_failed: session=%s error=%s",
+            session_id, exc,
+        )
+
+
 async def _await_with_heartbeat(
     task: asyncio.Task,
     heartbeat_payload: dict,
     interval: int | None = None,
+    session_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Yield heartbeat SSE while ``task`` runs. Caller reads ``task.result()`` after.
 
@@ -91,13 +126,21 @@ async def _await_with_heartbeat(
     sleep, so an instantly-completing task (e.g. AsyncMock in tests) adds
     zero latency. Previously slept a full interval per call regardless of
     task state, which compounded across iterations.
+
+    §17.167 — when ``session_id`` is provided, touches
+    ``last_activity_at`` on task completion so the §17.85 reaper sees
+    sub-step forward progress within a long-running iteration. Optional
+    parameter so the helper stays callable from non-session contexts
+    (tests, future non-research uses).
     """
     ivl = interval or HEARTBEAT_INTERVAL_SECONDS
     while not task.done():
         done, _pending = await asyncio.wait({task}, timeout=ivl)
         if task.done():
-            return
+            break
         yield _sse("heartbeat", heartbeat_payload)
+    if session_id is not None:
+        await _touch_last_activity(session_id)
 
 
 # =============================================================================

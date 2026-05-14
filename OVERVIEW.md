@@ -7294,6 +7294,45 @@ event: research_complete      # ← reaches terminal state cleanly
 
 **Why bundle these in one followup entry instead of three separate ones.** All three remain failure modes for long-running research sessions on CPU. Until one operator investigates the full session-stall surface end-to-end, fixing them piecemeal risks shipping a fix that masks another (e.g. better lifecycle-finalize would hide a still-broken topic-mode stall). §17.167 should treat them as a cluster.
 
+### 17.167 `last_activity_at` sub-step heartbeat — reaper sees forward progress (2026-05-13)
+
+Closes item 2 of the §17.166 followup cluster. Items 1 (topic-mode autonomous-research stalls) and 3 (lifecycle-finalize-on-disconnect not firing) stay open as separate followups — see end of this entry for the reasoning.
+
+**The gap.** ``research_sessions.last_activity_at`` was set at INSERT (default ``NOW()``), in ``_update_session_iteration`` (end of each iteration), in ``_pause_session``, and in ``_atomic_claim_for_resume``. It was NOT touched during a single iteration's sub-steps. The §17.85 stuck-session reaper uses ``last_activity_at < NOW() - stale_threshold_minutes`` (default 30 min) to identify dead sessions. A topic-mode iteration that runs decompose (1-3 min) → search (instant) → extract batches (~7 min × 3 = 21 min) → gap analysis (3-5 min) → summary (1-2 min) totals ~30-35 min for ONE iteration. The reaper sees ``last_activity_at = created_at`` for the whole window and kills it as stale — even though the session is making real forward progress.
+
+**The fix.** Touch ``last_activity_at`` after each ``_await_with_heartbeat``-wrapped task completes. ``_await_with_heartbeat`` now takes an optional ``session_id`` kwarg; when provided and the wrapped task reaches ``task.done()`` normally, the helper calls the new ``_touch_last_activity(session_id)`` to issue ``UPDATE research_sessions SET last_activity_at = NOW() WHERE id = :sid``.
+
+Why this preserves the reaper's semantics: ``_touch_last_activity`` is called **after** the task completes, not on each heartbeat tick. A session wedged inside a single LLM call (e.g. the §17.166 URL-mode stall before the wiki_article fix) still ages out — the wedged task never returns, the touch never fires, ``last_activity_at`` stays at its prior value, the reaper's threshold elapses, cleanup kicks in. A slow-but-progressing session (multi-step iteration on CPU) keeps tickling ``last_activity_at`` after each sub-step and stays visible to the reaper as legitimately alive.
+
+The crucial distinction: heartbeat TICK (timer-driven) = "the SSE stream is alive" → does NOT touch the DB. Task COMPLETION (real-progress signal) = "an LLM call returned, an HTTP fetch finished, a chunk ingested" → DOES touch the DB. Reaper continues to detect wedged sub-steps; legitimate slow paths no longer trip on the 30-min threshold.
+
+**Fail-soft on DB hiccup.** A transient DB error during the touch must NOT break the SSE flow (the operator-facing stream is more important than perfect activity tracking). ``_touch_last_activity`` wraps the UPDATE in try/except and logs ``touch_last_activity_failed: session=... error=...`` on failure. The reaper will catch any session that legitimately stalls; a missed touch just means slightly-stale activity data for the duration of the hiccup.
+
+**Files.**
+
+- ``app/modules/research_state.py`` — new ``_touch_last_activity(session_id)`` helper (fail-soft UPDATE). ``_await_with_heartbeat`` takes optional ``session_id`` kwarg; when the wrapped task completes (loop falls through naturally), calls the new helper. Default ``session_id=None`` preserves backwards compat for tests + future non-session uses.
+- ``app/modules/research_agent.py`` — all 12 ``_await_with_heartbeat`` call sites updated to pass ``session_id=session_id``. Each call site already had ``session_id`` in scope (it's threaded through every research entry point), so the change is purely additive — no signature changes downstream.
+- ``tests/test_research_agent_helpers.py`` — 4 new cases. ``test_touches_last_activity_when_session_id_provided`` pins the new behavior; ``test_does_not_touch_when_session_id_omitted`` pins backwards compat (helper still usable without a session id). ``TestTouchLastActivity::test_issues_update_to_research_sessions`` verifies the SQL shape (``last_activity_at = NOW()`` + correct sid param); ``test_fails_soft_on_db_error`` pins the fail-soft contract.
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_research_agent_helpers.py \
+    tests/test_research_agent_summary.py tests/test_research_url_mode.py \
+    tests/test_research_pdf_mode.py tests/test_research_agent_ingestion.py
+67 passed in 7.98s
+```
+
+4 new cases + 63 pre-existing across the research_agent test surface, all green. Call-site count check: ``grep -c '_await_with_heartbeat(' app/modules/research_agent.py`` returns 12; ``grep -A5 '_await_with_heartbeat(' | grep -c 'session_id=session_id'`` also returns 12 — every call site updated consistently.
+
+**Items NOT addressed in §17.167** (kept open):
+
+1. **Topic-mode autonomous-research stalls** (§17.166 deferred item 1). The iteration loop's LLM sub-steps (``_decompose_topic``, extract batches, ``_analyze_gaps``) have the same context-overflow + no-per-call-timeout shape as the §17.166 summary path. The §17.166 wiki_article fix doesn't reach this code path. Applying the same defensive pattern (per-call ``asyncio.wait_for`` timeouts + char-budgeted prompts) is the next step. Pre-§17.167 these stalls were doubly-bad because the reaper killed even legitimately-progressing topic runs; post-§17.167 the reaper at least lets slow-but-alive iterations through. So while the topic-mode stall bug is still present, its blast radius is bounded — wedged sessions age out cleanly via the reaper instead of compounding into "everything blocked by single-running-session guard." Treating §17.167 as a partial unblock for the cluster is intentional.
+2. **Lifecycle-finalize-on-disconnect not firing** (§17.166 deferred item 3). Live evidence in §17.165 + §17.166 shows ``_run_with_session_lifecycle.finally`` doesn't reach ``_finalize_session`` when curl times out on ``--max-time``: rows stay ``status='running'`` with ``updated_at = created_at``. Investigation needs (a) read Starlette's streaming-response cancellation path to confirm the CancelledError propagation through async generators, (b) instrument the lifecycle wrapper with a `print`/log at each `finally` entry to confirm whether the block executes at all, (c) test with a deliberate client disconnect (curl with --max-time 5 against a slow endpoint) to repro. Likely a Starlette-quirk or async-generator-aclose semantic mismatch; nontrivial debug.
+
+**Why ship §17.167 standalone instead of waiting for the full cluster.** Item 2 is a small additive change with no risk to existing behavior (default ``session_id=None`` preserves backwards compat; the new touch is fail-soft). Items 1 and 3 are larger investigations. Shipping the small operational guard now means the reaper stops false-positiving on slow-but-alive sessions IMMEDIATELY — a real operator improvement — while the bigger investigations proceed at their own pace. The §17.166 cluster-rationale ("fix all three together so one doesn't mask another") still applies, but the masking concern there was about fixing item 3 BEFORE item 1 (better disconnect handling could hide a still-broken topic stall). Shipping item 2 first does not mask either; it only changes WHEN the reaper kills a session, not WHETHER.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

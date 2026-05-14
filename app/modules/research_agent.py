@@ -849,7 +849,9 @@ async def _execute_iteration_loop(
             _extract_entries(results, topic, overrides=overrides)
         )
         async for hb in _await_with_heartbeat(
-            extract_task, {"status": "extracting", "iteration": state.iteration}
+            extract_task,
+            {"status": "extracting", "iteration": state.iteration},
+            session_id=session_id,
         ):
             yield hb
         entries = extract_task.result()
@@ -905,7 +907,8 @@ async def _execute_iteration_loop(
 
         gap_task = asyncio.create_task(_analyze_gaps(state, overrides=overrides))
         async for hb in _await_with_heartbeat(
-            gap_task, {"status": "analyzing_gaps"}
+            gap_task, {"status": "analyzing_gaps"},
+            session_id=session_id,
         ):
             yield hb
         gaps = gap_task.result()
@@ -1002,6 +1005,7 @@ async def _ingest_and_finalize_direct(
         async for hb in _await_with_heartbeat(
             ingest_task,
             {"status": "ingesting", "iteration": state.iteration, "entries": len(entries)},
+            session_id=session_id,
         ):
             yield hb
         stats = ingest_task.result()
@@ -1035,7 +1039,8 @@ async def _ingest_and_finalize_direct(
             _generate_summary(state, overrides=summary_overrides)
         )
         async for hb in _await_with_heartbeat(
-            summary_task, {"status": "summarizing"}
+            summary_task, {"status": "summarizing"},
+            session_id=session_id,
         ):
             yield hb
         summary = summary_task.result()
@@ -1082,7 +1087,8 @@ async def _run_research_openapi_mode(
 
     task = asyncio.create_task(fetch_and_parse_spec(spec_url))
     async for hb in _await_with_heartbeat(
-        task, {"status": "fetching_openapi", "iteration": 1}
+        task, {"status": "fetching_openapi", "iteration": 1},
+        session_id=session_id,
     ):
         yield hb
     endpoints, meta = task.result()
@@ -1192,7 +1198,8 @@ async def _run_research_github_mode(
 
     task = asyncio.create_task(fetch_repo_content(owner, repo, ref_hint=ref_hint))
     async for hb in _await_with_heartbeat(
-        task, {"status": "fetching_github", "iteration": 1}
+        task, {"status": "fetching_github", "iteration": 1},
+        session_id=session_id,
     ):
         yield hb
     files = task.result()
@@ -1346,7 +1353,8 @@ async def _run_research_hf_mode(
 
     task = asyncio.create_task(fetch_hf(kind, id_))
     async for hb in _await_with_heartbeat(
-        task, {"status": "fetching_hf", "iteration": 1}
+        task, {"status": "fetching_hf", "iteration": 1},
+        session_id=session_id,
     ):
         yield hb
     items = task.result()
@@ -1503,7 +1511,8 @@ async def _run_research_forum_mode(
 
     task = asyncio.create_task(_do_fetch())
     async for hb in _await_with_heartbeat(
-        task, {"status": f"fetching_{prefix}", "iteration": 1}
+        task, {"status": f"fetching_{prefix}", "iteration": 1},
+        session_id=session_id,
     ):
         yield hb
     items = task.result()
@@ -1781,7 +1790,8 @@ async def _run_research_url_mode(
             max_tokens=1024,
         ))
         async for hb in _await_with_heartbeat(
-            task, {"status": "extracting", "iteration": 1}
+            task, {"status": "extracting", "iteration": 1},
+            session_id=session_id,
         ):
             yield hb
         resp = task.result()
@@ -1949,7 +1959,8 @@ async def _run_research_pdf_mode(
             max_tokens=1024,
         ))
         async for hb in _await_with_heartbeat(
-            task, {"status": "extracting", "iteration": 1}
+            task, {"status": "extracting", "iteration": 1},
+            session_id=session_id,
         ):
             yield hb
         resp = task.result()
@@ -2187,6 +2198,7 @@ async def run_research(
             )
             async for hb in _await_with_heartbeat(
                 summary_task, {"status": "summarizing"},
+                session_id=session_id,
             ):
                 yield hb
             summary = summary_task.result()
@@ -2324,6 +2336,7 @@ async def resume_research(
             )
             async for hb in _await_with_heartbeat(
                 summary_task, {"status": "summarizing"},
+                session_id=session_id,
             ):
                 yield hb
             summary = summary_task.result()

@@ -68,6 +68,95 @@ class TestAwaitWithHeartbeat:
 
         assert yields == []
 
+    # §17.167 — last_activity_at touch on task completion
+    @pytest.mark.asyncio
+    async def test_touches_last_activity_when_session_id_provided(self):
+        from unittest.mock import AsyncMock, patch
+        from app.modules.research_agent import _await_with_heartbeat
+
+        async def _fast():
+            return "ok"
+
+        task = asyncio.create_task(_fast())
+        await task
+
+        touched_with = []
+        async def _stub_touch(sid):
+            touched_with.append(sid)
+
+        with patch("app.modules.research_state._touch_last_activity",
+                   new=_stub_touch):
+            async for _ in _await_with_heartbeat(
+                task, {"status": "x"}, interval=0,
+                session_id="abc-123",
+            ):
+                pass
+
+        assert touched_with == ["abc-123"]
+
+    @pytest.mark.asyncio
+    async def test_does_not_touch_when_session_id_omitted(self):
+        """Backwards compat — calls without session_id (existing test paths,
+        future non-research uses) must not require the DB to be available."""
+        from unittest.mock import patch
+        from app.modules.research_agent import _await_with_heartbeat
+
+        async def _fast():
+            return "ok"
+
+        task = asyncio.create_task(_fast())
+        await task
+
+        touched_with = []
+        async def _stub_touch(sid):
+            touched_with.append(sid)
+
+        with patch("app.modules.research_state._touch_last_activity",
+                   new=_stub_touch):
+            async for _ in _await_with_heartbeat(
+                task, {"status": "x"}, interval=0,
+            ):
+                pass
+
+        assert touched_with == []
+
+
+class TestTouchLastActivity:
+    """§17.167 — _touch_last_activity helper contract."""
+
+    @pytest.mark.asyncio
+    async def test_issues_update_to_research_sessions(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.modules.research_state import _touch_last_activity
+
+        session = AsyncMock()
+        session.execute = AsyncMock()
+        session.commit = AsyncMock()
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=session)
+        cm.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.modules.research_state._ra") as mock_ra:
+            mock_ra.return_value.async_session.return_value = cm
+            await _touch_last_activity("the-session-id")
+
+        session.execute.assert_awaited_once()
+        sql, params = session.execute.await_args.args
+        assert "last_activity_at = NOW()" in str(sql)
+        assert params == {"sid": "the-session-id"}
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_fails_soft_on_db_error(self):
+        """A DB hiccup must not break the SSE flow — log + swallow."""
+        from unittest.mock import patch
+        from app.modules.research_state import _touch_last_activity
+
+        with patch("app.modules.research_state._ra",
+                   side_effect=RuntimeError("db gone")):
+            # Must NOT raise.
+            await _touch_last_activity("any-id")
+
 
 class TestExecuteIterationLoop:
     @pytest.mark.asyncio
