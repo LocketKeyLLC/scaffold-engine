@@ -3,10 +3,12 @@
 #
 # After the §17.63 SSD migration left the toon_v2 collection empty, this
 # script is the canonical path for getting representative content back
-# into the KB. Curated source list spans all four populated partitions
-# from the pre-migration corpus (eng, llm, rag, spec); the prompt
-# partition stays empty by design (per the OVERVIEW retrieval baseline,
-# and per the existing per-query skip marks in test_retrieval_golden.py).
+# into the KB. Curated source list spans the populated partitions from
+# the pre-migration corpus (eng, llm, rag) plus the prompt partition
+# seed Chain-of-thought_prompting (§17.165). The spec partition stays
+# empty here — it's populated by other paths (§17.143 specs table
+# entries) and the relevant test_retrieval_golden cases carry their
+# own per-query skip marks.
 #
 # Three ingest modes (in order of speed):
 #
@@ -106,6 +108,14 @@ FAST_SOURCES=(
     "url|https://en.wikipedia.org/wiki/Software_design_pattern|eng|5|Design patterns survey (golden query: eng-pattern)"
     "url|https://en.wikipedia.org/wiki/Vector_database|rag|5|Vector DB primer + hybrid retrieval"
     "url|https://en.wikipedia.org/wiki/Retrieval-augmented_generation|rag|5|RAG architecture overview"
+    # §17.165 — close the §17.158 corpus regression. Chain-of-thought
+    # seeds the prompt partition (the [chain of thought-prompt-prompt
+    # engineering] golden needs this). Quantization_(signal_processing)
+    # is the specific Wikipedia article the [quantization-llm-quantiz]
+    # golden expects — the existing topic-mode "quantization" row drives
+    # autonomous research, which doesn't reliably produce that exact page.
+    "url|https://en.wikipedia.org/wiki/Chain-of-thought_prompting|prompt|5|Chain-of-thought (golden query: prompt-prompt engineering)"
+    "url|https://en.wikipedia.org/wiki/Quantization_(signal_processing)|llm|5|Signal-processing quantization (golden query: llm-quantiz)"
 )
 
 # Tier 2: topic (autonomous research — 18-27 min shallow each)

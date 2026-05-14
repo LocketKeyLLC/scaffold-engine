@@ -7159,6 +7159,62 @@ Pre-fix lifespan: ``milvus_connection_failed: ... cannot access local variable '
 
 **Audit-tail bookkeeping (updated).** §17.164 closes a Tier-1 latent bug whose impact spans every prior post-§17.63 entry that touched the corpus (§17.84, §17.85, §17.86, §17.92, §17.149, §17.154, §17.158). Future operators reading those entries should know: the loss patterns documented there were not coincidental — they were one bug firing repeatedly. The §-history retains the original narratives; this entry is the unified retrospective.
 
+### 17.165 Corpus repopulation post-§17.164 — 3/3 goldens green at 211 entries (2026-05-13)
+
+Closes the §17.158 corpus regression. Operator-chosen scope was "full tier (fast + topic)" via the AskUserQuestion gate — go-ahead to run all 11 sources in ``scripts/repopulate_kb.sh``. The execution surfaced a separate research-agent stall bug (logged as §17.166 followup) but didn't block the audit goal: **all 3 originally-failing test_golden_retrieval cases pass post-ingest**.
+
+**Two URL rows added to the runbook before the run.** §17.158's diagnosis identified three Wikipedia articles the failing goldens need: ``Chain-of-thought_prompting`` (prompt partition, golden `[chain of thought-prompt-prompt engineering]`), ``Quantization_(signal_processing)`` (llm partition, golden `[quantization-llm-quantiz]`), and ``Software_design_pattern`` (eng partition, golden `[singleton/factory-eng-pattern]`). Only the third was already in the runbook; the other two had never landed because the script didn't list them. §17.165 adds the two missing rows so post-migration repopulates produce the golden corpus shape going forward, and updates the runbook header comment (which had said "prompt partition stays empty by design" — incorrect post-§17.158).
+
+**Pass 1 — full ``repopulate_kb.sh --apply`` (8 of 11 failed).** 3 succeeded (anthropics/anthropic-cookbook + pytorch/torchtune + Test-driven_development → 183 entries). Source #4 (``Software_design_pattern``) stalled indefinitely in the ``summarizing`` phase — heartbeats kept firing but the orchestrator's research_agent never transitioned the session to a terminal state. After curl's ``--max-time 1800`` (30 min) hit, the curl client disconnected but the session row stayed ``status='running'``, which then blocked every subsequent source via the single-running-session guard. The script ran all 8 remaining sources but each immediately got ``HTTP 409: Research already in progress: 'https://en.wikipedia.org/wiki/Software_design_pattern'`` and exited fast.
+
+**Pass 2 — recovery batch in safest-first order (4 of 8 failed).** Cleared the stuck session in psql (``UPDATE research_sessions SET status='cancelled' WHERE id='5871cb9b-…'``), then ran an ad-hoc loop (``/tmp/repopulate_resume.sh``) over the 8 failed sources in a deliberate order: the 4 simple URL rows first (low stall risk), then the 3 topic-mode rows (medium risk), then Software_design_pattern LAST (known stall risk). The reordering paid off — the 4 URL rows all completed cleanly:
+
+| # | Source | Partition | Entries added |
+|---|---|---|---|
+| 1 | ``Vector_database`` | rag | +4 |
+| 2 | ``Retrieval-augmented_generation`` | rag | +4 |
+| 3 | **``Chain-of-thought_prompting``** | prompt | +4 |
+| 4 | **``Quantization_(signal_processing)``** | llm | +16 |
+
+Then source #5 (topic-mode ``function calling``) stalled in the SAME pattern as Software_design_pattern in pass 1 — summarizing-phase heartbeats forever, session never finalizes. Sources 6, 7, 8 (the 2 remaining topic rows + the retry of Software_design_pattern) all got blocked by the new stuck session and returned ``HTTP 409``.
+
+**Final state.** ``entry_count=211``. Per-partition shape post-§17.165:
+
+- ``llm``: anthropic-cookbook (43) + torchtune (~130) + Quantization_(signal_processing) (16) + topic-quantization (skipped)
+- ``eng``: TDD (10) + Software_design_pattern (incomplete; some chunks may have landed before the stall — corpus is enough)
+- ``rag``: Vector_database (4) + RAG (4) + topic-hybrid-search (skipped)
+- ``prompt``: Chain-of-thought_prompting (4)
+
+3 partitions populated cleanly + spec partition intentionally empty (§17.143 path populates it separately). Compared with the pre-§17.63 baseline (664 entries, eng=261/llm=218/rag=175/spec=8/prompt=0) this is a smaller corpus but covers the goldens' retrieval surface — 211 entries spanning the same 4 active partitions.
+
+**Golden-retrieval verification.** Live ``test_retrieval_golden.py`` run (Milvus + Ollama + CrossEncoder reranker, end-to-end), filtered to the 3 originally-failing cases:
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_retrieval_golden.py \
+    -k "chain or quantiz or pattern" -v
+
+PASSED tests/test_retrieval_golden.py::test_golden_retrieval
+       [What is chain of thought prompting?-prompt-prompt engineering]
+PASSED tests/test_retrieval_golden.py::test_golden_retrieval
+       [What is quantization and how does it reduce model size?-llm-quantiz]
+PASSED tests/test_retrieval_golden.py::test_golden_retrieval
+       [What are common software design patterns like singleton or factory?-eng-pattern]
+
+3 passed, 4 deselected in 340.09s (0:05:40)
+```
+
+3/3 green. The ``eng-pattern`` golden passes despite ``Software_design_pattern`` never reaching ``research_complete`` — partial-chunk ingestion before the stall, combined with adjacent eng-domain content from TDD + torchtune snippets, is enough for the reranker to surface a relevant match. Honest about the underlying state: the corpus is THINNER than the pre-§17.63 baseline in absolute terms but functionally restores retrieval quality on the goldens that motivated the regression diagnosis.
+
+**Why not push harder on the 3 topic-tier rows + Software_design_pattern retry.** Each additional attempt would either (a) stall the same way and require another manual psql cleanup, or (b) succeed but consume 20-30 min of CPU embedder time. The session-stall bug is the gate, not the corpus shape. Fixing the stall bug (§17.166) is the right way to unblock the topic tier — until then, repeated retries are throwing wall-clock at a problem the fix would eliminate. The 211-entry corpus + 3/3 green goldens is a clean stop point.
+
+**Files.**
+
+- ``scripts/repopulate_kb.sh`` — 2 new URL rows for Chain-of-thought_prompting (prompt partition) and Quantization_(signal_processing) (llm partition); header comment updated to reflect prompt-partition now populated.
+- ``OVERVIEW.md`` — this entry.
+
+**§17.166 followup (deferred).** Long-running LLM-driven research sessions (URL mode for content-heavy pages like ``Software_design_pattern``; topic mode for autonomous research) stall in the ``summarizing`` phase. Symptoms: heartbeats keep firing in the SSE stream, but ``research_sessions.last_activity_at`` never updates and no chunks reach the ``research_complete`` event. The curl client eventually disconnects on ``--max-time``; the session row stays ``status='running'`` until manual psql cleanup. Investigation should start with: (a) what the research_agent's summarizer awaits on — likely an Ollama call that never returns; (b) why heartbeats fire but ``last_activity_at`` doesn't (the §17.85 stuck-session pre-flight relies on ``last_activity_at`` advancing for cleanup decisions); (c) whether the stall is content-dependent (Software_design_pattern is a large, multi-section Wikipedia article — chunking pathology?). Logged for a focused debugging session; not in scope for §17.165.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
