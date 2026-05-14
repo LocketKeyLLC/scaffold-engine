@@ -175,3 +175,97 @@ class TestSummaryConstants:
         from app.config import settings
         from app.modules.research_agent import _SUMMARY_PROMPT_TIMEOUT_S
         assert _SUMMARY_PROMPT_TIMEOUT_S < settings.local_timeout / 4
+
+
+# §17.169 — _bounded_tool_call contract: per-LLM-call timeout with
+# synthetic failed-response fallback so existing success=False branches
+# at call sites handle the timeout without per-site special-casing.
+@pytest.mark.asyncio
+class TestBoundedToolCall:
+    async def test_returns_response_on_success(self):
+        """Happy path — the helper is a transparent passthrough when
+        the underlying tool_call completes within the timeout."""
+        from app.modules.research_agent import _bounded_tool_call
+        from app.providers.base import ModelResponse
+
+        ok = ModelResponse(
+            text="extracted", model="m", success=True, provider="ollama",
+        )
+
+        async def _fake_tool_call(**kwargs):
+            return ok
+
+        with patch("app.modules.research_agent.model_router.tool_call",
+                   new=_fake_tool_call):
+            out = await _bounded_tool_call(messages=[], tools=[], role="r")
+
+        assert out is ok
+
+    async def test_returns_synthetic_failed_response_on_timeout(self):
+        """If the LLM call doesn't return within
+        _RESEARCH_LLM_TIMEOUT_S, the helper logs a warning and returns
+        a synthetic ModelResponse with success=False so callers'
+        fallback branches activate. The synthetic response shape is
+        the contract — preserve it."""
+        from app.modules.research_agent import _bounded_tool_call
+
+        async def _hangs(**kwargs):
+            await asyncio.sleep(99999)
+
+        with patch("app.modules.research_agent.model_router.tool_call",
+                   new=_hangs), \
+             patch("app.modules.research_agent._RESEARCH_LLM_TIMEOUT_S",
+                   0.05):
+            out = await _bounded_tool_call(messages=[], tools=[], role="r")
+
+        assert out.success is False
+        assert "research_llm_timeout" in (out.error or "")
+        assert out.model == "<timeout>"
+        assert out.provider == "<timeout>"
+
+    async def test_synthetic_response_triggers_caller_fallback(self):
+        """Integration smoke — the synthetic response's success=False +
+        empty tool_calls means callers' existing fallback paths fire
+        without code changes. Pinned via _extract_entries: a timeout
+        on an LLM batch falls back to raw-chunk entries (the existing
+        ``if not entries:`` branch at line 610-622)."""
+        from app.modules.research_agent import _extract_entries
+
+        # Two synthetic results so the batch loop runs.
+        results = [
+            {"url": "https://example.com/a", "title": "A",
+             "content": "real content from page A " * 5,
+             "facet": "f"},
+            {"url": "https://example.com/b", "title": "B",
+             "content": "real content from page B " * 5,
+             "facet": "f"},
+        ]
+
+        # _bounded_tool_call returns the synthetic failed response —
+        # the call site's read_tool_args returns no entries, fallback
+        # branch builds chunk-based entries from the raw content.
+        async def _timeout_call(**kwargs):
+            from app.providers.base import ModelResponse
+            return ModelResponse(
+                model="<timeout>", success=False,
+                error="research_llm_timeout after 1s",
+                provider="<timeout>",
+            )
+
+        # Skip the trafilatura fetch step — the test wants to drive the
+        # batch loop with the synthetic-failed response.
+        async def _fake_fetch(rs):
+            return []
+
+        with patch("app.modules.research_agent._bounded_tool_call",
+                   new=_timeout_call), \
+             patch("app.modules.research_agent._fetch_and_extract",
+                   new=_fake_fetch):
+            out = await _extract_entries(results, topic="t")
+
+        # Each result becomes one chunk-based entry via the fallback path.
+        assert len(out) == 2
+        # The fallback entries carry source_type=community + facet
+        for e in out:
+            assert e["source_type"] == "community"
+            assert e["facet"] == "f"

@@ -7421,6 +7421,86 @@ The three failure modes the §17.166 cluster identified are now individually add
 
 Post-§17.167+§17.168, the operational impact of leaving item 1 open is bounded: a topic-mode stall now self-recovers via the reaper after 30 min instead of permanently wedging the single-running-session guard. The topic tier from §17.165 is still effectively unusable on CPU until item 1 is fixed, but the SYSTEM stays operational. Cluster effectively closed for operator-experience purposes; fix item 1 when topic-mode workloads return.
 
+### 17.169 Per-LLM-call timeout for research-agent — cluster item 1 closed (2026-05-13)
+
+Closes the last open item of the §17.166 cluster. Topic-mode autonomous-research stalls — the same shape as the §17.166 summary stall but on different code paths (``_decompose_topic``, ``_extract_entries`` per-batch, ``_analyze_gaps``, URL-mode + PDF-mode extract). Same fix pattern: per-call ``asyncio.wait_for`` + a fallback path the rest of the code already knows how to handle.
+
+**Centralized helper instead of per-site wrapping.** Each affected call site is a ``await model_router.tool_call(...)`` (or wrapped in ``asyncio.create_task``). Wrapping each individually with ``asyncio.wait_for`` would scatter the timeout-fallback logic across 6 sites with subtle variations (synthetic-failed-response shape differing per site). Instead, a single helper at module scope:
+
+```python
+_RESEARCH_LLM_TIMEOUT_S = 300   # 5 min — 5× summary cap (§17.166),
+                                # well under model_router's 30-min HTTP ceiling
+
+async def _bounded_tool_call(**kwargs) -> ModelResponse:
+    try:
+        return await asyncio.wait_for(
+            model_router.tool_call(**kwargs),
+            timeout=_RESEARCH_LLM_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("research_llm_timeout: kind=tool_call role=%s timeout_s=%d",
+                       kwargs.get("role") or kwargs.get("model"),
+                       _RESEARCH_LLM_TIMEOUT_S)
+        return ModelResponse(
+            model="<timeout>", success=False,
+            error=f"research_llm_timeout after {_RESEARCH_LLM_TIMEOUT_S}s",
+            provider="<timeout>",
+        )
+```
+
+The synthetic ``success=False`` response with empty ``tool_calls`` looks IDENTICAL to a genuine LLM dispatch failure to the caller — which means every caller's existing ``if not entries:`` / ``if not parsed:`` / ``if not resp.success:`` fallback branch fires automatically. No call site needs to know about TimeoutError. The fallback paths were already there for genuine LLM failures; this just makes them apply to wedged-call failures too.
+
+**Call sites converted.** 6 ``await model_router.tool_call(...)`` references in research_agent.py replaced with ``_bounded_tool_call``:
+
+| Function | Line | Fallback on timeout |
+|---|---|---|
+| ``_decompose_topic`` (initial) | 376 | retry once with stronger prompt; then fallback to single-query lookup using the topic itself |
+| ``_decompose_topic`` (retry) | 397 | falls through to the function's hard-coded fallback path |
+| ``_extract_entries`` (per-batch) | 573 | chunk-based entries from the raw fetched content (existing ``if not entries: ...`` at line 610-622) |
+| ``_analyze_gaps`` (retry loop) | 658 | ``coverage_pct=0`` + ``reason="gap_analysis_failed"`` — caller's convergence check explicitly handles this case |
+| URL-mode batch extract | 1819 | identical to ``_extract_entries`` — chunk-based fallback |
+| PDF-mode batch extract | 1988 | same |
+
+Each fallback path PRE-DATED §17.169 and is exercised by existing tests (the LLM-failure tests in ``tests/test_research_agent_extract_no_entries.py`` etc). §17.169 just routes timeouts through those same paths instead of letting them hang the iteration.
+
+**Why 300 s, not 120 s.** ``_generate_summary`` uses 120 s because a summary is a single bounded prompt (~6 KB cap, 2-8× margin for qwen2.5:7b). The extract/decompose/gap-analysis calls have larger legitimate working budgets: extract batches can process 5 results × 600 chars/result, gap analysis can sample 30 entries × 100 chars. On qwen2.5:7b on CPU, these can legitimately take 1-3 min per call. 300 s is 2-3× margin for legitimate slow runs while still well under the 30-min HTTP ceiling. Different caps for different roles is intentional — the constants are greppable + test-targettable.
+
+**Files.**
+
+- ``app/modules/research_agent.py`` — added ``ModelResponse`` to the imports, added ``_RESEARCH_LLM_TIMEOUT_S`` constant + ``_bounded_tool_call`` helper, replaced 6 ``model_router.tool_call`` references with ``_bounded_tool_call`` (4 awaited + 2 wrapped in ``asyncio.create_task``).
+- ``tests/test_research_agent_summary.py`` — added ``TestBoundedToolCall`` class (3 cases). ``test_returns_response_on_success`` pins happy-path passthrough. ``test_returns_synthetic_failed_response_on_timeout`` pins the synthetic-response shape (model/provider markers, success=False, error contains the timeout marker string). ``test_synthetic_response_triggers_caller_fallback`` is the integration smoke — drives ``_extract_entries`` with a stub timeout-response and verifies the chunk-based fallback fires + produces the expected entries.
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_research_agent_summary.py \
+    tests/test_research_agent_helpers.py tests/test_research_agent_ingestion.py \
+    tests/test_research_url_mode.py tests/test_research_pdf_mode.py \
+    tests/test_research_state_lifecycle.py tests/test_research_agent_extract_no_entries.py \
+    tests/test_research_agent_core.py
+99 passed
+```
+
+74 + 25 = 99 tests across the full research_agent surface. 3 new in §17.169, the rest pre-existing. The extract-no-entries tests are particularly relevant: they exercise the chunk-fallback path that §17.169 now routes timeouts through.
+
+**Live verification deferred.** The right validation is to run a topic-mode source with content-heavy results and watch one of the extract batches time out + fall back. That's a 22-min+ live test per the script. Given §17.167 + §17.168 already operationally close the cluster (slow sessions visible to reaper; wedged sessions age out; disconnected clients transition cleanly), the topic-tier sources from §17.165 can be re-run on the next operational pass — the stall paths are now bounded by the 5-min timeout and the chunk-fallback path is well-tested via the unit suite. Logged as a §17.167-style operator follow-up rather than blocking §17.169.
+
+**Cluster closed.** All three items from §17.166's followup list now have shipped fixes:
+
+1. ✅ Topic-mode autonomous-research stalls — this entry (§17.169).
+2. ✅ ``last_activity_at`` sub-step heartbeat — §17.167.
+3. ✅ Lifecycle-finalize-on-disconnect — §17.168.
+
+Operational behavior post-cluster:
+
+- A research session that's making real forward progress (across any combination of sub-steps) keeps its ``last_activity_at`` advancing, so the reaper leaves it alone (§17.167).
+- A research session wedged inside a single LLM call sees that call time out at 5 min (§17.169 — or 2 min for summary calls per §17.166), the fallback path activates, the iteration continues. The wedge cannot block forward progress for more than the per-call timeout.
+- A session that genuinely deadlocks for >30 min anyway (e.g. the executor pool itself is wedged, the reaper detects no ``last_activity_at`` movement, and kills the session cleanly (§17.85 + §17.167).
+- A client disconnect propagates cleanly: ``_run_with_session_lifecycle`` finalize-on-disconnect ships the UPDATE via ``asyncio.shield`` so the session row reaches ``cancelled``/``client_disconnect`` within seconds, releasing the single-running-session guard (§17.168).
+
+The four-way matrix is fully covered. No path leaves a session permanently wedged on this CPU host.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

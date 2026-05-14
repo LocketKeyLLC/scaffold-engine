@@ -32,7 +32,7 @@ from app import model_router
 from app.config import settings, get_model
 from app.database import async_session
 from app.modules.rag_pipeline import ingest_entries
-from app.providers.base import Tool
+from app.providers.base import ModelResponse, Tool
 from app.utils.http_clients import get_generic_http_client
 from app.utils.llm_parsing import parse_json_array, parse_json_object  # noqa: F401 — kept for back-compat re-exports
 from app.utils.tool_call_args import read_tool_args
@@ -373,7 +373,7 @@ async def _decompose_topic(
     if gap_focus:
         prompt += f"\n\nFocus specifically on these gaps: {gap_focus}"
 
-    resp = await model_router.tool_call(
+    resp = await _bounded_tool_call(
         messages=[
             {"role": "system", "content": DECOMPOSE_SYSTEM_V1},
             {"role": "user", "content": prompt},
@@ -394,7 +394,7 @@ async def _decompose_topic(
             f"Your previous attempt only produced {len(facets)} facet(s). "
             f"Each facet must cover a DIFFERENT aspect of the topic."
         )
-        retry_resp = await model_router.tool_call(
+        retry_resp = await _bounded_tool_call(
             messages=[
                 {"role": "system", "content": DECOMPOSE_SYSTEM_V1},
                 {"role": "user", "content": retry_prompt},
@@ -570,7 +570,7 @@ async def _extract_entries(
             f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['content'][:600]}"
             for r in batch
         )
-        resp = await model_router.tool_call(
+        resp = await _bounded_tool_call(
             messages=[
                 {"role": "system", "content": EXTRACT_SYSTEM_V1},
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=topic, results=results_text)},
@@ -655,7 +655,7 @@ async def _analyze_gaps(
     )
 
     for attempt in range(2):
-        resp = await model_router.tool_call(
+        resp = await _bounded_tool_call(
             messages=[
                 {"role": "system", "content": GAP_SYSTEM_V1},
                 {"role": "user", "content": prompt},
@@ -682,6 +682,44 @@ async def _analyze_gaps(
         "assessment": "Gap analysis failed to parse; continuing iteration.",
         "reason": "gap_analysis_failed",
     }
+
+
+# §17.169 — per-LLM-call timeout for the research path. Each individual
+# model_router.tool_call inside _extract_entries / _analyze_gaps /
+# _decompose_topic / URL-mode + PDF-mode extract has model_router's
+# 30-min local_timeout HTTP ceiling but no shorter client-side bound.
+# A single hung call stalled the whole iteration for the full 30 min
+# (§17.166 caught the summary half; this catches everything else).
+# 300 s (5 min) is 5× the summary cap and well under the HTTP ceiling.
+# On timeout the helpers return a synthetic failed ModelResponse so the
+# callers' existing fallback paths (chunk-based ingest, retry, etc.)
+# fire automatically without per-call-site special-casing.
+_RESEARCH_LLM_TIMEOUT_S = 300
+
+
+async def _bounded_tool_call(**kwargs) -> ModelResponse:
+    """§17.169 — timeout-bounded wrapper around model_router.tool_call.
+
+    Returns a synthetic failed ModelResponse on timeout so callers'
+    existing success=False fallback branches handle it cleanly.
+    """
+    try:
+        return await asyncio.wait_for(
+            model_router.tool_call(**kwargs),
+            timeout=_RESEARCH_LLM_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "research_llm_timeout: kind=tool_call role=%s timeout_s=%d",
+            kwargs.get("role") or kwargs.get("model"),
+            _RESEARCH_LLM_TIMEOUT_S,
+        )
+        return ModelResponse(
+            model="<timeout>",
+            success=False,
+            error=f"research_llm_timeout after {_RESEARCH_LLM_TIMEOUT_S}s",
+            provider="<timeout>",
+        )
 
 
 # §17.166 — summary prompt budget. Pre-fix the prompt concatenated up
@@ -1778,7 +1816,7 @@ async def _run_research_url_mode(
             f"Title: {page_title}\nURL: {url}\nSnippet: {c[:600]}"
             for c in batch_chunks
         )
-        task = asyncio.create_task(model_router.tool_call(
+        task = asyncio.create_task(_bounded_tool_call(
             messages=[
                 {"role": "system", "content": EXTRACT_SYSTEM_V1},
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=prompt_topic, results=results_text)},
@@ -1947,7 +1985,7 @@ async def _run_research_pdf_mode(
             f"URL: {virtual_url}\nSnippet: {c[:600]}"
             for c in batch_chunks
         )
-        task = asyncio.create_task(model_router.tool_call(
+        task = asyncio.create_task(_bounded_tool_call(
             messages=[
                 {"role": "system", "content": EXTRACT_SYSTEM_V1},
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=filename, results=results_text)},
