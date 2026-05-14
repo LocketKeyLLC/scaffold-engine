@@ -684,6 +684,43 @@ async def _analyze_gaps(
     }
 
 
+# §17.166 — summary prompt budget. Pre-fix the prompt concatenated up
+# to 60 entries verbatim, which on content-heavy Wikipedia pages
+# (Software_design_pattern, etc.) easily blew past qwen2.5:7b's 4K
+# context. Ollama's behavior on context overflow can be to hang
+# indefinitely rather than error cleanly; combined with the
+# 30-min local_timeout this turned every overflowed summary into a
+# 30-min stall, blocking subsequent ingests via the single-running-
+# session guard. Hard cap at ~6 KB total prompt body keeps us well
+# under context with overhead for the system prompt + topic header.
+_SUMMARY_PROMPT_BUDGET_CHARS = 6000
+# Per-call timeout (seconds). qwen2.5:7b on this host produces ~2 KB
+# summaries from a 6 KB prompt in 15-45 s. 120 s gives 2-8× margin
+# without letting a wedged Ollama hold the session running for the
+# full 30-min HTTP local_timeout.
+_SUMMARY_PROMPT_TIMEOUT_S = 120
+
+
+def _build_summary_prompt_body(state: "ResearchState") -> str:
+    """Pack as many ``[facet] content`` lines as fit under the char budget.
+
+    Trims by char count (a coarse-but-safe proxy for token count) instead
+    of by entry count. A 60-entry cap on content-rich pages overflows the
+    model context; this version stops adding entries when the running body
+    would push past the budget. Returns the concatenated body (without
+    the topic / entry-count header — caller prepends those).
+    """
+    out: list[str] = []
+    used = 0
+    for e in state.all_entries:
+        line = f"[{e.get('facet', '?')}] {e.get('content', '')}"
+        if used + len(line) + 1 > _SUMMARY_PROMPT_BUDGET_CHARS:
+            break
+        out.append(line)
+        used += len(line) + 1
+    return "\n".join(out)
+
+
 async def _generate_summary(
     state: ResearchState,
     *,
@@ -693,22 +730,32 @@ async def _generate_summary(
     """Generate human-readable summary of all collected research.
 
     §17.89 Pattern 3 — dispatch via role= so MODEL_VERIFIER_PROVIDER is honored.
+    §17.166 — char-budgeted prompt + per-call timeout. The fallback string
+    is the same shape produced by the resp.success=False branch, so
+    callers can't tell timeout from upstream failure (intentional —
+    both produce a partial summary; the LLM call path always reaches
+    finalize_session within bounded wall time).
     """
-    entry_texts = [
-        f"[{e.get('facet', '?')}] {e.get('content', '')}"
-        for e in state.all_entries
-    ]
-
     prompt = (
         f"Summarize the research collected on: {state.topic}\n\n"
         f"Total entries: {len(state.all_entries)}\n\n"
-        + "\n".join(entry_texts[:60])
+        + _build_summary_prompt_body(state)
     )
 
-    resp = await model_router.generate(
-        prompt, role=role, overrides=overrides, system=SUMMARY_SYSTEM_V1,
-        temperature=0.3, max_tokens=2048,
-    )
+    try:
+        resp = await asyncio.wait_for(
+            model_router.generate(
+                prompt, role=role, overrides=overrides, system=SUMMARY_SYSTEM_V1,
+                temperature=0.3, max_tokens=2048,
+            ),
+            timeout=_SUMMARY_PROMPT_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "summary_timeout: topic=%s entries=%d budget_s=%d — falling back",
+            state.topic, len(state.all_entries), _SUMMARY_PROMPT_TIMEOUT_S,
+        )
+        return f"Research collected {len(state.all_entries)} entries on '{state.topic}'."
 
     if resp.success:
         return resp.text.strip()

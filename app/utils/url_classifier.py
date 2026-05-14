@@ -34,6 +34,18 @@ CURATED_SOURCE_TYPES: frozenset[str] = frozenset({
     "so_answer",
     "official_docs",
     "curated",
+    # §17.166 — Wikipedia articles. The §17.112 docstring in
+    # research_agent._run_research_url_mode explicitly lists Wikipedia
+    # among the bypass-eligible source types, but ``wiki_article`` was
+    # never actually added to this frozenset. Result: Wikipedia URLs
+    # like https://en.wikipedia.org/wiki/Software_design_pattern fell
+    # through to the LLM extract loop and burned ~7 min per batch on
+    # this CPU host, exhausting curl ``--max-time 1800`` on multi-
+    # batch pages and leaving the session row stuck in ``running``.
+    # Direct chunk-to-entry path (no LLM) closes Wikipedia URLs in
+    # seconds with no quality loss — Wikipedia content is already
+    # structured, prose-clean, and trafilatura-extractable.
+    "wiki_article",
 })
 
 # (host_pattern, path_pattern, source_type). First match wins.

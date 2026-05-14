@@ -1,0 +1,177 @@
+"""§17.166 — tests for _generate_summary char-budget + timeout fallback.
+
+The bug (Software_design_pattern URL + topic-mode 'function calling'
+stalled in summarizing phase for 30 min, blocking subsequent ingests
+via the single-running-session guard) was caused by:
+
+1. The summary prompt concatenating up to 60 entries verbatim, which on
+   content-heavy pages exceeded Ollama's 4K context. Ollama's behavior
+   on context overflow can be to hang indefinitely.
+2. No per-call timeout. model_router.generate has a 30-min HTTP timeout
+   but no shorter client-side bound on the summary itself.
+
+§17.166 caps prompt body at ~6 KB and wraps the LLM call in
+asyncio.wait_for(120s). On timeout: log a warning and return the
+same fallback string the resp.success=False path produces.
+"""
+from tests._research_agent_shared import *  # noqa: F401, F403
+
+
+class TestBuildSummaryPromptBody:
+    def test_empty_entries_returns_empty_string(self):
+        from app.modules.research_agent import _build_summary_prompt_body
+        from app.modules.research_state import ResearchState
+        state = ResearchState(topic="t", depth="shallow", domain="llm")
+        assert _build_summary_prompt_body(state) == ""
+
+    def test_packs_within_budget(self):
+        from app.modules.research_agent import (
+            _SUMMARY_PROMPT_BUDGET_CHARS, _build_summary_prompt_body,
+        )
+        from app.modules.research_state import ResearchState
+        state = ResearchState(topic="t", depth="shallow", domain="llm")
+        state.all_entries = [
+            {"facet": "f", "content": "a" * 100} for _ in range(20)
+        ]
+        body = _build_summary_prompt_body(state)
+        assert len(body) <= _SUMMARY_PROMPT_BUDGET_CHARS
+        assert "f" in body
+        assert "a" * 100 in body  # full entry preserved when it fits
+
+    def test_truncates_at_budget_not_entry_count(self):
+        """Pre-§17.166 capped at entry_count=60. New behavior: stops adding
+        entries when the next one would push past the char budget, even if
+        we've added far fewer than 60 entries. This is the load-bearing
+        change — content-heavy pages no longer blow context."""
+        from app.modules.research_agent import (
+            _SUMMARY_PROMPT_BUDGET_CHARS, _build_summary_prompt_body,
+        )
+        from app.modules.research_state import ResearchState
+        state = ResearchState(topic="t", depth="shallow", domain="llm")
+        # 5 entries of 2 KB each = 10 KB total; budget is 6 KB so only ~3 fit.
+        state.all_entries = [
+            {"facet": "f", "content": "X" * 2000} for _ in range(5)
+        ]
+        body = _build_summary_prompt_body(state)
+        assert len(body) <= _SUMMARY_PROMPT_BUDGET_CHARS
+        # Should have fit ~3 entries, not all 5
+        assert body.count("[f]") < 5
+
+    def test_preserves_first_entries_in_order(self):
+        from app.modules.research_agent import _build_summary_prompt_body
+        from app.modules.research_state import ResearchState
+        state = ResearchState(topic="t", depth="shallow", domain="llm")
+        state.all_entries = [
+            {"facet": "first", "content": "A" * 100},
+            {"facet": "second", "content": "B" * 100},
+        ]
+        body = _build_summary_prompt_body(state)
+        first_idx = body.index("first")
+        second_idx = body.index("second")
+        assert first_idx < second_idx
+
+    def test_skips_overflow_entry_does_not_partial_truncate(self):
+        """If the next entry would push past budget, skip it entirely —
+        don't write a partial line. Keeps the [facet] content format intact
+        so the LLM doesn't see a corrupted line."""
+        from app.modules.research_agent import (
+            _SUMMARY_PROMPT_BUDGET_CHARS, _build_summary_prompt_body,
+        )
+        from app.modules.research_state import ResearchState
+        state = ResearchState(topic="t", depth="shallow", domain="llm")
+        # One small entry that fits + one huge entry that doesn't.
+        state.all_entries = [
+            {"facet": "small", "content": "x"},
+            {"facet": "huge", "content": "Y" * (_SUMMARY_PROMPT_BUDGET_CHARS * 2)},
+        ]
+        body = _build_summary_prompt_body(state)
+        assert "small" in body
+        assert "huge" not in body  # skipped entirely, not partially truncated
+
+
+@pytest.mark.asyncio
+class TestGenerateSummaryTimeout:
+    async def test_returns_fallback_on_timeout(self):
+        """If the LLM call doesn't return within _SUMMARY_PROMPT_TIMEOUT_S,
+        _generate_summary logs and returns the same fallback shape as the
+        resp.success=False branch.
+
+        Drives the real ``asyncio.wait_for`` with a tiny timeout +
+        a hanging stub so the timeout fires + the awaited coroutine
+        gets properly cancelled (no RuntimeWarning side effect)."""
+        from app.modules.research_agent import _generate_summary
+        from app.modules.research_state import ResearchState
+        state = ResearchState(topic="my topic", depth="shallow", domain="llm")
+        state.all_entries = [{"facet": "f", "content": "content"}]
+
+        async def _hangs(*a, **kw):
+            await asyncio.sleep(99999)
+
+        with patch("app.modules.research_agent.model_router.generate",
+                   new=_hangs), \
+             patch("app.modules.research_agent._SUMMARY_PROMPT_TIMEOUT_S",
+                   0.05):
+            out = await _generate_summary(state)
+        assert "1 entries" in out
+        assert "my topic" in out
+
+    async def test_returns_llm_text_on_success(self):
+        """Happy path — model returns text, _generate_summary returns the
+        stripped string. Pinned so the timeout-fallback contract doesn't
+        accidentally swallow successful responses."""
+        from app.modules.research_agent import _generate_summary
+        from app.modules.research_state import ResearchState
+        state = ResearchState(topic="topic", depth="shallow", domain="llm")
+        state.all_entries = [{"facet": "f", "content": "c"}]
+
+        from app.providers.base import ModelResponse
+        ok = ModelResponse(
+            text="  the summary  ", model="m", success=True, provider="ollama",
+        )
+        # Patch model_router.generate at the call site so the wait_for
+        # path actually awaits a coroutine that returns a real response.
+        async def _ok_generate(*a, **kw):
+            return ok
+        with patch("app.modules.research_agent.model_router.generate",
+                   new=_ok_generate):
+            out = await _generate_summary(state)
+        assert out == "the summary"
+
+    async def test_returns_fallback_on_llm_failure(self):
+        """If the LLM returns success=False (different from timeout),
+        we still get a fallback. This pre-existed but is regression-pinned
+        so a future refactor doesn't accidentally swallow the success flag."""
+        from app.modules.research_agent import _generate_summary
+        from app.modules.research_state import ResearchState
+        state = ResearchState(topic="t", depth="shallow", domain="llm")
+        state.all_entries = [{"facet": "f", "content": "c"}]
+
+        from app.providers.base import ModelResponse
+        fail = ModelResponse(
+            model="m", success=False, error="boom", provider="ollama",
+        )
+        async def _fail_generate(*a, **kw):
+            return fail
+        with patch("app.modules.research_agent.model_router.generate",
+                   new=_fail_generate):
+            out = await _generate_summary(state)
+        assert "1 entries" in out
+
+
+class TestSummaryConstants:
+    """Pin the budget + timeout values so regressions surface in code review."""
+
+    def test_budget_is_under_4k_token_context(self):
+        """A 4K-token model with ~4 chars/token has roughly 16 KB of
+        context. Our prompt body cap should leave 10+ KB of headroom
+        for the system prompt + topic header + model overhead."""
+        from app.modules.research_agent import _SUMMARY_PROMPT_BUDGET_CHARS
+        assert _SUMMARY_PROMPT_BUDGET_CHARS <= 8000
+
+    def test_timeout_well_under_local_timeout(self):
+        """The per-call summary timeout must be well under
+        ``settings.local_timeout`` (30 min) so a wedged Ollama can't
+        hold the session running for the full HTTP ceiling."""
+        from app.config import settings
+        from app.modules.research_agent import _SUMMARY_PROMPT_TIMEOUT_S
+        assert _SUMMARY_PROMPT_TIMEOUT_S < settings.local_timeout / 4

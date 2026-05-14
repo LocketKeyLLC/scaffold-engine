@@ -79,7 +79,14 @@ class TestShouldDistill:
 
     @pytest.mark.parametrize("source_type", [
         "community",       # forum threads — distill helps extract takeaways
-        "wiki_article",    # mutable, paraphrased
+        # §17.166 — wiki_article MOVED to curated. The original "mutable,
+        # paraphrased" rationale was outweighed by the operational cost:
+        # Wikipedia URLs burned ~7 min per LLM extract batch on the CPU
+        # embedder, exhausted curl --max-time on multi-batch pages
+        # (Software_design_pattern), and stalled the single-running-
+        # session guard. Wikipedia content is structured + trafilatura-
+        # clean so the LLM pass added little; chunk-based ingest closes
+        # Wikipedia URLs in seconds.
         "hn_comment",      # not in curated set
         "reddit_post",     # not in curated set
         "tech_docs",       # README-style prose

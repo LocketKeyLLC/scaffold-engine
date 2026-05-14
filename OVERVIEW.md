@@ -7215,6 +7215,85 @@ PASSED tests/test_retrieval_golden.py::test_golden_retrieval
 
 **§17.166 followup (deferred).** Long-running LLM-driven research sessions (URL mode for content-heavy pages like ``Software_design_pattern``; topic mode for autonomous research) stall in the ``summarizing`` phase. Symptoms: heartbeats keep firing in the SSE stream, but ``research_sessions.last_activity_at`` never updates and no chunks reach the ``research_complete`` event. The curl client eventually disconnects on ``--max-time``; the session row stays ``status='running'`` until manual psql cleanup. Investigation should start with: (a) what the research_agent's summarizer awaits on — likely an Ollama call that never returns; (b) why heartbeats fire but ``last_activity_at`` doesn't (the §17.85 stuck-session pre-flight relies on ``last_activity_at`` advancing for cleanup decisions); (c) whether the stall is content-dependent (Software_design_pattern is a large, multi-section Wikipedia article — chunking pathology?). Logged for a focused debugging session; not in scope for §17.165.
 
+### 17.166 Research-agent URL-mode stall — wiki_article bypass + summary safeguards (2026-05-13)
+
+Closes the URL-mode half of the §17.165 deferred followup. The stalls on ``Software_design_pattern`` and other Wikipedia URLs turned out to be a stale-list bug (one missing entry in a frozenset) plus a defensive gap (no per-call timeout on the summary LLM call). Topic-mode stalls remain open — call them out separately at the end.
+
+**Live diagnosis sequence.** Static investigation of the research_agent code found ``_generate_summary`` (line 705) hardcoded ``entry_texts[:60]`` — concatenating up to 60 entries verbatim into one prompt. For content-heavy pages the prompt body easily blew past qwen2.5:7b's 4K context, and Ollama's behavior on context overflow can be to hang indefinitely. Initial hypothesis: cap the prompt + add a per-call timeout. Both changes shipped; tests green.
+
+Then live-validated by retrying ``Software_design_pattern`` against the rebuilt orchestrator. The retry STILL stalled, but in a DIFFERENT phase: ``"status": "extracting"``, not ``"status": "summarizing"``. The orchestrator logs surfaced the missing detail:
+
+```
+url_mode_extract_loop_start: chunks=10 batches=2 batch_size=5
+  url=https://en.wikipedia.org/wiki/Software_design_pattern bypass=False
+url_mode_extract_batch_start: batch=0/2 chunks_in_batch=5
+... (7 min elapsed) ...
+url_mode_extract_no_entries: batch=0 reason=no_tool_calls falling_back_to_chunks
+url_mode_extract_batch_start: batch=1/2 ...
+... (curl --max-time 600s hit mid-batch-1) ...
+```
+
+``bypass=False`` was the smoking gun. Per the §17.112 docstring inside ``_run_research_url_mode`` (line 1664), Wikipedia URLs were SUPPOSED to skip the LLM extract loop via ``distill_bypass``. But ``classify_url("https://en.wikipedia.org/wiki/Software_design_pattern")`` returns ``"wiki_article"``, and ``should_distill("wiki_article")`` returns... ``True``. The bypass never fires for Wikipedia because ``wiki_article`` is NOT in ``CURATED_SOURCE_TYPES``. The docstring's stated intent and the actual frozenset disagree.
+
+**Root cause: stale-list bug.** The §17.112 docstring lists "SO answer, HF model card, arXiv abstract, GH release notes/CI/tests, Wikipedia, etc." as bypass-eligible source types. The frozenset at ``app/utils/url_classifier.py:27`` includes all of those EXCEPT ``wiki_article``. The omission appears to be a copy/sync gap when §17.112 shipped — the test even pinned ``wiki_article`` as uncurated explicitly (``test_uncurated_runs_distill[wiki_article]`` with the comment "mutable, paraphrased") so the gap was intentional in the test but contradicted the design intent in the agent docstring.
+
+**Fix 1: Add ``wiki_article`` to ``CURATED_SOURCE_TYPES``.** Wikipedia content is structured, prose-clean, and trafilatura-extractable — the LLM extract pass burned ~7 min per batch on this CPU host for no quality gain. The chunk-fallback path (which fires when the LLM produces no entries — see ``url_mode_extract_no_entries`` log line above) is what the corpus was actually receiving anyway. Skipping straight to chunk-based ingest closes Wikipedia URLs in seconds. The "mutable, paraphrased" rationale doesn't outweigh the operational cost.
+
+**Fix 2: ``_generate_summary`` char-budget + per-call timeout.** Defensive — protects any source that DOES reach the summary phase. Pre-fix the summary prompt could be 60-480 KB (60 entries × 1-8 KB content each); post-fix the body is capped at 6 KB via ``_build_summary_prompt_body``, which packs entries until the budget is hit and skips any entry that would overflow (no partial truncation — keeps the ``[facet] content`` line shape intact). The LLM call is wrapped in ``asyncio.wait_for(120s)``; on timeout the function returns the same fallback string as the ``resp.success=False`` branch (``"Research collected N entries on '<topic>'."``). 120 s is 2-8× margin over typical 15-45 s qwen2.5:7b summaries on a 6 KB prompt, and well under the 30 min ``settings.local_timeout`` ceiling (the test ``test_timeout_well_under_local_timeout`` pins this).
+
+**Test moved.** ``tests/test_url_classifier.py`` had ``wiki_article`` in the uncurated parametrize list. Now moved (via removal from the uncurated list; the curated test auto-includes it via ``sorted(CURATED_SOURCE_TYPES)``). Comment block in place explains the §17.166 policy change so a future audit doesn't try to revert it.
+
+**Files.**
+
+- ``app/utils/url_classifier.py`` — added ``"wiki_article"`` to ``CURATED_SOURCE_TYPES`` with an inline §17.166 comment block explaining the design-intent reconciliation.
+- ``app/modules/research_agent.py`` — ``_generate_summary`` rewritten: new ``_build_summary_prompt_body`` helper (char-budgeted packing), ``asyncio.wait_for(_SUMMARY_PROMPT_TIMEOUT_S)`` wrap with TimeoutError → fallback string. Two module-level constants (``_SUMMARY_PROMPT_BUDGET_CHARS=6000``, ``_SUMMARY_PROMPT_TIMEOUT_S=120``) so the values are greppable and test-targettable.
+- ``tests/test_url_classifier.py`` — moved ``wiki_article`` from uncurated to curated parametrize; added §17.166 comment block.
+- ``tests/test_research_agent_summary.py`` (new, 10 cases) — pins ``_build_summary_prompt_body``: empty / packs / truncates at budget / preserves order / no partial truncation. Pins ``_generate_summary``: returns fallback on timeout, returns text on success, returns fallback on LLM failure. Pins the budget constants are sane (budget under 8 KB, timeout under ``local_timeout / 4``).
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_url_classifier.py \
+    tests/test_research_agent_summary.py -v
+60 passed in 16.14s
+```
+
+Live retry of the previously-stalled URL after rebuild:
+
+```
+$ time curl -sS -N --max-time 300 \
+    -H "X-Api-Key: $SCAFFOLD_API_KEY" \
+    -X POST http://localhost:8000/research \
+    -d '{"topic":"https://en.wikipedia.org/wiki/Software_design_pattern",
+         "depth":"shallow","domain":"eng"}' \
+    -o /tmp/sdp_retry2.log
+
+wall_time=121s
+
+$ grep -E "^event:" /tmp/sdp_retry2.log
+event: research_started
+event: decomposition_complete
+event: search_complete
+event: distill_bypassed       # ← the fix is active
+event: extraction_complete
+event: ingestion_complete
+event: iteration_complete
+event: research_complete      # ← reaches terminal state cleanly
+```
+
+121 s end-to-end vs the prior 30+ min stall. The ``distill_bypassed`` SSE event confirms the fix path is taken. Re-ran the 3 originally-failing goldens against the same orchestrator state: 3/3 still pass (169 s wall time for the test suite, gated by Milvus + reranker cold-load latency rather than the fix).
+
+``entry_count`` stayed at 211 — the retry's chunks dedup-rejected (content-hash collision) against partial chunks ingested during the pass-1 stall in §17.165. Re-ingest produced no new entries because the corpus already had them; the win was that the session reached ``research_complete`` cleanly instead of stalling.
+
+**What this does NOT fix** (logged as §17.167 followup):
+
+- **Topic-mode autonomous-research stalls.** §17.165 pass-2 hit a separate stall on the topic-mode source ``function calling`` (and presumably the other 2 topic rows). Topic mode doesn't go through the URL classifier — its stall is in a different code path (probably the ``_decompose_topic`` LLM call or the iteration-loop's distill batches). The fix here doesn't address it. Investigation should start with the iteration loop in ``_execute_iteration_loop`` (line ~760) and the per-batch ``model_router.tool_call`` wrapped in ``_await_with_heartbeat`` — likely the same context-overflow + no-per-call-timeout pattern as the summary path, but on a different code path.
+- **The ``last_activity_at``-never-updates symptom** (raised in §17.165). Heartbeats fire forever, but ``research_sessions.last_activity_at`` is set only at INSERT time, never refreshed during a long-running session. The §17.85 stuck-session pre-flight guard relies on ``last_activity_at`` to decide cleanup, so a session stuck in an LLM call is invisible to the reaper until ``stale_threshold_minutes`` (30 min default) elapses. Fix: have the heartbeat path also touch ``last_activity_at``. Out of scope for §17.166.
+- **Lifecycle-finalize-on-disconnect.** When curl times out, the session row stays ``status='running'`` rather than transitioning to ``cancelled``. The ``_run_with_session_lifecycle.finally`` block SHOULD finalize on cancellation, but live evidence shows it doesn't fire (rows stay ``running``, ``updated_at`` matches ``created_at`` exactly). Investigation needed to determine whether the FastAPI streaming-response cancellation is actually propagating into the generator's finally. Out of scope for §17.166.
+
+**Why bundle these in one followup entry instead of three separate ones.** All three remain failure modes for long-running research sessions on CPU. Until one operator investigates the full session-stall surface end-to-end, fixing them piecemeal risks shipping a fix that masks another (e.g. better lifecycle-finalize would hide a still-broken topic-mode stall). §17.167 should treat them as a cluster.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
