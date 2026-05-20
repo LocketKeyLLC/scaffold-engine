@@ -8392,7 +8392,53 @@ $ docker exec scaffold-orchestrator pytest \
 
 §17.187 + §17.188 close AUDIT.md cohort "MEDIUM RAG cluster (2.5 + 2.6)". Remaining open: small MEDIUM wins (1.3 + 2.7 + 2.8), UX (5.4 + 5.5), MEDIUM observability (3.3 + 3.5 + 3.6), architecture (4.2 + 4.3 + 4.4), all LOW items.
 
----
+### §17.189 rag_pipeline typed-shape protocol — closes AUDIT 4.2
+
+Closes **AUDIT.md item 4.2** (MEDIUM): ``app/modules/rag_pipeline.py`` is a 4-way fan-in bottleneck — ``research_agent.ingest_entries``, ``ideation_workflow.ingest_entries``, ``execution_agent.query_rag`` (twice), and ``app/sim/topology_select.query_rag`` all consume the dict shapes these functions return. Pre-§17.189 the return signatures were ``dict[str, Any]`` and ``dict`` — every field rename rippled to 4 callers, and a field drift only surfaced at runtime in whichever caller's test reached for the renamed key.
+
+**Fix.** New ``app/modules/_rag_protocol.py`` pins the contract as TypedDicts:
+
+| Shape | Fields |
+|---|---|
+| ``RagScoresDict`` | vector / keyword / rrf / rerank / final / quality_bump |
+| ``RagResultDict`` | content / title / tags / source_url / entry_id / domain / version / supersedes_id / confidence_score / source_type / provenance / scores |
+| ``RagMetadataDict`` (``total=False``) | vector_hits / keyword_hits / fused_count / confidence_threshold / threshold_relaxed / below_threshold / fell_back_to_top3 / reranked / skipped_rerank / reranker_backend / warnings / latency_ms / cache_hit |
+| ``RagResponseDict`` | status (Literal "ok"/"error") / results / metadata + NotRequired query / result_count / error |
+| ``IngestStatsDict`` | new / versioned / rejected / skipped_hash / skipped_empty |
+
+``query_rag`` and ``ingest_entries`` now have those types as return annotations (under ``TYPE_CHECKING`` import so there's no runtime cost). Callers can opt into ``ctx: RagResponseDict = await query_rag(...)`` for typed access; the existing ``dict[str, Any]`` consumption keeps working.
+
+**Why TypedDict + runtime validators rather than a service facade.** Two reasons. (1) The audit offered either Protocol/TypedDict OR a facade module; the TypedDict approach has zero runtime cost (annotations only) and zero blast-radius (no caller changes required). (2) A facade would introduce an indirection layer that solves the same documentation problem at a higher maintenance cost. Pure typing wins.
+
+**Why also ship runtime validators.** Python doesn't runtime-check TypedDict, so the typed annotations are documentation-only without enforcement. ``validate_rag_response`` / ``validate_ingest_stats`` give the test suite something concrete to assert against — a future implementation change that adds/removes a field without the TypedDict update fires the corresponding snapshot test (``test_required_keys_snapshot_*``) loudly. The validators use ``__required_keys__`` / ``__optional_keys__`` introspection so they stay in sync with the TypedDict definitions automatically.
+
+**Gotcha discovered + documented.** Python's TypedDict introspection requires the actual ``NotRequired`` marker present at class-creation time. ``from __future__ import annotations`` (PEP 563) converts every annotation to a string literal, so ``NotRequired[X]`` becomes the string ``"NotRequired[X]"`` and the introspection misses it — all fields show as required. The fix is to NOT use the future-import in this file (Python 3.10+ handles ``X | Y`` / ``list[X]`` / ``dict[X, Y]`` natively); a one-paragraph note in the module docstring captures the trap for future readers.
+
+**Files.**
+
+- ``app/modules/_rag_protocol.py`` — new file, ~175 lines: 5 TypedDicts + 2 runtime validators + ``__required_keys__`` snapshots. Intentional sibling to ``_rag_entry.py`` (which models the ingest INPUT shape) — different "stability surfaces".
+- ``app/modules/rag_pipeline.py``:
+  - ``TYPE_CHECKING`` import of the new types.
+  - ``query_rag(...) -> "RagResponseDict"`` and ``ingest_entries(...) -> "IngestStatsDict"`` — forward-referenced annotations.
+- ``tests/test_rag_protocol.py`` — new file, 16 tests in three groups: 7 validator happy/drift cases (RagResponseDict shape, missing top-level key, missing per-result key, missing per-scores key, missing query on status='ok'), 4 required-keys snapshots locking the field sets, 3 validate_ingest_stats cases, 2 live drift guards (``test_ingest_entries_empty_input_matches_typed_shape`` + ``test_query_rag_error_path_matches_typed_shape``).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_rag_protocol.py --timeout=30 -v
+16 passed in ~3 s
+
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_rag_pipeline.py tests/test_rag_pipeline_smoke.py \
+    tests/test_rag_pipeline_cache.py --timeout=30
+47 passed in ~5 s   (no regression in adjacent rag_pipeline suites)
+```
+
+**What this does NOT change.**
+
+- Runtime behavior of ``query_rag`` / ``ingest_entries`` — annotations are documentation only.
+- Existing caller code — every site that does ``response["results"]`` keeps working.
+- The 4-way fan-in itself — restructuring the dependency graph (facade module, dependency-inversion layer) is out of scope; this commit pins the CONTRACT so future restructuring has a stable interface to migrate against.
 
 ## Phase 8 wrap — orchestration & memory caching hardening
 

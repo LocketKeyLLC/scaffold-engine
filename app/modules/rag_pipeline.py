@@ -34,9 +34,12 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from pymilvus import Collection
+
+if TYPE_CHECKING:
+    from app.modules._rag_protocol import IngestStatsDict, RagResponseDict
 from app.utils.milvus_utils import get_collection
 from app.utils.rag_result_cache import get_rag_result_cache
 from app.rerankers import rerank as cross_encoder_rerank
@@ -600,7 +603,7 @@ async def query_rag(
     skip_rerank: bool = False,
     include_history: bool = False,
     query_intent: str = "general",
-) -> dict[str, Any]:
+) -> "RagResponseDict":
     """Full RAG pipeline: embed → search → fuse → rerank → filter → supersede-sweep.
 
     ``query_intent`` selects the embedder instruction template (§17.118).
@@ -861,7 +864,7 @@ async def _walk_to_latest_version(
 async def ingest_entries(
     entries: list[dict], domain: str = "eng",
     *, session_id: str | None = None,
-) -> dict:
+) -> "IngestStatsDict":
     """Embed and upsert knowledge entries into toon_v2.
 
     Returns: {new, versioned, rejected, skipped_hash, skipped_empty}.
