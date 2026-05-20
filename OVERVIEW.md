@@ -8542,8 +8542,48 @@ $ docker exec scaffold-orchestrator pytest tests/test_execution_agent_concurrenc
 
 §17.189 + §17.190 + §17.191 close AUDIT.md cohort "Architecture (4.2 + 4.3 + 4.4)". Remaining open: small MEDIUM wins (1.3 + 2.7 + 2.8), UX (5.4 + 5.5), MEDIUM observability (3.3 + 3.5 + 3.6), all LOW items. AUDIT.md's HIGH-severity list is empty; remaining work is MEDIUM + LOW.
 
----
+### §17.192 observability module test extension — closes AUDIT 3.3
 
+Closes **AUDIT.md item 3.3** (MEDIUM). The audit's claim that ``app/observability/{metrics,thresholds,alerts}.py`` had "no dedicated test files" was partially outdated — the three test files existed but coverage was sparse:
+
+| Module | Pre-§17.192 tests | Gap |
+|---|---|---|
+| ``metrics.py`` (229 LOC) | 6 — endpoint shape + 2 counters + disabled-404 + provider-normalize + concurrency gauge | gauges + alert counters + LLM latency histogram buckets |
+| ``thresholds.py`` (331 LOC) | 4 — unresolved/cost/p95 breach + no-breach happy path | ``refresh_gauges`` (3 query branches + fail-open behavior); disabled-by-zero edge cases |
+| ``alerts.py`` (308 LOC) | 9 — emit/dedup/file-sink/endpoint/CLI | (adequate as-is) |
+
+§17.192 closes both gaps in the same commit:
+
+**``test_observability_metrics.py`` — 11 new tests in 3 classes.**
+
+- ``TestMetricsGauges`` (5): cap gauge set on scrape, jobs_by_status HELP/TYPE present in exposition, label values appear after ``set()``, calibration timestamp gauges default to 0, calibration_runs_total increments per status.
+- ``TestAlertCounters`` (2): ``alerts_emitted_total`` increments per (kind, severity); ``alerts_suppressed_total`` increments per kind.
+- ``TestLlmLatencyHistogram`` (4): 750 ms call lands in ``le="1.0"`` bucket but NOT ``le="0.5"``; ``_count`` + ``_sum`` recorded correctly; zero latency in smallest bucket; negative latency clamped (defensive — prometheus_client rejects negative observations on histograms).
+
+**``test_observability_thresholds.py`` — 11 new tests in 2 classes.**
+
+- ``TestRefreshGauges`` (7): jobs_by_status populated per status, label *cleared* between ticks (status that emptied must not stay stuck), research_sessions_running set, unresolved_errors_window set, 3 fail-open tests (each query failure must not break the other two — the existing comment ``# Fails open — a single bad query logs and the others still update`` is now enforced by tests).
+- ``TestThresholdsDisabledBySettings`` (4 via parametrize): the ``threshold > 0`` gate must treat 0 / negative values as "disable", not "always fire". Covers ``alert_unresolved_errors_threshold`` (0 + -1), ``alert_cost_window_usd_threshold`` (0.0), ``alert_p95_latency_ms_threshold`` (0).
+
+**Why the disabled-by-zero parametrize matters.** A misconfigured 0 in the wrong env file would otherwise produce "every tick fires the alert because 10_000 > 0" — the opposite of the intended "disable" semantics. The parametrize locks the invariant against a future condition rewrite that flips the comparison direction.
+
+**Files.**
+
+- ``tests/test_observability_metrics.py`` — 11 tests added (17 total).
+- ``tests/test_observability_thresholds.py`` — 11 tests added (15 total).
+
+No production code touched.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_observability_metrics.py tests/test_observability_thresholds.py \
+    --timeout=30
+32 passed in ~7 s   (10 pre-existing + 22 new)
+```
+
+---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
 
