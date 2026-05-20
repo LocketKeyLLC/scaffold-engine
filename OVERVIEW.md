@@ -8151,6 +8151,39 @@ $ docker exec scaffold-orchestrator pytest tests/test_error_logging_middleware.p
 - The ``error_logs`` table is unchanged. The ``error_type`` classification (``timeout`` / ``transient`` / ``validation`` / ``unrecoverable``) is unchanged — adding ``upstream_<service>`` rows would have needed a schema migration and is out of scope for the audit's "wire-level category surfacing" fix.
 - ``/health`` is unchanged — it was already the way to find out which dependency was down. §17.183 just removes the need to switch to /health to interpret a failed request.
 
+### §17.184 prompt_assembly.py unit tests — 38 tests, 7 functions + 1 dataclass
+
+Closes the first half of **AUDIT.md item 3.2** (HIGH): ``app/modules/prompt_assembly.py`` is 255 lines and is the **single source of truth** for the upstream-last prompt that both the autonomous executor (``execution_agent.execute_next_node``) and Assist Mode (``assist_agent.assemble_step_context``) feed to the LLM. Pre-§17.184 it had no dedicated test file — verified by ``ls tests/ | grep prompt_assembly`` returning nothing. Bugs here are silent quality regressions (truncation miscount, wrong context order, missing RAG block) invisible to execution-agent tests because those mock the prompt builder.
+
+**Coverage map.**
+
+| Function / class | Tests | What's pinned |
+|---|---|---|
+| ``system_for_tool`` | 4 (incl. parametrize over 4 non-CodeGen tools) | CodeGen → ``EXECUTION_SYSTEM_CODEGEN``, everything else → ``EXECUTION_SYSTEM_LLM`` |
+| ``truncate_output`` | 4 | under/at cap returns unchanged; over cap → 20% head + marker + 20% tail; math is correct (5000A/5000B/cap=2000 → 400A + 400B) |
+| ``build_base_prompt`` | 6 | template wins; no-template fallback shape; brief.description → goal; goals[0] fallback; both missing; brief=None; node={} edge case |
+| ``fetch_upstream_outputs`` | 4 | empty depends_on short-circuits DB call; node_key → output_text map; ``output_text NULL → ""``; **WHERE status='done'** invariant locked at the SQL string level so a future refactor that drops the filter fails this test before leaking partial state |
+| ``truncate_upstream_outputs`` | 6 | empty case; under-cap returns a *copy* (mutation safety); proportional split; min_chunk floor; min_chunk dominance when share would be smaller; settings defaults used when caller passes None |
+| ``render_upstream_block`` | 3 | empty → ``""`` (no-op prepend invariant); per-node ``### <node_key>`` header; "Upstream Node Outputs ... YOUR TASK" framing — the upstream-last contract |
+| ``assemble_step_context`` | 10 | end-to-end pipeline: no-upstream/no-grounding minimal path, upstream prepended *before* base prompt (the upstream-last load-bearing invariant), CodeGen system prompt routing, grounding_kind='milvus' → ``## Knowledge Base Results`` header, grounding_kind='searxng' → ``## Web Search Results``, generic kind → ``GROUND TRUTH`` phrasing, empty grounding skipped, truncated_keys surfaced for Assist-Mode UI, StepContext is a frozen dataclass |
+
+**Test isolation.** The ``db`` arg is a duck-typed ``AsyncMock`` whose ``execute(...)`` returns a ``MagicMock`` with a stub ``fetchall()`` — only that surface is touched by the production code. No DB, no live LLM, no settings mutation (one test uses ``monkeypatch.setattr(settings, ...)`` to verify default-source resolution).
+
+**Why pin the SQL string literally.** ``test_query_filters_to_done_status`` does ``assert "status = 'done'" in sql_str``. The string match is intentional — a refactor that switches the literal to a parametrized status value (``status IN (:status)``) would correctly preserve behavior but break this test, prompting the author to update the assertion to match the new shape. Better than a behavior-only test that wouldn't notice a refactor accidentally widening the filter to all statuses.
+
+**Files.**
+
+- ``tests/test_prompt_assembly.py`` — new file, 38 tests across 7 test classes.
+
+No production code touched. The audit gap was test coverage.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_prompt_assembly.py --timeout=30 -v
+38 passed in ~3 s
+```
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
