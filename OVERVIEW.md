@@ -7790,6 +7790,47 @@ Returns 0 on match, 1 on drift. The cloud CI run on this PR will be the first au
 
 Recommended follow-up (not in §17.175's scope): also add a ``schemas-in-sync`` gate that runs ``diff app/schemas.py sdk/scaffold_client/schemas.py`` to catch the §17.157 vendored-copy-drift pattern. Smaller PR; same principle (the failure mode has happened, so add a gate).
 
+### §17.176 §17.174 regression — `from app.main import list_jobs` in tests/test_jobs_synthesized_filter.py
+
+The §17.175 cloud-CI run was the first to exercise the §17.174 refactor in the Tier 1 (host-pytest) environment and immediately surfaced a regression I missed: ``tests/test_jobs_synthesized_filter.py`` does ``from app.main import list_jobs`` in 5 places, but §17.174 moved ``list_jobs`` to ``app.routers.jobs``. All 5 cases failed with ``ImportError: cannot import name 'list_jobs' from 'app.main'``.
+
+**Why §17.174's pre-flight missed this.** My check during §17.174 was:
+
+```
+grep -rn "app\.main\." tests/ | grep -v "from app.main import app"
+```
+
+— which finds ``patch("app.main.<symbol>")`` and ``app.main.<symbol>`` references but NOT ``from app.main import <symbol>`` (the import was filtered out by the ``grep -v``). The single-quoted regex form is the one that catches both patterns:
+
+```
+grep -rn -E "from app\.main import [^a]|app\.main\.[A-Za-z_]" tests/
+```
+
+The lesson, captured for future refactors:
+
+> When moving a symbol out of a module, check the test suite for **three** patterns — ``patch("module.symbol")``, ``module.symbol`` attribute access, and ``from module import symbol`` direct import. Pre-§17.176 sweeps only checked the first two.
+
+**Local verification missed it too** because the test file is decorated ``@pytest.mark.smoke`` and my dev-image test pass used ``-k "not validate"`` rather than the smoke marker. The ``ci-smoke`` make target uses ``-m smoke``, which is what surfaced these tests. Tier 1 cloud CI is the authoritative smoke run; the dev-image sweep doesn't substitute for it.
+
+**Fix.** Change the 5 import lines in ``tests/test_jobs_synthesized_filter.py`` from ``from app.main import list_jobs`` to ``from app.routers.jobs import list_jobs``. Inline ``# §17.176: moved from main in §17.174`` comment so a future reader sees the linkage.
+
+**What this does NOT fix.** The §17.175 CI run also surfaced 3 pre-existing failures in ``tests/test_research_verify.py`` — ``TestClient(app)`` context manager hanging on startup (``starlette/testclient.py:739 portal.call(self.wait_startup)``) → pytest-timeout fires at 30 s. These same 3 failures exist in the §17.169 cloud-CI run (verified by unzipping ``actions/runs/25838474030/logs``), so they pre-date the §17.170-§17.175 work. Out of scope for §17.176; logged for a separate investigation. Likely the lifespan now does work that hangs in cloud-CI's no-services env (init_clients does succeed because httpx is in requirements-ci.txt, but something downstream may not).
+
+**Files.**
+
+- ``tests/test_jobs_synthesized_filter.py`` — 5 imports updated.
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_jobs_synthesized_filter.py \
+    --noconftest -v --timeout=30
+5 passed in 2.16s
+```
+
+Cloud-CI confirmation pending on this commit's push.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

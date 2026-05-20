@@ -45,7 +45,7 @@ class TestSynthesizedFilter:
     set, and stay absent (NO clause emitted) when omitted/null."""
 
     async def test_synthesized_true_adds_where_clause(self):
-        from app.main import list_jobs
+        from app.routers.jobs import list_jobs  # §17.176: moved from main in §17.174
         db = _capture_db()
         await list_jobs(synthesized=True, db=db)
         # Both COUNT and SELECT carry the new clause.
@@ -58,7 +58,7 @@ class TestSynthesizedFilter:
             assert params.get("synthesized") is True
 
     async def test_synthesized_false_adds_where_clause(self):
-        from app.main import list_jobs
+        from app.routers.jobs import list_jobs  # §17.176: moved from main in §17.174
         db = _capture_db()
         await list_jobs(synthesized=False, db=db)
         for sql in _all_calls_sql_text(db):
@@ -71,7 +71,7 @@ class TestSynthesizedFilter:
         """Omitting the param must leave the WHERE clause unchanged from
         the pre-X.9 shape — no spurious `compiled_output_synthesized`
         comparison sneaking in."""
-        from app.main import list_jobs
+        from app.routers.jobs import list_jobs  # §17.176: moved from main in §17.174
         db = _capture_db()
         await list_jobs(db=db)  # synthesized defaults to None
         for sql in _all_calls_sql_text(db):
@@ -83,7 +83,7 @@ class TestSynthesizedFilter:
     async def test_synthesized_combines_with_status(self):
         """Filters must compose — `?status=completed&synthesized=true` should
         AND-combine into a single WHERE block."""
-        from app.main import list_jobs
+        from app.routers.jobs import list_jobs  # §17.176: moved from main in §17.174
         db = _capture_db()
         await list_jobs(status="completed", synthesized=True, db=db)
         sql, params = _last_call_sql_and_params(db)
@@ -96,7 +96,7 @@ class TestSynthesizedFilter:
 
     async def test_synthesized_with_q_search(self):
         """Three-way filter combination: status + q + synthesized."""
-        from app.main import list_jobs
+        from app.routers.jobs import list_jobs  # §17.176: moved from main in §17.174
         db = _capture_db()
         await list_jobs(q="homelab", synthesized=False, db=db)
         sql, params = _last_call_sql_and_params(db)
