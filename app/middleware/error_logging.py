@@ -176,14 +176,27 @@ def _classify_upstream(exc: Exception) -> tuple[str, str] | None:
         host = getattr(getattr(req, "url", None), "host", None)
         if not host:
             return None
+        # §17.207 — also compare port. Production hosts are all distinct
+        # (172.18.0.1 / searxng / milvus-standalone) so host-only was
+        # sufficient, but cloud-CI overrides every upstream to
+        # ``http://localhost:<port>``, collapsing the host tuples and
+        # making the iteration order silently win (searxng-first → ollama
+        # errors mis-classified as searxng). Comparing (host, port) keeps
+        # production behavior identical while making the test/CI deploy
+        # disambiguation correct.
+        port = getattr(getattr(req, "url", None), "port", None)
 
         for url, service in (
             (settings.searxng_url, "searxng"),
             (settings.ollama_base_url, "ollama"),
             (settings.milvus_uri, "milvus"),
         ):
-            cfg_host = urlparse(url).hostname
-            if cfg_host and host == cfg_host:
+            parsed = urlparse(url)
+            cfg_host = parsed.hostname
+            cfg_port = parsed.port
+            if cfg_host and host == cfg_host and (
+                cfg_port is None or port is None or cfg_port == port
+            ):
                 return (
                     service,
                     f"GET /health or check the scaffold-{service} container",

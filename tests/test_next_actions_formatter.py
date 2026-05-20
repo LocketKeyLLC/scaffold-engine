@@ -220,11 +220,27 @@ VENDORED = REPO_ROOT / "pipelines" / "_next_actions.py"
 
 
 def test_next_actions_vendor_files_exist():
+    # §17.207: same rationale as test_sse_event_inventory — the
+    # orchestrator's Docker image intentionally omits ``pipelines/``;
+    # ``make check-next-actions`` (host-side, ci.yml) is the primary
+    # drift gate. Skip when the vendor file isn't present so this
+    # in-suite defense-in-depth doesn't false-fail in container-only
+    # test runs.
+    if not VENDORED.is_file():
+        pytest.skip(
+            f"{VENDORED.relative_to(REPO_ROOT)} not present in this image "
+            "(expected when running inside the orchestrator container); "
+            "the host-side `make check-next-actions` gate covers drift."
+        )
     assert SOURCE.is_file(), f"missing {SOURCE}"
-    assert VENDORED.is_file(), f"missing {VENDORED}"
 
 
 def test_next_actions_vendor_byte_equal():
+    if not VENDORED.is_file():
+        pytest.skip(
+            f"{VENDORED.relative_to(REPO_ROOT)} not present in this image; "
+            "drift is covered by the host-side `make check-next-actions` gate."
+        )
     src = SOURCE.read_bytes()
     vendored = VENDORED.read_bytes()
     if src != vendored:

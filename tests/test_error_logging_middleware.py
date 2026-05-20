@@ -414,15 +414,20 @@ def test_classify_upstream_returns_none_for_http_status_error():
     assert _classify_upstream(exc) is None
 
 
-def test_classify_upstream_matches_on_host_only_ignoring_scheme_port_path(
-    monkeypatch,
-):
-    """The classifier compares hosts, not full URLs — a TLS upgrade or
-    different port on the same host still matches."""
+def test_classify_upstream_matches_ignoring_scheme_and_path(monkeypatch):
+    """The classifier ignores scheme + path: a TLS upgrade or different
+    path on the same host:port still matches.
+
+    §17.207 — port is now part of the match (production hosts are
+    distinct so this didn't matter, but cloud-CI collapses all
+    upstreams to localhost:<port> and port disambiguation was needed).
+    Same host + same port + different scheme/path still classifies.
+    Different port deliberately does NOT classify — see the
+    ``disambiguates_by_port`` tests above for the rationale."""
     monkeypatch.setattr(settings, "searxng_url", "http://searxng:8080")
     exc = httpx.ConnectError(
         "down",
-        request=_req_for("https://searxng:9999/some/other/path?q=x"),
+        request=_req_for("https://searxng:8080/some/other/path?q=x"),
     )
     result = _classify_upstream(exc)
     assert result is not None
@@ -436,3 +441,58 @@ def test_classify_upstream_hint_mentions_service():
     assert result is not None
     service, hint = result
     assert service in hint or "scaffold-" + service in hint
+
+
+# §17.207 — port-aware host comparison
+#
+# Pre-§17.207 the classifier compared hostname only. In production every
+# upstream has a distinct host (172.18.0.1 / searxng / milvus-standalone)
+# so host-only worked. In cloud-CI all three upstreams collapse to
+# ``http://localhost:<port>`` and the iteration order silently won —
+# ollama errors got mis-classified as searxng. The classifier now
+# compares (host, port) so colliding-on-host deployments disambiguate.
+
+
+def test_classify_upstream_disambiguates_by_port_when_hosts_collide(monkeypatch):
+    """Both searxng + ollama on localhost (the cloud-CI configuration);
+    an Ollama-port ConnectError must classify as ``ollama``, not
+    ``searxng`` (which is what the pre-§17.207 host-only match yielded
+    via iteration order)."""
+    monkeypatch.setattr(settings, "searxng_url", "http://localhost:8080")
+    monkeypatch.setattr(settings, "ollama_base_url", "http://localhost:11434")
+    exc = httpx.ConnectError(
+        "no route",
+        request=_req_for("http://localhost:11434/api/tags"),
+    )
+    result = _classify_upstream(exc)
+    assert result is not None
+    assert result[0] == "ollama"
+
+
+def test_classify_upstream_disambiguates_searxng_port_with_colliding_host(
+    monkeypatch,
+):
+    """Mirror of the above — same colliding host, but the error is on the
+    searxng port — must classify as ``searxng``, not the next match."""
+    monkeypatch.setattr(settings, "searxng_url", "http://localhost:8080")
+    monkeypatch.setattr(settings, "ollama_base_url", "http://localhost:11434")
+    exc = httpx.ConnectError(
+        "no route",
+        request=_req_for("http://localhost:8080/search"),
+    )
+    result = _classify_upstream(exc)
+    assert result is not None
+    assert result[0] == "searxng"
+
+
+def test_classify_upstream_matches_when_request_omits_port(monkeypatch):
+    """An httpx Request built from a URL without an explicit port (e.g.
+    a default-port HTTP URL) has ``url.port=None``. The classifier should
+    still match the host without requiring the port — otherwise we'd
+    break the historical host-only contract for the common case."""
+    monkeypatch.setattr(settings, "searxng_url", "http://searxng:8080")
+    # Build a Request to ``http://searxng/`` — no explicit port.
+    exc = httpx.ConnectError("x", request=_req_for("http://searxng/search"))
+    result = _classify_upstream(exc)
+    assert result is not None
+    assert result[0] == "searxng"
