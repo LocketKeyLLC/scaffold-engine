@@ -8882,6 +8882,33 @@ $ docker exec scaffold-orchestrator pytest \
 - Default behavior is byte-identical — the 5-minute cutoff remains the default, exactly matching pre-§17.198.
 - The dag_nodes sweep (stage 2 in the same function) is unchanged — it has no time threshold (resets ANY 'running' row at startup).
 
+### §17.199 triage_timeout 3600 → 120 — closes AUDIT 2.8
+
+Closes **AUDIT.md item 2.8** (MEDIUM): pre-§17.199 the OWUI pipeline's ``triage_timeout`` valve defaulted to ``3600`` seconds (1 hour). Triage uses the 4b Ollama model directly — typical response time 5-30 seconds. A wedged Ollama (or a typo'd ``ollama_base_url``) on the triage path would let the SSE connection hang for up to an hour before failing, compounding a misconfiguration into a one-hour zombie.
+
+**Fix.** Drop the default to **120 seconds** — generous for the 4b model on this host (median 12s, p99 ~45s observed) while bounding worst-case wedged-Ollama wall time. Still operator-overridable via ``SCAFFOLD_TRIAGE_TIMEOUT`` for a deployment that genuinely needs longer (e.g. triage against a cloud model).
+
+**Files.**
+
+- ``pipelines/scaffold_router.py``:
+  - Module docstring updated: ``triage_timeout (default 3600s)`` → ``(default 120s) (§17.199)``.
+  - ``Valves`` field default changed from ``3600`` to ``120`` with a 7-line inline comment explaining the rationale, the prior value, and the override path.
+- ``tests/test_scaffold_router_structure.py`` — ``TestTimeoutValveConsolidation`` gains 2 tests: default-120 invariant (reads Pydantic field default directly so env-overrides don't mask a regression) + sanity-check that the field is still operator-overridable.
+
+**Why no schema-level upper bound.** The audit's recommendation (drop to 120s) is about the default value, not a hard cap. A deployment running against a cloud LLM with 5-minute latency budgets needs to raise the value; enforcing a cap at the schema level would block that legitimate use case for no security benefit (the OWUI pipeline runs as a non-root user with no network or DB writes).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_scaffold_router_structure.py --timeout=30
+7 passed in ~17 s   (5 pre-existing + 2 new for §17.199)
+```
+
+§17.197 + §17.198 + §17.199 close AUDIT.md cohort "Small MEDIUM wins (1.3 + 2.7 + 2.8)". With this commit the AUDIT.md **MEDIUM list is empty**. Remaining open: LOW items only (1.6, 1.7, 2.9, 3.7, 5.6, 5.7).
+
+---
+
+
 
 ## Phase 8 wrap — orchestration & memory caching hardening
 

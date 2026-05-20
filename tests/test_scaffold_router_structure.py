@@ -58,3 +58,19 @@ class TestTimeoutValveConsolidation:
     def test_dag_timeout_alias_still_present(self, pipe):
         assert hasattr(pipe.valves, "dag_timeout")
 
+    def test_triage_timeout_default_is_120s(self):
+        """§17.199 — triage uses 4b model (5-30s typical). Default was
+        3600s pre-§17.199 — let a wedged Ollama hang SSE for up to an
+        hour. Default now 120s; still operator-overridable for genuine
+        long-Ollama deployments."""
+        # Read the class default directly so an env-override doesn't
+        # mask a regression of the field default.
+        from scaffold_router import Pipeline
+        assert Pipeline.Valves.model_fields["triage_timeout"].default == 120
+
+    def test_triage_timeout_remains_overridable(self, pipe):
+        """A deployment that needs longer can still override — the field
+        is a regular int valve, no bound enforcement at the schema layer."""
+        pipe.valves.triage_timeout = 600
+        assert pipe.valves.triage_timeout == 600
+

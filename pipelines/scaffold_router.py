@@ -6,7 +6,7 @@ Commands: see _help() for the full list.
 Three timeout valves (consolidated from six hardcoded values):
   - request_timeout  (default 30s)    — quick JSON endpoints
   - stream_timeout   (default 3600s)  — SSE + long-poll LLM endpoints
-  - triage_timeout   (default 3600s)  — direct Ollama calls for triage/synthesis
+  - triage_timeout   (default 120s)   — direct Ollama calls for triage/synthesis (§17.199)
 
 Legacy `dag_timeout` valve is preserved; if an admin customized it, the value
 is migrated into stream_timeout on pipeline init.
@@ -368,7 +368,14 @@ class Pipeline:
         # --- Consolidated timeouts (#8.8) ---
         request_timeout: int = 30     # quick JSON endpoints
         stream_timeout: int = 3600    # SSE + long-poll LLM endpoints
-        triage_timeout: int = 3600    # direct Ollama calls
+        # §17.199 — direct Ollama triage call default tightened
+        # 3600s → 120s (AUDIT 2.8). Triage uses the 4b model which
+        # responds in 5-30s on this host; the prior 1-hour default let a
+        # wedged Ollama hang the SSE side for up to an hour before
+        # surfacing the error. 120s is generous for the model and still
+        # operator-overridable via SCAFFOLD_TRIAGE_TIMEOUT for a
+        # deployment that genuinely needs longer.
+        triage_timeout: int = 120
         # Legacy alias (migrated to stream_timeout on init if non-default)
         dag_timeout: int = 3600
 
