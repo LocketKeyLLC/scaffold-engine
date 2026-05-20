@@ -8010,6 +8010,60 @@ The 17 existing PDF tests continue to pass — the audit fix is layered above ``
 - ``BodySizeLimitMiddleware`` still bypasses /research/pdf — the helper is the cap.
 - The 413 detail message format changed slightly ("PDF exceeds 20MB cap (stopped reading at N bytes)" instead of "PDF exceeds 20MB cap (N bytes)"); operator-visible only.
 
+### §17.181 DAG-input hash for idempotency — count check → hash check with drift recompute
+
+Closes **AUDIT.md item 2.3** (HIGH): pre-§17.181, the re-entry guard in ``app/modules/dag_generator.py::generate_dag`` was a node-count check — ``if node_count > 0: return 409``. This correctly prevents duplicate DAGs on idempotent retry but cannot distinguish "user called /dag twice with the same brief" from "user edited the brief and called /dag expecting a fresh DAG." Currently a non-issue because briefs are immutable on ``awaiting_confirmation``, but it's a footgun for any future "edit brief and re-confirm" flow — the stale DAG would silently authoritatively shadow the new brief.
+
+**Fix.** Replace the node-count check with a hash-based three-way guard. The hash is computed over ``(brief, model, model_overrides)`` — exactly the inputs that determine the generated DAG — using stable JSON serialization (``sort_keys=True``, ``separators=(",", ":")``) → SHA-256 hex. Three cases when ``node_count > 0``:
+
+| Stored hash | Existing nodes | Action | Reasoning |
+|---|---|---|---|
+| matches current | any | 409 "DAG already exists" | idempotent retry — same inputs would generate the same DAG |
+| differs | some not 'pending' | 409 "execution has started" | drift detected but blowing away running nodes would lose work |
+| differs | all 'pending' | log + DELETE old + recompute | drift detected; nothing executed yet, safe to regenerate |
+| NULL (pre-§17.181) | any | 409 "hash is unknown" | conservative — can't tell idempotent from drift; refuse rather than risk |
+
+The fourth row is the back-compat case: any job created before this migration has ``dag_input_hash = NULL``. Falls through to the same conservative-409 message as the execution-started branch, matching the pre-§17.181 behavior exactly (any existing nodes → 409). New jobs persist the hash on successful DAG persist (after node INSERTs commit, so a mid-flight failure doesn't leave a hash pointing at no DAG).
+
+**Why not always recompute on drift.** Two reasons. (1) If any node has progressed past ``pending``, regenerating the DAG would orphan any execution side-effects (output_text, output_artifact_id, cost rows, alerts). The audit suggested a 10-line fix without this guard; adding it is an extra 5 lines that turns a footgun into a contract. (2) The drift branch is forward-looking — there is no production path that currently triggers it (briefs are still immutable on awaiting_confirmation), so the conservative bias on the execution-started branch is essentially free.
+
+**Files.**
+
+- ``db/migrations/045_jobs_dag_input_hash.sql`` — new file: adds ``jobs.dag_input_hash TEXT`` nullable column. DO-block wrapped per the asyncpg multi-statement rule. Nullable so all pre-§17.181 jobs keep working; the generator falls back to the conservative-409 branch for NULL.
+- ``app/modules/dag_generator.py`` — new ``_compute_dag_input_hash(brief, model, overrides) -> str`` helper. ``generate_dag``:
+  - now selects ``j.dag_input_hash`` alongside status / brief / node_count in the FOR UPDATE-locked initial query,
+  - computes ``current_hash`` once after parsing the brief,
+  - branches on the table above for the ``node_count > 0`` case,
+  - on the drift-recompute branch, runs ``DELETE FROM dag_nodes WHERE job_id = :j`` before falling through to LLM call + INSERT,
+  - on successful DAG persist, ``UPDATE jobs SET status = 'executing', dag_input_hash = :h`` (single statement instead of two).
+- ``tests/integration/test_dag_generator_db.py`` — 4 new tests (8 total): ``test_generate_dag_persists_input_hash`` (verifies the hash is non-null SHA-256 hex after generation), ``test_generate_dag_same_inputs_returns_409_with_hash_match`` (idempotent retry path), ``test_generate_dag_input_drift_recomputes_when_no_execution_started`` (drift recompute path — old node UUIDs gone, new ones differ), ``test_generate_dag_input_drift_rejected_when_execution_started`` (drift but a node is 'running' — refuse, surviving node preserved).
+
+**Why the migration is a separate DO-block.** Follows the §17.140 / 032_system_alerts.sql pattern: every multi-statement migration must be a single DO-block because asyncpg's prepared-statement protocol rejects multi-statement strings outside of a transaction-control block. The migration here is single-statement, but wrapping it in a DO-block is cheap defensive consistency with the rest of the migration set.
+
+**Verification.**
+
+```
+$ docker exec scaffold-postgres psql -U scaffold -d scaffold_engine -c \
+    "SELECT filename FROM schema_migrations WHERE filename LIKE '045%';"
+ 045_jobs_dag_input_hash.sql
+
+$ docker exec scaffold-postgres psql -U scaffold -d scaffold_engine -c "\d jobs" | grep dag_input_hash
+ dag_input_hash              | text                     |           |          |
+
+$ docker exec scaffold-orchestrator pytest tests/integration/test_dag_generator_db.py --timeout=30 -v
+8 passed in 1.48s
+
+$ docker exec scaffold-orchestrator pytest tests/test_dag_generator.py tests/test_dag_validator.py tests/test_validate_dag.py --timeout=30
+56 passed in 4.62s
+```
+
+**What this does NOT change.**
+
+- The 409 contract for idempotent retry is unchanged — same status code, same ``error: "DAG already exists for this job"`` message. Operators / SDK consumers that grep on the error string keep working.
+- The drift-rejection path uses a new error message ("DAG already exists for this job and cannot be recomputed safely (execution has started or hash is unknown)") — a new failure mode that didn't exist before, so no existing consumer expects it.
+- The FOR UPDATE-of-jobs row lock from the 2026-05-05 audit is preserved; the new hash + drift check executes inside the same lock-held transaction so concurrent /dag calls are still serialized per job.
+- Pre-§17.181 jobs (NULL hash) keep the legacy "any nodes → 409" behavior; they only start getting hash-aware idempotency once they generate a fresh DAG.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

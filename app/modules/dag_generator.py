@@ -11,6 +11,7 @@ Persists nodes to dag_nodes table. Job transitions: planning → executing.
 Step 11 of 23-step build plan.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -291,6 +292,33 @@ async def _generate_dag_with_validator(
 
 
 # ---------------------------------------------------------------------------
+# §17.181 — DAG input hash for re-entry idempotency
+# ---------------------------------------------------------------------------
+
+def _compute_dag_input_hash(
+    brief: Any,
+    model: str | None,
+    model_overrides: dict | None,
+) -> str:
+    """SHA-256 over the inputs that fully determine the generated DAG.
+
+    Used by ``generate_dag`` to tell "idempotent retry of the same /dag call"
+    (return 409 — DAG already materialized) from "the brief changed since the
+    last generation" (recompute when safe). Stable across processes: the JSON
+    serialization uses ``sort_keys=True`` and a single separator pair so a key
+    reordering in Postgres' JSONB return doesn't flip the hash.
+    """
+    payload = {
+        "brief": brief if isinstance(brief, (dict, list)) else json.loads(brief)
+            if isinstance(brief, str) else brief,
+        "model": model,
+        "model_overrides": model_overrides or {},
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
 # Core DAG generation
 # ---------------------------------------------------------------------------
 
@@ -310,9 +338,11 @@ async def generate_dag(
     # FOR UPDATE serializes concurrent /dag calls on the same job_id so the
     # status + node-count checks below are race-free with the INSERT block.
     # Lock is released on commit/rollback at the end of this transaction.
+    # §17.181: also fetch dag_input_hash (NULL on pre-§17.181 jobs) so the
+    # re-entry guard can tell idempotent retry from a brief-edit drift.
     result = await db.execute(
         text("""
-            SELECT j.status, j.refined_brief,
+            SELECT j.status, j.refined_brief, j.dag_input_hash,
                    (SELECT COUNT(*) FROM dag_nodes WHERE job_id = j.id) AS node_count
             FROM jobs j
             WHERE j.id = :id
@@ -325,7 +355,7 @@ async def generate_dag(
         await db.rollback()
         return {"error": f"Job {job_id} not found"}
 
-    status, brief, node_count = row
+    status, brief, stored_hash, node_count = row
     # H6: accept 'planning' OR 'running' — execute_all_nodes flips to 'running'
     # before calling generate_dag on auto-gen path.
     if status not in ("planning", "running"):
@@ -340,19 +370,64 @@ async def generate_dag(
         await db.rollback()
         return {"error": "Job has no refined_brief — run idea refinement first"}
 
-    if (node_count or 0) > 0:
-        logger.warning(
-            "idempotency_rejected: job=%s existing_nodes=%d", job_id, node_count
-        )
-        await db.rollback()
-        return {
-            "error": "DAG already exists for this job",
-            "job_id": job_id,
-            "node_count": node_count,
-            "http_status": 409,
-        }
-
     brief_data = brief if isinstance(brief, dict) else json.loads(brief)
+    current_hash = _compute_dag_input_hash(brief_data, model, model_overrides)
+
+    # §17.181: re-entry guard. Three cases when nodes already exist:
+    #   (a) stored_hash matches current_hash → idempotent retry, return 409.
+    #   (b) stored_hash differs (or is NULL on pre-§17.181 rows) AND some
+    #       existing node has already left 'pending' → execution underway,
+    #       refuse with an explicit drift message rather than blowing away
+    #       in-flight work. NULL hash treated as "unknown" → conservative 409.
+    #   (c) stored_hash differs AND all existing nodes are still 'pending' →
+    #       log + DELETE the stale nodes and fall through to fresh generation.
+    if (node_count or 0) > 0:
+        if stored_hash is not None and stored_hash == current_hash:
+            logger.warning(
+                "idempotency_rejected: job=%s existing_nodes=%d hash_match=1",
+                job_id, node_count,
+            )
+            await db.rollback()
+            return {
+                "error": "DAG already exists for this job",
+                "job_id": job_id,
+                "node_count": node_count,
+                "http_status": 409,
+            }
+
+        non_pending = (await db.execute(
+            text("""
+                SELECT COUNT(*) FROM dag_nodes
+                WHERE job_id = :j AND status <> 'pending'
+            """),
+            {"j": uid},
+        )).scalar_one()
+        if stored_hash is None or non_pending > 0:
+            logger.warning(
+                "idempotency_rejected: job=%s existing_nodes=%d "
+                "non_pending=%d stored_hash=%s drift=1",
+                job_id, node_count, non_pending,
+                "null" if stored_hash is None else "set",
+            )
+            await db.rollback()
+            return {
+                "error": (
+                    "DAG already exists for this job and cannot be recomputed "
+                    "safely (execution has started or hash is unknown)"
+                ),
+                "job_id": job_id,
+                "node_count": node_count,
+                "http_status": 409,
+            }
+
+        logger.warning(
+            "dag_input_drift: job=%s existing_nodes=%d — brief or overrides "
+            "changed since last generation; recomputing", job_id, node_count,
+        )
+        await db.execute(
+            text("DELETE FROM dag_nodes WHERE job_id = :j"),
+            {"j": uid},
+        )
 
     # 2-3. Call LLM (with W.3 validator-driven retry loop) and parse output.
     route_kwargs = (
@@ -445,10 +520,18 @@ async def generate_dag(
                 },
             )
 
-        # 8. Transition job to executing
+        # 8. Transition job to executing and persist the input hash so a
+        # re-entry with the same inputs is recognized as idempotent
+        # (§17.181). The hash is stored *after* successful node persist so a
+        # mid-flight failure doesn't leave a hash pointing at no DAG.
         await db.execute(
-            text("UPDATE jobs SET status = 'executing' WHERE id = :id"),
-            {"id": uid},
+            text("""
+                UPDATE jobs
+                SET status = 'executing',
+                    dag_input_hash = :h
+                WHERE id = :id
+            """),
+            {"id": uid, "h": current_hash},
         )
         await db.commit()
     except Exception as exc:

@@ -62,6 +62,10 @@ async def test_generate_dag_rejects_when_dag_already_exists(db_session, insert_j
 
     Pre-seeds a node directly rather than calling generate_dag twice (which
     would re-enter the FOR UPDATE lock on the same session within one test).
+
+    §17.181: the pre-seeded node has no matching ``jobs.dag_input_hash``
+    (NULL) and no execution started, so this exercises the "unknown hash —
+    refuse rather than blow away unprovenanced nodes" branch.
     """
     job_id = await insert_job(status="planning", refined_brief={
         "title": "Test", "description": "T", "goals": ["g"],
@@ -76,6 +80,140 @@ async def test_generate_dag_rejects_when_dag_already_exists(db_session, insert_j
     result = await generate_dag(job_id, db_session)
     assert result.get("http_status") == 409
     assert "already exists" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# §17.181 — dag_input_hash re-entry guard
+# ---------------------------------------------------------------------------
+
+async def test_generate_dag_persists_input_hash(db_session, insert_job):
+    """After a successful generation the jobs.dag_input_hash is non-null."""
+    job_id = await insert_job(status="planning", refined_brief={
+        "title": "Test", "description": "T", "goals": ["g"],
+    })
+    with patch("app.modules.dag_generator.model_router.generate",
+               new=AsyncMock(return_value=_FakeResp(json.dumps(_VALID_DAG)))):
+        result = await generate_dag(job_id, db_session)
+    assert result["status"] == "executing"
+
+    h = (await db_session.execute(
+        text("SELECT dag_input_hash FROM jobs WHERE id = :j"), {"j": job_id},
+    )).scalar_one()
+    assert h is not None and len(h) == 64  # SHA-256 hex
+
+
+async def test_generate_dag_same_inputs_returns_409_with_hash_match(
+    db_session, insert_job,
+):
+    """Second call with the same inputs is rejected as idempotent retry."""
+    brief = {"title": "Same", "description": "same", "goals": ["g"]}
+    job_id = await insert_job(status="planning", refined_brief=brief)
+
+    with patch("app.modules.dag_generator.model_router.generate",
+               new=AsyncMock(return_value=_FakeResp(json.dumps(_VALID_DAG)))):
+        first = await generate_dag(job_id, db_session)
+    assert first["status"] == "executing"
+
+    # Flip back to planning so the status guard doesn't shadow the hash guard.
+    await db_session.execute(
+        text("UPDATE jobs SET status = 'planning' WHERE id = :j"),
+        {"j": job_id},
+    )
+    await db_session.commit()
+
+    second = await generate_dag(job_id, db_session)
+    assert second.get("http_status") == 409
+    assert "already exists" in second["error"]
+    assert "execution has started" not in second["error"]
+
+
+async def test_generate_dag_input_drift_recomputes_when_no_execution_started(
+    db_session, insert_job,
+):
+    """If the brief mutates and all nodes are still 'pending', recompute."""
+    brief_v1 = {"title": "Original", "description": "v1", "goals": ["g"]}
+    job_id = await insert_job(status="planning", refined_brief=brief_v1)
+
+    with patch("app.modules.dag_generator.model_router.generate",
+               new=AsyncMock(return_value=_FakeResp(json.dumps(_VALID_DAG)))):
+        first = await generate_dag(job_id, db_session)
+    assert first["status"] == "executing"
+    first_node_ids = [str(r[0]) for r in (await db_session.execute(
+        text("SELECT id FROM dag_nodes WHERE job_id = :j"), {"j": job_id},
+    )).all()]
+
+    # Mutate the brief and reset status back to planning. All nodes are
+    # still 'pending' (no execution started) so drift should recompute.
+    await db_session.execute(
+        text("""
+            UPDATE jobs SET refined_brief = CAST(:b AS JSONB),
+                            status = 'planning'
+             WHERE id = :j
+        """),
+        {"j": job_id, "b": json.dumps({**brief_v1, "description": "v2-changed"})},
+    )
+    await db_session.commit()
+
+    # Use a distinct fake DAG so we can verify the old nodes were replaced.
+    new_dag = {**_VALID_DAG, "tasks": [
+        {**t, "name": t["name"] + " v2"} for t in _VALID_DAG["tasks"]
+    ]}
+    with patch("app.modules.dag_generator.model_router.generate",
+               new=AsyncMock(return_value=_FakeResp(json.dumps(new_dag)))):
+        second = await generate_dag(job_id, db_session)
+    assert second["status"] == "executing"
+
+    rows = (await db_session.execute(
+        text("SELECT id, title FROM dag_nodes WHERE job_id = :j ORDER BY execution_order"),
+        {"j": job_id},
+    )).all()
+    new_node_ids = [str(r[0]) for r in rows]
+    # All node UUIDs are fresh — the old ones were DELETEd before INSERT.
+    assert not (set(first_node_ids) & set(new_node_ids))
+    assert all("v2" in r[1] for r in rows)
+
+
+async def test_generate_dag_input_drift_rejected_when_execution_started(
+    db_session, insert_job,
+):
+    """Brief mutated but a node is already running → 409 (don't lose work)."""
+    brief = {"title": "Live", "description": "v1", "goals": ["g"]}
+    job_id = await insert_job(status="planning", refined_brief=brief)
+
+    with patch("app.modules.dag_generator.model_router.generate",
+               new=AsyncMock(return_value=_FakeResp(json.dumps(_VALID_DAG)))):
+        first = await generate_dag(job_id, db_session)
+    assert first["status"] == "executing"
+
+    # Simulate execution underway: one node moved to 'running'.
+    await db_session.execute(
+        text("""
+            UPDATE dag_nodes SET status = 'running'
+             WHERE job_id = :j AND node_key = 'T1'
+        """),
+        {"j": job_id},
+    )
+    # Mutate the brief and flip job back to planning so the status guard
+    # doesn't fire before the hash guard.
+    await db_session.execute(
+        text("""
+            UPDATE jobs SET refined_brief = CAST(:b AS JSONB),
+                            status = 'planning'
+             WHERE id = :j
+        """),
+        {"j": job_id, "b": json.dumps({**brief, "description": "drift"})},
+    )
+    await db_session.commit()
+
+    second = await generate_dag(job_id, db_session)
+    assert second.get("http_status") == 409
+    assert "execution has started" in second["error"]
+    # The running node must still be there — we didn't blow away work.
+    surviving = (await db_session.execute(
+        text("SELECT COUNT(*) FROM dag_nodes WHERE job_id = :j AND status = 'running'"),
+        {"j": job_id},
+    )).scalar_one()
+    assert surviving == 1
 
 
 async def test_generate_dag_rejects_wrong_status(db_session, insert_job):
