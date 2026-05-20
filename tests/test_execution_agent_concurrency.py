@@ -313,3 +313,184 @@ class TestExecutionConcurrencyCap:
 
         assert "queued" not in [e[0] for e in events]
         assert "pipeline_complete" in [e[0] for e in events]
+
+
+# ===========================================================================
+# §17.191 — cross-DAG invariant: the global semaphore caps concurrent
+# *node executions* across multiple jobs, not just within a single one.
+# ===========================================================================
+
+@pytest.mark.smoke
+class TestCrossJobConcurrencyInvariant:
+    """The audit (AUDIT.md 4.4) flagged that ``_execution_slot_sem`` lives
+    at the module level and gates across DAGs in the same process — a
+    property TestExecutionConcurrencyCap above does NOT directly verify
+    because every test there exercises one job at a time. A future
+    refactor that moves the cap to per-job semaphores would change
+    behavior without breaking any of those tests.
+
+    The invariant test below runs two concurrent ``execute_all_nodes``
+    calls (job-A + job-B), patches ``execute_next_node`` to atomically
+    increment a shared counter while it "executes", and asserts the
+    counter never exceeds ``settings.execution_global_concurrency``.
+    """
+
+    @staticmethod
+    def _build_per_job_patches(active_counter, exec_delay_s):
+        """Build mocks for an N-job parallel run.
+
+        Production helpers patched (all module-globals):
+
+          * ``async_session`` → returns a FRESH happy-path session context
+            on every call so two jobs' overlapping DB calls don't exhaust
+            a shared side_effect iterator.
+          * ``_get_job(db, job_id)`` → ``{"status": "executing", "id": job_id}``
+            for any id (job-A or job-B).
+          * ``_peek_next_node(job_id)`` → returns one node on the first call
+            per job_id, ``None`` on the second (loop termination). Uses an
+            internal per-job counter — independent state per job.
+          * ``execute_next_node`` → bumps the shared active counter, sleeps
+            ``exec_delay_s`` to force overlap, decrements. The counter
+            mutation is locked so two jobs can't race the max-observed
+            increment.
+
+        Returns a context-manager-shaped dict of patches.
+        """
+        active_lock = asyncio.Lock()
+        # Per-job call counter so the second call returns "complete" and the
+        # main loop in execute_all_nodes terminates. execute_next_node is
+        # ALWAYS called (not gated on peek's None), so the second call must
+        # return a terminal status — otherwise the loop runs forever.
+        exec_calls: dict[str, int] = {}
+
+        async def _counting_exec(job_id, *args, **kwargs):
+            n = exec_calls.get(job_id, 0)
+            exec_calls[job_id] = n + 1
+            async with active_lock:
+                active_counter["count"] += 1
+                active_counter["max_observed"] = max(
+                    active_counter["max_observed"], active_counter["count"],
+                )
+            await asyncio.sleep(exec_delay_s)
+            async with active_lock:
+                active_counter["count"] -= 1
+            if n == 0:
+                return {
+                    "status": "done", "node_key": "T1", "title": "T",
+                    "output": "out", "verified": True, "confidence": 0.9,
+                    "model_used": "qwen2.5:7b",
+                }
+            return {"status": "complete"}
+
+        peek_state: dict[str, int] = {}
+
+        async def _per_job_peek(job_id):
+            n = peek_state.get(job_id, 0)
+            peek_state[job_id] = n + 1
+            if n == 0:
+                return {"node_key": "T1", "title": "T", "tool": "LLM"}
+            return None
+
+        async def _stub_get_job(db, job_id):
+            return {"status": "executing", "id": job_id}
+
+        # Permissive session: every db.execute() returns a mock that satisfies
+        # all shape probes in execute_all_nodes (rowcount=1 for the atomic
+        # guard, scalar()=1 for the dag_count > 0 check). Used in place of
+        # _make_happy_path_session because that helper's side_effect
+        # iterator can't survive two concurrent jobs sharing the same
+        # async_session() patch — each new call would advance the iterator
+        # in unpredictable order. The permissive mock is shape-stable
+        # across any call count.
+        permissive_result = MagicMock()
+        permissive_result.rowcount = 1
+        permissive_result.scalar = MagicMock(return_value=1)
+        permissive_db = AsyncMock()
+        permissive_db.execute = AsyncMock(return_value=permissive_result)
+        permissive_db.commit = AsyncMock()
+        permissive_ctx = AsyncMock()
+        permissive_ctx.__aenter__ = AsyncMock(return_value=permissive_db)
+        permissive_ctx.__aexit__ = AsyncMock(return_value=False)
+        _session_factory = MagicMock(return_value=permissive_ctx)
+
+        return _counting_exec, _per_job_peek, _stub_get_job, _session_factory
+
+    async def test_cap_holds_across_two_concurrent_jobs(self, monkeypatch):
+        """cap=1 → two parallel ``execute_all_nodes`` runs serialize through
+        the global semaphore; max simultaneous active node executions is 1."""
+        monkeypatch.setattr(settings, "execution_global_concurrency", 1)
+        monkeypatch.setattr(settings, "execution_queue_timeout_seconds", 1800)
+        ea._reset_execution_slot_sem()
+
+        active = {"count": 0, "max_observed": 0}
+        exec_fn, peek_fn, get_job_fn, session_fn = self._build_per_job_patches(
+            active, exec_delay_s=0.02,
+        )
+
+        with patch("app.modules.execution_agent.async_session", session_fn), \
+             patch("app.modules.execution_agent._get_job", get_job_fn), \
+             patch("app.modules.execution_agent._peek_next_node", peek_fn), \
+             patch("app.modules.execution_agent.execute_next_node", exec_fn):
+            events_a, events_b = await asyncio.gather(
+                _collect_sse(ea.execute_all_nodes("job-A")),
+                _collect_sse(ea.execute_all_nodes("job-B")),
+            )
+
+        # Invariant (a): max concurrent node executions never exceeded the cap.
+        assert active["max_observed"] <= 1, (
+            f"Global semaphore violated — max_observed={active['max_observed']} "
+            f"> cap=1. Cross-DAG invariant broken; the cap probably moved "
+            "to per-job."
+        )
+        # Invariant (b): both jobs completed.
+        types_a = [e[0] for e in events_a]
+        types_b = [e[0] for e in events_b]
+        assert "pipeline_complete" in types_a, f"job-A didn't complete: {types_a}"
+        assert "pipeline_complete" in types_b, f"job-B didn't complete: {types_b}"
+        # At least one of the two should have observed a `queued` event —
+        # the second job MUST have queued behind the first under cap=1.
+        # If neither did, the cap isn't actually gating across calls.
+        any_queued = "queued" in types_a or "queued" in types_b
+        assert any_queued, (
+            "Neither job emitted 'queued' under cap=1 — the second job "
+            "should have queued behind the first. If both completed "
+            "without queueing, the semaphore probably isn't gating "
+            "concurrent calls."
+        )
+
+    async def test_cap_two_allows_both_jobs_in_parallel(self, monkeypatch):
+        """cap=2 → both jobs hold slots simultaneously; max_observed=2, no queue."""
+        monkeypatch.setattr(settings, "execution_global_concurrency", 2)
+        monkeypatch.setattr(settings, "execution_queue_timeout_seconds", 1800)
+        ea._reset_execution_slot_sem()
+
+        active = {"count": 0, "max_observed": 0}
+        exec_fn, peek_fn, get_job_fn, session_fn = self._build_per_job_patches(
+            active, exec_delay_s=0.05,  # longer than cap=1 test to ensure overlap
+        )
+
+        with patch("app.modules.execution_agent.async_session", session_fn), \
+             patch("app.modules.execution_agent._get_job", get_job_fn), \
+             patch("app.modules.execution_agent._peek_next_node", peek_fn), \
+             patch("app.modules.execution_agent.execute_next_node", exec_fn):
+            events_a, events_b = await asyncio.gather(
+                _collect_sse(ea.execute_all_nodes("job-A")),
+                _collect_sse(ea.execute_all_nodes("job-B")),
+            )
+
+        # Invariant: cap=2 allows both nodes to run simultaneously.
+        assert active["max_observed"] <= 2
+        # If max_observed is 1, the test isn't exercising the cross-job
+        # path — the 50 ms exec sleep is long enough for both to overlap.
+        assert active["max_observed"] == 2, (
+            f"Expected max_observed=2 under cap=2 (both jobs hold slots "
+            f"simultaneously), got {active['max_observed']}. The cross-job "
+            "parallel path may not be exercising the global cap."
+        )
+        types_a = [e[0] for e in events_a]
+        types_b = [e[0] for e in events_b]
+        assert "pipeline_complete" in types_a
+        assert "pipeline_complete" in types_b
+        # Neither should have queued — cap was 2 and only 2 jobs ran.
+        assert "queued" not in types_a
+        assert "queued" not in types_b

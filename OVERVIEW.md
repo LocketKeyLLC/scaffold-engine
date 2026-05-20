@@ -8509,6 +8509,41 @@ exit=2
 
 ---
 
+### §17.191 cross-DAG concurrency invariant test — closes AUDIT 4.4
+
+Closes **AUDIT.md item 4.4** (MEDIUM): pre-§17.191, ``tests/test_execution_agent_concurrency.py`` covered the global semaphore in single-job scenarios (acquire → release → cap fires when slot held) — but every test exercised one ``execute_all_nodes`` invocation at a time. The audit flagged that the CROSS-DAG invariant ("total active node count across all jobs ≤ ``settings.execution_global_concurrency``") was the property worth pinning, and a future refactor that moves the cap to per-job semaphores would change behavior without breaking any of the existing tests.
+
+**Fix.** New ``TestCrossJobConcurrencyInvariant`` class with two tests:
+
+| Test | Cap | Asserts |
+|---|---|---|
+| ``test_cap_holds_across_two_concurrent_jobs`` | 1 | ``max_observed ≤ 1`` (serialization); both jobs reach ``pipeline_complete``; at least one job emitted ``queued`` |
+| ``test_cap_two_allows_both_jobs_in_parallel`` | 2 | ``max_observed == 2`` (parallel allowed); both jobs complete; neither queued |
+
+Each test runs ``asyncio.gather(execute_all_nodes("job-A"), execute_all_nodes("job-B"))`` and uses a counter side-channel: ``execute_next_node`` is patched to atomically bump the shared ``active["count"]`` under a lock, sleep 20-50 ms to force temporal overlap, then decrement. ``active["max_observed"]`` is the high-water mark observed during the overlap window — that's the value the invariant asserts against.
+
+**Test infrastructure.** The two-job parallel path needs each ``async_session()`` call to return a self-contained mock that doesn't share iterator state across jobs — the existing ``_make_happy_path_session`` helper uses ``side_effect=[guard, dag_check, cleanup_status]`` which gets exhausted unpredictably when two jobs share it. The new ``_build_per_job_patches`` static helper builds a "permissive session" where every ``db.execute()`` returns a single shape-stable mock (``rowcount=1``, ``scalar() == 1``) — works regardless of call order. ``_peek_next_node`` and ``execute_next_node`` use per-job-id call counters so the first call per job returns a node / "done" status, the second returns ``None`` / "complete" — the loop terminates per job independently.
+
+**Why this test would catch a per-job-semaphore refactor.** If a future change replaced the module-level ``_execution_slot_sem`` with a per-job dict ``_slot_sems_by_job[job_id]``, each job would acquire its own semaphore (always available), ``max_observed`` would reach 2 even under cap=1, and the cap=1 test would fail with the explicit message "Global semaphore violated — max_observed=2 > cap=1. Cross-DAG invariant broken; the cap probably moved to per-job."
+
+**Files.**
+
+- ``tests/test_execution_agent_concurrency.py``:
+  - New ``TestCrossJobConcurrencyInvariant`` class with the two tests + the ``_build_per_job_patches`` helper.
+
+No production code touched — the audit gap was test coverage of an existing invariant, not a behavior change.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_execution_agent_concurrency.py --timeout=30
+8 passed in ~9 s   (6 pre-existing + 2 new for §17.191)
+```
+
+§17.189 + §17.190 + §17.191 close AUDIT.md cohort "Architecture (4.2 + 4.3 + 4.4)". Remaining open: small MEDIUM wins (1.3 + 2.7 + 2.8), UX (5.4 + 5.5), MEDIUM observability (3.3 + 3.5 + 3.6), all LOW items. AUDIT.md's HIGH-severity list is empty; remaining work is MEDIUM + LOW.
+
+---
+
 
 ## Phase 8 wrap — orchestration & memory caching hardening
 
