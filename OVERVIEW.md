@@ -8735,6 +8735,68 @@ $ make check-next-actions
 - Existing consumers that read the raw ``next_actions`` field (typed-response SDK callers) keep working unchanged.
 
 ---
+### §17.196 PATCH /config/log-level — runtime log-level override — closes AUDIT 5.5
+
+Closes **AUDIT.md item 5.5** (MEDIUM): pre-§17.196 the only knob for bumping log verbosity was a restart with ``LOG_LEVEL=DEBUG`` in env — which dropped whatever in-flight debugging context the operator was working on. The audit was specific:
+
+> Add a `PATCH /config/log-level` endpoint (gated by auth, idempotent) that mutates the root logger's level. Pair with a `/config/log-level/reset` to restore. Emit a structured event each time the level changes so the audit trail is intact.
+
+**Fix.** Three new endpoints under ``/config/log-level`` plus three helpers in ``app/logging_config.py``:
+
+| Endpoint | Purpose | Body |
+|---|---|---|
+| ``GET /config/log-level`` | Inspect current root level + boot snapshot | — |
+| ``PATCH /config/log-level`` | Override the root level at runtime | ``{"level": "DEBUG"}`` (any of DEBUG/INFO/WARNING/ERROR/CRITICAL, case-insensitive) |
+| ``POST /config/log-level/reset`` | Restore the root level to the boot-time value | — |
+
+Response shape (all three endpoints): ``{level, level_int, boot_level, boot_level_int, is_overridden}``. ``is_overridden`` is True when the current level differs from the boot snapshot — convenient for an operator dashboard that wants to flag "this orchestrator is running under a runtime override".
+
+**Boot snapshot semantics.** ``app/logging_config.py`` captures the root logger's level on first ``get_current_level`` / ``set_runtime_level`` call into module-level ``_BOOT_LEVEL_INT`` / ``_BOOT_LEVEL_NAME``. The snapshot is the level the orchestrator booted with, NOT whatever was in ``settings.log_level`` at the moment of reset — so the "reset" flow restores the actual prior state, not a value an operator might have changed since.
+
+**Audit trail.** ``set_runtime_level`` (also called by ``reset_runtime_level``) emits a stable WARNING-level structured event:
+
+```
+event="log_level_changed" from=INFO to=DEBUG reason=runtime_override
+```
+
+The ``event="<name>"`` format matches the project's existing structured-log convention (§17.190 SSE events use the same shape) so the grep recipe is uniform. Every override fires the line, including no-op overrides where ``from == to`` — operator-visible observability of every attempt.
+
+**Why ValueError for unknown level names rather than fall-back to INFO.** The boot-time ``_resolve_level`` (in the same module) fails OPEN to INFO on garbage input because boot-time config files are operator-error-prone and a wedged log subsystem is worse than a too-verbose one. Runtime endpoints are different: an explicit operator PATCH with a typo should surface the typo, not silently set INFO. The new ``set_runtime_level`` raises ``ValueError`` on unknown names; the PATCH endpoint translates to ``HTTPException(400)`` with the same message.
+
+**Files.**
+
+- ``app/logging_config.py``:
+  - New module-level ``_BOOT_LEVEL_INT`` / ``_BOOT_LEVEL_NAME`` + ``_snapshot_boot_level_if_needed()`` helper.
+  - New ``get_current_level()`` / ``set_runtime_level(level)`` / ``reset_runtime_level()`` functions (~75 lines total).
+- ``app/main.py``:
+  - New ``BaseModel`` import + ``_LogLevelPatchIn`` request body schema.
+  - Three endpoints under ``/config/log-level`` immediately after the existing ``GET /config`` (logical grouping).
+  - All three inherit the global ``require_api_key`` auth dependency — no operator without the key can mutate verbosity.
+- ``tests/test_runtime_log_level.py`` — new file, 19 tests in 4 classes covering set/get/reset helpers, audit log emission on every call (incl. no-op idempotent calls), and the three endpoints (PATCH 200/400/422, GET, POST reset, PATCH+GET round-trip with is_overridden=True, case-insensitive over 3 variants).
+
+The autouse fixture snapshots both the root logger's level AND the module-level boot snapshot at fixture-setup and restores them at teardown so tests don't leak verbosity changes into each other.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_runtime_log_level.py --timeout=30
+19 passed in ~5 s
+
+$ docker exec scaffold-orchestrator pytest tests/test_main.py tests/test_health_cleanup.py --timeout=30
+36 passed in ~7 s   (no regression in /config or /health adjacent suites)
+```
+
+**What this does NOT change.**
+
+- ``setup_logging`` at boot is unchanged — ``settings.log_level`` still drives the initial level. Runtime endpoints are additive.
+- Per-module logger levels are NOT affected — only the root level. A caller that explicitly set ``logging.getLogger("scaffold.rag").setLevel(DEBUG)`` keeps its level after a root-level reset.
+- The auth posture is inherited — no public endpoint, no separate gate. Operators with an API key can already write to most surfaces; granting them read+mutate on the log level adds no privilege.
+
+§17.195 + §17.196 close AUDIT.md cohort "MEDIUM UX (5.4 + 5.5)". Remaining open: small MEDIUM wins (1.3 + 2.7 + 2.8), all LOW items.
+
+---
+
+
 
 ## Phase 8 wrap — orchestration & memory caching hardening
 

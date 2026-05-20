@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from pymilvus import connections as milvus_connections, utility, Collection
 from sqlalchemy import text
 from app.model_router import close_client
@@ -893,6 +894,69 @@ async def get_config():
     }
 
 
+# ---------------------------------------------------------------------------
+# §17.196 — Runtime log-level override (AUDIT 5.5)
+# ---------------------------------------------------------------------------
+#
+# Pre-§17.196 the only way to bump verbosity was a restart with
+# ``LOG_LEVEL=DEBUG`` — which dropped whatever in-flight debugging
+# context the operator was working on. These three endpoints (GET to
+# inspect, PATCH to override, POST to reset) let an authenticated
+# operator change the root logger level live, without losing state.
+# Auth-gated (inherited from the global require_api_key dependency).
+# Audit trail: ``set_runtime_level`` emits a stable ``event="log_level_
+# changed"`` line at WARNING so every change is grep-able in journald.
+
+class _LogLevelPatchIn(BaseModel):
+    """Request body for ``PATCH /config/log-level``.
+
+    Accepted level names: ``DEBUG`` / ``INFO`` / ``WARNING`` / ``ERROR``
+    / ``CRITICAL`` (case-insensitive). Unknown names return 400 — explicit
+    operator action should fail loud (different from boot-time config
+    which fails open to INFO).
+    """
+    level: str
+
+
+@app.get("/config/log-level", tags=["ops"])
+async def get_log_level():
+    """Return the root logger's current level + the boot-time snapshot.
+
+    Shape: ``{level, level_int, boot_level, boot_level_int, is_overridden}``.
+    ``is_overridden`` is True when the current level differs from the boot
+    snapshot — convenient for an operator dashboard that wants to flag
+    "this orchestrator is running under a runtime override".
+    """
+    from app.logging_config import get_current_level
+    return get_current_level()
+
+
+@app.patch("/config/log-level", tags=["ops"])
+async def patch_log_level(body: _LogLevelPatchIn):
+    """Override the root logger's level at runtime — survives until
+    process restart OR ``POST /config/log-level/reset``.
+
+    Idempotent: setting the level to its current value is a no-op
+    (the audit-trail log line still fires so the no-op is observable).
+    Unknown level names return 400.
+    """
+    from app.logging_config import set_runtime_level
+    try:
+        return set_runtime_level(body.level)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/config/log-level/reset", tags=["ops"])
+async def reset_log_level():
+    """Restore the root logger to the level the orchestrator booted with.
+
+    Pair with ``PATCH /config/log-level`` — the audit's recommended flow:
+    "I bumped to DEBUG for 5 minutes, now restore" without operator
+    memory of what the boot value was.
+    """
+    from app.logging_config import reset_runtime_level
+    return reset_runtime_level()
 
 
 
