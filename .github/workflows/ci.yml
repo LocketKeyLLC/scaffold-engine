@@ -97,7 +97,14 @@ jobs:
       - name: Run ci-smoke tests
         env:
           SCAFFOLD_API_KEY: "test-key-for-ci"
-          PYTHONPATH: "."
+          # §17.206 — ``sdk`` added to PYTHONPATH so the SDK's
+          # ``scaffold_client`` package resolves. Pre-§17.206 only ``.``
+          # was set, which made ``from scaffold_client.next_actions
+          # import …`` (the §17.195 formatter test) fail at collection
+          # with ``ModuleNotFoundError: No module named 'scaffold_client'``.
+          # In the dev image the SDK is on sys.path via editable install;
+          # cloud-CI doesn't run that install step.
+          PYTHONPATH: ".:sdk"
           # §17.177 — also set explicitly here (Makefile sets it too) so
           # an operator reading ci.yml sees why the reranker prewarm is
           # off in CI without having to grep the Makefile. The prewarm
