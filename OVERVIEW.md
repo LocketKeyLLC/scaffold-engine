@@ -8610,6 +8610,62 @@ Each alert has the PromQL expression, the recommended ``for:`` window, severity 
 - ``README.md`` — one-line pointer update: the broken "See USER_GUIDE for the alert-rule starter pack" line now points at the new doc and lists what metrics families are actually emitted.
 
 **Why a separate doc rather than a section in USER_GUIDE.md or README.md.** Three reasons. (1) The PromQL rules + scrape stanza are 50+ lines of monospace YAML — they would dominate any section they were inlined into. (2) The doc is meant to be linked from external dashboards / runbooks; a stable URL path is easier than "scroll to section #observability in README.md". (3) USER_GUIDE.md is operator-onboarding-shaped (what to type, what to expect); this doc is reference-shaped (what's emitted, how to consume it) — different reading modes.
+### §17.194 calibration state on /health + stable critical log line — closes AUDIT 3.6
+
+Closes **AUDIT.md item 3.6** (MEDIUM): pre-§17.194 the quarterly calibration cron's outcome was visible only via the ``system_alerts`` table (``SELECT * FROM system_alerts WHERE kind LIKE 'calibration.%'``) or by grepping journald. The audit asked for two specific gaps to close:
+
+> Make calibration outcomes visible in /health (a `calibration: {last_check_at, status}` block) and ensure a critical-level log line on drift uses a stable event name for grepping.
+
+**Fix part 1 — ``calibration`` block on /health.** New ``_check_calibration()`` helper in ``app/main.py`` runs as an 8th concurrent dependency check alongside the existing pg / ollama / milvus / redis / 3-sim-sidecar probes. Queries ``system_alerts`` for the most recent ``calibration.*`` alert and maps the kind to a status:
+
+| Most-recent kind | ``status`` field | Operator meaning |
+|---|---|---|
+| ``calibration.ok`` | ``ok`` | Cron ran and succeeded — last_check_at is the success timestamp |
+| ``calibration.failed`` | ``failed`` | Cron ran but the calibration job exited non-zero |
+| ``calibration.no_fire`` | ``missed`` | Watchdog detected a missed quarterly slot (cron disabled, laptop asleep, anacron didn't fill in) |
+| ``calibration.started`` (no follow-up) | ``in_progress`` | Cron started a run but hasn't reported done/failed yet |
+| any unmapped ``calibration.*`` kind | ``unknown`` (last_kind exposed for triage) | Future event we haven't seen yet — surfaces the raw kind so an operator can grep journald |
+| no calibration alerts at all | ``unknown``, ``last_check_at=None`` | Fresh install, OR DB probe failed (fail-safe — never crashes /health) |
+
+Block shape: ``{"status": <one of above>, "last_check_at": <ISO 8601 or null>, "last_kind": <"calibration.foo" or null>}``. Read-only and advisory — does NOT affect the top-level ``status`` field (a missed calibration is an operational concern, not a service-degradation signal — mirrors the §17.171 sim-sidecar policy).
+
+**Fix part 2 — stable critical-level log line on drift.** The watchdog's ``check()`` previously emitted the no_fire alert to the DB but did NOT log at any level — operators tailing ``docker logs scaffold-orchestrator`` saw no drift signal. §17.194 adds:
+
+```python
+logger.critical(
+    'event="calibration.no_fire" expected_fire_date=%s grace_minutes=%d msg=%s',
+    now_utc.date().isoformat(),
+    settings.calibration_grace_minutes,
+    "Quarterly calibration cron did not fire and grace elapsed",
+)
+```
+
+The ``event="<kind>"`` format matches the project's existing structured-log convention so the grep recipe (``docker logs scaffold-orchestrator | grep 'event="calibration.no_fire"'``) is the same as for any other event-name probe.
+
+**Files.**
+
+- ``app/main.py``:
+  - New ``_check_calibration()`` closure inside ``health()`` (~30 lines, doc + queries + status mapping + fail-safe branch).
+  - ``asyncio.gather()`` now collects 8 probes instead of 7 — added ``_check_calibration()`` alongside the others.
+  - Defensive ``isinstance(calibration, BaseException)`` unpack mirrors the §17.171 sim-sidecar pattern.
+- ``app/observability/calibration_watchdog.py``:
+  - ``check()`` now emits the new ``logger.critical`` event-name line right before calling ``_alerts.emit(kind="calibration.no_fire", …)``.
+- ``tests/test_calibration_watchdog.py`` — new ``TestWatchdogCriticalLogLine`` class, 2 tests (critical line fires on no_fire branch; no critical line on the happy "saw calibration today" branch).
+- ``tests/test_health_cleanup.py`` — new ``TestHealthCalibrationBlock`` class, 9 tests + ``_call_health_with_calibration`` helper. Covers all 5 status mappings (ok / failed / missed / in_progress / unknown), the fail-safe branch (DB probe raises), the policy guard (missed doesn't degrade overall /health), and the future-kind fallback (unmapped kind → status=unknown with raw kind preserved for triage).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_health_cleanup.py tests/test_calibration_watchdog.py \
+    --timeout=30
+34 passed in ~7 s   (25 pre-existing + 9 new for §17.194)
+```
+
+§17.192 + §17.193 + §17.194 close AUDIT.md cohort "MEDIUM observability (3.3 + 3.5 + 3.6)". Remaining open: small MEDIUM wins (1.3 + 2.7 + 2.8), UX (5.4 + 5.5), all LOW items.
+
+---
+
 
 ## Phase 8 wrap — orchestration & memory caching hardening
 

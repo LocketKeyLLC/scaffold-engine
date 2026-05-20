@@ -85,6 +85,19 @@ async def check(now_utc: datetime | None = None) -> dict[str, Any]:
             saw = await _saw_calibration_today(db, now_utc.date())
             if saw:
                 return {"checked": True, "fired_alert": False, "reason": "saw_calibration_today"}
+            # §17.194 — stable event-name log line at CRITICAL level so an
+            # operator grepping journald sees the drift without needing to
+            # query the alerts table. The alert itself (below) is the
+            # operator-facing surface; this log line is the
+            # forwarder/audit-trail surface. Pattern: `event="<kind>"` so
+            # the grep is the same as any other structured event line.
+            logger.critical(
+                'event="calibration.no_fire" expected_fire_date=%s '
+                'grace_minutes=%d msg=%s',
+                now_utc.date().isoformat(),
+                settings.calibration_grace_minutes,
+                "Quarterly calibration cron did not fire and grace elapsed",
+            )
             await _alerts.emit(
                 kind="calibration.no_fire",
                 severity="critical",

@@ -677,9 +677,62 @@ async def health():
     # these tasks; ``return_exceptions=True`` is left in only as
     # belt-and-suspenders for BaseException-derived cases (which we'd
     # actually want to propagate, not absorb).
-    pg, ollama, milvus, redis_pair, ngspice, verilator, symbiyosys = await asyncio.gather(
+    async def _check_calibration():
+        """§17.194 — surface quarterly-calibration cron outcomes on /health.
+
+        Pre-§17.194 calibration state was visible only via the
+        ``system_alerts`` table (or via grepping journald for
+        ``calibration.*`` events). The audit (AUDIT.md 3.6) flagged this
+        as an observability gap — operators reading /health for "is
+        anything broken" couldn't see that the quarterly drift-check
+        hadn't run in 6 months.
+
+        Status mapping:
+          * ``ok``           — most recent ``calibration.*`` alert is
+                                ``calibration.ok``
+          * ``failed``       — most recent is ``calibration.failed``
+          * ``missed``       — most recent is ``calibration.no_fire``
+                                (watchdog detected a missed quarterly slot)
+          * ``in_progress``  — most recent is ``calibration.started`` with
+                                no follow-up yet
+          * ``unknown``      — no calibration alerts on record, or DB probe
+                                failed. Fail-safe: never crashes /health.
+        """
+        try:
+            async with async_session() as db:
+                row = await db.execute(
+                    text(
+                        "SELECT kind, created_at FROM system_alerts "
+                        "WHERE kind LIKE 'calibration.%' "
+                        "ORDER BY created_at DESC LIMIT 1"
+                    ),
+                )
+                rec = row.first()
+            if rec is None:
+                return {"status": "unknown", "last_check_at": None, "last_kind": None}
+            kind = rec[0] or ""
+            created = rec[1]
+            kind_to_status = {
+                "calibration.ok": "ok",
+                "calibration.failed": "failed",
+                "calibration.no_fire": "missed",
+                "calibration.started": "in_progress",
+            }
+            status = kind_to_status.get(kind, "unknown")
+            return {
+                "status": status,
+                "last_check_at": created.isoformat() if created else None,
+                "last_kind": kind,
+            }
+        except Exception as exc:
+            # Fail-safe: never break /health on calibration-probe issues.
+            logger.debug("health_calibration_probe_failed: %s", exc)
+            return {"status": "unknown", "last_check_at": None, "last_kind": None}
+
+    pg, ollama, milvus, redis_pair, ngspice, verilator, symbiyosys, calibration = await asyncio.gather(
         _check_pg(), _check_ollama(), _check_milvus(), _check_redis(),
         _check_ngspice(), _check_verilator(), _check_symbiyosys(),
+        _check_calibration(),
         return_exceptions=True,
     )
     # §17.171 — defensive unpack. If _check_redis raises a BaseException
@@ -703,6 +756,10 @@ async def health():
         verilator = {"status": "down", "latency_ms": 0}
     if isinstance(symbiyosys, BaseException):
         symbiyosys = {"status": "down", "latency_ms": 0}
+    # §17.194 — calibration probe; same fail-safe pattern as the sidecars.
+    if isinstance(calibration, BaseException):
+        logger.warning("health_calibration_check_raised: %s", calibration)
+        calibration = {"status": "unknown", "last_check_at": None, "last_kind": None}
     reranker = _check_reranker_state(getattr(app, "state", None))
     checks = {
         "postgresql": pg, "ollama": ollama, "milvus": milvus,
@@ -719,6 +776,10 @@ async def health():
         "ngspice": ngspice,
         "verilator": verilator,
         "symbiyosys": symbiyosys,
+        # §17.194 — quarterly calibration cron state. Read-only; advisory.
+        # Does NOT affect top-level `status` (a missed calibration window
+        # is an operational concern, not a service-degradation signal).
+        "calibration": calibration,
     }
     pg_up = pg["status"] == "up"
     ollama_up = ollama["status"] == "up"

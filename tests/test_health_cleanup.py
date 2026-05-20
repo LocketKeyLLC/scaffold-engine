@@ -369,3 +369,182 @@ class TestHealthDegradedStates:
     def test_unhealthy_when_ollama_down(self):
         result = _call_health(ollama_up=False)
         assert result["status"] == "unhealthy"
+
+
+# ---------------------------------------------------------------------------
+# §17.194 — calibration block surfaced on /health
+# ---------------------------------------------------------------------------
+
+def _call_health_with_calibration(*, last_row=None, db_raises=False):
+    """Variant of _call_health that lets the test stub the calibration probe.
+
+    ``last_row`` is the (kind, created_at) tuple returned by the
+    SELECT ... FROM system_alerts query. None = no rows = unknown status.
+    ``db_raises`` simulates a DB-probe failure → falls into the unknown
+    fail-safe branch.
+    """
+    from datetime import datetime, timezone
+    from contextlib import asynccontextmanager
+
+    mock_conn = AsyncMock()
+    mock_conn.execute = AsyncMock()
+    mock_connect_cm = AsyncMock()
+    mock_connect_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_connect_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value = mock_connect_cm
+
+    mock_ollama_resp = MagicMock()
+    mock_ollama_resp.raise_for_status = MagicMock()
+    mock_ollama_resp.json.return_value = {"models": [{"name": "qwen3:4b"}]}
+    mock_ollama_client = MagicMock()
+    mock_ollama_client.get = AsyncMock(return_value=mock_ollama_resp)
+
+    mock_utility = MagicMock()
+    mock_collection_cls = MagicMock()
+    mock_utility.list_collections.return_value = ["toon_v2"]
+    mock_col_instance = MagicMock()
+    mock_col_instance.num_entities = 8
+    mock_collection_cls.return_value = mock_col_instance
+
+    mock_cache = MagicMock()
+    mock_cache.stats = {"hits": 5, "misses": 2}
+    mock_redis_conn = AsyncMock()
+    mock_redis_conn.ping = AsyncMock()
+    mock_redis_conn.dbsize = AsyncMock(return_value=10)
+    mock_cache._get_redis = AsyncMock(return_value=mock_redis_conn)
+
+    fake_state = SimpleNamespace(
+        reranker_prewarmed_at="2026-05-08T00:00:00+00:00",
+        reranker_prewarm_elapsed_s=12.5,
+        reranker_prewarm_error=None,
+        reranker_prewarm_skipped=False,
+    )
+
+    # Calibration probe: replace async_session with a CM whose db.execute
+    # returns last_row from .first() or raises if db_raises.
+    cal_db = AsyncMock()
+    cal_result = MagicMock()
+    cal_result.first.return_value = last_row
+    if db_raises:
+        cal_db.execute = AsyncMock(side_effect=RuntimeError("simulated DB down"))
+    else:
+        cal_db.execute = AsyncMock(return_value=cal_result)
+
+    @asynccontextmanager
+    async def fake_session():
+        yield cal_db
+
+    async def do_call():
+        with patch("app.main.engine", mock_engine), \
+             patch(
+                 "app.utils.http_clients.get_ollama_client",
+                 return_value=mock_ollama_client,
+             ), \
+             patch("app.main.utility", mock_utility), \
+             patch("app.main.Collection", mock_collection_cls), \
+             patch(
+                 "app.utils.embedding_cache.get_cache",
+                 return_value=mock_cache,
+             ), \
+             patch("app.main.async_session", fake_session):
+            from app.main import app, health
+            old_state = getattr(app, "state", None)
+            app.state = fake_state
+            try:
+                return await health()
+            finally:
+                if old_state is not None:
+                    app.state = old_state
+                else:
+                    delattr(app, "state")
+
+    return _run(do_call())
+
+
+@pytest.mark.smoke
+class TestHealthCalibrationBlock:
+    """§17.194 — calibration: {status, last_check_at, last_kind} block on /health.
+
+    Pre-§17.194 calibration cron health was visible only via the alerts
+    table or by grepping journald. The block surfaces it for ``make
+    doctor`` / dashboards / OWUI without an extra query.
+    """
+
+    def test_calibration_block_present_in_checks(self):
+        result = _call_health_with_calibration(last_row=None)
+        assert "calibration" in result["checks"]
+
+    def test_unknown_when_no_calibration_alerts(self):
+        result = _call_health_with_calibration(last_row=None)
+        cal = result["checks"]["calibration"]
+        assert cal["status"] == "unknown"
+        assert cal["last_check_at"] is None
+        assert cal["last_kind"] is None
+
+    def test_ok_status_for_calibration_ok_kind(self):
+        from datetime import datetime, timezone
+        ts = datetime(2026, 4, 1, 8, 5, tzinfo=timezone.utc)
+        result = _call_health_with_calibration(last_row=("calibration.ok", ts))
+        cal = result["checks"]["calibration"]
+        assert cal["status"] == "ok"
+        assert cal["last_kind"] == "calibration.ok"
+        assert cal["last_check_at"] == ts.isoformat()
+
+    def test_failed_status_for_calibration_failed_kind(self):
+        from datetime import datetime, timezone
+        ts = datetime(2026, 4, 1, 8, 5, tzinfo=timezone.utc)
+        result = _call_health_with_calibration(last_row=("calibration.failed", ts))
+        cal = result["checks"]["calibration"]
+        assert cal["status"] == "failed"
+        assert cal["last_kind"] == "calibration.failed"
+
+    def test_missed_status_for_calibration_no_fire_kind(self):
+        from datetime import datetime, timezone
+        ts = datetime(2026, 4, 1, 9, 0, tzinfo=timezone.utc)
+        result = _call_health_with_calibration(last_row=("calibration.no_fire", ts))
+        cal = result["checks"]["calibration"]
+        assert cal["status"] == "missed"
+        assert cal["last_kind"] == "calibration.no_fire"
+
+    def test_in_progress_status_for_calibration_started_kind(self):
+        from datetime import datetime, timezone
+        ts = datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc)
+        result = _call_health_with_calibration(last_row=("calibration.started", ts))
+        cal = result["checks"]["calibration"]
+        assert cal["status"] == "in_progress"
+
+    def test_unknown_when_db_probe_fails(self):
+        """Fail-safe: a DB-probe exception must not break /health — falls
+        through to status=unknown, no exception propagates."""
+        result = _call_health_with_calibration(db_raises=True)
+        cal = result["checks"]["calibration"]
+        assert cal["status"] == "unknown"
+        # /health itself still returns successfully (top-level shape OK).
+        assert "checks" in result and "status" in result
+
+    def test_calibration_missed_does_not_degrade_overall_status(self):
+        """Policy guard: 'missed' is an operational concern, not a service
+        degradation. Top-level /health must stay 'healthy' (mirroring
+        §17.171's sim sidecar policy)."""
+        from datetime import datetime, timezone
+        result = _call_health_with_calibration(
+            last_row=("calibration.no_fire",
+                      datetime(2026, 4, 1, 9, 0, tzinfo=timezone.utc)),
+        )
+        assert result["status"] == "healthy"
+        assert result["checks"]["calibration"]["status"] == "missed"
+
+    def test_unknown_kind_falls_back_to_unknown_status(self):
+        """A future calibration.* kind not in the mapping must not crash —
+        falls through to status='unknown' with the raw kind exposed for
+        operator triage."""
+        from datetime import datetime, timezone
+        result = _call_health_with_calibration(
+            last_row=("calibration.future_event_we_havent_seen_yet",
+                      datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc)),
+        )
+        cal = result["checks"]["calibration"]
+        assert cal["status"] == "unknown"
+        # The raw kind is still surfaced so the operator can grep journald.
+        assert cal["last_kind"] == "calibration.future_event_we_havent_seen_yet"

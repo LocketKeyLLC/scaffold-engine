@@ -122,3 +122,91 @@ class TestWatchdogFire:
         assert result["checked"] is True
         assert result["fired_alert"] is False
         assert result["reason"] == "saw_calibration_today"
+
+
+# ---------------------------------------------------------------------------
+# §17.194 — stable critical log line on drift emission
+# ---------------------------------------------------------------------------
+
+@pytest.mark.smoke
+class TestWatchdogCriticalLogLine:
+    """The audit (AUDIT.md 3.6) asked for "a critical-level log line on
+    drift uses a stable event name for grepping." Pre-§17.194 the
+    no_fire path only emitted the alert to the DB — operators tailing
+    journald saw nothing at CRITICAL level. The new logger.critical
+    line uses ``event="calibration.no_fire"`` as the stable grep token."""
+
+    async def test_critical_log_emitted_on_no_fire(self, monkeypatch, caplog):
+        import logging
+        monkeypatch.setattr(
+            "app.observability.calibration_watchdog.settings.calibration_watchdog_enabled",
+            True, raising=False,
+        )
+        monkeypatch.setattr(
+            "app.observability.calibration_watchdog.settings.calibration_grace_minutes",
+            60, raising=False,
+        )
+
+        db = _watchdog_db(saw_today=False)
+
+        class _Ctx:
+            async def __aenter__(self_): return db
+            async def __aexit__(self_, *a): return False
+
+        with patch(
+            "app.observability.calibration_watchdog.async_session",
+            return_value=_Ctx(),
+        ):
+            with caplog.at_level(logging.CRITICAL, logger="scaffold.calibration_watchdog"):
+                now = datetime(2026, 7, 1, 9, 30, tzinfo=timezone.utc)
+                await _watchdog.check(now_utc=now)
+
+        # The stable event-name grep token must appear at CRITICAL.
+        critical_records = [
+            r for r in caplog.records
+            if r.levelno == logging.CRITICAL
+        ]
+        assert critical_records, "expected at least one CRITICAL log record"
+        joined = " ".join(r.message for r in critical_records)
+        assert 'event="calibration.no_fire"' in joined, (
+            f"expected stable event name in critical log; got: {joined}"
+        )
+        # The date and grace minutes should be on the same line for
+        # operator triage without needing to read the DB.
+        assert "2026-07-01" in joined
+        assert "grace_minutes=60" in joined
+
+    async def test_no_critical_log_when_calibration_already_seen(self, monkeypatch, caplog):
+        """Sanity: the critical line fires ONLY on the no_fire branch — a
+        normal "saw calibration today" path emits no CRITICAL."""
+        import logging
+        monkeypatch.setattr(
+            "app.observability.calibration_watchdog.settings.calibration_watchdog_enabled",
+            True, raising=False,
+        )
+        monkeypatch.setattr(
+            "app.observability.calibration_watchdog.settings.calibration_grace_minutes",
+            60, raising=False,
+        )
+
+        db = _watchdog_db(saw_today=True)
+
+        class _Ctx:
+            async def __aenter__(self_): return db
+            async def __aexit__(self_, *a): return False
+
+        with patch(
+            "app.observability.calibration_watchdog.async_session",
+            return_value=_Ctx(),
+        ):
+            with caplog.at_level(logging.CRITICAL, logger="scaffold.calibration_watchdog"):
+                now = datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc)
+                await _watchdog.check(now_utc=now)
+
+        critical_records = [
+            r for r in caplog.records
+            if r.levelno == logging.CRITICAL
+        ]
+        assert critical_records == [], (
+            f"unexpected CRITICAL records on happy path: {[r.message for r in critical_records]}"
+        )
