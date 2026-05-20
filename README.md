@@ -68,10 +68,12 @@ Now open `.env` in your editor and set the four **required** values at the top �
 ### 3. Pull the local models
 
 ```bash
-ollama pull qwen3:4b qwen2.5:7b qwen2.5-coder:7b qwen3-embedding:8b qwen3.5:latest
+ollama pull qwen3:4b qwen2.5:7b qwen2.5-coder:7b nomic-embed-text qwen3.5:latest
 ```
 
-This downloads the five default models. Each is 1–8 GB; on a typical home connection plan for ~10 minutes total. Ollama caches them in `~/.ollama/models`.
+This downloads the five default local models. Each is 1–8 GB except `nomic-embed-text` (~270 MB); on a typical home connection plan for ~10 minutes total. Ollama caches them in `~/.ollama/models`.
+
+> **Embedder note:** the embedder is `nomic-embed-text` (137M params, 768-dim native, MRL-truncated to 512 to match Milvus). Earlier docs and pre-§17.81 deploys referenced `qwen3-embedding:8b`; that model wedges deterministically on Ollama 0.17.5 + this host's `--ollama-engine` path (OVERVIEW §17.81/82) and is no longer used. If you pulled it under prior instructions you can safely `ollama rm qwen3-embedding:8b`.
 
 > **What can go wrong:**
 > - "model not found" → Ollama isn't running. Start it: `ollama serve` (foreground) or check the systemd unit on Linux.
@@ -212,20 +214,31 @@ scaffold-engine/
 ├── sdk/             Python client (scaffold-engine-client). Sync + async.
 ├── cli/             Terminal client (scaffold-engine-cli). Wraps the SDK.
 ├── pipelines/       5 Open WebUI pipelines. Slash-command surface.
-├── db/              init.sql + 24 forward-only migrations.
+├── db/              init.sql + forward-only migrations under db/migrations/.
+├── docker/          Dockerfiles for the three simulation sidecars.
 ├── scripts/         bootstrap, doctor, init, sync-valves, reindex, …
-├── tests/           ~930 tests covering orchestrator + SDK + CLI.
+├── tests/           pytest suite covering orchestrator + SDK + CLI.
 ├── docker-compose.yml      production runtime (no tests, no Makefile in image)
 ├── docker-compose.dev.yml  dev override (mounts tests, Makefile, docs)
 ├── Dockerfile              multi-stage: builder → runtime → dev
-└── docs/openapi.json       v1.0.0 API contract (machine-readable)
+└── docs/openapi.json       v1.1.0 API contract (machine-readable)
 ```
+
+---
+
+## Optional surfaces
+
+The default `docker compose up -d` brings up everything below — there's no opt-in step beyond a healthy stack. Listed here so you know what you have:
+
+- **Prometheus `/metrics`** (no auth). Set `METRICS_ENABLED=true` in `.env` (default on). The orchestrator emits counters/gauges for job execution latency, node retry counts, RAG cache hit rates, error counts by type. Sample scrape: `curl http://localhost:8000/metrics`. See USER_GUIDE for the alert-rule starter pack.
+- **Simulation sidecars.** Three FastAPI services at `127.0.0.1:8001-8003` for hardware-design tasks: `scaffold-ngspice` (analog SPICE), `scaffold-verilator` (digital SystemVerilog), `scaffold-symbiyosys` (formal verification). The orchestrator invokes them via the `ai-network` bridge; they isolate untrusted simulator input from the orchestrator's process tree. Each has its own `/health`; the orchestrator's `/health` aggregates them. If you don't run hardware-design workflows you can comment out the three `scaffold-*` services in `docker-compose.yml` without losing other functionality.
+- **Native web UI.** `http://localhost:8000/web/jobs` is a server-rendered HTML browser for jobs, ideate/confirm forms, and live SSE-streamed execution progress. Auth-bypassed on the loopback bind, since `localhost:8000` is the operator's box.
 
 ---
 
 ## Status
 
-Active solo development. v1.0.0 tagged 2026-05-07. The audit-flagged work queue (10 items) is closed in code; see OVERVIEW §16. Tests passing: orchestrator ~932, SDK 88, CLI 38. The 14 pre-existing test failures documented in OVERVIEW §14.1 are mock-side drift, not regressions.
+Active solo development. v1.0.0 tagged 2026-05-07; API contract pinned at v1.1.0 (`docs/openapi.json`). The audit-flagged work queue (10 items) is closed in code; see OVERVIEW §16. For the current test-suite counts and any known failures, see OVERVIEW §14.1 — that section is updated each sprint; the README intentionally does not duplicate the number.
 
 ## License
 

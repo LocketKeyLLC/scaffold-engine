@@ -7501,6 +7501,45 @@ Operational behavior post-cluster:
 
 The four-way matrix is fully covered. No path leaves a session permanently wedged on this CPU host.
 
+### §17.170 README + .env.example doc drift — embedder name, migration count, missing surfaces
+
+Closes the §AUDIT.md top-finding for documentation drift. The 2026-05-20 AUDIT pass found three places where the README's first-touch onboarding had diverged from live runtime config:
+
+1. ``README.md:71`` instructed ``ollama pull … qwen3-embedding:8b``. Compose pins ``MODEL_EMBEDDER_PIPELINE=nomic-embed-text`` since §17.81/82 (qwen3-embedding wedged on this host's Ollama 0.17.5 ``--ollama-engine`` path). First-touch operators were eating ~5 GB of disk + download time on a model the orchestrator never invokes.
+2. ``README.md:215`` claimed "24 forward-only migrations." Actual count: 43 (002..044, with the latest landing in §17.140-§17.142 for the sim-sidecar tables). Cosmetic but a stale-doc signal.
+3. ``README.md:228`` froze a specific orchestrator-test count ("~932"). Suite has grown well past that (post-§17.x sprints); operator reading the README sees stale numbers and assumes drift.
+
+The README also had no mention of three live feature surfaces: Prometheus ``/metrics``, the three ngspice/verilator/symbiyosys sidecars on ``127.0.0.1:8001-8003``, and the native ``/web/jobs`` HTML UI. All three ship today; only OVERVIEW documented them.
+
+Symmetric drift in ``.env.example:112-113``: still surfaced ``qwen3-embedding:8b`` / ``qwen3-embedding-8b-mrl512`` as the embedder default (commented-out, but the comment block didn't say it was wrong).
+
+**Fix.** Single-PR doc sweep. No code touched.
+
+- ``README.md`` — pull list now ``qwen3:4b qwen2.5:7b qwen2.5-coder:7b nomic-embed-text qwen3.5:latest``. Added an "Embedder note" callout pointing at the §17.81/82 history + a ``ollama rm qwen3-embedding:8b`` cleanup hint for anyone who already followed the old instructions. Migration count line now says "forward-only migrations under db/migrations/" with no fixed number (OVERVIEW §5.3 stays the canonical migration ledger). Test-count line says "for the current test-suite counts and any known failures, see OVERVIEW §14.1". Added a new "Optional surfaces" section listing the three live feature surfaces with one paragraph each.
+- ``.env.example`` — embedder default lines updated to ``nomic-embed-text`` / ``nomic-embed-text`` with an inline comment block explaining the §17.81/82 reason for the switch.
+
+**Why not auto-generate the migration / test counts.** Both are drift magnets but generating them from CI would mean re-rendering the README on every doc-touch and either (a) cluttering reviews with auto-changes or (b) gating the README behind a generator no one wants to run locally. Cheaper: point at the OVERVIEW where the counts belong, and free the README from carrying numbers that have a half-life of weeks.
+
+**Files.**
+
+- ``README.md`` — three blocks edited: model pull list (L71 area), "Project layout" (L215 area), "Status" (L228 area); one section added: "Optional surfaces" between the layout block and the status line.
+- ``.env.example`` — embedder default lines (L112-113 area).
+
+**Verification.**
+
+The change is doc-only; no test suite gates it. Verified by ``diff README.md`` reading + checking that the surfaces named in "Optional surfaces" are reachable on the running stack:
+
+```
+$ curl -s http://localhost:8000/metrics | head -3  # METRICS_ENABLED on
+# HELP scaffold_*… 
+$ curl -s http://localhost:8001/health             # ngspice sidecar
+{"status":"ok",…}
+$ curl -s http://localhost:8000/web/jobs | head -1 # native web UI
+<!DOCTYPE html>
+```
+
+All three surfaces respond. README description matches reality.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
