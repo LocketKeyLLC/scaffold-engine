@@ -8584,6 +8584,32 @@ $ docker exec scaffold-orchestrator pytest \
 ```
 
 ---
+### §17.193 /metrics documentation — closes AUDIT 3.5
+
+Closes **AUDIT.md item 3.5** (MEDIUM): the README claimed "See USER_GUIDE for the alert-rule starter pack" but ``USER_GUIDE.md`` had no metrics section — verified by ``grep -n "prometheus|/metrics|METRICS_ENABLED|observab" USER_GUIDE.md`` returning nothing. A Prometheus operator wanting to wire ``scaffold_*`` metrics had to read ``app/observability/metrics.py`` to discover the inventory and write their own alert rules from scratch.
+
+**Fix.** New ``docs/observability.md`` with four sections:
+
+1. **Enabling** — ``METRICS_ENABLED`` gate semantics; why ``/metrics`` is unauthenticated (Prometheus convention + loopback bind); reverse-proxy guidance for public deployments.
+2. **Metric inventory** — three tables: counters (5), histograms (2), gauges (7). Each row carries metric name, labels, source code path, and operator-facing notes. Live as of §17.193; the doc explicitly calls out that new metrics need to land here in the same commit.
+3. **Sample Prometheus scrape config** — a copy-pasteable ``scrape_configs`` stanza with the recommended 30 s interval (rationale: histogram bucket resolution argues against faster scrapes, alert rules argue against slower).
+4. **Starter alert rule pack** — 5 rules covering the highest-signal failure modes:
+   - ``ScaffoldHttpServerErrorRateHigh`` (5xx rate > 5% over 5 min)
+   - ``ScaffoldLlmCallFailureRateHigh`` (LLM call failure rate > 10% over 10 min)
+   - ``ScaffoldLlmP95LatencyHigh`` (per-model p95 latency > 120s over 10 min)
+   - ``ScaffoldCalibrationStale`` (last successful calibration > 100 days ago)
+   - ``ScaffoldExecutorPermanentlySaturated`` (inflight ÷ cap ≥ 1.0 for 30 min)
+
+Each alert has the PromQL expression, the recommended ``for:`` window, severity label, and an annotation pointing the operator at the next debugging step.
+
+**Cross-references at the bottom** so a reader can jump from a metric name to the emitter source, the internal threshold evaluator (which fires its own DB-backed alerts), and the historical OVERVIEW entries that introduced each metric.
+
+**Files.**
+
+- ``docs/observability.md`` — new file, ~150 lines.
+- ``README.md`` — one-line pointer update: the broken "See USER_GUIDE for the alert-rule starter pack" line now points at the new doc and lists what metrics families are actually emitted.
+
+**Why a separate doc rather than a section in USER_GUIDE.md or README.md.** Three reasons. (1) The PromQL rules + scrape stanza are 50+ lines of monospace YAML — they would dominate any section they were inlined into. (2) The doc is meant to be linked from external dashboards / runbooks; a stable URL path is easier than "scroll to section #observability in README.md". (3) USER_GUIDE.md is operator-onboarding-shaped (what to type, what to expect); this doc is reference-shaped (what's emitted, how to consume it) — different reading modes.
 
 ## Phase 8 wrap — orchestration & memory caching hardening
 
