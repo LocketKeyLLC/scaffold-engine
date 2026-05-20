@@ -45,6 +45,23 @@ jobs:
             pip install -r requirements-ci.txt
           fi
 
+      # §17.175 — OpenAPI drift gate. `make openapi-check` uses `docker exec`
+      # (operator-only path); in CI we run the script directly since
+      # requirements-ci.txt already brings in everything `from app.main import app`
+      # needs. Catches contract drift before tests even run, so a developer who
+      # adds an endpoint without regenerating docs/openapi.json sees a fast
+      # focused failure rather than fishing through smoke output.
+      #
+      # If this step fails: `make openapi-snapshot` locally, review the diff,
+      # bump app.version if the change is breaking, commit the regenerated
+      # docs/openapi.json. See §17.174 for the §17.62 → §17.173 drift accident
+      # this gate exists to prevent.
+      - name: Verify OpenAPI snapshot matches live spec (§17.175)
+        env:
+          SCAFFOLD_API_KEY: "test-key-for-ci"
+          PYTHONPATH: "."
+        run: python scripts/openapi_snapshot.py --check
+
       - name: Run ci-smoke tests
         env:
           SCAFFOLD_API_KEY: "test-key-for-ci"

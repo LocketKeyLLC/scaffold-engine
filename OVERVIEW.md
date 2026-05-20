@@ -7759,6 +7759,37 @@ $ # 87-file targeted test run covering touched + adjacent suites:
 
 **What this does NOT do.** Doesn't change any behavior, doesn't add tests, doesn't fix any bugs. Pure structural refactor. Future maintenance is easier: a new contributor adding a ``/workflow`` endpoint touches ``routers/workflow.py`` (220 lines) instead of finding the right spot in a 1,700-line main.py.
 
+### §17.175 wire `make openapi-check` into CI — close the drift accident
+
+Closes the §17.174 follow-up. ``make openapi-check`` exists and the gate works correctly, but it was operator-manual-only — there was no automated barrier preventing a PR from merging while ``docs/openapi.json`` was out of sync with the live spec. §17.174 surfaced that this exact failure mode had been silently active for ~30 sprints (§17.62 → §17.173): every endpoint added between those sprints landed without a snapshot update, accumulating 1,323 lines of unsnapshotted additions until §17.174 caught it.
+
+**Fix.** Add a step to the Tier 1 ``smoke`` job in ``.github/workflows/ci.yml`` that runs ``python scripts/openapi_snapshot.py --check`` directly (no ``docker exec`` wrapper). Step runs *before* the smoke tests so a developer who adds an endpoint without regenerating the snapshot sees a fast focused failure (~5 s) instead of fishing through pytest output for the contract violation.
+
+**Why bypass the make target.** ``make openapi-check`` runs ``docker exec scaffold-orchestrator python scripts/openapi_snapshot.py --check`` — appropriate for the operator's day-to-day flow but useless in cloud CI where there's no orchestrator container. The script itself only needs ``from app.main import app`` to succeed, and ``requirements-ci.txt`` already brings in every dependency the import chain touches (verified by inspection: fastapi, sqlalchemy, asyncpg, pydantic, httpx, pymilvus, structlog, redis, trafilatura, pypdf, pdfplumber, apscheduler, tzlocal, jinja2, python-multipart, json_repair, jsonschema). The smoke job already loads ``app.main`` for its tests, so the OpenAPI-check step adds ~1 s of marginal cost.
+
+**No new make target.** Considered adding ``make openapi-check-host`` for parity with the docker-based target, but that would have been an unused alias — the CI script invocation is one line and self-explanatory, and operators still want the ``docker exec`` path because it tests against the running container (catches "code committed but image not rebuilt" drift).
+
+**Files.**
+
+- ``.github/workflows/ci.yml`` — new step inserted after dependency install, before ``make ci-smoke``: ``- name: Verify OpenAPI snapshot matches live spec (§17.175)`` with ``run: python scripts/openapi_snapshot.py --check``. Inline comment explains the resolution path on failure (``make openapi-snapshot`` locally → review diff → bump version if breaking → commit).
+
+**Verification.**
+
+Live simulation of the CI step on the local box:
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    -e SCAFFOLD_API_KEY=test-key-for-ci -e PYTHONPATH=/code -w /code \
+    scaffold-orchestrator python scripts/openapi_snapshot.py --check
+OK: docs/openapi.json matches the live OpenAPI spec.
+```
+
+Returns 0 on match, 1 on drift. The cloud CI run on this PR will be the first authoritative test of the gate in its target environment.
+
+**What this does NOT do.** Doesn't enforce ``make openapi-check`` on the Tier 2 (self-hosted / docker-stack) flow — that's commented out in ci.yml until a self-hosted runner is available. The Tier 1 gate alone is sufficient because the check runs against the live ``app.openapi()`` output, which is identical regardless of which environment loads the module.
+
+Recommended follow-up (not in §17.175's scope): also add a ``schemas-in-sync`` gate that runs ``diff app/schemas.py sdk/scaffold_client/schemas.py`` to catch the §17.157 vendored-copy-drift pattern. Smaller PR; same principle (the failure mode has happened, so add a gate).
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
