@@ -7971,6 +7971,45 @@ $ docker compose run --rm --no-deps -T scaffold-orchestrator \
 
 Cloud-CI run on this push will exercise the caps under the actual unreachable-services condition; expect green.
 
+### §17.180 PDF research path memory bound — streaming UploadFile cap
+
+Closes **AUDIT.md item 1.5** (MEDIUM): pre-§17.180, the ``/research/pdf`` endpoint at ``app/routers/research.py:137`` consumed the entire multipart upload into RAM (``pdf_bytes = await file.read()``) before checking ``len(pdf_bytes) > settings.research_max_pdf_bytes`` and 413'ing. A hostile uploader could transiently inflate orchestrator RSS by up to ``research_max_pdf_bytes`` (20 MB default) plus the post-decode overhead per request, even though the request would be rejected immediately after. ``BodySizeLimitMiddleware`` bypasses ``/research/pdf`` (by design — that endpoint's own cap is larger than the global cap), so this was the only enforcement point.
+
+**Fix.** Two-part defense in ``app/routers/research.py::research_pdf_endpoint``:
+
+1. **Content-Length pre-check.** If the client declared a ``Content-Length`` header that exceeds ``research_max_pdf_bytes``, raise 413 immediately. Header is advisory (multipart and chunked uploads may omit or spoof it) but for well-formed clients this short-circuits oversize uploads with zero I/O. Not the authoritative cap — the streaming read below is.
+
+2. **Streaming chunked read with mid-stream abort.** New helper ``app/utils/upload.py::read_capped(file, cap_bytes, chunk_bytes=1MiB, label=…)`` reads in 1 MiB chunks, accumulates into a list, and raises ``HTTPException(413)`` as soon as ``total > cap_bytes``. Peak inflation is bounded by ``cap_bytes + chunk_bytes`` regardless of actual upload size — far smaller than the pre-§17.180 worst case of ``cap_bytes`` (whole upload buffered before rejection).
+
+The helper is a thin Protocol-typed wrapper (accepts anything with ``async read(size) -> bytes``), reusable for any future endpoint that takes large multipart uploads under a documented cap.
+
+**Why a streaming helper rather than relying on ``BodySizeLimitMiddleware``.** The middleware caps total request body via ``Content-Length`` and intentionally bypasses ``/research/pdf`` because the PDF endpoint's per-request cap (20 MB default) is larger than the global cap (1 MB default per ``settings.max_request_body_bytes``). Routing /research/pdf back through the middleware would mean either raising the global cap (defeats the point — every other endpoint gets the larger cap too) or maintaining a parallel "per-path-override" cap-table. A streaming reader local to the endpoint is the minimal-blast-radius fix.
+
+**Files.**
+
+- ``app/utils/upload.py`` — new file, ~60 lines: ``read_capped`` + ``_AsyncReadable`` Protocol + cap-math.
+- ``app/routers/research.py`` — ``research_pdf_endpoint`` now does Content-Length pre-check + ``await read_capped(file, settings.research_max_pdf_bytes, label="PDF")`` instead of ``await file.read()`` + post-read length check. Empty-file detection unchanged.
+- ``tests/test_upload_read_capped.py`` — new file, 8 tests covering under-cap / exactly-at-cap / one-byte-over / huge-upload-bound (RSS-bound guarantee asserted directly via a tracking UploadFile stub) / empty / argument validation / label propagation.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_upload_read_capped.py --timeout=30 -v
+8 passed in 1.00s
+
+$ docker exec scaffold-orchestrator pytest tests/test_research_pdf_mode.py --timeout=30 -v
+17 passed in 3.44s
+```
+
+The 17 existing PDF tests continue to pass — the audit fix is layered above ``run_research_pdf`` (called after the cap check) so the generator-level tests are unaffected. The 8 new tests prove the streaming-bound guarantee directly: a 10 MB upload against a 512 KB cap with 64 KB chunks reads at most ``cap + chunk = 576 KB``, never the full 10 MB.
+
+**What this does NOT change.**
+
+- ``settings.research_max_pdf_bytes`` default (20 MB) is unchanged.
+- The /research/pdf success path is byte-identical for under-cap uploads (``read_capped`` returns the same bytes as ``file.read()``).
+- ``BodySizeLimitMiddleware`` still bypasses /research/pdf — the helper is the cap.
+- The 413 detail message format changed slightly ("PDF exceeds 20MB cap (stopped reading at N bytes)" instead of "PDF exceeds 20MB cap (N bytes)"); operator-visible only.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

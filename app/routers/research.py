@@ -37,6 +37,7 @@ from app.schemas import (
 )
 from app.utils.model_validation import _require_valid_models
 from app.utils.sse import _sse_with_disconnect_watch
+from app.utils.upload import read_capped
 
 router = APIRouter()
 
@@ -134,15 +135,32 @@ async def research_pdf_endpoint(
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="File must be a PDF")
 
-    pdf_bytes = await file.read()
+    # §17.180: Content-Length pre-check (cheap rejection before we touch the body
+    # at all). The header is advisory — multipart/chunked uploads may omit or
+    # spoof it — but for well-formed clients this short-circuits oversize uploads
+    # without any I/O. The streaming read below is the authoritative cap.
+    cl_header = request.headers.get("content-length")
+    if cl_header and cl_header.isdigit():
+        if int(cl_header) > settings.research_max_pdf_bytes:
+            cap_mb = settings.research_max_pdf_bytes // (1024 * 1024)
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"PDF exceeds {cap_mb}MB cap "
+                    f"(declared Content-Length {cl_header} bytes)"
+                ),
+            )
+
+    # §17.180: stream-read in 1 MiB chunks and abort mid-stream once we've read
+    # past the cap. Pre-§17.180 used ``await file.read()`` which buffered the
+    # entire payload before any size check — a hostile uploader could inflate
+    # orchestrator RSS by the full ``research_max_pdf_bytes`` before being
+    # rejected. Now the peak is cap + one chunk regardless of actual upload size.
+    pdf_bytes = await read_capped(
+        file, settings.research_max_pdf_bytes, label="PDF",
+    )
     if not pdf_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
-    if len(pdf_bytes) > settings.research_max_pdf_bytes:
-        cap_mb = settings.research_max_pdf_bytes // (1024 * 1024)
-        raise HTTPException(
-            status_code=413,
-            detail=f"PDF exceeds {cap_mb}MB cap ({len(pdf_bytes)} bytes)",
-        )
 
     await _require_valid_models(None)
 
