@@ -76,7 +76,13 @@ bench-check-pipeline: _ensure_dev ## Gate: fail if bench_pipeline total_pipeline
 bench-check: bench-check-rag bench-check-embed bench-check-pipeline ## Gate: run every bench-check; skips gates whose JSONL file is missing or sparse
 
 ci-smoke: ## Cloud-CI smoke tests — host pytest on `-m smoke`, no docker, no live services. Used by .github/workflows/ci.yml.
-	SCAFFOLD_CI_SMOKE_MODE=1 pytest tests/ -m smoke --timeout=30 -v
+	# §17.177 — SCAFFOLD_PREWARM_RERANKER=false skips the lifespan
+	# CrossEncoder prewarm. Tests that use `with TestClient(app) as c:`
+	# trigger the lifespan; in cloud CI without sentence_transformers
+	# (not in requirements-ci.txt) + no pre-warmed HF cache, the prewarm
+	# can stall past pytest-timeout (30 s). Reranker has no role in
+	# smoke tests, so prewarm is pure waste.
+	SCAFFOLD_CI_SMOKE_MODE=1 SCAFFOLD_PREWARM_RERANKER=false pytest tests/ -m smoke --timeout=30 -v
 
 ci: _ensure_dev ## Run CI-safe tests (no live services; dev image) + bench regression gates (skip on missing/sparse history)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v \

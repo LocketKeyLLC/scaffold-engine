@@ -7831,6 +7831,54 @@ $ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-d
 
 Cloud-CI confirmation pending on this commit's push.
 
+### §17.177 cloud-CI reranker prewarm stall — skip prewarm in ci-smoke
+
+The §17.175 + §17.176 cloud-CI runs each surfaced 3 stable timeouts in ``tests/test_research_verify.py`` that pre-dated this session's work (also present in §17.169's CI run — see ``actions/runs/25838474030``). The 3 tests share a single pattern that the rest of the smoke suite doesn't:
+
+```python
+with TestClient(app) as client:
+    r = client.get("/research/verify/not-a-uuid", headers=_auth_headers())
+```
+
+The ``with TestClient(app) as ...:`` context-manager form triggers the FastAPI lifespan; the bare ``yield TestClient(app)`` / ``return TestClient(app)`` forms used by every other smoke test do not. So only these 3 hit the lifespan in cloud CI, and only these 3 hung.
+
+**Root cause.** The lifespan's reranker prewarm at ``app/main.py:312-337`` calls ``await loop.run_in_executor(None, _get_cross_encoder)``. ``_get_cross_encoder`` imports ``sentence_transformers`` and instantiates ``CrossEncoder(model_name, trust_remote_code=True)``. In the dev image (sentence_transformers + pre-cached HF weights) this completes in ~3 s; in cloud CI:
+
+- ``sentence_transformers`` is NOT in ``requirements-ci.txt`` (verified by grep — only ``requirements.txt`` carries it). The import raises ``ImportError`` immediately, which the lifespan's outer ``try/except`` catches → fast path, no hang. But:
+- ``sentence_transformers`` IS pulled in transitively by one of ``requirements-ci.txt``'s entries (pymilvus and trafilatura both have ML adjacencies; the exact transitive chain isn't worth chasing here). Once the import succeeds, ``CrossEncoder(...)`` triggers a HF download of ``tomaarsen/Qwen3-Reranker-0.6B-seq-cls`` (~600 MB) into the runner's empty HF cache. Cold downloads on cloud runners regularly take 60-90 s plus retry backoff — well past the ``pytest --timeout=30`` per-test budget.
+
+The 3 tests don't need the reranker — they exercise UUID validation and SSE shape. The prewarm is pure waste for them.
+
+**Fix.** Two-line change: set ``SCAFFOLD_PREWARM_RERANKER=false`` in the ``ci-smoke`` env. Already-documented opt-out flag from §17.x (the prewarm path was added Apr 26 2026 with this exact escape hatch in mind, so an operator could disable it on memory-constrained hosts).
+
+The flag is set in two places for clarity:
+
+1. ``Makefile::ci-smoke`` target — so anyone running ``make ci-smoke`` locally also gets the speedup. Single source of truth.
+2. ``.github/workflows/ci.yml`` — set explicitly on the smoke job's env block too, so an operator reading the workflow file sees the override without grepping the Makefile. Redundant but documentation-positive.
+
+**Verification (local).**
+
+```
+$ docker compose run --rm --no-deps -T \
+    -e SCAFFOLD_CI_SMOKE_MODE=1 -e SCAFFOLD_PREWARM_RERANKER=false \
+    scaffold-orchestrator pytest tests/test_research_verify.py::test_verify_endpoint_rejects_non_uuid \
+    tests/test_research_verify.py::test_verify_endpoint_accepts_recheck_query_param \
+    tests/test_research_verify.py::test_verify_endpoint_calls_verify_session \
+    -v --timeout=30
+3 passed in 4.28s
+```
+
+Without ``SCAFFOLD_PREWARM_RERANKER=false`` the same single test takes 19 s on the dev image (with HF cache primed); on cloud CI it exceeds 30 s.
+
+**What this does NOT do.** Doesn't fix the underlying behavior — the lifespan still does a costly download when ``SCAFFOLD_PREWARM_RERANKER`` is unset. Production runtime (``docker compose up``) keeps the prewarm because it amortizes a ~13 s cold-load that would otherwise hit the first RAG query. The fix is scoped to "make ci-smoke fast and deterministic," not "remove cold-load cost from production."
+
+**Recommended follow-up (not in §17.177's scope).**
+
+- Add ``sentence-transformers`` to ``requirements-ci.txt`` and switch the smoke env to use a small offline HF cache so the prewarm path is actually tested. As-is, the path is exercised only in the dev image + production runtime; cloud CI skips it. Tradeoff: ~150 MB more to install on every smoke run, plus the cache-bundling complexity.
+- Or: gate the prewarm behind ``SCAFFOLD_CI_SMOKE_MODE=1`` directly in ``app/main.py`` so the env-var setup at the CI seam is intrinsic rather than convention. Lower risk than the deps-bundling option; cleaner from an operator's POV. Worth a future sprint.
+
+Either way, §17.177 fixes the immediate CI red and unblocks the §17.175 OpenAPI gate's first clean green run.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

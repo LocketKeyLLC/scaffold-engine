@@ -66,6 +66,12 @@ jobs:
         env:
           SCAFFOLD_API_KEY: "test-key-for-ci"
           PYTHONPATH: "."
+          # §17.177 — also set explicitly here (Makefile sets it too) so
+          # an operator reading ci.yml sees why the reranker prewarm is
+          # off in CI without having to grep the Makefile. The prewarm
+          # stalls cloud CI on cold HF download; reranker has no role
+          # in smoke tests anyway.
+          SCAFFOLD_PREWARM_RERANKER: "false"
         run: make ci-smoke
 
   # ──────────────────────────────────────────────────────────
