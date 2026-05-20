@@ -607,16 +607,72 @@ async def health():
                     cache_stats, verifier_cache_stats,
                     rag_cache_stats, fetch_cache_stats)
 
+    # §17.171 — sim sidecars. Optional surfaces (ngspice/verilator/symbiyosys);
+    # absent or wedged sidecars do NOT degrade overall /health status — they
+    # don't block legacy/scaffold workflows — but the operator gets
+    # per-sidecar visibility in the checks dict. Each helper does a single
+    # GET /health with a 5 s timeout via the shared httpx client pool.
+    async def _check_sidecar(label: str):
+        t0 = time.monotonic()
+        try:
+            from app.utils.http_clients import (
+                get_ngspice_client, get_verilator_client, get_symbiyosys_client,
+            )
+            getters = {
+                "ngspice": get_ngspice_client,
+                "verilator": get_verilator_client,
+                "symbiyosys": get_symbiyosys_client,
+            }
+            client = getters[label]()
+            # Relative "/health" — base_url is the sidecar's URL per
+            # app/utils/http_clients.py:_build_<name>(). 5 s read timeout
+            # so a wedged sidecar can't stall /health past its own SLO.
+            resp = await client.get("/health", timeout=5.0)
+            resp.raise_for_status()
+            return {"status": "up", "latency_ms": round((time.monotonic() - t0) * 1000)}
+        except Exception:
+            return {"status": "down", "latency_ms": round((time.monotonic() - t0) * 1000)}
+
+    async def _check_ngspice():
+        return await _check_sidecar("ngspice")
+
+    async def _check_verilator():
+        return await _check_sidecar("verilator")
+
+    async def _check_symbiyosys():
+        return await _check_sidecar("symbiyosys")
+
     # Each _check_* wraps its body in try/except Exception and returns a
     # dict on failure, so gather() cannot surface Exception objects from
     # these tasks; ``return_exceptions=True`` is left in only as
     # belt-and-suspenders for BaseException-derived cases (which we'd
     # actually want to propagate, not absorb).
-    pg, ollama, milvus, redis_pair = await asyncio.gather(
+    pg, ollama, milvus, redis_pair, ngspice, verilator, symbiyosys = await asyncio.gather(
         _check_pg(), _check_ollama(), _check_milvus(), _check_redis(),
+        _check_ngspice(), _check_verilator(), _check_symbiyosys(),
         return_exceptions=True,
     )
-    redis_info, cache_stats, verifier_cache_stats, rag_cache_stats, fetch_cache_stats = redis_pair
+    # §17.171 — defensive unpack. If _check_redis raises a BaseException
+    # (CancelledError / KeyboardInterrupt), gather() returns the exception
+    # object in place of the tuple — the pre-§17.171 code would then crash
+    # on tuple-unpack and 500 the /health endpoint, defeating its purpose.
+    if isinstance(redis_pair, BaseException):
+        logger.warning("health_redis_check_raised_base_exception: %s", redis_pair)
+        redis_info = {"status": "down", "keys": 0}
+        cache_stats = verifier_cache_stats = rag_cache_stats = fetch_cache_stats = {}
+    else:
+        redis_info, cache_stats, verifier_cache_stats, rag_cache_stats, fetch_cache_stats = redis_pair
+    # The three sidecars likewise return dicts; if gather absorbed a
+    # BaseException, surface as 'down' rather than crashing the endpoint.
+    for _name, _val in [("ngspice", ngspice), ("verilator", verilator), ("symbiyosys", symbiyosys)]:
+        if isinstance(_val, BaseException):
+            logger.warning("health_sidecar_check_raised: name=%s err=%s", _name, _val)
+    if isinstance(ngspice, BaseException):
+        ngspice = {"status": "down", "latency_ms": 0}
+    if isinstance(verilator, BaseException):
+        verilator = {"status": "down", "latency_ms": 0}
+    if isinstance(symbiyosys, BaseException):
+        symbiyosys = {"status": "down", "latency_ms": 0}
     reranker = _check_reranker_state(getattr(app, "state", None))
     checks = {
         "postgresql": pg, "ollama": ollama, "milvus": milvus,
@@ -625,6 +681,14 @@ async def health():
         "rag_result_cache": rag_cache_stats,
         "fetch_cache": fetch_cache_stats,
         "reranker": reranker,
+        # §17.171 — sim sidecars surfaced for operator visibility. Their
+        # state does NOT affect the top-level `status` field below: a wedged
+        # sidecar leaves /health "healthy" so legacy/scaffold workflows
+        # keep working, but the per-sidecar 'down' is visible to anyone
+        # who reads the checks dict (make doctor, dashboards, OWUI).
+        "ngspice": ngspice,
+        "verilator": verilator,
+        "symbiyosys": symbiyosys,
     }
     pg_up = pg["status"] == "up"
     ollama_up = ollama["status"] == "up"

@@ -7540,6 +7540,47 @@ $ curl -s http://localhost:8000/web/jobs | head -1 # native web UI
 
 All three surfaces respond. README description matches reality.
 
+### §17.171 sim sidecars on /health — operator visibility without status-bleed
+
+Closes the AUDIT.md operator-UX top-finding. The orchestrator's ``/health`` checked five dependencies (pg / ollama / milvus / redis / reranker) and three sidecars at ``scaffold-{ngspice,verilator,symbiyosys}:8001-8003`` were invisible — operators with a wedged Verilator saw ``/health: healthy`` and only discovered the failure when a sim-backed design job hung mid-stage. Verified pre-fix by grep: ``scaffold-ngspice|verilator|symbiyosys|_check_ngspice`` returned no hits in ``app/main.py``.
+
+**Three sidecars added to the gather, but explicitly without status-bleed.** A sidecar being ``'down'`` does NOT flip the top-level ``status`` field away from ``healthy`` — sim is optional and a wedge there must not trigger docker's healthcheck restart loop on the orchestrator itself. The per-sidecar block is surfaced in the ``checks`` dict for ``make doctor`` / dashboards / OWUI to inspect.
+
+```
+"checks": {
+  "postgresql": {...}, "ollama": {...}, "milvus": {...},
+  "redis": {...}, "embedding_cache": {...},
+  "verifier_cache": {...}, "rag_result_cache": {...},
+  "fetch_cache": {...}, "reranker": {...},
+  "ngspice":    {"status": "up", "latency_ms": 3},
+  "verilator":  {"status": "up", "latency_ms": 4},
+  "symbiyosys": {"status": "down", "latency_ms": 5004}
+}
+```
+
+**Defensive unpack added.** The pre-§17.171 ``gather`` returned a 5-tuple for redis and would crash on tuple-unpack if ``return_exceptions=True`` absorbed a ``BaseException`` from the redis check. The new code also gathers three sidecar dicts; if any of those four return values comes back as a ``BaseException`` (CancelledError / KeyboardInterrupt), we log + fall back to a synthetic ``{"status": "down"}`` instead of letting the ``/health`` endpoint itself 500. Surfaces a separate (AUDIT.md-flagged) latent crash that pre-dated this entry.
+
+**Implementation.** Single nested helper ``_check_sidecar(label)`` parameterised over the three client getters from ``app/utils/http_clients.py``: ``get_ngspice_client``, ``get_verilator_client``, ``get_symbiyosys_client``. Each does ``client.get('/health', timeout=5.0)`` against the sidecar's relative ``/health`` route (base_url is set in ``_build_<name>`` at client construction). 5 s read-timeout caps stall-on-/health risk to the sidecar's own SLO.
+
+**Why ``timeout=5.0`` and not the per-sidecar ``ngspice_http_timeout_s`` / ``verilator_http_timeout_s`` etc.** Those settings are sized for ``/run`` (ngspice subprocess + verilator compile-and-run); ``/health`` is a no-op route inside the sidecar's FastAPI app and should respond in ~ms. 5 s is generous (10 000× the expected RTT). Reusing the heavy ``/run`` timeout here would mean a single dead sidecar could stall ``/health`` for 600+ s — wrong tradeoff.
+
+**Files.**
+
+- ``app/main.py`` — added ``_check_sidecar`` + three thin wrappers (``_check_ngspice``, ``_check_verilator``, ``_check_symbiyosys``) inside ``health()``; extended the ``gather`` to seven coroutines; added defensive ``isinstance(..., BaseException)`` unpacks for both the redis tuple and the three sidecar dicts; added the three blocks to ``checks``. ~50 net lines.
+- ``tests/test_health_cleanup.py`` — added ``_call_health_with_sidecars(ngspice_up=, verilator_up=, symbiyosys_up=)`` helper (mirrors the existing ``_call_health`` mock setup + patches the three sidecar getters); added ``TestHealthSimSidecarChecks`` (5 cases: keys present, status+latency shape, down-doesn't-degrade-status policy guard, all-up path, mixed up/down per sidecar).
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_health_cleanup.py -v --timeout=30
+18 passed in 5.52s
+```
+
+5 new + 13 pre-existing (``TestHealthEndpointResponse`` × 10, ``TestHealthDegradedStates`` × 3). Pre-existing tests cover the status calc policy unchanged (pg + ollama down → unhealthy; milvus down → degraded; everything up → healthy); the new tests cover the policy guard that says sidecar state must NOT bleed into that calc.
+
+No OpenAPI snapshot impact — ``/health`` has no ``response_model``; the new keys are additive on a dynamically-shaped dict.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
