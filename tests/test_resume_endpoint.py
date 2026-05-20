@@ -134,7 +134,7 @@ def client():
 @pytest.fixture
 def patch_models_ok():
     """_require_valid_models is async + raises on missing — short-circuit it."""
-    with patch("app.main._require_valid_models", new_callable=AsyncMock) as m:
+    with patch("app.routers.jobs._require_valid_models", new_callable=AsyncMock) as m:
         m.return_value = None
         yield m
 
@@ -143,7 +143,7 @@ def test_resume_endpoint_404_on_unknown_job(client, patch_models_ok):
     """An unknown job_id surfaces as 404."""
     job_id = str(uuid4())
     with patch(
-        "app.main.resume_cancelled_job",
+        "app.routers.jobs.resume_cancelled_job",
         new=AsyncMock(return_value={"outcome": "not_found", "job_id": job_id}),
     ):
         r = client.post(f"/jobs/{job_id}/resume", json={})
@@ -155,7 +155,7 @@ def test_resume_endpoint_409_on_wrong_status(client, patch_models_ok):
     """A non-cancelled job surfaces as 409 with current_status in detail."""
     job_id = str(uuid4())
     with patch(
-        "app.main.resume_cancelled_job",
+        "app.routers.jobs.resume_cancelled_job",
         new=AsyncMock(return_value={
             "outcome": "wrong_status",
             "job_id": job_id,
@@ -185,13 +185,13 @@ def test_resume_endpoint_streams_on_success(client, patch_models_ok):
         yield "event: done\ndata: {}\n\n"
 
     with patch(
-        "app.main.resume_cancelled_job",
+        "app.routers.jobs.resume_cancelled_job",
         new=AsyncMock(return_value={
             "outcome": "resumed",
             "job_id": job_id,
             "prior_status": "cancelled",
         }),
-    ), patch("app.main.execute_all_nodes", new=_fake_stream):
+    ), patch("app.routers.jobs.execute_all_nodes", new=_fake_stream):
         r = client.post(f"/jobs/{job_id}/resume", json={})
 
     assert r.status_code == 200
@@ -212,13 +212,13 @@ def test_resume_endpoint_passes_model_overrides(client, patch_models_ok):
         yield "event: ping\ndata: {}\n\n"
 
     with patch(
-        "app.main.resume_cancelled_job",
+        "app.routers.jobs.resume_cancelled_job",
         new=AsyncMock(return_value={
             "outcome": "resumed",
             "job_id": job_id,
             "prior_status": "cancelled",
         }),
-    ), patch("app.main.execute_all_nodes", new=_fake_stream):
+    ), patch("app.routers.jobs.execute_all_nodes", new=_fake_stream):
         r = client.post(
             f"/jobs/{job_id}/resume",
             json={"model_overrides": {"model_general": "custom:7b"}},
@@ -244,9 +244,9 @@ def test_resume_endpoint_validates_models_before_db(client):
         db_called = True
         return {"outcome": "resumed"}
 
-    with patch("app.main._require_valid_models",
+    with patch("app.routers.jobs._require_valid_models",
                new_callable=AsyncMock, side_effect=exc), \
-         patch("app.main.resume_cancelled_job", new=_fake_resume):
+         patch("app.routers.jobs.resume_cancelled_job", new=_fake_resume):
         r = client.post(
             f"/jobs/{job_id}/resume",
             json={"model_overrides": {"model_general": "bad:1b"}},

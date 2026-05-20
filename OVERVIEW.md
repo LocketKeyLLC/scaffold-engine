@@ -7682,6 +7682,83 @@ $ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-d
 
 Live verification deferred — the right reproduction is "type ``/confirm <job_id>`` in OWUI and watch the chat for ~10 min, expecting ~5 visible '⏳' markers." That requires a real research run; the unit tests + contract guards are the proof for now.
 
+### §17.174 main.py → routers/ refactor — endpoint extraction (40 endpoints into 7 routers)
+
+Closes the AUDIT.md architecture top-finding (#4). main.py was 1,727 lines pre-refactor, hosting ~40 endpoint functions inline alongside the lifespan and middleware setup. The ``app/routers/`` package already existed for status / assist / observability / alerts / specs / design endpoints; this entry extends that pattern to the rest of the surface so a new contributor doesn't have to skim 1,700 lines to find the workflow-related endpoint they want to extend.
+
+**Endpoint inventory (40 endpoints moved):**
+
+| New router | Endpoints |
+|---|---|
+| ``routers/workflow.py`` (219 lines) | ``POST /ideas``, ``POST /ideate``, ``POST /ideate/confirm``, ``GET /dag/{job_id}``, ``POST /dag``, ``GET /exec/status/{job_id}``, ``POST /exec/retry``, ``POST /optimize``, ``POST /execute``, ``POST /execute/all``, ``POST /skip`` |
+| ``routers/research.py`` (272 lines) | ``POST /research``, ``POST /research/reply``, ``GET /research/verify/{session_id}``, ``POST /research/pdf``, ``GET /research/pdf``, ``GET /research/sessions``, ``DELETE /research/sessions/{session_id}``, ``PATCH /research/sessions/{session_id}`` |
+| ``routers/jobs.py`` (293 lines) | ``POST /jobs/cleanup``, ``POST /jobs/{job_id}/resume``, ``GET /jobs``, ``DELETE /jobs/{job_id}``, ``PATCH /jobs/{job_id}``, ``GET /jobs/{job_id}/costs``, ``PATCH /jobs/{job_id}/synthesis`` |
+| ``routers/schedule.py`` (101 lines) | ``POST /schedule``, ``GET /schedule``, ``DELETE /schedule/{schedule_id}`` |
+| ``routers/gt.py`` (80 lines) | ``POST /gt``, ``GET /gt/list``, ``POST /gt/search``, ``GET /gt/detail/{entry_id}``, ``GET /gt/stats`` |
+| ``routers/prompts.py`` (82 lines) | ``GET /prompts/{job_id}``, ``GET /prompts/{job_id}/{node_key}``, ``GET /prompts/{job_id}/{node_key}/history``, ``POST /prompts/{job_id}/{node_key}`` |
+| ``routers/rag.py`` (74 lines) | ``POST /rag``, ``GET /rag/dedup`` |
+
+main.py keeps: lifespan + middleware + the four system endpoints (``GET /``, ``GET /health``, ``GET /config``, ``GET /metrics``) + the auth-exempt web routes mount.
+
+Two helpers extracted to ``app/utils/`` so per-domain routers can import them without re-triggering main.py's top-of-module side effects:
+
+- ``app/utils/model_validation.py::_require_valid_models`` (49 lines) — the "validate Ollama + models or raise 503/422" gate used by 6 of the 7 new routers.
+- ``app/utils/sse.py::_sse_with_disconnect_watch`` (74 lines) — the keepalive wrapper that makes SSE streams notice client disconnect within ~1 s. Used by the 4 streaming endpoints in ``routers/research.py`` + ``routers/jobs.py``.
+
+**OpenAPI contract preserved.** Function names, paths, ``response_model`` declarations, ``tags``, and parameter signatures are all verbatim across the move. FastAPI auto-generates ``operationId`` from the function name + path + method, so a verbatim move means zero ``operationId`` churn.
+
+Side effect: regenerating the OpenAPI snapshot for the first time since §17.130 captures **all** the post-§17.130 additions that had silently drifted from ``docs/openapi.json``:
+
+| Path | Sprint that introduced it |
+|---|---|
+| ``POST /jobs/{job_id}/resume`` | §17.130 |
+| ``GET /research/verify/{session_id}`` | §17.114 + §17.121 |
+| ``POST /design`` + ``POST /design/{job_id}/advance`` + ``GET /design/{job_id}`` | §17.151 |
+| ``POST /specs/{spec_id}/confirm`` + ``POST /specs/{spec_id}/unconfirm`` + ``GET /specs/pending`` | §17.145 |
+| ``POST /specs/{spec_id}/topology-select`` | §17.146 |
+| ``POST /topology-selections/{topology_selection_id}/size`` | §17.147 + §17.152 |
+| ``GET /device-sizings/{sizing_id}/report`` | §17.148 |
+| ``GET /digital-sizings/{sizing_id}/report`` | §17.153 |
+
+The committed snapshot was last regenerated near §17.62. Verified by diffing pre-§17.174 ``docs/openapi.json`` against the live spec — 1,323 lines of additions, 0 lines of removals. Every endpoint that was ever in the snapshot is still in the live spec; the snapshot just stopped capturing new endpoints. **The §17.174 refactor itself introduces zero new OpenAPI changes** (verified by inspection — same function names, paths, tags, response_models in the new files).
+
+**Version bumped 1.1.0 → 1.2.0** to honestly reflect that ~12 new endpoints have shipped since v1.1.0 was tagged on 2026-05-07. All the bumped-in changes are additive (no removals, no breaking renames), consistent with a minor-version bump.
+
+**Why CI didn't catch the drift earlier.** ``make openapi-check`` exists and the gate works, but it isn't run in CI — only manually before commits. Sprints between §17.62 and §17.173 didn't re-run it after touching the OpenAPI surface. Recommended follow-up (not in §17.174's scope): wire ``make openapi-check`` into ``.github/workflows/ci.yml`` so future drift fails the PR.
+
+**Test impact.** Five tests patched ``app.main._require_valid_models`` and ``app.main.resume_cancelled_job`` — symbols that moved. Per-router patches now used:
+
+- ``app.main._require_valid_models`` → ``app.routers.{schedule,workflow,gt,jobs}._require_valid_models`` (the symbol is imported into each router's namespace at import time; patches must target where the route handler looks it up, not where the function is defined).
+- ``app.main.resume_cancelled_job`` + ``app.main.execute_all_nodes`` → ``app.routers.jobs.{resume_cancelled_job,execute_all_nodes}``.
+
+Live verification post-refactor:
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator python scripts/openapi_snapshot.py --check
+OK: docs/openapi.json matches the live OpenAPI spec.
+
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator python -c "from app.main import app; print(len(app.routes))"
+86 routes  # same as pre-refactor
+
+$ # 87-file targeted test run covering touched + adjacent suites:
+1284 passed, 3 failed in 501s
+# The 3 failures are pre-existing --noconftest setup artifacts
+# (RuntimeError: Generic HTTP client not initialized) — confirmed
+# by re-running the same 3 tests WITH conftest: 3 passed in 3.41s.
+```
+
+**Files.**
+
+- ``app/main.py`` — 1,727 → 808 lines. Removed all 40 endpoint definitions + 2 helper functions. Added 7 ``app.include_router`` calls. Trimmed ~50 unused imports.
+- ``app/routers/{workflow,research,jobs,schedule,gt,prompts,rag}.py`` — 7 new files totaling 1,121 lines. Endpoints moved verbatim.
+- ``app/utils/model_validation.py``, ``app/utils/sse.py`` — 2 new utility modules totaling 123 lines.
+- ``docs/openapi.json`` — regenerated. 4,949 → 6,271 lines net. All additive (post-§17.130 endpoints + schemas that the snapshot stopped tracking).
+- ``tests/test_main.py``, ``tests/test_resume_endpoint.py`` — 5 patch targets updated from ``app.main.*`` to the appropriate ``app.routers.<group>.*``.
+
+**What this does NOT do.** Doesn't change any behavior, doesn't add tests, doesn't fix any bugs. Pure structural refactor. Future maintenance is easier: a new contributor adding a ``/workflow`` endpoint touches ``routers/workflow.py`` (220 lines) instead of finding the right spot in a 1,700-line main.py.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

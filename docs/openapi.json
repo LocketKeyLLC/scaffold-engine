@@ -262,6 +262,400 @@
         "title": "DeleteResponse",
         "type": "object"
       },
+      "DesignAmbiguityRead": {
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "reason",
+          "question"
+        ],
+        "title": "DesignAmbiguityRead",
+        "type": "object"
+      },
+      "DesignCreateInput": {
+        "description": "POST /design body. ``brief`` is the natural-language design\nintent. Optional ``model_role`` lets operators override the\nextractor model (e.g. for offline-only deployments).",
+        "properties": {
+          "brief": {
+            "maxLength": 10000,
+            "minLength": 1,
+            "title": "Brief",
+            "type": "string"
+          },
+          "model_role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Role"
+          }
+        },
+        "required": [
+          "brief"
+        ],
+        "title": "DesignCreateInput",
+        "type": "object"
+      },
+      "DesignCreateResponse": {
+        "description": "POST /design response. Exactly one of the three result groups\nis non-empty: success (``job_id`` + ``spec_id``), ambiguity\n(``ambiguities`` populated), or extractor error (``errors``).",
+        "properties": {
+          "ambiguities": {
+            "items": {
+              "$ref": "#/components/schemas/DesignAmbiguityRead"
+            },
+            "title": "Ambiguities",
+            "type": "array"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "model_used": {
+            "default": "",
+            "title": "Model Used",
+            "type": "string"
+          },
+          "spec_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spec Id"
+          }
+        },
+        "title": "DesignCreateResponse",
+        "type": "object"
+      },
+      "DesignStateRead": {
+        "description": "GET /design/{job_id} response — aggregated pipeline state.",
+        "properties": {
+          "brief": {
+            "title": "Brief",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "device_sizing_converged": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Sizing Converged"
+          },
+          "device_sizing_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Sizing Id"
+          },
+          "job_id": {
+            "format": "uuid",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "job_type": {
+            "title": "Job Type",
+            "type": "string"
+          },
+          "spec_confirmed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spec Confirmed At"
+          },
+          "spec_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spec Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "topology_selection_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topology Selection Id"
+          }
+        },
+        "required": [
+          "job_id",
+          "job_type",
+          "status",
+          "brief",
+          "created_at"
+        ],
+        "title": "DesignStateRead",
+        "type": "object"
+      },
+      "DeviceSizingRead": {
+        "description": "Response for POST /topology-selections/{id}/size when\n``design.kind == 'analog_circuit'``. Returns the persisted\ndevice_sizings row whether or not the loop converged —\n``converged`` is the outcome flag, ``errors`` carries the loop's\ndiagnostic. The wider pipeline accepts a sizing as ready only\nwhen ``converged == True``.",
+        "properties": {
+          "candidate_idx": {
+            "title": "Candidate Idx",
+            "type": "integer"
+          },
+          "converged": {
+            "title": "Converged",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "final_measurements": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Final Measurements",
+            "type": "object"
+          },
+          "final_netlist": {
+            "title": "Final Netlist",
+            "type": "string"
+          },
+          "final_params": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Final Params",
+            "type": "object"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "iterations": {
+            "title": "Iterations",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "analog",
+            "default": "analog",
+            "title": "Kind",
+            "type": "string"
+          },
+          "model_used": {
+            "title": "Model Used",
+            "type": "string"
+          },
+          "sim_run_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Sim Run Ids",
+            "type": "array"
+          },
+          "spec_id": {
+            "format": "uuid",
+            "title": "Spec Id",
+            "type": "string"
+          },
+          "topology_selection_id": {
+            "format": "uuid",
+            "title": "Topology Selection Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "spec_id",
+          "topology_selection_id",
+          "candidate_idx",
+          "converged",
+          "iterations",
+          "final_params",
+          "final_netlist",
+          "final_measurements",
+          "sim_run_ids",
+          "model_used",
+          "errors",
+          "created_at"
+        ],
+        "title": "DeviceSizingRead",
+        "type": "object"
+      },
+      "DigitalSizingRead": {
+        "description": "§17.152 — Response for POST /topology-selections/{id}/size\nwhen ``design.kind == 'digital_logic'``. Mirror of\n``DeviceSizingRead`` with ``final_sv_source`` + ``top_module``\ninstead of ``final_netlist``. The ``kind`` discriminator field\nlets clients distinguish the two response shapes without parsing\nthe ``id`` table provenance.",
+        "properties": {
+          "candidate_idx": {
+            "title": "Candidate Idx",
+            "type": "integer"
+          },
+          "converged": {
+            "title": "Converged",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "final_measurements": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Final Measurements",
+            "type": "object"
+          },
+          "final_params": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Final Params",
+            "type": "object"
+          },
+          "final_sv_source": {
+            "title": "Final Sv Source",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "iterations": {
+            "title": "Iterations",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "digital",
+            "default": "digital",
+            "title": "Kind",
+            "type": "string"
+          },
+          "model_used": {
+            "title": "Model Used",
+            "type": "string"
+          },
+          "sim_run_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Sim Run Ids",
+            "type": "array"
+          },
+          "spec_id": {
+            "format": "uuid",
+            "title": "Spec Id",
+            "type": "string"
+          },
+          "top_module": {
+            "title": "Top Module",
+            "type": "string"
+          },
+          "topology_selection_id": {
+            "format": "uuid",
+            "title": "Topology Selection Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "spec_id",
+          "topology_selection_id",
+          "candidate_idx",
+          "converged",
+          "iterations",
+          "final_params",
+          "final_sv_source",
+          "top_module",
+          "final_measurements",
+          "sim_run_ids",
+          "model_used",
+          "errors",
+          "created_at"
+        ],
+        "title": "DigitalSizingRead",
+        "type": "object"
+      },
       "ErrorLogResolveInput": {
         "description": "Audit M4 — input for PATCH /observability/errors/{id}.\n\n``resolved`` is required so the caller declares intent explicitly.\n``resolution`` is a free-form note describing the triage decision\n(e.g. \"fixed_by: W.6 tool_call migration\"); empty / None means\nno note. The endpoint stamps ``resolved_at = NOW()`` when\nresolved=true, and clears it when resolved=false.",
         "properties": {
@@ -1232,6 +1626,17 @@
             "title": "Query",
             "type": "string"
           },
+          "query_intent": {
+            "default": "general",
+            "enum": [
+              "general",
+              "code",
+              "qa",
+              "paper"
+            ],
+            "title": "Query Intent",
+            "type": "string"
+          },
           "skip_rerank": {
             "default": false,
             "title": "Skip Rerank",
@@ -1433,6 +1838,34 @@
         "title": "ResearchSessionSummary",
         "type": "object"
       },
+      "ResumeJobInput": {
+        "description": "Body for POST /jobs/{job_id}/resume. ``job_id`` comes from the path.",
+        "properties": {
+          "model_overrides": {
+            "anyOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Overrides"
+          },
+          "skip_optimize": {
+            "default": false,
+            "title": "Skip Optimize",
+            "type": "boolean"
+          },
+          "skip_verify": {
+            "default": false,
+            "title": "Skip Verify",
+            "type": "boolean"
+          }
+        },
+        "title": "ResumeJobInput",
+        "type": "object"
+      },
       "ScheduleCreate": {
         "properties": {
           "cron_expression": {
@@ -1595,6 +2028,99 @@
         "title": "SkipNodeInput",
         "type": "object"
       },
+      "SpecPendingListResponse": {
+        "description": "Response for GET /specs/pending — list of specs awaiting\noperator confirmation.",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "pending": {
+            "items": {
+              "$ref": "#/components/schemas/SpecRead"
+            },
+            "title": "Pending",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pending",
+          "count"
+        ],
+        "title": "SpecPendingListResponse",
+        "type": "object"
+      },
+      "SpecRead": {
+        "description": "Serializable view of a row from the ``specs`` table. Used by\nthe /specs/* endpoints and by any caller that needs to hand a\nconfirmation state to a client.",
+        "properties": {
+          "confirmed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirmed At"
+          },
+          "confirmed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirmed By"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "spec_json": {
+            "title": "Spec Json",
+            "type": "object"
+          },
+          "spec_sha256": {
+            "title": "Spec Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "schema_version",
+          "spec_json",
+          "spec_sha256",
+          "created_at"
+        ],
+        "title": "SpecRead",
+        "type": "object"
+      },
       "StatusCounts": {
         "properties": {
           "assisted_executing": {
@@ -1699,6 +2225,102 @@
           "timestamp"
         ],
         "title": "StatusResponse",
+        "type": "object"
+      },
+      "TopologyCandidateRead": {
+        "description": "One LLM-proposed topology, with citations into the RAG\nretrieval set. ``citations`` are entry_ids the wrapper has already\nvalidated against the retrieval set — a response carrying this\ntype is guaranteed not to contain hallucinated citations.",
+        "properties": {
+          "citations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Citations",
+            "type": "array"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "rationale": {
+            "title": "Rationale",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "rationale",
+          "citations"
+        ],
+        "title": "TopologyCandidateRead",
+        "type": "object"
+      },
+      "TopologySelectionRead": {
+        "description": "Response for POST /specs/{spec_id}/topology-select. Carries\nboth the candidates and the retrieval-audit columns so a client\ncan render the citations as live links into the corpus.",
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/TopologyCandidateRead"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "model_used": {
+            "title": "Model Used",
+            "type": "string"
+          },
+          "rag_chunk_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Rag Chunk Ids",
+            "type": "array"
+          },
+          "rag_domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rag Domain"
+          },
+          "rag_query": {
+            "title": "Rag Query",
+            "type": "string"
+          },
+          "spec_id": {
+            "format": "uuid",
+            "title": "Spec Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "spec_id",
+          "candidates",
+          "rag_chunk_ids",
+          "rag_query",
+          "model_used",
+          "created_at"
+        ],
+        "title": "TopologySelectionRead",
         "type": "object"
       },
       "ValidationError": {
@@ -1842,7 +2464,7 @@
   "info": {
     "description": "Self-hosted RAG-powered workflow orchestrator",
     "title": "Scaffold Engine",
-    "version": "1.1.0"
+    "version": "1.2.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -2570,6 +3192,275 @@
           }
         ],
         "summary": "Get Dag"
+      }
+    },
+    "/design": {
+      "post": {
+        "description": "Create a design_circuit job from a natural-language brief.\n\nThree response shapes, distinguished by which fields are populated:\n\n  * Success — ``job_id`` + ``spec_id`` set; ``ambiguities=[]``\n    and ``errors=[]``. Status code 200.\n  * Ambiguity — ``ambiguities`` non-empty; ``job_id`` is null and\n    no DB rows are persisted. Operator clarifies and re-posts.\n    Status code 200.\n  * Extractor error — ``errors`` non-empty; no rows persisted.\n    Status code 200 (errors are data, not exceptions — same\n    posture as the simulator wrappers).",
+        "operationId": "post_create_design_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DesignCreateInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DesignCreateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Post Create",
+        "tags": [
+          "Design"
+        ]
+      }
+    },
+    "/design/{job_id}": {
+      "get": {
+        "description": "Read the aggregated pipeline state for a design_circuit job.\n\nA single read that joins jobs ⨝ specs ⨝ topology_selections ⨝\ndevice_sizings. Nullable fields reflect the furthest-completed\nstage; an operator can poll this to see \"is my spec confirmed\nyet?\" or \"did the sizing converge?\" without hitting each stage's\nindividual GET surface.\n\n404 when the job_id is missing or not a design_circuit job.",
+        "operationId": "get_state_design__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DesignStateRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get State",
+        "tags": [
+          "Design"
+        ]
+      }
+    },
+    "/design/{job_id}/advance": {
+      "post": {
+        "description": "Advance the design_circuit pipeline by one stage. Returns an\nSSE stream — clients should read ``text/event-stream`` events of\ntype ``stage_start`` / ``stage_done`` / ``stage_error`` / ``done``.\n\nStage semantics:\n  * ``topology`` — requires confirmed spec; runs §17.146.\n  * ``size``     — requires prior topology selection; runs §17.147.\n  * ``report``   — requires prior device sizing; renders §17.148.\n\nPer-stage granularity is intentional (per §17.151 design choice) —\nthe operator can inspect persisted audit rows between stages and\ncorrect course without re-running the entire chain.\n\nStatus mapping at the HTTP layer:\n  * 400 — unknown stage\n  * 404 — job_id not a design_circuit row\n  * 200 + SSE stream — every successful invocation; stage outcomes\n          live inside the event payloads, not the HTTP code.",
+        "operationId": "post_advance_design__job_id__advance_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "stage",
+            "required": false,
+            "schema": {
+              "default": "topology",
+              "title": "Stage",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Post Advance",
+        "tags": [
+          "Design"
+        ]
+      }
+    },
+    "/device-sizings/{sizing_id}/report": {
+      "get": {
+        "description": "Render the terminal report for an ANALOG sizing attempt.\n\nNon-converged sizings are renderable (with a banner) — the report\nis the post-mortem artefact for \"why did this attempt fail?\",\nnot just the success surface.\n\nStatus:\n  * 200 — report rendered.\n  * 400 — unknown ``format`` (only ``json`` / ``markdown``).\n  * 404 — sizing_id missing OR is in ``digital_sizings``\n          (use /digital-sizings/{id}/report instead).",
+        "operationId": "get_report_device_sizings__sizing_id__report_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sizing_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Sizing Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "json",
+              "title": "Format",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/markdown": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Report",
+        "tags": [
+          "Specs"
+        ]
+      }
+    },
+    "/digital-sizings/{sizing_id}/report": {
+      "get": {
+        "description": "Render the terminal report for a DIGITAL sizing attempt.\n\nSame contract as ``/device-sizings/{id}/report`` but for rows\nliving in ``digital_sizings``. The response carries\n``kind='digital'`` and populates ``final_sv_source`` + ``top_module``\ninstead of ``final_netlist``.\n\nStatus:\n  * 200 — report rendered.\n  * 400 — unknown ``format``.\n  * 404 — sizing_id missing OR is in ``device_sizings``\n          (use /device-sizings/{id}/report instead).",
+        "operationId": "get_digital_report_digital_sizings__sizing_id__report_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sizing_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Sizing Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "json",
+              "title": "Format",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/markdown": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Digital Report",
+        "tags": [
+          "Specs"
+        ]
       }
     },
     "/exec/retry": {
@@ -3405,6 +4296,62 @@
           }
         ],
         "summary": "Get Job Costs Endpoint",
+        "tags": [
+          "Management"
+        ]
+      }
+    },
+    "/jobs/{job_id}/resume": {
+      "post": {
+        "description": "Resume a cancelled job and stream its execution.\n\nAtomically flips the job from ``cancelled`` back to ``executing`` and\nre-fires ``/execute/all``-equivalent execution. Replaces the manual\nSQL-then-curl recipe in debugging.md. ``execute_all_nodes`` is\nidempotent over completed nodes — execution picks up from the last\npending node, with done-node outputs serving as upstream context.\n\nStatus codes:\n  - 200 + SSE stream on successful resume\n  - 404 if no job with that ID exists\n  - 409 if the job exists but isn't in ``cancelled`` (current status\n    returned in detail for client-side dispatch)\n  - 400 on malformed UUID",
+        "operationId": "resume_job_endpoint_jobs__job_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResumeJobInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Resume Job Endpoint",
         "tags": [
           "Management"
         ]
@@ -4690,6 +5637,76 @@
         ]
       }
     },
+    "/research/verify/{session_id}": {
+      "get": {
+        "description": "Session-scoped provenance audit (§17.114 + §17.121).\n\nLists every Milvus entry produced by the given research session and\nreports its current state — present, superseded, or missing. Used to\nsurface drift between what was ingested and what's currently in the\nindex, without re-fetching upstream content. See\n``app/modules/research_verify.py`` for the returned-shape contract.\n\n``?recheck=true`` (§17.121) additionally HEAD-requests each entry's\n``source_url`` and reports ``upstream_state`` (reachable / missing /\nforbidden / error / skipped) per entry plus rollup totals. Bounded\nconcurrency (5). SSRF re-checked on every URL.\n\nPre-§17.114 sessions have no provenance rows linked by session_id\nand return an empty ``entries`` list — that's expected, not an error.",
+        "operationId": "research_verify_endpoint_research_verify__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "If true, HEAD-request each entry's source_url to surface upstream reachability state.",
+            "in": "query",
+            "name": "recheck",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "If true, HEAD-request each entry's source_url to surface upstream reachability state.",
+              "title": "Recheck",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "If true (§17.126), GET each URL and SHA256-compare against the stored raw_upstream_hash. Implies recheck=true.",
+            "in": "query",
+            "name": "compare_hash",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "If true (§17.126), GET each URL and SHA256-compare against the stored raw_upstream_hash. Implies recheck=true.",
+              "title": "Compare Hash",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Research Verify Endpoint",
+        "tags": [
+          "Research"
+        ]
+      }
+    },
     "/schedule": {
       "get": {
         "operationId": "list_schedules_schedule_get",
@@ -4874,6 +5891,219 @@
         ]
       }
     },
+    "/specs/pending": {
+      "get": {
+        "description": "List specs awaiting operator confirmation, oldest first.\n\nOptional ``job_id`` query parameter scopes the list to a specific\njob; without it the list is global across the deployment. UI\nlayers use this to render a \"needs your attention\" panel.",
+        "operationId": "get_pending_specs_pending_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "job_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Job Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpecPendingListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Pending",
+        "tags": [
+          "Specs"
+        ]
+      }
+    },
+    "/specs/{spec_id}/confirm": {
+      "post": {
+        "description": "Mark a spec as operator-confirmed.\n\nIdempotent — re-confirming an already-confirmed spec just\nrefreshes ``confirmed_at`` and rewrites ``confirmed_by``. The\naudit of who-confirmed-when over time is deferred to the future\naudit surface; the column carries only the most recent confirmer.",
+        "operationId": "post_confirm_specs__spec_id__confirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "spec_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Spec Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpecRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Post Confirm",
+        "tags": [
+          "Specs"
+        ]
+      }
+    },
+    "/specs/{spec_id}/topology-select": {
+      "post": {
+        "description": "Run the topology-selection stage against a confirmed spec.\n\nThe stage retrieves engineering-domain reference chunks, asks the\nconfigured model to propose 2–4 candidate topologies with\ncitations into the retrieval set, hard-rejects any hallucinated\ncitation, and persists one ``topology_selections`` row on success.\n\nStatus mapping:\n  * 200 — selection persisted; response carries the candidates +\n          retrieval audit columns.\n  * 404 — spec_id has no row in ``specs``.\n  * 409 — spec exists but is not confirmed (or any other\n          ``ok=False`` path: RAG empty, LLM failure, hallucinated\n          citation, etc.). The body carries ``errors`` so the\n          caller can surface the specific reason.",
+        "operationId": "post_topology_select_specs__spec_id__topology_select_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "spec_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Spec Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopologySelectionRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Post Topology Select",
+        "tags": [
+          "Specs"
+        ]
+      }
+    },
+    "/specs/{spec_id}/unconfirm": {
+      "post": {
+        "description": "Clear a spec's confirmation columns. Use when a confirmed spec\nneeds to be revoked (e.g. a downstream stage flagged a problem and\nthe operator wants to extract a fresh spec).\n\nIdempotent — calling on an already-unconfirmed spec is a no-op.",
+        "operationId": "post_unconfirm_specs__spec_id__unconfirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "spec_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Spec Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpecRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Post Unconfirm",
+        "tags": [
+          "Specs"
+        ]
+      }
+    },
     "/status": {
       "get": {
         "description": "Return job status counts and recent jobs.",
@@ -4952,6 +6182,89 @@
           }
         ],
         "summary": "Get Status"
+      }
+    },
+    "/topology-selections/{topology_selection_id}/size": {
+      "post": {
+        "description": "Run the closed-loop sizing stage against a topology candidate.\n\nDispatches on ``spec.design.kind`` (§17.152):\n  * ``analog_circuit`` → §17.147 ngspice-in-the-loop sizer,\n    returns ``DeviceSizingRead``.\n  * ``digital_logic`` → §17.152 Verilator-in-the-loop sizer,\n    returns ``DigitalSizingRead``.\n  * any other kind → 400.\n\nAlways persists an audit row (device_sizings or digital_sizings)\nwhen the stage gets past the gate checks. The persisted row\nrecords the attempt — a non-converged sizing carries\n``converged=False`` and an ``errors`` list explaining why; the\nwider pipeline accepts it as ready only when ``converged=True``.\n\nStatus mapping:\n  * 200 — row persisted (caller checks ``converged`` for outcome\n          and reads ``kind`` to know which response shape arrived).\n  * 400 — candidate_idx out of bounds, or unsupported design.kind.\n  * 404 — topology_selection_id not found.",
+        "operationId": "post_size_device_topology_selections__topology_selection_id__size_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topology_selection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Topology Selection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "candidate_idx",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "Candidate Idx",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_iterations",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Iterations"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/DeviceSizingRead"
+                    },
+                    {
+                      "$ref": "#/components/schemas/DigitalSizingRead"
+                    }
+                  ],
+                  "title": "Response Post Size Device Topology Selections  Topology Selection Id  Size Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Post Size Device",
+        "tags": [
+          "Specs"
+        ]
       }
     }
   }

@@ -35,7 +35,11 @@ def test_schedule_awaits_require_valid_models(client):
             "missing_models": ["nonexistent:1b"],
         },
     )
-    with patch("app.main._require_valid_models",
+    # §17.174 — /schedule moved to app.routers.schedule; patch the
+    # symbol where the route handler looks it up (the workflow.py /
+    # schedule.py modules import _require_valid_models into their own
+    # namespace at import time).
+    with patch("app.routers.schedule._require_valid_models",
                new_callable=AsyncMock, side_effect=exc):
         response = client.post(
             "/schedule",
@@ -107,7 +111,8 @@ def test_fix15_ideas_runs_model_validation(client):
         status_code=422,
         detail={"error": "model_validation_failed", "missing_models": ["nope:1b"]},
     )
-    with patch("app.main._require_valid_models",
+    # §17.174 — /ideas moved to app.routers.workflow.
+    with patch("app.routers.workflow._require_valid_models",
                new_callable=AsyncMock, side_effect=exc):
         response = client.post(
             "/ideas",
@@ -124,7 +129,8 @@ def test_fix15_gt_runs_model_validation(client):
         status_code=422,
         detail={"error": "model_validation_failed", "missing_models": ["nope:1b"]},
     )
-    with patch("app.main._require_valid_models",
+    # §17.174 — /gt moved to app.routers.gt.
+    with patch("app.routers.gt._require_valid_models",
                new_callable=AsyncMock, side_effect=exc):
         response = client.post(
             "/gt",
@@ -154,7 +160,8 @@ def test_fix98_execute_runs_model_validation(client):
         status_code=422,
         detail={"error": "model_validation_failed", "missing_models": ["nope:1b"]},
     )
-    with patch("app.main._require_valid_models",
+    # §17.174 — /execute moved to app.routers.workflow.
+    with patch("app.routers.workflow._require_valid_models",
                new_callable=AsyncMock, side_effect=exc):
         response = client.post(
             "/execute",
