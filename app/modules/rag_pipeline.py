@@ -731,16 +731,26 @@ async def query_rag(
     # multiplicative bump based on quality_signal from provenance; re-sort
     # by the bumped final_score. Bumps cap at ×1.20; embedding similarity
     # remains the primary signal. Entries with no provenance row get 1.0.
+    #
+    # §17.197 — use ``dataclasses.replace`` to build the bumped result
+    # objects instead of mutating final_score in place. The earlier
+    # ``_rerank`` and ``_rrf_fuse`` paths already use replace() to keep
+    # RagResult immutable from a caller's perspective; the in-place bump
+    # broke that invariant. Currently practically safe (filtered doesn't
+    # escape the function), but the moment a future change caches the
+    # RagResult list rather than the response dict, the bump would
+    # double-apply on a cache hit. Locking the no-mutation contract now.
     quality_bumps: dict[str, float] = {}
     if filtered:
         from app.modules.quality_rerank import quality_bump
         for r in filtered:
             prov = prov_map.get(r.entry_id)
             qs = (prov or {}).get("quality_signal")
-            bump = quality_bump(r.source_type, qs)
-            quality_bumps[r.entry_id] = bump
-            if bump != 1.0:
-                r.final_score = r.final_score * bump
+            quality_bumps[r.entry_id] = quality_bump(r.source_type, qs)
+        filtered = [
+            replace(r, final_score=r.final_score * quality_bumps[r.entry_id])
+            for r in filtered
+        ]
         filtered.sort(key=lambda r: r.final_score, reverse=True)
 
     latency_ms = round((time.monotonic() - t0) * 1000, 1)

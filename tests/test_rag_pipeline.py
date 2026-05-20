@@ -153,6 +153,91 @@ class TestQueryRagHappyPath:
 
 
 # ===========================================================================
+# §17.197 — quality-bump no-mutation invariant
+# ===========================================================================
+#
+# Pre-§17.197 the quality-bump phase did ``r.final_score *= bump`` — an
+# in-place mutation that broke the no-mutation invariant ``_rerank`` /
+# ``_rrf_fuse`` establish via ``dataclasses.replace``. The mutation was
+# practically safe because ``filtered`` doesn't escape ``query_rag``,
+# but a future change that caches the RagResult list rather than the
+# response dict would double-apply the bump on a cache hit. §17.197
+# replaces the mutation with ``dataclasses.replace``; the test below
+# locks the invariant.
+
+@pytest.mark.smoke
+class TestQualityBumpNoMutation:
+    def test_quality_bump_phase_uses_replace_not_inplace(self):
+        """Source-level guard against re-introducing the in-place
+        mutation §17.197 removed. The pre-§17.197 pattern was
+        ``r.final_score = r.final_score * bump`` — broke the no-mutation
+        invariant ``_rerank`` / ``_rrf_fuse`` establish via
+        ``dataclasses.replace``. The current implementation builds a
+        new list via ``replace``; this test ensures a future refactor
+        can't silently slide back."""
+        import inspect
+        from app.modules import rag_pipeline as rp
+        src = inspect.getsource(rp.query_rag)
+        # The forbidden pattern (with optional spaces). Catches the
+        # canonical form; a creative refactor using a different variable
+        # name would slip past, but the §17.120 quality-bump pattern is
+        # stable across the codebase.
+        assert "r.final_score = r.final_score" not in src, (
+            "regression: quality-bump phase reintroduced in-place "
+            "mutation that §17.197 removed"
+        )
+        # And the replace pattern IS present.
+        assert "replace(r, final_score=" in src, (
+            "expected `replace(r, final_score=...)` in query_rag for "
+            "the §17.197 quality-bump phase"
+        )
+
+    def test_bump_factor_applied_to_response_score(self):
+        """When quality_bump returns 1.5, the response's final score is
+        1.5× the rrf_score (the post-rerank score; mock_rerank sets it).
+        Confirms the §17.197 ``replace(r, final_score=r.final_score *
+        bump)`` formula actually applies the bump rather than dropping it."""
+        vector_results = _make_vector_results([
+            {"content": "A", "title": "DA", "entry_id": "e1", "vector_score": 0.9},
+        ])
+        patches = _patch_rag_deps(vector_results=vector_results)
+        with _PatchStack(patches), \
+             patch("app.modules.quality_rerank.quality_bump", return_value=1.5):
+            from app.modules.rag_pipeline import query_rag
+            result = _run(query_rag(
+                "test query", domain="eng", confidence_threshold=0.0,
+            ))
+
+        final = result["results"][0]["scores"]["final"]
+        rrf = result["results"][0]["scores"]["rrf"]
+        # mock_rerank sets rerank_score = rrf_score and final_score =
+        # rrf_score on its returned list (the new copies built by
+        # _rrf_fuse's replace). The bump multiplies that by 1.5.
+        assert final == pytest.approx(rrf * 1.5, rel=1e-4)
+        assert result["results"][0]["scores"]["quality_bump"] == pytest.approx(1.5)
+
+    def test_bump_of_one_leaves_score_at_rerank_value(self):
+        """When quality_bump returns 1.0 (no provenance row → identity),
+        the final_score in the response equals the post-rerank score —
+        no spurious round-trip changes."""
+        vector_results = _make_vector_results([
+            {"content": "A", "title": "DA", "entry_id": "e1", "vector_score": 0.9},
+        ])
+        patches = _patch_rag_deps(vector_results=vector_results)
+        with _PatchStack(patches), \
+             patch("app.modules.quality_rerank.quality_bump", return_value=1.0):
+            from app.modules.rag_pipeline import query_rag
+            result = _run(query_rag(
+                "test query", domain="eng", confidence_threshold=0.0,
+            ))
+        final = result["results"][0]["scores"]["final"]
+        rrf = result["results"][0]["scores"]["rrf"]
+        # Bump factor 1.0 — response score equals the rerank-stage score.
+        assert final == pytest.approx(rrf, rel=1e-9)
+        assert result["results"][0]["scores"]["quality_bump"] == pytest.approx(1.0)
+
+
+# ===========================================================================
 # Error Handling
 # ===========================================================================
 

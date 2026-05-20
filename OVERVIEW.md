@@ -8794,9 +8794,53 @@ $ docker exec scaffold-orchestrator pytest tests/test_main.py tests/test_health_
 
 §17.195 + §17.196 close AUDIT.md cohort "MEDIUM UX (5.4 + 5.5)". Remaining open: small MEDIUM wins (1.3 + 2.7 + 2.8), all LOW items.
 
+### §17.197 quality-bump no-mutation — closes AUDIT 1.3
+
+Closes **AUDIT.md item 1.3** (MEDIUM): pre-§17.197 the quality-signal-weighted rerank phase at ``app/modules/rag_pipeline.py:743`` did ``r.final_score = r.final_score * bump`` — an in-place mutation that broke the no-mutation invariant ``_rerank`` and ``_rrf_fuse`` establish via ``dataclasses.replace``. The audit flagged this as MEDIUM (not HIGH) because ``filtered`` doesn't escape ``query_rag`` in the current code path, so the mutation isn't actually observable to callers today. But the moment a future change caches the ``RagResult`` list rather than the response dict, the bump would double-apply on a cache hit. Locking the invariant now removes the foot-in-mouth.
+
+**Fix.** Replace the in-place loop with a list comprehension using ``dataclasses.replace``:
+
+```python
+# pre-§17.197
+for r in filtered:
+    bump = quality_bump(r.source_type, qs)
+    quality_bumps[r.entry_id] = bump
+    if bump != 1.0:
+        r.final_score = r.final_score * bump   # in-place mutation
+filtered.sort(key=lambda r: r.final_score, reverse=True)
+
+# post-§17.197
+for r in filtered:
+    quality_bumps[r.entry_id] = quality_bump(r.source_type, qs)
+filtered = [
+    replace(r, final_score=r.final_score * quality_bumps[r.entry_id])
+    for r in filtered
+]
+filtered.sort(key=lambda r: r.final_score, reverse=True)
+```
+
+The ``dataclasses.replace`` builds a new ``RagResult`` per entry; the original objects from ``_rerank``'s output (themselves copies built by ``_rrf_fuse``'s ``replace`` calls) are never touched. The bump factor lookup is unconditional (no ``if bump != 1.0`` guard) because ``replace`` is just as cheap when the result is identical — the early-exit was a micro-optimization that obscured the contract.
+
+**Files.**
+
+- ``app/modules/rag_pipeline.py`` — quality-bump loop rewritten (~10 lines changed); ``replace`` already imported from the §17.120 work.
+- ``tests/test_rag_pipeline.py`` — new ``TestQualityBumpNoMutation`` class with 3 tests: source-level guard via ``inspect.getsource`` (catches a future regression that reintroduces ``r.final_score = r.final_score`` mutation), bump=1.5 behavioral check, bump=1.0 identity check.
+
+**Why the source-level guard rather than a behavioral mutation test.** A pure behavioral test would need to capture a reference to a ``RagResult`` before the bump phase and assert it's unchanged after. But ``_rrf_fuse`` always uses ``replace`` (introducing new objects), so the upstream ``vector_results`` references are decoupled from what reaches the bump phase — the mutation, if it returned, would be invisible to test code from the outside. The source-level guard catches the regression directly without requiring an end-to-end reproduction setup.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_rag_pipeline.py --timeout=30
+42 passed in ~5 s   (39 pre-existing + 3 new for §17.197)
+```
+
+**What this does NOT change.**
+
+- Bump SEMANTICS unchanged — same quality_signal lookup, same per-source bump function, same sort-by-final_score.
+- Response payload byte-equal — operators reading the response see the same numbers.
+
 ---
-
-
 
 ## Phase 8 wrap — orchestration & memory caching hardening
 
