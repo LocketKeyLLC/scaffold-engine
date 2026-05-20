@@ -262,3 +262,177 @@ def test_wire_500_redacts_secret_but_db_keeps_raw(mock_session):
     mock_session.execute.assert_awaited_once()
     bind = mock_session.execute.await_args.args[1]
     assert leaked in bind["error_message"], "DB record should retain raw text for operator debug"
+
+
+# ---------- §17.183 — typed upstream-down classification ----------
+#
+# Pre-§17.183 every unhandled exception bubbled to a generic 500. An
+# operator hitting "Internal Server Error" couldn't tell SearXNG-down from
+# Milvus-collection-missing from a plain ValueError without tailing docker
+# logs. The new ``_classify_upstream`` helper inspects transport-layer
+# failures and surfaces a 503 ``{error: upstream_unreachable, service,
+# hint}`` body when the failing host matches a configured upstream URL.
+
+from pymilvus.exceptions import MilvusException  # noqa: E402 — late import,
+# kept here so the §17.183 block reads as a self-contained section.
+
+from app.config import settings  # noqa: E402
+from app.middleware import error_logging as elm  # noqa: E402
+from app.middleware.error_logging import _classify_upstream  # noqa: E402
+
+
+def _req_for(url: str) -> httpx.Request:
+    """Build a Request bound to a URL so TransportError carries .request."""
+    return httpx.Request("GET", url)
+
+
+def _app_raising(exc: Exception) -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(ErrorLoggingMiddleware)
+
+    @app.get("/boom")
+    async def boom():
+        raise exc
+
+    return app
+
+
+def test_upstream_ollama_connect_error_yields_503(mock_session):
+    exc = httpx.ConnectError(
+        "no route",
+        request=_req_for(settings.ollama_base_url + "/api/tags"),
+    )
+    client = TestClient(_app_raising(exc), raise_server_exceptions=False)
+    r = client.get("/boom")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["error"] == "upstream_unreachable"
+    assert body["service"] == "ollama"
+    assert body["path"] == "/boom"
+    assert "hint" in body and body["hint"]
+
+
+def test_upstream_searxng_connect_error_yields_503(mock_session):
+    exc = httpx.ConnectError(
+        "down",
+        request=_req_for(settings.searxng_url + "/search"),
+    )
+    client = TestClient(_app_raising(exc), raise_server_exceptions=False)
+    r = client.get("/boom")
+    assert r.status_code == 503
+    assert r.json()["service"] == "searxng"
+
+
+def test_upstream_read_timeout_to_ollama_yields_503(mock_session):
+    """ReadTimeout is a TransportError subclass (via TimeoutException)."""
+    exc = httpx.ReadTimeout(
+        "slow upstream",
+        request=_req_for(settings.ollama_base_url + "/api/chat"),
+    )
+    client = TestClient(_app_raising(exc), raise_server_exceptions=False)
+    r = client.get("/boom")
+    assert r.status_code == 503
+    assert r.json()["service"] == "ollama"
+
+
+def test_upstream_milvus_exception_yields_503(mock_session):
+    """PyMilvus speaks gRPC, not httpx — separate classification branch."""
+    exc = MilvusException(message="collection 'xyz' not loaded")
+    client = TestClient(_app_raising(exc), raise_server_exceptions=False)
+    r = client.get("/boom")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["error"] == "upstream_unreachable"
+    assert body["service"] == "milvus"
+
+
+def test_unrelated_host_falls_back_to_500(mock_session):
+    """A transport error to an unknown host is NOT classified as upstream."""
+    exc = httpx.ConnectError(
+        "no route",
+        request=_req_for("http://some.other.host:9999/"),
+    )
+    client = TestClient(_app_raising(exc), raise_server_exceptions=False)
+    r = client.get("/boom")
+    assert r.status_code == 500
+    assert r.json()["error"] == "ConnectError"
+
+
+def test_http_status_error_not_classified_as_upstream_unreachable(mock_session):
+    """5xx from upstream means it IS reachable — different concern. The
+    audit was explicit that only transport-level failures qualify."""
+    req = _req_for(settings.searxng_url + "/search")
+    resp = httpx.Response(500, request=req)
+    exc = httpx.HTTPStatusError("server error", request=req, response=resp)
+    client = TestClient(_app_raising(exc), raise_server_exceptions=False)
+    r = client.get("/boom")
+    assert r.status_code == 500
+    assert r.json()["error"] == "HTTPStatusError"
+
+
+def test_value_error_not_classified_as_upstream(mock_session):
+    """A plain programming bug → generic 500, not 503."""
+    client = TestClient(_app_raising(ValueError("oops")), raise_server_exceptions=False)
+    r = client.get("/boom")
+    assert r.status_code == 500
+    assert r.json()["error"] == "ValueError"
+
+
+def test_transport_error_without_request_attribute_falls_back_to_500(mock_session):
+    """ConnectError without a bound request (pool-time failures) — bail safely."""
+    exc = httpx.ConnectError("pool exhausted")
+    client = TestClient(_app_raising(exc), raise_server_exceptions=False)
+    r = client.get("/boom")
+    assert r.status_code == 500
+    assert "service" not in r.json()
+
+
+def test_classified_503_still_writes_error_log_row(mock_session):
+    """The 503 path must still persist the audit row — operator visibility."""
+    exc = MilvusException(message="lost connection")
+    client = TestClient(_app_raising(exc), raise_server_exceptions=False)
+    r = client.get("/boom")
+    assert r.status_code == 503
+    # The error_log row must have been written exactly once.
+    mock_session.execute.assert_awaited_once()
+
+
+# ---------- direct unit tests for _classify_upstream ----------
+
+def test_classify_upstream_returns_none_for_unrelated_exception():
+    assert _classify_upstream(ValueError("hello")) is None
+    assert _classify_upstream(KeyError("k")) is None
+    assert _classify_upstream(TypeError("t")) is None
+    assert _classify_upstream(RuntimeError("r")) is None
+
+
+def test_classify_upstream_returns_none_for_http_status_error():
+    """HTTPStatusError is not a TransportError — explicitly out of scope."""
+    req = _req_for("http://searxng:8080/")
+    resp = httpx.Response(404, request=req)
+    exc = httpx.HTTPStatusError("nf", request=req, response=resp)
+    assert _classify_upstream(exc) is None
+
+
+def test_classify_upstream_matches_on_host_only_ignoring_scheme_port_path(
+    monkeypatch,
+):
+    """The classifier compares hosts, not full URLs — a TLS upgrade or
+    different port on the same host still matches."""
+    monkeypatch.setattr(settings, "searxng_url", "http://searxng:8080")
+    exc = httpx.ConnectError(
+        "down",
+        request=_req_for("https://searxng:9999/some/other/path?q=x"),
+    )
+    result = _classify_upstream(exc)
+    assert result is not None
+    assert result[0] == "searxng"
+
+
+def test_classify_upstream_hint_mentions_service():
+    """Hint is operator-facing — should reference the failing service name."""
+    exc = httpx.ConnectError("x", request=_req_for(settings.milvus_uri + "/"))
+    result = _classify_upstream(exc)
+    assert result is not None
+    service, hint = result
+    assert service in hint or "scaffold-" + service in hint

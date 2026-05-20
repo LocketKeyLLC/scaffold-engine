@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 import re
 import traceback
+from urllib.parse import urlparse
+
 import httpx
 
 from fastapi import Request, Response
@@ -18,6 +20,14 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import JSONResponse
 from sqlalchemy import text
 
+try:
+    from pymilvus.exceptions import MilvusException
+except ImportError:  # pragma: no cover — pymilvus is required, but keep the
+    # import defensive so a stripped install can still load the middleware.
+    class MilvusException(Exception):  # type: ignore[no-redef]
+        pass
+
+from app.config import settings
 from app.database import async_session
 
 logger = logging.getLogger("scaffold.errors")
@@ -59,7 +69,7 @@ def _redact_secrets(text_in: str) -> str:
 
 
 class ErrorLoggingMiddleware(BaseHTTPMiddleware):
-    """Intercept unhandled exceptions → write to error_logs → return 500."""
+    """Intercept unhandled exceptions → write to error_logs → return 500/503."""
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint,
@@ -101,6 +111,27 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
             except Exception as db_err:
                 logger.error("Failed to persist error log: %s", db_err)
 
+            # §17.183: typed upstream-down classification. Pre-§17.183 every
+            # unhandled exception bubbled to a generic 500 "Internal Server
+            # Error" — an operator debugging a research call had to grep
+            # docker logs + cross-reference timestamps to tell SearXNG-down
+            # from Milvus-collection-missing. Now: transport failures to
+            # known upstream URLs surface as 503 with {service, hint} so the
+            # category is on the wire. Stack traces stay redacted; the
+            # error_logs row is unchanged.
+            upstream = _classify_upstream(exc)
+            if upstream is not None:
+                service, hint = upstream
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": "upstream_unreachable",
+                        "service": service,
+                        "hint": hint,
+                        "path": request.url.path,
+                    },
+                )
+
             return JSONResponse(
                 status_code=500,
                 content={
@@ -109,6 +140,56 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
                     "path": request.url.path,
                 },
             )
+
+
+def _classify_upstream(exc: Exception) -> tuple[str, str] | None:
+    """Map known upstream transport failures to (service, hint), or None.
+
+    Returns a tuple when the exception carries enough information to identify
+    the failing upstream:
+
+      * ``pymilvus.MilvusException`` → ("milvus", …) — Milvus speaks gRPC,
+        not httpx, so its failures arrive as a separate exception type.
+      * ``httpx.TransportError`` (connect / timeout / network / protocol)
+        whose request URL host matches ``settings.searxng_url``,
+        ``settings.ollama_base_url``, or ``settings.milvus_uri`` → the
+        respective service. ``httpx.HTTPStatusError`` is intentionally NOT
+        classified — a 5xx response means the upstream IS reachable and
+        chose to return an error, which is a different operator concern.
+
+    Returns None for anything else; the middleware then falls back to a
+    generic 500.
+    """
+    if isinstance(exc, MilvusException):
+        return ("milvus", "GET /health or check the scaffold-milvus container")
+
+    if isinstance(exc, httpx.TransportError):
+        # ``httpx.RequestError.request`` is a property that RAISES
+        # RuntimeError when no request was bound to the exception (e.g.
+        # pool-time failures). ``getattr(..., None)`` would let that
+        # RuntimeError escape ``_classify_upstream`` and crash the
+        # middleware — so wrap the access explicitly.
+        try:
+            req = exc.request
+        except RuntimeError:
+            return None
+        host = getattr(getattr(req, "url", None), "host", None)
+        if not host:
+            return None
+
+        for url, service in (
+            (settings.searxng_url, "searxng"),
+            (settings.ollama_base_url, "ollama"),
+            (settings.milvus_uri, "milvus"),
+        ):
+            cfg_host = urlparse(url).hostname
+            if cfg_host and host == cfg_host:
+                return (
+                    service,
+                    f"GET /health or check the scaffold-{service} container",
+                )
+
+    return None
 
 
 def _classify_error(exc: Exception) -> str:

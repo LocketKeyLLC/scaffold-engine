@@ -8105,6 +8105,52 @@ $ docker exec scaffold-orchestrator pytest \
 31 passed in ~3 s
 ```
 
+### §17.183 typed upstream-down errors in ErrorLoggingMiddleware
+
+Closes **AUDIT.md item 5.3** (MEDIUM, honorable mention): pre-§17.183, ``ErrorLoggingMiddleware`` mapped every unhandled exception to a generic ``500 {error: <ExcClass>, message: "...", path: "..."}`` response — operator-debug-hostile because "Internal Server Error" doesn't say which dependency failed. A research call with SearXNG down looked identical on the wire to one where Milvus collection was missing; the debug loop was: 500 → tail docker logs → cross-reference timestamps to figure out which dependency was the culprit. The redacted message is correct for security (the §17.162 redaction work explicitly removes credentials and stack traces from the wire) but loses the **category** that an operator most needs.
+
+**Fix.** New ``_classify_upstream(exc) -> tuple[str, str] | None`` helper in the same module. Returns ``(service, hint)`` when the exception is a transport-level failure to a known upstream URL, ``None`` otherwise:
+
+| Exception | Matches when | Maps to |
+|---|---|---|
+| ``pymilvus.MilvusException`` | any | (``"milvus"``, hint) |
+| ``httpx.TransportError`` (Connect / Network / Timeout / Protocol subclasses) | ``urlparse(exc.request.url).host == urlparse(settings.searxng_url).hostname`` | (``"searxng"``, hint) |
+| ``httpx.TransportError`` | matches ``settings.ollama_base_url`` host | (``"ollama"``, hint) |
+| ``httpx.TransportError`` | matches ``settings.milvus_uri`` host | (``"milvus"``, hint) |
+| ``httpx.HTTPStatusError`` (5xx response from upstream) | — | None — upstream IS reachable; different concern |
+| any other exception | — | None — falls through to generic 500 |
+
+Classified failures now respond with ``503 {error: "upstream_unreachable", service: <name>, hint: <operator-facing string>, path: <request path>}``. Unclassified failures keep the existing 500 contract verbatim. The ``error_logs`` audit row is written on both paths — operator visibility into 503s is the same as into 500s.
+
+**Defensive lookup.** ``httpx.RequestError.request`` is a *property* that RAISES ``RuntimeError`` when no request was bound (pool-time failures, construction-time errors). ``getattr(exc, "request", None)`` would let that ``RuntimeError`` escape ``_classify_upstream`` and crash the middleware itself — so the property access is wrapped in ``try / except RuntimeError`` and falls through to None on failure. Test ``test_transport_error_without_request_attribute_falls_back_to_500`` is the explicit guard.
+
+**Why not also classify the HTTPStatusError path.** A 5xx response from upstream means the connection succeeded and upstream chose to return an error — this is meaningfully different from "couldn't reach upstream." Conflating the two would mis-direct operators: a 5xx from SearXNG telling us "no results" looks identical on the wire to SearXNG being down. The audit was explicit ("Catch known upstream failure classes (httpx.ConnectError to SearXNG/Ollama/Milvus, PyMilvus MilvusException)") — transport-level only.
+
+**Why match on host only, ignoring scheme/port/path.** A future deployment may upgrade ollama from http to https or change its port; the operator's classification still applies. The match is on ``urlparse(...).hostname``, which gives just the host string. ``test_classify_upstream_matches_on_host_only_ignoring_scheme_port_path`` is the regression guard.
+
+**Files.**
+
+- ``app/middleware/error_logging.py``:
+  - new ``urllib.parse.urlparse`` import + defensive ``MilvusException`` import (try/except ImportError for stripped installs);
+  - new ``_classify_upstream(exc) -> tuple[str, str] | None`` function;
+  - ``ErrorLoggingMiddleware.dispatch`` checks classification after the existing log + DB write and returns 503 when classified, falls through to the existing 500 path otherwise.
+- ``tests/test_error_logging_middleware.py`` — 13 new tests appended in a §17.183-marked section: 4 happy-path classifier cases, 4 fall-through cases (HTTPStatusError, unrelated host, ValueError, no-request), 1 audit-row-still-written guard, 4 direct unit tests of ``_classify_upstream``.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_error_logging_middleware.py --timeout=30 -v
+40 passed in ~5 s
+```
+
+(40 total = 27 pre-existing + 13 new for §17.183.)
+
+**What this does NOT change.**
+
+- Existing 500 contract: same status, same body shape ``{error, message, path}``, same secret redaction (``§17.162``). Operators / SDK consumers grepping on the existing shape keep working.
+- The ``error_logs`` table is unchanged. The ``error_type`` classification (``timeout`` / ``transient`` / ``validation`` / ``unrecoverable``) is unchanged — adding ``upstream_<service>`` rows would have needed a schema migration and is out of scope for the audit's "wire-level category surfacing" fix.
+- ``/health`` is unchanged — it was already the way to find out which dependency was down. §17.183 just removes the need to switch to /health to interpret a failed request.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
