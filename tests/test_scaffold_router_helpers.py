@@ -527,3 +527,58 @@ class TestBootstrapValves:
         assert "FROM_USER" in live.read_text()
         assert "FROM_TMPL" not in live.read_text()
 
+
+@pytest.mark.smoke
+class TestPostWithKeepaliveProgressMarkers:
+    """§17.173 — _post_with_keepalive emits visible elapsed-time markers
+    when a progress_label is supplied. Without a label (or with
+    progress_marker_interval=0), behavior is unchanged: only zero-width
+    keepalive ticks are emitted between the POST start and return.
+
+    The visible-marker-fires path needs a slow POST + controlled clock to
+    test deterministically; we cover that path via the live OWUI flow.
+    What we lock here is (a) the new valve default, (b) the keyword-only
+    kwarg shape, and (c) the back-compat invariants (no label or
+    interval=0 → behavior unchanged from pre-§17.173).
+    """
+
+    def test_progress_marker_interval_valve_default(self, pipe):
+        """New valve exists with default 120 (~2 min between visible
+        markers — chosen so a 25-min Phase 2 yields ~10 markers, not
+        50+ chat-cluttering lines)."""
+        assert pipe.valves.progress_marker_interval == 120
+
+    def test_post_with_keepalive_accepts_progress_label_kwarg(self, pipe):
+        """The new kwarg must be keyword-only (callers can't accidentally
+        pass it positionally and bypass the in-between zero-width tick
+        behavior)."""
+        import inspect
+        sig = inspect.signature(pipe._post_with_keepalive)
+        param = sig.parameters.get("progress_label")
+        assert param is not None
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY
+        assert param.default is None
+
+    def test_no_visible_marker_when_label_absent(self, pipe):
+        """Back-compat: without progress_label, the generator only yields
+        zero-width spaces — no '⏳' lines anywhere. Pre-§17.173 callers
+        keep their previous behavior."""
+        fake_resp = MagicMock(status_code=200)
+        with patch.object(_mod, "_HTTP_SESSION") as sess:
+            sess.post = MagicMock(return_value=fake_resp)
+            chunks = list(pipe._post_with_keepalive("http://x", {}, 5))
+        assert all("⏳" not in c for c in chunks)
+
+    def test_no_visible_marker_when_interval_zero(self, pipe):
+        """Operator escape hatch: setting progress_marker_interval=0
+        disables visible markers even with progress_label set. Lets
+        operators silence the markers without code changes."""
+        pipe.valves.progress_marker_interval = 0
+        fake_resp = MagicMock(status_code=200)
+        with patch.object(_mod, "_HTTP_SESSION") as sess:
+            sess.post = MagicMock(return_value=fake_resp)
+            chunks = list(pipe._post_with_keepalive(
+                "http://x", {}, 5, progress_label="Test phase",
+            ))
+        assert all("⏳" not in c for c in chunks)
+

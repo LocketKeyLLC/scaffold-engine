@@ -353,6 +353,14 @@ class Pipeline:
 
         # SSE cadence & per-read timeout & stall threshold multiplier source
         keepalive_interval: int = 10
+        # §17.173 — visible elapsed-time marker cadence for long blocking
+        # POSTs (Phase 2 research, ~10-25 min on CPU). Zero-width keepalives
+        # tick every keepalive_interval (above) to keep the SSE connection
+        # alive; this separate cadence governs the *visible* "⏳ still
+        # working" markers users see in chat. 120 s = ~10 markers across a
+        # 25-min job, which surfaces progress without filling the chat with
+        # redundant ticks. Set to 0 to disable visible markers.
+        progress_marker_interval: int = 120
 
         # Triage
         triage_model: str = "qwen3:4b"
@@ -1083,11 +1091,12 @@ class Pipeline:
                 return
             payload["feedback"] = feedback
 
-        yield "🔬 Starting research and knowledge ingestion — this may take several minutes on CPU...\n\n"
+        yield "🔬 Starting research and knowledge ingestion — this may take 10-25 minutes on CPU. Progress markers will appear roughly every 2 minutes.\n\n"
 
         ok, res = yield from self._post_with_keepalive(
             f"{self.valves.orchestrator_url}/ideate/confirm",
             payload, self.valves.stream_timeout,
+            progress_label="Phase 2 — researching + ingesting",
         )
         if not ok:
             yield (
@@ -1119,6 +1128,7 @@ class Pipeline:
             f"{self.valves.orchestrator_url}/dag",
             {"job_id": job_id, "model_overrides": self._model_overrides()},
             self.valves.stream_timeout,
+            progress_label="Phase 3 — planning DAG",
         )
         if not ok:
             yield (
@@ -1740,9 +1750,20 @@ class Pipeline:
 
     def _post_with_keepalive(
         self, url: str, payload: dict, timeout: int,
+        *, progress_label: str | None = None,
     ):
         """Generator: yields '\\u200b' every keepalive_interval until POST returns.
-        Terminates with `return (ok, response_or_exception)`."""
+
+        \u00a717.173 \u2014 when ``progress_label`` is set, additionally yields a
+        visible "\u23f3 <label>... (Nm SSs elapsed)" marker every
+        ``progress_marker_interval`` seconds. This surfaces progress to
+        the OWUI chat for long blocking POSTs (Phase 2 research can
+        take 10-25 min on CPU; without visible markers the chat appears
+        frozen). Zero-width keepalives continue ticking in between to
+        maintain SSE connection.
+
+        Terminates with ``return (ok, response_or_exception)``.
+        """
         result = [None]
         error = [None]
 
@@ -1756,9 +1777,30 @@ class Pipeline:
 
         t = threading.Thread(target=_call, daemon=True)
         t.start()
+
+        # \u00a717.173 \u2014 track elapsed time so visible markers stay synchronized
+        # to wall-clock progress regardless of keepalive_interval. Marker
+        # interval of 0 disables visible markers entirely (back-compat for
+        # tests that count zero-width ticks).
+        start = time.monotonic()
+        marker_interval = self.valves.progress_marker_interval
+        last_marker = start
+
         while t.is_alive():
             time.sleep(self.valves.keepalive_interval)
-            if t.is_alive():
+            if not t.is_alive():
+                break
+            now = time.monotonic()
+            if (
+                progress_label
+                and marker_interval > 0
+                and (now - last_marker) >= marker_interval
+            ):
+                elapsed = int(now - start)
+                mm, ss = elapsed // 60, elapsed % 60
+                yield f"\n\u23f3 {progress_label}\u2026 ({mm}m {ss:02d}s elapsed)\n"
+                last_marker = now
+            else:
                 yield "\u200b"
         t.join()
 
@@ -1778,6 +1820,7 @@ class Pipeline:
             f"{self.valves.orchestrator_url}/ideate",
             {"idea": message, "model_overrides": self._model_overrides()},
             self.valves.stream_timeout,
+            progress_label="Phase 1 — refining idea",
         )
         if not ok:
             err = res
@@ -1835,6 +1878,7 @@ class Pipeline:
             f"{self.valves.orchestrator_url}/dag",
             {"job_id": job_id, "model_overrides": self._model_overrides()},
             self.valves.stream_timeout,
+            progress_label="Phase 3 — planning DAG",
         )
         if not ok:
             err = res

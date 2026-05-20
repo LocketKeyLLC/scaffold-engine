@@ -145,7 +145,7 @@ Check progress at any time with:
 That command knows the job's current status and shows what to do next — including pre-filled commands if a node failed and needs a retry.
 
 > **What can go wrong on your first run:**
-> - Phase 2 (research) can take 10–25 minutes. There's no progress bar; check the orchestrator logs (`docker logs -f scaffold-orchestrator`) to confirm it's working.
+> - Phase 2 (research) can take 10–25 minutes on CPU. The chat shows a visible "⏳ Phase 2 — researching + ingesting… (Xm YYs elapsed)" marker every ~2 minutes (§17.173). For sub-step detail, tail the orchestrator (`docker logs -f scaffold-orchestrator`) — it logs each SearXNG query, distillation batch, and Milvus ingest as it happens.
 > - If the system says `awaiting_confirmation` and won't move forward, you skipped step 6 (the `/confirm` command).
 > - If a DAG node fails after three auto-retries, it goes to `blocked`. Run `/results <job_id>` for a copy-pasteable retry or skip command.
 

@@ -7631,6 +7631,57 @@ Live verification deferred — the right reproduction is mid-iteration Milvus fa
 
 **Why not use a single async session across both Milvus and dedup_log.** Postgres ``async_session()`` rolls back on raise, but Milvus is a separate write surface with no compatible two-phase commit. The pragmatic atomicity boundary is: "dedup_log writes are atomic with each other (batched commit) and ordered after the Milvus upsert they describe." That's what §17.172 enforces. A real distributed-transaction story is out of scope for this codebase's scale.
 
+### §17.173 Visible elapsed-time progress markers during long blocking POSTs
+
+Closes the AUDIT.md operator+user UX top-finding (#5). README itself flagged this at line 146 pre-fix: "Phase 2 (research) can take 10-25 minutes. There's no progress bar; check the orchestrator logs (`docker logs -f scaffold-orchestrator`) to confirm it's working." For a self-hosted system whose primary differentiator is local sovereignty, telling the user to tail Docker logs is a UX hole.
+
+**Root cause.** ``/ideate/confirm`` is a non-streaming POST that takes 10-25 min to return. The OWUI pipeline wraps that with ``_post_with_keepalive`` (in ``pipelines/scaffold_router.py``) which spawns a background thread for the POST and yields zero-width spaces (U+200B) every ``keepalive_interval`` (default 10 s) to keep the SSE connection alive. The user sees an apparently-frozen "🔬 Starting research..." line for the entire wait — zero-width chars are *invisible by design*.
+
+**Why not stream ``/ideate/confirm`` directly.** Converting it to ``StreamingResponse`` is a contract change on a v1.1.0-pinned endpoint, would ripple to ``research_and_compile``'s return shape and every SDK consumer, and the pipeline would still have to wait for the full result before auto-chaining to ``/dag``. The fix is at the visible layer.
+
+**Fix.** Two complementary additions, both in ``pipelines/scaffold_router.py``:
+
+1. **New keyword-only ``progress_label`` param on ``_post_with_keepalive``.** When set, the helper additionally emits a visible ``"\n⏳ {label}… ({mm}m {ss:02d}s elapsed)\n"`` line every ``progress_marker_interval`` seconds. Zero-width keepalives continue to tick in between (every ``keepalive_interval`` seconds — separately tunable). The visible marker is purely additive: callers that don't supply a label behave exactly as pre-§17.173.
+
+2. **New ``progress_marker_interval`` valve, default 120 s.** Chosen so a 25-min Phase 2 yields ~10 markers (not 50+ chat-cluttering lines, not 2 markers that miss the early progress feedback). ``=0`` disables visible markers entirely (operator escape hatch for very chatty deployments).
+
+The four call sites are updated to pass meaningful labels:
+
+| Call site | progress_label |
+|---|---|
+| ``_handle_confirm`` → ``/ideate/confirm`` | "Phase 2 — researching + ingesting" |
+| ``_handle_confirm`` → ``/dag`` | "Phase 3 — planning DAG" |
+| ``_auto_chain`` → ``/ideate`` | "Phase 1 — refining idea" |
+| ``_auto_chain`` → ``/dag`` | "Phase 3 — planning DAG" |
+
+The user-facing chat banner in ``_handle_confirm`` is also rewritten from "this may take several minutes on CPU..." to "this may take 10-25 minutes on CPU. Progress markers will appear roughly every 2 minutes." — sets the expectation up front so the operator isn't surprised by the marker cadence.
+
+**Why not also emit orchestrator-side SSE events from ``research_and_compile``.** This was considered. ``app/modules/research_agent.py`` already emits rich SSE events (``search_complete``, ``extraction_complete``, ``ingestion_complete``, ``gap_analysis``, ``convergence``, …) — the rendering on the OWUI side is comprehensive (``pipelines/scaffold_router.py`` L2026-2089). But ``/research`` streams while ``/ideate/confirm`` does not: Phase 2 uses ``ideation_workflow.research_and_compile`` which is a single-dict-returning async function. Converting it to a generator + streaming endpoint is a contract change. §17.173 ships the visible-marker layer that delivers the UX value today; a future sprint can convert ``/ideate/confirm`` to streaming if/when the contract churn is acceptable.
+
+**What this does NOT solve.**
+
+- Sub-stage visibility within Phase 2 ("X/Y URLs fetched", "N entries distilled"). The orchestrator logs these in ``docker logs scaffold-orchestrator`` but they don't reach the chat. Operators with a wedged-feeling Phase 2 still need ``docker logs -f`` for sub-stage diagnosis. The README is updated to point at this fallback explicitly.
+- Progress markers during ``/execute/all`` — already covered by the existing rich SSE event stream (``node_started``, ``node_completed``, etc.). The markers are for *non-streaming* endpoints.
+
+**Files.**
+
+- ``pipelines/scaffold_router.py`` — new ``progress_marker_interval`` valve (next to ``keepalive_interval``, default 120); ``_post_with_keepalive`` accepts ``*, progress_label=None`` kwarg and emits visible elapsed-time markers when set; 4 call sites updated to pass labels; chat banner in ``_handle_confirm`` updated to mention the marker cadence.
+- ``tests/test_scaffold_router_helpers.py`` — new ``TestPostWithKeepaliveProgressMarkers`` class (4 cases): valve default, keyword-only kwarg shape, back-compat with no label, back-compat with interval=0.
+- ``README.md`` — line 146 callout updated: removes "no progress bar" claim, points at the new marker UX + the ``docker logs`` fallback for sub-stage detail.
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_scaffold_router_helpers.py \
+    tests/test_scaffold_router_structure.py --noconftest -v --timeout=30
+56 passed in 202.32s
+```
+
+4 new + 52 pre-existing. The visible-marker emission path (slow POST, marker fires after interval) is not covered by an automated test — it needs a controlled monotonic clock to be deterministic, and the value of that test is marginal compared to the manual sanity check. The structural tests lock the contract (valve exists, kwarg is keyword-only, back-compat invariants hold); the live OWUI flow exercises the emission path.
+
+Live verification deferred — the right reproduction is "type ``/confirm <job_id>`` in OWUI and watch the chat for ~10 min, expecting ~5 visible '⏳' markers." That requires a real research run; the unit tests + contract guards are the proof for now.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
