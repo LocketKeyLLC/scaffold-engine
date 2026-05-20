@@ -125,11 +125,17 @@ def _auth_headers() -> dict:
 
 @pytest.mark.smoke
 def test_verify_endpoint_rejects_non_uuid():
-    """Endpoint validates session_id is a UUID; non-UUID → 400."""
+    """Endpoint validates session_id is a UUID; non-UUID → 400.
+
+    §17.178 — bare ``TestClient(app)`` (no context manager) so lifespan
+    doesn't run; the endpoint validates the UUID before touching any
+    lifespan-initialized state, so this is functionally equivalent and
+    sidesteps the cloud-CI lifespan-hang surfaced in §17.177.
+    """
     from fastapi.testclient import TestClient
     from app.main import app
-    with TestClient(app) as client:
-        r = client.get("/research/verify/not-a-uuid", headers=_auth_headers())
+    client = TestClient(app)
+    r = client.get("/research/verify/not-a-uuid", headers=_auth_headers())
     assert r.status_code == 400
     assert "Invalid session_id" in r.json()["detail"]
 
@@ -436,18 +442,22 @@ async def test_verify_session_compare_hash_implies_recheck():
 
 @pytest.mark.smoke
 def test_verify_endpoint_accepts_recheck_query_param():
-    """Endpoint passes ?recheck=true → verify_session(recheck_upstream=True)."""
+    """Endpoint passes ?recheck=true → verify_session(recheck_upstream=True).
+
+    §17.178 — bare ``TestClient(app)`` (no context manager); see
+    ``test_verify_endpoint_rejects_non_uuid`` for the rationale.
+    """
     from fastapi.testclient import TestClient
     from app.main import app
 
     fake_report = {"session_id": "x", "session_meta": None, "totals": {}, "entries": []}
     with patch("app.modules.research_verify.verify_session",
                AsyncMock(return_value=fake_report)) as verify_mock:
-        with TestClient(app) as client:
-            r = client.get(
-                "/research/verify/66666666-6666-6666-6666-666666666666?recheck=true",
-                headers=_auth_headers(),
-            )
+        client = TestClient(app)
+        r = client.get(
+            "/research/verify/66666666-6666-6666-6666-666666666666?recheck=true",
+            headers=_auth_headers(),
+        )
     assert r.status_code == 200
     # Kwarg propagated.
     kwargs = verify_mock.call_args.kwargs
@@ -456,7 +466,11 @@ def test_verify_endpoint_accepts_recheck_query_param():
 
 @pytest.mark.smoke
 def test_verify_endpoint_calls_verify_session():
-    """Endpoint dispatches to verify_session and returns its JSON shape."""
+    """Endpoint dispatches to verify_session and returns its JSON shape.
+
+    §17.178 — bare ``TestClient(app)`` (no context manager); see
+    ``test_verify_endpoint_rejects_non_uuid`` for the rationale.
+    """
     from fastapi.testclient import TestClient
     from app.main import app
 
@@ -468,11 +482,11 @@ def test_verify_endpoint_calls_verify_session():
     }
     with patch("app.modules.research_verify.verify_session",
                AsyncMock(return_value=fake_report)) as verify_mock:
-        with TestClient(app) as client:
-            r = client.get(
-                f"/research/verify/{fake_report['session_id']}",
-                headers=_auth_headers(),
-            )
+        client = TestClient(app)
+        r = client.get(
+            f"/research/verify/{fake_report['session_id']}",
+            headers=_auth_headers(),
+        )
     assert r.status_code == 200
     assert r.json() == fake_report
     verify_mock.assert_awaited_once()

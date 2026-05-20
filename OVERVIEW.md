@@ -7879,6 +7879,46 @@ Without ``SCAFFOLD_PREWARM_RERANKER=false`` the same single test takes 19 s on t
 
 Either way, §17.177 fixes the immediate CI red and unblocks the §17.175 OpenAPI gate's first clean green run.
 
+> **Post-mortem update (§17.178 follow-up).** The CI run on this commit (`0bbaa49`) confirmed §17.177's env-var fix did NOT eliminate the 3 timeouts — same 3 tests still failed at 30 s, still hanging immediately after the ``symbiyosys client initialized`` log line. Disproves the "reranker prewarm is the hang" theory: the prewarm was indeed skipped (by the env var) but the hang continued somewhere further into the lifespan. The actual fix is §17.178 below — change the tests to not invoke the lifespan at all via the ``with TestClient(app) as c:`` form. The env-var settings from §17.177 stay in place as defensive scaffolding (no future smoke test should pay the prewarm cost) but they did not close the immediate issue.
+
+### §17.178 ditch ``with TestClient(app)`` in 3 smoke tests — sidesteps the lifespan-hang root cause
+
+§17.177 was wrong about the root cause: setting ``SCAFFOLD_PREWARM_RERANKER=false`` didn't help the cloud-CI hang. The 3 ``tests/test_research_verify.py`` tests still timed out at 30 s with the lifespan hanging right after the ``symbiyosys client initialized`` log line (the last line ``init_clients()`` emits). Something ELSE in the lifespan blocks past the prewarm — most likely the cluster of DB-requiring steps that fire after init_clients (startup cleanup, scheduler init, embedder drift check), each of which opens an ``async_session()`` against ``scaffold-postgres:5432`` (the docker compose hostname that doesn't resolve on cloud runners). asyncpg's connect-retry, SQLAlchemy's pool-pre-ping, or a combination is probably the source. Investigating further would require either (a) instrumenting lifespan with print-style breadcrumbs that pytest doesn't suppress, or (b) capturing a thread dump from the CI runner mid-hang. Either is meaningful work and the right fix doesn't need that diagnosis — the tests don't depend on the lifespan to begin with.
+
+**Surgical fix.** The 3 affected tests use ``with TestClient(app) as client:`` (context-manager form), which is what triggers FastAPI's lifespan. They could just use bare ``client = TestClient(app)``:
+
+```diff
+- with TestClient(app) as client:
+-     r = client.get("/research/verify/not-a-uuid", headers=_auth_headers())
++ client = TestClient(app)
++ r = client.get("/research/verify/not-a-uuid", headers=_auth_headers())
+```
+
+The endpoint validates UUID format **before** touching any lifespan-initialized state (no app.state read, no DB session, no Milvus call). Bare TestClient is functionally equivalent and skips the lifespan entirely. The two ``verify_session``-mocked variants similarly don't need lifespan — ``verify_session`` is patched to an ``AsyncMock``, so the endpoint never reaches its DB call.
+
+**Why this is the right fix, not a workaround.**
+
+- Every other smoke test in the suite (1,048 passing) uses the bare ``TestClient(app)`` form (``yield TestClient(app)`` or ``return TestClient(app)``). The 3 in test_research_verify were outliers, accidentally invoking the heavyweight lifespan when they only needed the request-handling surface.
+- The lifespan's job is bringing real external services online (Ollama, Milvus, Postgres, Redis, scheduler). Unit tests don't have those services and don't need them. Bare TestClient is the right idiom.
+- The §17.177 env-var settings (SCAFFOLD_PREWARM_RERANKER=false in both Makefile and ci.yml) stay in place as defensive scaffolding — no future smoke test should pay the prewarm cost — even though they didn't close the immediate issue.
+
+**What this does NOT investigate.** The lifespan-hang in cloud CI is a real bug that would bite anyone trying to write a smoke test that *does* need the lifespan (e.g. testing that ``/health`` reports degraded state when Postgres is down). The right long-term fix is to make the lifespan's DB/Milvus/Ollama probes truly fail-fast under unreachable conditions (cap the connect timeouts at ~2 s instead of the asyncpg default 60 s; same for milvus_connections.connect). Logged as a deferred item — outside §17.178's scope.
+
+**Files.**
+
+- ``tests/test_research_verify.py`` — 3 tests converted from ``with TestClient(app) as client:`` to bare ``client = TestClient(app)``. Each test gets an inline ``§17.178`` comment explaining the rationale + linking back to the cloud-CI lifespan-hang.
+
+**Verification (local).**
+
+```
+$ docker compose run --rm --no-deps -T \
+    -e SCAFFOLD_CI_SMOKE_MODE=1 \
+    scaffold-orchestrator pytest tests/test_research_verify.py -m smoke -v --timeout=30
+3 passed, 16 deselected in 3.58s
+```
+
+Was: 30 s timeout (cloud CI) / 19 s pass (dev image with warm HF cache). Now: 3.58 s on the same dev image. Cloud-CI confirmation pending on this commit's push.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
