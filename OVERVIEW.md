@@ -7581,6 +7581,56 @@ $ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-d
 
 No OpenAPI snapshot impact — ``/health`` has no ``response_model``; the new keys are additive on a dynamically-shaped dict.
 
+### §17.172 dedup_log ↔ Milvus upsert atomicity — symmetric to §16 item #6
+
+Closes the AUDIT.md bug top-finding for ingest atomicity. §16 item #6 (closed 2026-05-07) fixed the inverse hole: pre-fix, version-chain ingest upserted into Milvus but never wrote ``dedup_log`` for the supersede event — invariant #9 violated in one direction. The symmetric defect remained: the post-#6 implementation wrote ``dedup_log`` (action='versioned') in its own short-lived session **before** the corresponding Milvus upsert. If the upsert later failed (network blip, schema lag, capacity), the audit ledger carried a row for a version chain that never materialized.
+
+Verified pre-fix by reading ``ingest_entries`` at L935-962 (version branch) + L989-1003 (upsert): the order was INSERT-then-upsert, not upsert-then-INSERT.
+
+**Fix.** Deferred + batched. New ``dedup_log_writes: list[tuple[str, str, float, str]]`` accumulator local to ``ingest_entries`` carries ``(content_hash, existing_entry_id, similarity_score, action)`` tuples. The two write sites change as follows:
+
+- **Reject branch** (sim ≥ dedup_threshold, default 0.95): the entry never reaches the upsert, so the append is unconditional — done immediately after the rejection decision. Net behavior unchanged, but the per-entry ``async_session`` is gone; the batched commit at end-of-function handles it.
+- **Version branch** (version_threshold ≤ sim < dedup_threshold, default [0.90, 0.95)): the append is **moved into the post-upsert success block**, gated on ``collection.upsert(r)`` returning cleanly. If the upsert raises, the tuple is never appended and the batched commit observes an empty (or shorter) list. ``version_sim_score`` captured in the supersede branch threads the score into the success block.
+
+Single batched commit at end-of-function, mirroring the pre-existing ``provenance_writes`` batch (different session — distinct failure modes; a provenance-write failure must not roll back dedup_log and vice versa).
+
+**Invariant restored.**
+
+```
+if   dedup_log row exists with action='versioned' AND  Milvus version chain exists
+then ✅ consistent — every superseded row in the ledger maps to a real chain
+```
+
+The reverse (Milvus has a chain but no ledger row) is still possible if the batched commit fails — accepted: dedup_log is a best-effort audit ledger, not a transactional twin. The audit-flag invariant we care about is "no false claims of supersedes" — the new code holds that.
+
+**Files.**
+
+- ``app/modules/rag_pipeline.py`` — added ``dedup_log_writes`` accumulator at start of ``ingest_entries`` (L820 area); added ``version_sim_score`` local in the per-entry loop; replaced the eager INSERT in the version branch with the captured-and-stash pattern; replaced the eager INSERT in the reject branch with ``dedup_log_writes.append(...)``; moved the 'versioned' append into the upsert-success block (gated on ``collection.upsert`` returning cleanly); added the batched-commit block at end-of-function, after the provenance batch. Net: ~25 lines added, ~30 lines removed, behavior equivalent on the success path and strictly safer on the failure path.
+- ``tests/test_dedup_rejection.py`` — added 3 cases. ``test_version_chain_writes_dedup_log_after_upsert_succeeds`` pins the happy-path (upsert OK → dedup_log INSERT issued, action='versioned'). ``test_version_chain_skips_dedup_log_when_upsert_fails`` is the explicit invariant guard (upsert raises → zero dedup_log INSERTs; this is the bug the entry closes). ``test_rejected_dedup_log_uses_batched_commit`` locks the reject-path migration to the batched accumulator.
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_dedup_rejection.py tests/test_rag_pipeline.py \
+    tests/test_rag_pipeline_smoke.py tests/test_rag_pipeline_cache.py \
+    tests/test_rag_entry.py -v --timeout=30
+54 passed in 6.25s
+```
+
+Plus the research/provenance suite that exercises ingest end-to-end:
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_research_agent_ingestion.py \
+    tests/test_provenance.py -v --timeout=30
+30 passed in 4.69s
+```
+
+Live verification deferred — the right reproduction is mid-iteration Milvus failure (kill the milvus-standalone container during a research run, observe that no dedup_log rows land for the in-flight versioned-attempt entries). The mock-driven invariant test is sufficient for the audit-invariant guarantee; live verification adds operational confidence but doesn't change the proof of the contract.
+
+**Why not use a single async session across both Milvus and dedup_log.** Postgres ``async_session()`` rolls back on raise, but Milvus is a separate write surface with no compatible two-phase commit. The pragmatic atomicity boundary is: "dedup_log writes are atomic with each other (batched commit) and ordered after the Milvus upsert they describe." That's what §17.172 enforces. A real distributed-transaction story is out of scope for this codebase's scale.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

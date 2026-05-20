@@ -819,6 +819,17 @@ async def ingest_entries(
     now = int(time.time())
     safe_domain = _escape_literal(domain)
     provenance_writes: list[tuple[str, dict, str | None]] = []
+    # §17.172 — dedup_log writes deferred + batched. Pre-§17.172 the
+    # 'versioned' branch wrote its INSERT in its own session *before* the
+    # corresponding Milvus upsert. If the upsert failed, the dedup_log
+    # carried a 'versioned' row whose successor never materialized,
+    # breaking the audit invariant "if dedup_log says 'versioned',
+    # the version chain exists in Milvus." Now: stash all writes here,
+    # append the 'versioned' tuple only AFTER the Milvus upsert succeeds,
+    # commit once at the end. The 'rejected' path (no follow-up upsert)
+    # also flows through this list — equivalent behavior, single commit.
+    # Tuple shape: (new_content_hash, existing_entry_id, similarity_score, action).
+    dedup_log_writes: list[tuple[str, str, float, str]] = []
 
     # ---- Pass 1: normalize + exact-hash filter ----
     prepared: list[dict] = []
@@ -888,6 +899,10 @@ async def ingest_entries(
 
         new_version = 1
         new_supersedes = ""
+        # §17.172 — captured in the supersede branch below + read in the
+        # post-upsert dedup_log append. 0.0 sentinel = "no supersede happened
+        # for this entry"; only consulted when new_supersedes is non-empty.
+        version_sim_score: float = 0.0
 
         try:
             sim_results = await loop.run_in_executor(
@@ -918,18 +933,11 @@ async def ingest_entries(
                         "dedup_rejected: sim=%.4f title='%s' existing='%s'",
                         sim_score, p["title"][:50], existing_eid,
                     )
-                    try:
-                        async with async_session() as session:
-                            await session.execute(
-                                text(
-                                    "INSERT INTO dedup_log (new_content_hash, existing_entry_id, similarity_score, action_taken) "
-                                    "VALUES (:hash, :eid, :score, 'rejected')"
-                                ),
-                                {"hash": p["ch"], "eid": existing_eid, "score": sim_score},
-                            )
-                            await session.commit()
-                    except Exception as db_err:
-                        logger.error("dedup_log_write_failed: %s", db_err)
+                    # §17.172 — rejected rows have no Milvus follow-up, so
+                    # append unconditionally. The batched commit at the end
+                    # of ingest_entries persists this alongside all other
+                    # dedup_log writes.
+                    dedup_log_writes.append((p["ch"], existing_eid, sim_score, "rejected"))
                     stats["rejected"] += 1
                     continue
                 elif sim_score >= version_threshold:
@@ -941,25 +949,16 @@ async def ingest_entries(
                     )
                     new_version = latest_version + 1
                     new_supersedes = latest_eid
+                    version_sim_score = sim_score
                     logger.info(
                         "version_chain_linked: v%d supersedes='%s' sim=%.4f title='%s'",
                         new_version, latest_eid, sim_score, p["title"][:50],
                     )
-                    # Audit: superseded entries get a dedup_log row alongside
-                    # rejections (invariant #9). Action='versioned' to
-                    # distinguish from outright rejection.
-                    try:
-                        async with async_session() as session:
-                            await session.execute(
-                                text(
-                                    "INSERT INTO dedup_log (new_content_hash, existing_entry_id, similarity_score, action_taken) "
-                                    "VALUES (:hash, :eid, :score, 'versioned')"
-                                ),
-                                {"hash": p["ch"], "eid": latest_eid, "score": sim_score},
-                            )
-                            await session.commit()
-                    except Exception as db_err:
-                        logger.error("dedup_log_write_failed: %s", db_err)
+                    # §17.172 — DO NOT append the 'versioned' dedup_log row
+                    # here. The pre-§17.172 code wrote it eagerly and broke
+                    # the invariant when the follow-up Milvus upsert failed.
+                    # The append now happens inside the upsert try-block
+                    # below, gated on success of collection.upsert().
         except Exception as e:
             logger.debug("semantic_dedup_failed: %s", e)
 
@@ -992,6 +991,16 @@ async def ingest_entries(
             )
             if new_supersedes:
                 stats["versioned"] += 1
+                # §17.172 — dedup_log 'versioned' append now happens HERE
+                # (post-upsert success), gated on the upsert above. Pre-fix
+                # this INSERT ran before the upsert, so an upsert failure
+                # left the audit ledger claiming a version chain that
+                # didn't materialize. Tuple shape mirrors the rejection
+                # branch; uses version_sim_score captured in the supersede
+                # branch in the dedup loop above.
+                dedup_log_writes.append(
+                    (p["ch"], new_supersedes, version_sim_score, "versioned")
+                )
             else:
                 stats["new"] += 1
             # Provenance is written when EITHER the producer supplied a
@@ -1022,5 +1031,26 @@ async def ingest_entries(
                 await session.commit()
         except Exception as e:
             logger.error("provenance_batch_write_failed: %s n=%d", e, len(provenance_writes))
+
+    # §17.172 — batched dedup_log commit. Separate session from the
+    # provenance batch above because the failure modes are distinct:
+    # dedup_log is the supersede ledger (invariant #9), provenance is
+    # the source-URL audit pointer. A failure in one must not roll back
+    # the other. Single session inside this block for write-amplification
+    # (one round-trip for all rows of either action_taken).
+    if dedup_log_writes:
+        try:
+            async with async_session() as session:
+                for ch_hash, eid, score, action in dedup_log_writes:
+                    await session.execute(
+                        text(
+                            "INSERT INTO dedup_log (new_content_hash, existing_entry_id, similarity_score, action_taken) "
+                            "VALUES (:hash, :eid, :score, :action)"
+                        ),
+                        {"hash": ch_hash, "eid": eid, "score": score, "action": action},
+                    )
+                await session.commit()
+        except Exception as e:
+            logger.error("dedup_log_batch_write_failed: %s n=%d", e, len(dedup_log_writes))
 
     return stats
