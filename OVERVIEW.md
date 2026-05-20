@@ -8184,6 +8184,41 @@ $ docker exec scaffold-orchestrator pytest tests/test_prompt_assembly.py --timeo
 38 passed in ~3 s
 ```
 
+### §17.185 job_utils.fail_job unit tests — 9 tests for the failed-state helper
+
+Closes the second half of **AUDIT.md item 3.2** (HIGH): ``app/utils/job_utils.py`` is small (22 lines, one function) but ``fail_job`` is the single chokepoint every orchestrator path uses to mark a job failed — dag_generator on persistence failure, execution_agent on uncaught exception, idea_refinement on LLM-output validation failure, every ``except`` block that needs to fail the job cleanly. Pre-§17.185 it had no dedicated tests; the contract was implicit in code-review discipline.
+
+**Contract pinned.**
+
+| Test | What's locked |
+|---|---|
+| ``test_executes_update_with_failed_status`` | SQL is ``UPDATE jobs SET status = 'failed' …``; bind params carry the job_id + error |
+| ``test_commits_after_update`` | ``db.commit()`` is awaited exactly once — load-bearing because the failed status MUST survive a caller's subsequent rollback. Without this, an exception-handling path that wraps fail_job in its own session-level rollback would silently revert the failed state. |
+| ``test_truncates_error_to_cap`` | A 2500-char error is truncated to exactly ``_ERROR_SUMMARY_MAX`` (1000) chars so a long traceback can't bloat the row |
+| ``test_short_error_passes_through_untruncated`` | "short" stays "short" |
+| ``test_accepts_uuid_job_id`` | UUID type accepted |
+| ``test_accepts_string_job_id`` | str type accepted (helper signature is ``UUID | str``) |
+| ``test_empty_error_message_still_executes`` | ``str(exc)`` returning ``""`` doesn't crash; the row still gets updated |
+| ``test_error_at_exact_cap_not_modified`` | Boundary case: ``len == cap`` is preserved; only ``> cap`` triggers truncation |
+| ``test_logger_emits_on_fail`` | Every fail emits a ``scaffold.jobs`` ERROR log line carrying both ``job_id`` and error text — so an operator tailing journald sees the failure without querying ``jobs`` |
+
+**Test isolation.** ``db`` is a fresh ``AsyncMock`` per test. No real DB, no real session. ``caplog`` captures the logger emission for the last test.
+
+**Files.**
+
+- ``tests/test_job_utils.py`` — new file, 9 tests.
+
+No production code touched.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_job_utils.py --timeout=30 -v
+9 passed in ~1 s
+```
+
+§17.184 + §17.185 close the entirety of AUDIT.md item 3.2 (prompt_assembly + job_utils — both HIGH-severity untested modules). Combined with §17.182 (sim adapter tests), the audit's "HIGH-severity untested modules" list is now empty.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
