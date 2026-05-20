@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas idea resume explain whatnow confirm retry skip node-logs config audit
+.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events idea resume explain whatnow confirm retry skip node-logs config audit
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -216,6 +216,20 @@ check-schemas: ## §17.186 — Verify sdk/scaffold_client/schemas.py is byte-equ
 		exit 1; \
 	fi
 	@echo "✓ sdk/scaffold_client/schemas.py is in sync with app/schemas.py."
+
+sync-sse-events: ## §17.190 — Refresh pipelines/_sse_events.py from app/sse_events.py (byte-equal vendor)
+	cp app/sse_events.py pipelines/_sse_events.py
+	@echo "Vendored pipelines/_sse_events.py from app/sse_events.py."
+
+check-sse-events: ## §17.190 — Verify pipelines/_sse_events.py is byte-equal to app/sse_events.py (CI gate)
+	@if ! diff -q app/sse_events.py pipelines/_sse_events.py >/dev/null 2>&1; then \
+		printf '\033[1;31m✗ pipelines/_sse_events.py has drifted from app/sse_events.py.\033[0m\n'; \
+		printf '\033[2m  Diff (first 40 lines):\033[0m\n'; \
+		diff -u app/sse_events.py pipelines/_sse_events.py | head -40 || true; \
+		printf '\033[1;33m  Fix: `make sync-sse-events` then commit the regenerated file.\033[0m\n'; \
+		exit 1; \
+	fi
+	@echo "✓ pipelines/_sse_events.py is in sync with app/sse_events.py."
 
 ## ──────────────────────────────────────────────
 ## Build & Ops

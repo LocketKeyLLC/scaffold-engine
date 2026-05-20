@@ -116,6 +116,10 @@ services:
       - ./pipelines/execution_handler.py:/app/pipelines/execution_handler.py:ro
       - ./pipelines/gt_browser.py:/app/pipelines/gt_browser.py:ro
       - ./pipelines/prompt_inspector.py:/app/pipelines/prompt_inspector.py:ro
+      # §17.190 — vendored SSE-event constants. Mounted read-only with the
+      # same posture as the pipeline .py files so a compromised pipeline
+      # cannot rewrite the shared event vocabulary on the host.
+      - ./pipelines/_sse_events.py:/app/pipelines/_sse_events.py:ro
     security_opt:
       - no-new-privileges:true
     cap_drop:

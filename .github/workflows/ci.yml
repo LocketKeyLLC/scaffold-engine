@@ -76,6 +76,16 @@ jobs:
       - name: Verify SDK schemas vendor is in sync (§17.186)
         run: make check-schemas
 
+      # §17.190 — SSE-event constants drift gate. app/sse_events.py is the
+      # canonical event-name vocabulary; pipelines/_sse_events.py is the
+      # byte-equal vendor that the OWUI pipelines container imports. Same
+      # rationale as §17.186: a developer who edits one side without the
+      # other ships a router that matches against names the orchestrator
+      # no longer emits (the §17.190 audit found exactly this drift in
+      # the pre-§17.190 scaffold_router.py).
+      - name: Verify SSE-event constants vendor is in sync (§17.190)
+        run: make check-sse-events
+
       - name: Run ci-smoke tests
         env:
           SCAFFOLD_API_KEY: "test-key-for-ci"

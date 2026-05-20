@@ -8439,6 +8439,76 @@ $ docker exec scaffold-orchestrator pytest \
 - Runtime behavior of ``query_rag`` / ``ingest_entries`` — annotations are documentation only.
 - Existing caller code — every site that does ``response["results"]`` keeps working.
 - The 4-way fan-in itself — restructuring the dependency graph (facade module, dependency-inversion layer) is out of scope; this commit pins the CONTRACT so future restructuring has a stable interface to migrate against.
+### §17.190 shared SSE event-name constants + drift surfacing — closes AUDIT 4.3
+
+Closes **AUDIT.md item 4.3** (MEDIUM): the orchestrator emits Server-Sent Events from three module families (``execution_agent`` / ``assist_agent`` / ``research_agent`` / ``app/sim/design_pipeline``) and the OWUI side (``pipelines/scaffold_router.py``) matches event-type strings to render the right UI. Pre-§17.190 both sides used string literals with no shared module — a rename on either side silently broke rendering with no test coverage spanning the seam.
+
+**Real drift the audit surfaced + this fix corrects.** ``pipelines/scaffold_router.py`` L1646-1648 matched ``"node_started"`` / ``"node_completed"`` (past tense) but the orchestrator emits ``node_start`` / ``node_done`` (no past-tense form anywhere). Those two consumer branches were dead code; the assist UI lost node-progress rendering during the post-handoff autonomous run. §17.190 renames the consumer branches to the canonical NODE_START / NODE_DONE constants — first visible behavior change is "assist UI now shows ▶ / ✓ progress markers per node during post-handoff execution."
+
+**Design — single source of truth + vendor copy.** Pattern follows §17.186's schemas-in-sync mechanism exactly:
+
+| Side | File | Purpose |
+|---|---|---|
+| Orchestrator | ``app/sse_events.py`` | Canonical constants (``NODE_START = "node_start"``, …) grouped by emitter, plus ``ALL_EVENT_NAMES`` frozenset for inventory tests |
+| OWUI | ``pipelines/_sse_events.py`` | Byte-equal vendored copy; imported by ``scaffold_router.py`` via ``importlib.util.spec_from_file_location`` so it works in both the OWUI pipelines runtime and the orchestrator's importlib-based test harness |
+
+The vendor pattern (rather than a shared package) exists because the OWUI ``pipelines`` container doesn't ship the orchestrator's ``app/`` tree — the .py files are bind-mounted individually with a read-only overlay (``./pipelines/<name>.py:/app/pipelines/<name>.py:ro``). The new ``_sse_events.py`` gets the same RO mount so a compromised pipeline can't rewrite the shared event vocabulary.
+
+**Make targets + CI gate.**
+
+- ``make sync-sse-events`` — refresh ``pipelines/_sse_events.py`` from ``app/sse_events.py``.
+- ``make check-sse-events`` — fast (~50 ms) ``diff -q`` with colored failure banner + first 40 lines of unified diff + actionable fix recipe (parallel to §17.186's ``make check-schemas``).
+- ``.github/workflows/ci.yml`` — new step "Verify SSE-event constants vendor is in sync (§17.190)" immediately after the §17.186 schemas gate. Catches drift before smoke tests run.
+
+**Inventory test — guards both directions of the seam.** ``tests/test_sse_event_inventory.py`` does three things:
+
+1. Byte-equal vendor check (defense-in-depth alongside ``make check-sse-events``).
+2. Scans the orchestrator emitter files for ``_sse("name", ...)`` literals and asserts every name is in ``ALL_EVENT_NAMES`` — a new emitter that invents a name without registering it fires the test.
+3. Scans ``scaffold_router.py`` for ``event_type == "name"`` literals and asserts every name is registered — a consumer reaching for a name that no emitter produces fires the test.
+
+The inventory scan surfaced two additional unregistered names during its first run that I wouldn't have caught otherwise: ``"stage_error"`` (legitimate emitter from design_pipeline that I missed in the initial enumeration) and ``"blocked"`` (emitted via ``_sse(status, ...)`` where status is a variable — regex can't see the literal, so it's documented as a "variable-emitted" exception in the constants module).
+
+**Files.**
+
+- ``app/sse_events.py`` — new file, 38 constants grouped by emitter (execution / assist / research / design / DAG / consumer-synthesized / generic) + ``ALL_EVENT_NAMES`` frozenset.
+- ``pipelines/_sse_events.py`` — byte-equal vendored copy.
+- ``pipelines/scaffold_router.py``:
+  - New ``_SSE`` import via ``importlib.util.spec_from_file_location`` (works in both OWUI runtime and the importlib-based test harness).
+  - L1646-1648 renamed consumer branches: ``"node_started"`` / ``"node_completed"`` → ``_SSE.NODE_START`` / ``_SSE.NODE_DONE`` — fixes the dead-branch drift.
+  - Same block also routes ``ASSIST_HANDOFF_STARTED`` / ``ASSIST_HANDOFF_DONE`` / ``NODE_FAILED`` / ``ERROR`` through the constants module.
+- ``docker-compose.yml`` — new ``./pipelines/_sse_events.py:/app/pipelines/_sse_events.py:ro`` bind mount mirroring the other pipeline .py RO overlays.
+- ``Makefile`` — ``sync-sse-events`` + ``check-sse-events`` targets, both added to ``.PHONY``.
+- ``.github/workflows/ci.yml`` — new "Verify SSE-event constants vendor is in sync (§17.190)" step.
+- ``tests/test_sse_event_inventory.py`` — new file, 6 tests covering byte-equal vendor + emitter inventory + consumer inventory + orphan detection + non-empty inventory sanity.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_sse_event_inventory.py \
+    tests/test_scaffold_router_structure.py tests/test_scaffold_router_sse.py \
+    --timeout=30
+15 passed in ~42 s   (6 inventory + 9 scaffold_router unchanged)
+
+$ make check-sse-events
+✓ pipelines/_sse_events.py is in sync with app/sse_events.py.
+
+# Drift case (manually verified by appending a comment to the vendored
+# copy then running the gate):
+$ make check-sse-events; echo exit=$?
+✗ pipelines/_sse_events.py has drifted from app/sse_events.py.
+  Diff (first 40 lines): … unified diff …
+  Fix: `make sync-sse-events` then commit the regenerated file.
+exit=2
+```
+
+**What this does NOT change.**
+
+- Emitter sites in the orchestrator modules still use string literals (``_sse("node_start", ...)``). The audit didn't ask to refactor the emitter call sites; the constants module + inventory test ensure they stay in lockstep with the consumer without needing the refactor. A future cleanup could route emitters through the constants for symmetry.
+- The 5 generic / variable-emitted events (``ERROR`` / ``WARNING`` / ``HEARTBEAT`` / ``DONE`` / ``QUEUED`` / ``BLOCKED`` / ``STREAM_STALLED``) are documented as test exceptions; the inventory's orphan-detection allows them explicitly.
+
+---
+
 
 ## Phase 8 wrap — orchestration & memory caching hardening
 

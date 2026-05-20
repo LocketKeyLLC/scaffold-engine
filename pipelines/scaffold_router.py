@@ -28,6 +28,23 @@ import time
 import requests
 from pydantic import BaseModel
 
+# §17.190: vendored SSE event-name constants (byte-equal copy of
+# app/sse_events.py — see ``make sync-sse-events`` / ``make check-sse-
+# events``). The OWUI pipelines runtime loads scaffold_router.py with
+# /app/pipelines on sys.path (so ``import _sse_events`` would work
+# there), while the orchestrator test harness loads scaffold_router via
+# importlib.util.spec_from_file_location (so plain ``import`` wouldn't
+# find _sse_events.py). Load by file path to work in both environments.
+import importlib.util as _importlib_util  # noqa: E402
+import pathlib as _pathlib  # noqa: E402
+_sse_events_path = _pathlib.Path(__file__).parent / "_sse_events.py"
+_spec = _importlib_util.spec_from_file_location(
+    "scaffold_router_sse_events", _sse_events_path,
+)
+_SSE = _importlib_util.module_from_spec(_spec)
+_spec.loader.exec_module(_SSE)
+del _importlib_util, _pathlib, _sse_events_path, _spec
+
 # Module-level Session for connection reuse across the many orchestrator
 # HTTP calls a pipeline makes during a chat session. ``requests.X(...)``
 # would open a fresh TCP connection per call; ``_HTTP_SESSION.X(...)``
@@ -1639,17 +1656,24 @@ class Pipeline:
                 payload = json.loads(data)
             except Exception:
                 continue
-            if event_type == "assist_handoff_started":
+            # §17.190: event-name vocabulary lives in pipelines/_sse_events.py
+            # (byte-equal vendor of app/sse_events.py). Pre-§17.190 the two
+            # branches below matched ``"node_started"`` / ``"node_completed"``
+            # — neither of which is ever emitted by the orchestrator. Those
+            # were dead branches; the assist UI lost node-progress rendering
+            # during the post-handoff autonomous run. Names now match the
+            # actual NODE_START / NODE_DONE emitter constants.
+            if event_type == _SSE.ASSIST_HANDOFF_STARTED:
                 yield f"\n🟢 Autonomous executor took over `{payload.get('node_key', '?')}`.\n"
-            elif event_type == "assist_handoff_done":
+            elif event_type == _SSE.ASSIST_HANDOFF_DONE:
                 yield f"\n✅ Handoff complete. Run `/assist next {payload.get('session_id', '?')}` to continue.\n"
-            elif event_type == "node_started":
+            elif event_type == _SSE.NODE_START:
                 yield f"  ▶ {payload.get('node_key', '?')} — {payload.get('title', '?')}\n"
-            elif event_type == "node_completed":
+            elif event_type == _SSE.NODE_DONE:
                 yield f"  ✓ {payload.get('node_key', '?')} (model: {payload.get('model', '?')})\n"
-            elif event_type == "node_failed":
+            elif event_type == _SSE.NODE_FAILED:
                 yield f"  ✗ {payload.get('node_key', '?')}: {payload.get('error', '?')}\n"
-            elif event_type == "error":
+            elif event_type == _SSE.ERROR:
                 yield f"\n⚠️ {payload.get('detail') or payload}\n"; return
 
     def _assist_simple_post(self, session_id: str, action: str) -> Generator[str, None, None]:
