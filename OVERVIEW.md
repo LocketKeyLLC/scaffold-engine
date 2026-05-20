@@ -8064,6 +8064,47 @@ $ docker exec scaffold-orchestrator pytest tests/test_dag_generator.py tests/tes
 - The FOR UPDATE-of-jobs row lock from the 2026-05-05 audit is preserved; the new hash + drift check executes inside the same lock-held transaction so concurrent /dag calls are still serialized per job.
 - Pre-§17.181 jobs (NULL hash) keep the legacy "any nodes → 409" behavior; they only start getting hash-aware idempotency once they generate a fresh DAG.
 
+### §17.182 sim sidecar adapter tests — ngspice / verilator / symbiyosys
+
+Closes **AUDIT.md item 3.1** (HIGH, honorable mention): pre-§17.182, the three orchestrator-side adapters under ``app/sim/`` (ngspice 196 lines, verilator 228 lines, symbiyosys 244 lines) had **zero dedicated unit tests** — verified by ``ls tests/ | grep -iE 'ngspice|verilator|symbiyosys'`` returning nothing pre-fix. Each adapter marshals input (SPICE netlist / SystemVerilog source / SBY config), POSTs to the corresponding sidecar's ``/run``, parses the JSON response into a typed dataclass, and writes a ``sim_runs`` audit row before returning. The contract (§17.140 / §17.141 / §17.142) is "never raise on simulator failure — every failure mode surfaces as ``ok=False`` with audit row intact." That invariant was implicit code-discipline; §17.182 makes it explicit and testable.
+
+**What's covered.** Three new test files, all using ``httpx.MockTransport`` to mock the sidecar HTTP layer + monkeypatched ``_insert_sim_run`` so tests don't need a real Postgres:
+
+| File | Tests | Failure modes |
+|---|---|---|
+| ``tests/test_sim_ngspice_adapter.py`` | 9 | success, sidecar 500, ConnectError, ReadTimeout, malformed JSON, non-zero exit (data not exception), int→float measurement coercion, empty-netlist validation, content-addressable sha256 |
+| ``tests/test_sim_verilator_adapter.py`` | 9 | success, build-failure ``BUILD FAILED:\n…`` audit prefix, run-failure (no build prefix), sidecar 500, ConnectError, ReadTimeout, malformed JSON, empty-source + empty-top-module validation |
+| ``tests/test_sim_symbiyosys_adapter.py`` | 13 | PASS / FAIL / TIMEOUT / UNKNOWN verdicts, ``ok`` mirrors ``verdict == PASS``, lowercase verdict normalization, unknown verdict coerced to ERROR, counterexample VCD in dataclass-only (NOT persisted per §17.140 deferral), depth_reached → measurements, sidecar 500 → ERROR verdict, ConnectError → ERROR, ReadTimeout → ERROR, malformed JSON → ERROR, empty-source + empty-top-module validation, depth_reached=None → empty measurements |
+
+**Test isolation pattern.** Each test:
+
+1. Builds a real ``httpx.AsyncClient(transport=httpx.MockTransport(handler))`` so the adapter's exact error-handling path (``raise_for_status`` / ``.json()`` / ``httpx.HTTPError`` catch) is exercised — not bypassed.
+2. ``monkeypatch.setattr(<module>, "get_<name>_client", lambda: client)`` redirects the adapter to the mocked client without touching the real http_clients module.
+3. ``monkeypatch.setattr(<module>, "_insert_sim_run", _FakeInsert())`` captures the audit-row kwargs so the test can assert the contract ("audit row written exactly once, with these fields") without needing a real DB session.
+
+The ``AsyncMock()`` placeholder for the ``db`` parameter is never actually used because ``_insert_sim_run`` is the patched callable that would have read it.
+
+**Why not integration tests against live sidecars.** ngspice / verilator / symbiyosys all have their own integration tests under ``tests/integration/`` that exercise the full path against the live sidecar containers (and gate on container reachability). §17.182's purpose is to lock the **adapter's** error-handling contract — the marshal-call-parse-persist seam — independent of sidecar availability so unit-level CI can catch regressions in the wrapper logic before any sidecar is involved.
+
+**Files.**
+
+- ``tests/test_sim_ngspice_adapter.py`` — 9 tests, 240 LOC.
+- ``tests/test_sim_verilator_adapter.py`` — 9 tests, 215 LOC.
+- ``tests/test_sim_symbiyosys_adapter.py`` — 13 tests, 290 LOC.
+
+No production code touched — the audit gap was test coverage, and the adapters' contracts are already correct as verified by §17.140-§17.142 live integration tests.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_sim_ngspice_adapter.py \
+    tests/test_sim_verilator_adapter.py \
+    tests/test_sim_symbiyosys_adapter.py \
+    --timeout=30 -v
+31 passed in ~3 s
+```
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
