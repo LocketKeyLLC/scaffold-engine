@@ -14,7 +14,7 @@ from sqlalchemy import text
 
 from app.database import async_session
 from app.modules.rag_pipeline import query_rag as _query_rag
-from app.schemas import RagInput
+from app.schemas import DedupLogResponse, RagInput
 
 router = APIRouter()
 
@@ -45,7 +45,7 @@ async def query_rag(body: RagInput):
     return result
 
 
-@router.get("/rag/dedup")
+@router.get("/rag/dedup", response_model=DedupLogResponse)
 async def list_dedup_log(limit: int = 50, offset: int = 0):
     """List logged near-duplicate rejections for manual review."""
     if limit < 1 or limit > 200:

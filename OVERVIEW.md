@@ -8973,6 +8973,71 @@ Closes **AUDIT.md item 2.9** (LOW): the OWUI ``/help`` output is a markdown blob
 
 - ``pipelines/scaffold_router.py`` — ``_help()`` returns the same body plus the new footer.
 
+### §17.203 response_model annotations on /health, /config, /rag/dedup — closes AUDIT 3.7
+
+Closes **AUDIT.md item 3.7** (LOW): pre-§17.203 three audit endpoints returned bare dicts with no ``response_model`` annotation. OpenAPI inferred a permissive ``additionalProperties: true`` schema, so SDK consumers got no typed access to the documented fields.
+
+**Fix.** Four new Pydantic models in ``app/schemas.py`` + ``response_model=`` on the three endpoints:
+
+| Endpoint | Response model | Notes |
+|---|---|---|
+| ``GET /health`` | ``HealthCheckResponse`` | Top-level shape; ``checks`` stays ``dict[str, Any]`` because per-subsystem shapes vary; ``ConfigDict(extra="allow")`` for forward-compat |
+| ``GET /config`` | ``ConfigResponse`` | Wraps a list of ``ConfigFieldEntry`` (name / value / type / default / is_default / description) |
+| ``GET /rag/dedup`` | ``DedupLogResponse`` | total / limit / offset / entries[] of ``DedupLogEntry`` |
+
+The nested dynamic dicts (per-subsystem health blocks, per-config-field metadata) keep their permissive shape via ``dict[str, Any]``. The top-level wrappers use ``ConfigDict(extra="allow")`` so a future field addition doesn't fail Pydantic validation.
+
+**Why not stricter models on the nested dicts.** ``/health``'s per-subsystem dicts vary by check (Postgres returns ``{status, latency_ms}``; Ollama adds ``models_loaded``; the reranker adds ``score_range`` from §17.187; the calibration block from §17.194 is its own discriminated union). Pinning all of those would either lose flexibility for future probes or require a tagged union per subsystem — heavier than the audit's "stable enough to type" goal warranted.
+
+**Files.**
+
+- ``app/schemas.py`` — 5 new classes (``HealthCheckResponse``, ``ConfigFieldEntry``, ``ConfigResponse``, ``DedupLogEntry``, ``DedupLogResponse``).
+- ``sdk/scaffold_client/schemas.py`` — auto-synced via ``make sync-schemas`` (§17.186 gate verifies byte-equal).
+- ``app/main.py`` — new schema imports + ``response_model=`` on ``/health`` + ``/config``.
+- ``app/routers/rag.py`` — ``response_model=DedupLogResponse`` on ``/rag/dedup``.
+- ``docs/openapi.json`` — regenerated. New schemas appear under ``components/schemas/``.
+
+### §17.204 bash completion for `make` targets — closes AUDIT 5.6
+
+Closes **AUDIT.md item 5.6** (LOW): the Makefile has 45+ targets at ``make help`` (status, status-raw, doctor, doctor-explain, build, build-dev, sync-*, check-*, idea, resume, …). A new contributor typing ``make st<TAB>`` got nothing — the discoverability tax for ``make help`` is opt-in.
+
+**Fix.** New ``scripts/make-completion.bash``. Reads target names from the Makefile in the current directory dynamically (via ``grep -E '^[a-z][a-zA-Z0-9_-]*:'``) so a new or renamed target is picked up automatically on the next shell session without editing the completion file itself.
+
+**Install paths.**
+
+- Repo-local (per-shell): ``source scripts/make-completion.bash``
+- Persistent (~/.bashrc): ``echo "source $(realpath scripts/make-completion.bash)" >> ~/.bashrc``
+
+After install, ``make h<TAB>`` shows ``help`` / ``health``; ``make sync-<TAB>`` shows ``sync-api-key`` / ``sync-schemas`` / ``sync-sse-events`` / ``sync-next-actions`` / ``sync-valves``.
+
+**Files.**
+
+- ``scripts/make-completion.bash`` — new file (~50 lines including the install-instructions header comment).
+- ``README.md`` — one-line install note in "Day-to-day operations".
+
+### §17.205 `make doctor` opening banner — closes AUDIT 5.7
+
+Closes **AUDIT.md item 5.7** (LOW): ``make doctor`` runs 9 sections but output started mid-stream with the first section's results. A new operator running it for the first time had no signal of what was being probed or how many sections to expect; "is this hung?" was a common new-operator reaction.
+
+**Fix.** Add a 9-line opening banner to ``scripts/doctor.sh`` before any section runs — section labels mirror the existing ``hdr "..."`` calls, with operator-tested parenthetical descriptions ("ai-network, postgres + milvus data" / "all 7 services running" / "highest applied vs db/migrations/") to anchor the operator's expectations.
+
+**Why a manually-maintained banner rather than auto-extracted from ``hdr`` calls.** The inline ``hdr`` lines have terse names; the banner's parenthetical helper text would have no source to extract from. The maintenance tax is one banner-line edit per section change — cheap, and the operator-clarity payoff is high enough that the explicit list is worth duplicating.
+
+**Files.**
+
+- ``scripts/doctor.sh`` — banner block added after the ANSI helpers and before the first ``hdr ".env"`` call.
+- ``README.md`` — "First-time install" section's ``make doctor`` paragraph updated to mention the §17.205 banner so new operators know to expect the section list.
+
+§17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
+
+---
+
+
+
+§17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
+
+---
+
 
 ## Phase 8 wrap — orchestration & memory caching hardening
 

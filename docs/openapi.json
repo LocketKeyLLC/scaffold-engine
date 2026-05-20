@@ -169,6 +169,74 @@
         "title": "Body_research_pdf_endpoint_research_pdf_post",
         "type": "object"
       },
+      "ConfigFieldEntry": {
+        "description": "One row of ``GET /config``'s ``fields`` list.",
+        "properties": {
+          "default": {
+            "title": "Default"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "is_default": {
+            "title": "Is Default",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value"
+          }
+        },
+        "required": [
+          "name",
+          "value",
+          "type",
+          "default",
+          "is_default"
+        ],
+        "title": "ConfigFieldEntry",
+        "type": "object"
+      },
+      "ConfigResponse": {
+        "additionalProperties": true,
+        "description": "Top-level shape for ``GET /config``.",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/ConfigFieldEntry"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "redacted": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Redacted",
+            "type": "array"
+          }
+        },
+        "required": [
+          "fields",
+          "redacted",
+          "count"
+        ],
+        "title": "ConfigResponse",
+        "type": "object"
+      },
       "ConfirmInput": {
         "properties": {
           "feedback": {
@@ -242,6 +310,77 @@
           "job_id"
         ],
         "title": "DagInput",
+        "type": "object"
+      },
+      "DedupLogEntry": {
+        "additionalProperties": true,
+        "description": "One row of ``GET /rag/dedup``'s ``entries`` list.",
+        "properties": {
+          "action_taken": {
+            "title": "Action Taken",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At"
+          },
+          "existing_entry_id": {
+            "title": "Existing Entry Id",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id"
+          },
+          "new_content_hash": {
+            "title": "New Content Hash",
+            "type": "string"
+          },
+          "similarity_score": {
+            "title": "Similarity Score",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "new_content_hash",
+          "existing_entry_id",
+          "similarity_score",
+          "action_taken",
+          "created_at"
+        ],
+        "title": "DedupLogEntry",
+        "type": "object"
+      },
+      "DedupLogResponse": {
+        "additionalProperties": true,
+        "description": "Top-level shape for ``GET /rag/dedup``.",
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/DedupLogEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "limit",
+          "offset",
+          "entries"
+        ],
+        "title": "DedupLogResponse",
         "type": "object"
       },
       "DeleteResponse": {
@@ -1053,6 +1192,36 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthCheckResponse": {
+        "additionalProperties": true,
+        "description": "Top-level shape for ``GET /health``.\n\nThe ``checks`` dict has one entry per probed subsystem\n(``postgresql``, ``ollama``, ``milvus``, ``redis``, ``reranker``,\nsim sidecars, embedding/verifier/rag/fetch caches, calibration);\ninner shapes are subsystem-specific and documented in the\n``_check_*`` helpers in ``app/main.py``. ``model_config =\nextra=\"allow\"`` so a future top-level field (e.g. a new aggregate\nsummary) doesn't break this schema.",
+        "properties": {
+          "auth_enabled": {
+            "title": "Auth Enabled",
+            "type": "boolean"
+          },
+          "checks": {
+            "title": "Checks",
+            "type": "object"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "checks",
+          "timestamp",
+          "auth_enabled"
+        ],
+        "title": "HealthCheckResponse",
         "type": "object"
       },
       "IdeaInput": {
@@ -2356,6 +2525,20 @@
         "title": "ValidationError",
         "type": "object"
       },
+      "_LogLevelPatchIn": {
+        "description": "Request body for ``PATCH /config/log-level``.\n\nAccepted level names: ``DEBUG`` / ``INFO`` / ``WARNING`` / ``ERROR``\n/ ``CRITICAL`` (case-insensitive). Unknown names return 400 — explicit\noperator action should fail loud (different from boot-time config\nwhich fails open to INFO).",
+        "properties": {
+          "level": {
+            "title": "Level",
+            "type": "string"
+          }
+        },
+        "required": [
+          "level"
+        ],
+        "title": "_LogLevelPatchIn",
+        "type": "object"
+      },
       "app__routers__status__JobSummary": {
         "properties": {
           "created_at": {
@@ -3092,7 +3275,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -3104,6 +3289,99 @@
           }
         ],
         "summary": "Get Config",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/config/log-level": {
+      "get": {
+        "description": "Return the root logger's current level + the boot-time snapshot.\n\nShape: ``{level, level_int, boot_level, boot_level_int, is_overridden}``.\n``is_overridden`` is True when the current level differs from the boot\nsnapshot — convenient for an operator dashboard that wants to flag\n\"this orchestrator is running under a runtime override\".",
+        "operationId": "get_log_level_config_log_level_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Log Level",
+        "tags": [
+          "ops"
+        ]
+      },
+      "patch": {
+        "description": "Override the root logger's level at runtime — survives until\nprocess restart OR ``POST /config/log-level/reset``.\n\nIdempotent: setting the level to its current value is a no-op\n(the audit-trail log line still fires so the no-op is observable).\nUnknown level names return 400.",
+        "operationId": "patch_log_level_config_log_level_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_LogLevelPatchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Patch Log Level",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/config/log-level/reset": {
+      "post": {
+        "description": "Restore the root logger to the level the orchestrator booted with.\n\nPair with ``PATCH /config/log-level`` — the audit's recommended flow:\n\"I bumped to DEBUG for 5 minutes, now restore\" without operator\nmemory of what the boot value was.",
+        "operationId": "reset_log_level_config_log_level_reset_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Reset Log Level",
         "tags": [
           "ops"
         ]
@@ -3877,7 +4155,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5231,7 +5511,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DedupLogResponse"
+                }
               }
             },
             "description": "Successful Response"

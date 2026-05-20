@@ -54,6 +54,34 @@ explain() {
     fi
 }
 
+# §17.205 — opening banner so a new operator knows what's about to be
+# probed before any section runs. Mirrors the section names declared
+# below; needs a manual update when sections are added or renamed,
+# but the cost is one line per change and the operator-facing clarity
+# is worth it.
+printf '%s┌── make doctor ──%s pre-flight diagnostic, 9 sections, read-only.%s\n' \
+    "$C_INFO" "$C_RST" "$C_RST"
+printf '%s│%s  1. .env                          (required secrets present)\n' \
+    "$C_INFO" "$C_RST"
+printf '%s│%s  2. Docker network + volumes      (ai-network, postgres + milvus data)\n' \
+    "$C_INFO" "$C_RST"
+printf '%s│%s  3. Containers                    (all 7 services running)\n' \
+    "$C_INFO" "$C_RST"
+printf '%s│%s  4. Orchestrator /health          (per-subsystem latencies)\n' \
+    "$C_INFO" "$C_RST"
+printf '%s│%s  5. Ollama (host)                 (CPU model registry reachable)\n' \
+    "$C_INFO" "$C_RST"
+printf '%s│%s  6. OpenAI provider               (cloud key configured if used)\n' \
+    "$C_INFO" "$C_RST"
+printf '%s│%s  7. API key sync                  (.env ↔ container env ↔ bashrc ↔ valves.json)\n' \
+    "$C_INFO" "$C_RST"
+printf '%s│%s  8. Auth posture                  (gate enabled / SCAFFOLD_AUTH_DISABLED honored)\n' \
+    "$C_INFO" "$C_RST"
+printf '%s│%s  9. Schema migrations             (highest applied vs db/migrations/)\n' \
+    "$C_INFO" "$C_RST"
+printf '%s└──%s pass --explain to see what each section verifies inline.\n\n' \
+    "$C_INFO" "$C_RST"
+
 # ---- 1. .env file ----------------------------------------------------
 hdr ".env"
 explain "Verifies the four required runtime secrets exist and that .env beats valves.json on key rotation."

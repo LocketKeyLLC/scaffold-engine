@@ -19,6 +19,13 @@ from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+# §17.203 — response_model annotations for /health, /config, /rag/dedup
+# (AUDIT 3.7). Pinning the top-level shapes for SDK consumers.
+from app.schemas import (
+    ConfigResponse,
+    HealthCheckResponse,
+)
 from pymilvus import connections as milvus_connections, utility, Collection
 from sqlalchemy import text
 from app.model_router import close_client
@@ -571,7 +578,7 @@ async def web_root_redirect():
 
 # ── Health check (no auth — exempt from global require_api_key) ──────
 
-@app.get("/health", dependencies=[])
+@app.get("/health", dependencies=[], response_model=HealthCheckResponse)
 async def health():
     """Concurrent dependency health check — no auth required."""
 
@@ -853,7 +860,7 @@ def _is_secret_field(name: str, value: object) -> bool:
     return False
 
 
-@app.get("/config", tags=["ops"])
+@app.get("/config", tags=["ops"], response_model=ConfigResponse)
 async def get_config():
     """Return the orchestrator's loaded Settings (audit item U.5).
 

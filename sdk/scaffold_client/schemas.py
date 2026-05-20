@@ -937,3 +937,78 @@ class ReportRead(BaseModel):
     sim_runs: list[ReportSimRunRead]
     errors: list[str]
     model_used: str
+
+
+# ---------------------------------------------------------------------------
+# §17.203 — system-endpoint response models (AUDIT 3.7)
+# ---------------------------------------------------------------------------
+#
+# /health, /config, /rag/dedup pre-§17.203 returned bare dicts with no
+# response_model annotation — OpenAPI inferred a permissive
+# ``additionalProperties: true`` schema. SDK consumers got no typed
+# access to the documented fields. The models below pin the top-level
+# shape; nested dynamic dicts (per-subsystem health blocks, per-config-
+# field metadata) keep their permissive shape via ``dict[str, Any]``.
+# ``model_config = ConfigDict(extra="allow")`` on the top-level wrappers
+# means a future field addition doesn't fail validation against the
+# pinned schema — it just isn't typed.
+
+
+class HealthCheckResponse(BaseModel):
+    """Top-level shape for ``GET /health``.
+
+    The ``checks`` dict has one entry per probed subsystem
+    (``postgresql``, ``ollama``, ``milvus``, ``redis``, ``reranker``,
+    sim sidecars, embedding/verifier/rag/fetch caches, calibration);
+    inner shapes are subsystem-specific and documented in the
+    ``_check_*`` helpers in ``app/main.py``. ``model_config =
+    extra="allow"`` so a future top-level field (e.g. a new aggregate
+    summary) doesn't break this schema.
+    """
+    status: str  # one of "healthy" / "degraded" / "unhealthy"
+    checks: dict[str, Any]
+    timestamp: str
+    auth_enabled: bool
+
+    model_config = ConfigDict(extra="allow")
+
+
+class ConfigFieldEntry(BaseModel):
+    """One row of ``GET /config``'s ``fields`` list."""
+    name: str
+    value: Any
+    type: str
+    default: Any
+    is_default: bool
+    description: str = ""
+
+
+class ConfigResponse(BaseModel):
+    """Top-level shape for ``GET /config``."""
+    fields: list[ConfigFieldEntry]
+    redacted: list[str]
+    count: int
+
+    model_config = ConfigDict(extra="allow")
+
+
+class DedupLogEntry(BaseModel):
+    """One row of ``GET /rag/dedup``'s ``entries`` list."""
+    id: Any  # UUID — may serialize as str or UUID depending on driver
+    new_content_hash: str
+    existing_entry_id: str
+    similarity_score: float
+    action_taken: str
+    created_at: Any  # datetime — orchestrator may serialize as ISO str
+
+    model_config = ConfigDict(extra="allow")
+
+
+class DedupLogResponse(BaseModel):
+    """Top-level shape for ``GET /rag/dedup``."""
+    total: int
+    limit: int
+    offset: int
+    entries: list[DedupLogEntry]
+
+    model_config = ConfigDict(extra="allow")

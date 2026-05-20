@@ -96,7 +96,7 @@ This starts seven containers: orchestrator, Postgres, Milvus, Redis, SearXNG, Op
 make doctor
 ```
 
-This runs an end-to-end audit. Expected output is a short list of subsystem checks, all `OK`. The script also confirms your `.env` API key matches what the running containers are using and warns if they've drifted.
+This runs an end-to-end audit. §17.205 — the script opens with a 9-section banner listing every check that's about to run (`.env`, Docker network + volumes, Containers, Orchestrator `/health`, Ollama, OpenAI provider, API key sync across .env/container/bashrc/valves.json, Auth posture, Schema migrations) so you know what's being probed before output starts scrolling. Expected output is the banner followed by a short list of subsystem checks, all `PASS`. The script also confirms your `.env` API key matches what the running containers are using and warns if they've drifted. Pass `--explain` (or run `make doctor-explain`) for a one-line description under each section.
 
 ```bash
 curl -H "X-API-Key: $SCAFFOLD_API_KEY" http://localhost:8000/health
@@ -164,6 +164,8 @@ Once the stack is running, these are the commands you'll use most often:
 | Apply DB migrations | `make migrate` | The lifespan auto-applies migrations on startup; this is for force-runs. |
 | Re-run health audit | `make doctor` | Full pre-flight, with explanations. |
 | Show all targets | `make help` | Self-documenting Makefile; every target has a one-line description. |
+
+Bash completion for `make` targets (§17.204): `source scripts/make-completion.bash` to enable `make st<TAB>` → `status` / `status-raw` for the current shell, or append the `source` line to `~/.bashrc` for it to stick across sessions.
 
 Open WebUI is for chat-driven workflows. The Python SDK and `scaffold` CLI exist for programmatic access — see [USER_GUIDE.md](./USER_GUIDE.md) for examples of both.
 
