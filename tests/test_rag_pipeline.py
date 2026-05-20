@@ -212,6 +212,127 @@ class TestDomainContract:
         with pytest.raises(ValueError):
             _domain_expr("")
 
+
+# ===========================================================================
+# §17.188 — domain_hint narrows fan-out from N partitions to {hint, "llm"}
+# ===========================================================================
+
+@pytest.mark.smoke
+class TestDomainHintFanOut:
+    """``_iter_search_domains(domain=None, hint=X)`` narrows the all-
+    partition fan-out to ``{X, "llm"}`` when X is a valid domain. A strict
+    ``domain`` arg always wins (hint is no-op when domain is set). An
+    invalid hint logs + falls through to the full fan-out — never raises."""
+
+    def test_hint_with_strict_domain_is_ignored(self):
+        """domain="eng" → strict [eng], regardless of hint."""
+        from app.modules.rag_pipeline import _iter_search_domains
+        assert _iter_search_domains("eng", hint="rag") == ["eng"]
+
+    def test_hint_eng_collapses_fan_out_to_eng_plus_llm(self):
+        from app.modules.rag_pipeline import _iter_search_domains
+        assert _iter_search_domains(None, hint="eng") == ["eng", "llm"]
+
+    def test_hint_llm_collapses_fan_out_to_just_llm(self):
+        """When the hint IS 'llm', the set {hint, 'llm'} = {'llm'} —
+        no duplicate search across the same partition."""
+        from app.modules.rag_pipeline import _iter_search_domains
+        assert _iter_search_domains(None, hint="llm") == ["llm"]
+
+    @pytest.mark.parametrize("hint", ["prompt", "rag", "code", "qa", "spec"])
+    def test_every_valid_hint_always_includes_llm_fallback(self, hint):
+        """The 'llm' partition is the generic-knowledge fallback included
+        on every hint path so cross-domain hits still surface."""
+        from app.modules.rag_pipeline import _iter_search_domains
+        out = _iter_search_domains(None, hint=hint)
+        assert "llm" in out
+        assert hint in out
+        assert len(out) == 2 if hint != "llm" else 1
+
+    def test_invalid_hint_falls_through_to_full_fan_out(self, caplog):
+        """A typo'd hint must not break retrieval — log + fall back to all."""
+        import logging
+        from app.modules.rag_pipeline import _iter_search_domains
+        from app.config import VALID_DOMAINS
+        with caplog.at_level(logging.WARNING, logger="scaffold"):
+            out = _iter_search_domains(None, hint="not-a-real-domain")
+        assert set(out) == set(VALID_DOMAINS)
+        assert any("invalid_domain_hint_ignored" in r.message for r in caplog.records)
+
+    def test_no_hint_keeps_legacy_full_fan_out(self):
+        """When hint is None and domain is None, behavior matches pre-§17.188."""
+        from app.modules.rag_pipeline import _iter_search_domains
+        from app.config import VALID_DOMAINS
+        assert set(_iter_search_domains(None)) == set(VALID_DOMAINS)
+        assert set(_iter_search_domains(None, hint=None)) == set(VALID_DOMAINS)
+
+
+# ===========================================================================
+# §17.188 — _lookup_superseded result-cap
+# ===========================================================================
+
+@pytest.mark.smoke
+class TestSupersedesLookupCap:
+    """``_lookup_superseded`` previously used ``max(1, len(entry_ids) * 4)``
+    with no upper bound. §17.188 caps it at ``settings.max_supersedes_
+    lookup_results`` (default 128) and logs when the cap fires."""
+
+    def _make_collection(self):
+        collection = MagicMock()
+        collection.query = MagicMock(return_value=[])
+        return collection
+
+    def test_small_lookup_uses_proposed_limit_uncapped(self, monkeypatch):
+        """5 entry_ids → proposed limit = 20, well under default cap of 128 —
+        cap doesn't fire, log isn't emitted."""
+        from app.modules.rag_pipeline import _lookup_superseded
+        collection = self._make_collection()
+        _run(_lookup_superseded(collection, ["e1", "e2", "e3", "e4", "e5"]))
+        # The collection.query call's `limit=` kwarg is the proposed value.
+        kwargs = collection.query.call_args.kwargs
+        assert kwargs["limit"] == 20
+
+    def test_large_lookup_caps_to_settings_value(self, monkeypatch, caplog):
+        """50 entry_ids → proposed limit = 200, capped to default 128."""
+        import logging
+        from app.config import settings
+        from app.modules.rag_pipeline import _lookup_superseded
+
+        # Lock the setting in test scope so a future default-change doesn't
+        # silently re-tune this assertion.
+        monkeypatch.setattr(settings, "max_supersedes_lookup_results", 128)
+
+        collection = self._make_collection()
+        entry_ids = [f"e{i}" for i in range(50)]
+        with caplog.at_level(logging.WARNING, logger="scaffold"):
+            _run(_lookup_superseded(collection, entry_ids))
+
+        kwargs = collection.query.call_args.kwargs
+        assert kwargs["limit"] == 128
+        assert any(
+            "supersedes_lookup_cap_fired" in r.message
+            and "proposed_limit=200" in r.message
+            and "effective_limit=128" in r.message
+            for r in caplog.records
+        ), "expected structured cap-fired log line"
+
+    def test_cap_setting_respected_when_overridden(self, monkeypatch):
+        """An operator that lowers the cap to 10 sees a fire at 5 entry_ids
+        (proposed=20 > cap=10)."""
+        from app.config import settings
+        from app.modules.rag_pipeline import _lookup_superseded
+        monkeypatch.setattr(settings, "max_supersedes_lookup_results", 10)
+        collection = self._make_collection()
+        _run(_lookup_superseded(collection, ["e1", "e2", "e3", "e4", "e5"]))
+        assert collection.query.call_args.kwargs["limit"] == 10
+
+    def test_empty_entry_ids_skips_lookup(self):
+        from app.modules.rag_pipeline import _lookup_superseded
+        collection = self._make_collection()
+        result = _run(_lookup_superseded(collection, []))
+        assert result == set()
+        collection.query.assert_not_called()
+
     def test_domain_literal_is_escaped(self):
         from app.modules.rag_pipeline import _domain_expr
         got = _domain_expr('e"ng')

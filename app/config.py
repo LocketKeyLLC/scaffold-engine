@@ -345,6 +345,14 @@ class Settings(BaseSettings):
     max_upstream_chars: int = Field(default=8000, ge=100, le=200000)
     rag_cosine_floor: float = Field(default=0.3, ge=0.0, le=1.0)
     verifier_top_k: int = Field(default=5, ge=1, le=50)
+    # §17.188 — cap for ``_lookup_superseded`` so a brief-flood scenario
+    # (filtered result count × 4) can't unboundedly inflate the Milvus
+    # query limit. 128 is generous: typical retrieval returns ≤ 5 results
+    # and the lookup queries entry_ids * 4 = 20; the cap only fires when
+    # an unusually-large top_k or a future per-entry-version expansion
+    # pushes past it. When fired, a structured log line surfaces so the
+    # operator can decide whether to raise the cap.
+    max_supersedes_lookup_results: int = Field(default=128, ge=1, le=10_000)
     compile_output_gate_chars: int = Field(default=50_000, ge=1_000, le=1_000_000)
     compile_output_min_chunk: int = Field(default=200, ge=1, le=10_000)
     # Sprint W.2 — content cap for the stored compiled_output. Distinct from

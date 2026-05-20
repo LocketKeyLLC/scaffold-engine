@@ -146,18 +146,44 @@ def _domain_expr(domain: str | None) -> str | None:
     return f'domain == "{_escape_literal(domain)}"'
 
 
-def _iter_search_domains(domain: str | None) -> list[str]:
+def _iter_search_domains(
+    domain: str | None,
+    *,
+    hint: str | None = None,
+) -> list[str]:
     """Expand a user-supplied domain arg into the list of domains to fan out to.
 
     Milvus partition-key isolation rejects both "no expr" and "IN" exprs, so a
     caller asking for domain=None is served by running one == search per
     configured partition and merging the results.
+
+    §17.188 — ``hint`` is a softer alternative to ``domain``: when ``domain``
+    is None AND a valid ``hint`` is provided, fan out only to
+    ``{hint, "llm"}`` instead of every partition. The audit (AUDIT.md 2.6)
+    flagged the all-partitions fan-out as a scaling concern as VALID_DOMAINS
+    grows; the hint path keeps a small cross-domain fallback open without
+    paying the full N-search cost. Has no effect when ``domain`` is set
+    (strict mode wins). An invalid hint is logged + ignored — falls through
+    to the full-fan-out fallback rather than throwing, so a typo never
+    breaks retrieval.
     """
-    if domain is None:
-        return sorted(VALID_DOMAINS)
     if domain == "":
         raise ValueError('domain="" is not allowed; pass None to search all partitions')
-    return [domain]
+    if domain is not None:
+        return [domain]
+    if hint is not None:
+        if hint not in VALID_DOMAINS:
+            logger.warning(
+                "invalid_domain_hint_ignored: hint=%r valid=%s; "
+                "falling back to all-partition fan-out",
+                hint, sorted(VALID_DOMAINS),
+            )
+            return sorted(VALID_DOMAINS)
+        # Always include "llm" as the generic-knowledge fallback so a
+        # cross-domain hit still surfaces. When the hint IS "llm" the
+        # set collapses to just ["llm"] — no duplicate work.
+        return sorted({hint, "llm"})
+    return sorted(VALID_DOMAINS)
 
 
 # ---------------------------------------------------------------------------
@@ -247,14 +273,19 @@ async def _vector_search(
     query_embedding: list[float],
     top_k: int,
     domain: str | None = None,
+    *,
+    domain_hint: str | None = None,
 ) -> list[RagResult]:
     """ANN search in Milvus (off event loop).
 
     Fans out one search per partition when domain is None. Under partition-key
     isolation Milvus rejects both "no expr" and "IN" over the partition key,
     so per-partition == exprs are the only safe path.
+
+    §17.188 — ``domain_hint`` narrows the fan-out from "all partitions" to
+    ``{hint, "llm"}`` when ``domain`` is None. See ``_iter_search_domains``.
     """
-    domains = _iter_search_domains(domain)
+    domains = _iter_search_domains(domain, hint=domain_hint)
 
     def _sync() -> list[RagResult]:
         if collection is None:
@@ -312,6 +343,8 @@ async def _keyword_search(
     query: str,
     top_k: int,
     domain: str | None = None,
+    *,
+    domain_hint: str | None = None,
 ) -> list[RagResult]:
     """Keyword-based search (off event loop).
 
@@ -320,6 +353,8 @@ async def _keyword_search(
 
     Fans out one query per partition when domain is None (partition-key
     isolation rejects IN and unfiltered exprs).
+
+    §17.188 — ``domain_hint`` narrows fan-out; see ``_iter_search_domains``.
     """
     tokens = _KEYWORD_TERM_RE.findall(query.lower())
     words = [t for t in tokens if len(t) >= 3 and t not in _STOPWORDS]
@@ -332,7 +367,7 @@ async def _keyword_search(
         conditions.append(f'title like "%{word}%"')
     keyword_expr = " or ".join(conditions)
 
-    domains = _iter_search_domains(domain)
+    domains = _iter_search_domains(domain, hint=domain_hint)
 
     def _sync() -> list[RagResult]:
         if collection is None:
@@ -514,6 +549,11 @@ async def _lookup_superseded(
 
     Queries: supersedes_id IN (entry_ids). A hit means some newer row points
     at one of our ids → that id is stale. Closes overview issue #7.
+
+    §17.188 — limit is capped at ``settings.max_supersedes_lookup_results``
+    (default 128) so a brief-flood scenario can't unboundedly inflate the
+    Milvus query. When the cap fires a structured log line surfaces so an
+    operator can decide whether to raise the cap.
     """
     if not entry_ids:
         return set()
@@ -521,12 +561,21 @@ async def _lookup_superseded(
     quoted = [f'"{_escape_literal(eid)}"' for eid in entry_ids]
     expr = f"supersedes_id in [{', '.join(quoted)}]"
 
+    proposed_limit = max(1, len(entry_ids) * 4)
+    effective_limit = min(proposed_limit, settings.max_supersedes_lookup_results)
+    if proposed_limit > effective_limit:
+        logger.warning(
+            "supersedes_lookup_cap_fired: entry_ids=%d proposed_limit=%d "
+            "effective_limit=%d (settings.max_supersedes_lookup_results)",
+            len(entry_ids), proposed_limit, effective_limit,
+        )
+
     def _sync() -> set[str]:
         try:
             rows = collection.query(
                 expr=expr,
                 output_fields=["supersedes_id"],
-                limit=max(1, len(entry_ids) * 4),
+                limit=effective_limit,
             )
             return {r.get("supersedes_id", "") for r in rows if r.get("supersedes_id")}
         except Exception as e:
@@ -545,6 +594,7 @@ async def query_rag(
     query: str,
     *,
     domain: str | None = None,
+    domain_hint: str | None = None,
     top_k: int = DEFAULT_TOP_K,
     confidence_threshold: float = CONFIDENCE_THRESHOLD,
     skip_rerank: bool = False,
@@ -556,6 +606,14 @@ async def query_rag(
     ``query_intent`` selects the embedder instruction template (§17.118).
     See ``EMBED_QUERY_TEMPLATES`` in ``app/utils/embedding.py`` for the
     supported intents (``general`` / ``code`` / ``qa`` / ``paper``).
+
+    §17.188 — ``domain`` is strict (None searches every partition; a string
+    searches that one only). ``domain_hint`` is a softer signal applied
+    only when ``domain is None``: search ``{hint, "llm"}`` instead of the
+    full all-partition fan-out so a caller that knows its likely domain
+    can opt out of the linear-in-VALID_DOMAINS round-trip cost while still
+    getting the "llm" generic-knowledge fallback. Has no effect when
+    ``domain`` is set; an invalid hint is logged + ignored.
     """
     top_k = max(1, min(top_k, MAX_TOP_K))
     t0 = time.monotonic()
@@ -598,8 +656,14 @@ async def query_rag(
         }
 
     vector_results, keyword_results = await asyncio.gather(
-        _vector_search(collection, query_embedding, top_k * 2, domain=domain),
-        _keyword_search(collection, query, top_k * 2, domain=domain),
+        _vector_search(
+            collection, query_embedding, top_k * 2,
+            domain=domain, domain_hint=domain_hint,
+        ),
+        _keyword_search(
+            collection, query, top_k * 2,
+            domain=domain, domain_hint=domain_hint,
+        ),
     )
 
     logger.info(

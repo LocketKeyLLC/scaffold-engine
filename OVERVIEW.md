@@ -8321,6 +8321,77 @@ $ docker exec scaffold-orchestrator pytest \
 - The threshold constant (``settings.confidence_threshold`` default 0.8) is unchanged. The fix preserves its meaning across model swaps; it doesn't re-tune it.
 - ``rerank()`` and ``rerank_rrf()`` are unchanged — the RRF fallback uses its own score scale (1/(rank+k)) which has no model dependency.
 
+### §17.188 RAG partition fan-out hint + supersedes lookup cap — closes AUDIT 2.6
+
+Closes **AUDIT.md item 2.6** (MEDIUM): two related concerns flagged in the same audit item.
+
+**Part 1 — Partition fan-out.** Pre-§17.188, ``query_rag(domain=None)`` ran one Milvus search per VALID_DOMAINS partition (currently 7: prompt / rag / eng / llm / spec / code / qa) and merged the results. Under Milvus partition-key isolation this is the only safe path — both "no expr" and IN-over-partition-key are rejected — but it scales linearly: as VALID_DOMAINS grows past the current 7, every all-partition retrieval pays N more Milvus round-trips, even when the caller has a strong prior on which domain is relevant.
+
+**Part 2 — Supersedes lookup limit.** ``_lookup_superseded`` used ``limit=max(1, len(entry_ids) * 4)`` with no upper bound. For typical retrieval (≤ 5 results) this is fine — limit=20 is trivial. But a future per-entry-version expansion or an unusually-large top_k could push past hundreds of rows with no operator visibility.
+
+**Fix part 1 — ``domain_hint`` kwarg.**
+
+```python
+async def query_rag(query, *, domain=None, domain_hint=None, ...):
+    ...
+```
+
+| Caller pattern | Fan-out (pre-§17.188) | Fan-out (post-§17.188) |
+|---|---|---|
+| ``domain="eng"`` | 1 partition (strict) | 1 partition (unchanged — strict still wins) |
+| ``domain=None``, no hint | 7 partitions (all) | 7 partitions (unchanged — explicit fallback) |
+| ``domain=None``, ``domain_hint="eng"`` | n/a (new) | 2 partitions: ``{"eng", "llm"}`` |
+| ``domain=None``, ``domain_hint="llm"`` | n/a (new) | 1 partition: ``{"llm"}`` (no duplicate) |
+| ``domain=None``, ``domain_hint="typo"`` | n/a (new) | 7 partitions + structured warning log |
+
+The "llm" generic-knowledge fallback is always included so cross-domain hits still surface — a hint isn't a strict filter, just a fan-out narrower. Invalid hints are logged + ignored (not raised) so a typo never breaks retrieval. ``domain`` strict mode wins over any hint.
+
+**Why a separate kwarg rather than expanding ``domain`` to accept a list or a hint-mode flag.** Three reasons. (1) Strict and hinted are different semantics — overloading the same parameter would surface ambiguity at the call site. (2) Existing callers (execution_agent, topology_select, /rag endpoint) keep working byte-for-byte without any signature migration. (3) The signature documents the new capability explicitly at the docstring level.
+
+**Why "llm" specifically as the fallback.** "llm" is the project's generic-knowledge partition — historically the dumping ground for cross-cutting references (prompt engineering, model-router patterns, common Python idioms) that don't fit any vertical. A hinted query on "eng" that happens to be answered better by a "llm" entry should still find it; reversing the bias (hint to "llm" alone) is the symmetric case and collapses naturally to a single search.
+
+**Fix part 2 — ``settings.max_supersedes_lookup_results`` cap.**
+
+```python
+proposed_limit = max(1, len(entry_ids) * 4)
+effective_limit = min(proposed_limit, settings.max_supersedes_lookup_results)
+if proposed_limit > effective_limit:
+    logger.warning("supersedes_lookup_cap_fired: ...")
+```
+
+Default 128 — generous for the typical ≤ 5-result case (proposed = 20, cap doesn't fire) and only binds when an operator runs an unusually-large top_k. When the cap fires, a structured ``supersedes_lookup_cap_fired`` log line surfaces with both proposed and effective values so the operator can decide whether to raise the cap or trim the query.
+
+**Files.**
+
+- ``app/config.py`` — new ``max_supersedes_lookup_results: int = Field(default=128, ge=1, le=10_000)`` setting with the why-128 inline rationale.
+- ``app/modules/rag_pipeline.py``:
+  - ``_iter_search_domains(domain, *, hint=None)`` — new keyword-only ``hint`` arg; behavior table above.
+  - ``_vector_search(..., *, domain_hint=None)`` and ``_keyword_search(..., *, domain_hint=None)`` — additive kwargs, threaded into the same helper call.
+  - ``query_rag(..., *, domain_hint=None)`` — new public kwarg, threaded into both fan-out branches.
+  - ``_lookup_superseded`` — proposed/effective limit math + structured warning on cap fire.
+- ``tests/test_rag_pipeline.py`` — 10 new tests in two classes: ``TestDomainHintFanOut`` (strict-domain wins, hint collapses to {hint,llm}, hint=llm collapses to [llm], 5-parametrize over every other valid hint, invalid hint logged+fallback, no-hint legacy behavior preserved) + ``TestSupersedesLookupCap`` (small lookup uncapped, large lookup hits 128 with structured log, settings override respected, empty entry_ids short-circuit).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_rag_pipeline.py --timeout=30
+39 passed in ~5 s   (29 pre-existing + 10 new for §17.188)
+
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_rag_pipeline_smoke.py tests/test_domain_filtering.py tests/test_main.py \
+    --timeout=30
+29 passed in ~6 s   (no regression in adjacent suites)
+```
+
+**What this does NOT change.**
+
+- Behavior for existing callers (execution_agent ``_fetch_rag_context`` / ``_milvus_search``, topology_select.size_device, /rag endpoint) is byte-identical — ``domain_hint`` defaults to None and existing code doesn't pass it.
+- The strict ``domain`` semantics are unchanged. Adopting the hint is opt-in.
+- Default ``max_supersedes_lookup_results=128`` is high enough that the cap doesn't fire for any current call pattern — a typical 5-result retrieval proposes 20, well under 128. The cap only activates for unusual workloads.
+- Milvus partition-key isolation contract is unchanged — every search still uses per-partition ``==`` exprs; the hint just narrows which partitions get a query.
+
+§17.187 + §17.188 close AUDIT.md cohort "MEDIUM RAG cluster (2.5 + 2.6)". Remaining open: small MEDIUM wins (1.3 + 2.7 + 2.8), UX (5.4 + 5.5), MEDIUM observability (3.3 + 3.5 + 3.6), architecture (4.2 + 4.3 + 4.4), all LOW items.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
