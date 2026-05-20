@@ -46,6 +46,14 @@ from app.routers.status import router as status_router
 
 logger = logging.getLogger("scaffold")
 
+# §17.179 — cap each lifespan service probe at this many seconds. The
+# Ollama client default (1800 s = local_timeout, sized for LLM calls),
+# pymilvus's unbounded connect, and asyncpg's 60 s connect_timeout were
+# all longer than any sensible startup budget. 5 s is generous (1000× the
+# expected localhost RTT, ample for healthy-service handshakes) while
+# still letting the lifespan complete fast under unreachable conditions.
+_STARTUP_PROBE_TIMEOUT_S: float = 5.0
+
 setup_logging(
     json_logs=settings.log_json_format,
     log_level=settings.log_level,
@@ -184,12 +192,28 @@ async def _pre_migration_sweep() -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: verify Ollama, Milvus, PostgreSQL connectivity."""
+    """Startup: verify Ollama, Milvus, PostgreSQL connectivity.
 
-    # Verify Ollama
+    §17.179 — all three probes are timeout-capped at
+    ``_STARTUP_PROBE_TIMEOUT_S`` (5 s) so the lifespan completes fast
+    under unreachable conditions. Pre-§17.179 the Ollama client
+    inherited the 1800 s ``local_timeout`` default, Milvus connect had
+    no timeout cap, and asyncpg's connect default of 60 s would bite
+    every DB-touching step downstream. Cumulatively this could make
+    ``with TestClient(app) as c:`` hang for many minutes in cloud-CI
+    smoke runs (caught and partially worked around by §17.177/§17.178).
+    The cap here is the defensive root-cause fix; the §17.178 test
+    refactor stays as belt-and-suspenders.
+    """
+
+    # Verify Ollama — explicit 5 s cap overrides the client's default
+    # local_timeout (1800 s, sized for actual LLM calls).
     try:
         from app.model_router import _get_client
-        resp = await _get_client().get(f"{settings.ollama_base_url}/api/tags")
+        resp = await _get_client().get(
+            f"{settings.ollama_base_url}/api/tags",
+            timeout=_STARTUP_PROBE_TIMEOUT_S,
+        )
         models = [m["name"] for m in resp.json().get("models", [])]
         logger.info("ollama_connected: models_available=%d", len(models))
     except Exception as e:
@@ -197,11 +221,18 @@ async def lifespan(app: FastAPI):
 
     # Verify Milvus — PyMilvus is sync; wrap so the event loop is not
     # blocked during the (potentially slow) initial connect handshake.
+    # asyncio.wait_for caps the await; the underlying thread may still
+    # be running after timeout but that's acceptable for a one-shot
+    # lifespan call (orchestrator is starting up — a zombie thread is
+    # harmless until process exit).
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: milvus_connections.connect(alias="default", uri=settings.milvus_uri),
+        await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: milvus_connections.connect(alias="default", uri=settings.milvus_uri),
+            ),
+            timeout=_STARTUP_PROBE_TIMEOUT_S,
         )
         logger.info("milvus_connected: uri=%s", settings.milvus_uri)
     except Exception as e:

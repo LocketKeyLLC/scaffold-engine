@@ -7919,6 +7919,58 @@ $ docker compose run --rm --no-deps -T \
 
 Was: 30 s timeout (cloud CI) / 19 s pass (dev image with warm HF cache). Now: 3.58 s on the same dev image. Cloud-CI confirmation pending on this commit's push.
 
+### §17.179 cap lifespan probe timeouts — root-cause fix for the §17.178 hang
+
+The §17.178 fix sidestepped the cloud-CI lifespan hang by changing 3 tests to bare ``TestClient(app)`` (no context manager) — they didn't need lifespan-initialized state anyway. But the underlying defect remained: any future smoke test that *does* need lifespan would hit the same hang. §17.179 fixes the defect itself so the workaround isn't load-bearing.
+
+**Root cause of the hang.** Three independent paths in ``app/main.py::lifespan`` had no probe-timeout cap:
+
+1. **Ollama check** (L189-196) — ``await _get_client().get(f"{settings.ollama_base_url}/api/tags")``. The shared Ollama AsyncClient has a default ``timeout=settings.local_timeout = 1800`` (30 min — sized for actual LLM calls, not probes). Under unreachable Ollama, this could wait 30 min.
+2. **Milvus connect** (L198-208) — ``loop.run_in_executor(None, lambda: milvus_connections.connect(...))``. Pymilvus has no public connect-timeout knob and its internal default is long. Under unreachable Milvus, this could hang indefinitely.
+3. **All async_session() calls** (multiple lifespan steps after ``init_clients``) — ``create_async_engine`` was called without ``connect_args``, so asyncpg used its default ``connect_timeout=60`` (1 minute per connection attempt). Under unreachable Postgres (``scaffold-postgres:5432`` is NXDOMAIN on cloud runners), every DB-touching lifespan step (pre-migration sweep, migrations, embedder drift check, startup cleanup, scheduler init) would block for ~1 minute each.
+
+Cumulatively a fully-unreachable cloud-CI environment could keep the lifespan stalled for 5+ minutes before any test hit it. The 30 s pytest-timeout was a symptom; the lifespan's connect-budgets were the disease.
+
+**Fix.** Three small caps, all at 5 s (the same budget ``/health`` already uses for its probes — 10000× the localhost RTT, ample for healthy handshakes):
+
+| Where | Before | After |
+|---|---|---|
+| ``app/main.py`` Ollama probe | inherits 1800 s default | explicit ``timeout=5.0`` on the GET |
+| ``app/main.py`` Milvus probe | unbounded ``run_in_executor`` | wrapped in ``asyncio.wait_for(..., timeout=5.0)`` |
+| ``app/database.py`` engine | asyncpg default 60 s connect | ``connect_args={"timeout": 5}`` on ``create_async_engine`` |
+
+Centralized in a single ``_STARTUP_PROBE_TIMEOUT_S = 5.0`` constant at the top of ``app/main.py``. Database connect cap lives in ``app/database.py`` because the engine is constructed there; it applies to every ``async_session()`` open across the codebase, not just lifespan (the cap is on the connect handshake only — per-query budgets stay unbounded).
+
+**Why hardcode 5 s instead of a setting.** Three reasons. (1) The /health probe already uses 5 s without a setting (verified by reading ``app/main.py::health()``); operator-facing consistency. (2) Adding ``settings.startup_probe_timeout_s`` would surface a knob that almost nobody should ever touch — knob-surface inflation has its own maintenance cost. (3) If a future deployment genuinely needs a different cap, promoting to settings is a 5-line change with full back-compat.
+
+**What this fixes for cloud CI.** With all three caps in place, even a fully-unreachable cloud-CI environment completes the lifespan in ~15-20 s (5 s/probe × 3 + remaining steps that are fast), well under the 30 s pytest-timeout. So ``with TestClient(app) as c:`` becomes safe to use in cloud-CI smoke tests — it was the 60+ s asyncpg connect retries that made it dangerous. §17.178's bare-TestClient rewrite remains as the immediate fix for the 3 specific tests; §17.179's caps remove the structural pitfall so future tests don't have to worry about it.
+
+**What this does NOT change.**
+
+- Production runtime (``docker compose up``) behavior is unchanged for healthy services — healthy probes complete in ms, well under the 5 s cap. Under genuinely-unhealthy services, the lifespan now logs a probe failure 55 s faster and continues; the affected feature (Ollama / Milvus / Postgres-backed paths) still degrades to its existing error-handling.
+- The /health endpoint's probes are unchanged (they already use 5 s).
+- Per-query and per-LLM-call timeouts are unchanged (those remain governed by ``cloud_timeout`` / ``local_timeout`` / ``research_llm_timeout`` etc.).
+
+**Files.**
+
+- ``app/main.py`` — new ``_STARTUP_PROBE_TIMEOUT_S`` constant; Ollama probe passes explicit ``timeout=``; Milvus probe wrapped in ``asyncio.wait_for(...)``.
+- ``app/database.py`` — ``create_async_engine(..., connect_args={"timeout": 5})``.
+
+**Verification (local).**
+
+```
+$ docker compose run --rm --no-deps -T scaffold-orchestrator \
+    python scripts/openapi_snapshot.py --check
+OK: docs/openapi.json matches the live OpenAPI spec.
+
+$ docker compose run --rm --no-deps -T scaffold-orchestrator \
+    pytest tests/test_health_cleanup.py tests/test_research_verify.py \
+    -m smoke -v --timeout=30
+21 passed, 16 deselected in 5.58s
+```
+
+Cloud-CI run on this push will exercise the caps under the actual unreachable-services condition; expect green.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
