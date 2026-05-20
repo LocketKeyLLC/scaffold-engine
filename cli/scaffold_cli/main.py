@@ -25,30 +25,24 @@ from scaffold_cli import project as _project
 
 def _render_next_actions(data: dict) -> None:
     """Render the orchestrator's ``next_actions`` field (audit item 10)
-    as a markdown-flavored bulleted block, written to stdout.
+    as a colored bulleted block, written to stdout.
 
-    Filters out wait-style actions (which are noise on a CLI surface)
-    and pretty-prints commands so a user can copy-paste the next step.
-    No-op when the response carries no actions.
+    §17.195 — filter + per-action field selection delegated to the SDK's
+    shared helpers (``scaffold_client.next_actions``). The CLI retains
+    its own loop so it can color the clickable token with ``click.secho``
+    — the SDK's ``format_block`` is markdown/plain text-only.
     """
-    actions = data.get("next_actions") or []
-    renderable = [a for a in actions if a.get("action") != "wait"]
+    from scaffold_client.next_actions import action_clickable, filter_renderable
+    renderable = filter_renderable(data.get("next_actions") or [])
     if not renderable:
         return
     click.echo("")
     click.secho("Next steps:", fg="cyan", bold=True)
     for a in renderable:
-        cmd = a.get("command")
-        endpoint = a.get("endpoint")
-        method = a.get("method", "GET")
-        desc = a.get("description", "")
-        if cmd:
-            click.echo(f"  • ", nl=False)
-            click.secho(cmd, fg="cyan", nl=False)
-            click.echo(f"   — {desc}")
-        elif endpoint:
-            click.echo(f"  • ", nl=False)
-            click.secho(f"{method} {endpoint}", fg="cyan", nl=False)
+        clickable, desc = action_clickable(a)
+        if clickable is not None:
+            click.echo("  • ", nl=False)
+            click.secho(clickable, fg="cyan", nl=False)
             click.echo(f"   — {desc}")
         else:
             click.echo(f"  • {desc}")

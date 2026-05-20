@@ -8664,8 +8664,77 @@ $ docker exec scaffold-orchestrator pytest \
 
 §17.192 + §17.193 + §17.194 close AUDIT.md cohort "MEDIUM observability (3.3 + 3.5 + 3.6)". Remaining open: small MEDIUM wins (1.3 + 2.7 + 2.8), UX (5.4 + 5.5), all LOW items.
 
----
+### §17.195 shared next_actions formatter — closes AUDIT 5.4
 
+Closes **AUDIT.md item 5.4** (MEDIUM): pre-§17.195 the orchestrator's per-status ``next_actions`` registry (``app/modules/recovery.py``) was rendered by THREE consumers, each carrying its own copy of the filter-then-format logic:
+
+| Consumer | Pre-§17.195 implementation | Diverged on |
+|---|---|---|
+| OWUI pipeline | ``pipelines/scaffold_router.py::_render_next_actions`` (markdown) | uses ``• `cmd` — desc`` shape |
+| CLI | ``cli/scaffold_cli/main.py::_render_next_actions`` (colored terminal) | uses ``  • cmd   — desc`` shape with click coloring |
+| SDK | Raw list returned via the typed response models | (no rendering) |
+
+Same registry → same INPUT → three slightly-different OUTPUTS, with the filter (drop ``action="wait"`` entries) and field-selection (command preferred over endpoint) logic copy-pasted across consumers. The audit asked for a shared formatter to keep the registry as a single source of truth and the rendering centralized.
+
+**Fix.** New ``sdk/scaffold_client/next_actions.py`` with three small style-agnostic helpers:
+
+| Helper | Purpose |
+|---|---|
+| ``filter_renderable(actions)`` | Drop ``"wait"`` noise actions; returns a fresh list |
+| ``action_clickable(action) -> (text, desc)`` | Decide which field to surface — command > endpoint > None |
+| ``format_block(actions, *, style)`` | Full block; ``style="markdown"`` (OWUI default) or ``style="plain"`` (terminal default) |
+
+The helpers are split so callers that want per-token styling (the CLI uses ``click.secho`` on the clickable text) compose ``filter_renderable`` + ``action_clickable`` themselves, and callers that want a one-shot block (the OWUI pipeline) call ``format_block`` directly.
+
+**Vendor pattern (mirrors §17.190 SSE events).** The OWUI pipelines container doesn't ship the SDK, so ``pipelines/_next_actions.py`` is a byte-equal vendored copy loaded via ``importlib.util.spec_from_file_location`` (same path-loader as ``_sse_events.py``). New Makefile targets + CI gate keep the two in sync:
+
+- ``make sync-next-actions`` — refresh vendor from SDK source.
+- ``make check-next-actions`` — fast (~50 ms) ``diff -q`` with colored failure banner + actionable fix recipe.
+- ``.github/workflows/ci.yml`` — new step "Verify next_actions vendor is in sync (§17.195)" immediately after the §17.190 SSE-events gate.
+- ``docker-compose.yml`` — ``./pipelines/_next_actions.py:/app/pipelines/_next_actions.py:ro`` bind mount (same security posture as the other pipeline overlays).
+
+**Behavior preservation.** ``test_byte_identical_to_pre_17195_markdown_output`` asserts ``format_block(_SAMPLE_ACTIONS, style="markdown")`` returns the exact byte sequence the pre-§17.195 OWUI pipeline emitted — operators reading chat threads across pre/post-§17.195 orchestrators see the same shape. The CLI's color routing is preserved by composing the helpers in the existing click-coloring loop rather than calling ``format_block``.
+
+**Files.**
+
+- ``sdk/scaffold_client/next_actions.py`` — new module, 3 helpers + module docstring.
+- ``sdk/scaffold_client/__init__.py`` — exports ``action_clickable`` / ``filter_renderable`` / ``format_block``.
+- ``pipelines/_next_actions.py`` — byte-equal vendored copy.
+- ``pipelines/scaffold_router.py``:
+  - The ``importlib`` vendor-load helper is now factored into a reusable ``_load_vendor(modname, filename)`` function (loads both ``_sse_events.py`` and ``_next_actions.py``).
+  - ``_render_next_actions`` is now a 3-line shim around ``_next_actions.format_block(..., style="markdown")``.
+- ``cli/scaffold_cli/main.py`` — ``_render_next_actions`` rewritten to call ``filter_renderable`` + ``action_clickable`` from the SDK, preserving click's per-token coloring.
+- ``Makefile`` — new ``sync-next-actions`` / ``check-next-actions`` targets + ``.PHONY`` update.
+- ``.github/workflows/ci.yml`` — new CI step.
+- ``docker-compose.yml`` — new ``_next_actions.py:ro`` bind mount.
+- ``tests/test_next_actions_formatter.py`` — new file, 26 tests covering all three helpers, both styles, edge cases (empty input, all-wait input, none clickable, case-insensitive style errors), and the byte-equal vendor invariant.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_next_actions_formatter.py --timeout=30
+26 passed in ~2 s
+
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_scaffold_router_structure.py tests/test_scaffold_router_sse.py \
+    --timeout=30
+9 passed in ~27 s   (router untouched)
+
+$ docker exec scaffold-orchestrator sh -c "cd /code/cli && python -m pytest tests/ --timeout=10"
+135 passed in ~1 s   (CLI untouched)
+
+$ make check-next-actions
+✓ pipelines/_next_actions.py is in sync with sdk/scaffold_client/next_actions.py.
+```
+
+**What this does NOT change.**
+
+- ``app/modules/recovery.py`` (the REGISTRY) is untouched. This commit refactors rendering only.
+- OWUI pipeline output is byte-identical for the markdown path — locked by the explicit byte-equal test.
+- CLI coloring is unchanged — the per-token ``click.secho`` calls stay in the CLI, the helpers just supply the data.
+- Existing consumers that read the raw ``next_actions`` field (typed-response SDK callers) keep working unchanged.
+
+---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
 

@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events idea resume explain whatnow confirm retry skip node-logs config audit
+.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions idea resume explain whatnow confirm retry skip node-logs config audit
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -230,6 +230,20 @@ check-sse-events: ## §17.190 — Verify pipelines/_sse_events.py is byte-equal 
 		exit 1; \
 	fi
 	@echo "✓ pipelines/_sse_events.py is in sync with app/sse_events.py."
+
+sync-next-actions: ## §17.195 — Refresh pipelines/_next_actions.py from sdk/scaffold_client/next_actions.py (byte-equal vendor)
+	cp sdk/scaffold_client/next_actions.py pipelines/_next_actions.py
+	@echo "Vendored pipelines/_next_actions.py from sdk/scaffold_client/next_actions.py."
+
+check-next-actions: ## §17.195 — Verify pipelines/_next_actions.py is byte-equal to sdk/scaffold_client/next_actions.py (CI gate)
+	@if ! diff -q sdk/scaffold_client/next_actions.py pipelines/_next_actions.py >/dev/null 2>&1; then \
+		printf '\033[1;31m✗ pipelines/_next_actions.py has drifted from sdk/scaffold_client/next_actions.py.\033[0m\n'; \
+		printf '\033[2m  Diff (first 40 lines):\033[0m\n'; \
+		diff -u sdk/scaffold_client/next_actions.py pipelines/_next_actions.py | head -40 || true; \
+		printf '\033[1;33m  Fix: `make sync-next-actions` then commit the regenerated file.\033[0m\n'; \
+		exit 1; \
+	fi
+	@echo "✓ pipelines/_next_actions.py is in sync with sdk/scaffold_client/next_actions.py."
 
 ## ──────────────────────────────────────────────
 ## Build & Ops

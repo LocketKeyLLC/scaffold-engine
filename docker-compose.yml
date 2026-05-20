@@ -120,6 +120,8 @@ services:
       # same posture as the pipeline .py files so a compromised pipeline
       # cannot rewrite the shared event vocabulary on the host.
       - ./pipelines/_sse_events.py:/app/pipelines/_sse_events.py:ro
+      # §17.195 — vendored next_actions formatter, same RO posture.
+      - ./pipelines/_next_actions.py:/app/pipelines/_next_actions.py:ro
     security_opt:
       - no-new-privileges:true
     cap_drop:

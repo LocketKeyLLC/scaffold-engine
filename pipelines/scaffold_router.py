@@ -28,22 +28,26 @@ import time
 import requests
 from pydantic import BaseModel
 
-# §17.190: vendored SSE event-name constants (byte-equal copy of
-# app/sse_events.py — see ``make sync-sse-events`` / ``make check-sse-
-# events``). The OWUI pipelines runtime loads scaffold_router.py with
-# /app/pipelines on sys.path (so ``import _sse_events`` would work
-# there), while the orchestrator test harness loads scaffold_router via
-# importlib.util.spec_from_file_location (so plain ``import`` wouldn't
-# find _sse_events.py). Load by file path to work in both environments.
+# §17.190 / §17.195: vendored modules from app/ + sdk/scaffold_client/
+# (byte-equal copies — see ``make sync-sse-events`` / ``make sync-next-
+# actions`` and the corresponding check-* gates). The OWUI pipelines
+# runtime loads scaffold_router.py with /app/pipelines on sys.path,
+# while the orchestrator test harness loads it via
+# importlib.util.spec_from_file_location; loading by file path works in
+# both environments.
 import importlib.util as _importlib_util  # noqa: E402
 import pathlib as _pathlib  # noqa: E402
-_sse_events_path = _pathlib.Path(__file__).parent / "_sse_events.py"
-_spec = _importlib_util.spec_from_file_location(
-    "scaffold_router_sse_events", _sse_events_path,
-)
-_SSE = _importlib_util.module_from_spec(_spec)
-_spec.loader.exec_module(_SSE)
-del _importlib_util, _pathlib, _sse_events_path, _spec
+
+def _load_vendor(modname: str, filename: str):
+    path = _pathlib.Path(__file__).parent / filename
+    spec = _importlib_util.spec_from_file_location(modname, path)
+    mod = _importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+_SSE = _load_vendor("scaffold_router_sse_events", "_sse_events.py")
+_next_actions = _load_vendor("scaffold_router_next_actions", "_next_actions.py")
+del _importlib_util, _pathlib, _load_vendor
 
 # Module-level Session for connection reuse across the many orchestrator
 # HTTP calls a pipeline makes during a chat session. ``requests.X(...)``
@@ -2897,27 +2901,16 @@ class Pipeline:
     def _render_next_actions(self, data: dict) -> str:
         """Format the orchestrator-supplied `next_actions` list (audit
         item 10) into a markdown 'Next steps' block. Returns "" when
-        the response carries no actions (e.g., older orchestrators)."""
-        actions = data.get("next_actions") or []
-        # Filter out wait-style actions for terminal states — "wait" only
-        # makes sense when something is in-flight; emitting it for completed
-        # jobs is noise.
-        renderable = [a for a in actions if a.get("action") != "wait"]
-        if not renderable:
-            return ""
-        lines = ["", "**Next steps:**"]
-        for a in renderable:
-            cmd = a.get("command")
-            desc = a.get("description", "")
-            if cmd:
-                lines.append(f"• `{cmd}` — {desc}")
-            elif a.get("endpoint"):
-                lines.append(
-                    f"• `{a.get('method','GET')} {a['endpoint']}` — {desc}"
-                )
-            else:
-                lines.append(f"• {desc}")
-        return "\n".join(lines)
+        the response carries no actions (e.g., older orchestrators).
+
+        §17.195 — delegates filter + field-selection to the shared helper
+        in ``pipelines/_next_actions.py`` (byte-equal vendor of
+        ``sdk/scaffold_client/next_actions.py``). Output is byte-identical
+        to the pre-§17.195 inline implementation.
+        """
+        return _next_actions.format_block(
+            data.get("next_actions") or [], style="markdown",
+        )
 
     def _handle_results(self, parts: list) -> str:
         if len(parts) < 2:

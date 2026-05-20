@@ -27,6 +27,11 @@ from .errors import (
     ScaffoldError,
     TimeoutError,
 )
+from .next_actions import (
+    action_clickable,
+    filter_renderable,
+    format_block,
+)
 
 __all__ = [
     "__version__",
@@ -41,4 +46,8 @@ __all__ = [
     "RequestError",
     "ScaffoldError",
     "TimeoutError",
+    # §17.195 — shared next_actions formatter
+    "action_clickable",
+    "filter_renderable",
+    "format_block",
 ]

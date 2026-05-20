@@ -86,6 +86,14 @@ jobs:
       - name: Verify SSE-event constants vendor is in sync (§17.190)
         run: make check-sse-events
 
+      # §17.195 — next_actions formatter vendor gate. sdk/scaffold_client/
+      # next_actions.py is the source; pipelines/_next_actions.py is the
+      # byte-equal vendor imported by the OWUI pipeline. Same rationale as
+      # §17.186 / §17.190: a developer editing one side without the other
+      # ships a router that renders next_actions differently from the CLI/SDK.
+      - name: Verify next_actions vendor is in sync (§17.195)
+        run: make check-next-actions
+
       - name: Run ci-smoke tests
         env:
           SCAFFOLD_API_KEY: "test-key-for-ci"
