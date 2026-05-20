@@ -8906,8 +8906,72 @@ $ docker exec scaffold-orchestrator pytest tests/test_scaffold_router_structure.
 
 §17.197 + §17.198 + §17.199 close AUDIT.md cohort "Small MEDIUM wins (1.3 + 2.7 + 2.8)". With this commit the AUDIT.md **MEDIUM list is empty**. Remaining open: LOW items only (1.6, 1.7, 2.9, 3.7, 5.6, 5.7).
 
----
+### §17.200 visible synthesis-fallback warning — closes AUDIT 1.6
 
+Closes **AUDIT.md item 1.6** (LOW): pre-§17.200, when ``Pipeline._synthesize_idea`` failed (triage LLM transport error / HTTP error / empty-after-think-strip), it silently built ``fallback = " ".join(user_texts)`` and returned that as the launch plan. The pre-fix log line ("Synthesis cleaned to empty, using fallback") only surfaced in ``docker logs scaffold-orchestrator`` — the user typing ``/go`` saw the orchestrator launch with a plan they couldn't reconcile against what they typed.
+
+**Fix.** ``_synthesize_idea`` now returns ``(text, used_fallback: bool)``. The ``/go`` caller (``_handle_go``) yields a visible warning to chat when ``used_fallback`` is True before auto-chaining:
+
+```
+⚠️ Couldn't synthesize a plan from this conversation (triage LLM failed);
+using your raw messages instead. Consider rephrasing in a single message
+if the launch doesn't match your intent.
+```
+
+The launch still proceeds (the warning is informational, not blocking) — operators wanting to abort can just not type ``/confirm`` at the awaiting_confirmation gate.
+
+**Files.**
+
+- ``pipelines/scaffold_router.py`` — ``_synthesize_idea`` return type changed to ``tuple[str, bool]``; ``_handle_go`` reads the tuple and yields the warning.
+- ``tests/test_scaffold_router_commands.py`` — existing tests updated to mock the new tuple shape; new ``TestSynthesisFallbackWarning`` class with 2 tests (warning emitted on fallback, NOT emitted on success).
+
+---
+### §17.201 _post_with_keepalive Future swap — closes AUDIT 1.7
+
+Closes **AUDIT.md item 1.7** (LOW): pre-§17.201 ``Pipeline._post_with_keepalive`` used a daemon-thread writing into two single-element lists (``result = [None]`` / ``error = [None]``) for the main coroutine to read after ``Thread.join()``. The pattern is safe on current CPython (GIL + Thread.join's implicit barrier give happens-before semantics) but is exactly the kind of thread-safety-by-CPython-quirk pattern that breaks on PyPy, no-GIL CPython 3.13+, or any interpreter that loosens the memory model.
+
+**Fix.** Replace the single-element-list pattern with ``concurrent.futures.Future``:
+
+```python
+# pre-§17.201
+result = [None]; error = [None]
+def _call():
+    try:    result[0] = _HTTP_SESSION.post(...)
+    except Exception as e: error[0] = e
+t = threading.Thread(target=_call, daemon=True); t.start()
+while t.is_alive(): ... yield keepalives ...
+t.join()
+if error[0] is not None: return (False, error[0])
+return (True, result[0])
+
+# post-§17.201
+future: Future = Future()
+def _call():
+    try:    future.set_result(_HTTP_SESSION.post(...))
+    except BaseException as e: future.set_exception(e)
+t = threading.Thread(target=_call, daemon=True); t.start()
+while not future.done(): ... yield keepalives ...
+try:    return (True, future.result())
+except BaseException as e: return (False, e)
+```
+
+``Future`` is the stdlib-blessed cross-thread synchronization point. The change also tightens exception capture from ``Exception`` to ``BaseException`` so ``KeyboardInterrupt`` / ``SystemExit`` propagate via ``Future.result()`` rather than silently dropping.
+
+**Files.**
+
+- ``pipelines/scaffold_router.py`` — ``_post_with_keepalive`` rewritten (~20 lines changed). Behavior contract identical (still yields keepalive ticks + visible markers + returns ``(ok, value)``); only the synchronization mechanism changed.
+
+**Why this fix is scoped to ``_post_with_keepalive`` only.** The audit noted two other SSE methods use threading patterns (the SSE reader threads) — but those are producer-consumer with a proper ``queue.Queue`` and sentinel, not the single-element-list anti-pattern. Different concern; out of scope here.
+
+### §17.202 /help footer reminder — closes AUDIT 2.9
+
+Closes **AUDIT.md item 2.9** (LOW): the OWUI ``/help`` output is a markdown blob that immediately joins chat history and scrolls away. CLI users get sticky help (``scaffold --help`` reflects against terminal scrollback); OWUI users have no reflexive way to recall it.
+
+**Fix.** Append a sticky footer to the ``_help`` text reminding users that ``/help`` is one message away, pointing at the web UI as a stickier alternative, and giving the repo docs as the long form. No backend change, no orchestrator surface — pure chat-side message tweak.
+
+**Files.**
+
+- ``pipelines/scaffold_router.py`` — ``_help()`` returns the same body plus the new footer.
 
 
 ## Phase 8 wrap — orchestration & memory caching hardening

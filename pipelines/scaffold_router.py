@@ -735,10 +735,22 @@ class Pipeline:
             self.logger.error("Triage call error: %s", e)
             return f"⚠️ Triage error: {e}. Type `/go` to launch directly."
 
-    def _synthesize_idea(self, messages: List[dict]) -> str:
+    def _synthesize_idea(self, messages: List[dict]) -> tuple[str, bool]:
+        """Synthesize a launch plan from the chat history.
+
+        Returns ``(text, used_fallback)``:
+          * ``text`` — the synthesized plan (or fallback concatenation
+            of raw user messages when synthesis failed).
+          * ``used_fallback`` — True when the Ollama call errored, HTTP-
+            errored, or returned empty-after-think-strip, so the caller
+            yielded a visible warning to the chat. §17.200 — pre-§17.200
+            the fallback was silent (logged at INFO only); operators saw
+            the orchestrator launch with a plan they couldn't reconcile
+            against what they typed.
+        """
         clean = self._clean_messages(messages)
         if not any(m["role"] == "user" for m in clean):
-            return ""
+            return "", False
 
         transcript = "\n\n".join(
             f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}"
@@ -767,7 +779,7 @@ class Pipeline:
                     "", raw, flags=re.DOTALL,
                 ).strip()
                 if cleaned:
-                    return cleaned
+                    return cleaned, False
                 self.logger.info("Synthesis cleaned to empty, using fallback")
             else:
                 self.logger.error("Synthesis HTTP %s: %s", r.status_code, r.text[:300])
@@ -777,7 +789,7 @@ class Pipeline:
         user_texts = [m["content"] for m in clean if m["role"] == "user"]
         fallback = " ".join(user_texts)
         self.logger.info("Synthesis fallback (%d chars): %s", len(fallback), fallback[:200])
-        return fallback
+        return fallback, True
 
     # ------------------------------------------------------------------
     # Main entry
@@ -1012,7 +1024,7 @@ class Pipeline:
             return
 
         yield f"📋 Synthesizing from {len(user_msgs)} user message(s)...\n\n"
-        synthesized = self._synthesize_idea(chat_history)
+        synthesized, used_fallback = self._synthesize_idea(chat_history)
 
         if not synthesized or len(synthesized.strip()) < 10:
             yield ("⚠️ Synthesis produced an empty or too-short result. "
@@ -1025,6 +1037,18 @@ class Pipeline:
             yield "\nPlease try rephrasing your idea in a single message, then type `/go`."
             return
 
+        # §17.200 — when the LLM synthesis path failed (transport / HTTP
+        # error / empty-after-think-strip) but the fallback "join user
+        # messages" produced something usable, surface a visible warning
+        # so the user knows their plan wasn't actually LLM-refined. Pre-
+        # §17.200 this fallback was silent (logged at INFO only) and
+        # operators saw the orchestrator launch with a plan they
+        # couldn't reconcile against what they typed.
+        if used_fallback:
+            yield ("⚠️ Couldn't synthesize a plan from this conversation "
+                   "(triage LLM failed); using your raw messages instead. "
+                   "Consider rephrasing in a single message if the launch "
+                   "doesn't match your intent.\n\n")
         yield f"> **Launching with:** {synthesized}\n\n---\n\n"
         yield from self._auto_chain(synthesized)
 
@@ -1797,18 +1821,31 @@ class Pipeline:
         frozen). Zero-width keepalives continue ticking in between to
         maintain SSE connection.
 
+        \u00a717.201 \u2014 the worker thread's result/exception are passed
+        through a ``concurrent.futures.Future`` rather than the pre-fix
+        single-element-list pattern. The list pattern relied on the
+        CPython GIL plus ``Thread.join``'s implicit barrier for safe
+        cross-thread reads \u2014 which works today but is the kind of
+        thread-safety-by-CPython-quirk pattern that breaks under PyPy
+        or no-GIL CPython 3.13+. ``Future`` makes the synchronization
+        point explicit and survives any interpreter.
+
         Terminates with ``return (ok, response_or_exception)``.
         """
-        result = [None]
-        error = [None]
+        from concurrent.futures import Future
+
+        future: Future = Future()
 
         def _call():
             try:
-                result[0] = _HTTP_SESSION.post(
+                future.set_result(_HTTP_SESSION.post(
                     url, json=payload, headers=self._auth_headers(), timeout=timeout,
-                )
-            except Exception as e:
-                error[0] = e
+                ))
+            except BaseException as e:
+                # BaseException (not Exception) so KeyboardInterrupt /
+                # SystemExit don't slip past silently \u2014 Future raises
+                # whatever exception was set when .result() is called.
+                future.set_exception(e)
 
         t = threading.Thread(target=_call, daemon=True)
         t.start()
@@ -1821,9 +1858,9 @@ class Pipeline:
         marker_interval = self.valves.progress_marker_interval
         last_marker = start
 
-        while t.is_alive():
+        while not future.done():
             time.sleep(self.valves.keepalive_interval)
-            if not t.is_alive():
+            if future.done():
                 break
             now = time.monotonic()
             if (
@@ -1837,13 +1874,12 @@ class Pipeline:
                 last_marker = now
             else:
                 yield "\u200b"
-        t.join()
-
-        if error[0] is not None:
-            return (False, error[0])
-        if result[0] is None:
-            return (False, "no response")
-        return (True, result[0])
+        # The loop exited because future.done() is True; result() returns
+        # immediately or raises the set exception.
+        try:
+            return (True, future.result())
+        except BaseException as e:
+            return (False, e)
 
     # ------------------------------------------------------------------
     # /go auto-chain
@@ -3539,4 +3575,7 @@ class Pipeline:
 | `/logs <job_id>` | Per-node DAG state with output preview. |
 | `/exec retry <job_id> <node_key>` | Retry a failed/blocked node. |
 | `/cleanup` | Sweep stale jobs (resets orphans, cancels long-idle). |
-| `/cost <job_id>` | Cost + latency rollup (J.3) — totals + per-(provider, model) breakdown."""
+| `/cost <job_id>` | Cost + latency rollup (J.3) — totals + per-(provider, model) breakdown.
+
+---
+*§17.202 — type `/help` again any time to recall this list. Native web UI: `http://<host>:8000/web/jobs`. Full reference: README.md + USER_GUIDE.md in the repo.*"""

@@ -141,7 +141,7 @@ class TestGoCommand:
             {"role": "user", "content": "/go"},
         ]
         body = {}
-        with patch.object(pipe, "_synthesize_idea", return_value="Build a homelab dashboard for Docker") as mock_synth, \
+        with patch.object(pipe, "_synthesize_idea", return_value=("Build a homelab dashboard for Docker", False)) as mock_synth, \
              patch.object(_mod, "_HTTP_SESSION") as mock_requests:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
@@ -241,7 +241,7 @@ class TestContextStripping:
             {"role": "user", "content": raw_msg},
         ]
         body = {}
-        with patch.object(pipe, "_synthesize_idea", return_value="Test idea from context") as mock_synth, \
+        with patch.object(pipe, "_synthesize_idea", return_value=("Test idea from context", False)) as mock_synth, \
              patch.object(_mod, "_HTTP_SESSION") as mock_requests:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
@@ -262,6 +262,70 @@ class TestContextStripping:
         chunks = list(pipe.pipe("/help", "test-model", messages, body))
         combined = "".join(chunks)
         assert "/go" in combined
+
+
+# ===================================================================
+# §17.200 — silent-fallback warning on /go
+# ===================================================================
+
+@pytest.mark.smoke
+class TestSynthesisFallbackWarning:
+    """When /go's triage LLM fails (transport / HTTP / empty), the
+    pipeline silently used `" ".join(user_texts)` as the launch plan.
+    §17.200 — caller now yields a visible "couldn't synthesize, using
+    raw messages" warning before launching so the user knows their
+    plan wasn't actually LLM-refined."""
+
+    def test_warning_emitted_when_fallback_used(self, pipe):
+        """``_synthesize_idea`` returns ``(text, True)`` on fallback;
+        the /go caller yields the §17.200 warning before auto-chaining."""
+        messages = [
+            {"role": "user", "content": "Build a thing"},
+            {"role": "user", "content": "/go"},
+        ]
+        body = {}
+        with patch.object(
+            pipe, "_synthesize_idea",
+            return_value=("Build a thing", True),  # used_fallback=True
+        ), patch.object(_mod, "_HTTP_SESSION") as mock_requests:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "job_id": "j1", "status": "awaiting_confirmation",
+                "confidence": 0.9, "risks": [], "clarifications": [],
+            }
+            mock_requests.post.return_value = mock_resp
+            chunks = list(pipe.pipe("/go", "test-model", messages, body))
+        combined = "".join(chunks)
+        assert "Couldn't synthesize" in combined
+        assert "raw messages" in combined
+        # The launch still proceeds — warning doesn't block.
+        assert "Launching with" in combined
+
+    def test_no_warning_when_synthesis_succeeded(self, pipe):
+        """``_synthesize_idea`` returns ``(text, False)`` on success;
+        the §17.200 warning must NOT fire — pre-§17.200 launches were
+        silent on the happy path and that stays."""
+        messages = [
+            {"role": "user", "content": "Build a thing"},
+            {"role": "user", "content": "/go"},
+        ]
+        body = {}
+        with patch.object(
+            pipe, "_synthesize_idea",
+            return_value=("A nicely synthesized plan", False),
+        ), patch.object(_mod, "_HTTP_SESSION") as mock_requests:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "job_id": "j1", "status": "awaiting_confirmation",
+                "confidence": 0.9, "risks": [], "clarifications": [],
+            }
+            mock_requests.post.return_value = mock_resp
+            chunks = list(pipe.pipe("/go", "test-model", messages, body))
+        combined = "".join(chunks)
+        assert "Couldn't synthesize" not in combined
+        assert "Launching with" in combined
 
 
 # ===================================================================
