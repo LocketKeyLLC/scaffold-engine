@@ -2,15 +2,77 @@
 from __future__ import annotations
 
 import logging
+import math
 import random
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
 # Max query-document pairs to score per rerank call (CrossEncoder input cap)
 _MAX_PAIRS = 20
+
+
+# ---------------------------------------------------------------------------
+# §17.187 — Per-reranker score normalization registry.
+#
+# Different CrossEncoder models emit scores on different ranges:
+#
+#   * Qwen3-Reranker (production default) post-sigmoids inside the model;
+#     scores arrive in roughly [0, 1] — identity is correct.
+#   * cross-encoder/ms-marco-* outputs raw logits, roughly [-10, +10]; the
+#     downstream confidence threshold (0.8 by default) becomes either
+#     trivially-met or never-met without normalization.
+#   * BAAI/bge-reranker-* (large + base) similarly emits raw logits.
+#
+# MODEL_RERANKER is config-only per the project invariants (cannot be
+# swapped per-request) so the normalizer is selected once at the call
+# site against ``settings.model_reranker``. A model not in the registry
+# is conservatively assumed to be already-[0,1] (identity) and reported
+# as "unknown (assumed [0,1])" on /health so an operator sees the gap.
+#
+# Match is substring-on-lowercased name so we tolerate the common
+# variants (model org prefix, version suffix, etc.) without enumerating
+# every published tag.
+# ---------------------------------------------------------------------------
+
+def _normalize_identity(scores: list[float]) -> list[float]:
+    """Pass-through — score is already in the expected [0, 1] range."""
+    return list(scores)
+
+
+def _normalize_sigmoid(scores: list[float]) -> list[float]:
+    """Apply sigmoid to map raw logits → (0, 1)."""
+    return [1.0 / (1.0 + math.exp(-float(s))) for s in scores]
+
+
+# Pairs are (substring-in-model-name-lowercased, range_label, normalizer).
+# Order matters — first match wins.
+_RERANKER_NORMALIZERS: list[tuple[str, str, Callable[[list[float]], list[float]]]] = [
+    ("qwen3-reranker", "[0, 1] (already-sigmoid)", _normalize_identity),
+    ("ms-marco", "raw logits → sigmoid", _normalize_sigmoid),
+    ("bge-reranker", "raw logits → sigmoid", _normalize_sigmoid),
+]
+
+
+def get_score_range_info(
+    model_name: str | None,
+) -> tuple[str, Callable[[list[float]], list[float]]]:
+    """Return (range_label, normalizer) for the reranker ``model_name``.
+
+    Unknown models are assumed already-[0, 1] (identity) so the production
+    threshold survives a swap that didn't get registered here — but the
+    range_label flags the gap to an operator reading /health.
+    """
+    if not model_name:
+        return ("unknown (no model configured)", _normalize_identity)
+    name = model_name.lower()
+    for pat, label, fn in _RERANKER_NORMALIZERS:
+        if pat in name:
+            return (label, fn)
+    return ("unknown (assumed [0, 1])", _normalize_identity)
 
 # ---------------------------------------------------------------------------
 # Lazy-loaded CrossEncoder singleton
@@ -136,9 +198,10 @@ def rerank_cross_encoder(
 ) -> RerankResult | None:
     """Score query-document pairs via CrossEncoder. Returns None on failure.
 
-    Score range is model-dependent. Qwen3-Reranker emits ~0..1 (post-sigmoid);
-    other CrossEncoders may output raw logits. Do not compare scores across
-    different reranker models.
+    Raw scores are model-dependent (see ``get_score_range_info``); §17.187
+    normalizes them to a stable [0, 1] range before returning so the
+    downstream confidence threshold (``settings.confidence_threshold``)
+    survives a reranker model swap without per-deployment retuning.
     """
     model = _get_cross_encoder()
     if model is None:
@@ -148,8 +211,13 @@ def rerank_cross_encoder(
     pairs = [[_format_query(query), _format_document(doc)] for doc in docs]
 
     try:
+        from app.config import settings
         t0 = time.monotonic()
-        scores = model.predict(pairs)
+        raw_scores = model.predict(pairs)
+        # §17.187 — apply the per-model normalizer so threshold semantics
+        # are stable across reranker swaps.
+        _, normalize = get_score_range_info(settings.model_reranker)
+        scores = normalize([float(s) for s in raw_scores])
         elapsed_ms = (time.monotonic() - t0) * 1000
 
         items = [

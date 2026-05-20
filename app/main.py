@@ -71,26 +71,41 @@ def _check_reranker_state(state) -> dict:
       - "unknown"  — neither flag present (build pre-X.1, or app.state
                      not yet wired). Treated as non-fatal.
 
+    §17.187: also includes ``model`` + ``score_range`` so an operator can
+    see (a) which reranker is loaded and (b) what range its scores arrive
+    on — "unknown (assumed [0,1])" flags an unregistered model that may
+    silently make ``settings.confidence_threshold`` either trivially-met
+    or never-met.
+
     Pulled out of health() to keep it directly unit-testable. ``state``
     is the FastAPI app's state object (or any object with the same
     attribute names).
     """
+    # §17.187 — score-range surface, populated regardless of prewarm outcome
+    # (an operator inspecting a "down" reranker still benefits from knowing
+    # which model would have been loaded).
+    from app.rerankers import get_score_range_info
+    model_name = getattr(settings, "model_reranker", None)
+    score_range, _ = get_score_range_info(model_name)
+    base = {"model": model_name, "score_range": score_range}
+
     if state is None:
-        return {"status": "unknown", "prewarmed": False}
+        return {**base, "status": "unknown", "prewarmed": False}
     prewarmed_at = getattr(state, "reranker_prewarmed_at", None)
     elapsed = getattr(state, "reranker_prewarm_elapsed_s", None)
     error = getattr(state, "reranker_prewarm_error", None)
     skipped = getattr(state, "reranker_prewarm_skipped", False)
     if error:
-        return {"status": "down", "prewarmed": False, "error": error}
+        return {**base, "status": "down", "prewarmed": False, "error": error}
     if skipped:
-        return {"status": "skipped", "prewarmed": False}
+        return {**base, "status": "skipped", "prewarmed": False}
     if prewarmed_at:
         return {
+            **base,
             "status": "up", "prewarmed": True,
             "prewarmed_at": prewarmed_at, "elapsed_s": elapsed,
         }
-    return {"status": "unknown", "prewarmed": False}
+    return {**base, "status": "unknown", "prewarmed": False}
 
 
 async def _pre_migration_sweep() -> dict:

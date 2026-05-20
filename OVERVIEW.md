@@ -8273,6 +8273,54 @@ exit=2
 - ``make sync-schemas`` is unchanged — it remains the official "fix the drift" command.
 - The vendored-copy contract is unchanged. SDK still ships ``app/schemas.py`` byte-equal; orchestrator still treats ``app/schemas.py`` as the source-of-truth.
 
+### §17.187 Reranker score-range normalization — closes AUDIT 2.5
+
+Closes **AUDIT.md item 2.5** (MEDIUM): pre-§17.187, ``rerank_cross_encoder`` returned whatever raw score the loaded CrossEncoder model emitted, and the downstream confidence filter (``query_rag`` L631-637, threshold default 0.8) compared it directly. The production reranker (``tomaarsen/Qwen3-Reranker-0.6B-seq-cls``) post-sigmoids internally so scores arrive in roughly [0, 1] and 0.8 is a meaningful threshold. But ``MODEL_RERANKER`` is a documented operator knob (config-only per the project invariants — can't be swapped per-request, but CAN be swapped at deploy time); a swap to ``cross-encoder/ms-marco-MiniLM-L-6-v2`` (raw logits ≈ [-10, +10]) or any BAAI ``bge-reranker-*`` (also raw logits) silently broke the threshold without any operator-facing surface — every comparison would be either trivially-met (positive logits all >> 0.8) or never-met (depending on direction).
+
+**Fix.** Per-model normalization registry + /health surface.
+
+| Reranker family | Raw output range | §17.187 normalizer | Threshold survives swap? |
+|---|---|---|---|
+| ``tomaarsen/Qwen3-Reranker-*`` (production) | ~[0, 1] (already sigmoid) | identity | ✓ (no change) |
+| ``cross-encoder/ms-marco-*`` | raw logits ~[-10, +10] | sigmoid | ✓ (NEW — was broken pre-§17.187) |
+| ``BAAI/bge-reranker-*`` | raw logits | sigmoid | ✓ (NEW) |
+| anything else | unknown | identity (assumed [0, 1]) | conservative |
+
+Match is substring-on-lowercased model-name so the registry tolerates the published-tag variants (org prefix, version suffix, variant suffix) without enumerating every HF release. An unregistered model gets identity (no transform) plus a ``"unknown (assumed [0, 1])"`` label on /health so an operator who swaps to a model not in the registry sees the gap — better than a silent threshold mismatch.
+
+**Why a registry rather than always-sigmoid.** Always-sigmoid would map the already-sigmoid'd Qwen3 outputs through σ a second time, collapsing scores from [0, 1] into [0.5, 0.731] — the production threshold of 0.8 would never be met. The registry preserves the existing production behavior byte-for-byte while fixing the gap for the alternative models.
+
+**Why not normalize after the threshold check.** The normalization must happen INSIDE ``rerank_cross_encoder`` so downstream code (``query_rag`` filter, RagResult.final_score consumers, /rag's result-cache key) all see the same normalized scale. Doing it any later would mean each consumer needs to know which model is loaded — an abstraction leak.
+
+**Files.**
+
+- ``app/rerankers.py``:
+  - New ``_normalize_identity`` / ``_normalize_sigmoid`` helpers + ``_RERANKER_NORMALIZERS`` registry tuple-list (pattern, range_label, normalizer).
+  - New ``get_score_range_info(model_name) -> (label, normalizer)`` public helper — also used by /health.
+  - ``rerank_cross_encoder`` now resolves the normalizer once per call (against ``settings.model_reranker``) and applies it before building the ``RerankedItem`` list. Existing ``items.sort`` + ``top_k`` truncation is unchanged.
+
+- ``app/main.py::_check_reranker_state`` — surfaces ``model`` + ``score_range`` fields on every /health response (regardless of prewarm outcome — an operator inspecting a "down" reranker still benefits from knowing which model would have been loaded). Additive change; existing keyset preserved.
+
+- ``tests/test_rerankers.py`` — 15 new tests in two groups: registry coverage (Qwen3 identity, ms-marco logits via 3-parametrize, bge-reranker logits via 3-parametrize, unknown-model fallback, None-model edge case, case-insensitivity, sigmoid math, copy-not-alias invariant) + end-to-end (rerank_cross_encoder applies sigmoid for ms-marco model, leaves Qwen3 unchanged).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_rerankers.py --timeout=30 -v
+26 passed in ~2 s   (11 pre-existing + 15 new for §17.187)
+
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_x1_thresholds_and_health.py tests/test_health_cleanup.py \
+    --timeout=30
+27 passed in ~6 s   (no regression in /health coverage)
+```
+
+**What this does NOT change.**
+
+- Production behavior is byte-identical — the default reranker is Qwen3 which gets the identity normalizer.
+- The threshold constant (``settings.confidence_threshold`` default 0.8) is unchanged. The fix preserves its meaning across model swaps; it doesn't re-tune it.
+- ``rerank()`` and ``rerank_rrf()`` are unchanged — the RRF fallback uses its own score scale (1/(rank+k)) which has no model dependency.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening
