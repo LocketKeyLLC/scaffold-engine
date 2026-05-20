@@ -134,9 +134,15 @@ async def test_sweep_runs_update_when_table_exists_with_stuck_rows():
     sessions_update_sql = db.execute.await_args_list[1].args[0].text
     assert "UPDATE research_sessions" in sessions_update_sql
     assert "status = 'cancelled'" in sessions_update_sql
-    # Sprint X.1: 30 → 5 min cutoff (since `_sse_with_disconnect_watch`
-    # finalizes mid-flight disconnects live).
-    assert "5 minutes" in sessions_update_sql
+    # §17.198: cutoff is now driven by settings.startup_sweep_research_
+    # idle_min (default 5) via a bind param. Verify both the SQL shape
+    # and that the bind value matches the live settings value.
+    assert "make_interval(mins => :idle_min)" in sessions_update_sql
+    from app.config import settings
+    sessions_update_params = db.execute.await_args_list[1].args[1]
+    assert sessions_update_params == {
+        "idle_min": settings.startup_sweep_research_idle_min,
+    }
 
 
 async def test_sweep_idempotent_when_no_stuck_rows():

@@ -34,17 +34,44 @@ class TestThresholdDefaults:
 @pytest.mark.smoke
 class TestPreMigrationSweepCutoff:
     """The defensive startup sweep's INTERVAL was tightened from 30 min
-    → 5 min in X.1. Inspect the SQL string directly so the test doesn't
-    need a live database."""
+    → 5 min in X.1, then made configurable via
+    ``settings.startup_sweep_research_idle_min`` in §17.198 (default 5).
+    Inspect the SQL + the bind params so the tests don't need a live DB."""
 
-    def test_sweep_interval_is_5_minutes(self):
+    def test_sweep_uses_make_interval_with_settings_bind(self):
+        """§17.198 — the SQL must use ``make_interval(mins => :idle_min)``
+        with a bind param (not a hardcoded interval literal)."""
         import inspect
-
         from app import main
-
         src = inspect.getsource(main._pre_migration_sweep)
-        assert "INTERVAL '5 minutes'" in src
+        # New shape: parameterized interval driven by settings.
+        assert "make_interval(mins => :idle_min)" in src
+        assert "settings.startup_sweep_research_idle_min" in src
+        # Old shapes must not return.
+        assert "INTERVAL '5 minutes'" not in src
         assert "INTERVAL '30 minutes'" not in src
+
+    def test_sweep_default_is_5_minutes(self):
+        """The boot-time default keeps the pre-§17.198 behavior."""
+        from app.config import Settings
+        # Read directly from the Pydantic field default — robust against
+        # operator env overrides leaking into the live settings instance.
+        assert Settings.model_fields["startup_sweep_research_idle_min"].default == 5
+
+    def test_sweep_setting_bounds_enforced(self):
+        """Floor of 1 min (lower would reap healthy in-flight rows);
+        ceiling of 1440 min / 24h."""
+        from pydantic import ValidationError
+        from app.config import Settings
+        # Below floor — Pydantic rejects.
+        with pytest.raises(ValidationError):
+            Settings(startup_sweep_research_idle_min=0)
+        # Above ceiling.
+        with pytest.raises(ValidationError):
+            Settings(startup_sweep_research_idle_min=1441)
+        # In range — accepted.
+        s = Settings(startup_sweep_research_idle_min=15)
+        assert s.startup_sweep_research_idle_min == 15
 
 
 @pytest.mark.smoke

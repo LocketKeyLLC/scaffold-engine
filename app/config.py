@@ -339,6 +339,16 @@ class Settings(BaseSettings):
     # simply re-execute on the next /execute/all tick.
     node_orphan_threshold_minutes: int = Field(default=30, ge=5, le=1440)
     cleanup_interval_seconds: int = Field(default=900, ge=10, le=86400)
+    # §17.198 — startup pre-migration sweep: how long a 'running'
+    # research_sessions row must have been idle (last updated_at) before
+    # the boot-time sweep cancels it. Previously hardcoded 5 minutes
+    # inside _pre_migration_sweep; the default keeps the prior behavior
+    # while letting an operator restart-during-a-slow-LLM-call raise
+    # the cutoff so the in-flight row doesn't get reaped mid-flight.
+    # Bounds: 1 minute floor (anything less reaps healthy in-flight
+    # rows); 1440-minute ceiling (24h — a long-running research session
+    # is the only legitimate reason to need a value this high).
+    startup_sweep_research_idle_min: int = Field(default=5, ge=1, le=1440)
 
     # Execution agent tuning
     node_timeout_seconds: int = Field(default=600, ge=1, le=86400)

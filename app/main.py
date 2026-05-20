@@ -132,6 +132,13 @@ async def _pre_migration_sweep() -> dict:
     Sprint X.1: research_sessions cutoff tightened 30min → 5min once
     ``_sse_with_disconnect_watch`` reliably finalized rows live.
 
+    §17.198: the 5-minute cutoff is now configurable via
+    ``settings.startup_sweep_research_idle_min`` (default 5). An operator
+    restarting the orchestrator during a slow LLM call (the 7b verifier's
+    cold-load can take 6+ minutes) can raise the cutoff so the in-flight
+    row doesn't get reaped mid-flight. Floor is 1 minute (any lower and
+    healthy rows get reaped); ceiling is 24h.
+
     Sprint X.25: stage 2 added. Previously dag_nodes relied on the 30-min
     periodic orphan reaper (``_REAP_ORPHAN_NODES_SQL``), which used
     ``started_at < NOW() - threshold`` — correct under live operation but
@@ -152,6 +159,11 @@ async def _pre_migration_sweep() -> dict:
                 sessions_reason = "table_not_yet_created"
                 sessions_cleared = 0
             else:
+                # §17.198 — interval driven by settings, not hardcoded.
+                # Postgres' make_interval handles the minute-level value
+                # cleanly without f-string SQL interpolation (which would
+                # be unsafe for arbitrary values; this one is bounded by
+                # the settings field's ge/le but we still parameterize).
                 sessions_result = await db.execute(text("""
                     UPDATE research_sessions
                        SET status = 'cancelled',
@@ -159,8 +171,8 @@ async def _pre_migration_sweep() -> dict:
                            completed_at = NOW(),
                            updated_at = NOW()
                      WHERE status = 'running'
-                       AND updated_at < NOW() - INTERVAL '5 minutes'
-                """))
+                       AND updated_at < NOW() - make_interval(mins => :idle_min)
+                """), {"idle_min": settings.startup_sweep_research_idle_min})
                 sessions_skipped = False
                 sessions_reason = None
                 sessions_cleared = (

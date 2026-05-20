@@ -8841,6 +8841,47 @@ $ docker exec scaffold-orchestrator pytest tests/test_rag_pipeline.py --timeout=
 - Response payload byte-equal — operators reading the response see the same numbers.
 
 ---
+### §17.198 configurable pre-migration sweep cutoff — closes AUDIT 2.7
+
+Closes **AUDIT.md item 2.7** (MEDIUM): pre-§17.198 ``_pre_migration_sweep`` at ``app/main.py`` cancelled any ``research_sessions`` row in ``status='running'`` whose ``updated_at`` was older than a hardcoded ``INTERVAL '5 minutes'``. The 5-minute window was correct under normal operation (Sprint X.1 tightened it from 30→5 once ``_sse_with_disconnect_watch`` reliably finalized rows live), but an operator restarting the orchestrator during a slow LLM call (the 7b verifier's cold-load can take 6+ minutes) would reap the in-flight row even though it would have completed cleanly.
+
+**Fix.** Promote the literal to ``settings.startup_sweep_research_idle_min`` (default 5, ge=1, le=1440):
+
+```python
+# pre-§17.198
+WHERE status = 'running'
+  AND updated_at < NOW() - INTERVAL '5 minutes'
+
+# post-§17.198
+WHERE status = 'running'
+  AND updated_at < NOW() - make_interval(mins => :idle_min)
+```
+
+Bind-param driven via ``settings``. ``make_interval`` takes the minute count cleanly without f-string SQL interpolation (which would be unsafe for arbitrary values; this one is bounded by the Pydantic field's ``ge=1, le=1440`` but parameterizing is defensive consistency).
+
+**Why ge=1 floor.** Anything less reaps healthy in-flight rows on the very next sweep — the floor enforces a minimum buffer. **Why le=1440 ceiling.** A 24-hour cutoff is the longest reasonable value; higher is almost certainly operator-error.
+
+**Files.**
+
+- ``app/config.py`` — new ``startup_sweep_research_idle_min: int = Field(default=5, ge=1, le=1440)`` with inline why-bounds rationale.
+- ``app/main.py`` — ``_pre_migration_sweep`` SQL parameterized; docstring updated with §17.198 cross-ref + the "restart-during-slow-LLM-call" use case.
+- ``tests/test_x1_thresholds_and_health.py`` — ``TestPreMigrationSweepCutoff`` updated for new SQL shape + 2 new tests (Pydantic field default=5 invariant, bounds enforced via ValidationError).
+- ``tests/test_pre_migration_sweep.py`` — existing ``test_sweep_runs_update_when_table_exists_with_stuck_rows`` updated to assert the new ``make_interval(mins => :idle_min)`` shape + the bind param matches live settings.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_x1_thresholds_and_health.py tests/test_pre_migration_sweep.py \
+    --timeout=30
+19 passed in ~5 s
+```
+
+**What this does NOT change.**
+
+- Default behavior is byte-identical — the 5-minute cutoff remains the default, exactly matching pre-§17.198.
+- The dag_nodes sweep (stage 2 in the same function) is unchanged — it has no time threshold (resets ANY 'running' row at startup).
+
 
 ## Phase 8 wrap — orchestration & memory caching hardening
 
