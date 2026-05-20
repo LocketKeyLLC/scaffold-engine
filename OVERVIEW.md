@@ -8219,6 +8219,60 @@ $ docker exec scaffold-orchestrator pytest tests/test_job_utils.py --timeout=30 
 
 §17.184 + §17.185 close the entirety of AUDIT.md item 3.2 (prompt_assembly + job_utils — both HIGH-severity untested modules). Combined with §17.182 (sim adapter tests), the audit's "HIGH-severity untested modules" list is now empty.
 
+### §17.186 schemas-in-sync CI gate — close the §17.175 follow-up
+
+Closes **AUDIT.md item 3.4** (MEDIUM) and the explicit follow-up §17.175 logged ("schemas-in-sync gate that runs ``diff app/schemas.py sdk/scaffold_client/schemas.py`` to catch the §17.157 vendored-copy-drift pattern. Smaller PR; same principle."). The defect this fixes: ``app/schemas.py`` is the orchestrator's Pydantic source-of-truth; ``sdk/scaffold_client/schemas.py`` is a byte-equal vendored copy so ``pip install scaffold-engine-client`` works without the orchestrator's runtime deps. A developer who edits the source without running ``make sync-schemas`` ships a client that mis-serializes against the current orchestrator — the exact failure mode §17.157 had to catch up on after drift accumulated unnoticed across §17.143-§17.156.
+
+**Why a separate gate instead of relying on the existing test.** ``tests/test_sdk_schema_parity.py::test_schemas_byte_equal`` already enforces the invariant — but only as one entry in a 1340+-test suite. §17.186 makes the failure surface explicit:
+
+| Surface | Failure mode pre-§17.186 | Failure mode post-§17.186 |
+|---|---|---|
+| Smoke suite | One of 1340 tests fails, message buried in pytest output | Same — kept as defense-in-depth (redundant in-suite guard) |
+| CI | Test fails alongside any other smoke-suite failure | **Distinct fast-fail step** before smoke tests run; ~50 ms zero-dep ``diff`` |
+| Local dev | Discover via ``make test`` (~5 min) | ``make check-schemas`` (~50 ms) |
+
+The pattern mirrors ``make openapi-check`` / ``Verify OpenAPI snapshot matches live spec (§17.175)`` — also originally only enforced by a script, also promoted to a dedicated CI step after the same drift-discovery pattern repeated.
+
+**Files.**
+
+- ``Makefile`` — new ``check-schemas`` target. ``diff -q app/schemas.py sdk/scaffold_client/schemas.py`` with ``set -e`` semantics; on drift, prints a colored failure banner + the first 40 lines of unified diff + the actionable fix recipe (``make sync-schemas`` then commit). Also added to the ``.PHONY`` list so a future ``check-schemas/`` directory in the repo wouldn't shadow it.
+- ``.github/workflows/ci.yml`` — new step "Verify SDK schemas vendor is in sync (§17.186)" immediately after the §17.175 OpenAPI gate. Runs ``make check-schemas`` (zero deps; ``diff`` is on every cloud runner). Inline comment cross-references §17.157 (the drift-accumulation incident that motivated this gate).
+- No production code touched — purely the CI surface.
+
+**Why this is a one-line ``diff`` rather than a Python script.** ``check-schemas`` doesn't need to import anything from ``app/`` — both files are repo-local bytes-on-disk. A Python implementation would need PYTHONPATH plumbing + dependency setup; the shell ``diff`` is faster (saves ~3 s of CI startup), more portable, and easier to read in CI logs.
+
+**Verification (local).**
+
+```
+# Clean case — fast, quiet success.
+$ make check-schemas
+✓ sdk/scaffold_client/schemas.py is in sync with app/schemas.py.
+
+# Drift case — color failure + diff + actionable fix recipe.
+$ echo "# drift" >> sdk/scaffold_client/schemas.py
+$ make check-schemas; echo "exit=$?"
+✗ sdk/scaffold_client/schemas.py has drifted from app/schemas.py.
+  Diff (first 40 lines):
+--- app/schemas.py	2026-05-12 20:32:43.029857124 -0400
++++ sdk/scaffold_client/schemas.py	2026-05-20 16:40:56.853120115 -0400
+@@ -937,3 +937,4 @@
+     sim_runs: list[ReportSimRunRead]
+     errors: list[str]
+     model_used: str
++# drift
+  Fix: `make sync-schemas` then commit the regenerated file.
+make: *** [Makefile:211: check-schemas] Error 1
+exit=2
+```
+
+(``exit=2`` is ``make``'s usual exit code when a child fails; the CI step fails on any non-zero exit.)
+
+**What this does NOT change.**
+
+- ``test_schemas_byte_equal`` in the smoke suite stays in place as defense-in-depth. A developer who skips CI (e.g., direct push to a feature branch with broken Actions) still gets the failure surfaced by ``make test``.
+- ``make sync-schemas`` is unchanged — it remains the official "fix the drift" command.
+- The vendored-copy contract is unchanged. SDK still ships ``app/schemas.py`` byte-equal; orchestrator still treats ``app/schemas.py`` as the source-of-truth.
+
 ---
 
 ## Phase 8 wrap — orchestration & memory caching hardening

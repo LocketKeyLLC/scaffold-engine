@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas idea resume explain whatnow confirm retry skip node-logs config audit
+.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas idea resume explain whatnow confirm retry skip node-logs config audit
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -206,6 +206,16 @@ openapi-check: ## Verify docs/openapi.json matches the live spec (CI gate)
 sync-schemas: ## Refresh sdk/scaffold_client/schemas.py from app/schemas.py (byte-equal vendor)
 	cp app/schemas.py sdk/scaffold_client/schemas.py
 	@echo "Vendored sdk/scaffold_client/schemas.py from app/schemas.py."
+
+check-schemas: ## §17.186 — Verify sdk/scaffold_client/schemas.py is byte-equal to app/schemas.py (CI gate)
+	@if ! diff -q app/schemas.py sdk/scaffold_client/schemas.py >/dev/null 2>&1; then \
+		printf '\033[1;31m✗ sdk/scaffold_client/schemas.py has drifted from app/schemas.py.\033[0m\n'; \
+		printf '\033[2m  Diff (first 40 lines):\033[0m\n'; \
+		diff -u app/schemas.py sdk/scaffold_client/schemas.py | head -40 || true; \
+		printf '\033[1;33m  Fix: `make sync-schemas` then commit the regenerated file.\033[0m\n'; \
+		exit 1; \
+	fi
+	@echo "✓ sdk/scaffold_client/schemas.py is in sync with app/schemas.py."
 
 ## ──────────────────────────────────────────────
 ## Build & Ops
