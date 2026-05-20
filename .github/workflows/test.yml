@@ -57,7 +57,7 @@ jobs:
             -e MILVUS_URI=$MILVUS_URI \
             -e SEARXNG_URL=$SEARXNG_URL \
             -e SCAFFOLD_API_KEY=$SCAFFOLD_API_KEY \
-            -e PYTHONPATH=/code \
+            -e PYTHONPATH=/code:/code/sdk \
             scaffold-orchestrator:ci \
             pytest tests/ --timeout=30 -v \
               --ignore=tests/eval_retrieval.py \
