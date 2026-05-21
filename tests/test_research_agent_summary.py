@@ -269,3 +269,117 @@ class TestBoundedToolCall:
         for e in out:
             assert e["source_type"] == "community"
             assert e["facet"] == "f"
+
+
+# §17.208 — _bounded_tool_call touches research_sessions.last_activity_at
+# on real LLM progress so the §17.85 reaper sees multi-batch topic-mode
+# iterations as alive. Gated on resp.success so the §17.169 synthetic-
+# failure response does NOT count as progress.
+@pytest.mark.asyncio
+class TestBoundedToolCallTouch:
+    async def test_touches_on_success_when_session_id_provided(self):
+        """Happy path — successful tool_call with session_id triggers
+        the _touch_last_activity UPDATE."""
+        from app.modules.research_agent import _bounded_tool_call
+        from app.providers.base import ModelResponse
+
+        async def _ok(**kwargs):
+            return ModelResponse(model="m", success=True, provider="ollama")
+
+        touched = []
+
+        async def _fake_touch(sid):
+            touched.append(sid)
+
+        with patch("app.modules.research_agent.model_router.tool_call",
+                   new=_ok), \
+             patch("app.modules.research_agent._touch_last_activity",
+                   new=_fake_touch):
+            await _bounded_tool_call(
+                messages=[], tools=[], role="r",
+                session_id="sess-abc",
+            )
+
+        assert touched == ["sess-abc"]
+
+    async def test_does_not_touch_when_session_id_omitted(self):
+        """Backwards-compat: callers that don't pass session_id
+        (e.g. tests, future non-research uses) still work, no touch."""
+        from app.modules.research_agent import _bounded_tool_call
+        from app.providers.base import ModelResponse
+
+        async def _ok(**kwargs):
+            return ModelResponse(model="m", success=True, provider="ollama")
+
+        touched = []
+
+        async def _fake_touch(sid):
+            touched.append(sid)
+
+        with patch("app.modules.research_agent.model_router.tool_call",
+                   new=_ok), \
+             patch("app.modules.research_agent._touch_last_activity",
+                   new=_fake_touch):
+            await _bounded_tool_call(messages=[], tools=[], role="r")
+
+        assert touched == []
+
+    async def test_does_not_touch_on_timeout(self):
+        """§17.167 invariant — a wedged call must NOT touch
+        last_activity_at; the reaper relies on staleness to kill it.
+        The §17.169 timeout path returns the synthetic-failure response
+        but must skip the touch entirely."""
+        from app.modules.research_agent import _bounded_tool_call
+
+        async def _hangs(**kwargs):
+            await asyncio.sleep(99999)
+
+        touched = []
+
+        async def _fake_touch(sid):
+            touched.append(sid)
+
+        with patch("app.modules.research_agent.model_router.tool_call",
+                   new=_hangs), \
+             patch("app.modules.research_agent._RESEARCH_LLM_TIMEOUT_S",
+                   0.05), \
+             patch("app.modules.research_agent._touch_last_activity",
+                   new=_fake_touch):
+            out = await _bounded_tool_call(
+                messages=[], tools=[], role="r",
+                session_id="sess-xyz",
+            )
+
+        assert out.success is False
+        assert "research_llm_timeout" in (out.error or "")
+        assert touched == []   # no touch on timeout
+
+    async def test_does_not_touch_on_unsuccessful_response(self):
+        """A genuine LLM failure (provider returns success=False, not a
+        timeout) also must not advance last_activity_at — same reaper
+        invariant: only real forward progress counts."""
+        from app.modules.research_agent import _bounded_tool_call
+        from app.providers.base import ModelResponse
+
+        async def _fail(**kwargs):
+            return ModelResponse(
+                model="m", success=False, provider="ollama",
+                error="upstream said no",
+            )
+
+        touched = []
+
+        async def _fake_touch(sid):
+            touched.append(sid)
+
+        with patch("app.modules.research_agent.model_router.tool_call",
+                   new=_fail), \
+             patch("app.modules.research_agent._touch_last_activity",
+                   new=_fake_touch):
+            out = await _bounded_tool_call(
+                messages=[], tools=[], role="r",
+                session_id="sess-fail",
+            )
+
+        assert out.success is False
+        assert touched == []

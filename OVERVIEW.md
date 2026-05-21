@@ -9030,6 +9030,64 @@ Closes **AUDIT.md item 5.7** (LOW): ``make doctor`` runs 9 sections but output s
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
+### §17.208 `_bounded_tool_call` touches `last_activity_at` — closes topic-mode reaper-staleness regression (2026-05-20)
+
+Closes a regression in §17.167's heartbeat-touch contract surfaced during a live verification run of §17.169's per-LLM-call timeout fallback. Topic-mode iterations never advanced ``research_sessions.last_activity_at`` despite making real LLM progress; the §17.85 reaper would have killed slow-but-alive sessions at its 30-min staleness threshold.
+
+**The gap.** §17.167 wired ``_touch_last_activity`` into ``_await_with_heartbeat`` (touch on wrapped-task completion). It updated all 12 ``_await_with_heartbeat`` call sites to thread ``session_id=session_id``. But three topic-mode helpers — ``_decompose_topic`` (line 358), ``_extract_entries`` (line 486), ``_analyze_gaps`` (line 628) — call ``model_router.tool_call`` directly without going through ``_await_with_heartbeat``. §17.169 unified those direct calls into ``_bounded_tool_call`` but did not carry the touch forward; the helpers also didn't receive ``session_id``, so the §17.167 fix was structurally unreachable from the topic-mode hot path.
+
+**Live evidence.** A 30-min topic-mode verification run ("How does function calling work in LLM tool use?") on 2026-05-20 produced 3 extract-batch successes + 3 §17.169 timeouts + multiple decompose / search / fetch sub-steps. Final ``EXTRACT(EPOCH FROM (last_activity_at - created_at))`` = 0 seconds. The outer wrap on ``_extract_entries`` (at line 887, via ``_await_with_heartbeat``) DOES touch when the helper returns — but ``_extract_entries`` itself loops over multiple LLM batches inside one call, and each batch can take 3-5 min on CPU. A single-batch run would touch, but a 6-batch run touches once at the 30-min mark — racing the reaper.
+
+**The fix.** Move the touch into ``_bounded_tool_call`` itself, gated on ``resp.success`` so the §17.169 synthetic-failure response does NOT count as progress. Then thread ``session_id`` through the three topic-mode helpers and their 4 internal callers.
+
+```python
+async def _bounded_tool_call(
+    *, session_id: str | None = None, **kwargs,
+) -> ModelResponse:
+    try:
+        resp = await asyncio.wait_for(
+            model_router.tool_call(**kwargs),
+            timeout=_RESEARCH_LLM_TIMEOUT_S,
+        )
+        if session_id is not None and resp.success:
+            await _touch_last_activity(session_id)
+        return resp
+    except asyncio.TimeoutError:
+        ...  # synthetic failure — do NOT touch; reaper stays the safety net
+```
+
+The ``resp.success`` gate is the load-bearing line. A wedged-then-timed-out call returns ``success=False`` and skips the touch — so a session where every LLM call times out (catastrophic LLM-side failure) keeps ageing toward the reaper, exactly per §17.167's "no real progress = dead" invariant. A successful call (single batch returned cleanly) touches — so multi-batch iterations like the live run's 6 extract calls would have produced 3 touches at 00:13:57, 00:18:25, and one more before the §17.169 timeouts started, comfortably keeping ``last_activity_at`` < 5 min stale.
+
+**Scope deliberately limited.** This fix covers the 4 direct-await ``_bounded_tool_call`` sites in topic-mode (lines 378, 400, 578, 665). The two ``asyncio.create_task(_bounded_tool_call(...))`` sites in URL-mode (line 1840) and PDF-mode (line 2009) still rely on the outer ``_await_with_heartbeat`` to touch on task completion — which has its own subtle problem: it touches on task completion *regardless* of ``resp.success``, so a session where every URL/PDF extract returns a §17.169 synthetic-failure would keep tickling ``last_activity_at`` forever and never get reaped. Same bug shape on the URL/PDF path; **logged as a separate follow-up** so the topic-mode fix can ship without entangling the bigger ``_await_with_heartbeat`` contract change.
+
+**Files.**
+
+- ``app/modules/research_agent.py`` — imported ``_touch_last_activity`` from ``research_state``. Added ``session_id: str | None = None`` keyword-only param to ``_bounded_tool_call`` + the three topic helpers. Passed ``session_id=session_id`` at the 4 topic-mode ``_bounded_tool_call`` sites and the 4 internal helper-call sites (lines 908, 967, 2230, 2243). The URL-mode and PDF-mode sites (1840, 2009) intentionally left unchanged — they still rely on the outer ``_await_with_heartbeat`` touch and are the subject of the follow-up.
+- ``tests/test_research_agent_summary.py`` — new ``TestBoundedToolCallTouch`` class with 4 cases:
+  - ``test_touches_on_success_when_session_id_provided`` — happy path; the touch fires exactly once with the correct sid.
+  - ``test_does_not_touch_when_session_id_omitted`` — backwards compat for tests / future non-session callers.
+  - ``test_does_not_touch_on_timeout`` — pins §17.167's "wedged calls let the reaper kill the session" invariant against §17.169's synthetic-failure response.
+  - ``test_does_not_touch_on_unsuccessful_response`` — pins the same invariant for a genuine ``success=False`` from the provider (not just timeouts).
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_research_agent_summary.py \
+    tests/test_research_agent_helpers.py tests/test_research_agent_core.py \
+    tests/test_research_topic_bypass.py tests/test_research_url_mode.py \
+    tests/test_research_pdf_mode.py tests/test_research_agent_ingestion.py \
+    tests/test_research_agent_extract_no_entries.py \
+    tests/test_research_state_lifecycle.py
+107 passed in 15.35s
+```
+
+4 new cases + 103 pre-existing across the full research_agent test surface. The pre-existing ``AdaptedConnection`` GC warnings on ``test_no_results_breaks_early`` are unrelated to this change (verified by stashing the diff + rerunning that test in isolation — same warnings on main).
+
+**Open follow-up logged** (separate scope):
+
+- URL-mode (line 1840) + PDF-mode (line 2009) ``_bounded_tool_call`` calls still touch via the outer ``_await_with_heartbeat`` on task completion *regardless of resp.success*. A session where every extract batch hits a §17.169 timeout would keep tickling ``last_activity_at`` forever via the heartbeat-helper's unconditional touch, never getting reaped despite making zero real progress. Fix shape: add a ``did_succeed`` callback to ``_await_with_heartbeat`` (or change the contract to inspect ``task.result().success`` before touching). Bigger blast radius because ``_await_with_heartbeat`` is used in 12 places; deliberately split.
+
 ---
 
 

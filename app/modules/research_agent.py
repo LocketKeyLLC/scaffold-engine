@@ -91,6 +91,7 @@ from app.modules.research_state import (
     _rehydrate_state,
     _run_with_session_lifecycle,
     _sse,
+    _touch_last_activity,
     _update_session_iteration,
 )
 
@@ -362,6 +363,7 @@ async def _decompose_topic(
     overrides: dict | None = None,
     existing_facets: list | None = None,
     gap_focus: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Decompose topic into queries. Retries once on <2 facets; falls back.
 
@@ -380,6 +382,7 @@ async def _decompose_topic(
         ],
         tools=[PLAN_RESEARCH_TOOL],
         role=role, overrides=overrides, temperature=0.4, max_tokens=2048,
+        session_id=session_id,
     )
     parsed = read_tool_args(resp)
     if parsed and "queries" in parsed:
@@ -401,6 +404,7 @@ async def _decompose_topic(
             ],
             tools=[PLAN_RESEARCH_TOOL],
             role=role, overrides=overrides, temperature=0.5, max_tokens=2048,
+            session_id=session_id,
         )
         retry_parsed = read_tool_args(retry_resp)
         if retry_parsed and "queries" in retry_parsed:
@@ -489,6 +493,7 @@ async def _extract_entries(
     *,
     role: str = "model_verifier",
     overrides: dict | None = None,
+    session_id: str | None = None,
 ) -> list[dict]:
     """Distill search results into knowledge entries.
 
@@ -577,6 +582,7 @@ async def _extract_entries(
             ],
             tools=[RECORD_ENTRIES_TOOL],
             role=role, overrides=overrides, temperature=0.1, max_tokens=1024,
+            session_id=session_id,
         )
 
         entries: list[dict] = []
@@ -630,6 +636,7 @@ async def _analyze_gaps(
     *,
     role: str = "model_verifier",
     overrides: dict | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Analyze coverage gaps. Retries once on parse failure.
 
@@ -662,6 +669,7 @@ async def _analyze_gaps(
             ],
             tools=[ASSESS_COVERAGE_TOOL],
             role=role, overrides=overrides, temperature=0.3, max_tokens=2048,
+            session_id=session_id,
         )
         parsed = read_tool_args(resp)
         if parsed:
@@ -697,17 +705,30 @@ async def _analyze_gaps(
 _RESEARCH_LLM_TIMEOUT_S = 300
 
 
-async def _bounded_tool_call(**kwargs) -> ModelResponse:
+async def _bounded_tool_call(
+    *, session_id: str | None = None, **kwargs,
+) -> ModelResponse:
     """§17.169 — timeout-bounded wrapper around model_router.tool_call.
 
     Returns a synthetic failed ModelResponse on timeout so callers'
     existing success=False fallback branches handle it cleanly.
+
+    §17.208 — when ``session_id`` is provided and the underlying call
+    returns ``success=True``, tickles ``research_sessions.last_activity_at``
+    so the §17.85 reaper sees per-LLM-call forward progress during
+    multi-batch topic-mode iterations. Gated on ``resp.success`` so the
+    §17.169 synthetic-failure response does NOT count as progress —
+    preserves §17.167's "wedged calls let the reaper kill the session"
+    invariant. The touch is fail-soft inside ``_touch_last_activity``.
     """
     try:
-        return await asyncio.wait_for(
+        resp = await asyncio.wait_for(
             model_router.tool_call(**kwargs),
             timeout=_RESEARCH_LLM_TIMEOUT_S,
         )
+        if session_id is not None and resp.success:
+            await _touch_last_activity(session_id)
+        return resp
     except asyncio.TimeoutError:
         logger.warning(
             "research_llm_timeout: kind=tool_call role=%s timeout_s=%d",
@@ -884,7 +905,7 @@ async def _execute_iteration_loop(
             break
 
         extract_task = asyncio.create_task(
-            _extract_entries(results, topic, overrides=overrides)
+            _extract_entries(results, topic, overrides=overrides, session_id=session_id)
         )
         async for hb in _await_with_heartbeat(
             extract_task,
@@ -943,7 +964,7 @@ async def _execute_iteration_loop(
             })
             break
 
-        gap_task = asyncio.create_task(_analyze_gaps(state, overrides=overrides))
+        gap_task = asyncio.create_task(_analyze_gaps(state, overrides=overrides, session_id=session_id))
         async for hb in _await_with_heartbeat(
             gap_task, {"status": "analyzing_gaps"},
             session_id=session_id,
@@ -2205,7 +2226,9 @@ async def run_research(
             "session_id": session_id,
         })
 
-        decomposition = await _decompose_topic(topic, overrides=model_overrides)
+        decomposition = await _decompose_topic(
+            topic, overrides=model_overrides, session_id=session_id,
+        )
         state.outline_facets = decomposition.get("facets", [topic])
         queries = decomposition.get("queries", [])
 
@@ -2346,6 +2369,7 @@ async def resume_research(
             overrides=model_overrides,
             existing_facets=state.outline_facets,
             gap_focus=reply,
+            session_id=session_id,
         )
         new_queries = decomposition.get("queries", [])
 
