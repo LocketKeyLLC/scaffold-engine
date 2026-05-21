@@ -9165,6 +9165,35 @@ $ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-d
 
 The §17.167 invariant ("only real forward progress counts; wedged calls let the reaper kill the session") now applies uniformly across all research-mode hot paths.
 
+### §17.210 `repopulate_kb.sh` per-source `--max-time` 1800 → 3600 — close the topic-tier wall-clock cap (2026-05-20)
+
+Closes a structural script-side limit caught by the first ``--tier=all`` corpus repopulation run after §17.208 + §17.209 landed. All three topic-mode sources (``function calling``, ``hybrid search``, ``quantization``) bailed at exactly ``duration_ms=1800000`` with ``error_message='client_disconnect'`` — the per-source ``curl --max-time 1800`` (30 min) was structurally too tight for topic-mode shallow iterations on this CPU host. The orchestrator was making real forward progress (7+ batches success on hybrid-search before the curl bail; §17.208/§17.209's ``last_activity_at`` heartbeats firing per batch). The 30-min cap simply doesn't fit what a shallow topic-mode iteration costs:
+
+| Step | Wall time (observed) |
+|---|---|
+| decompose | ~30 s |
+| 4 SearXNG queries | ~8 s |
+| trafilatura fetch (17-20 URLs) | ~5 s |
+| extract loop (6-8 batches × 2.7-5 min) | **19-40 min** |
+| gap_analysis | 3-5 min |
+| ingest | variable |
+| ``_generate_summary`` (§17.166 budget) | 120 s timeout + ~2 min average |
+| **Total** | **30-55 min** |
+
+Bumping to ``--max-time 3600`` gives 1.5-2× headroom over observed wall times while still bounding pathological wedges (e.g. an LLM truly stuck for the full 60 min would still get cancelled cleanly via §17.168's ``asyncio.shield`` finalize-on-disconnect path — verified live across all 3 cancelled sessions from the prior run).
+
+**Why not also raise it for fast tier.** Fast tier sources (github + URL) completed in 27-153 seconds each — the existing 30-min cap is a 12-66× headroom, plenty. The cap is per-source; only topic-mode was hitting it.
+
+**Why a single global cap and not per-tier.** Considered. The fast/topic boundary is a script-internal concept (rows in ``FAST_SOURCES`` vs ``TOPIC_SOURCES``); the curl call doesn't know which one it's serving. A per-tier cap would require threading the kind through ``run_research()`` and switching on it inside the curl invocation. Not worth the conditional for a value that's "60 min for everything" — the orchestrator already enforces its own per-LLM-call timeout (§17.169 ``_RESEARCH_LLM_TIMEOUT_S = 300``) and summary timeout (§17.166 ``_SUMMARY_PROMPT_TIMEOUT_S = 120``), so the script's curl cap is a wrapper around the orchestrator's own bounded execution. Lifting it to 60 min just removes the structurally-too-tight outer cap; the orchestrator's inner caps remain authoritative.
+
+**The prior-run lesson worth keeping**: ``last_activity_at`` advancement via §17.208/§17.209 is necessary but not sufficient for topic-mode to succeed. The babysit-touch-on-wakeup approach was treating the wrong threshold — the curl wall-time cap fires at the same 30-min mark the reaper would, so manual touches couldn't extend wall time beyond the curl ceiling. **Bumping the ceiling is the actual fix**; the touches were defending a fortress whose gate was already kicked open.
+
+**Files.**
+
+- ``scripts/repopulate_kb.sh`` — single line edit (``--max-time 1800`` → ``--max-time 3600``) with inline §17.210 comment block explaining the why + the observed evidence from the prior failed run.
+
+**Verification** (deferred to live re-run): topic tier on its own (``--apply --tier topic``), expected ~60-90 min wall time, expected to land net-new entries in ``llm`` / ``rag`` partitions that the §17.158 corpus regression flagged as missing. Will be reported as a §17.x follow-up if the topic sessions still don't complete (e.g. iterations exceed 60 min — would point at a deeper per-LLM-call latency problem on this host).
+
 ---
 
 

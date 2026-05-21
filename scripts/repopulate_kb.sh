@@ -177,8 +177,18 @@ run_research() {
     local curl_log
     curl_log="$(mktemp /tmp/repopulate_kb_curl.XXXXXX.log)"
 
+    # §17.210 — bumped from 1800 (30 min) to 3600 (60 min). The 30-min
+    # cap was structurally too tight for topic-mode shallow iterations
+    # on this CPU host: decompose + search + fetch + 6-8 extract batches
+    # (2.7-5 min each) + gap_analysis + ingest + summary totals 30-55 min
+    # routinely. The first --tier=all run after §17.208/§17.209 landed
+    # caught all 3 topic sources at exactly duration_ms=1800000 with
+    # `error_message='client_disconnect'`, despite the orchestrator
+    # making real forward progress (7+ batches success on the hybrid-
+    # search source before the curl bail). 60 min gives 1.5-2× headroom
+    # over observed wall times while still bounding pathological wedges.
     if ! curl -sS -N \
-        --max-time 1800 \
+        --max-time 3600 \
         -H "Content-Type: application/json" \
         -H "X-Api-Key: $SCAFFOLD_API_KEY" \
         -X POST "$ORCHESTRATOR_URL/research" \
