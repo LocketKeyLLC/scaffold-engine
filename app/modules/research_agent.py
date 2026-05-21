@@ -1837,6 +1837,11 @@ async def _run_research_url_mode(
             f"Title: {page_title}\nURL: {url}\nSnippet: {c[:600]}"
             for c in batch_chunks
         )
+        # §17.209 — pass session_id to _bounded_tool_call (touch gated on
+        # resp.success per §17.208); drop session_id from the outer heartbeat
+        # so an all-timeout extract doesn't tickle last_activity_at via the
+        # unconditional touch-on-task-completion path. A doomed session must
+        # age out via the §17.85 reaper, not get spuriously kept alive.
         task = asyncio.create_task(_bounded_tool_call(
             messages=[
                 {"role": "system", "content": EXTRACT_SYSTEM_V1},
@@ -1847,10 +1852,10 @@ async def _run_research_url_mode(
             overrides=overrides,
             temperature=0.1,
             max_tokens=1024,
+            session_id=session_id,
         ))
         async for hb in _await_with_heartbeat(
             task, {"status": "extracting", "iteration": 1},
-            session_id=session_id,
         ):
             yield hb
         resp = task.result()
@@ -2006,6 +2011,7 @@ async def _run_research_pdf_mode(
             f"URL: {virtual_url}\nSnippet: {c[:600]}"
             for c in batch_chunks
         )
+        # §17.209 — same gating as URL-mode (§17.208 + comment at line 1840).
         task = asyncio.create_task(_bounded_tool_call(
             messages=[
                 {"role": "system", "content": EXTRACT_SYSTEM_V1},
@@ -2016,10 +2022,10 @@ async def _run_research_pdf_mode(
             overrides=overrides,
             temperature=0.1,
             max_tokens=1024,
+            session_id=session_id,
         ))
         async for hb in _await_with_heartbeat(
             task, {"status": "extracting", "iteration": 1},
-            session_id=session_id,
         ):
             yield hb
         resp = task.result()

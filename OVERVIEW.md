@@ -9084,9 +9084,86 @@ $ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-d
 
 4 new cases + 103 pre-existing across the full research_agent test surface. The pre-existing ``AdaptedConnection`` GC warnings on ``test_no_results_breaks_early`` are unrelated to this change (verified by stashing the diff + rerunning that test in isolation — same warnings on main).
 
-**Open follow-up logged** (separate scope):
+**Open follow-up logged** (separate scope) → **closed in §17.209**:
 
 - URL-mode (line 1840) + PDF-mode (line 2009) ``_bounded_tool_call`` calls still touch via the outer ``_await_with_heartbeat`` on task completion *regardless of resp.success*. A session where every extract batch hits a §17.169 timeout would keep tickling ``last_activity_at`` forever via the heartbeat-helper's unconditional touch, never getting reaped despite making zero real progress. Fix shape: add a ``did_succeed`` callback to ``_await_with_heartbeat`` (or change the contract to inspect ``task.result().success`` before touching). Bigger blast radius because ``_await_with_heartbeat`` is used in 12 places; deliberately split.
+
+### §17.209 URL-mode + PDF-mode extract touch gating — closes §17.208 split follow-up (2026-05-20)
+
+Closes the URL/PDF half of the §17.208 fix without changing ``_await_with_heartbeat``'s contract. The bug shape: at lines 1840 (URL-mode) and 2009 (PDF-mode) ``_await_with_heartbeat`` wrapped a single ``asyncio.create_task(_bounded_tool_call(...))`` and touched ``last_activity_at`` on task completion regardless of ``resp.success``. So a session where every extract batch returned the §17.169 synthetic-failure response (timeout) would keep tickling ``last_activity_at`` forever via the outer heartbeat's unconditional touch — never getting reaped, despite making zero real progress.
+
+**The fix.** Move the gate to the same place §17.208 put it: ``_bounded_tool_call`` itself. Thread ``session_id=session_id`` into the inner ``_bounded_tool_call`` call (so §17.208's ``resp.success`` gate applies), and DROP ``session_id=session_id`` from the surrounding ``_await_with_heartbeat`` (so the heartbeat's unconditional task-completion touch is suppressed for these two sites). All-success URL/PDF extracts still touch — once per call via the inner gate. All-timeout extracts no longer touch — the reaper stays the safety net per §17.167's invariant.
+
+```python
+# §17.209 — pass session_id to _bounded_tool_call (touch gated on
+# resp.success per §17.208); drop session_id from the outer heartbeat
+# so an all-timeout extract doesn't tickle last_activity_at via the
+# unconditional touch-on-task-completion path. A doomed session must
+# age out via the §17.85 reaper, not get spuriously kept alive.
+task = asyncio.create_task(_bounded_tool_call(
+    messages=..., role="model_verifier", overrides=overrides,
+    temperature=0.1, max_tokens=1024,
+    session_id=session_id,
+))
+async for hb in _await_with_heartbeat(
+    task, {"status": "extracting", "iteration": 1},
+):
+    yield hb
+```
+
+**Why not change ``_await_with_heartbeat`` instead.** The §17.208 entry's follow-up note proposed "add a ``did_succeed`` callback to ``_await_with_heartbeat`` (or change the contract to inspect ``task.result().success`` before touching)." That would have been a bigger blast radius: ``_await_with_heartbeat`` is used in 12 places, most of which wrap non-``_bounded_tool_call`` tasks (``ingest_entries``, ``_generate_summary``, ``fetch_repo_content``, ``fetch_hf``, ``_extract_entries``, ``_analyze_gaps``, etc.) whose return values either have no ``.success`` attribute (``list[dict]``, ``str``) or for which the existing unconditional touch is correct behavior (the helper returning at all = real progress). Restricting the change to the two sites that actually have the bug shape — a heartbeat directly wrapping a single ``_bounded_tool_call`` — keeps the fix narrow and matches §17.208's already-shipped pattern. The other 10 ``_await_with_heartbeat`` sites are unchanged.
+
+**Coverage analysis (12 call sites).**
+
+| Line | Wraps | Behavior post-§17.209 |
+|---|---|---|
+| 907 | ``_extract_entries`` helper | Outer touch on helper return; helper internally touches per-batch via §17.208 |
+| 967 | ``_analyze_gaps`` helper | Same as above |
+| 1061 | ``ingest_entries`` | Real-progress signal on completion — touch correct |
+| 1097 | ``_generate_summary`` | Always returns a string (LLM or fallback) — touch correct |
+| 1147 | ``fetch_and_parse_spec`` | Fetch completion = real progress |
+| 1258 | ``fetch_repo_content`` | Same |
+| 1413 | ``fetch_hf`` | Same |
+| 1571 | ``_do_fetch`` | Same |
+| **1840** | **``_bounded_tool_call`` directly** | **Touch via inner gate only (§17.209 fix)** |
+| **2009** | **``_bounded_tool_call`` directly** | **Touch via inner gate only (§17.209 fix)** |
+| 2257 | ``_generate_summary`` | Always returns a string — touch correct |
+| 2396 | ``_generate_summary`` | Same |
+
+**Files.**
+
+- ``app/modules/research_agent.py`` — two sites (URL-mode extract @ 1840, PDF-mode extract @ 2009): added ``session_id=session_id`` to the inner ``_bounded_tool_call(...)``, removed ``session_id=session_id`` from the outer ``_await_with_heartbeat(...)``. Inline §17.209 comment at the URL site explains the gate; PDF site has a one-line "same gating as URL-mode" comment pointing at the URL comment.
+- ``tests/test_research_url_mode.py`` — new ``TestUrlModeTouchGating`` class with 2 behavioral cases:
+  - ``test_url_mode_extract_threads_session_id_to_bounded_tool_call`` — drives URL-mode through one iteration with a kwarg-capturing ``_bounded_tool_call`` patch; asserts ``session_id`` arrives at the inner call (without this, §17.208's gate cannot apply).
+  - ``test_url_mode_all_timeout_does_not_advance_last_activity`` — drives URL-mode through with ``_bounded_tool_call`` always returning the §17.169 synthetic-failure shape; asserts ``_touch_last_activity`` was never called. Pre-§17.209, this would have failed because the outer heartbeat would have touched on task completion.
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm --no-deps -T \
+    scaffold-orchestrator pytest tests/test_research_url_mode.py \
+    tests/test_research_pdf_mode.py tests/test_research_agent_summary.py \
+    tests/test_research_agent_helpers.py tests/test_research_agent_core.py \
+    tests/test_research_topic_bypass.py tests/test_research_agent_ingestion.py \
+    tests/test_research_agent_extract_no_entries.py \
+    tests/test_research_state_lifecycle.py
+109 passed in 14.19s
+```
+
+2 new cases + 107 pre-existing across the full research_agent test surface. The pre-existing GC warnings on ``test_no_results_breaks_early`` + ``test_classified_url_without_body_falls_through`` are unrelated (also present pre-§17.208).
+
+**Cluster fully closed.** Combined with §17.208, the entire ``last_activity_at`` heartbeat-touch contract is now consistent across all 6 ``_bounded_tool_call`` sites:
+
+| Site | Mode | Pre-§17.208 | Post-§17.208 + §17.209 |
+|---|---|---|---|
+| 378 | topic decompose initial | never touched | touch on resp.success |
+| 400 | topic decompose retry | never touched | touch on resp.success |
+| 578 | topic extract batch | never touched | touch on resp.success |
+| 665 | topic gap analysis | never touched | touch on resp.success |
+| 1840 | URL extract batch | unconditional touch | touch on resp.success |
+| 2009 | PDF extract batch | unconditional touch | touch on resp.success |
+
+The §17.167 invariant ("only real forward progress counts; wedged calls let the reaper kill the session") now applies uniformly across all research-mode hot paths.
 
 ---
 

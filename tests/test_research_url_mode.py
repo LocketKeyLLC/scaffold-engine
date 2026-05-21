@@ -326,3 +326,104 @@ class TestRunResearchUrlMode:
                 events.append(blob)
 
             decompose_mock.assert_called_once()
+
+
+# §17.209 — URL-mode + PDF-mode extract sites must thread session_id to
+# _bounded_tool_call so the §17.208 resp.success gate applies. Pre-fix,
+# the outer _await_with_heartbeat touched last_activity_at on task
+# completion regardless of success — so a session where every extract
+# call returned a §17.169 synthetic-failure response (timeout) would
+# never get reaped, despite making zero real progress.
+@pytest.mark.asyncio
+class TestUrlModeTouchGating:
+    async def test_url_mode_extract_threads_session_id_to_bounded_tool_call(self):
+        """The session_id arg arrives at _bounded_tool_call (pinned via
+        kwarg capture). Without this, §17.208's resp.success gate
+        cannot apply — the URL-mode extract path bypasses the touch
+        entirely."""
+        captured = []
+
+        async def _capturing_bounded(*, session_id=None, **kwargs):
+            captured.append(session_id)
+            return _llm_with_entries(
+                '[{"title":"T","content":"c body long","tags":"",'
+                '"source":"https://example.com/page",'
+                '"source_type":"community"}]'
+            )
+
+        with patch.object(ra, "_guard_and_create_session",
+                          AsyncMock(return_value=("sess-url-209", None))), \
+             patch.object(ra, "_robots_allowed", AsyncMock(return_value=True)), \
+             patch.object(ra, "_fetch_url_bounded",
+                          AsyncMock(return_value="<html>x</html>")), \
+             patch("asyncio.to_thread",
+                   AsyncMock(return_value="Clean article body " * 30)), \
+             patch.object(ra, "_bounded_tool_call", _capturing_bounded), \
+             patch.object(ra, "ingest_entries",
+                          AsyncMock(return_value={"new": 1, "versioned": 0,
+                                                   "rejected": 0, "skipped_hash": 0})), \
+             patch.object(ra, "_generate_summary",
+                          AsyncMock(return_value="summary")), \
+             patch.object(ra, "_update_session_iteration", AsyncMock()), \
+             patch.object(ra, "_finalize_session", AsyncMock()):
+
+            async for _ in ra.run_research(
+                "https://example.com/page", depth="medium",
+            ):
+                pass
+
+        assert captured, "_bounded_tool_call should have been called"
+        for sid in captured:
+            assert sid == "sess-url-209", (
+                f"URL-mode extract must thread session_id; got {sid!r}"
+            )
+
+    async def test_url_mode_all_timeout_does_not_advance_last_activity(self):
+        """When every URL-mode extract _bounded_tool_call returns the
+        §17.169 synthetic-failure response, last_activity_at must NOT
+        be touched. Pre-§17.209 the outer _await_with_heartbeat
+        touched unconditionally on task completion, keeping a doomed
+        session alive past the §17.85 reaper threshold."""
+        from app.providers.base import ModelResponse
+
+        # Patch _bounded_tool_call to bypass §17.208's internal touch
+        # AND the timeout-vs-success branch entirely — drive the
+        # synthetic-failure shape that the §17.169 timeout produces.
+        async def _always_synthetic_failure(*, session_id=None, **kwargs):
+            return ModelResponse(
+                model="<timeout>", success=False,
+                error="research_llm_timeout after 1s",
+                provider="<timeout>",
+            )
+
+        touched = []
+
+        async def _fake_touch(sid):
+            touched.append(sid)
+
+        with patch.object(ra, "_guard_and_create_session",
+                          AsyncMock(return_value=("sess-url-209b", None))), \
+             patch.object(ra, "_robots_allowed", AsyncMock(return_value=True)), \
+             patch.object(ra, "_fetch_url_bounded",
+                          AsyncMock(return_value="<html>x</html>")), \
+             patch("asyncio.to_thread",
+                   AsyncMock(return_value="Clean article body " * 30)), \
+             patch.object(ra, "_bounded_tool_call", _always_synthetic_failure), \
+             patch.object(ra, "_touch_last_activity", _fake_touch), \
+             patch.object(ra, "ingest_entries",
+                          AsyncMock(return_value={"new": 0, "versioned": 0,
+                                                   "rejected": 0, "skipped_hash": 0})), \
+             patch.object(ra, "_generate_summary",
+                          AsyncMock(return_value="summary")), \
+             patch.object(ra, "_update_session_iteration", AsyncMock()), \
+             patch.object(ra, "_finalize_session", AsyncMock()):
+
+            async for _ in ra.run_research(
+                "https://example.com/page", depth="medium",
+            ):
+                pass
+
+        assert touched == [], (
+            f"All-timeout URL-mode extract must NOT touch last_activity_at; "
+            f"got {len(touched)} touches: {touched}"
+        )
