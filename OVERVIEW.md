@@ -9194,6 +9194,37 @@ Bumping to ``--max-time 3600`` gives 1.5-2× headroom over observed wall times w
 
 **Verification** (deferred to live re-run): topic tier on its own (``--apply --tier topic``), expected ~60-90 min wall time, expected to land net-new entries in ``llm`` / ``rag`` partitions that the §17.158 corpus regression flagged as missing. Will be reported as a §17.x follow-up if the topic sessions still don't complete (e.g. iterations exceed 60 min — would point at a deeper per-LLM-call latency problem on this host).
 
+### §17.211 Tier A golden-recovery helper — `scripts/repopulate_kb_tier_a.sh` (2026-05-22)
+
+§17.210's --tier=topic rebuild landed corpus 231 → 377 (3/3 topic sources completed), but `scripts/score_retrieval.py` against the 2026-05-08 golden_set reported **0/20 coverage**. Investigation: every `expected_entry_ids` slug in `tests/fixtures/golden_set.json` points at content from pre-§17.63 batch runs that the §17.165 + §17.210 repopulation didn't restore. The retrieval pipeline IS working — it returns whatever IS in the corpus that the reranker scores highest. The corpus simply lacks the content the golden set was built against.
+
+**Slug-to-source archaeology.** Cross-referenced 31 unique `expected_entry_ids` against `research_sessions` history (kept across the §17.63 SSD migration; only Milvus's collection was rebuilt, Postgres tables survived). Six confirmed source topics in the pre-§17.63 history that would re-produce 18 of the 31 expected slugs:
+
+| Source topic (2026-04-16 → 04-18 batch) | Expected slugs covered |
+|---|---|
+| `Kahn's algorithm for topological sorting and parallel implementation` | `kahn's-algorithm-for-topological-sorting`, `kahn's-algorithm-implementation`, `parallel-implementation-of-kahn's-algorithm`, `parallel-kahn's-algorithm`, `topological-sorting-process` |
+| `Redis caching patterns: write-through, write-behind, and cache invalidation` | `cache-invalidation`, `caching-data-between-runs`, `redis-cache-invalidation-patterns`, `write-through-pattern`, `write-behind-caching`, `storage-quotas-and-eviction` |
+| `gRPC vs REST API performance benchmarks and tradeoffs` | `grpc-vs-rest-performance`, `grpc-vs-rest-performance-benchmark` |
+| `gzip vs brotli HTTP compression tradeoffs and lossless compression` | `compression-dictionary-transport`, `lossless-compression` |
+| `OAuth2 bearer token authentication patterns in FastAPI` | `oauth2-proxy` |
+| `Truncation vs rounding in computer science and mathematics` | `truncation-definition`, `truncation-in-mathematics-and-computer-science` |
+
+**Tier B slugs not covered here** (13 of 31, held for a separate decision): keycloak / keycloak-docker-image, content-security-policy-(csp), web-security-implementation-guides, bitnami-helm-chart-for-milvus, bitnami/milvus, bitnamicharts/milvus, docker-image-qwen3-reranker-vllm, fastapi-docker-image, fastapi-docker-image-size, minimizing-eventual-consistency, vector-telemetry-data-router. These slugs aren't represented in `research_sessions` history pre-§17.63 — they may have come from curated direct-Milvus inserts, URL-mode runs with non-obvious source URLs, or sessions in a table that's since been pruned. Speculative re-ingestion would gamble on slug match (LLM-generated titles vary per run), so Tier B held until Tier A confirms whether the slug-match assumption holds at all.
+
+**The slug-match assumption.** Topic-mode entry titles come from the LLM's `RECORD_ENTRIES` tool call (§7.x extraction), not from any deterministic source. Re-running the same topic prompt may produce different titles. If Tier A lands 0 new matching slugs, it means the assumption fails — the golden_set is more brittle than its `expected_entry_ids` shape suggests, and the right next step is to switch the goldens to title-substring or content-hash matching instead of exact entry-id. If Tier A lands some matching slugs (even 5-8 of 18), the assumption holds at least probabilistically and Tier B becomes worth attempting.
+
+**Files.**
+
+- `scripts/repopulate_kb_tier_a.sh` — new helper, modeled on `repopulate_kb.sh` patterns (ANSI helpers, --apply/--dry-run/--force, 60-min curl cap from §17.210, single-running-session pre-flight, per-source SSE event capture, post-flight entry_count delta check). Six rows in `TIER_A_SOURCES`, all topic-mode, all eng-domain, ~45 min each, ~4-5 hr total wall time on this CPU host.
+
+**Verification** (deferred to live run): `bash scripts/repopulate_kb_tier_a.sh --apply` then `python3 -u scripts/score_retrieval.py` from a separate compose container (per the §17.211 launch instructions; the script's reranker load OOMs the running orchestrator's 3g mem_limit if executed in-container). Expected outcome ranges:
+
+| Tier A coverage delta | Interpretation |
+|---|---|
+| 0/20 → 0/20 | Slug-match assumption fails; switch goldens to substring/hash matching |
+| 0/20 → 4-8/20 | Slug-match works partially; Tier B worth attempting with the same shape |
+| 0/20 → 14-18/20 | Slug-match is reliable; the 2026-05-08 baseline is recoverable via topic-mode replay |
+
 ---
 
 
