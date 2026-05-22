@@ -1634,7 +1634,7 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 **Model overrides (8 roles):** `model_general`, `model_verifier`, `model_coder`, `model_embedder`, `model_reranker`, `model_router`, `model_fallback`, `model_cloud_alt`
 
-**Valve bootstrap pattern** (`valves.template.json` → live `valves.json` → env fallback → persist): each pipeline's `_bootstrap_valves` re-seeds from a template file when the live file is missing or `{}`. `_apply_env_fallbacks` fills empty string-valued valves from `SCAFFOLD_API_KEY` / `SCAFFOLD_ORCHESTRATOR_URL`, then persists resolved values back to disk. **OWUI Pipelines treats every `.py` under `/app/pipelines/` as a pipeline candidate** — so per-pipeline helpers must be inlined, not extracted to a shared module (a sibling `_helpers.py` gets auto-discovered and quarantined).
+**Valve bootstrap pattern** (`valves.template.json` → live `valves.json` → env fallback → persist): each pipeline's `_bootstrap_valves` re-seeds from a template file when the live file is missing or `{}`. `_apply_env_fallbacks` fills empty string-valued valves from `SCAFFOLD_API_KEY` / `SCAFFOLD_ORCHESTRATOR_URL`, then persists resolved values back to disk. **OWUI Pipelines treats every `.py` under `/app/pipelines/` as a pipeline candidate** — so per-pipeline helpers must be inlined or placed in `pipelines/_vendor/` (the loader scan is non-recursive, §17.212). A sibling `_helpers.py` under `pipelines/` gets auto-discovered and quarantined to `pipelines/failed/`; the `:ro` bind-mount overlay does NOT prevent that rename, since `os.rename` operates on the parent directory entry.
 
 **5-place API key sync** (must stay aligned after rotation):
 1. `.env`
@@ -1865,7 +1865,7 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 
 13. **`apscheduler_jobs.next_run_time` type.** DOUBLE PRECISION — APScheduler's interpretation depends on the float layout. Don't alter.
 
-14. **OWUI pipeline file rule.** OWUI Pipelines treats every `.py` under `/app/pipelines/` as a pipeline candidate. Per-pipeline helpers must be **inlined** — a sibling `_helpers.py` gets auto-discovered and quarantined to `pipelines/failed/`.
+14. **OWUI pipeline file rule.** OWUI Pipelines treats every `.py` under `/app/pipelines/` as a pipeline candidate. Per-pipeline helpers must be **inlined OR placed in `pipelines/_vendor/`** (§17.212 — the loader scan is non-recursive, so a subdirectory is invisible to it). A sibling `_helpers.py` under `pipelines/` gets auto-discovered and quarantined to `pipelines/failed/`; the `:ro` per-file bind mount does NOT prevent the rename — `os.rename` operates on the parent directory entry, which is RW.
 
 15. **Pipeline auto-chain on `/confirm`.** Lives in `pipelines/scaffold_router.py`, **not** in orchestrator endpoints. Curl-only paths bypass it.
 
@@ -9224,6 +9224,28 @@ Bumping to ``--max-time 3600`` gives 1.5-2× headroom over observed wall times w
 | 0/20 → 0/20 | Slug-match assumption fails; switch goldens to substring/hash matching |
 | 0/20 → 4-8/20 | Slug-match works partially; Tier B worth attempting with the same shape |
 | 0/20 → 14-18/20 | Slug-match is reliable; the 2026-05-08 baseline is recoverable via topic-mode replay |
+
+---
+
+### §17.212 Move OWUI pipeline vendor files into `pipelines/_vendor/` — close `open-webui-pipelines` restart-loop regression (2026-05-22)
+
+`open-webui-pipelines` was in a persistent restart loop. The §17.190 + §17.195 vendor pattern placed `_sse_events.py` and `_next_actions.py` directly under `pipelines/`, relying on per-file `:ro` bind mounts to keep them host-immutable. The OWUI loader (`/app/main.py:155-170` in the pinned image) iterates **every** top-level `pipelines/*.py`, fails the two helpers ("No Pipeline class found"), and `os.rename`s them to `pipelines/failed/`. The `:ro` overlay protects file *content*, but `os.rename` operates on the directory entry; the parent `./pipelines:/app/pipelines` mount is RW, so the rename succeeds and removes the helpers from the host's `pipelines/` tree. Next startup: `scaffold_router._load_vendor("_sse_events.py")` → `FileNotFoundError` → scaffold_router fails to load → loader tries to mv it to `failed/` → `EBUSY` on its `:ro` mount → lifespan startup aborts → exit 3 → restart.
+
+**The fix.** Move both vendor files into `pipelines/_vendor/`. The OWUI loader scans top-level only (`os.listdir(directory)` + `endswith(".py")`, non-recursive), so a subdirectory is invisible to it. The byte-equal-vendor invariant from §17.190/§17.195 is preserved; only the location moves.
+
+**Files.**
+
+- `pipelines/scaffold_router.py` — `_load_vendor` path joins `__file__.parent / "_vendor" / filename` (was `__file__.parent / filename`); two doc-comment references updated.
+- `docker-compose.yml` — two `:ro` bind mounts now `./pipelines/_vendor/_*.py:/app/pipelines/_vendor/_*.py:ro`. Parent `./pipelines:/app/pipelines` RW mount unchanged.
+- `Makefile` — `sync-sse-events` / `check-sse-events` / `sync-next-actions` / `check-next-actions` cp+diff targets now point at `pipelines/_vendor/_*.py`.
+- `app/sse_events.py`, `sdk/scaffold_client/next_actions.py` — module docstrings updated to reference the new vendor path.
+- `tests/test_sse_event_inventory.py`, `tests/test_next_actions_formatter.py` — `VENDORED` path constants updated.
+- `.github/workflows/ci.yml` — comments on the §17.190 / §17.195 drift-gate steps updated for accuracy (the gates themselves are unchanged `make check-*` calls).
+- `pipelines/_vendor/_sse_events.py`, `pipelines/_vendor/_next_actions.py` — new files (byte-equal copies of source). Removed: prior `pipelines/_*.py` and `pipelines/failed/_*.py` strays.
+
+**Why this wasn't caught.** The pattern shipped in §17.190 (sse_events) and §17.195 (next_actions) assumed `:ro` protected against the loader's quarantine. OVERVIEW.md L1868 documents the exact rule violated ("OWUI Pipelines treats every `.py` under `/app/pipelines/` as a pipeline candidate. Per-pipeline helpers must be **inlined** — a sibling `_helpers.py` gets auto-discovered and quarantined to `pipelines/failed/`"). The `:ro` overlay was a content-protection mechanism that got conflated with rename protection during the §17.190 audit-closure work. The right resolution is structural (subdirectory invisible to the scan), not protective.
+
+**Verification.** `make check-sse-events check-next-actions` both green against new paths. `docker compose up -d pipelines` recreates the container; logs show all five pipelines (`scaffold_router`, `dag_viewer`, `execution_handler`, `gt_browser`, `prompt_inspector`) load, "Application startup complete", uvicorn on `:9099`, container healthy. `curl http://localhost:9099/` → `{"status":true}`.
 
 ---
 

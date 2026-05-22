@@ -216,7 +216,7 @@ class TestFormatBlockPlain:
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = REPO_ROOT / "sdk" / "scaffold_client" / "next_actions.py"
-VENDORED = REPO_ROOT / "pipelines" / "_next_actions.py"
+VENDORED = REPO_ROOT / "pipelines" / "_vendor" / "_next_actions.py"
 
 
 def test_next_actions_vendor_files_exist():

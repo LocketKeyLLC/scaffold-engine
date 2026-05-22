@@ -39,7 +39,13 @@ import importlib.util as _importlib_util  # noqa: E402
 import pathlib as _pathlib  # noqa: E402
 
 def _load_vendor(modname: str, filename: str):
-    path = _pathlib.Path(__file__).parent / filename
+    # §17.212: vendor files live in `pipelines/_vendor/` rather than next to
+    # this file. The OWUI loader scans every top-level `pipelines/*.py` and
+    # quarantines any without a Pipeline class to `pipelines/failed/` — the
+    # `:ro` overlay protects file content but not the directory entry, so the
+    # rename succeeded and broke startup. A subdirectory is invisible to the
+    # non-recursive loader scan.
+    path = _pathlib.Path(__file__).parent / "_vendor" / filename
     spec = _importlib_util.spec_from_file_location(modname, path)
     mod = _importlib_util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -1691,7 +1697,7 @@ class Pipeline:
                 payload = json.loads(data)
             except Exception:
                 continue
-            # §17.190: event-name vocabulary lives in pipelines/_sse_events.py
+            # §17.190: event-name vocabulary lives in pipelines/_vendor/_sse_events.py
             # (byte-equal vendor of app/sse_events.py). Pre-§17.190 the two
             # branches below matched ``"node_started"`` / ``"node_completed"``
             # — neither of which is ever emitted by the orchestrator. Those
@@ -2947,7 +2953,7 @@ class Pipeline:
         the response carries no actions (e.g., older orchestrators).
 
         §17.195 — delegates filter + field-selection to the shared helper
-        in ``pipelines/_next_actions.py`` (byte-equal vendor of
+        in ``pipelines/_vendor/_next_actions.py`` (byte-equal vendor of
         ``sdk/scaffold_client/next_actions.py``). Output is byte-identical
         to the pre-§17.195 inline implementation.
         """

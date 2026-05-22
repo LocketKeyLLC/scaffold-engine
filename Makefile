@@ -217,33 +217,33 @@ check-schemas: ## §17.186 — Verify sdk/scaffold_client/schemas.py is byte-equ
 	fi
 	@echo "✓ sdk/scaffold_client/schemas.py is in sync with app/schemas.py."
 
-sync-sse-events: ## §17.190 — Refresh pipelines/_sse_events.py from app/sse_events.py (byte-equal vendor)
-	cp app/sse_events.py pipelines/_sse_events.py
-	@echo "Vendored pipelines/_sse_events.py from app/sse_events.py."
+sync-sse-events: ## §17.190 — Refresh pipelines/_vendor/_sse_events.py from app/sse_events.py (byte-equal vendor)
+	cp app/sse_events.py pipelines/_vendor/_sse_events.py
+	@echo "Vendored pipelines/_vendor/_sse_events.py from app/sse_events.py."
 
-check-sse-events: ## §17.190 — Verify pipelines/_sse_events.py is byte-equal to app/sse_events.py (CI gate)
-	@if ! diff -q app/sse_events.py pipelines/_sse_events.py >/dev/null 2>&1; then \
-		printf '\033[1;31m✗ pipelines/_sse_events.py has drifted from app/sse_events.py.\033[0m\n'; \
+check-sse-events: ## §17.190 — Verify pipelines/_vendor/_sse_events.py is byte-equal to app/sse_events.py (CI gate)
+	@if ! diff -q app/sse_events.py pipelines/_vendor/_sse_events.py >/dev/null 2>&1; then \
+		printf '\033[1;31m✗ pipelines/_vendor/_sse_events.py has drifted from app/sse_events.py.\033[0m\n'; \
 		printf '\033[2m  Diff (first 40 lines):\033[0m\n'; \
-		diff -u app/sse_events.py pipelines/_sse_events.py | head -40 || true; \
+		diff -u app/sse_events.py pipelines/_vendor/_sse_events.py | head -40 || true; \
 		printf '\033[1;33m  Fix: `make sync-sse-events` then commit the regenerated file.\033[0m\n'; \
 		exit 1; \
 	fi
-	@echo "✓ pipelines/_sse_events.py is in sync with app/sse_events.py."
+	@echo "✓ pipelines/_vendor/_sse_events.py is in sync with app/sse_events.py."
 
-sync-next-actions: ## §17.195 — Refresh pipelines/_next_actions.py from sdk/scaffold_client/next_actions.py (byte-equal vendor)
-	cp sdk/scaffold_client/next_actions.py pipelines/_next_actions.py
-	@echo "Vendored pipelines/_next_actions.py from sdk/scaffold_client/next_actions.py."
+sync-next-actions: ## §17.195 — Refresh pipelines/_vendor/_next_actions.py from sdk/scaffold_client/next_actions.py (byte-equal vendor)
+	cp sdk/scaffold_client/next_actions.py pipelines/_vendor/_next_actions.py
+	@echo "Vendored pipelines/_vendor/_next_actions.py from sdk/scaffold_client/next_actions.py."
 
-check-next-actions: ## §17.195 — Verify pipelines/_next_actions.py is byte-equal to sdk/scaffold_client/next_actions.py (CI gate)
-	@if ! diff -q sdk/scaffold_client/next_actions.py pipelines/_next_actions.py >/dev/null 2>&1; then \
-		printf '\033[1;31m✗ pipelines/_next_actions.py has drifted from sdk/scaffold_client/next_actions.py.\033[0m\n'; \
+check-next-actions: ## §17.195 — Verify pipelines/_vendor/_next_actions.py is byte-equal to sdk/scaffold_client/next_actions.py (CI gate)
+	@if ! diff -q sdk/scaffold_client/next_actions.py pipelines/_vendor/_next_actions.py >/dev/null 2>&1; then \
+		printf '\033[1;31m✗ pipelines/_vendor/_next_actions.py has drifted from sdk/scaffold_client/next_actions.py.\033[0m\n'; \
 		printf '\033[2m  Diff (first 40 lines):\033[0m\n'; \
-		diff -u sdk/scaffold_client/next_actions.py pipelines/_next_actions.py | head -40 || true; \
+		diff -u sdk/scaffold_client/next_actions.py pipelines/_vendor/_next_actions.py | head -40 || true; \
 		printf '\033[1;33m  Fix: `make sync-next-actions` then commit the regenerated file.\033[0m\n'; \
 		exit 1; \
 	fi
-	@echo "✓ pipelines/_next_actions.py is in sync with sdk/scaffold_client/next_actions.py."
+	@echo "✓ pipelines/_vendor/_next_actions.py is in sync with sdk/scaffold_client/next_actions.py."
 
 ## ──────────────────────────────────────────────
 ## Build & Ops

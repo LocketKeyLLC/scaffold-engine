@@ -8,7 +8,7 @@ and there was no shared module ensuring they agreed — a rename on either
 side silently broke rendering.
 
 This module is the single source of truth for the event-name vocabulary.
-The vendored copy at ``pipelines/_sse_events.py`` keeps the same byte-equal
+The vendored copy at ``pipelines/_vendor/_sse_events.py`` keeps the same byte-equal
 constants accessible from the OWUI side (which doesn't import ``app.*``
 at runtime). ``make sync-sse-events`` refreshes the vendor; ``make
 check-sse-events`` is the CI gate (parallel to §17.186's schemas-in-sync

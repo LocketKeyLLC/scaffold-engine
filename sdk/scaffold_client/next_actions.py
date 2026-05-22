@@ -23,7 +23,7 @@ can compose them into their own rendering pipeline:
     emits the OWUI pipeline's existing shape; ``style="plain"`` emits a
     terminal-friendly variant without markdown backticks.
 
-This file is also vendored to ``pipelines/_next_actions.py`` (byte-equal
+This file is also vendored to ``pipelines/_vendor/_next_actions.py`` (byte-equal
 copy, see ``make sync-next-actions`` / ``make check-next-actions``) so
 the OWUI pipelines container — which doesn't ship the SDK — has the
 same helpers available.

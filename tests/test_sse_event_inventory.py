@@ -1,4 +1,4 @@
-"""§17.190 — drift guards for app/sse_events.py + pipelines/_sse_events.py.
+"""§17.190 — drift guards for app/sse_events.py + pipelines/_vendor/_sse_events.py.
 
 Two distinct guards:
 
@@ -34,7 +34,7 @@ from app.sse_events import ALL_EVENT_NAMES
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = REPO_ROOT / "app" / "sse_events.py"
-VENDORED = REPO_ROOT / "pipelines" / "_sse_events.py"
+VENDORED = REPO_ROOT / "pipelines" / "_vendor" / "_sse_events.py"
 
 EMITTER_FILES = [
     REPO_ROOT / "app" / "modules" / "execution_agent.py",

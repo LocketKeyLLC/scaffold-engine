@@ -77,7 +77,7 @@ jobs:
         run: make check-schemas
 
       # §17.190 — SSE-event constants drift gate. app/sse_events.py is the
-      # canonical event-name vocabulary; pipelines/_sse_events.py is the
+      # canonical event-name vocabulary; pipelines/_vendor/_sse_events.py is the
       # byte-equal vendor that the OWUI pipelines container imports. Same
       # rationale as §17.186: a developer who edits one side without the
       # other ships a router that matches against names the orchestrator
@@ -87,7 +87,7 @@ jobs:
         run: make check-sse-events
 
       # §17.195 — next_actions formatter vendor gate. sdk/scaffold_client/
-      # next_actions.py is the source; pipelines/_next_actions.py is the
+      # next_actions.py is the source; pipelines/_vendor/_next_actions.py is the
       # byte-equal vendor imported by the OWUI pipeline. Same rationale as
       # §17.186 / §17.190: a developer editing one side without the other
       # ships a router that renders next_actions differently from the CLI/SDK.
