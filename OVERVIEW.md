@@ -9450,9 +9450,6 @@ tests/test_main.py::test_database_connect_timeout_capped_at_2_seconds PASSED [ 9
 
 ---
 
-
----
-
 ### §17.218 GitHub blob @ SHA — `raw_upstream_hash` wiring (§17.126 follow-up) (2026-05-23)
 
 Closes one of three §17.126 follow-ups: when `fetch_repo_content` is called with `ref_hint` (i.e., the caller pinned to a tag/branch/SHA and we resolved it to an immutable commit SHA), stamp every ingested blob entry with `raw_upstream_hash = sha256(blob_bytes)`. `/research/verify?compare_hash=true` re-fetches the blob and compares.
@@ -9564,9 +9561,6 @@ Remaining `unverifiable` content states in `/research/verify?compare_hash=true` 
 
 ---
 
-
----
-
 ### §17.221 atomic-claim coverage extensions — dependency-gating + cross-job isolation + N=10 fanout
 
 Closes the §16.5-deferred line item "live concurrency tests for ``_get_next_node``'s atomic claim under simultaneous /execute calls" along three axes the §17.136 baseline did not exercise. §17.136 covered single-job N-vs-M contention (N ∈ {2, 5}, M ∈ {1, 2}); the audit deferral asked for live-Postgres coverage of the atomic claim, and one file shouldn't carry every shape of that invariant. §17.221 adds the three shapes that materially differ from §17.136's harness — dependency gating, cross-job isolation, and high-N fanout — in a sibling file so future readers can grep for either §17.136 or §17.221 and find the relevant case.
@@ -9652,9 +9646,6 @@ Live full-suite run (timing baseline): ``4 passed, 3 skipped in 592.95s`` agains
 
 ---
 
-
----
-
 ### §17.223 `make doctor` cold-backup mount guard — held-from-§17.214 follow-up
 
 Closes the §17.214 follow-up held with reduced urgency: after the §17.213 AM8180 USB-NVMe enclosure crash and the §17.214 migration to internal NVMe (`~/scaffold-engine`), `/mnt/adamssd/` was demoted to cold-backup-only. Nothing in the runtime path prevented a future edit from silently re-introducing a bind-mount or volume option pointing at that path, which would re-arm the §17.213 enclosure-hang failure class (host lockup under sustained write load).
@@ -9699,9 +9690,6 @@ Each surface emits an individual `PASS` or `FAIL` line with redacted fingerprint
 - `Makefile` — `doctor:` target's help string already updated by §17.224 to "11 sections" (no further change required here).
 
 **Verify.** On the current host the section runs against the live 6 surfaces. Baseline shows a single pre-existing `FAIL pipelines/scaffold_router/valves.json — api_key empty` — that's the same hybrid drift §17.35's body documents (`4 of 5 valves populated, scaffold_router empty`), now surfaced where an operator will actually see it. Deliberate regression — rotate `pipelines/dag_viewer/valves.json` to a dummy `sk-scaffold-DUMMY-…` value — produces an additional `FAIL pipelines/dag_viewer/valves.json — api_key drift (sk-scaffold…AAAA ≠ sk-scaffold…<ref-last4>)` and bumps the `DRIFT: N` count from 1 to 2. Restoring the valves.json from backup returns the section to its baseline single-fail state.
-
----
-
 
 ---
 
