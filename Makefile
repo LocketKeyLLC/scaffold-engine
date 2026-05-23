@@ -110,7 +110,7 @@ bootstrap-host: ## Audit I1: host-level setup audit (SSD mount, daemon.json, ai-
 bootstrap-host-check: ## Same as bootstrap-host, but read-only — no changes applied.
 	@bash scripts/bootstrap-host.sh check
 
-doctor: ## Health audit: probe every dep + verify key sync (read-only)
+doctor: ## Health audit: probe every dep + verify key sync + cold-backup mount guard (read-only, 11 sections)
 	@bash scripts/doctor.sh
 
 doctor-explain: ## Same as doctor, but with a one-liner per check explaining what it verifies

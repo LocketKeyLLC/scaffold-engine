@@ -9655,6 +9655,56 @@ Live full-suite run (timing baseline): ``4 passed, 3 skipped in 592.95s`` agains
 
 ---
 
+### §17.223 `make doctor` cold-backup mount guard — held-from-§17.214 follow-up
+
+Closes the §17.214 follow-up held with reduced urgency: after the §17.213 AM8180 USB-NVMe enclosure crash and the §17.214 migration to internal NVMe (`~/scaffold-engine`), `/mnt/adamssd/` was demoted to cold-backup-only. Nothing in the runtime path prevented a future edit from silently re-introducing a bind-mount or volume option pointing at that path, which would re-arm the §17.213 enclosure-hang failure class (host lockup under sustained write load).
+
+**Fix.** Append a `Cold-backup mount guard` section to `scripts/doctor.sh` (section 10). It scans three surfaces:
+
+- every `docker-compose*.yml` at the repo root,
+- every `.env*` file at the repo root (`.env`, `.env.example`, plus anything an operator drops in like `.env.local`),
+- every named docker volume's `Mountpoint` and `Options.device` fields (`docker volume inspect -f ...`).
+
+A hit on any surface emits a `FAIL` line with file:line (or volume name) plus a 120-char excerpt of the offending content, and the section then prints a red `REGRESSION:` banner with a recovery hint pointing the operator at internal NVMe + service-recreate. The check is read-only and adds ~50ms to `make doctor` on a stack with 7 volumes (one `docker volume inspect` per volume).
+
+**Why a guard and not just a doc note.** Post-§17.214 the path is invisible in the live working tree — `git grep /mnt/adamssd` returns empty. A future commit that re-introduces the path (cold-backup script that gets copy-pasted into compose, an operator who hand-edits `.env` to point logs at the spare drive) would land green through normal review because the only signal that the path is dangerous lives in OVERVIEW §17.213. The guard surfaces the invariant at the canonical operator-side health-check, so a regression shows up the next time anyone runs `make doctor` — the same surface that already gates §17.205 onboarding.
+
+**Files.**
+
+- `scripts/doctor.sh` — `Cold-backup mount guard` section added between `Schema migrations` and `Summary`. Opening banner (§17.205) updated: section count `9` → `11`, and the new section's one-line summary added in the banner block.
+- `Makefile` — `doctor:` target's help string updated to mention the new section ("cold-backup mount guard … 11 sections").
+
+**Verify.** Clean run on the current host: section emits `PASS no /mnt/adamssd references in compose / .env* / docker volumes`. Deliberate regression — `echo SCAFFOLD_DATA_DIR=/mnt/adamssd/foo > .env.test`, re-run `make doctor` — the section emits `FAIL .env.test:1 references /mnt/adamssd — SCAFFOLD_DATA_DIR=/mnt/adamssd/foo` followed by the red `REGRESSION:` banner; exit code stays non-zero. Removing `.env.test` restores `PASS`.
+
+---
+
+### §17.224 `make doctor` API-key 6-surface read-side check — closes §17.35 follow-up
+
+Closes the read-side gap left by §17.35 (Sprint X.8 `make sync-api-key`). That sprint shipped the write path: `make sync-api-key [KEY=…]` strict-syncs `SCAFFOLD_API_KEY` across `.env`, every `pipelines/*/valves.json`, and `~/.bashrc`. The OVERVIEW conventions section (`OVERVIEW.md:1639`, `references/debugging.md:140-150`) lists the full 5-place invariant — those three surfaces plus the `scaffold-orchestrator` container env and the `open-webui-pipelines` container env. Until now nothing read those six surfaces back and verified them; drift produced as mysterious `401 Unauthorized` mid-job, with the operator falling back to the manual grep recipe in `references/debugging.md`.
+
+**Fix.** Append an `API key 6-surface sync (read-side)` section to `scripts/doctor.sh` (section 11). It takes `.env`'s `SCAFFOLD_API_KEY` as the reference value, prints a redacted fingerprint (`sk-scaffold…<last4>`) for log readability, and then compares against every downstream surface:
+
+- every `pipelines/*/valves.json` file that declares an `api_key` field (vendor subdirs `_next_actions/` and `_sse_events/` ship `{}` valves.json and are skipped — they have no Pipeline class, no api-key surface),
+- `~/.bashrc`'s `export SCAFFOLD_API_KEY=…` line (operator-shell surface),
+- `scaffold-orchestrator` container's runtime env (`docker exec … printenv SCAFFOLD_API_KEY`),
+- `open-webui-pipelines` container's runtime env.
+
+Each surface emits an individual `PASS` or `FAIL` line with redacted fingerprints, and the section closes with a red `DRIFT: N surface(s) disagree …` banner pointing the operator at `make sync-api-key` when any mismatch is present. The existing section 7 (`API key sync`) is left intact — it does the `.env↔orchestrator` two-surface fast-check in roughly one `docker exec`; the new section 11 covers the full §17.35 invariant in a self-contained block so `make doctor` surfaces the whole picture without grepping logs or running the §17.35 recipe by hand.
+
+**Why read-side, given there's already a write-side.** `make sync-api-key` is one-shot: an operator who rotates a key, restarts compose, but forgets to `source ~/.bashrc` (or restart `open-webui-pipelines` if it was running on a stale env) has all five write-targets aligned but a sixth surface stale. The read-side check is the only thing that catches "I rotated everything but one container restart didn't take" before the next `/research` job 401s.
+
+**Files.**
+
+- `scripts/doctor.sh` — `API key 6-surface sync (read-side)` section added between the new §17.223 cold-backup guard and `Summary`. Opening banner (§17.205) updated to list this as section 11 with the one-liner ".env + 5x valves.json + bashrc + 2 containers".
+- `Makefile` — `doctor:` target's help string already updated by §17.224 to "11 sections" (no further change required here).
+
+**Verify.** On the current host the section runs against the live 6 surfaces. Baseline shows a single pre-existing `FAIL pipelines/scaffold_router/valves.json — api_key empty` — that's the same hybrid drift §17.35's body documents (`4 of 5 valves populated, scaffold_router empty`), now surfaced where an operator will actually see it. Deliberate regression — rotate `pipelines/dag_viewer/valves.json` to a dummy `sk-scaffold-DUMMY-…` value — produces an additional `FAIL pipelines/dag_viewer/valves.json — api_key drift (sk-scaffold…AAAA ≠ sk-scaffold…<ref-last4>)` and bumps the `DRIFT: N` count from 1 to 2. Restoring the valves.json from backup returns the section to its baseline single-fail state.
+
+---
+
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

@@ -59,25 +59,29 @@ explain() {
 # below; needs a manual update when sections are added or renamed,
 # but the cost is one line per change and the operator-facing clarity
 # is worth it.
-printf '%s┌── make doctor ──%s pre-flight diagnostic, 9 sections, read-only.%s\n' \
+printf '%s┌── make doctor ──%s pre-flight diagnostic, 11 sections, read-only.%s\n' \
     "$C_INFO" "$C_RST" "$C_RST"
-printf '%s│%s  1. .env                          (required secrets present)\n' \
+printf '%s│%s   1. .env                          (required secrets present)\n' \
     "$C_INFO" "$C_RST"
-printf '%s│%s  2. Docker network + volumes      (ai-network, postgres + milvus data)\n' \
+printf '%s│%s   2. Docker network + volumes      (ai-network, postgres + milvus data)\n' \
     "$C_INFO" "$C_RST"
-printf '%s│%s  3. Containers                    (all 7 services running)\n' \
+printf '%s│%s   3. Containers                    (all 7 services running)\n' \
     "$C_INFO" "$C_RST"
-printf '%s│%s  4. Orchestrator /health          (per-subsystem latencies)\n' \
+printf '%s│%s   4. Orchestrator /health          (per-subsystem latencies)\n' \
     "$C_INFO" "$C_RST"
-printf '%s│%s  5. Ollama (host)                 (CPU model registry reachable)\n' \
+printf '%s│%s   5. Ollama (host)                 (CPU model registry reachable)\n' \
     "$C_INFO" "$C_RST"
-printf '%s│%s  6. OpenAI provider               (cloud key configured if used)\n' \
+printf '%s│%s   6. OpenAI provider               (cloud key configured if used)\n' \
     "$C_INFO" "$C_RST"
-printf '%s│%s  7. API key sync                  (.env ↔ container env ↔ bashrc ↔ valves.json)\n' \
+printf '%s│%s   7. API key sync                  (.env ↔ container env ↔ bashrc ↔ valves.json)\n' \
     "$C_INFO" "$C_RST"
-printf '%s│%s  8. Auth posture                  (gate enabled / SCAFFOLD_AUTH_DISABLED honored)\n' \
+printf '%s│%s   8. Auth posture                  (gate enabled / SCAFFOLD_AUTH_DISABLED honored)\n' \
     "$C_INFO" "$C_RST"
-printf '%s│%s  9. Schema migrations             (highest applied vs db/migrations/)\n' \
+printf '%s│%s   9. Schema migrations             (highest applied vs db/migrations/)\n' \
+    "$C_INFO" "$C_RST"
+printf '%s│%s  10. Cold-backup mount guard       (no /mnt/adamssd in compose/.env/volumes — §17.213)\n' \
+    "$C_INFO" "$C_RST"
+printf '%s│%s  11. API key 6-surface sync        (read-side: .env + 5x valves.json + bashrc + 2 containers)\n' \
     "$C_INFO" "$C_RST"
 printf '%s└──%s pass --explain to see what each section verifies inline.\n\n' \
     "$C_INFO" "$C_RST"
@@ -255,6 +259,190 @@ if docker ps --format '{{.Names}}' | grep -qx scaffold-postgres; then
         pass "highest applied migration: $HIGHEST"
     else
         warn "could not query schema_migrations (DB unreachable or table missing)"
+    fi
+fi
+
+# ---- 9. Cold-backup mount guard (§17.215 candidate) ------------------
+# Repo moved to internal NVMe in §17.214 after the AM8180 USB-NVMe
+# enclosure hung the host under write pressure (§17.213). /mnt/adamssd
+# is demoted to cold-backup-only; ANY runtime reference to it from
+# compose, .env, or a docker volume re-creates that crash risk class.
+# This guard fires LOUD so a stray bind-mount can't sneak back in
+# unnoticed during a future edit.
+hdr "Cold-backup mount guard"
+explain "Scans every compose file, every .env*, and every named docker volume for paths under /mnt/adamssd/. Post-§17.214 that path is cold-backup-only — the AM8180 USB-NVMe enclosure that mounts there hangs the host under sustained write load (§17.213). A regression that re-introduces it would silently re-arm the enclosure-crash failure mode."
+
+COLD_PATH="/mnt/adamssd"
+COLD_HITS=0
+
+# Compose files
+shopt -s nullglob
+for cf in "$REPO_ROOT"/docker-compose*.yml; do
+    if grep -nE "${COLD_PATH}" "$cf" >/dev/null 2>&1; then
+        # Print every offending line with file:line for fast triage
+        while IFS=: read -r lineno line; do
+            fail "${cf#$REPO_ROOT/}:$lineno references $COLD_PATH — $(echo "$line" | sed 's/^[[:space:]]*//' | head -c 120)"
+            COLD_HITS=$((COLD_HITS+1))
+        done < <(grep -nE "${COLD_PATH}" "$cf")
+    fi
+done
+
+# .env files (.env, .env.example, .env.local, …)
+for ef in "$REPO_ROOT"/.env*; do
+    [[ -f "$ef" ]] || continue
+    if grep -nE "${COLD_PATH}" "$ef" >/dev/null 2>&1; then
+        while IFS=: read -r lineno line; do
+            fail "${ef#$REPO_ROOT/}:$lineno references $COLD_PATH — $(echo "$line" | sed 's/^[[:space:]]*//' | head -c 120)"
+            COLD_HITS=$((COLD_HITS+1))
+        done < <(grep -nE "${COLD_PATH}" "$ef")
+    fi
+done
+shopt -u nullglob
+
+# Docker named volumes — inspect Mountpoint + Options.device of every
+# volume. A volume created with `--opt device=/mnt/adamssd/...` is the
+# stealth-regression shape: nothing in the repo references the path,
+# but the running stack still binds it.
+if command -v docker >/dev/null 2>&1; then
+    while IFS= read -r vol; do
+        [[ -z "$vol" ]] && continue
+        # -f templating keeps this fast (~5ms per volume) vs jq.
+        offenders="$(docker volume inspect -f '{{.Mountpoint}}{{"\n"}}{{range $k,$v := .Options}}{{$v}}{{"\n"}}{{end}}' "$vol" 2>/dev/null | grep -F "$COLD_PATH" || true)"
+        if [[ -n "$offenders" ]]; then
+            fail "docker volume '$vol' binds $COLD_PATH ($(echo "$offenders" | tr '\n' ' ' | head -c 120))"
+            COLD_HITS=$((COLD_HITS+1))
+        fi
+    done < <(docker volume ls --format '{{.Name}}' 2>/dev/null)
+fi
+
+if [[ $COLD_HITS -eq 0 ]]; then
+    pass "no $COLD_PATH references in compose / .env* / docker volumes"
+else
+    printf '  %s┃%s %sREGRESSION:%s %d reference(s) to %s found — post-§17.214 this path is cold-backup-only.\n' \
+        "$C_ERR" "$C_RST" "$C_ERR" "$C_RST" "$COLD_HITS" "$COLD_PATH"
+    printf '  %s┃%s Restore by moving the offending mount to internal NVMe (~/scaffold-engine) and recreating the affected service or volume.\n' \
+        "$C_ERR" "$C_RST"
+fi
+
+# ---- 10. API-key 6-surface read-side sync (§17.35 follow-up) ---------
+# `make sync-api-key` is the write path; this is the read-side guard
+# that catches drift after a one-off manual edit, a partial sync, or
+# a container that wasn't restarted post-rotation. Loud-fails on any
+# of the six surfaces disagreeing with .env.
+hdr "API key 6-surface sync (read-side)"
+explain "Reads SCAFFOLD_API_KEY from all six places it must agree on: .env, every pipelines/*/valves.json, ~/.bashrc, the scaffold-orchestrator container env, and the open-webui-pipelines container env. Section 7 above only covers .env↔orchestrator; this section covers the full §17.35 surface so a stale valves.json or unsourced bashrc shows up here, not as a mysterious 401 mid-job."
+
+if [[ ! -f "$ENV_FILE" ]]; then
+    warn ".env missing — cannot establish reference value for 6-surface sync"
+else
+    REF_KEY="$(grep -E '^SCAFFOLD_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+    if [[ -z "$REF_KEY" ]]; then
+        warn "SCAFFOLD_API_KEY empty in .env — cannot reference-check downstream surfaces"
+    else
+        # Render a short fingerprint for log readability (full key never printed)
+        ref_fp="${REF_KEY:0:11}…${REF_KEY: -4}"
+        info "reference (.env): $ref_fp"
+        SYNC_MISMATCH=0
+
+        # (a) pipelines/*/valves.json — every Pipeline valves file. We
+        # only check files that declare an `api_key` field; vendor
+        # subdirs like pipelines/_next_actions and pipelines/_sse_events
+        # ship `{}` valves.json (no Pipeline class, no api_key surface)
+        # and aren't part of the 5-place sync invariant.
+        shopt -s nullglob
+        for valves in "$REPO_ROOT"/pipelines/*/valves.json; do
+            name="$(basename "$(dirname "$valves")")"
+            # has_key returns "PRESENT" or "ABSENT"; vkey is "" when absent.
+            read -r has_key vkey < <(python3 -c '
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    print("ABSENT", "")
+    sys.exit(0)
+if "api_key" in data:
+    print("PRESENT", data.get("api_key", ""))
+else:
+    print("ABSENT", "")
+' "$valves" 2>/dev/null)
+            if [[ "$has_key" != "PRESENT" ]]; then
+                # Vendor / non-Pipeline valves — silently skip.
+                continue
+            fi
+            if [[ -z "$vkey" ]]; then
+                fail "pipelines/$name/valves.json — api_key empty (run: make sync-api-key)"
+                SYNC_MISMATCH=$((SYNC_MISMATCH+1))
+            elif [[ "$vkey" != "$REF_KEY" ]]; then
+                fail "pipelines/$name/valves.json — api_key drift (${vkey:0:11}…${vkey: -4} ≠ $ref_fp)"
+                SYNC_MISMATCH=$((SYNC_MISMATCH+1))
+            else
+                pass "pipelines/$name/valves.json matches .env"
+            fi
+        done
+        shopt -u nullglob
+
+        # (b) ~/.bashrc — operator-shell surface. We grep verbatim;
+        # `source ~/.bashrc` is the operator's responsibility, but the
+        # written value must match so a fresh shell picks the right key.
+        BASHRC="${HOME}/.bashrc"
+        if [[ ! -f "$BASHRC" ]]; then
+            warn "~/.bashrc not found — operator-shell surface unverifiable"
+        else
+            bkey="$(grep -E '^export SCAFFOLD_API_KEY=' "$BASHRC" | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+            if [[ -z "$bkey" ]]; then
+                fail "~/.bashrc — no 'export SCAFFOLD_API_KEY=' line (run: make sync-api-key)"
+                SYNC_MISMATCH=$((SYNC_MISMATCH+1))
+            elif [[ "$bkey" != "$REF_KEY" ]]; then
+                fail "~/.bashrc — api_key drift (${bkey:0:11}…${bkey: -4} ≠ $ref_fp)"
+                SYNC_MISMATCH=$((SYNC_MISMATCH+1))
+            else
+                pass "~/.bashrc matches .env"
+            fi
+        fi
+
+        # (c) scaffold-orchestrator container env. Section 7 above also
+        # checks this; repeating here keeps the 6-surface report
+        # self-contained and lets `make doctor | grep -A1 '6-surface'`
+        # show the full picture in one block.
+        if docker ps --format '{{.Names}}' | grep -qx scaffold-orchestrator; then
+            okey="$(docker exec scaffold-orchestrator printenv SCAFFOLD_API_KEY 2>/dev/null || true)"
+            if [[ -z "$okey" ]]; then
+                fail "scaffold-orchestrator container — SCAFFOLD_API_KEY unset"
+                SYNC_MISMATCH=$((SYNC_MISMATCH+1))
+            elif [[ "$okey" != "$REF_KEY" ]]; then
+                fail "scaffold-orchestrator container — api_key drift (${okey:0:11}…${okey: -4} ≠ $ref_fp; restart compose)"
+                SYNC_MISMATCH=$((SYNC_MISMATCH+1))
+            else
+                pass "scaffold-orchestrator container matches .env"
+            fi
+        else
+            warn "scaffold-orchestrator container not running — env unverifiable"
+        fi
+
+        # (d) open-webui-pipelines container env. OWUI pipelines read
+        # the key when they call the orchestrator over the bridge; drift
+        # here surfaces as 401s on /ideate, /research, /gt, /optimize.
+        if docker ps --format '{{.Names}}' | grep -qx open-webui-pipelines; then
+            pkey="$(docker exec open-webui-pipelines printenv SCAFFOLD_API_KEY 2>/dev/null || true)"
+            if [[ -z "$pkey" ]]; then
+                fail "open-webui-pipelines container — SCAFFOLD_API_KEY unset"
+                SYNC_MISMATCH=$((SYNC_MISMATCH+1))
+            elif [[ "$pkey" != "$REF_KEY" ]]; then
+                fail "open-webui-pipelines container — api_key drift (${pkey:0:11}…${pkey: -4} ≠ $ref_fp; restart compose)"
+                SYNC_MISMATCH=$((SYNC_MISMATCH+1))
+            else
+                pass "open-webui-pipelines container matches .env"
+            fi
+        else
+            warn "open-webui-pipelines container not running — env unverifiable"
+        fi
+
+        if [[ $SYNC_MISMATCH -eq 0 ]]; then
+            pass "all 6 surfaces agree on SCAFFOLD_API_KEY ($ref_fp)"
+        else
+            printf '  %s┃%s %sDRIFT:%s %d surface(s) disagree with .env. Fix: %smake sync-api-key%s (no arg → propagate .env value).\n' \
+                "$C_ERR" "$C_RST" "$C_ERR" "$C_RST" "$SYNC_MISMATCH" "$C_INFO" "$C_RST"
+        fi
     fi
 fi
 
