@@ -9705,6 +9705,161 @@ Each surface emits an individual `PASS` or `FAIL` line with redacted fingerprint
 
 ---
 
+### §17.225 `/skip <job_id>` ergonomics — closes commands.md L159 friction
+
+Pre-§17.225 the OWUI `/skip` handler hard-required **both** `job_id` and `node_key`; typing bare `/skip <job_id>` produced `Usage: /skip <job_id> <node_key>` and nothing else. Per OVERVIEW commands.md L159 this is a known friction: the operator already has the job_id (e.g. from `/results`) but rarely has the node_key memorized — they have to round-trip through `/results <job_id>` to read the failed/blocked node table, then come back and paste the key.
+
+**Fix.** Bare `/skip <job_id>` now calls `/exec/status/{job_id}` and renders a markdown hint listing every skippable node (failed → blocked → pending) with a copy-pasteable ``/skip <job_id> <node_key>`` line per candidate. Done / skipped / running nodes are excluded (skipping those is either a no-op or destructive). Mirrors the affordance pattern from `_render_next_actions` (§17.195): the chat surfaces the exact command the operator should run rather than making them assemble it.
+
+The full two-arg form is unchanged — scripted callers and muscle-memory operators hit the same code path as before.
+
+**Files.**
+
+- ``pipelines/scaffold_router.py``:
+  - `/skip` branch in `_handle_command` (around L2469) now accepts a single-arg form; placeholder check rearranged so `_is_placeholder(parts[1])` fires first.
+  - New helper `_render_skip_candidates(job_id)` (placed next to `_render_next_actions` and `_render_rag_results` for legibility). Handles request timeouts, connection errors, HTTP 404, HTTP ≥400, and non-JSON responses by falling back to the original usage hint plus a parenthetical reason — never raises.
+  - `/help` table row updated: `/skip <job_id> <node_key>` → `/skip <job_id> [<node_key>]` with the new copy lists candidates hint.
+- ``tests/test_scaffold_router_commands.py`` — three new tests:
+  - `test_skip_bare_lists_candidates` — failed / blocked / pending nodes render copy-pasteable lines; done / running do not.
+  - `test_skip_bare_no_candidates` — completed-job branch renders the "no skippable nodes" message rather than an empty list.
+  - `test_skip_with_node_key_unchanged` — regression guard for the original two-arg POST shape (`job_id` + `node_key` in the body).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest --noconftest \
+    tests/test_scaffold_router_commands.py \
+    tests/test_scaffold_router_helpers.py \
+    tests/test_scaffold_router_structure.py --timeout=30
+139 passed in ~1156s   (131 baseline + 8 new across E1/E2/E4)
+```
+
+**Behavior preservation.** The legacy `/skip 01ab243e T2` form POSTs to `/skip` with the identical body as pre-§17.225; the new code path only triggers when `len(parts) < 3`. Operators who already know the node_key (or paste the command from `/results`) see no change.
+
+---
+
+### §17.226 `/research` vs `/rag` disambiguation — closes commands.md L161 footgun
+
+`/research` triggers a 20–60 minute autonomous web-research + ingestion run (Phase 2 of the auto-chain). `/rag` is a sub-second lookup against the existing Milvus KB. The two commands are typed with the same shape (`/<verb> <text>`) and operators reaching for the lookup occasionally hit the autonomous mode by accident — at minimum a wasted CPU hour, at worst a duplicate ingestion run thrashing the KB. Per OVERVIEW commands.md L161 this is the known footgun.
+
+**Fix.** A new heuristic in `_handle_research` detects "this looks like a `/rag` query" — `≤4` tokens AND no URL / `github:` / `hf:` / `arxiv:` / `openapi:` / `pdf:` prefix — and replaces the Phase-2 fire with a disambiguation prompt offering both copy-pasteable forms:
+
+```
+**`/research` runs 20-60 min of autonomous web research.** It looks like a short
+query — did you mean `/rag`?
+
+- **Quick lookup (seconds):** `/rag <topic>`
+- **Autonomous research (20-60 min):** `/research <topic> --confirm`
+```
+
+A new `--confirm` flag bypasses the prompt and fires Phase 2 directly. The flag is stripped before the topic is parsed, so it composes with `--depth` (e.g. `/research Docker networking --depth deep --confirm`). Scripted callers add `--confirm` once; ad-hoc users see the prompt and pick.
+
+Long topics, URLs, and source-prefixed forms (`github:owner/repo`, `arxiv:1234.5678`, `https://...`) always pass through — those inputs are unambiguously research-mode.
+
+**Files.**
+
+- ``pipelines/scaffold_router.py``:
+  - `_handle_research` (around L1081) — `--confirm` token sniff before parser invocation; new `_looks_like_rag_query` check after placeholder rejection. If the heuristic fires and `--confirm` is absent, yields the disambiguation prompt and returns without firing `_research_and_stream`.
+  - `_RESEARCH_PREFIX_RE` (class-level compiled regex) matches `https?://|github:|hf:|arxiv:|openapi:|pdf:` (case-insensitive).
+  - `_looks_like_rag_query(topic) -> bool` — returns True iff topic is non-empty, has no prefix match, and tokenizes to ≤4 whitespace-split tokens.
+- ``tests/test_scaffold_router_commands.py``:
+  - Pre-existing tests `test_research_depth_flag_parsed`, `test_research_default_depth_medium`, `test_research_stream_triggered` now pass `--confirm` (their topics are 2-3 tokens and would otherwise trip the new prompt). Docstrings updated to flag the change.
+  - Two new tests:
+    - `test_research_short_query_prompts_disambiguation` — bare 2-token research call yields the prompt with both copy-pasteable forms; `_research_and_stream` is NOT invoked.
+    - `test_research_long_topic_skips_disambiguation` — >4-token topic passes straight through.
+    - `test_research_url_skips_disambiguation` — `https://...` topic passes straight through regardless of token count.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest --noconftest \
+    tests/test_scaffold_router_commands.py \
+    tests/test_scaffold_router_helpers.py \
+    tests/test_scaffold_router_structure.py --timeout=30
+139 passed in ~1156s   (131 baseline + 8 new across E1/E2/E4)
+```
+
+**Why ≤4 tokens.** Calibrated against the four `/research` invocations in OVERVIEW history: "kubernetes pods", "Docker networking", "Python asyncio patterns", "Redis caching" — all ≤4 tokens and all the kind of phrase a hurried operator might also type into `/rag`. Real research topics in the codebase trend longer ("how does X handle Y", "research the differences between A and B"); the ≤4 threshold gates the ambiguous cases while letting genuine topics flow through.
+
+**Why a `--confirm` flag, not a separate `/research-now` command.** Adding a new top-level command would split scripts that already type `/research <topic>`; a flag preserves the existing surface and adds an explicit-opt-in path. The flag name mirrors the existing `/confirm` job-locking convention in the same pipeline.
+
+---
+
+### §17.227 Phase-2 progress aggregator — DESIGN-BLOCKED, needs orchestrator-side SSE switch
+
+**Status.** Item E3 is **design-blocked at the orchestrator boundary** and ships no code in this commit. Capturing the analysis here so the next pass starts with the question already framed.
+
+**The ask.** During `/confirm` auto-chain, Phase 2 wall-clock is 512–1450 seconds with no visible progress in chat between SSE events. Aggregate the Phase-2 events into a single rolling status line of the form `researching → distilling → ingesting (NN entries) → planning (DAG: N nodes)`, updated on each `_SSE.STAGE_*` (or similar) event, without adding new events on the orchestrator side.
+
+**Why it's blocked.**
+
+The prompt assumes a "Phase-2 SSE stream" exists. It doesn't:
+
+- `_handle_confirm` (L1126-1229) POSTs to `/ideate/confirm` via `_post_with_keepalive` (L1816-1888) — a **blocking** POST that yields zero-width keepalives + a generic `⏳ Phase 2 — researching + ingesting (NmSSs elapsed)` wall-clock marker every `progress_marker_interval` seconds. There is no SSE consumer on this code path.
+- Server side, `app/routers/workflow.py` L82 `ideate_confirm_endpoint` is a plain `async def` returning a JSON dict when `research_and_compile` completes. No `StreamingResponse`, no `_sse(...)` calls. The endpoint emits **zero** events while running.
+- The Phase-2 sub-stage events listed in `pipelines/_vendor/_sse_events.py` (`SEARCH_COMPLETE`, `EXTRACTION_COMPLETE`, `INGESTION_COMPLETE`, `DECOMPOSITION_COMPLETE`, …) ARE real events — but they're emitted by `research_agent.py` only when the user invokes `/research` directly (which hits `_research_and_stream_raw`, a real SSE consumer). The `/confirm` path calls the same underlying functions but the events go nowhere because the HTTP transport is not SSE.
+
+So "aggregate the events that are already emitted" cannot be done from inside `scaffold_router.py` — the events never cross the network boundary on the `/confirm` path.
+
+**Design questions for the next pass.**
+
+1. **Should `/ideate/confirm` become an SSE endpoint?** This is the cleanest fix. The pre-§17.227 contract (returns a dict; HTTP 4xx on error) would need to be preserved for non-OWUI callers (e.g. recovery probe at `app/modules/recovery.py:70`). A separate `/ideate/confirm/stream` endpoint that wraps `research_and_compile` and yields stage events as it runs is one option; another is to make `/ideate/confirm` return an `Accept: text/event-stream` variant.
+2. **Or: should the OWUI consumer poll a progress endpoint?** A `GET /ideate/confirm/progress/{job_id}` returning `{stage, entries_ingested, dag_nodes}` could be polled every N seconds during the keepalive loop. Cheaper to ship than full SSE; uglier (HTTP polling); needs a server-side state machine.
+3. **Or: should `_post_with_keepalive` learn a per-stage label progression?** Currently it shows `Phase 2 — researching + ingesting (XmYs elapsed)`. The label is static. We could ship a time-heuristic-driven label ("researching" 0-3min, "distilling" 3-5min, "ingesting" 5-8min, "planning" 8min+) but that's **fabricating progress, not aggregating real events** — the prompt explicitly forbids this ("Don't add new events; consume what's already emitted").
+
+**Recommended path (not shipped here).** Option 1 — SSE-ify `/ideate/confirm` server-side, add a `_post_with_sse_keepalive` consumer to `scaffold_router.py`, and aggregate the existing `STAGE_*` / research events into a rolling chat line. This is a 2-file change (`app/routers/workflow.py` + `pipelines/scaffold_router.py`) and would need its own §-entry. The work is well-bounded but lives **outside** the single-file scope of this prompt.
+
+**Why ship a section file with no code.** Per the workstream instructions: "If an item is design-blocked (genuinely ambiguous and needs user input), ship a section file with the DESIGN QUESTIONS clearly listed and skip the code — partial is fine but be explicit." The other three items in this batch (E1 / E2 / E4) ship complete; this one is paused on a server-side decision.
+
+**Files touched.** None — section file only.
+
+**Verification.** N/A (no code change).
+
+---
+
+### §17.228 RAG provenance in chat — surfaces source_type + confidence_score
+
+Pre-§17.228 the `/rag <query>` handler returned the orchestrator's response via the generic `_fmt(r)` helper — i.e. a raw ```json.dumps(data, indent=2)``` block. The orchestrator's `/rag` endpoint has been populating `source_type` and `confidence_score` per result since Phase-7 wrap (§17.104 + §17.120), but those fields were being dropped on the floor at the chat surface. Operators reading `/rag` results in chat could not tell whether a hit came from `tech_docs` (high confidence) vs a `chat_log` snippet (low confidence) without round-tripping through the Milvus UI or `/results`.
+
+**Fix.** A new `_render_rag_results(r, *, query)` helper consumes the `/rag` JSON envelope and renders each result as:
+
+```
+### Result <N> · source_type=<type> · confidence=<0.NN>
+
+<text body>
+
+_(source: <source_url-or-source_ref>)_
+```
+
+Format matches the spec exactly: ``· source_type=tech_docs · confidence=0.82`` appended to each result's header line. Empty results render `No matches for \`<query>\`.` rather than an empty JSON dump. HTTP ≥400 / non-JSON / unrecognized envelope shapes fall back to the original `_fmt(r)` path to stay safe against orchestrator version drift.
+
+**Files.**
+
+- ``pipelines/scaffold_router.py``:
+  - `/rag` branch in `_handle_command` (around L2495) — `return self._fmt(r)` → `return self._render_rag_results(r, query=text)`.
+  - New helper `_render_rag_results` placed next to `_render_skip_candidates` and `_render_next_actions` for legibility. Iterates `results`, pulls `text` / `content` / `chunk` (in that order — different orchestrator versions have used different field names), then appends `source_type=…` and `confidence=…` only when present. Optional `source_url` / `source_ref` rendered as a footer line per result.
+- ``tests/test_scaffold_router_commands.py``:
+  - Existing `test_rag_command` unchanged (it asserts `"Proxmox" in result OR "```json" in result`; the new renderer's output still contains "Proxmox" so the assertion holds).
+  - Two new tests:
+    - `test_rag_renders_source_type_and_confidence` — two-result fixture with distinct `source_type` and `confidence_score`; asserts both `source_type=tech_docs` / `confidence=0.82` and `source_type=chat_log` / `confidence=0.41` appear, and that both bodies are surfaced.
+    - `test_rag_empty_results` — empty `results` array renders the "No matches for `<query>`" line.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest --noconftest \
+    tests/test_scaffold_router_commands.py \
+    tests/test_scaffold_router_helpers.py \
+    tests/test_scaffold_router_structure.py --timeout=30
+139 passed in ~1156s   (131 baseline + 8 new across E1/E2/E4)
+```
+
+**Why a per-result `confidence:.2f`.** Two decimals matches the precision the orchestrator persists (Phase-7's `confidence_score` is a single float column); rounding any further would mask the difference between 0.51 and 0.49 boundary hits, which is exactly the bucket operators care about when judging whether a hit is trustworthy.
+
+**Why not `/research_topic` too.** The prompt mentions both `_handle_rag` and `_handle_research_topic` as candidate rendering sites. The current codebase only renders `/rag` results synchronously (`/research_topic` does not exist as a separate command — the topic streamer lives in `_research_and_stream_raw` and emits events one at a time, with no aggregated per-result rendering site to attach provenance to). When the research-topic streamer eventually aggregates per-result hits, the same helper signature can be reused.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

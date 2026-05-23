@@ -96,6 +96,104 @@ class TestHandleCommand:
         mock_post.assert_called_once()
         assert "Proxmox" in result or "```json" in result
 
+    @patch("scaffold_router._HTTP_SESSION.post")
+    def test_rag_renders_source_type_and_confidence(self, mock_post, pipe):
+        """§17.215 E4 — /rag results render ``source_type`` and
+        ``confidence_score`` per hit (populated since §17.104 + §17.120).
+        """
+        mock_post.return_value = _make_response(200, {
+            "results": [
+                {
+                    "text": "Proxmox is a hypervisor...",
+                    "source_type": "tech_docs",
+                    "confidence_score": 0.82,
+                    "source_url": "https://example.com/proxmox",
+                },
+                {
+                    "text": "Second result body.",
+                    "source_type": "chat_log",
+                    "confidence_score": 0.41,
+                },
+            ],
+        })
+        result = pipe._handle_command("/rag what is proxmox")
+        assert "source_type=tech_docs" in result
+        assert "confidence=0.82" in result
+        assert "source_type=chat_log" in result
+        assert "confidence=0.41" in result
+        # Both bodies still surfaced.
+        assert "Proxmox is a hypervisor" in result
+        assert "Second result body" in result
+
+    @patch("scaffold_router._HTTP_SESSION.post")
+    def test_rag_empty_results(self, mock_post, pipe):
+        """§17.215 E4 — empty results array renders a friendly "no
+        matches" line rather than an empty JSON dump.
+        """
+        mock_post.return_value = _make_response(200, {"results": []})
+        result = pipe._handle_command("/rag obscure query")
+        assert "No matches" in result
+        assert "obscure query" in result
+
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_skip_bare_lists_candidates(self, mock_get, pipe):
+        """§17.215 E1 — bare ``/skip <job_id>`` fetches status and
+        emits a markdown hint with copy-pasteable ``/skip job_id
+        node_key`` lines for failed / blocked / pending nodes.
+        """
+        mock_get.return_value = _make_response(200, {
+            "status": "failed",
+            "nodes": [
+                {"node_key": "T1", "title": "Setup", "status": "done"},
+                {"node_key": "T2", "title": "Build artifact", "status": "failed"},
+                {"node_key": "T3", "title": "Wait on T2", "status": "blocked"},
+                {"node_key": "T4", "title": "Cleanup", "status": "pending"},
+                {"node_key": "T5", "title": "Now running", "status": "running"},
+            ],
+        })
+        result = pipe._handle_command("/skip 01ab243e")
+        mock_get.assert_called_once()
+        # Each candidate surfaces a copy-pasteable command line.
+        assert "/skip 01ab243e T2" in result
+        assert "/skip 01ab243e T3" in result
+        assert "/skip 01ab243e T4" in result
+        # Done / running nodes are excluded.
+        assert "/skip 01ab243e T1" not in result
+        assert "/skip 01ab243e T5" not in result
+
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_skip_bare_no_candidates(self, mock_get, pipe):
+        """§17.215 E1 — bare ``/skip <job_id>`` with no skippable
+        nodes still emits the usage hint plus a clear "nothing to
+        skip" line rather than an empty list.
+        """
+        mock_get.return_value = _make_response(200, {
+            "status": "completed",
+            "nodes": [
+                {"node_key": "T1", "title": "Setup", "status": "done"},
+            ],
+        })
+        result = pipe._handle_command("/skip 01ab243e")
+        assert "no skippable nodes" in result.lower()
+        assert "completed" in result
+
+    @patch("scaffold_router._HTTP_SESSION.post")
+    def test_skip_with_node_key_unchanged(self, mock_post, pipe):
+        """§17.215 E1 — the full ``/skip <job_id> <node_key>`` form
+        still POSTs to /skip exactly as before (no regression for
+        scripted callers / muscle-memory operators).
+        """
+        mock_post.return_value = _make_response(200, {"status": "skipped"})
+        result = pipe._handle_command("/skip 01ab243e T2")
+        mock_post.assert_called_once()
+        # Body sent to orchestrator carries both fields.
+        call_kwargs = mock_post.call_args
+        sent = call_kwargs.kwargs.get("json") or (
+            call_kwargs.args[1] if len(call_kwargs.args) > 1 else {}
+        )
+        assert sent.get("job_id") == "01ab243e"
+        assert sent.get("node_key") == "T2"
+
     @patch("scaffold_router._HTTP_SESSION.get")
     def test_network_timeout(self, mock_get, pipe):
         """Network timeouts should produce a friendly error, not a crash."""
@@ -445,7 +543,13 @@ class TestResearchCommand:
         assert "/research" in combined
 
     def test_research_depth_flag_parsed(self, pipe):
-        """'--depth deep' is extracted and topic is cleaned."""
+        """'--depth deep' is extracted and topic is cleaned.
+
+        §17.215 E2 — short queries now hit the /rag vs /research
+        disambiguation prompt unless --confirm is passed. ``Docker
+        networking`` is 2 tokens (≤4), so the test now includes
+        ``--confirm`` to keep the assertion on the parsed topic/depth.
+        """
         called_with = {}
 
         def fake_stream(topic, depth):
@@ -455,16 +559,21 @@ class TestResearchCommand:
 
         pipe._research_and_stream = fake_stream
         output = list(pipe.pipe(
-            user_message="/research Docker networking --depth deep",
+            user_message="/research Docker networking --depth deep --confirm",
             model_id="test",
-            messages=[{"role": "user", "content": "/research Docker networking --depth deep"}],
-            body={"messages": [{"role": "user", "content": "/research Docker networking --depth deep"}]},
+            messages=[{"role": "user", "content": "/research Docker networking --depth deep --confirm"}],
+            body={"messages": [{"role": "user", "content": "/research Docker networking --depth deep --confirm"}]},
         ))
         assert called_with["topic"] == "Docker networking"
         assert called_with["depth"] == "deep"
 
     def test_research_default_depth_medium(self, pipe):
-        """No --depth flag defaults to 'medium'."""
+        """No --depth flag defaults to 'medium'.
+
+        §17.215 E2 — adds ``--confirm`` because ``Python asyncio
+        patterns`` is 3 tokens (≤4) and would otherwise trip the
+        disambiguation prompt before reaching _research_and_stream.
+        """
         called_with = {}
 
         def fake_stream(topic, depth):
@@ -474,16 +583,43 @@ class TestResearchCommand:
 
         pipe._research_and_stream = fake_stream
         output = list(pipe.pipe(
-            user_message="/research Python asyncio patterns",
+            user_message="/research Python asyncio patterns --confirm",
             model_id="test",
-            messages=[{"role": "user", "content": "/research Python asyncio patterns"}],
-            body={"messages": [{"role": "user", "content": "/research Python asyncio patterns"}]},
+            messages=[{"role": "user", "content": "/research Python asyncio patterns --confirm"}],
+            body={"messages": [{"role": "user", "content": "/research Python asyncio patterns --confirm"}]},
         ))
         assert called_with["depth"] == "medium"
         assert called_with["topic"] == "Python asyncio patterns"
 
     def test_research_stream_triggered(self, pipe):
-        """Valid /research triggers header + _research_and_stream."""
+        """Valid /research triggers header + _research_and_stream.
+
+        §17.215 E2 — short query (2 tokens) needs ``--confirm`` to
+        bypass the new disambiguation prompt.
+        """
+        stream_called = [False]
+
+        def fake_stream(topic, depth):
+            stream_called[0] = True
+            yield "streaming..."
+
+        pipe._research_and_stream = fake_stream
+        output = list(pipe.pipe(
+            user_message="/research Redis caching --confirm",
+            model_id="test",
+            messages=[{"role": "user", "content": "/research Redis caching --confirm"}],
+            body={"messages": [{"role": "user", "content": "/research Redis caching --confirm"}]},
+        ))
+        combined = "".join(output)
+        assert stream_called[0] is True
+        assert "Researching" in combined
+        assert "Redis caching" in combined
+
+    def test_research_short_query_prompts_disambiguation(self, pipe):
+        """§17.215 E2 — ``/research <short query>`` without --confirm
+        surfaces the /rag vs /research disambiguation prompt instead of
+        firing Phase 2. The prompt offers both copy-pasteable forms.
+        """
         stream_called = [False]
 
         def fake_stream(topic, depth):
@@ -498,9 +634,48 @@ class TestResearchCommand:
             body={"messages": [{"role": "user", "content": "/research Redis caching"}]},
         ))
         combined = "".join(output)
-        assert stream_called[0] is True
-        assert "Researching" in combined
-        assert "Redis caching" in combined
+        assert stream_called[0] is False
+        assert "/rag Redis caching" in combined
+        assert "/research Redis caching --confirm" in combined
+
+    def test_research_long_topic_skips_disambiguation(self, pipe):
+        """§17.215 E2 — topics with >4 tokens are unambiguous and fire
+        Phase 2 directly without needing --confirm.
+        """
+        called_with = {}
+
+        def fake_stream(topic, depth):
+            called_with["topic"] = topic
+            yield "streaming..."
+
+        pipe._research_and_stream = fake_stream
+        output = list(pipe.pipe(
+            user_message="/research how does Redis handle persistence and replication",
+            model_id="test",
+            messages=[{"role": "user", "content": "/research how does Redis handle persistence and replication"}],
+            body={"messages": [{"role": "user", "content": "/research how does Redis handle persistence and replication"}]},
+        ))
+        assert called_with.get("topic") == "how does Redis handle persistence and replication"
+
+    def test_research_url_skips_disambiguation(self, pipe):
+        """§17.215 E2 — URL inputs always pass through; the prefix
+        regex matches https?:// regardless of token count.
+        """
+        called_with = {}
+
+        def fake_stream(topic, depth):
+            called_with["topic"] = topic
+            yield "streaming..."
+
+        pipe._research_and_stream = fake_stream
+        url = "https://example.com/article"
+        output = list(pipe.pipe(
+            user_message=f"/research {url}",
+            model_id="test",
+            messages=[{"role": "user", "content": f"/research {url}"}],
+            body={"messages": [{"role": "user", "content": f"/research {url}"}]},
+        ))
+        assert called_with.get("topic") == url
 
     def test_research_complete_suggests_go(self, pipe, monkeypatch):
         """After research_complete, output should prompt the user to type /go.

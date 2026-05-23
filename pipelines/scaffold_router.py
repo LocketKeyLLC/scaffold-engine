@@ -1098,6 +1098,21 @@ class Pipeline:
             yield parser.help_text() + "\n\nManage sessions: `/research/help`"
             return
 
+        # §17.215 E2 — /research is autonomous (20-60 min wall time) and
+        # easy to mistake for /rag (instant lookup). Detect a `--confirm`
+        # flag and strip it before parsing; without it, short plain-text
+        # queries get a disambiguation prompt rather than booting Phase 2.
+        # Long topics, URL/github:/hf:/arxiv:/openapi: prefixes, and
+        # scripted callers that pass --confirm bypass the prompt.
+        confirm_explicit = False
+        stripped_tokens = []
+        for tok in raw_args.split():
+            if tok == "--confirm":
+                confirm_explicit = True
+                continue
+            stripped_tokens.append(tok)
+        raw_args = " ".join(stripped_tokens)
+
         try:
             args, topic, _ = parser.parse(raw_args)
         except _ChatArgError as e:
@@ -1111,8 +1126,37 @@ class Pipeline:
                    + parser.help_text())
             return
 
+        if not confirm_explicit and self._looks_like_rag_query(topic):
+            yield (
+                "**`/research` runs 20-60 min of autonomous web research.** "
+                "It looks like a short query — did you mean `/rag`?\n\n"
+                f"- **Quick lookup (seconds):** `/rag {topic}`\n"
+                f"- **Autonomous research (20-60 min):** "
+                f"`/research {topic} --confirm`\n"
+            )
+            return
+
         yield f"🔬 Researching: **{topic}** (depth: {args.depth})\n\n"
         yield from self._research_and_stream(topic, args.depth)
+
+    # §17.215 E2 — heuristic used by _handle_research to decide whether
+    # to surface the disambiguation prompt (vs. firing Phase 2). Returns
+    # True for "looks more like a /rag query than a research topic":
+    # ≤4 tokens AND no URL / github: / hf: / arxiv: / openapi: / pdf:
+    # prefix. URLs and source-prefixed forms always pass through (they
+    # are unambiguously research-mode inputs).
+    _RESEARCH_PREFIX_RE = re.compile(
+        r"^(?:https?://|github:|hf:|arxiv:|openapi:|pdf:)",
+        re.IGNORECASE,
+    )
+
+    def _looks_like_rag_query(self, topic: str) -> bool:
+        t = topic.strip()
+        if not t:
+            return False
+        if self._RESEARCH_PREFIX_RE.match(t):
+            return False
+        return len(t.split()) <= 4
 
     def _handle_execute(self, msg: str) -> Generator[str, None, None]:
         parts = msg.split()
@@ -2467,9 +2511,18 @@ class Pipeline:
                 )
                 return self._fmt(r)
             if cmd == "/skip":
-                if len(parts) < 3:
+                if len(parts) < 2:
                     return "Usage: /skip <job_id> <node_key>"
-                if _is_placeholder(parts[1]) or _is_placeholder(parts[2]):
+                if _is_placeholder(parts[1]):
+                    return "It looks like job_id or node_key is missing or a placeholder. Try `/skip 01ab243e T2`."
+                # §17.215 E1 — bare `/skip <job_id>` now lists candidate nodes
+                # (failed / blocked / pending) with copy-pasteable /skip lines,
+                # instead of erroring out. Mirrors the _render_next_actions
+                # affordance (§17.195). If a node_key is supplied, behave as
+                # before.
+                if len(parts) < 3:
+                    return self._render_skip_candidates(parts[1])
+                if _is_placeholder(parts[2]):
                     return "It looks like job_id or node_key is missing or a placeholder. Try `/skip 01ab243e T2`."
                 r = _HTTP_SESSION.post(
                     f"{self.valves.orchestrator_url}/skip",
@@ -2504,7 +2557,7 @@ class Pipeline:
                     headers=self._auth_headers(),
                     timeout=self.valves.request_timeout,
                 )
-                return self._fmt(r)
+                return self._render_rag_results(r, query=text)
             if cmd == "/status":
                 r = _HTTP_SESSION.get(
                     f"{self.valves.orchestrator_url}/status",
@@ -2960,6 +3013,166 @@ class Pipeline:
         return _next_actions.format_block(
             data.get("next_actions") or [], style="markdown",
         )
+
+    def _render_rag_results(
+        self, r: requests.Response, *, query: str,
+    ) -> str:
+        """§17.215 E4 — render `/rag` results with provenance.
+
+        The orchestrator's ``/rag`` endpoint returns a JSON envelope
+        ``{"results": [{"text": str, "source_type": str,
+        "confidence_score": float, ...}, ...]}``. ``source_type`` +
+        ``confidence_score`` are populated since Phase-7 wrap
+        (§17.104 + §17.120) but the pre-§17.215 renderer dropped them
+        on the floor by returning a raw ``json.dumps`` blob via
+        ``_fmt``. This renderer surfaces both per result so operators
+        can judge whether a hit is from a high-confidence tech_docs
+        chunk vs. a low-confidence chat-log snippet without round-tripping
+        through `/results` or the Milvus UI.
+
+        Falls back to the raw JSON dump (via ``_fmt``) on any envelope
+        shape we don't recognize, to stay safe against orchestrator
+        version drift.
+        """
+        # Error path: defer to the existing formatter, which already
+        # handles non-JSON responses + HTTP >=400 + drift hints.
+        if r.status_code >= 400:
+            return self._fmt(r)
+        try:
+            data = r.json()
+        except Exception:
+            return self._fmt(r)
+
+        results = data.get("results")
+        if not isinstance(results, list) or not results:
+            # Empty hit list: explicit message rather than empty JSON.
+            return f"No matches for `{query}`."
+
+        # All results need the dict shape; otherwise fall back to raw
+        # JSON to avoid masking server-side changes.
+        if not all(isinstance(rr, dict) for rr in results):
+            return self._fmt(r)
+
+        lines = [f"**RAG results for `{query}`** ({len(results)} hit(s)):\n"]
+        for i, hit in enumerate(results, start=1):
+            text_field = (
+                hit.get("text")
+                or hit.get("content")
+                or hit.get("chunk")
+                or ""
+            )
+            source_type = hit.get("source_type")
+            confidence = hit.get("confidence_score")
+            meta_parts = []
+            if source_type:
+                meta_parts.append(f"source_type={source_type}")
+            if isinstance(confidence, (int, float)):
+                meta_parts.append(f"confidence={confidence:.2f}")
+            meta = (" · " + " · ".join(meta_parts)) if meta_parts else ""
+            # Header line per result; matches the spec format
+            # `· source_type=tech_docs · confidence=0.82`.
+            lines.append(f"\n### Result {i}{meta}\n")
+            if text_field:
+                lines.append(f"{text_field}\n")
+            # Optional provenance fields are surfaced as a footer if
+            # present. We keep this terse — chat real estate is scarce.
+            extras = []
+            if "source_url" in hit and hit["source_url"]:
+                extras.append(f"source: <{hit['source_url']}>")
+            elif "source_ref" in hit and hit["source_ref"]:
+                extras.append(f"source: {hit['source_ref']}")
+            if extras:
+                lines.append("_(" + " · ".join(extras) + ")_\n")
+        return "".join(lines)
+
+    def _render_skip_candidates(self, job_id: str) -> str:
+        """§17.215 E1 — render a markdown hint listing skippable nodes
+        for `job_id` when the user types bare `/skip <job_id>` with no
+        node_key. Fetches `/exec/status/{job_id}` and surfaces failed,
+        blocked, and pending nodes with copy-pasteable
+        ``/skip <job_id> <node_key>`` lines.
+
+        Mirrors the affordance pattern of ``_render_next_actions``
+        (§17.195): the user does not have to remember (or look up) the
+        node_key — the chat surfaces it. If the job is not reachable or
+        has no candidates, we fall back to the original usage hint so
+        scripted callers and operator muscle-memory still get a clear
+        message.
+        """
+        try:
+            r = _HTTP_SESSION.get(
+                f"{self.valves.orchestrator_url}/exec/status/{job_id}",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.Timeout:
+            return (
+                "Usage: /skip <job_id> <node_key>\n\n"
+                "_(also tried to list candidate nodes, but the request "
+                "to the orchestrator timed out.)_"
+            )
+        except requests.exceptions.ConnectionError:
+            return (
+                "Usage: /skip <job_id> <node_key>\n\n"
+                "_(also tried to list candidate nodes, but the "
+                "orchestrator is unreachable.)_"
+            )
+
+        if r.status_code == 404:
+            return f"Job not found: `{job_id}`"
+        if r.status_code >= 400:
+            return (
+                "Usage: /skip <job_id> <node_key>\n\n"
+                f"_(also tried to list candidate nodes, but the "
+                f"orchestrator returned HTTP {r.status_code}.)_"
+            )
+
+        try:
+            data = r.json()
+        except ValueError:
+            return (
+                "Usage: /skip <job_id> <node_key>\n\n"
+                "_(also tried to list candidate nodes, but the "
+                "orchestrator response was not JSON.)_"
+            )
+
+        # Bucket nodes by status. The orchestrator emits a `nodes` array
+        # of dicts each with `node_key`, `title`, `status`. We surface
+        # failed first (most likely to need a skip), then blocked, then
+        # pending. `done` / `skipped` / `running` are intentionally
+        # excluded — skipping those is a no-op or destructive.
+        nodes = [n for n in (data.get("nodes") or []) if isinstance(n, dict)]
+        buckets: dict = {"failed": [], "blocked": [], "pending": []}
+        for n in nodes:
+            status = (n.get("status") or "").lower()
+            if status in buckets:
+                buckets[status].append(n)
+
+        candidates = buckets["failed"] + buckets["blocked"] + buckets["pending"]
+        if not candidates:
+            job_status = data.get("status") or data.get("job_status") or "unknown"
+            return (
+                f"Usage: `/skip <job_id> <node_key>`\n\n"
+                f"Job `{job_id}` (status: **{job_status}**) has no "
+                f"skippable nodes (no failed / blocked / pending nodes "
+                f"found).\n"
+            )
+
+        lines = [
+            f"Usage: `/skip <job_id> <node_key>`\n",
+            f"Candidate nodes for job `{job_id}`:\n",
+        ]
+        for status_key in ("failed", "blocked", "pending"):
+            group = buckets[status_key]
+            if not group:
+                continue
+            lines.append(f"\n**{status_key.capitalize()}:**\n")
+            for n in group:
+                node_key = n.get("node_key", "?")
+                title = n.get("title", "")
+                title_part = f" — {title}" if title else ""
+                lines.append(f"- `/skip {job_id} {node_key}`{title_part}\n")
+        return "".join(lines)
 
     def _handle_results(self, parts: list) -> str:
         if len(parts) < 2:
@@ -3544,7 +3757,7 @@ class Pipeline:
 | Command | Description |
 |---|---|
 | `/execute <job_id>` | Run all pending DAG nodes (use after cancel or if auto-chain stalls). |
-| `/skip <job_id> <node_key>` | Skip a specific node so downstream can proceed. |
+| `/skip <job_id> [<node_key>]` | Skip a specific node; bare `/skip <job_id>` lists candidates. |
 | `/results <job_id>` | View output, in-flight progress, or failure details + recovery hints. |
 | `/status` | List active jobs grouped by state. |
 
