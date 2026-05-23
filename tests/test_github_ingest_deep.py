@@ -209,6 +209,66 @@ async def test_fetch_repo_content_with_ref_resolves_sha_and_pins():
 
 
 # ---------------------------------------------------------------------------
+# §17.126 follow-up — raw_upstream_hash on pinned-SHA GitHub blobs
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_fetch_repo_content_pinned_ref_stamps_raw_upstream_hash():
+    """When ref_hint pins source_ref to a commit SHA, every entry derived
+    from a blob carries raw_upstream_hash = sha256(blob_bytes)."""
+    import hashlib
+    from app.utils import github_ingest
+
+    readme_body = b"# Readme\nhello"
+    docs_body = b"# Guide\nbody"
+    pinned_sha = "deadbeef" + "0" * 32
+    responses = [
+        # commits/{ref_hint} → SHA
+        _make_response(json_data={"sha": pinned_sha}),
+        # README (200)
+        _make_response(json_data={"path": "README.md", "content": _b64(readme_body.decode())}),
+        # tree at sha
+        _make_response(json_data={"tree": [
+            {"path": "docs/guide.md", "type": "blob", "sha": "blobG"},
+        ]}, headers={"X-RateLimit-Remaining": "4999"}),
+        # blob for docs/guide.md
+        _make_response(json_data={"encoding": "base64", "content": _b64(docs_body.decode())}),
+    ]
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=responses)
+
+    with patch("app.utils.github_ingest.get_github_client", return_value=mock_client):
+        results = await github_ingest.fetch_repo_content("owner", "repo", ref_hint="v1.0")
+
+    by_path = {r["path"]: r for r in results}
+    assert by_path["README.md"]["raw_upstream_hash"] == hashlib.sha256(readme_body).hexdigest()
+    assert by_path["docs/guide.md"]["raw_upstream_hash"] == hashlib.sha256(docs_body).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_fetch_repo_content_default_branch_omits_raw_upstream_hash():
+    """Without ref_hint (default-branch path), source_ref is a mutable
+    branch name — verify-mode would re-fetch a moving target, so we do
+    NOT stamp raw_upstream_hash."""
+    from app.utils import github_ingest
+
+    responses = [
+        _make_response(json_data={"default_branch": "main"}),
+        _make_response(json_data={"path": "README.md", "content": _b64("# R\nbody")}),
+        _make_response(json_data={"tree": [
+            {"path": "docs/guide.md", "type": "blob", "sha": "blobG"},
+        ]}),
+        _make_response(json_data={"encoding": "base64", "content": _b64("# Guide")}),
+    ]
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=responses)
+    with patch("app.utils.github_ingest.get_github_client", return_value=mock_client):
+        results = await github_ingest.fetch_repo_content("owner", "repo")
+    for r in results:
+        assert "raw_upstream_hash" not in r
+
+
+# ---------------------------------------------------------------------------
 # fetch_repo_releases
 # ---------------------------------------------------------------------------
 

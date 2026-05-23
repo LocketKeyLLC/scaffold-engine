@@ -427,6 +427,38 @@ async def test_fetch_arxiv_full_zero_budget_returns_empty(fake_cache_miss):
     assert out == []
 
 
+@pytest.mark.asyncio
+async def test_fetch_arxiv_full_stamps_raw_upstream_hash(fake_cache_miss):
+    """§17.126 follow-up — every chunk derived from a PDF carries
+    raw_upstream_hash = sha256(pdf_bytes), shared across chunks because
+    they share the source body."""
+    import hashlib
+    from app.utils import forum_ingest
+
+    pdf_bytes = b"%PDF-1.4 fake bytes for hash test"
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = pdf_bytes
+    client = MagicMock()
+    client.get = AsyncMock(return_value=mock_resp)
+
+    fake_page1 = MagicMock()
+    fake_page1.extract_text = MagicMock(return_value="Page 1 text.")
+    fake_page2 = MagicMock()
+    fake_page2.extract_text = MagicMock(return_value="Page 2 text.")
+    fake_reader = MagicMock()
+    fake_reader.pages = [fake_page1, fake_page2]
+
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client), \
+         patch("pypdf.PdfReader", return_value=fake_reader):
+        out = await forum_ingest.fetch_arxiv_full("2310.06825")
+
+    expected = hashlib.sha256(pdf_bytes).hexdigest()
+    assert len(out) >= 1
+    for chunk in out:
+        assert chunk["raw_upstream_hash"] == expected
+
+
 # ---------------------------------------------------------------------------
 # §17.125 — disputed_claim ingest opt-in
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ get the long ``fetch_cache_ttl_immutable_seconds`` TTL (default 30 d).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any
@@ -59,29 +60,32 @@ async def _fetch_raw_file_cached(
     id_: str,
     revision: str,
     path: str,
-) -> str:
+) -> tuple[str, bytes]:
     """Fetch a raw file from ``/<kind>/<id>/raw/<rev>/<path>`` with cache.
 
-    Returns empty string on 404 (e.g., no README). Other errors propagate.
-    Cache key uses the resolved commit SHA so re-fetches at the same SHA
-    skip the network entirely.
+    Returns ``(text, raw_bytes)``. Both empty on 404 (e.g., no README).
+    Other errors propagate. Cache key uses the resolved commit SHA so
+    re-fetches at the same SHA skip the network entirely.
+
+    ``raw_bytes`` is the body bytes — used by callers to compute
+    ``raw_upstream_hash`` (§17.126) when ingesting at a pinned revision.
     """
     cache = get_fetch_cache()
     cached = await cache.get("hf", revision, f"{repo_kind}/{id_}/{path}")
     if cached:
-        return cached.decode("utf-8", errors="replace")
+        return cached.decode("utf-8", errors="replace"), cached
 
     url = f"/{repo_kind}/{id_}/raw/{revision}/{path}"
     r = await client.get(url)
     if r.status_code == 404:
-        return ""
+        return "", b""
     _check_response(r, f"raw {repo_kind}/{id_}@{revision}/{path}")
     body = r.content
     await cache.put(
         "hf", revision, f"{repo_kind}/{id_}/{path}",
         body, ttl_seconds=settings.fetch_cache_ttl_immutable_seconds,
     )
-    return body.decode("utf-8", errors="replace")
+    return body.decode("utf-8", errors="replace"), body
 
 
 async def _fetch_api_json_cached(
@@ -139,12 +143,20 @@ async def fetch_hf_model(id_: str) -> list[dict[str, Any]]:
     if revision == "main":
         logger.warning("hf_model_unrevisioned: %s — sha missing, falling back to main", id_)
 
+    # §17.126 follow-up — when revision is a resolved commit SHA (not the
+    # mutable "main" fallback), the README body fetched via
+    # ``/raw/{revision}/README.md`` is byte-stable. Stamp every entry
+    # derived from those bytes with ``raw_upstream_hash``.
+    pinned = revision != "main"
+
     out: list[dict[str, Any]] = []
 
     # 1. README body (the canonical model card content)
-    readme = await _fetch_raw_file_cached(client, "models", id_, revision, "README.md")
+    readme, readme_raw = await _fetch_raw_file_cached(
+        client, "models", id_, revision, "README.md",
+    )
     if readme.strip():
-        out.append({
+        entry = {
             "path": f"hf:model/{id_}/README.md",
             "content": readme,
             "source_type": "model_card",
@@ -155,7 +167,10 @@ async def fetch_hf_model(id_: str) -> list[dict[str, Any]]:
                 "likes": int(meta.get("likes") or 0),
                 "tags": meta.get("tags") or [],
             },
-        })
+        }
+        if pinned and readme_raw:
+            entry["raw_upstream_hash"] = hashlib.sha256(readme_raw).hexdigest()
+        out.append(entry)
 
     # 2. Structured metadata summary — captures pipeline_tag, library, license,
     #    eval results from cardData.model-index. Useful for "what does this
@@ -215,11 +230,16 @@ async def fetch_hf_dataset(id_: str) -> list[dict[str, Any]]:
     if revision == "main":
         logger.warning("hf_dataset_unrevisioned: %s — sha missing", id_)
 
+    # §17.126 follow-up — same pinned-revision rule as fetch_hf_model.
+    pinned = revision != "main"
+
     out: list[dict[str, Any]] = []
 
-    readme = await _fetch_raw_file_cached(client, "datasets", id_, revision, "README.md")
+    readme, readme_raw = await _fetch_raw_file_cached(
+        client, "datasets", id_, revision, "README.md",
+    )
     if readme.strip():
-        out.append({
+        entry = {
             "path": f"hf:dataset/{id_}/README.md",
             "content": readme,
             "source_type": "dataset_card",
@@ -230,7 +250,10 @@ async def fetch_hf_dataset(id_: str) -> list[dict[str, Any]]:
                 "likes": int(meta.get("likes") or 0),
                 "tags": meta.get("tags") or [],
             },
-        })
+        }
+        if pinned and readme_raw:
+            entry["raw_upstream_hash"] = hashlib.sha256(readme_raw).hexdigest()
+        out.append(entry)
 
     summary_lines = [f"# Dataset: {id_}"]
     card_data = meta.get("cardData") or {}
@@ -326,7 +349,9 @@ async def fetch_hf_space(id_: str) -> list[dict[str, Any]]:
     revision = meta.get("sha") or "main"
 
     out: list[dict[str, Any]] = []
-    readme = await _fetch_raw_file_cached(client, "spaces", id_, revision, "README.md")
+    readme, _readme_raw = await _fetch_raw_file_cached(
+        client, "spaces", id_, revision, "README.md",
+    )
     if readme.strip():
         out.append({
             "path": f"hf:space/{id_}/README.md",

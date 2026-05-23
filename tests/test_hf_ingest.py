@@ -193,6 +193,70 @@ async def test_fetch_hf_model_zero_budget_returns_empty(fake_cache_miss):
 
 
 # ---------------------------------------------------------------------------
+# §17.126 follow-up — raw_upstream_hash on pinned-revision HF cards
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_fetch_hf_model_pinned_revision_stamps_raw_upstream_hash(fake_cache_miss):
+    """When /api/models returns a real sha, the README body fetched at that
+    revision is byte-stable. Stamp raw_upstream_hash on the README entry."""
+    import hashlib
+    from app.utils import hf_ingest
+
+    readme_body = b"# Model Card\nIt does things.\n"
+    meta = {"sha": "abc123def456", "cardData": {}}
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=[
+        _make_response(json_data=meta),
+        _make_response(content=readme_body),
+    ])
+    with patch("app.utils.hf_ingest.get_huggingface_client", return_value=mock_client):
+        out = await hf_ingest.fetch_hf_model("owner/repo")
+
+    by_path = {e["path"]: e for e in out}
+    readme_entry = by_path["hf:model/owner/repo/README.md"]
+    assert readme_entry["raw_upstream_hash"] == hashlib.sha256(readme_body).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_fetch_hf_model_main_fallback_omits_raw_upstream_hash(fake_cache_miss):
+    """When sha is missing and revision falls back to 'main' (mutable),
+    we MUST NOT stamp raw_upstream_hash — verify-mode would re-fetch a
+    moving target."""
+    from app.utils import hf_ingest
+    meta = {"cardData": {}}  # no sha → revision="main"
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=[
+        _make_response(json_data=meta),
+        _make_response(content=b"# README"),
+    ])
+    with patch("app.utils.hf_ingest.get_huggingface_client", return_value=mock_client):
+        out = await hf_ingest.fetch_hf_model("owner/repo")
+    for e in out:
+        assert "raw_upstream_hash" not in e
+
+
+@pytest.mark.asyncio
+async def test_fetch_hf_dataset_pinned_revision_stamps_raw_upstream_hash(fake_cache_miss):
+    import hashlib
+    from app.utils import hf_ingest
+
+    readme_body = b"# Dataset Card\nA QA dataset.\n"
+    meta = {"sha": "ds-sha-1", "cardData": {}}
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=[
+        _make_response(json_data=meta),
+        _make_response(content=readme_body),
+    ])
+    with patch("app.utils.hf_ingest.get_huggingface_client", return_value=mock_client):
+        out = await hf_ingest.fetch_hf_dataset("squad")
+
+    by_path = {e["path"]: e for e in out}
+    readme_entry = by_path["hf:dataset/squad/README.md"]
+    assert readme_entry["raw_upstream_hash"] == hashlib.sha256(readme_body).hexdigest()
+
+
+# ---------------------------------------------------------------------------
 # fetch_hf_dataset
 # ---------------------------------------------------------------------------
 

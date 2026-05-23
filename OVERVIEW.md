@@ -9453,6 +9453,120 @@ tests/test_main.py::test_database_connect_timeout_capped_at_2_seconds PASSED [ 9
 
 ---
 
+### §17.218 GitHub blob @ SHA — `raw_upstream_hash` wiring (§17.126 follow-up) (2026-05-23)
+
+Closes one of three §17.126 follow-ups: when `fetch_repo_content` is called with `ref_hint` (i.e., the caller pinned to a tag/branch/SHA and we resolved it to an immutable commit SHA), stamp every ingested blob entry with `raw_upstream_hash = sha256(blob_bytes)`. `/research/verify?compare_hash=true` re-fetches the blob and compares.
+
+**Why pinned only.** The default-branch path leaves `source_ref` as a mutable branch name; the entry's `source_url` resolves through that branch ref. Verify-mode re-fetches via `source_url`, so a default-branch entry's "current" hash would be from whatever the branch HEAD points at today — guaranteed drift the moment a single commit lands. Pinned-SHA fetches use the immutable commit SHA in the URL, so re-fetch is byte-stable iff the blob content is.
+
+**API surface change.** `_fetch_readme` now returns `(path, content, raw_bytes)`; `_fetch_blob` returns `(text, raw_bytes)`. Internal helpers — no external callers. The raw bytes are the base64-decoded blob body (the original file bytes pre-docstring-extraction for `*.py`), so a verify-mode re-fetch of the same blob SHA yields the same hash regardless of whether the entry stores the full file or a docstring.
+
+**Per-producer wiring update:**
+
+| Producer | Hash domain | Wired? |
+|---|---|---|
+| GitHub blob @ SHA (`ref_hint` path) | `sha256(blob_bytes)` | ✓ this commit |
+| GitHub blob @ branch (default-branch path) | mutable ref | intentionally NOT wired |
+| GH releases / issues / discussions | mutable bodies | not wired (per §17.126 table) |
+
+**Files.**
+
+- `app/utils/github_ingest.py` — `_fetch_readme` + `_fetch_blob` return raw bytes; `fetch_repo_content` stamps `raw_upstream_hash` on README + tree-walk entries when `ref_hint is not None`.
+- `tests/test_github_ingest_deep.py` — 2 new tests: `test_fetch_repo_content_pinned_ref_stamps_raw_upstream_hash` (asserts hash matches `sha256(blob_bytes)` for both README and a docs blob), `test_fetch_repo_content_default_branch_omits_raw_upstream_hash` (asserts no stamping on the mutable path).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_github_ingest.py tests/test_github_ingest_deep.py tests/test_github_ingest_cache.py --timeout=30 -q
+58 passed in 6.27s
+```
+
+---
+
+### §17.219 HF model/dataset @ revision — `raw_upstream_hash` wiring (§17.126 follow-up) (2026-05-23)
+
+Closes one of three §17.126 follow-ups: when `/api/models/{id}` or `/api/datasets/{id}` returns a real commit SHA (not the `main` mutable fallback), the README body fetched via `/{kind}/{id}/raw/{revision}/README.md` is byte-stable. Hash those bytes once and stamp the README entry with `raw_upstream_hash`. `/research/verify?compare_hash=true` re-fetches the README at the same revision and compares.
+
+**What we hash.** The README raw bytes — NOT the `/api/{kind}/{id}` metadata response. The API response carries `downloads`, `likes`, and other counters that drift constantly; hashing it would always-drift. The pinned `/raw/{revision}/README.md` path is the only stable hash domain in the HF surface for cards.
+
+**Why the metadata-summary entry is skipped.** `fetch_hf_model` and `fetch_hf_dataset` each emit a second entry (`hf:model/{id}/metadata` or `hf:dataset/{id}/metadata`) synthesized from `cardData` + API counters (`downloads`, `likes`). Those fields drift even when the underlying card SHA is pinned — stamping a hash would mean guaranteed drift. Left unstamped; verify-mode reports `content_state="unverifiable"` for those entries, which is the correct semantic.
+
+**Why `revision == "main"` is skipped.** When `meta.get("sha")` is missing (rare, but the code logs `hf_model_unrevisioned`/`hf_dataset_unrevisioned` and falls back to `main`), the `/raw/main/README.md` URL resolves through a mutable branch. Stamping would yield false drift. Treat exactly like the GitHub default-branch case (§17.218).
+
+**Per-producer wiring update:**
+
+| Producer | Hash domain | Wired? |
+|---|---|---|
+| `hf:model/<id>` README (pinned revision) | `sha256(readme_bytes)` | ✓ this commit |
+| `hf:dataset/<id>` README (pinned revision) | `sha256(readme_bytes)` | ✓ this commit |
+| `hf:model`/`hf:dataset` metadata summary | API counters drift | NOT wired (would always drift) |
+| `hf:space/<id>` README | revision is pinned but Space content not in §17.126 scope | not wired (out of §17.126 table) |
+| `hf:doc/<topic>` | mutable HTML | not wired (per §17.126 table) |
+| `hf:paper/<id>` | arXiv-backed; verify via arxiv path | not wired here |
+
+**API surface change.** `_fetch_raw_file_cached` now returns `(text, raw_bytes)` instead of `text`. The cached path also returns the raw bytes (the cached value is the original body), so verify-mode hashing is identical for cache-hit and cache-miss paths.
+
+**Files.**
+
+- `app/utils/hf_ingest.py` — `_fetch_raw_file_cached` returns `(text, raw_bytes)`; `fetch_hf_model` + `fetch_hf_dataset` stamp `raw_upstream_hash` on the README entry when `revision != "main"`; `fetch_hf_space` unpacks-and-discards the raw bytes (no stamping — out of scope).
+- `tests/test_hf_ingest.py` — 3 new tests: model pinned-revision happy path, model `main` fallback omits hash, dataset pinned-revision happy path.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_hf_ingest.py --timeout=30 -q
+27 passed in 8.22s
+```
+
+---
+
+### §17.220 arXiv full-PDF — `raw_upstream_hash` wiring (§17.126 follow-up) (2026-05-23)
+
+Closes the third §17.126 follow-up: `fetch_arxiv_full` (the `arxiv:<id>:full` mode wired in §17.123) now hashes the PDF bytes once at fetch time and stamps every derived chunk entry with the same `raw_upstream_hash`. `/research/verify?compare_hash=true` re-fetches `arxiv.org/pdf/<id>.pdf` and re-hashes the body.
+
+**Why one hash for all chunks.** A single PDF fans out into up-to-`arxiv_max_sections` chunks via `_chunk_text`. The chunks share the source body, so they share the hash — verify-mode hits `source_url` (`https://arxiv.org/abs/<id>` for all chunks of the same paper) and compares the re-fetched body's hash to the stored value. All chunks of the paper report `content_state` consistently (`matches` if upstream PDF unchanged, `drifted` if changed).
+
+**Why the hash is computed pre-chunk.** Same rationale as the §17.126 arXiv-abstract producer: the byte-stable domain is the upstream response body, not the post-extraction text or per-chunk slices. Hashing per-chunk would let pypdf text-extraction quirks (e.g., layout-engine non-determinism between pypdf versions) introduce false drift. Hashing the raw PDF bytes is upstream-truth.
+
+**Why query mode is excluded.** `mode="query"` (the search variant) was deliberately left unstamped in §17.126 — search responses drift as new papers index, so the hash would always-drift. Same rule applies here: `fetch_arxiv_full` is `mode="id_full"`-only (a single paper at a pinned ID), so no query-mode concern.
+
+**Per-producer wiring update:**
+
+| Producer | Hash domain | Wired? |
+|---|---|---|
+| arXiv (id mode, abstract Atom) | `sha256(atom_body_bytes)` | ✓ §17.126 |
+| arXiv (id_full, PDF) | `sha256(pdf_bytes)` | ✓ this commit |
+| arXiv (query mode) | response drifts | intentionally NOT wired |
+
+**Cache-hit path note.** The cache-hit branch (`cached = await cache.get("arxiv", arxiv_id, "pdf")`) returns the same PDF bytes that would be fetched live (the cache stores the raw body at immutable TTL — `fetch_cache_ttl_immutable_seconds`). The hash computes from `pdf_bytes` after that branch merges, so cached and live paths produce identical hashes for a given paper.
+
+**Files.**
+
+- `app/utils/forum_ingest.py` — `fetch_arxiv_full` computes `sha256(pdf_bytes)` after the cache/live-fetch branches converge and stamps every chunk entry.
+- `tests/test_forum_ingest.py` — 1 new test `test_fetch_arxiv_full_stamps_raw_upstream_hash` (asserts every chunk carries the same `sha256(pdf_bytes)` hash).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_forum_ingest.py tests/test_research_verify.py --timeout=30 -q
+[passed; full run combined with B1+B2 below]
+
+$ docker exec scaffold-orchestrator pytest tests/test_research_verify.py tests/test_forum_ingest.py tests/test_github_ingest.py tests/test_github_ingest_deep.py tests/test_github_ingest_cache.py tests/test_hf_ingest.py --timeout=30 -q
+156 passed in 31.07s
+```
+
+**§17.126 follow-up list status.** All three producers wired:
+- §17.218 (B1) — GitHub blob @ SHA
+- §17.219 (B2) — HF model/dataset @ revision
+- §17.220 (B3) — arXiv full-PDF (this entry)
+
+Remaining `unverifiable` content states in `/research/verify?compare_hash=true` are now confined to producers explicitly out-of-scope per §17.126's table: HN, Reddit, SO, Wikipedia, HF doc/paper, GH releases/issues/discussions.
+
+---
+
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

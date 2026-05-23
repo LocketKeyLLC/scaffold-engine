@@ -755,6 +755,13 @@ async def fetch_arxiv_full(arxiv_id: str) -> list[dict[str, Any]]:
     from app.modules.research_extractors import _chunk_text
     chunks = _chunk_text(text)
     total = len(chunks)
+    # §17.126 follow-up — arXiv PDFs are byte-stable post-publication
+    # (same immutable-TTL cache rationale). Hash the PDF bytes once and
+    # stamp every chunk so verify-mode (?compare_hash=true) can detect
+    # if the upstream PDF ever drifts. Verify re-fetches arxiv.org/pdf
+    # and re-hashes the body; chunks all carry the same hash because
+    # they share a source.
+    raw_hash = hashlib.sha256(pdf_bytes).hexdigest()
     out: list[dict[str, Any]] = []
     for i, chunk in enumerate(chunks[: settings.arxiv_max_sections]):
         out.append({
@@ -764,6 +771,7 @@ async def fetch_arxiv_full(arxiv_id: str) -> list[dict[str, Any]]:
             "source_url": abs_url,
             "source_ref": arxiv_id,
             "quality_signal": {"full_pdf": True, "chunk_total": total},
+            "raw_upstream_hash": raw_hash,
         })
     return out
 

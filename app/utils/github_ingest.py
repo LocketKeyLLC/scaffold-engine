@@ -11,6 +11,7 @@ pass these straight to ``ingest_entries`` for provenance recording.
 import asyncio
 import ast
 import base64
+import hashlib
 import json
 import logging
 from typing import Any
@@ -173,22 +174,30 @@ async def _resolve_ref_to_sha(
     return r.json().get("sha", "")
 
 
-async def _fetch_readme(client: httpx.AsyncClient, owner: str, repo: str) -> tuple[str, str]:
-    """Returns (path, content) or ('', '') if no README."""
+async def _fetch_readme(
+    client: httpx.AsyncClient, owner: str, repo: str,
+) -> tuple[str, str, bytes]:
+    """Returns (path, content, raw_bytes) or ('', '', b'') if no README.
+
+    ``raw_bytes`` is the base64-decoded blob body — used by callers to
+    compute ``raw_upstream_hash`` (§17.126) when ingesting at a pinned
+    SHA. Empty bytes on 404.
+    """
     r = await client.get(f"/repos/{owner}/{repo}/readme")
     _check_rate_limit(r)
     if r.status_code == 404:
-        return "", ""
+        return "", "", b""
     r.raise_for_status()
     data = r.json()
     try:
-        content = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+        raw = base64.b64decode(data["content"])
+        content = raw.decode("utf-8", errors="replace")
     except (ValueError, TypeError, KeyError) as e:
         # Distinguish decode failure from "no README" — caller logs and continues,
         # but does not silently treat a corrupt README as missing.
         logger.error("README decode failed for %s/%s: %s", owner, repo, e)
         raise
-    return data.get("path", "README"), content
+    return data.get("path", "README"), content, raw
 
 
 async def _get_tree(client: httpx.AsyncClient, owner: str, repo: str, branch: str) -> tuple[list[dict], bool]:
@@ -285,18 +294,27 @@ def _select_tree_files(tree: list[dict], remaining_cap: int) -> list[dict]:
     return selected
 
 
-async def _fetch_blob(client: httpx.AsyncClient, owner: str, repo: str, sha: str) -> str:
+async def _fetch_blob(
+    client: httpx.AsyncClient, owner: str, repo: str, sha: str,
+) -> tuple[str, bytes]:
+    """Fetch a blob by content-addressed SHA. Returns (text, raw_bytes).
+
+    ``raw_bytes`` is the base64-decoded file body — used by callers to
+    compute ``raw_upstream_hash`` (§17.126) for entries derived from this
+    blob. Empty on encoding mismatch or decode failure.
+    """
     r = await client.get(f"/repos/{owner}/{repo}/git/blobs/{sha}")
     _check_rate_limit(r)
     r.raise_for_status()
     data = r.json()
     if data.get("encoding") != "base64":
-        return ""
+        return "", b""
     try:
-        return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+        raw = base64.b64decode(data["content"])
+        return raw.decode("utf-8", errors="replace"), raw
     except Exception as e:
         logger.warning("Blob decode failed: %s", e)
-        return ""
+        return "", b""
 
 
 def _extract_docstring(source: str) -> str:
@@ -345,19 +363,30 @@ async def fetch_repo_content(
             raise GitHubRepoNotFoundError(f"{owner}/{repo}@{ref_hint} sha unresolved")
         tree_ref = source_ref
 
+    # §17.126 follow-up — when ``ref_hint`` pinned ``source_ref`` to an
+    # immutable commit SHA, hash each blob's raw bytes and stamp every
+    # derived entry with ``raw_upstream_hash``. Skipped on the default-branch
+    # path because the entry's ``source_url`` resolves through a mutable
+    # branch ref — verify-mode would re-fetch a moving target and report
+    # false drift.
+    hash_blobs = ref_hint is not None
+
     results: list[dict[str, Any]] = []
 
     # 1. README (dedicated endpoint — handles case/extension automatically)
-    readme_path, readme_content = await _fetch_readme(client, owner, repo)
+    readme_path, readme_content, readme_raw = await _fetch_readme(client, owner, repo)
     if readme_content.strip():
-        results.append({
+        entry = {
             "path": readme_path,
             "content": readme_content,
             "source_type": _classify_path(readme_path),
             "source_url": f"https://github.com/{owner}/{repo}/blob/{tree_ref}/{readme_path}",
             "source_ref": source_ref,
             "quality_signal": {},
-        })
+        }
+        if hash_blobs and readme_raw:
+            entry["raw_upstream_hash"] = hashlib.sha256(readme_raw).hexdigest()
+        results.append(entry)
     elif readme_path:  # README endpoint returned something but body is empty/whitespace
         logger.warning(
             "GitHub README is empty/whitespace-only, dropping: %s/%s path=%s",
@@ -380,7 +409,7 @@ async def fetch_repo_content(
         async def _fetch_one(entry: dict) -> dict | None:
             path = entry["path"]
             async with sem:
-                content = await _fetch_blob(client, owner, repo, entry["sha"])
+                content, raw_bytes = await _fetch_blob(client, owner, repo, entry["sha"])
             if not content.strip():
                 return None
             stype = _classify_path(path)
@@ -392,7 +421,7 @@ async def fetch_repo_content(
                 if not docstring:
                     return None
                 content = docstring
-            return {
+            result = {
                 "path": path,
                 "content": content,
                 "source_type": stype,
@@ -400,6 +429,12 @@ async def fetch_repo_content(
                 "source_ref": source_ref,
                 "quality_signal": {},
             }
+            # §17.126 follow-up — stamp the raw-blob hash on pinned-SHA fetches.
+            # Hash the ORIGINAL blob bytes (pre-docstring-extraction) so a
+            # verify-mode re-fetch of the same blob SHA yields the same hash.
+            if hash_blobs and raw_bytes:
+                result["raw_upstream_hash"] = hashlib.sha256(raw_bytes).hexdigest()
+            return result
 
         fetched = await asyncio.gather(
             *(_fetch_one(e) for e in selected), return_exceptions=True,
