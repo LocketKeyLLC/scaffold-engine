@@ -9848,6 +9848,129 @@ $ docker exec scaffold-orchestrator pytest --noconftest \
 
 ---
 
+### §17.229 Tier A KB recovery — 5/6 sources ingested, slug-match assumption fails per §17.211 (2026-05-23)
+
+Closes the operator action queued at the end of the post-§17.214 audit. Ran `scripts/repopulate_kb_tier_a.sh --apply` live on this host; scored against `tests/fixtures/golden_set.json` from a freshly-launched orchestrator sidecar (the running orchestrator's 3g `mem_limit` is too tight to score in-container per §17.211; sidecar took `--memory 6g`).
+
+**Ingestion outcome (5/6 complete).**
+
+| # | Source | Duration | Result |
+|---|---|---:|---|
+| 1 | Kahn's algorithm for topological sorting and parallel implementation | ~41 min | ✓ |
+| 2 | Redis caching patterns: write-through, write-behind, and cache invalidation | ~36 min | ✓ |
+| 3 | gRPC vs REST API performance benchmarks and tradeoffs | ~23 min | ✓ |
+| 4 | gzip vs brotli HTTP compression tradeoffs and lossless compression | ~28 min | ✓ (`new=17, versioned=2, rejected=1, skipped_hash=5`) |
+| 5 | OAuth2 bearer token authentication patterns in FastAPI | ~39 min | ✓ |
+| 6 | Truncation vs rounding in computer science and mathematics | **60 min cap** | ✗ `curl: (28) Operation timed out after 3600001 ms` — extraction phase exceeded the §17.210 per-source `--max-time 3600` cap; no entries from this source landed |
+
+Milvus `entry_count`: **565 → 685 (+120)**. Total wall time: 3 h 36 min from kickoff.
+
+**Score (live, sidecar):**
+
+```
+Queries:           20
+Coverage:          0.0%        (exact entry_id match)
+Mean Recall@5:     0.000
+Mean Recall@10:    0.000
+Mean MRR:          0.000
+```
+
+**Per-§17.211's decision table this lands in the "slug-match assumption fails" cohort (0/20 → 0/20 exact-id).** But hash-suffix audit on the per-query results reveals partial title-level coverage:
+
+| | Exact `entry_id` match | Title root match, hash differs |
+|---|---:|---:|
+| Queries hitting | 0 / 20 | **2 / 20** |
+
+The two title-level hits are `scaffold-compression-dictionary-transport` (golden expects `-a3f299a4`; KB now has `-8b65f156`) and `scaffold-lossless-compression` (golden expects `-28cb4801`; KB now has `-63fe002e`). Both produced by source #4 (gzip vs brotli). The titles re-derived deterministically from topic content but the `-<8-char-hash>` suffix is per-ingestion-run, not per-content — exactly the brittleness §17.211 flagged.
+
+**Diagnostic — why only 2/20 title matches on a 5/6-source successful run.**
+
+Cross-reference of expected slug roots against the sources that actually completed:
+
+| Golden expects | Source that should have produced it | Source status | Title in KB? |
+|---|---|---|---|
+| `parallel-implementation-of-kahn's-algorithm` | #1 Kahn's | ✓ | no title-root match in top-10 |
+| `kahn's-algorithm-implementation` / `for-topological-sorting` | #1 | ✓ | no |
+| `topological-sorting-process` | #1 | ✓ | no |
+| `parallel-kahn's-algorithm` | #1 | ✓ | no |
+| `cache-invalidation` / `redis-cache-invalidation-patterns` | #2 Redis | ✓ | no |
+| `write-through-pattern` / `write-behind-caching` | #2 | ✓ | no |
+| `caching-data-between-runs` / `storage-quotas-and-eviction` | #2 | ✓ | no |
+| `grpc-vs-rest-performance` (-benchmark) | #3 gRPC | ✓ | no |
+| `compression-dictionary-transport` | #4 gzip vs brotli | ✓ | **YES** (different hash) |
+| `lossless-compression` | #4 | ✓ | **YES** (different hash) |
+| `oauth2-proxy` | #5 OAuth2 | ✓ | no |
+| `truncation-definition` / `truncation-in-mathematics-and-computer-science` | #6 Truncation | ✗ TIMEOUT | not ingested |
+| (Tier B slugs — keycloak, bitnami/milvus, fastapi-docker-image, vector-telemetry-data-router, minimizing-eventual-consistency, csp, web-security-implementation-guides, docker-image-qwen3-reranker-vllm) | not in Tier A scope | held | not ingested |
+
+So source #4 is the only one whose LLM-generated titles re-derived close enough to the original to register as title-root matches. The other 5 completed sources ingested content under titles that don't share roots with the goldens — the LLM produced different surface forms ("topological sort" vs "topological-sorting-process", "Redis cache" vs "redis-cache-invalidation-patterns", etc.). This is the deeper failure mode: not just the trailing hash, the title roots themselves drift across re-ingestion.
+
+**Decision per §17.211's outcome table.**
+
+> 0/20 → 0/20 (with no title-level recovery beyond a couple of edge cases): **Slug-match assumption fails; switch goldens to substring/hash matching.**
+
+Confirmed. The right next step is not Tier B (re-ingesting more topics with the same brittle expected-id matching would land in the same place). The right next step is changing `tests/fixtures/golden_set.json`'s assertion shape — either:
+
+1. **Title-substring matching** — assert that retrieved entries' titles contain expected substrings (`"contains": ["topological", "kahn"]` instead of fixed `entry_id`).
+2. **Content-hash matching** — store `content_hash` per expected, assert any retrieved entry's hash matches.
+3. **Semantic acceptance** — feed retrieved snippets to a verifier LLM that scores topical relevance to the query.
+
+Option 1 is the lightest lift and matches the precedent §17.222 already established (`test_retrieval_golden.py` already uses substring matching internally; `golden_set.json` is the holdout that still uses fixed IDs). Logged as **§17.230 candidate**.
+
+**Tier B explicitly NOT attempted.** Per §17.211's gate ("if Tier A lands 0 new matching slugs, the slug-match assumption fails — switch goldens to substring/hash matching instead of exact entry-id"), Tier B is off the table until the assertion shape changes. Re-ingesting the Tier B slugs without changing the matching scheme would burn another 4-5 hr of CPU for the same 0/20.
+
+**Source #6 retry — held.** The Truncation source timed out the 60-min curl cap during iteration 1's extraction phase. Two hypotheses:
+
+1. **§17.169 per-LLM-call timeout fired** but topic-mode iteration kept retrying past the curl cap. Live container is pre-§17.215 (drain-cancel finalize was committed today; not deployed), so cancellation semantics are the pre-fix shape.
+2. **Truncation topic produces an unusually high search-result count** and the extractor chewed through tokens linearly. The other 5 sources completed in 23-41 min; #6's 60-min hit is an outlier.
+
+A targeted retry is cheap (one source, 30-60 min wall) but would still land in the same 0/20 score unless the goldens are switched first. Held pending §17.230.
+
+**Provenance fetch warnings (informational).** Score run emitted ~7 `provenance_fetch_failed: password authentication failed for user "scaffold"` lines. The sidecar's `--env-file` loads `SCAFFOLD_API_KEY` etc., but the runtime path that fetches provenance metadata reaches Postgres with a different connection-string resolution that disagreed with the live container's auth. The score itself completed cleanly — provenance fetch is decorative metadata, not part of the retrieval scoring path. Logged for §17.230 follow-up.
+
+**Files.**
+
+- None in the repo proper — this is a runbook outcome entry.
+- `/tmp/retrieval_report.json` — full per-query JSON; not committed (transient artifact, regenerated on every run).
+- `~/scaffold-engine/retrieval_report.json` — bind-mount target during the failed first sidecar attempt (RO-mount blocked the write; subsequent runs wrote to `/host-tmp` via `-v /tmp:/host-tmp`); host file unchanged from the pre-§17.214 baseline.
+
+**Verification.**
+
+```
+$ curl -s http://localhost:8000/health | jq '.checks.milvus'
+{
+  "status": "up",
+  "latency_ms": ...,
+  "collection_count": 1,
+  "entry_count": 685
+}
+
+$ docker run --rm --network ai-network --env-file ~/scaffold-engine/.env \
+    --memory 6g --user 1000:1000 \
+    -v ~/scaffold-engine:/code:ro -v /tmp:/host-tmp -w /code \
+    scaffold-engine:dev \
+    python3 scripts/score_retrieval.py --output /host-tmp/retrieval_report.json
+...
+============================================================
+Retrieval Quality Report
+============================================================
+Queries:           20
+Coverage:          0.0%
+Mean Recall@5:     0.000
+Mean Recall@10:    0.000
+Mean MRR:          0.000
+============================================================
+```
+
+**Open follow-ups.**
+
+1. **§17.230 candidate** — switch `tests/fixtures/golden_set.json` to substring or content-hash matching (the §17.211 decision-tree leaf). Cheap; unblocks meaningful retrieval scoring against the regrown corpus.
+2. **§17.231 candidate** — re-run source #6 (Truncation) under §17.230's new matching scheme. Target slugs: `truncation-definition`, `truncation-in-mathematics-and-computer-science`.
+3. **§17.232 candidate** — Tier B (keycloak / bitnami-milvus / fastapi-docker-image / minimizing-eventual-consistency / vector-telemetry-data-router / docker-image-qwen3-reranker-vllm / web-security-implementation-guides / content-security-policy). Held; re-evaluate after §17.230 lands.
+4. **§17.230 sub-item** — diagnose the sidecar provenance-fetch Postgres auth fail. Likely the runtime path uses a Postgres URL built from individual `POSTGRES_*` env vars; the sidecar's env passed via `--env-file` may have stale-vs-live values for one of them.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
