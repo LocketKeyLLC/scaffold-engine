@@ -7,6 +7,30 @@ embedding model changes, or Milvus re-indexing.
 
 Run:  docker exec scaffold-orchestrator pytest tests/test_retrieval_golden.py -v
 Tier: make validate
+
+Assertion shape — title-substring, not entry-id. Each parametrization
+asserts a case-insensitive substring of an expected topic appears in a
+top-3 title. This is intentional: §17.211's corpus archaeology found
+that topic-mode entry titles come from the LLM's RECORD_ENTRIES tool
+call (§7.x extraction) and are non-deterministic across re-ingestion —
+the same source URL re-ingested can produce different slugs. Substring
+matching survives that drift; the goldens here would not survive an
+exact entry-id assertion shape. (``scripts/score_retrieval.py`` +
+``tests/fixtures/golden_set.json`` use the entry-id shape and pay for
+that brittleness with the 0/20 coverage observation in §17.211.)
+
+Why three queries skip. The corpus regression documented in §17.158
+(Milvus collection rebuilt empty post-§17.63 SSD migration; only
+``eng`` re-landed; ``llm`` / ``rag`` / ``prompt`` partitions partial)
+plus the §17.165 + §17.210 repopulation passes left the knowledge base
+without the specific Wikipedia / vendor documents the three skipped
+parametrizations need (function-calling, hybrid-search, TOON spec).
+Each skip's ``reason=`` names the exact missing source so a future
+ingest pass can flip it back on. §17.92 already flipped 2 of the
+original 5 §17.86 skips to active; the remaining 3 are corpus-content
+dependencies the goldens cannot satisfy until the source-of-truth
+documents are ingested. See ``OVERVIEW.md`` §§17.86, 17.92, 17.158,
+17.165, 17.210, 17.211 for the full corpus history.
 """
 
 
@@ -35,25 +59,35 @@ from tests._milvus_helpers import skip_if_milvus_empty
 # Chain-of-thought_prompting (prompt) + Quantization_(signal_processing)
 # (llm) which flipped two previously-skipped queries to active.
 _NEEDS_FUNCTION_CALLING_DOC = pytest.mark.skip(
-    reason="prompt partition lacks a doc whose title contains 'function-calling' — "
-    "Wikipedia has no Function_calling article (the page 404s; the topic "
-    "is covered as a sub-section of Prompt_engineering, whose <title> is "
-    "'Prompt engineering - Wikipedia'). Skip until a vendor-doc or "
-    "hand-curated source named for function-calling specifically is ingested."
+    reason="KB-content dependency (corpus regression §17.158, partial recovery "
+    "§17.165 + §17.210): prompt partition lacks a doc whose title contains "
+    "'function-calling'. Wikipedia has no Function_calling article (the page "
+    "404s; the topic is covered as a sub-section of Prompt_engineering, "
+    "whose <title> is 'Prompt engineering - Wikipedia'). Skip until a "
+    "vendor-doc or hand-curated source named for function-calling "
+    "specifically is ingested. See OVERVIEW.md §17.158 for the post-§17.63 "
+    "Milvus rebuild that emptied this partition."
 )
 _NEEDS_HYBRID_SEARCH_DOC = pytest.mark.skip(
-    reason="rag partition lacks a doc whose title contains 'hybrid' — Wikipedia "
-    "has no Hybrid_search / Hybrid_retrieval article (both 404). The "
-    "available related Wikipedia articles (Okapi_BM25, Learning_to_rank, "
-    "Semantic_search) don't carry 'hybrid' in their titles. Skip until a "
-    "vendor blog post or paper-derived doc with 'hybrid' in title is ingested."
+    reason="KB-content dependency (corpus regression §17.158, partial recovery "
+    "§17.165 + §17.210): rag partition lacks a doc whose title contains "
+    "'hybrid'. Wikipedia has no Hybrid_search / Hybrid_retrieval article "
+    "(both 404). The available related Wikipedia articles (Okapi_BM25, "
+    "Learning_to_rank, Semantic_search) don't carry 'hybrid' in their "
+    "titles. Skip until a vendor blog post or paper-derived doc with "
+    "'hybrid' in title is ingested. See OVERVIEW.md §17.158 for the "
+    "post-§17.63 Milvus rebuild that left this partition under-seeded."
 )
 _NEEDS_SPEC_TOON = pytest.mark.skip(
-    reason="spec partition lacks a TOON spec doc — TOON (Token-Oriented Object "
-    "Notation) is project-internal with no external Wikipedia or vendor "
-    "source. docs/toon/toon_validator_reference/ exists but is a Python "
-    "reference implementation, not a spec document. Skip until a markdown "
-    "spec is written and ingested as a custom URL or file upload."
+    reason="KB-content dependency (corpus regression §17.158): spec partition "
+    "lacks a TOON spec doc — TOON (Token-Oriented Object Notation) is "
+    "project-internal with no external Wikipedia or vendor source. "
+    "docs/toon/toon_validator_reference/ exists but is a Python reference "
+    "implementation, not a spec document. Skip until a markdown spec is "
+    "written and ingested as a custom URL or file upload. See OVERVIEW.md "
+    "§17.158 for the broader corpus-regression context — this skip pre-dates "
+    "that incident but shares the resolution shape (ingest source-of-truth, "
+    "then drop the skip mark)."
 )
 
 GOLDEN_QUERIES = [

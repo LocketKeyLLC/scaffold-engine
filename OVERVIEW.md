@@ -9567,6 +9567,94 @@ Remaining `unverifiable` content states in `/research/verify?compare_hash=true` 
 
 ---
 
+### §17.221 atomic-claim coverage extensions — dependency-gating + cross-job isolation + N=10 fanout
+
+Closes the §16.5-deferred line item "live concurrency tests for ``_get_next_node``'s atomic claim under simultaneous /execute calls" along three axes the §17.136 baseline did not exercise. §17.136 covered single-job N-vs-M contention (N ∈ {2, 5}, M ∈ {1, 2}); the audit deferral asked for live-Postgres coverage of the atomic claim, and one file shouldn't carry every shape of that invariant. §17.221 adds the three shapes that materially differ from §17.136's harness — dependency gating, cross-job isolation, and high-N fanout — in a sibling file so future readers can grep for either §17.136 or §17.221 and find the relevant case.
+
+**New tests.** ``tests/integration/test_get_next_node_atomic_claim.py``:
+
+| Test | Asserts |
+|---|---|
+| ``test_dependency_unsatisfied_blocks_all_claimers`` | T2 depends on T1, T1 still pending → 4 claimers race; exactly 1 wins T1, T2 NEVER claimed in this round. Pins the SELECT-then-filter step in ``_get_next_node`` that decides eligibility before the row lock fires. |
+| ``test_dependency_satisfied_unblocks_next_node`` | After T1 is marked ``done``, a fresh round of 4 claimers correctly picks up T2 (1 winner, 3 None). Confirms the gate isn't sticky. |
+| ``test_concurrent_claims_across_two_jobs_isolated`` | Two jobs each with 1 pending node; 8 interleaved claimers (4 per job). Each job ends with exactly 1 ``running`` row, no claimer ever wins a row owned by the other job. Pins ``WHERE job_id = :job_id`` against a future refactor that hoists the SELECT cross-job for batching. |
+| ``test_ten_claimers_one_pending_row`` | N=10 claimers, 1 row → exactly 1 winner, 9 None. §17.136 capped fanout at N=5; this confirms no degradation at 2× the contention. |
+
+**Harness.** Mirrors the §17.136 pattern: each claimer opens its own ``async_session()`` (one asyncpg connection per claimer) so row-lock arbitration happens at Postgres, not inside SQLAlchemy. Sharing a session across the gather set deadlocks at the connection layer — documented as a flaky harness anti-pattern in §17.136 and not re-exercised here. ``depends_on`` in the seed SQL uses Postgres array literal syntax (``'{}'`` / ``'{"T1"}'``) because ``dag_nodes.depends_on`` is ``TEXT[]``, not JSONB — first attempt cast to JSONB and tripped a ``DatatypeMismatchError`` during the integration run; fixed before commit.
+
+**Why this matters.** The dependency-gate path in ``_get_next_node`` is filter-then-update, not update-with-WHERE — the SELECT collects all pending rows, the Python ``next(...)`` picks the first dep-satisfied candidate, then the UPDATE locks that ONE row. Without this test, a future refactor that (a) widened the SELECT, (b) batched the UPDATE across multiple rows, or (c) dropped the depends_on filter from the Python side would compile clean and pass §17.136's tests but break dep gating under concurrency. The cross-job test catches an analogous slip on the ``job_id`` filter.
+
+No production code touched — this is test coverage of an existing invariant, not a behavior change.
+
+**Files.**
+
+- ``tests/integration/test_get_next_node_atomic_claim.py``: new file, 4 tests + 4 helpers.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator bash -c "cd /code && pytest tests/integration/test_get_next_node_atomic_claim.py --timeout=60 -v"
+…
+tests/integration/test_get_next_node_atomic_claim.py::test_dependency_unsatisfied_blocks_all_claimers PASSED [ 25%]
+tests/integration/test_get_next_node_atomic_claim.py::test_dependency_satisfied_unblocks_next_node PASSED [ 50%]
+tests/integration/test_get_next_node_atomic_claim.py::test_concurrent_claims_across_two_jobs_isolated PASSED [ 75%]
+tests/integration/test_get_next_node_atomic_claim.py::test_ten_claimers_one_pending_row PASSED [100%]
+
+============================== 4 passed in 2.22s ===============================
+```
+
+**§16.5 status delta.** The §16.5 deferral "live concurrency tests for ``_get_next_node``'s atomic claim under simultaneous /execute calls" is now closed across the shapes the audit named: single-job contention (§17.136 — 5 tests), dependency gating + cross-job isolation + N=10 fanout (§17.221 — 4 tests). Combined integration coverage of ``_get_next_node`` under concurrency is 9 tests, ~7 s wall time.
+
+---
+
+### §17.222 ``test_retrieval_golden`` skip-rationale refresh — link 3 KB-dependent skips to the §17.158 corpus regression
+
+The Phase-8 retrieval-golden wrap-up (§17.86 + §17.92) left ``tests/test_retrieval_golden.py`` in a known shape: 4 active queries pass, 3 query parametrizations skip behind named ``pytest.mark.skip`` rationales (function-calling, hybrid-search, TOON spec). A live run on 2026-05-23 confirmed the shape is intact:
+
+```
+$ docker exec scaffold-orchestrator bash -c "cd /code && pytest tests/test_retrieval_golden.py --timeout=180 --tb=line -v"
+…
+=================== 4 passed, 3 skipped in 592.95s (0:09:52) ===================
+```
+
+— so the "three queries still fail" framing in the §17.211 followup notes was stale: those three queries have been documented skips since §17.92, not failures. What WAS missing was the linkage between those skips and the §17.158 corpus regression. The pre-§17.222 rationales explained the per-query missing-source-of-truth ("Wikipedia has no Function_calling article", "no Hybrid_search article", "TOON is project-internal") but didn't connect those gaps to the broader corpus-regression history. A reader who hit one of these skips and went hunting for "why doesn't the KB have this" found §17.86 / §17.92 (which describe the original deferrals) but not §17.158 (which describes the post-§17.63 Milvus rebuild that emptied the partitions in the first place).
+
+**The fix is doc-only.** No assertion shape changes, no parametrizations dropped. The three ``pytest.mark.skip(reason=…)`` strings now lead with "KB-content dependency (corpus regression §17.158, partial recovery §17.165 + §17.210)" and end with a pointer to OVERVIEW.md §17.158 for full context. The module docstring grows two paragraphs: one explaining the title-substring assertion shape (per §17.211's slug-match brittleness finding — topic-mode entry titles come from the LLM's ``RECORD_ENTRIES`` tool call and are non-deterministic across re-ingestion), and one explaining why three queries skip (corpus-content dependencies §17.158 + §17.165 + §17.210 leave the KB without specific source-of-truth docs).
+
+**Why this is the right resolution.** The task framing flagged two acceptable outcomes — (a) "diagnose root cause and either fix or rewrite the failing assertions to title-substring / content-hash matching" or (b) "if the failures are KB-content-dependent … document the dependency in the test docstring and ``pytest.skip`` with a reason that points at §17.158". This file is already substring-matching (``expected_substr.lower() in t.lower()``) so (a)'s assertion-shape upgrade is in place; the active 4 queries pass on the current KB shape (4 passed in the live run above). The remaining gap was (b) — the documentation pointer. §17.222 closes (b) without touching the live-passing queries.
+
+**Files.**
+
+- ``tests/test_retrieval_golden.py``:
+  - Module docstring: +2 paragraphs (assertion-shape rationale per §17.211; KB-dependency rationale per §17.158).
+  - ``_NEEDS_FUNCTION_CALLING_DOC`` reason: now leads with "KB-content dependency (corpus regression §17.158, partial recovery §17.165 + §17.210)" and trails with "See OVERVIEW.md §17.158".
+  - ``_NEEDS_HYBRID_SEARCH_DOC`` reason: same shape.
+  - ``_NEEDS_SPEC_TOON`` reason: same shape, with the caveat that this skip pre-dates §17.158 but shares the resolution path (ingest source-of-truth, then drop the skip mark).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator bash -c "cd /code && pytest tests/test_retrieval_golden.py --collect-only -q"
+…
+7 tests collected in 0.98s
+
+$ docker exec scaffold-orchestrator bash -c "cd /code && pytest tests/test_retrieval_golden.py -k 'function or hybrid or TOON' --timeout=60 -v --tb=no"
+…
+SKIPPED [1] …:146: KB-content dependency (corpus regression §17.158, partial recovery §17.165 + §17.210): prompt partition lacks a doc whose title contains 'function-calling'. …
+SKIPPED [1] …:146: KB-content dependency (corpus regression §17.158, partial recovery §17.165 + §17.210): rag partition lacks a doc whose title contains 'hybrid'. …
+SKIPPED [1] …:146: KB-content dependency (corpus regression §17.158): spec partition lacks a TOON spec doc — TOON … See OVERVIEW.md §17.158 …
+3 skipped, 4 deselected in 1.01s
+```
+
+Live full-suite run (timing baseline): ``4 passed, 3 skipped in 592.95s`` against the current KB (~565 entries — see §17.158 baseline). The 9-minute wall time is dominated by the CrossEncoder reranker on CPU per active query; this is consistent with the §17.86 ``@pytest.mark.timeout(300)`` rationale.
+
+**Open follow-up.** If a future ingest pass lands one of the missing source documents (Wikipedia adds a Function_calling article, a vendor blog post titled "hybrid search" gets ingested, or a markdown TOON spec is written and ingested), drop the corresponding ``_NEEDS_*`` skip mark from the ``pytest.param(...)`` line. Substring assertion will validate against the new content automatically; no further code change needed.
+
+---
+
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
