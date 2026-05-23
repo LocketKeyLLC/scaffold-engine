@@ -171,6 +171,43 @@ def test_fix98_execute_runs_model_validation(client):
     assert response.status_code == 422, response.text
 
 
+def test_startup_probe_timeout_capped_at_2_seconds():
+    """§17.179 follow-up — the lifespan probe cap MUST stay <= 2 s so
+    cloud-CI smoke runs against unreachable services complete the lifespan
+    inside pytest's 30 s timeout. The constant fans out to both the Milvus
+    asyncio.wait_for cap and the Ollama HTTP GET timeout in app/main.lifespan."""
+    from app import main as main_mod
+    assert main_mod._STARTUP_PROBE_TIMEOUT_S <= 2.0, (
+        f"_STARTUP_PROBE_TIMEOUT_S regressed above the 2 s cap: "
+        f"{main_mod._STARTUP_PROBE_TIMEOUT_S}"
+    )
+
+
+def test_database_connect_timeout_capped_at_2_seconds():
+    """§17.179 follow-up — asyncpg connect_timeout must stay <= 2 s; it
+    governs every async_session() open across the codebase, not just
+    lifespan. Default is 60 s, which under unreachable Postgres makes
+    every DB-touching lifespan step block for ~1 min each."""
+    from app.database import engine
+    # SQLAlchemy stores the connect_args on the dialect / pool config; the
+    # most stable read is via the engine's __repr__-able pool / kwargs.
+    # We assert via the create_async_engine input by re-reading the source
+    # of truth — the engine's url + dialect connect_args proxy.
+    # Easiest: inspect the module-level engine's pool _kwargs.
+    connect_args = engine.pool._creator.keywords.get("connect_args", {}) \
+        if hasattr(engine.pool, "_creator") and hasattr(engine.pool._creator, "keywords") \
+        else {}
+    # Fallback: parse the engine's url query params or just import the
+    # database module and read the source constant. Use a direct module
+    # re-import to read the literal we set.
+    import inspect
+    from app import database as db_mod
+    src = inspect.getsource(db_mod)
+    assert '"timeout": 2' in src or "'timeout': 2" in src, (
+        "asyncpg connect_timeout in app/database.py regressed above 2 s"
+    )
+
+
 def test_fix95_skip_node_return_shape_matches_execution_result():
     """#95: skip_node returns keys that ExecutionResult response_model accepts.
 

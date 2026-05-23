@@ -57,10 +57,15 @@ logger = logging.getLogger("scaffold")
 # §17.179 — cap each lifespan service probe at this many seconds. The
 # Ollama client default (1800 s = local_timeout, sized for LLM calls),
 # pymilvus's unbounded connect, and asyncpg's 60 s connect_timeout were
-# all longer than any sensible startup budget. 5 s is generous (1000× the
-# expected localhost RTT, ample for healthy-service handshakes) while
-# still letting the lifespan complete fast under unreachable conditions.
-_STARTUP_PROBE_TIMEOUT_S: float = 5.0
+# all longer than any sensible startup budget.
+#
+# §17.179 follow-up (2026-05-23) — lowered from 5.0 → 2.0. The §17.179
+# OVERVIEW entry already flagged 2 s as the right long-term cap; 5 s was
+# the conservative first step. Cloud-CI smoke runs against unreachable
+# scaffold-postgres / milvus / ollama still complete the lifespan inside
+# pytest's 30 s timeout with margin (3 probes × 2 s + remaining steps).
+# Healthy localhost handshakes complete in <50 ms — 2 s is 40× headroom.
+_STARTUP_PROBE_TIMEOUT_S: float = 2.0
 
 setup_logging(
     json_logs=settings.log_json_format,

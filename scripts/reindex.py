@@ -269,6 +269,33 @@ async def reindex_all(
 
 
 # ---------------------------------------------------------------------------
+# cache_metadata.active_embedder_id post-reindex update — §17.155 follow-up #2
+# ---------------------------------------------------------------------------
+async def _record_active_embedder(new_id: str) -> None:
+    """UPSERT the new embedder identity into ``cache_metadata`` so the
+    lifespan drift check (``app/utils/embedder_drift.py``) sees
+    ``outcome='unchanged'`` on the next boot. Without this, the first boot
+    after a reindex fires a spurious ``cache.embedder_drift`` CRITICAL
+    alert (stored = old id, configured = new id) even though the corpus
+    was just re-embedded to match the new id.
+
+    Mirrors the upsert in ``embedder_drift.check_embedder_drift``."""
+    from sqlalchemy import text
+    from app.database import async_session
+    async with async_session() as db:
+        await db.execute(
+            text(
+                "INSERT INTO cache_metadata (key, value) "
+                "VALUES (:k, :v) "
+                "ON CONFLICT (key) DO UPDATE "
+                "  SET value = EXCLUDED.value, updated_at = NOW()"
+            ),
+            {"k": "active_embedder_id", "v": new_id},
+        )
+        await db.commit()
+
+
+# ---------------------------------------------------------------------------
 # CLI wrapper
 # ---------------------------------------------------------------------------
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -347,6 +374,28 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
         dry_run=args.dry_run,
     ))
+
+    # §17.155 follow-up #2 — record the new embedder identity in
+    # cache_metadata so the next lifespan boot sees outcome='unchanged'
+    # instead of firing a spurious cache.embedder_drift CRITICAL alert.
+    # Mirrors the upsert pattern in app/utils/embedder_drift.py. Only
+    # runs on a live (non-dry-run) reindex with no errors — a partial
+    # rewrite must not advance the recorded identity.
+    if not args.dry_run and not totals["errors"]:
+        new_id = args.new_embedder or settings.model_embedder_id
+        try:
+            asyncio.run(_record_active_embedder(new_id))
+            print(f"\nRecorded active_embedder_id={new_id!r} in cache_metadata "
+                  f"(prevents spurious drift alert on next boot).")
+        except Exception as exc:
+            logger.warning(
+                "active_embedder_id_record_failed: model=%s err=%s — "
+                "the next lifespan boot may emit a spurious "
+                "cache.embedder_drift alert; re-run with --yes after "
+                "fixing the DB connectivity, or manually UPSERT into "
+                "cache_metadata.",
+                new_id, exc,
+            )
 
     print()
     print("Per-partition stats:")

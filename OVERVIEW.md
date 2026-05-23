@@ -9349,6 +9349,110 @@ Executes the §17.213 decision. About four hours after the AM8180 enclosure fail
 
 
 
+### §17.215 `_execute_research_job` finalizes on scheduler-drain CancelledError — close §17.155 follow-up #1 (2026-05-23)
+
+Closes **OVERVIEW §17.155 follow-up #1** (Phase-8 wrap). After §17.137 added the explicit async drain to `shutdown_scheduler`, a drain that exceeded `settings.scheduler_shutdown_timeout` would propagate `CancelledError` into every in-flight `_execute_research_job`. The pre-fix `finally` finalized the `research_sessions` row only on `timed_out=True`; the drain-cancel path matched neither `except asyncio.TimeoutError` nor `except Exception` (CancelledError is a BaseException, not Exception — same gotcha as §17.168 in `_run_with_session_lifecycle`). The session row stayed `status='running'` until the §17.85 reaper noticed at its next tick (24 h on this host per `STALE_THRESHOLD`, not the 30 min the original §17.155 follow-up note assumed). The scheduled_jobs row also did not get a result-write for the cancel.
+
+**Fix.** Three changes in `app/scheduler.py::_execute_research_job`:
+
+1. New `drain_cancelled` flag, set from a new `except asyncio.CancelledError` branch that logs `event="scheduled_research_drain_cancelled"`, then re-raises so asyncio cancellation semantics are preserved.
+2. The `finally` block's gate widened from `if timed_out and session_id` to `if (timed_out or drain_cancelled) and session_id`. The UPDATE payload is parameterized — `status='cancelled', error_message='scheduler_drain_cancelled'` on the drain path, the existing timeout message on the timeout path.
+3. The DB UPDATE is now wrapped in `asyncio.shield(...)` so it commits even though the surrounding coroutine is itself being cancelled (the re-raise in step 1 reaches us via the `finally`). This mirrors the §17.168 pattern in `app/modules/research_state.py::_run_with_session_lifecycle`. A nested `except asyncio.CancelledError` around the shield logs `event="scheduled_research_cancel_shielded"` and re-raises so cancellation continues to propagate.
+
+The `scheduled_jobs` result-write below the `try/finally` is intentionally skipped on the drain path — the re-raise out of the inner try unwinds past it. A `cancelled` status would not be meaningful in `last_status` anyway (the scheduler is shutting down — there's no "next run" semantic). The reaper still catches any session that somehow slips past this finalization (defense in depth).
+
+**Files.**
+
+- `app/scheduler.py` — new `except asyncio.CancelledError` branch + `drain_cancelled` flag; finally gate widened; DB UPDATE under `asyncio.shield`.
+- `tests/test_scheduler.py` — `TestExecuteResearchJob::test_drain_cancelled_finalizes_session_under_shield` regression test: drives `_execute_research_job` to yield a `session_id`, then cancels the outer task; asserts the UPDATE was issued with `sid='drained-sid'`, `st='cancelled'`, `msg='scheduler_drain_cancelled'`.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_scheduler.py -v --timeout=30
+...
+tests/test_scheduler.py::TestExecuteResearchJob::test_drain_cancelled_finalizes_session_under_shield PASSED [ 80%]
+...
+============================= 15 passed in 10.07s ==============================
+```
+
+---
+
+### §17.216 `scripts/reindex.py` writes `cache_metadata.active_embedder_id` after a successful reindex — close §17.155 follow-up #2 (2026-05-23)
+
+Closes **OVERVIEW §17.155 follow-up #2**. The §17.135 lifespan drift check (`app/utils/embedder_drift.py::check_embedder_drift`) compares `settings.model_embedder_id` against `cache_metadata.active_embedder_id` and fires a `cache.embedder_drift` CRITICAL alert + observability `system_alerts` row when they diverge. The lifespan first-run path already upserts the value, but `scripts/reindex.py` did not — so the operator workflow
+
+1. run `scripts/reindex.py --new-embedder X`,
+2. update `MODEL_EMBEDDER_PIPELINE=X` in `.env`,
+3. `make restart`
+
+fired a spurious drift alert on step 3, even though the corpus was just re-embedded specifically to match `X`. The alert would dedup-key by `stored→configured`, so subsequent restarts stayed quiet — but the first post-reindex boot would page operators about a non-issue.
+
+**Fix.** Two additions in `scripts/reindex.py`:
+
+1. New `_record_active_embedder(new_id)` async helper — mirrors the upsert in `embedder_drift.check_embedder_drift` exactly (same SQL, same key, same on-conflict shape). Opens an `async_session` and commits.
+2. After `asyncio.run(reindex_all(...))` returns in `main()`, call `_record_active_embedder(args.new_embedder or settings.model_embedder_id)` — but only when `not args.dry_run and not totals["errors"]`. A partial rewrite must NOT advance the recorded identity (that would mask a genuinely-broken reindex behind a no-alert state). A best-effort try/except around it: a DB hiccup logs a clear remediation message ("re-run with --yes after fixing DB connectivity, or manually UPSERT into cache_metadata") and does not fail the script (the reindex itself already succeeded; surfacing the partial outcome as exit=1 would falsely imply the corpus is unsafe).
+
+The new id is announced on stdout: `Recorded active_embedder_id='nomic-embed-text-v2' in cache_metadata (prevents spurious drift alert on next boot).`
+
+**Files.**
+
+- `scripts/reindex.py` — new `_record_active_embedder()` helper above the CLI section; UPSERT call in `main()` after a clean live reindex.
+- `tests/test_reindex.py` — `test_record_active_embedder_upserts_cache_metadata` regression: mocks `app.database.async_session`, asserts the helper issues one UPSERT against `cache_metadata` with `key='active_embedder_id'` and the requested model id, plus a commit.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_reindex.py -v --timeout=30
+...
+tests/test_reindex.py::test_record_active_embedder_upserts_cache_metadata PASSED [100%]
+
+============================== 12 passed in 4.08s ==============================
+```
+
+---
+
+### §17.217 Cap lifespan probe + asyncpg connect timeouts at 2 s — close §17.179 deferral (2026-05-23)
+
+Closes the deferred long-term cap flagged in **OVERVIEW §17.179** ("the right long-term fix is to make the lifespan's DB/Milvus/Ollama probes truly fail-fast under unreachable conditions (cap the connect timeouts at ~2 s instead of the asyncpg default 60 s; same for milvus_connections.connect)"). §17.179 took the conservative first step (5 s); under unreachable cloud-CI conditions the cumulative lifespan budget was still ~15-20 s — comfortably inside the 30 s pytest-timeout but leaving thin margin for any future probe addition. 2 s is what the original §17.179 entry called out as the eventual target.
+
+**Fix.** Two one-line changes:
+
+| Where | Before | After |
+|---|---|---|
+| `app/main.py::_STARTUP_PROBE_TIMEOUT_S` | `5.0` | `2.0` |
+| `app/database.py` `create_async_engine` `connect_args` | `{"timeout": 5}` | `{"timeout": 2}` |
+
+The Ollama and Milvus probe paths in `lifespan()` both read the constant, so they pick up the lower cap automatically. The asyncpg connect cap is independent (lives on the engine, applies to every `async_session()` open across the codebase, not just lifespan), so it gets its own edit — matched to the new constant for operator-visible consistency.
+
+**Why 2 s is safe in production.** Healthy localhost handshakes complete in <50 ms (verified live: `/health` reports `postgresql.latency_ms=44`, `ollama.latency_ms=43`, `milvus.latency_ms=41`). 2 s is 40× headroom over the observed RTT — well above any reasonable transient spike, well below anything an operator would notice during a `make restart`. Under genuinely-unhealthy services the lifespan now logs a probe failure 3 s sooner per unreachable dep than under the §17.179 cap; the affected feature still degrades via its existing error-handling.
+
+**What this does NOT change.** Per-query, per-LLM-call, and per-research-llm timeouts (`cloud_timeout`, `local_timeout`, `research_llm_timeout`) all remain unchanged. The 2 s cap is the connect-handshake budget only. The `/health` probes are also unchanged — they already use 5 s, sized independently as an HTTP request budget rather than a connect cap (and a slightly slower health probe is fine; a slow lifespan probe blocks startup).
+
+**Files.**
+
+- `app/main.py` — `_STARTUP_PROBE_TIMEOUT_S: float = 5.0` → `2.0`; comment updated to explain the post-§17.179 tightening.
+- `app/database.py` — `connect_args={"timeout": 5}` → `{"timeout": 2}`; comment updated.
+- `tests/test_main.py` — two regression tests: `test_startup_probe_timeout_capped_at_2_seconds` asserts the constant is `<= 2.0`; `test_database_connect_timeout_capped_at_2_seconds` asserts the asyncpg literal in `app/database.py` source still reads `"timeout": 2`.
+
+**Verification (local).**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_main.py -v --timeout=30
+...
+tests/test_main.py::test_startup_probe_timeout_capped_at_2_seconds PASSED [ 81%]
+tests/test_main.py::test_database_connect_timeout_capped_at_2_seconds PASSED [ 90%]
+...
+============================== 11 passed in 9.00s ==============================
+```
+
+**Live healthy-path verification:** orchestrator on the dev image came up clean against the new caps; `/health` reports `status=healthy` with `postgresql.latency_ms=44`, `ollama.latency_ms=43`, `milvus.latency_ms=41`. The tighter caps had zero effect on the warm-startup path.
+
+---
+
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

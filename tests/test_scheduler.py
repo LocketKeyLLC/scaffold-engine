@@ -243,6 +243,61 @@ class TestExecuteResearchJob:
         assert params.get("st") == "success"
 
 
+    @pytest.mark.asyncio
+    async def test_drain_cancelled_finalizes_session_under_shield(self):
+        """§17.155 follow-up #1: a scheduler-drain CancelledError (§17.137)
+        used to leave the research_sessions row stuck in 'running' until the
+        §17.85 reaper cleaned it ~30 min later. The except-CancelledError
+        branch in _execute_research_job now records the session_id + status,
+        then re-raises; the finally finalizes under asyncio.shield."""
+        from app import scheduler as sched_mod
+
+        async def yields_then_hangs(*args, **kwargs):
+            # Emit a session_id then sleep forever — the outer task will be
+            # cancelled by the drain, mid-stream.
+            yield 'event: research_started\ndata: {"session_id": "drained-sid", "topic": "x"}\n\n'
+            import asyncio as _a
+            while True:
+                await _a.sleep(10)
+                yield {}
+
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        update_result = MagicMock()
+        update_result.rowcount = 1
+        mock_session.execute = AsyncMock(return_value=update_result)
+        mock_session.commit = AsyncMock()
+
+        sched_mod._scheduler = None
+
+        import asyncio
+        with patch.object(sched_mod, "async_session", return_value=mock_session), \
+             patch("app.modules.research_agent.run_research", side_effect=yields_then_hangs):
+            task = asyncio.create_task(
+                sched_mod._execute_research_job(99, "topic", "medium")
+            )
+            # Let the inner _consume tick once so session_id is captured.
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        # The finally must have issued a cancellation UPDATE against
+        # research_sessions with status='cancelled' and error_message
+        # naming the drain.
+        cancel_calls = [
+            c for c in mock_session.execute.call_args_list
+            if "research_sessions" in str(c[0][0])
+        ]
+        assert cancel_calls, "expected an UPDATE against research_sessions"
+        last = cancel_calls[-1]
+        params = last[0][1] if len(last[0]) > 1 else last[1]
+        assert params.get("sid") == "drained-sid"
+        assert params.get("st") == "cancelled"
+        assert params.get("msg") == "scheduler_drain_cancelled"
+
+
 class TestExtractSessionId:
     def test_extracts_from_sse_string(self):
         from app.scheduler import _extract_session_id

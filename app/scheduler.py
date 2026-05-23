@@ -408,6 +408,7 @@ async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> Non
                     session_id = sid
 
     timed_out = False
+    drain_cancelled = False
     try:
         try:
             await asyncio.wait_for(_consume(), timeout=settings.scheduler_job_timeout)
@@ -418,6 +419,21 @@ async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> Non
                 'event="scheduled_research_timeout" schedule_id=%s session_id=%s timeout=%ds',
                 schedule_id, session_id, settings.scheduler_job_timeout,
             )
+        except asyncio.CancelledError:
+            # §17.155 follow-up — scheduler-drain (§17.137) cancels in-flight
+            # jobs when shutdown_scheduler's drain timeout expires. CancelledError
+            # is a BaseException, NOT Exception, so the prior ``except Exception``
+            # below did not catch it. Without finalization here, the session row
+            # stayed ``status='running'`` until the §17.85 reaper cleaned it up
+            # ~30 min later. Mark + re-raise so asyncio semantics are preserved;
+            # the finally block does the DB write under asyncio.shield.
+            drain_cancelled = True
+            status = "cancelled"
+            logger.warning(
+                'event="scheduled_research_drain_cancelled" schedule_id=%s session_id=%s',
+                schedule_id, session_id,
+            )
+            raise
         except Exception as exc:
             status = "failed"
             logger.error(
@@ -425,22 +441,28 @@ async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> Non
                 schedule_id, session_id, exc,
             )
     finally:
-        # On timeout, run_research was cancelled mid-stream — its session row
-        # stays 'running' and waits 30 min for the reaper. Finalize it here so
-        # downstream consumers see 'cancelled' immediately.
-        if timed_out and session_id:
-            try:
+        # On timeout or scheduler-drain cancel, run_research was cancelled
+        # mid-stream — its session row stays 'running' and waits 30 min for
+        # the reaper. Finalize it here so downstream consumers see the
+        # terminal status immediately.
+        if (timed_out or drain_cancelled) and session_id:
+            cancel_status = "cancelled"
+            cancel_msg = (
+                "scheduler_drain_cancelled" if drain_cancelled
+                else "Scheduled run exceeded scheduler_job_timeout"
+            )
+
+            async def _finalize_cancel() -> None:
                 async with async_session() as db:
                     result = await db.execute(text("""
                         UPDATE research_sessions
-                        SET status = 'cancelled',
-                            error_message = COALESCE(error_message,
-                                'Scheduled run exceeded scheduler_job_timeout'),
+                        SET status = :st,
+                            error_message = COALESCE(error_message, :msg),
                             updated_at = NOW(),
                             completed_at = NOW()
                         WHERE id = :sid
                           AND status IN ('pending', 'running')
-                    """), {"sid": session_id})
+                    """), {"sid": session_id, "st": cancel_status, "msg": cancel_msg})
                     await db.commit()
                     # Zero rows = the session moved off pending/running before
                     # we got here (user /cancel, reaper, or successful resume
@@ -453,12 +475,34 @@ async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> Non
                             'reason="session_already_terminal_or_concurrent_update"',
                             schedule_id, session_id,
                         )
+
+            try:
+                # §17.155 follow-up — wrap in asyncio.shield so the DB UPDATE
+                # commits even when this coroutine is itself being cancelled
+                # (the drain path re-raises CancelledError above). Mirrors the
+                # §17.168 pattern in research_state._run_with_session_lifecycle.
+                await asyncio.shield(_finalize_cancel())
+            except asyncio.CancelledError:
+                # Caller-side cancellation hit while waiting on the shielded
+                # finalize. The DB UPDATE is still in flight on the event loop
+                # and will commit. Re-raise so cancellation propagates correctly.
+                logger.warning(
+                    'event="scheduled_research_cancel_shielded" '
+                    'schedule_id=%s session_id=%s '
+                    '— UPDATE continues on loop',
+                    schedule_id, session_id,
+                )
+                raise
             except Exception as exc:
                 logger.error(
                     'event="scheduled_research_cancel_write_failed" '
                     'schedule_id=%s session_id=%s error=%s',
                     schedule_id, session_id, exc,
                 )
+
+    # NOTE: a drain-cancel raised in the inner try re-raises out of this
+    # function after the finally above finalizes the session row; we never
+    # reach the scheduled_jobs result-write below on that path.
 
     # Compute next_run_at from the live scheduler job (avoids the DOUBLE-PRECISION
     # → TIMESTAMPTZ type mismatch that the old subquery had).
