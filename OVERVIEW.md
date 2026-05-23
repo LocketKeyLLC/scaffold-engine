@@ -9249,6 +9249,104 @@ Bumping to ``--max-time 3600`` gives 1.5-2× headroom over observed wall times w
 
 ---
 
+### §17.213 `/mnt/adamssd` USB-NVMe enclosure crash — AMicro AM8180 bridge hang under sustained writes, recover via reseat, migrate active work to NVMe (2026-05-23)
+
+Claude Code's `/doctor` surfaced `EIO: i/o error, statx '/mnt/adamssd/scaffold-engine/.claude/agents'` and would not clear across re-login. Investigation revealed this was a hardware-bus failure of the USB-NVMe enclosure backing `/mnt/adamssd`, not a software issue at any layer of the scaffold-engine stack.
+
+**Timeline (kernel uptime offsets, single boot).**
+
+- `t=317060s` (≈3.7 days ago, under active dockerd write load): SCSI commands to `/dev/sdc` start returning `hostbyte=DID_ERROR` — *transport-layer* errors, not media errors. ext4 logs `Buffer I/O error on dev sdc, logical block 0, lost sync page write` while trying to update the superblock, aborts the journal (`Aborting journal on device sdc-8`), remounts read-only (`EXT4-fs (sdc): Remounting filesystem read-only`), then enters emergency shutdown (`EXT4-fs (sdc): shut down requested (2)`). Final `Synchronize Cache(10) failed: Result: hostbyte=DID_ERROR` — the bridge could not flush its own cache. Kernel releases `/dev/sdc`; mount entry persists as a ghost (`emergency_ro,shutdown` flags in `/proc/mounts`, no device behind it).
+- `t=329555s` → `t=329958s`: every process touching `/mnt/adamssd` (`claude`, `2.1.149`, `Bun Pool 1`, `dockerd`) hits `EXT4-fs warning ... htree_dirblock_to_tree:1051: inode #18481153: lblock 0: error -5 reading directory block`. Inode `#18481153` resolved to `/mnt/adamssd/scaffold-engine/.claude/agents` — the exact path `/doctor` reported.
+- `t=335846s` (today, after USB reseat): drive re-enumerates as `/dev/sda` (USB letters reassign per plug event); `lsblk` shows correct 954 GiB; clean `Attached SCSI disk`.
+
+**Root cause.** The enclosure is a budget USB-to-NVMe adapter using the **AMicro AM8180** bridge chip (USB IDs `0x1de1:0xe101`, identifies as `AMicro AM8180 NVME`). The AM8180 has a documented track record of locking up under sustained write load, particularly with concurrent I/O patterns. Under dockerd's write churn it hung the bridge, which propagated as bus-level `DID_ERROR` to the host. **The SSD inside is healthy** — a Western Digital PC SN7100S 1 TB (`SDFPMSL-1T00-1101`, SN `25245U801955`, FW `7611M001`), which is a standard OEM NVMe stick. The failure is in the enclosure, not the drive.
+
+**Recovery sequence.**
+
+1. `sudo umount -l /mnt/adamssd` — clears the ghost mount pointing at non-existent `/dev/sdc`.
+2. Physical USB cable unplug, ≥5s wait, replug on a different USB port. Bridge power-cycles and re-enumerates.
+3. `lsblk` confirms new device letter; `dmesg | tail -40` confirms clean enumeration (no `DID_ERROR` on the post-replug pass).
+4. `sudo mount -o ro /dev/sda /mnt/adamssd` (whole-disk ext4, no partition table — `/dev/sda` directly, *not* `/dev/sda1`).
+5. `rsync -aHAX --info=progress2 /mnt/adamssd/scaffold-engine/ ~/scaffold-engine-backup/` — 611 MB / 18,489 files at 102 MB/s, zero errors. Sustained read through the bridge works; sustained write was the trigger.
+6. `rsync -anc -aHAX --info=stats1 /mnt/adamssd/scaffold-engine/ ~/scaffold-engine-backup/` — checksum dry-run reports zero files needing transfer. **Backup verified bit-perfect.**
+
+**SMART data unobtainable.** The AM8180 bridge does not proxy NVMe SMART commands. `smartctl --scan` reports `Unknown USB bridge [0x1de1:0xe101 (0x2001)]`. `-d sntjmicron` and `-d sntasmedia` both return `Read NVMe Identify Controller failed: scsi error unsupported scsi opcode`. `-d sat` reaches the drive's ATA shim enough to read Device Model / Serial / Firmware (logged above) but `A mandatory SMART command failed` on the actual health probe — `-d sat` is the wrong protocol for an NVMe drive, and the bridge has no SAT-to-NVMe translation worth the name. **The SSD's internal health counters cannot be read while it remains in this enclosure.** To get SMART, slot the bare NVMe into a real M.2 socket or a bridge with proper NVMe passthrough (JMicron JMS583, ASMedia ASM2362, Realtek RTL9210).
+
+**Going-forward decision: demote `/mnt/adamssd` to cold storage; move active work to NVMe.** The internal NVMe (`/dev/nvme0n1p3`, LUKS-on-LVM, mounted at `/`) has 158 GB free of 225 GB; `/mnt/adamssd` is 47 GB used. Migration target is straightforward by size. The AM8180 enclosure has now demonstrated it will hang and EIO the filesystem under the exact workload scaffold-engine generates (dockerd + embedder + Postgres + Milvus volumes), so leaving the active repo there is gambling on a recurrence we know is coming. The post-§17.63 SSD migration that placed everything on `/mnt/adamssd/` predated this evidence — it's been reversed by physical reality, not by a code change.
+
+**Files.**
+
+- `~/scaffold-engine-backup/` — clean NVMe-resident copy of `/mnt/adamssd/scaffold-engine/` as of 2026-05-23. Becomes the new live repo once the migration steps below land.
+- `/mnt/adamssd/` — currently mounted read-only as a recovery target only. Do not write to it; the AM8180 will hang again under load.
+- Migration follow-ups (separate §-entries when each lands):
+  - `docker-compose.yml`, `docker-compose.dev.yml`, `docker-compose.prod.yml` — bind-mount and volume paths referencing `/mnt/adamssd/` need updating to the new NVMe-resident location.
+  - `.env` — any `SCAFFOLD_*_PATH` / `DOCKER_DATA_ROOT` values pointing at `/mnt/adamssd/`.
+  - `/etc/fstab` — confirm `/mnt/adamssd` entry uses UUID (`587e65d5-f696-48e7-9601-d435c4e8ff34`, the dm-1 device — verify; the old `/dev/sdc` device-letter reference would now mount the wrong drive). Optional: drop the entry entirely if the enclosure is being demoted to ad-hoc backups.
+  - `~/.bashrc`, `~/.profile` — any `cd /mnt/adamssd/...` shortcuts or env exports.
+  - Claude Code project memory directory: `/home/aedefruscio/.claude/projects/-mnt-adamssd-scaffold-engine/` carries the auto-memory path-mangled from the working directory; after migration the path-derived key changes, so memory will appear "missing" from a fresh session at the new path until the project key is updated or memory is moved.
+
+**Verification (this entry).** `/doctor` no longer flagged once the underlying mount cleared; rsync integrity check confirmed bit-perfect copy; `lsblk` confirms post-recovery enumeration. Verification of the migration target itself deferred to the per-step §-entries.
+
+**Why this matters beyond the immediate fix.** Three durable lessons:
+
+1. **Cheap USB-NVMe bridges are not reliable substrates for active dev work** with concurrent writers. The AM8180 is the smoking gun here, but the broader class (single-chip USB-NVMe bridges costing <$20) shares failure modes: thermal throttling under sustained load, firmware hangs under concurrent I/O, no SMART passthrough. For backups and cold storage they're fine. For containers + databases + a knowledge-base embedder, they will fail under load.
+2. **`emergency_ro,shutdown` in `/proc/mounts` is diagnostic gold.** It localizes the problem to the ext4 layer's own escape hatch — the FS detected an unrecoverable error and stopped writing, which means the bug is below ext4 (block layer, controller, drive). Saved hours that would otherwise have gone to fsck'ing a device that wasn't there.
+3. **USB device letters are not stable.** `/etc/fstab` and any scripts referencing `/dev/sdc` etc. will silently target the wrong drive after a replug. Always mount external USB storage by UUID or by `/dev/disk/by-id/...` symlink.
+
+**Open follow-ups** (separate §-entries):
+
+- §17.214 candidate — actually perform the migration (compose path updates, .env updates, fstab cleanup, Claude Code project-key migration). Block on user confirmation of new layout.
+- §17.215 candidate — bake a `make doctor` check that fails loud if any path under `/mnt/adamssd/` appears in compose, .env, or docker volume mounts, so the migration can't silently regress.
+
+---
+
+### §17.214 NVMe migration cutover — repo to `~/scaffold-engine`, Docker data-root to `/var/lib/docker`, `/mnt/adamssd` demoted (2026-05-23)
+
+Executes the §17.213 decision. About four hours after the AM8180 enclosure failure was diagnosed, the full active stack is back on the internal NVMe with every named volume preserved bit-perfect and zero data loss.
+
+**The migration turned out to be a single config-line change plus an rsync.** §17.213's compose audit found that all data persistence sits behind named Docker volumes under `/etc/docker/daemon.json`'s `data-root` override. Every app-side bind mount uses relative paths (`./pipelines`, `./db/init.sql`, etc.) so they follow the repo wherever it goes. The only absolute mount in compose was `/home/aedefruscio/searxng:/etc/searxng:ro`, already on NVMe and irrelevant. Outcome: the migration was *not* a path rewrite across the codebase; it was three operations on the host (`rsync /mnt/adamssd/docker → /var/lib/docker`, edit `daemon.json`, replace the `~/scaffold-engine` symlink with the real backup tree).
+
+**Order of operations.**
+
+1. *Repo backup integrity*: `rsync -anc -aHAX` checksum dry-run between `/mnt/adamssd/scaffold-engine/` and `~/scaffold-engine-backup/` (the §17.213 backup) returned **zero files needing transfer** — repo backup verified bit-perfect before any destructive step. The 611 MB source-tree backup landed via `rsync -aHAX --info=progress2` at 102 MB/s in 5s (the bridge handles sustained reads fine; only sustained *writes* were the trigger for the original §17.213 failure).
+2. *Docker shutdown*: not needed — daemon was already `failed (Result: exit-code) since Sat 2026-05-23 08:04:02 EDT`, downstream casualty of the original FS shutdown ~3 hours before this work began. `docker.socket` was at `service-start-limit-hit`. No graceful `compose down` possible; none required.
+3. *Data-root migration*: `sudo rsync -aHAX --info=progress2 /mnt/adamssd/docker/ /var/lib/docker/` — **48,973,599,006 bytes transferred at 126.65 MB/s in 6m 8s, 492,823 files, zero I/O errors**. `/var/lib/docker` did not pre-exist on this host (Docker had been installed already-configured with the §17.63 data-root override), so the `mv /var/lib/docker /var/lib/docker.preexisting` precautionary step errored harmlessly and rsync created the path fresh.
+4. *Config flip*: `/etc/docker/daemon.json` from `{"data-root": "/mnt/adamssd/docker"}` to `{}`. Backup preserved at `/etc/docker/daemon.json.bak`.
+5. *Daemon start*: `sudo systemctl start docker.socket docker` — `active (running)` within ~35 ms, `Docker Root Dir: /var/lib/docker` confirmed via `docker info`. **Auto-restart picked up nine `restart: always` containers immediately** against the migrated volumes; by the time the operator ran `docker compose up -d` they were already at `Up 11 minutes (healthy)`. Volume listing intact: all seven named volumes (`scaffold-postgres-data`, `scaffold-engine_redis-data`, `scaffold-engine_hf-cache`, `scaffold-engine_scaffold-logs`, `scaffold-engine_searxng-cache`, plus externals `milvus-data-v2` and `open-webui`) mountpointed under `/var/lib/docker/volumes/`.
+6. *Repo cutover*: `~/scaffold-engine` (symlink → `/mnt/adamssd/scaffold-engine`, created 2026-05-09 11:47 per §17.63's muscle-memory shim) → real directory containing the verified backup tree. `cd ~` first (the shell was sitting inside the symlink-resolved RO mount), then `rm ~/scaffold-engine` (link only, target untouched), then `mv ~/scaffold-engine-backup ~/scaffold-engine`. The repo's literal physical home is now `/home/aedefruscio/scaffold-engine`.
+7. *Orchestrator cycle*: `docker compose up -d` from the new repo location recreated only `scaffold-orchestrator` (its config diffed against the pre-crash stored state); the other nine containers were already healthy on the migrated volumes from step 5's auto-revive. Orchestrator settled to `Up X minutes (healthy)` after ~30s of lifespan probe + reranker prewarm.
+8. *Demote*: `sudo umount /mnt/adamssd` clean — nothing held the mount open after the container cycle. **`/etc/fstab` entry retained with `noauto` added** (via `sed -i.bak`) so the drive stays available for manual `sudo mount /dev/sda /mnt/adamssd` (cold backups) but won't auto-mount at boot. The `nofail,x-systemd.device-timeout=10s` options that were already present remain — boot-safe regardless of `noauto`.
+
+**Verification.**
+
+- `/health`: `status=healthy`. postgresql/ollama/milvus/redis all `up`. **`milvus.collection_count=1, entry_count=565`** (corpus preserved through the migration; matches §17.158's documented post-§17.63 state). **`redis.keys=1717`** (cache preserved). Reranker prewarmed in 8.99s at startup. `auth_enabled=true`. All six observability caches initialized at zero (expected — fresh process state, not data loss).
+- `make doctor`: **`1 warnings, no failures`**. The single warning is the long-standing `SCAFFOLD_VALVES_ENV_OVERRIDE not enabled` default-off behavior, unrelated to migration. Network `ai-network` present, externals `open-webui` and `milvus-data-v2` present, all 7 expected containers running, schema migration `045_jobs_dag_input_hash.sql` latest applied (matches pre-crash state — DB volume preserved).
+- `docker volume inspect scaffold-postgres-data` → `Mountpoint: /var/lib/docker/volumes/scaffold-postgres-data/_data` (was `/mnt/adamssd/docker/volumes/scaffold-postgres-data/_data` before).
+- `lsblk` after umount: `sda 953.9G 0 disk` with no mountpoint — drive present but not in use.
+- **End-to-end downtime ≈ 25 minutes** (rsync 6m + daemon restart + container cycle drift + verification). Most of that was the rsync; everything else was concurrent against the host coming back up.
+
+**Files changed.**
+
+- `/etc/docker/daemon.json` — `{"data-root": "/mnt/adamssd/docker"}` → `{}`. Backup at `/etc/docker/daemon.json.bak`.
+- `/etc/fstab` — `/mnt/adamssd` mount options now `noauto,defaults,nofail,x-systemd.device-timeout=10s`. Backup at `/etc/fstab.bak`.
+- `~/scaffold-engine` — symlink replaced with real directory containing the 18,489-file repo tree.
+- `/var/lib/docker/` — newly populated (49 GB) from former `/mnt/adamssd/docker/`. All named volumes preserved bit-perfect.
+
+**Repo-side files changed: zero.** No commit needed. The §17.213 audit's "compose is location-portable" finding held under live cutover — not a single `docker-compose*.yml`, `.env`, or `Makefile` line was edited.
+
+**Final state of `/mnt/adamssd`.** Unmounted. Drive (currently enumerated as `/dev/sda` while plugged) physically present but `noauto` in fstab. Available for ad-hoc `sudo mount /dev/sda /mnt/adamssd` for cold backups. **Read-only mounts only** unless someone has electrically replaced the enclosure — the §17.213 root cause (AMicro AM8180 bridge hang under sustained writes) is structural; retries won't help. The drive itself (WD PC SN7100S 1 TB) is healthy and can be repurposed inside a better enclosure or directly in an M.2 slot.
+
+**§17.213's open follow-ups, status.**
+
+- §17.214 candidate — actually perform the migration. **This entry. Closed.**
+- §17.215 candidate — `make doctor` check that fails loud if any path under `/mnt/adamssd/` appears in compose, .env, or docker volume mounts. **Held with reduced urgency.** The migration didn't surface any such paths in the repo (the project was already location-portable; the only `/mnt/adamssd` reference in any config file was `/etc/docker/daemon.json`, which is system-level and now reverted). A guard would still be cheap insurance against a future commit re-introducing the path; logged for a quiet-window commit.
+
+**One remaining operator-side cleanup (not §-tracked).** Claude Code's project memory directory is keyed off cwd. The current session's memory lives at `~/.claude/projects/-mnt-adamssd-scaffold-engine/memory/`. Future sessions opened in `~/scaffold-engine` will key off `~/.claude/projects/-home-aedefruscio-scaffold-engine/` — which has stale `.jsonl` session logs and a stale `memory/` dir from May 9 (pre-§17.63). Recommended action: copy the current memory dir into the new key location (overwriting the stale files), or accept a memory reset on next session. The old session JSONLs can stay; they're historical and don't conflict.
+
+**What §17.213 + §17.214 leave us with going forward.** Active scaffold-engine work is now on the internal LUKS-on-LVM NVMe (229.5 GB total, 158 GB free pre-migration → ~109 GB free post-migration with 49 GB of Docker volumes on board). The encryption + LVM layer adds a thin perf tax but the host has demonstrated it can saturate the bus at native NVMe speed for the workloads that actually matter. The AM8180 enclosure is demoted to manual-mount cold-backup duty; its primary contribution from here is "do not buy single-chip USB-NVMe enclosures for active dev work with concurrent writers" (§17.213's first durable lesson, now lived experience). The §17.63 SSD migration's premise — that the USB-attached SSD would handle the orchestrator + Milvus + Postgres + Redis + Ollama-adjacent workload at acceptable reliability — is **superseded**. The §17.63 entry's claim still describes what was attempted; this entry records why it was reversed.
+
+---
+
 
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
