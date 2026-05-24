@@ -1456,3 +1456,58 @@ class TestAssistChatMemory:
         assert "ℹ️" in out and "already" in out and "`?`" in out, \
             f"expected no_op banner with '?' fallback; got: {out!r}"
 
+    # -- §17.275: extend the JSON-parse guard pattern to /skip and /pause/resume --
+
+    def test_skip_handles_non_json_body(self, pipe, monkeypatch):
+        """§17.275 — /assist skip: non-JSON 200 body must yield ❌ cleanly,
+        not crash the generator (same pattern §17.259 closed for /start)."""
+        _log, responses = _http_call_log(monkeypatch)
+        responses[("get", "/assist/_chatmap/chat-N")] = _make_response(
+            200, {"chat_id": "chat-N", "session_id": _UUID_A, "last_node_key": "T7"},
+        )
+        responses[("post", f"/assist/{_UUID_A}/submit")] = _make_response(
+            200, "not json at all",
+        )
+        responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
+
+        out = "".join(pipe.pipe("/assist skip", "m", [], self._body_with_chat("chat-N")))
+        assert "❌" in out and "non-JSON" in out, \
+            f"expected JSON-parse error yield; got: {out!r}"
+
+    def test_pause_handles_non_json_body(self, pipe, monkeypatch):
+        """§17.275 — /assist pause (one of the _assist_simple_post actions):
+        non-JSON 200 body must yield ❌ cleanly."""
+        _log, responses = _http_call_log(monkeypatch)
+        responses[("get", "/assist/_chatmap/chat-O")] = _make_response(
+            200, {"chat_id": "chat-O", "session_id": _UUID_A, "last_node_key": None},
+        )
+        responses[("post", f"/assist/{_UUID_A}/pause")] = _make_response(
+            200, "not json at all",
+        )
+
+        out = "".join(pipe.pipe("/assist pause", "m", [], self._body_with_chat("chat-O")))
+        assert "❌" in out and "non-JSON" in out, \
+            f"expected JSON-parse error yield; got: {out!r}"
+
+
+# ===========================================================================
+# §17.275 — JSON-parse guards in sync action handlers
+# (/jobs list, /jobs rename, /research list)
+# ===========================================================================
+
+@pytest.mark.smoke
+class TestSyncActionJsonGuards:
+    """§17.275 — sync action handlers (return strings, not generators) now
+    have inline try/except around r.json(). One representative test per
+    handler is enough; the pattern is identical across the three callsites
+    and dag_viewer's _render. Pre-§17.275 these would have raised
+    ValueError up the stack, surfacing as 'Internal pipeline error' in OWUI."""
+
+    def test_jobs_list_action_handles_non_json_body(self, pipe, monkeypatch):
+        _log, responses = _http_call_log(monkeypatch)
+        responses[("get", "/jobs")] = _make_response(200, "not json at all")
+
+        out = "".join(pipe.pipe("/jobs", "m", [], {}))
+        assert "⚠️" in out and "non-JSON" in out, \
+            f"expected non-JSON warning; got: {out!r}"
+

@@ -1718,7 +1718,13 @@ class Pipeline:
             yield f"❌ Connection error: {e}"; return
         if r.status_code >= 400:
             yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
-        d = r.json()
+        # §17.275 — mirror §17.259's _assist_start guards.
+        try:
+            d = r.json()
+        except ValueError as e:
+            yield f"❌ Assist skip: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+        if not isinstance(d, dict):
+            yield f"❌ Assist skip: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
         next_nk = d.get("next_node_key")
         self._assist_remember(
             chat_id, session_id=session_id, last_node_key=next_nk,
@@ -1821,7 +1827,13 @@ class Pipeline:
             yield f"❌ Connection error: {e}"; return
         if r.status_code >= 400:
             yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
-        d = r.json()
+        # §17.275 — mirror §17.259's _assist_start guards.
+        try:
+            d = r.json()
+        except ValueError as e:
+            yield f"❌ Assist {action}: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+        if not isinstance(d, dict):
+            yield f"❌ Assist {action}: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
         yield f"✅ Session `{session_id}` -> `{d.get('status', action)}`."
 
     def _assist_done(
@@ -2895,7 +2907,13 @@ class Pipeline:
             return f"⚠️ {e}"
         if r.status_code >= 400:
             return self._fmt(r)
-        data = r.json()
+        # §17.275 — non-JSON 200 body would have crashed pre-fix.
+        try:
+            data = r.json()
+        except ValueError as e:
+            return f"⚠️ Jobs list: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"
+        if not isinstance(data, dict):
+            return f"⚠️ Jobs list: orchestrator reply not a dict; raw: {str(data)[:200]}"
         jobs = data.get("jobs", [])
         total = data.get("total", 0)
         header_bits = []
@@ -2927,7 +2945,13 @@ class Pipeline:
             return f"Job not found: `{job_id}`"
         if r.status_code >= 400:
             return self._fmt(r)
-        d = r.json()
+        # §17.275 — non-JSON 200 body would have crashed pre-fix.
+        try:
+            d = r.json()
+        except ValueError as e:
+            return f"⚠️ Job rename: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"
+        if not isinstance(d, dict):
+            return f"⚠️ Job rename: orchestrator reply not a dict; raw: {str(d)[:200]}"
         return f"✅ Renamed `{(d.get('id') or '')[:8]}`: **{d.get('title')}**"
 
     def _jobs_delete_action(self, job_id: str, confirm: bool) -> str:
@@ -3027,7 +3051,13 @@ class Pipeline:
             return f"⚠️ {e}"
         if r.status_code >= 400:
             return self._fmt(r)
-        data = r.json()
+        # §17.275 — non-JSON 200 body would have crashed pre-fix.
+        try:
+            data = r.json()
+        except ValueError as e:
+            return f"⚠️ Research list: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"
+        if not isinstance(data, dict):
+            return f"⚠️ Research list: orchestrator reply not a dict; raw: {str(data)[:200]}"
         sessions = data.get("sessions", [])
         total = data.get("total", 0)
         header = "## 🔍 Research Sessions"

@@ -14886,6 +14886,39 @@ async with async_session() as session:
 
 ---
 
+### §17.275 batch close of the 6 remaining bare `r.json()` callsites — close §17.273 🔴 #2-#7 (2026-05-24)
+
+§17.273's six other red items. Apply the §17.259/§17.268 defensive pattern (try/except ValueError + isinstance dict check + .get() fallbacks) to every remaining unwrapped `r.json()` callsite the audit surfaced. Two-callsite groups by caller shape:
+
+**Generator yields** (pre-fix: `ValueError` mid-yield → crashed chat thread):
+- `pipelines/scaffold_router.py:_assist_skip` — `/assist/{sid}/submit` with `action="skip"`. New error message: `❌ Assist skip: orchestrator returned non-JSON body ...`
+- `pipelines/scaffold_router.py:_assist_simple_post` — generic `/assist/{sid}/{action}` handler (covers `pause`, `resume`, `cancel`, etc.). New error message includes the action verb verbatim so operators see which subcommand failed.
+
+**Sync action handlers** (pre-fix: `ValueError` bubbled up the stack → OWUI saw "Internal pipeline error"):
+- `pipelines/scaffold_router.py:_jobs_list_action` — `/jobs` index render.
+- `pipelines/scaffold_router.py:_jobs_rename_action` — `PATCH /jobs/{id}`.
+- `pipelines/scaffold_router.py:_research_list_action` — `/research/sessions` index render.
+
+**Soft case** (`dag_viewer.py:_render` path) — pre-fix the bare `r.json()` was technically INSIDE an outer `except Exception` that would catch `ValueError` and emit `⚠️ Error: <generic>`. Not a crash but a poor diagnostic. Inline guard now produces `⚠️ DAG: orchestrator returned non-JSON body ({e}); raw: ...` so operators know the body shape was wrong vs. a connection-level issue.
+
+All six edits follow the same three-layer shape (mirrors §17.259):
+1. `try: ... = r.json() / except ValueError as e: yield/return ⚠️|❌ ... non-JSON body ...; return`
+2. `if not isinstance(d, dict): yield/return ... reply not a dict ...; return`
+3. Preserve existing `.get()` usage on the result; no hard `d[...]` accesses introduced
+
+**Test-suite delta:** +3 tests:
+- `test_skip_handles_non_json_body` in `TestAssistChatMemory` (mirrors `test_next_handles_non_json_body`)
+- `test_pause_handles_non_json_body` in `TestAssistChatMemory` — `_assist_simple_post` exercise via `/assist pause` (representative of `pause`/`resume`/`cancel`)
+- `test_jobs_list_action_handles_non_json_body` in new `TestSyncActionJsonGuards` — representative of the three sync-return handlers (rename + research_list share the same edit shape; one test pins the pattern; the inline guards are uniform)
+
+Full file 14 → 17 passing in the relevant classes. No regressions.
+
+**§17.273 closeout status.** All 7 🔴 closed (§17.274 + §17.275). The 2 🟡 + 3 🟢 + 4 test gaps remain as the next work surface.
+
+**Sweep observation across §17.259 + §17.268 + §17.275.** The same `if r.status_code >= 400: return; d = r.json()` pattern surfaced THREE times in the audit cycle. Each pass added a few guards. The cumulative coverage now: all 9 originally-flagged callsites (3 in §17.259, 2 in §17.268, 4 in §17.275-from-scaffold_router) plus dag_viewer's soft case. A future-proof preventative would be a lint rule or a thin `_safe_json(r, label)` helper that every caller routes through — logged as a candidate refactor but not in scope here; the inline pattern is short enough to live at each callsite and the §-marker comments make grep-discovery trivial.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

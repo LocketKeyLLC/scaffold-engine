@@ -244,7 +244,17 @@ class Pipeline:
                 hint = self._drift_hint() if r.status_code == 401 else ""
                 return f"⚠️ Error {r.status_code}: {r.text[:200]}{hint}"
 
-            data = r.json()
+            # §17.275 — the outer `except Exception` at the function bottom
+            # WOULD catch a ValueError from .json() and emit a generic
+            # "⚠️ Error: ..." message, but that loses the diagnostic that
+            # the body shape was wrong vs. a connection-level issue. Inline
+            # guard gives the operator an actionable error.
+            try:
+                data = r.json()
+            except ValueError as e:
+                return f"⚠️ DAG: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"
+            if not isinstance(data, dict):
+                return f"⚠️ DAG: orchestrator reply not a dict; raw: {str(data)[:200]}"
             nodes = data.get("nodes", [])
             if not nodes:
                 return f"No DAG nodes found for job `{job_id}`."
