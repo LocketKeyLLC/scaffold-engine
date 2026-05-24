@@ -14777,6 +14777,34 @@ The older sibling (`25b5cbab`, by `created_at`) stays linked to the original pre
 
 ---
 
+### §17.272 sweeper applied across all remaining domains — 2 more branches reconciled (2026-05-24)
+
+Operator-invoked full-corpus sweep with `--apply` (no `--domain` flag → all seven). Closes the "possible but unconfirmed" tail §17.271 logged.
+
+**Dry-run pre-apply (exit 1):** 2 branches found, both in the §17.267 race shape.
+
+| Domain | Predecessor | Re-link |
+|---|---|---|
+| `llm` | `scaffold-pytorch-torchtune-readme-md-code-15-9c5e084a` | `...release-v0-5-0-code-1-fcfb0446` → v=3 successor of `...release-v0-4-0-code-3-8172cfe9` |
+| `prompt` | `scaffold-prompt-engineering-wikipedia-ea243ce4` | `...wikipedia-9a0861df` → v=3 successor of `...wikipedia-1618265b` |
+
+Both branches are domain-natural concurrent-ingest residue (overlapping `/research` runs on torchtune release notes / prompt-engineering wikipedia entries). The race fired on three out of seven domains.
+
+**Apply (exit 0):** `flatten_summary: mode=APPLY domains=7 branches=2 rewrites=2`. Two upserts landed; predecessor lock fired on each. Empty domains (`code`, `qa`, `spec`) skipped cleanly; pre-clean domains (`eng` from §17.271, `rag`) traversed without rewrite.
+
+**Post-apply dry-run (exit 0):** `flatten_summary: mode=DRY-RUN domains=7 branches=0 rewrites=0`. Full corpus linear. Idempotence proven at the cross-domain scale.
+
+**§17.267 production race-residue empirical tally (final):**
+- 7 domains scanned
+- 3 had branches (eng = 1, llm = 1, prompt = 1)
+- 3 were empty (code, qa, spec — none ingested into yet)
+- 1 was naturally linear (rag)
+- 4 total rewrites across §17.271 + §17.272 (1 eng + 1 llm + 1 prompt + 0 because eng was a single-row rewrite)
+
+Correction: 3 total rewrites (§17.271 = 1 in eng, §17.272 = 2 across llm + prompt). The chain is now globally consistent. The §17.267 → §17.269 → §17.270 → §17.271 → §17.272 thread terminates with zero production-data debt.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
