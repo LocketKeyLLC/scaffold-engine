@@ -511,6 +511,13 @@ class RagInput(BaseModel):
     # EMBED_QUERY_TEMPLATES keys at the endpoint layer; pydantic Literal
     # gives a clean 422 response shape for unknown intents.
     query_intent: Literal["general", "code", "qa", "paper"] = "general"
+    # §17.234 — per-request override for settings.rerank_max_candidates.
+    # When None (default), the global config value applies. When set,
+    # caps the candidates passed into the CrossEncoder so an interactive
+    # /rag can trade some marginal recall for latency (rerank cost is
+    # ~7s per pair on CPU with default doc_truncate=2000; see §17.233).
+    # Same bounds as the underlying setting.
+    max_candidates: int | None = Field(default=None, ge=1, le=512)
 
 
 class GtInput(BaseModel):

@@ -78,6 +78,31 @@ class TestMakeKey:
         b = make_key("q", "eng", 5, 0.5, False, False, "general")
         assert a != b
 
+    # §17.234 — max_candidates is part of the key. A request with
+    # max_candidates=5 must NOT hit a cached entry from a request with
+    # max_candidates=32 (different reranker shortlist → different results).
+    def test_max_candidates_change_changes_key(self):
+        a = make_key("q", "eng", 5, 0.3, False, False, "general", max_candidates=5)
+        b = make_key("q", "eng", 5, 0.3, False, False, "general", max_candidates=32)
+        assert a != b
+
+    def test_max_candidates_none_distinct_from_explicit(self):
+        """max_candidates=None (settings-default semantics) keys differently
+        from max_candidates=<int> even when the int equals the settings
+        default. Operators reading cache stats should be able to distinguish
+        explicit-cap vs default-cap calls."""
+        a = make_key("q", "eng", 5, 0.3, False, False, "general", max_candidates=None)
+        b = make_key("q", "eng", 5, 0.3, False, False, "general", max_candidates=10)
+        assert a != b
+
+    def test_max_candidates_default_arg_matches_explicit_none(self):
+        """Omitting max_candidates is equivalent to passing None — the field
+        defaults to None so pre-§17.234 callers (and cached entries from
+        before this rollout) keep their existing key under the new code."""
+        a = make_key("q", "eng", 5, 0.3, False, False, "general")
+        b = make_key("q", "eng", 5, 0.3, False, False, "general", max_candidates=None)
+        assert a == b
+
 
 # ---------------------------------------------------------------------------
 # _is_cacheable

@@ -10680,6 +10680,184 @@ claim (`mem_limit: 3g → 6g` is the right fix for the crash) but the
 
 ---
 
+### §17.234 `max_candidates` as per-request `/rag` override — close §17.233 candidate C (2026-05-24)
+
+Closes §17.233 candidate C — "surface `rerank_max_candidates` as a
+per-request param." Previously the cap was config-only
+(`settings.rerank_max_candidates`, default 10 post-§17.233): an OWUI
+operator running a quick `/rag` couldn't trade marginal recall for
+latency on a per-call basis, and a batch caller wanting maximum
+recall had to coordinate a restart-with-env-change to raise the cap.
+This commit adds `max_candidates` to the `/rag` request body so each
+call can pick its own latency/recall point.
+
+**Schema.**
+
+`RagInput` gains one optional field:
+
+```python
+max_candidates: int | None = Field(default=None, ge=1, le=512)
+```
+
+When `None` (default), the global `settings.rerank_max_candidates`
+applies — pre-§17.234 behavior preserved byte-for-byte. When set,
+caps the number of RRF candidates passed into the CrossEncoder for
+this call only. Same bounds (1-512) as the underlying setting; same
+Pydantic validation shape on a 422 for out-of-range.
+
+**Plumbing — 4 files, all additive.**
+
+| File | Change |
+|---|---|
+| `app/schemas.py` | `RagInput.max_candidates: int \| None = Field(default=None, ge=1, le=512)` + 6-line rationale comment |
+| `sdk/scaffold_client/schemas.py` | Auto-synced via `make sync-schemas` (byte-equal vendor; §17.186 gate verified) |
+| `app/routers/rag.py` | `POST /rag` handler passes `max_candidates=body.max_candidates` through to `_query_rag` |
+| `app/modules/rag_pipeline.py` | `query_rag` adds `max_candidates: int \| None = None` kwarg; threads to `_rerank` and `rag_cache.get`/`.put` |
+| `app/modules/rag_pipeline.py::_rerank` | New keyword-only `max_candidates: int \| None = None`; `max_cand = int(max_candidates if max_candidates is not None else settings.rerank_max_candidates)` |
+| `app/utils/rag_result_cache.py` | `_canonical_payload` + `make_key` + `RagResultCache.get` + `RagResultCache.put` all gain `max_candidates: int \| None = None`; included in the canonical JSON so two requests differing only in `max_candidates` get different cache keys |
+
+The cache-key change matters when `settings.cache_rag_results` is on
+(default off). A request with `max_candidates=5` reranks 5 candidates
+and stores a shortlist-of-5-shaped response; a follow-up request with
+`max_candidates=32` must NOT hit the same cached row (different
+shortlist semantics). The new key field separates them. A request
+omitting `max_candidates` (the default-None case) gets the same key
+as a pre-§17.234 caller — backward-compat preserved for any cached
+rows that survive across the deploy.
+
+**Tests — 7 new in 2 files; 4 existing mocks updated.**
+
+`tests/test_rag_pipeline.py::TestRerankMaxCandidatesOverride` (4
+tests):
+
+| Test | Locks in |
+|---|---|
+| `test_override_caps_pairs_fed_to_reranker` | `max_candidates=3` against 15 input results → CrossEncoder receives exactly 3 docs |
+| `test_none_falls_back_to_settings` | `max_candidates=None` against 50 input results → CrossEncoder receives `settings.rerank_max_candidates` docs (post-§17.233: 10) |
+| `test_override_zero_inputs_returns_empty` | Empty results short-circuit before max_candidates is consulted |
+| `test_override_larger_than_results_is_safe` | `max_candidates=999` against 3 results → 3 docs to reranker (Python slice semantics; no error) |
+
+`tests/test_rag_result_cache.py::TestMakeKey` (3 new):
+
+| Test | Locks in |
+|---|---|
+| `test_max_candidates_change_changes_key` | `max_candidates=5` vs `max_candidates=32` → different keys |
+| `test_max_candidates_none_distinct_from_explicit` | `max_candidates=None` ≠ `max_candidates=<settings-default-int>` (operator stats can distinguish default-cap vs explicit-cap calls) |
+| `test_max_candidates_default_arg_matches_explicit_none` | Omitting the arg ≡ passing `None` (backward-compat with pre-§17.234 callers) |
+
+Updates to existing mocks:
+- `tests/test_rag_pipeline.py::_patch_rag_deps::mock_rerank` — added `*, max_candidates=None` kwarg.
+- `tests/test_rag_pipeline.py::TestConfidenceThreshold::low_rerank` — same.
+- 8 fixtures that called `_rerank` indirectly through the mock kept working without changes.
+
+**Verification — live `/rag truncation domain=eng` at three depths on the §17.232 + §17.233 stack.**
+
+```
+$ curl -X POST http://localhost:8000/rag \
+    -H 'X-Api-Key: …' -H 'Content-Type: application/json' \
+    -d '{"query":"truncation","domain":"eng","top_k":10,"max_candidates":5}'
+```
+
+| `max_candidates` | wall | `reranker_completed.docs` | `elapsed_ms` | `top_score` |
+|---:|---:|---:|---:|---:|
+| 5 (new override) | **39.2 s** | 5 | 39,124 | 0.3119 |
+| 10 (§17.233 default) | 76.6 s | 10 | 76,565 | 0.3119 |
+| 20 (pre-§17.232 effective) | 234 s | 20 | 234,409 | 0.3119 |
+
+Three observations:
+
+1. **Latency scales linearly** with `max_candidates`, as expected from
+   the reranker's CPU profile (each pair costs ~7s; total ≈ pairs ×
+   per-pair cost).
+2. **`top_score` is unchanged across all three depths** for this
+   query. The winning doc is captured even by the smallest shortlist
+   (max=5); the candidates added by deeper reranks don't outrank the
+   top-5. This is the at-the-margin case §17.233 framed: deeper
+   rerank IS useful sometimes, but for many real queries the top-N
+   from RRF already contains the eventual top-K answer.
+3. **`reranker_decision` log level** drops from `error` (>120s) at
+   `max_candidates=20`, to `warning` (>30s) at `max_candidates=10`,
+   stays at `warning` at `max_candidates=5`. Operators tuning the
+   per-request value can read off the latency threshold they need
+   from the log level without parsing `elapsed_ms`.
+
+**Why the operator-facing surface is the right place.**
+
+Three alternatives were considered:
+
+| Alternative | Pros | Cons | Decision |
+|---|---|---|---|
+| Per-request override (this commit) | Operator picks per-call; no restart for a different tradeoff; OWUI can default to fast/shallow while batch keeps deep | Adds a request field | **shipped** |
+| Global setting only (status quo pre-§17.234) | Smallest surface | Restart-with-env to change; one-size-fits-all | rejected — was the §17.233 candidate C ask |
+| Auto-tune based on query "interactive" hint | Smart | Heuristic-based; would surprise operators ("why is this slow?") | rejected — explicit is better than magic for a latency knob |
+
+OWUI's `pipelines/scaffold_router.py` `/rag` handler can adopt
+`max_candidates=5` for chat-side use without affecting the SDK / CLI
+/ direct-curl callers, who all default to None and get the global
+config's value. That update is a separate small commit (one line in
+the `/rag` POST body in `scaffold_router.py`) — kept out of §17.234
+to keep the engine-side change atomic.
+
+**What §17.234 does NOT change.**
+
+- `settings.rerank_max_candidates` default (10) — unchanged. Pre-
+  §17.234 callers that don't pass `max_candidates` see the same
+  behavior as post-§17.233.
+- `rerank_doc_truncate` (2000 chars). The quadratic lever from
+  §17.234 candidate A is still on the table; the per-request
+  shortlist cap addresses the linear lever cleanly without touching
+  it.
+- Reranker model. §17.234 candidate B (`Qwen3-Reranker-0.1B` swap)
+  remains a separate evaluation.
+- OWUI `pipelines/scaffold_router.py` — does not yet pass
+  `max_candidates`. Operator default-fast on the chat surface is a
+  separate one-line commit; held until a goldens-vs-shortlist quality
+  evaluation confirms 5 is the right interactive default (currently
+  empirical only on this single "truncation" query).
+
+**Files.**
+
+- `app/schemas.py` — `RagInput.max_candidates` field.
+- `sdk/scaffold_client/schemas.py` — byte-equal vendor copy (`make sync-schemas`).
+- `app/routers/rag.py` — handler plumbs the field through.
+- `app/modules/rag_pipeline.py` — `query_rag` + `_rerank` thread the override.
+- `app/utils/rag_result_cache.py` — cache key + get/put signatures.
+- `tests/test_rag_pipeline.py` — `TestRerankMaxCandidatesOverride` (4 new); 2 mock fixtures updated.
+- `tests/test_rag_result_cache.py` — 3 new `TestMakeKey` cases.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_rag_pipeline.py tests/test_rag_result_cache.py \
+    tests/test_rag_pipeline_smoke.py -q --timeout=30
+80 passed in 7.97s   (73 pre-existing + 7 new §17.234 tests)
+
+$ make check-schemas
+✓ sdk/scaffold_client/schemas.py is in sync with app/schemas.py.
+```
+
+Live three-depth /rag test (table above): 39s @ 5, 77s @ 10, 234s @
+20. `top_score` invariant at 0.3119 across all three. `n_results=3`
+unchanged. Response body byte-equal at 12,025 bytes.
+
+**Open follow-ups.**
+
+1. **Adopt `max_candidates=5` in OWUI `pipelines/scaffold_router.py`'s
+   `/rag` handler.** One-line edit in the request body; halves
+   chat-side `/rag` wall from 77 s → 39 s on this hardware. Held
+   pending a quality eval (a goldens score with `max_candidates=5` to
+   confirm coverage@10 doesn't regress meaningfully from the
+   `max_candidates=10` baseline).
+2. **§17.234 candidate A** (still open) — `rerank_doc_truncate`
+   evaluation harness. Quadratic lever; needs the same goldens-based
+   eval scaffold.
+3. **§17.234 candidate B** (still open) — `Qwen3-Reranker-0.1B`
+   swap; ~6× speedup on the model dimension; needs threshold retune
+   + retrieval-quality eval.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

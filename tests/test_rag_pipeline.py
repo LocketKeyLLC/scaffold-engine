@@ -56,8 +56,13 @@ def _patch_rag_deps(
     if keyword_results is None:
         keyword_results = []
 
-    async def mock_rerank(query, results, top_k):
-        """New contract: _rerank returns (ranked, meta)."""
+    async def mock_rerank(query, results, top_k, *, max_candidates=None):
+        """New contract: _rerank returns (ranked, meta).
+
+        §17.234 — max_candidates kwarg added; mock accepts and ignores
+        (mock returns the input results in their existing order; the
+        kwarg only matters at the real CrossEncoder boundary).
+        """
         for r in results:
             r.rerank_score = r.rrf_score
             r.final_score = r.rrf_score
@@ -533,6 +538,93 @@ class TestRerankEmptyItems:
 
 
 # ===========================================================================
+# §17.234 — per-request max_candidates override
+# ===========================================================================
+
+class TestRerankMaxCandidatesOverride:
+    """_rerank honors per-call max_candidates; falls back to settings when None."""
+
+    def _make_results(self, n):
+        from app.modules.rag_pipeline import RagResult
+        return [
+            RagResult(content=f"doc-{i}", entry_id=f"e{i}", rrf_score=1.0 - i*0.01)
+            for i in range(n)
+        ]
+
+    def test_override_caps_pairs_fed_to_reranker(self):
+        """max_candidates=3 → reranker receives exactly 3 docs, not the global cap."""
+        from app.modules.rag_pipeline import _rerank
+
+        fake_rr = MagicMock()
+        fake_rr.items = []  # reranker no-op; we only care what we pass in
+        fake_rr.backend = "mock"
+        fake_rr.latency_ms = 1.0
+
+        results = self._make_results(15)
+
+        captured_docs = []
+        def capture(query, docs, top_k):
+            captured_docs.extend(docs)
+            return fake_rr
+
+        with patch("app.modules.rag_pipeline.cross_encoder_rerank", side_effect=capture):
+            _run(_rerank("q", results, top_k=10, max_candidates=3))
+
+        assert len(captured_docs) == 3, f"expected 3 docs to reranker, got {len(captured_docs)}"
+
+    def test_none_falls_back_to_settings(self):
+        """max_candidates=None uses settings.rerank_max_candidates."""
+        from app.modules.rag_pipeline import _rerank
+        from app.config import settings
+
+        fake_rr = MagicMock()
+        fake_rr.items = []
+        fake_rr.backend = "mock"
+        fake_rr.latency_ms = 1.0
+
+        # 50 input results so the cap matters regardless of settings value
+        results = self._make_results(50)
+        captured_docs = []
+        def capture(query, docs, top_k):
+            captured_docs.extend(docs)
+            return fake_rr
+
+        with patch("app.modules.rag_pipeline.cross_encoder_rerank", side_effect=capture):
+            _run(_rerank("q", results, top_k=10, max_candidates=None))
+
+        assert len(captured_docs) == int(settings.rerank_max_candidates), (
+            f"expected {settings.rerank_max_candidates} (settings default), got {len(captured_docs)}"
+        )
+
+    def test_override_zero_inputs_returns_empty(self):
+        """Empty results short-circuit before max_candidates is even consulted."""
+        from app.modules.rag_pipeline import _rerank
+        ranked, meta = _run(_rerank("q", [], top_k=10, max_candidates=5))
+        assert ranked == []
+        assert meta["backend"] is None
+
+    def test_override_larger_than_results_is_safe(self):
+        """max_candidates > len(results) caps at len(results) without error."""
+        from app.modules.rag_pipeline import _rerank
+
+        fake_rr = MagicMock()
+        fake_rr.items = []
+        fake_rr.backend = "mock"
+        fake_rr.latency_ms = 1.0
+
+        results = self._make_results(3)
+        captured_docs = []
+        def capture(query, docs, top_k):
+            captured_docs.extend(docs)
+            return fake_rr
+
+        with patch("app.modules.rag_pipeline.cross_encoder_rerank", side_effect=capture):
+            _run(_rerank("q", results, top_k=10, max_candidates=999))
+
+        assert len(captured_docs) == 3  # Python list[:999] just stops at len(results)
+
+
+# ===========================================================================
 # Confidence Threshold Relaxation
 # ===========================================================================
 
@@ -546,7 +638,7 @@ class TestConfidenceThreshold:
             {"content": "Low C", "entry_id": "e3", "vector_score": 0.1},
         ])
 
-        async def low_rerank(query, results, top_k):
+        async def low_rerank(query, results, top_k, *, max_candidates=None):
             for r in results:
                 r.final_score = 0.1  # below default 0.8
             meta = {"backend": "mock", "skipped_rerank": False, "warnings": []}

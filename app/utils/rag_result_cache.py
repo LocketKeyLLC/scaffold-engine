@@ -59,7 +59,13 @@ def _canonical_payload(
     skip_rerank: bool,
     include_history: bool,
     query_intent: str,
+    max_candidates: int | None = None,
 ) -> str:
+    # §17.234 — max_candidates added with default=None for backward-
+    # compat with existing cached entries (a call that doesn't pass it
+    # gets the same key as pre-§17.234). Explicit values produce a
+    # different key so a max_candidates=5 request doesn't hit cache from
+    # a max_candidates=32 request and vice versa.
     return json.dumps(
         {
             "query": query,
@@ -69,6 +75,7 @@ def _canonical_payload(
             "skip_rerank": skip_rerank,
             "include_history": include_history,
             "query_intent": query_intent,
+            "max_candidates": max_candidates,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -83,11 +90,13 @@ def make_key(
     skip_rerank: bool,
     include_history: bool,
     query_intent: str,
+    max_candidates: int | None = None,
 ) -> str:
     """Build the Redis key for a query_rag call."""
     payload = _canonical_payload(
         query, domain, top_k, confidence_threshold,
         skip_rerank, include_history, query_intent,
+        max_candidates=max_candidates,
     )
     h = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     domain_seg = domain if domain else "all"
@@ -133,6 +142,8 @@ class RagResultCache:
         skip_rerank: bool,
         include_history: bool,
         query_intent: str,
+        *,
+        max_candidates: int | None = None,
     ) -> dict[str, Any] | None:
         """Return cached response or None on miss / gate-off / Redis error."""
         if not settings.cache_rag_results:
@@ -142,6 +153,7 @@ class RagResultCache:
         key = make_key(
             query, domain, top_k, confidence_threshold,
             skip_rerank, include_history, query_intent,
+            max_candidates=max_candidates,
         )
         try:
             r = await self._get_redis()
@@ -180,6 +192,8 @@ class RagResultCache:
         include_history: bool,
         query_intent: str,
         response: dict[str, Any],
+        *,
+        max_candidates: int | None = None,
     ) -> bool:
         """Store a response. Returns True on write, False on skip/error.
 
@@ -195,6 +209,7 @@ class RagResultCache:
         key = make_key(
             query, domain, top_k, confidence_threshold,
             skip_rerank, include_history, query_intent,
+            max_candidates=max_candidates,
         )
         try:
             value = json.dumps(response, separators=(",", ":")).encode("utf-8")

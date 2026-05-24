@@ -472,17 +472,22 @@ async def _rerank(
     query: str,
     results: list[RagResult],
     top_k: int,
+    *,
+    max_candidates: int | None = None,
 ) -> tuple[list[RagResult], dict[str, Any]]:
     """Rerank via CrossEncoder. Returns (ranked, meta).
 
     meta contains: backend, skipped_rerank, warnings (list[str]).
+
+    §17.234 — ``max_candidates`` overrides ``settings.rerank_max_candidates``
+    per call. When None, the config default applies (post-§17.233: 10).
     """
     meta: dict[str, Any] = {"backend": None, "skipped_rerank": False, "warnings": []}
 
     if not results:
         return [], meta
 
-    max_cand = int(settings.rerank_max_candidates)
+    max_cand = int(max_candidates if max_candidates is not None else settings.rerank_max_candidates)
     doc_trunc = int(settings.rerank_doc_truncate)
     warn_ms = int(settings.rerank_warn_ms)
     error_ms = int(settings.rerank_error_ms)
@@ -603,6 +608,7 @@ async def query_rag(
     skip_rerank: bool = False,
     include_history: bool = False,
     query_intent: str = "general",
+    max_candidates: int | None = None,
 ) -> "RagResponseDict":
     """Full RAG pipeline: embed → search → fuse → rerank → filter → supersede-sweep.
 
@@ -633,6 +639,7 @@ async def query_rag(
     cached = await rag_cache.get(
         query, domain, top_k, confidence_threshold,
         skip_rerank, include_history, query_intent,
+        max_candidates=max_candidates,
     )
     if cached is not None:
         meta = cached.setdefault("metadata", {})
@@ -684,7 +691,7 @@ async def query_rag(
         if skip_rerank:
             rerank_meta["skipped_rerank"] = True
     else:
-        ranked, rerank_meta = await _rerank(query, fused, top_k)
+        ranked, rerank_meta = await _rerank(query, fused, top_k, max_candidates=max_candidates)
 
     warnings.extend(rerank_meta.get("warnings", []))
     backend = rerank_meta.get("backend")
@@ -808,6 +815,7 @@ async def query_rag(
         query, domain, top_k, confidence_threshold,
         skip_rerank, include_history, query_intent,
         response,
+        max_candidates=max_candidates,
     )
     return response
 
