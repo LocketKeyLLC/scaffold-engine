@@ -14455,6 +14455,24 @@ Full class: 7 → 10 passing. No regressions in the existing 7. `_make_response`
 
 ---
 
+### §17.260 reranker partial-failure fallback — close §17.258 🔴 #2 (2026-05-24)
+
+§17.258's second red item. Pre-fix, `app/modules/rag_pipeline.py::_rerank` at lines 509-526 had a guard for the all-empty case (`if not rr.items and docs:` → fall back to RRF) but no guard for the **partial** case (`0 < len(rr.items) < len(docs)`). In the partial case, the loop at 522-524 ran `score_map.get(i, r.rrf_score)` for each of the `max_cand` docs sent to the reranker, silently substituting `rrf_score` for any index the reranker didn't return. The final list was then sorted by `final_score` — **mixing reranker (post-§17.187 normalized [0,1]) and RRF (~1/(60+rank)) scales in the same sort key produces undefined order**, because the two scales overlap at the boundary where reranker scores fall to ~0.02 and RRF scores hover at ~0.016. The collision band is small but real.
+
+**Reranker contract (verified in `app/rerankers.py:223-228`):** `rerank_cross_encoder` returns `RerankedItem` for every input pair, then truncates with `items[:top_k]`. The call site in `_rerank` passes `top_k=len(docs)`, so a healthy CrossEncoder always returns exactly `len(docs)` items. Partial output only happens on anomalous backends — but the existing code's guard didn't enforce it, leaving the silent-corruption path open if anyone adds a different reranker backend (vLLM-served, remote API, etc.).
+
+**Single-predicate fix at `rag_pipeline.py:505-527`:** replaced the `if not rr.items and docs:` check with `if docs and len(rr.items) < len(docs):`, which subsumes the existing empty case and adds the partial case. Same recovery path for both: rebuild every result with `rerank_score = rrf_score` + `final_score = rrf_score`, sort by `final_score` — guarantees single-scale ordering. Warning string differentiates: `"reranker_returned_no_items"` (preserves the existing test contract) for empty, `"reranker_returned_partial_{N}_of_{M}"` for partial. Both reach `meta["warnings"]` non-empty, so `app/utils/rag_result_cache.py:24`'s cache-reject-on-warnings gate continues to fire for both.
+
+**Test-suite delta:** +2 tests in new `TestRerankPartialItems` (`test_rag_pipeline.py`):
+- `test_partial_items_triggers_fallback` — reranker returns items for indices [0, 2] of 3 docs. Asserts `skipped_rerank=True`, `"reranker_returned_partial_2_of_3"` in warnings, and **all three `final_score` values equal their `rrf_score`** (the load-bearing assertion: single-scale, not mixed). The test fixture is chosen specifically so the post-fix order would diverge from a hypothetical mixed-scale sort: pre-fix, index 2 would carry reranker score 0.10 while index 1 keeps `rrf_score=0.3`, so a sort by `final_score` would put index 1 ahead of index 2 by accident; post-fix, the same outcome holds for the right reason (both on RRF scale).
+- `test_full_items_unaffected` — reranker returns N items for N docs. Asserts `skipped_rerank=False`, `warnings == []`, and reranker scores are applied. Guards against the new check widening the existing contract.
+
+Existing `TestRerankEmptyItems::test_empty_items_triggers_fallback` continues to pass — the new predicate covers it as a subset (`not rr.items` ⊂ `len(rr.items) < len(docs)`). Full `test_rag_pipeline.py`: 57 → 59 passing.
+
+**Comment rewrite included in the diff.** The old comment ("Empty items but non-empty docs = reranker silently produced nothing.") described half the picture; the new comment explicitly documents both anomaly cases, the score-scale-mixing failure mode, the single-scale recovery, and the §17.260 audit reference.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

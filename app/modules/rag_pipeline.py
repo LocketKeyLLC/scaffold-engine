@@ -502,17 +502,28 @@ async def _rerank(
 
     meta["backend"] = getattr(rr, "backend", None)
 
-    # Empty items but non-empty docs = reranker silently produced nothing.
-    # Surface as an explicit WARNING and fall back to RRF ordering.
-    # Uses dataclasses.replace to honor _rrf_fuse's no-mutation contract —
+    # Reranker contract (post-§17.260): for N docs in, return exactly N
+    # items out. Both anomalies are unrecoverable for a stable sort:
+    #   - items == [] : reranker silently produced nothing.
+    #   - 0 < len(items) < len(docs) : partial result. Indices not in
+    #     score_map would fall back to rrf_score, mixing two score scales
+    #     in the final sort → undefined order. Bug found in §17.258 audit.
+    # Recovery for both: rebuild every result with rerank_score = rrf_score
+    # and sort by that — guarantees single-scale ordering.
+    # Uses dataclasses.replace to honor _rrf_fuse's no-mutation contract:
     # callers may hold references to results that pre-date this rerank.
-    if not rr.items and docs:
+    if docs and len(rr.items) < len(docs):
+        warning_kind = (
+            "reranker_returned_no_items" if not rr.items
+            else f"reranker_returned_partial_{len(rr.items)}_of_{len(docs)}"
+        )
         logger.warning(
-            "rerank_skipped: backend=%s returned 0 items for %d docs; falling back to RRF order",
-            meta["backend"], len(docs),
+            "rerank_fallback: backend=%s returned %d items for %d docs (%s); "
+            "falling back to RRF order to avoid mixed-scale sort",
+            meta["backend"], len(rr.items), len(docs), warning_kind,
         )
         meta["skipped_rerank"] = True
-        meta["warnings"].append("reranker_returned_no_items")
+        meta["warnings"].append(warning_kind)
         rebuilt = [replace(r, rerank_score=r.rrf_score, final_score=r.rrf_score) for r in results]
         rebuilt.sort(key=lambda r: r.final_score, reverse=True)
         return rebuilt[:top_k], meta

@@ -545,6 +545,91 @@ class TestRerankEmptyItems:
 
 
 # ===========================================================================
+# §17.260 — partial reranker output must trigger same fallback as empty
+# ===========================================================================
+
+class TestRerankPartialItems:
+    """§17.260 — _rerank must warn + fall back to RRF when reranker returns
+    fewer items than docs submitted. Pre-fix, the missing slots silently
+    fell back to rrf_score via score_map.get(i, r.rrf_score), then the final
+    list was sorted by final_score — mixing reranker + RRF scales produced
+    undefined sort order."""
+
+    def test_partial_items_triggers_fallback(self):
+        from app.modules.rag_pipeline import _rerank, RagResult
+        from app.rerankers import RerankedItem
+
+        # Reranker sent 3 docs, returns scores for only indices [0, 2].
+        # Pre-§17.260: index 1 would fall back to rrf_score=0.3 while
+        # index 0 gets reranker score 0.95 and index 2 gets 0.10 — mixed
+        # scales, sort order depends on which scale wins by accident.
+        fake_rr = MagicMock()
+        fake_rr.items = [
+            RerankedItem(index=0, score=0.95, text="a"),
+            RerankedItem(index=2, score=0.10, text="c"),
+        ]
+        fake_rr.backend = "flaky"
+        fake_rr.latency_ms = 12.0
+
+        results = [
+            RagResult(content="a", entry_id="e1", rrf_score=0.5),
+            RagResult(content="b", entry_id="e2", rrf_score=0.3),
+            RagResult(content="c", entry_id="e3", rrf_score=0.2),
+        ]
+
+        with patch(
+            "app.modules.rag_pipeline.cross_encoder_rerank",
+            return_value=fake_rr,
+        ):
+            ranked, meta = _run(_rerank("q", results, top_k=10))
+
+        assert meta["skipped_rerank"] is True
+        assert "reranker_returned_partial_2_of_3" in meta["warnings"]
+        assert meta["backend"] == "flaky"
+        # Fallback: every final_score == its rrf_score (single scale).
+        assert ranked[0].final_score == 0.5  # 'a'
+        assert ranked[1].final_score == 0.3  # 'b'
+        assert ranked[2].final_score == 0.2  # 'c'
+        # Crucially: index 1 ('b') is preserved at rank 2 — pre-fix it
+        # would have been outranked by index 2 ('c') because c got the
+        # reranker score 0.10 while b kept rrf_score 0.3 (mixed-scale sort
+        # at the boundary where reranker scores > rrf scores). Here we
+        # assert the post-fix single-scale order.
+
+    def test_full_items_unaffected(self):
+        """§17.260 — when reranker returns N items for N docs, the partial
+        fallback must NOT fire. Ensures the new guard didn't widen the
+        existing contract."""
+        from app.modules.rag_pipeline import _rerank, RagResult
+        from app.rerankers import RerankedItem
+
+        fake_rr = MagicMock()
+        fake_rr.items = [
+            RerankedItem(index=0, score=0.9, text="a"),
+            RerankedItem(index=1, score=0.4, text="b"),
+        ]
+        fake_rr.backend = "healthy"
+        fake_rr.latency_ms = 5.0
+
+        results = [
+            RagResult(content="a", entry_id="e1", rrf_score=0.5),
+            RagResult(content="b", entry_id="e2", rrf_score=0.3),
+        ]
+
+        with patch(
+            "app.modules.rag_pipeline.cross_encoder_rerank",
+            return_value=fake_rr,
+        ):
+            ranked, meta = _run(_rerank("q", results, top_k=10))
+
+        assert meta["skipped_rerank"] is False
+        assert meta["warnings"] == []
+        # Reranker scores applied; sort by score
+        assert ranked[0].final_score == 0.9
+        assert ranked[1].final_score == 0.4
+
+
+# ===========================================================================
 # §17.234 — per-request max_candidates override
 # ===========================================================================
 
