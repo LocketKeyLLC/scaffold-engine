@@ -12678,6 +12678,170 @@ No app code change. No test change. Defaults unchanged.
 
 ---
 
+### §17.247 Tier 2 CI workflow + `make ci-tier-2` integration suite (2026-05-24)
+
+Closes §17.246 candidate A — "tier 2 CI workflow — boots compose stack
++ runs `make doctor` whole-cloth + golden retrieval." Activates the
+commented-out integration block in `.github/workflows/ci.yml:125-174`
+that's been sitting dormant since (per its own comment) "configure a
+self-hosted runner to enable."
+
+**Two artifacts ship in §17.247.**
+
+1. **`make ci-tier-2`** — operator-runnable integration suite. Bundles
+   the post-§17.231 full-stack verification into a single make target
+   so an operator can run the same sequence locally before pushing
+   (CI then calls the same target if a self-hosted runner is wired).
+
+   Sequence:
+
+   | Step | What | Latency (this host) | Gates on |
+   |---|---|---|---|
+   | 1/4 | `curl /health` probe (5 s timeout) | ~50 ms | orchestrator live |
+   | 2/4 | `make doctor` whole-cloth | ~3 s (all 12 sections) | all sections pass |
+   | 3/4 | `make check-rerank-drift` | ~10 ms | 3-site default alignment (§17.245/§17.246) |
+   | 4/4 | golden retrieval sidecar (post-§17.235 defaults) | ~6-8 min wall | sidecar exit code + coverage/MRR readout |
+
+   Step 4 uses the §17.239 sidecar pattern (offline + HF cache volume
+   + memoized listing) and the §17.240/§17.241/§17.242 pre-flight
+   probes — so a stale or empty cache surfaces immediately, not after
+   the orchestrator boots.
+
+   Total wall time: ~7-9 min on the T480 host. Within
+   `timeout-minutes: 20` with buffer.
+
+2. **`.github/workflows/ci.yml` integration job** — activated
+   (uncommented). Triggers on push to main with a self-hosted runner
+   registered. Inactive without a runner — the job sits dormant and
+   never blocks tier 1 (smoke) which runs on `ubuntu-latest`.
+
+   The job body is intentionally tiny:
+
+   ```yaml
+   integration:
+     name: "Tier 2 · Full-stack integration (§17.247)"
+     runs-on: self-hosted
+     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+     needs: smoke
+     timeout-minutes: 20
+     steps:
+       - uses: actions/checkout@v4
+       - name: Rebuild orchestrator with PR code
+         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build scaffold-orchestrator
+       - name: Wait for healthy
+         run: …
+       - name: Run tier 2 integration suite
+         env:
+           SCAFFOLD_API_KEY: ${{ secrets.SCAFFOLD_API_KEY }}
+         run: make ci-tier-2
+   ```
+
+   The actual verification logic lives in the Makefile target. CI
+   stays a thin wrapper, matching the §17.186/§17.190/§17.195/§17.245
+   pattern.
+
+**Why a Makefile target rather than inlining steps in ci.yml.**
+
+Three reasons:
+
+1. **Operator parity.** An operator running `make ci-tier-2` locally
+   before pushing gets the exact same verification sequence CI runs.
+   No "CI passes but my local fails" drift.
+2. **Single source for the sequence.** If a future tier 2 needs an
+   additional step, update the Makefile target — CI inherits
+   automatically without editing the workflow YAML.
+3. **Surface discoverability.** `make help` shows `ci-tier-2`
+   alongside the other `check-*` and `ci-*` targets; the workflow
+   YAML is more obscure to a new operator.
+
+**The `make help` regex fix.**
+
+While adding `ci-tier-2`, noticed `make help` filtered out targets
+with digits in their names (regex `^[a-zA-Z_-]+:`). Widened to
+`^[a-zA-Z0-9_-]+:` so `ci-tier-2` and any future numbered targets
+surface. Also bumped the column width from `%-14s` to `%-18s` so
+longer names (`check-rerank-drift`, `check-sse-events`, etc.) align
+without truncation. Two-character cosmetic improvement.
+
+**What §17.247 does NOT change.**
+
+- Tier 1 (smoke) — unchanged. Continues to run on `ubuntu-latest`
+  with the §17.186/§17.190/§17.195/§17.246 drift gates.
+- `make doctor` content — unchanged from §17.245. Tier 2 just runs
+  it end-to-end and gates on its exit code.
+- Existing CI activation — tier 2 is gated on `runs-on: self-hosted`.
+  Without a registered runner, the job sits in GitHub's queue
+  indefinitely (the standard behavior for unmatched job labels);
+  it never fires, never blocks. Tier 1 continues to run.
+- The orchestrator's compose configuration. The CI workflow's
+  `docker compose up -d --build` step explicitly targets the dev
+  override compose file (`docker-compose.dev.yml`) so the rebuilt
+  image is the dev variant — tests + Makefile + tools available
+  for the `make doctor` step that runs inside the orchestrator
+  container.
+
+**Verification.**
+
+| Sub-step | Verified via |
+|---|---|
+| `/health` probe shape | §17.232 onward (orchestrator restarts in this session) |
+| `make doctor` whole-cloth | §17.245 (live runs on this host) |
+| `make check-rerank-drift` | §17.246 (happy + drift branches) |
+| Golden retrieval sidecar | §17.235 + §17.236 + §17.237 + §17.238 + §17.241 (full matrix sweep + per-axis sweeps + cell-by-cell reruns) |
+
+YAML lint:
+
+```
+$ python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
+# silent — parses clean
+```
+
+`make help` surfaces the new target:
+
+```
+$ make help | grep ci-tier
+  ci-tier-2         §17.247 — Integration check: full-stack doctor + drift gate + golden retrieval sidecar. …
+```
+
+End-to-end `make ci-tier-2` against the live stack NOT run as part
+of this commit because it would surface the known-pre-existing
+scaffold_router empty `api_key` drift (`§17.35` documented state)
+at step 2 and exit non-zero. The fix for that drift is
+operator-side (`make sync-api-key`) and is outside §17.247's scope;
+the operator can run `make ci-tier-2` after addressing that
+drift.
+
+**Files.**
+
+- `Makefile`:
+  - New `ci-tier-2` target with the 4-step sequence above.
+  - `.PHONY` line updated.
+  - `make help` regex widened to allow digit-bearing target names;
+    column width bumped from 14 to 18 chars.
+- `.github/workflows/ci.yml`:
+  - 52-line commented-out integration block replaced with an
+    active 25-line block calling `make ci-tier-2`.
+  - Comment block above the job documents the activation gate
+    (self-hosted runner + push to main).
+- `OVERVIEW.md` — this entry.
+
+No app code change. No test change. Defaults unchanged.
+
+**Open follow-ups.**
+
+1. **§17.248 candidate A** — fix the scaffold_router empty api_key
+   drift (§17.35 documented state) so `make ci-tier-2` passes
+   end-to-end. One-line operator action — `make sync-api-key` then
+   commit if any state diffs. Logged but operator-decision.
+2. **§17.248 candidate B** — register a self-hosted runner on the
+   repo so the tier 2 workflow actually fires on push to main.
+   Operator-side; documented in the workflow comment.
+3. **§17.232 A/B/C / §17.234 B / §17.236 A/C / §17.237 C / F3** —
+   unchanged. Tier 2 CI gives those a regression-gating surface
+   when they land.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

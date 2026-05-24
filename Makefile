@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift idea resume explain whatnow confirm retry skip node-logs config audit
+.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-2 idea resume explain whatnow confirm retry skip node-logs config audit
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -245,6 +245,40 @@ check-next-actions: ## §17.195 — Verify pipelines/_vendor/_next_actions.py is
 	fi
 	@echo "✓ pipelines/_vendor/_next_actions.py is in sync with sdk/scaffold_client/next_actions.py."
 
+ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + golden retrieval sidecar. Runs locally OR via self-hosted CI; requires the orchestrator + Milvus + Postgres + Redis + Ollama stack to be live.
+	@set -euo pipefail; \
+	printf '\033[1;36m== §17.247 tier 2 — full-stack integration ==\033[0m\n'; \
+	printf '\033[1;36m-- step 1/4: orchestrator /health --\033[0m\n'; \
+	if ! curl -sf --max-time 5 http://localhost:8000/health >/dev/null; then \
+		printf '\033[1;31m✗ orchestrator /health unreachable\033[0m  Fix: docker compose up -d scaffold-orchestrator\n'; \
+		exit 1; \
+	fi; \
+	echo "  ✓ orchestrator healthy"; \
+	printf '\033[1;36m-- step 2/4: make doctor (whole-cloth) --\033[0m\n'; \
+	$(MAKE) doctor; \
+	printf '\033[1;36m-- step 3/4: make check-rerank-drift --\033[0m\n'; \
+	$(MAKE) check-rerank-drift; \
+	printf '\033[1;36m-- step 4/4: golden retrieval sidecar --\033[0m\n'; \
+	mkdir -p /tmp/ci-tier-2; \
+	docker run --rm \
+		--network ai-network \
+		--env-file .env \
+		--memory 6g \
+		--user 1000:1000 \
+		-e HF_HUB_OFFLINE=1 \
+		-e HF_HOME=/sidecar-hf \
+		-v "$$PWD:/code:ro" \
+		-v /tmp/ci-tier-2:/host-tmp \
+		-v scaffold-engine_hf-cache:/sidecar-hf:ro \
+		-w /code \
+		scaffold-engine:dev \
+		python3 scripts/score_retrieval.py \
+			--output /host-tmp/retrieval_report_ci_tier_2.json \
+		2>&1 | grep -vE "reranker_decision|provenance_fetch_failed|Loading weights" | tail -15; \
+	python3 -c "import json,sys; d=json.load(open('/tmp/ci-tier-2/retrieval_report_ci_tier_2.json')); \
+	print(f\"  ✓ coverage_at_5={d['coverage_at_5']:.1%}  coverage_at_10={d['coverage_at_10']:.1%}  mean_mrr={d['mean_title_mrr']:.3f}\")"; \
+	printf '\033[1;32mAll tier 2 checks passed.\033[0m\n'
+
 check-rerank-drift: ## §17.245 — Verify MODEL_RERANKER default matches across Dockerfile ARG ↔ app/config.py ↔ .env.example (CI gate; mirrors doctor section 12)
 	@DKR=$$(grep -E '^ARG MODEL_RERANKER=' Dockerfile | head -1 | sed 's/^ARG MODEL_RERANKER=//'); \
 	CFG=$$(grep -E '^    model_reranker: str = ' app/config.py | head -1 | sed 's/^    model_reranker: str = "\(.*\)"$$/\1/'); \
@@ -350,7 +384,9 @@ health: ## Query /health endpoint (no auth required)
 ## ──────────────────────────────────────────────
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+	@# §17.247 — added 0-9 to the target-name character class so digit-bearing
+	@# names (ci-tier-2, etc.) surface in `make help`.
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 .DEFAULT_GOAL := help
