@@ -11025,6 +11025,124 @@ doc_truncate=500
 
 ---
 
+### §17.236 OWUI chat-side `max_candidates=5` adoption — falsified by eval; hold global default at 10 (2026-05-24)
+
+Closes §17.235 candidate D — "OWUI `pipelines/scaffold_router.py`
+default-fast adoption" — with a **negative result**. The candidate's
+premise was that §17.235's "truncate 2000 → 500 left coverage flat"
+generalizes to `max_candidates=5` at the chat surface. A direct
+goldens eval at `(max_candidates=5, doc_truncate=500)` against the
+732-entry post-§17.231 KB falsifies that premise.
+
+**The eval.**
+
+```
+$ docker run --rm --network ai-network --env-file .env --memory 6g \
+    --user 1000:1000 -e RERANK_MAX_CANDIDATES=5 \
+    -v $PWD:/code:ro -v /tmp/eval_doc_truncate:/host-tmp -w /code \
+    scaffold-engine:dev \
+    python3 scripts/score_retrieval.py \
+    --output /host-tmp/retrieval_report_max5_truncate500.json
+```
+
+Side-by-side vs the post-§17.235 default (max=10, truncate=500):
+
+| metric | max=5 (proposed) | max=10 (current default) | Δ |
+|---|---:|---:|---:|
+| `coverage_at_5` | **10.0%** | 15.0% | **-5 pt** |
+| `coverage_at_10` | **10.0%** | 15.0% | **-5 pt** |
+| `mean_title_mrr` | **0.100** | 0.150 | -0.050 |
+| `exact_id_coverage` | 0.0% | 0.0% | 0 (archival unchanged) |
+
+**One query regressed.** `g007 how do I handle cache invalidation
+correctly` (`expected_titles_contain=["cache","invalidation"]`) flipped
+from rank-1 HIT under max=10 to MISS under max=5. The expected entry
+was at RRF position 6–10 (inside the max=10 rerank shortlist but
+outside the max=5 shortlist); the reranker had promoted it to top-1
+when it was in scope, and now stays at its lower RRF rank when not.
+The other 17 misses are §17.231 surface-form drift, unaffected by
+either knob.
+
+So `max_candidates=5` IS too aggressive for the goldens — even though
+truncate=500 isn't. **Different knobs are touched by different
+queries**; the §17.235 cross-knob inference doesn't hold.
+
+**Decision — no chat-side default adoption.**
+
+`pipelines/scaffold_router.py:2548-2560` continues to send `/rag`
+requests with no `max_candidates` field, inheriting the orchestrator's
+global default (`settings.rerank_max_candidates=10`,
+§17.233). Chat-side `/rag` wall stays at ~25 s (post-§17.235 default
+config); operators with latency-critical workloads can opt into the
+shallower rerank on a per-call basis via the §17.234 per-request
+override.
+
+**Why max=10 is the right global default.**
+
+Empirical: coverage holds (15%) and the latency is bounded
+(~25 s/query post-§17.235 default config). The marginal latency win
+from going to max=5 (~12 s/query) costs 33 % of the actionable
+coverage (3 hits → 2 hits); the latency wasn't bad enough to justify
+the quality drop. If a future ingest pass closes some of the §17.231
+surface-form drift and pushes coverage to e.g. 8/20, the math changes
+— but right now, dropping 1/3 of the working signal isn't acceptable
+even for an interactive UX.
+
+**Per-request override is the right escape hatch.**
+
+The §17.234 plumbing already lets operators pass `max_candidates`
+per call. Any caller — OWUI, SDK, CLI, curl — that knows it wants
+sub-15-s latency can request:
+
+```bash
+curl -X POST http://localhost:8000/rag \
+     -H 'X-Api-Key: …' -H 'Content-Type: application/json' \
+     -d '{"query":"…","domain":"eng","top_k":10,"max_candidates":5}'
+```
+
+and trade coverage for speed on that specific call. The opt-in shape
+is what was missing pre-§17.234; with it, the trade-off lives at the
+call site instead of the global config — exactly where it should be.
+
+**Files.** No code change. OVERVIEW.md only.
+
+**Verification.** The eval table above. Both reports preserved at
+`/tmp/eval_doc_truncate/retrieval_report_{max5_truncate500,truncate_500}.json`
+(transient artifacts; not committed).
+
+**What §17.236 does NOT change.**
+
+- `settings.rerank_max_candidates=10` — unchanged.
+- `settings.rerank_doc_truncate=500` — unchanged.
+- `pipelines/scaffold_router.py:2548-2560` — unchanged.
+- `tests/fixtures/golden_set.json` — unchanged. The 1-query regression
+  IS the signal; pinning it as a regression-guard test would be
+  premature (a future ingest may re-promote g007 to RRF top-5,
+  reopening max=5 as viable).
+
+**Open follow-ups (now §17.237 candidates).**
+
+1. **Sweep `max_candidates ∈ {6, 7, 8, 9}` to find the break point.**
+   If max=7 or max=8 holds coverage at 15% while saving some latency
+   vs max=10, that's a viable default. ~4 more sidecars × ~3 min =
+   12 min. Cheap to run via a small extension of
+   `scripts/eval_doc_truncate.py` (add a `--max-candidates` sweep
+   axis, parallel to `--values` for truncate). Logged but not
+   blocking.
+2. **2-D matrix sweep** — `(max_candidates × doc_truncate)` together,
+   per §17.235 candidate B. Would surface the best operating point
+   directly. ~30 lines of harness code; mechanical.
+3. **Smaller reranker model** (Qwen3-Reranker-0.1B, BGE-base) — §17.234
+   candidate B. Would give ~6× speedup on the model dimension; could
+   make max=10 chat-acceptable without any candidate-cap compromise.
+   Needs threshold retune + a full goldens eval.
+
+These are open against the chat-side responsiveness goal, not against
+§17.236 specifically — §17.236 is closed by the negative-result
+documentation here.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
