@@ -135,7 +135,21 @@ class Settings(BaseSettings):
     # Operators wanting the deeper rerank can raise via
     # RERANK_MAX_CANDIDATES in .env (no code change required).
     rerank_max_candidates: int = Field(default=10, ge=1, le=512)
-    rerank_doc_truncate: int = Field(default=2000, ge=100, le=20000)
+    # §17.235 — rerank_doc_truncate default 2000 → 500. Empirical sweep
+    # (scripts/eval_doc_truncate.py against tests/fixtures/golden_set.json,
+    # KB=732 post-Tier-A + Truncation re-ingest) at max_candidates=10:
+    #   truncate=2000  →  52.0 s/query   coverage@5/10=15% (3/20)
+    #   truncate=1000  →  28.5 s/query   coverage@5/10=15% (3/20)
+    #   truncate= 500  →  17.2 s/query   coverage@5/10=15% (3/20)
+    # 3× /rag latency cut on this benchmark with no measurable quality
+    # change — the 3 hits' matching content concentrates in the first
+    # 500 chars of each doc. The 17 misses are corpus-content gaps
+    # (§17.231 surface-form drift) unaffected by truncate. Worst case for
+    # the new default is a long-form entry whose matching paragraph sits
+    # past char 500; operators with such workloads can raise via
+    # RERANK_DOC_TRUNCATE in .env (no code change required). For per-
+    # request override, see §17.234 candidate D logged in §17.235.
+    rerank_doc_truncate: int = Field(default=500, ge=100, le=20000)
     rerank_warn_ms: int = Field(default=30000, ge=0, le=60000)
     rerank_error_ms: int = Field(default=120000, ge=0, le=300000)
 
