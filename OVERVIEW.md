@@ -11583,6 +11583,142 @@ combination is correctness-by-construction.
 
 ---
 
+### §17.240 Harness pre-flight HF-cache volume probe — fail fast on missing setup (2026-05-24)
+
+Closes §17.239 candidate A — "harness pre-flight volume probe." The
+§17.239 fix hardcoded `_HF_CACHE_VOLUME = "scaffold-engine_hf-cache"`
+into ``scripts/eval_doc_truncate.py``. Two failure modes for that
+hardcode:
+
+1. **Renamed compose project** — operators who set
+   ``COMPOSE_PROJECT_NAME=foo`` produce ``foo_hf-cache`` instead;
+   the harness would emit a docker `exit=125` per cell with a
+   confusing "volume not found" trace inside each sidecar run.
+2. **Fresh deployment** — on a clean host where the orchestrator
+   has never booted, the named volume doesn't exist yet (it's
+   created and populated by the first ``docker compose up -d
+   scaffold-orchestrator`` lifespan, when sentence-transformers
+   downloads the CrossEncoder model into ``HF_HOME``).
+
+Either failure mode produces *N* identical errors (one per cell)
+before the harness summarizes; the operator wades through N
+identical tracebacks to spot the real cause. §17.240 surfaces the
+diagnosis once, at the top of the run.
+
+**Fix.**
+
+New ``_check_hf_cache_volume()`` helper called by ``main()`` after
+argparse but before the first ``_run_cell``. It shells out to
+``docker volume inspect <name>``; on non-zero exit, ``raise
+SystemExit`` with a multi-line diagnostic that names both
+failure modes and the corresponding fix:
+
+```
+HF cache volume 'scaffold-engine_hf-cache' not found.
+
+Likely causes:
+  1. COMPOSE_PROJECT_NAME differs from 'scaffold-engine'.
+     Fix: update _HF_CACHE_VOLUME at the top of
+          scripts/eval_doc_truncate.py to match your
+          actual volume name (check via `docker volume ls`).
+  2. The orchestrator has never booted in this deployment.
+     The volume is created and populated the first time
+     scaffold-orchestrator starts (sentence-transformers
+     downloads the CrossEncoder model into HF_HOME).
+     Fix: `docker compose up -d scaffold-orchestrator`
+          then wait for `/health` to report 'healthy'.
+```
+
+Also handles ``FileNotFoundError`` (no ``docker`` in PATH) with a
+direct one-line error rather than letting argparse continue into
+the loop where every sidecar would die at ``subprocess.run``.
+
+**Verification — both branches.**
+
+```
+$ python3 -c "from scripts.eval_doc_truncate import _check_hf_cache_volume; _check_hf_cache_volume()"
+# (silent — pass)
+
+$ python3 -c "
+import importlib.util
+spec = importlib.util.spec_from_file_location('m', 'scripts/eval_doc_truncate.py')
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m._HF_CACHE_VOLUME = 'definitely-not-a-real-volume-xyz'
+m._check_hf_cache_volume()
+"
+HF cache volume 'definitely-not-a-real-volume-xyz' not found.
+Likely causes:
+  1. COMPOSE_PROJECT_NAME differs from 'scaffold-engine'.
+  …
+```
+
+Live smoke against the populated cache + a previously-cached cell:
+
+```
+$ python3 scripts/eval_doc_truncate.py --matrix "max_candidates=10:doc_truncate=1000"
+matrix sweep (2-D): max_candidates∈[10] × doc_truncate∈[1000]
+golden: tests/fixtures/golden_set.json
+reports dir: /tmp/eval_doc_truncate
+
+--- max_candidates=10 doc_truncate=1000 ---
+  [skip] existing retrieval_report_max_candidates_10_doc_truncate_1000.json
+…
+```
+
+Probe runs silently, harness proceeds normally.
+
+**Files.**
+
+- ``scripts/eval_doc_truncate.py``:
+  - New ``_check_hf_cache_volume()`` helper.
+  - One-line call from ``main()`` after ``mkdir`` and before axis
+    parsing.
+
+No app code change. No test change. Default settings unchanged.
+
+**Why the probe lives in ``main`` rather than ``_run_cell``.**
+
+``_run_cell`` is also called by the (deprecated) ``_run_one``
+back-compat shim and could in principle be invoked by other future
+callers. Volume existence is a session-level concern, not a
+per-cell concern, so it belongs at the entry point. Probing once
+per session is also cheaper than per-cell (one ``docker volume
+inspect`` rather than N).
+
+**What §17.240 does NOT change.**
+
+- The hardcoded volume name — still ``scaffold-engine_hf-cache``.
+  Dynamic detection (parse ``docker volume ls`` output for any
+  matching name) was considered and rejected: a multi-volume
+  match needs disambiguation logic (the §17.238 + §17.239 path
+  showed there ARE multiple `hf-cache`-named volumes on this
+  host — `hf-cache` (an empty stray) and `scaffold-engine_hf-cache`
+  (the populated one)), and picking the right one without a
+  project name requires querying volume contents. Cleaner to keep
+  the explicit name + a clear "edit me if renamed" message in the
+  error.
+- The probe's stale-cache detection — empty cache file shows the
+  same symptom as missing volume on the consumer side (model load
+  fails), but a "volume exists, contents are empty" branch would
+  require shelling out to query volume contents. Out of scope for
+  §17.240; logged.
+
+**Open follow-ups.**
+
+1. **§17.241 candidate A** — extend the probe to verify the cache
+   has actual content (sentence-transformers model files present,
+   not just an empty volume). One extra subprocess that lists the
+   `hub/` subdirectory. ~5 lines on top of §17.240.
+2. **Dockerfile cache pre-bake** (still logged from §17.239) —
+   adding a ``RUN python3 -c "CrossEncoder('…')"`` layer in the
+   prod image would eliminate the "fresh deployment / orchestrator
+   hasn't booted" failure mode by baking the cache into the image.
+   Image grows ~600 MB; trade-off TBD.
+3. **§17.234 candidate B / §17.237 candidate C** — smaller
+   reranker model. Unchanged status.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

@@ -50,6 +50,41 @@ _KNOB_ENV = {
 _HF_CACHE_VOLUME = "scaffold-engine_hf-cache"
 
 
+def _check_hf_cache_volume() -> None:
+    """§17.240 — pre-flight: fail loud if the HF cache volume is missing.
+
+    Without this check, an operator on a non-default COMPOSE_PROJECT_NAME
+    (or one who has never booted the orchestrator) would see every
+    sidecar fail with cryptic `docker run` errors. Detecting it up-front
+    surfaces the actionable cause once instead of N times.
+    """
+    try:
+        proc = subprocess.run(
+            ["docker", "volume", "inspect", _HF_CACHE_VOLUME],
+            capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        raise SystemExit(
+            "docker CLI not found in PATH; this harness requires docker."
+        )
+    if proc.returncode != 0:
+        raise SystemExit(
+            f"HF cache volume '{_HF_CACHE_VOLUME}' not found.\n"
+            f"\n"
+            f"Likely causes:\n"
+            f"  1. COMPOSE_PROJECT_NAME differs from 'scaffold-engine'.\n"
+            f"     Fix: update _HF_CACHE_VOLUME at the top of\n"
+            f"          scripts/eval_doc_truncate.py to match your\n"
+            f"          actual volume name (check via `docker volume ls`).\n"
+            f"  2. The orchestrator has never booted in this deployment.\n"
+            f"     The volume is created and populated the first time\n"
+            f"     scaffold-orchestrator starts (sentence-transformers\n"
+            f"     downloads the CrossEncoder model into HF_HOME).\n"
+            f"     Fix: `docker compose up -d scaffold-orchestrator`\n"
+            f"          then wait for `/health` to report 'healthy'.\n"
+        )
+
+
 def _cell_filename(point: list[tuple[str, int]]) -> str:
     """File name for a (knob,value) cell — supports both 1-D and N-D."""
     parts = "_".join(f"{k}_{v}" for k, v in point)
@@ -293,6 +328,7 @@ def main() -> int:
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    _check_hf_cache_volume()  # §17.240 — fail fast before the first sidecar
 
     if args.matrix:
         axes = _parse_matrix(args.matrix)
