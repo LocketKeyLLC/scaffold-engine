@@ -11143,6 +11143,140 @@ documentation here.
 
 ---
 
+### §17.237 `max_candidates` break-point sweep — break at 8→9; hold default at 10 (1-position margin > 10% latency win) (2026-05-24)
+
+Closes §17.236 candidate A — "Sweep `max_candidates ∈ {6,7,8,9}` to find
+the break point." Ran the sweep, found the break, decided to hold the
+global default. Documents the empirical curve so a future operator
+considering a tighter default sees the per-rank evidence.
+
+**Harness extension.** `scripts/eval_doc_truncate.py` gained a
+``--knob {doc_truncate,max_candidates}`` selector so the same harness
+sweeps either axis. Env-var dispatch via ``_KNOB_ENV`` map; output
+file naming reflects the knob (``retrieval_report_<knob>_<value>.json``).
+Default ``--knob`` is ``doc_truncate`` (backward-compat with the
+§17.235 invocation).
+
+**The full curve (KB=732, `doc_truncate=500` per post-§17.235 default).**
+
+| `max_candidates` | wall_s | s/query | cov@5 | cov@10 | mean_title_mrr |
+|---:|---:|---:|---:|---:|---:|
+| 5 (§17.236) | ~170 | ~8.5 | 10.0 % | 10.0 % | 0.100 |
+| 6 | 207 | 10.4 | 10.0 % | 10.0 % | 0.100 |
+| 7 | 250 | 12.5 | 10.0 % | 10.0 % | 0.100 |
+| 8 | 284 | 14.2 | 10.0 % | 10.0 % | 0.100 |
+| **9** | **308** | **15.4** | **15.0 %** | **15.0 %** | **0.150** |
+| 10 (§17.235 default) | 345 | 17.2 | 15.0 % | 15.0 % | 0.150 |
+
+**The break is clean at max=8→9.** Per-query bisection (comparing each
+adjacent pair's per_query reports) identifies a single query as the
+sole flipper: **g007 `how do I handle cache invalidation correctly`**
+goes from MISS at max≤8 to HIT-at-rank-1 at max≥9. The expected entry
+sits at RRF position 9 — promoted to response top-1 by the reranker
+when it's in the shortlist, dropped from the response entirely when
+it's not.
+
+The other 17 misses are §17.231 surface-form drift (unaffected by
+shortlist depth at any value 5-10), and the other 2 hits (g017
+compression-dictionary, g019 lossless-compression) have their expected
+entries at RRF positions ≤5 (in scope at every value).
+
+**Decision — hold global default at `max_candidates=10`.**
+
+Two reasons:
+
+1. **One-position margin matters more than 10 % latency.** Going
+   max=10 → max=9 saves 1.8 s/query (10 %) at zero observed
+   coverage change on the current goldens. But it shrinks the
+   buffer between "what the reranker sees" and "the deepest entry
+   we know rerank can promote" from 1 position to 0. A future
+   ingest that bumps any expected entry's RRF rank from 10 to 11
+   would silently drop coverage under max=9; under max=10 it would
+   still be caught (RRF 10 is in scope).
+2. **The latency win is small relative to the floor.** Chat-side
+   `/rag` post-§17.235 default config is ~17–25 s end-to-end (
+   17.2 s/query reranker + search/embed/RRF overhead). Cutting to
+   15.4 s saves the operator ~1.5 s out of 17 — not enough to
+   change the UX category (still feels "slow but acceptable" either
+   way; the threshold for "feels fast" is sub-3 s and neither value
+   crosses it).
+
+**Operator escape hatches — documented, not enabled by default.**
+
+| Want | Lever | Cost |
+|---|---|---|
+| ~10 % faster `/rag`, same observed quality | `RERANK_MAX_CANDIDATES=9` in `.env` + restart | 1-position margin reduction; risks future-ingest regression |
+| ~50 % faster `/rag`, accept -5 pt coverage | `RERANK_MAX_CANDIDATES=5` in `.env` + restart, OR per-request `{"max_candidates":5}` via §17.234 | Already known to miss g007 (§17.236) |
+| Per-call latency control (no global change) | Pass `max_candidates` in `/rag` body per §17.234 | Caller decides per request |
+
+The §17.234 per-request override remains the right shape for callers
+that want latency-tuning without affecting other callers. The global
+default stays optimized for correctness; tightening it requires either
+new evidence (a future eval that closes the §17.231 surface-form drift
+and changes the curve) or an explicit operator decision.
+
+**Files.**
+
+- `scripts/eval_doc_truncate.py` — added ``--knob`` selector +
+  ``_KNOB_ENV`` env-var dispatch map + per-knob output naming. The
+  pre-§17.237 invocation (`--values <list>` only, no `--knob`)
+  continues to sweep `doc_truncate` as before.
+- `OVERVIEW.md` — this entry.
+
+No app code change. No test change. Default values unchanged.
+
+**Verification.**
+
+```
+$ python3 scripts/eval_doc_truncate.py --knob max_candidates --values 6,7,8,9 --out-dir /tmp/eval_doc_truncate
+sweep: rerank_max_candidates ∈ [6, 7, 8, 9]
+golden: tests/fixtures/golden_set.json
+reports dir: /tmp/eval_doc_truncate
+…
+========================================================================================
+rerank_max_candidates sweep — quality vs latency curve
+========================================================================================
+max_candidates    wall_s    s/query    cov@5   cov@10     mrr   exact_id
+----------------------------------------------------------------------------------------
+             6       207       10.4    10.0%    10.0%   0.100       0.0%
+             7       250       12.5    10.0%    10.0%   0.100       0.0%
+             8       284       14.2    10.0%    10.0%   0.100       0.0%
+             9       308       15.4    15.0%    15.0%   0.150       0.0%
+========================================================================================
+```
+
+Per-query bisection (Python one-liner against the per_query JSON):
+
+```
+max=9: False→True on "how do I handle cache invalidation correctly"
+```
+
+Single-query flipper at the break confirms the g007 entry's RRF
+position 9 hypothesis.
+
+**Open follow-ups.**
+
+1. **§17.238 candidate A — 2-D matrix sweep.** Combine
+   `max_candidates ∈ {5,7,9,10}` × `doc_truncate ∈ {250,500,1000}`
+   into a single matrix. Would surface combined operating points
+   (e.g. max=5 + truncate=250 might be 5 s/query but with the
+   same -5 pt loss as max=5 + truncate=500). ~30 lines on top of
+   the §17.237 ``--knob`` extension; mechanical.
+2. **§17.234 candidate B / §17.237 candidate C** (still open) —
+   smaller reranker model. Would change the curve substantially;
+   needs threshold retune + full eval at every relevant
+   `(max_candidates, doc_truncate)` point on the new model. Single
+   biggest potential improvement; biggest scope.
+3. **Re-run the §17.237 sweep periodically** as the corpus changes.
+   The break-point query (g007) is a function of the current
+   reranker output on the current corpus; an ingest pass that
+   changes RRF ordering or rerank scores moves the break. A
+   regression-guard CI step could re-run the sweep on every
+   `/research`-driven ingest commit and alert if the
+   max_candidates=10 break-point shifts past max=10.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

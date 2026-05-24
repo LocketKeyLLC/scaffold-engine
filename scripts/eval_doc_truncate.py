@@ -38,14 +38,21 @@ import time
 from pathlib import Path
 
 
-def _run_one(truncate: int, golden_path: str, out_dir: Path, force: bool) -> dict:
-    """Run score_retrieval as a sidecar with RERANK_DOC_TRUNCATE override."""
-    report_path = out_dir / f"retrieval_report_truncate_{truncate}.json"
+_KNOB_ENV = {
+    "doc_truncate": "RERANK_DOC_TRUNCATE",
+    "max_candidates": "RERANK_MAX_CANDIDATES",
+}
+
+
+def _run_one(knob: str, value: int, golden_path: str, out_dir: Path, force: bool) -> dict:
+    """Run score_retrieval as a sidecar with the chosen knob's env override."""
+    env_var = _KNOB_ENV[knob]
+    report_path = out_dir / f"retrieval_report_{knob}_{value}.json"
     container_report = f"/host-tmp/{report_path.name}"
 
     if report_path.exists() and not force:
         print(f"  [skip] existing {report_path.name} (use --force to re-run)")
-        return {"truncate": truncate, "skipped": True, "wall_s": None,
+        return {"knob": knob, "value": value, "skipped": True, "wall_s": None,
                 "report": json.loads(report_path.read_text())}
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -57,7 +64,7 @@ def _run_one(truncate: int, golden_path: str, out_dir: Path, force: bool) -> dic
         "--env-file", str(env_file),
         "--memory", "6g",
         "--user", "1000:1000",
-        "-e", f"RERANK_DOC_TRUNCATE={truncate}",
+        "-e", f"{env_var}={value}",
         "-v", f"{repo_root}:/code:ro",
         "-v", f"{out_dir}:/host-tmp",
         "-w", "/code",
@@ -72,33 +79,33 @@ def _run_one(truncate: int, golden_path: str, out_dir: Path, force: bool) -> dic
     wall_s = time.monotonic() - t0
 
     if proc.returncode != 0:
-        print(f"  [fail] truncate={truncate} exit={proc.returncode}")
+        print(f"  [fail] {knob}={value} exit={proc.returncode}")
         print(f"    stderr tail: {proc.stderr[-400:]}")
-        return {"truncate": truncate, "skipped": False, "wall_s": wall_s,
+        return {"knob": knob, "value": value, "skipped": False, "wall_s": wall_s,
                 "report": None, "error": f"exit={proc.returncode}"}
 
     if not report_path.exists():
-        return {"truncate": truncate, "skipped": False, "wall_s": wall_s,
+        return {"knob": knob, "value": value, "skipped": False, "wall_s": wall_s,
                 "report": None, "error": "report not written"}
 
-    return {"truncate": truncate, "skipped": False, "wall_s": wall_s,
+    return {"knob": knob, "value": value, "skipped": False, "wall_s": wall_s,
             "report": json.loads(report_path.read_text())}
 
 
-def _summarize(rows: list[dict]) -> None:
+def _summarize(knob: str, rows: list[dict]) -> None:
     """Print a comparison table across the sweep."""
     print()
     print("=" * 88)
-    print("rerank_doc_truncate sweep — quality vs latency curve")
+    print(f"rerank_{knob} sweep — quality vs latency curve")
     print("=" * 88)
-    print(f"{'truncate':>10}  {'wall_s':>8}  {'s/query':>9}  "
+    print(f"{knob:>14}  {'wall_s':>8}  {'s/query':>9}  "
           f"{'cov@5':>7}  {'cov@10':>7}  {'mrr':>6}  {'exact_id':>9}")
     print("-" * 88)
     for row in rows:
         report = row.get("report")
         if report is None:
             err = row.get("error", "unknown")
-            print(f"{row['truncate']:>10}  {'FAIL':>8}  {'':>9}  "
+            print(f"{row['value']:>14}  {'FAIL':>8}  {'':>9}  "
                   f"{'':>7}  {'':>7}  {'':>6}  {'':>9}  [{err}]")
             continue
         n = report["total_queries"]
@@ -109,15 +116,18 @@ def _summarize(rows: list[dict]) -> None:
         c10 = f"{report['coverage_at_10']:.1%}"
         mrr = f"{report['mean_title_mrr']:.3f}"
         eid = f"{report['exact_id_coverage']:.1%}"
-        print(f"{row['truncate']:>10}  {wall_str:>8}  {s_per_q:>9}  "
+        print(f"{row['value']:>14}  {wall_str:>8}  {s_per_q:>9}  "
               f"{c5:>7}  {c10:>7}  {mrr:>6}  {eid:>9}")
     print("=" * 88)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--knob", default="doc_truncate",
+                        choices=sorted(_KNOB_ENV.keys()),
+                        help="which reranker setting to sweep (default: doc_truncate)")
     parser.add_argument("--values", default="2000,1000,500",
-                        help="comma-separated rerank_doc_truncate values")
+                        help="comma-separated values for the chosen knob")
     parser.add_argument("--golden", default="tests/fixtures/golden_set.json")
     parser.add_argument("--out-dir", default="/tmp/eval_doc_truncate", type=Path)
     parser.add_argument("--force", action="store_true",
@@ -127,21 +137,21 @@ def main() -> int:
     values = [int(v.strip()) for v in args.values.split(",") if v.strip()]
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"sweep: truncate ∈ {values}")
+    print(f"sweep: rerank_{args.knob} ∈ {values}")
     print(f"golden: {args.golden}")
     print(f"reports dir: {args.out_dir}")
 
     rows = []
     for v in values:
-        print(f"\n--- truncate={v} ---")
-        rows.append(_run_one(v, args.golden, args.out_dir, args.force))
+        print(f"\n--- {args.knob}={v} ---")
+        rows.append(_run_one(args.knob, v, args.golden, args.out_dir, args.force))
 
-    _summarize(rows)
+    _summarize(args.knob, rows)
 
     # Persist the sweep summary alongside the per-value reports.
-    summary_path = args.out_dir / "sweep_summary.json"
+    summary_path = args.out_dir / f"sweep_summary_{args.knob}.json"
     summary_path.write_text(json.dumps([
-        {"truncate": r["truncate"], "wall_s": r.get("wall_s"),
+        {"knob": r["knob"], "value": r["value"], "wall_s": r.get("wall_s"),
          "report": r.get("report"), "error": r.get("error")}
         for r in rows
     ], indent=2))
