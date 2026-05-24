@@ -1501,8 +1501,14 @@ async def execute_all_nodes(
 
             # Spawn keepalive so the SSE stream doesn't look dead during long LLM calls.
             keepalive_stop = asyncio.Event()
+            _node_start_t = time.monotonic()
 
             async def _keepalive_loop():
+                # §17.261 — progress watchdog. Each keepalive tick, log a
+                # "still_running" line carrying job_id + node_key + elapsed
+                # so a hung exec_task is visible in logs without waiting
+                # for the 30-min orphan-reset sweep (node_orphan_threshold).
+                # Pure observability; does not touch exec_task lifecycle.
                 while not keepalive_stop.is_set():
                     try:
                         await asyncio.wait_for(
@@ -1510,7 +1516,12 @@ async def execute_all_nodes(
                             timeout=settings.sse_keepalive_seconds,
                         )
                     except asyncio.TimeoutError:
-                        pass  # heartbeat tick — handled below
+                        logger.info(
+                            "exec_node_still_running: job=%s node=%s elapsed_s=%.1f",
+                            job_id,
+                            (node["node_key"] if node else "unknown"),
+                            time.monotonic() - _node_start_t,
+                        )
 
             keepalive_queue: asyncio.Queue[str] = asyncio.Queue()
 
@@ -1525,6 +1536,7 @@ async def execute_all_nodes(
                         await keepalive_queue.put(": keepalive\n\n")
 
             hb_task = asyncio.create_task(_heartbeat_producer())
+            ka_task = asyncio.create_task(_keepalive_loop())  # §17.261
             exec_task = asyncio.create_task(
                 execute_next_node(job_id, model_overrides=model_overrides)
             )
@@ -1542,8 +1554,13 @@ async def execute_all_nodes(
             finally:
                 keepalive_stop.set()
                 hb_task.cancel()
+                ka_task.cancel()  # §17.261
                 try:
                     await hb_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                try:
+                    await ka_task
                 except (asyncio.CancelledError, Exception):
                     pass
             status = result.get("status", "unknown")

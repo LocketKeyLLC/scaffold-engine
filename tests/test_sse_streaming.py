@@ -348,3 +348,87 @@ class TestHeartbeatCharacter:
         assert "\u200b" in source or "\\u200b" in source, (
             "Keepalive should use zero-width space"
         )
+
+
+# ===========================================================================
+# \u00a717.261 \u2014 _keepalive_loop watchdog wired as progress logger
+# ===========================================================================
+
+@pytest.mark.smoke
+class TestKeepaliveProgressWatchdog:
+    """Section 17.261 - wired-up _keepalive_loop logs exec_node_still_running
+    per keepalive tick while exec_task runs. Pure observability - no
+    SSE event added, no lifecycle change. Closes section 17.258 red #3."""
+
+    def test_long_running_exec_emits_progress_log(self, caplog):
+        """A node that takes longer than sse_keepalive_seconds must produce
+        at least one `exec_node_still_running` log line carrying job_id +
+        node_key + elapsed_s."""
+        from app.config import settings
+        import logging
+
+        # Slow exec_task: first call awaits ~0.18s and returns _done(),
+        # second call returns _COMPLETE. With sse_keepalive_seconds=0.05,
+        # the watchdog ticks ~3 times during the first call.
+        call_count = {"n": 0}
+
+        async def _exec_side(*_a, **_kw):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                await asyncio.sleep(0.18)
+                return _done("T1", "X")
+            return _COMPLETE
+
+        db, mock_session = _make_sse_db(dag_node_count=1)
+        with caplog.at_level(logging.INFO, logger="app.modules.execution_agent"), \
+             patch.object(settings, "sse_keepalive_seconds", 0.05), \
+             patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job",
+                   AsyncMock(return_value={"status": "executing", "id": "job-261"})), \
+             patch("app.modules.execution_agent._peek_next_node",
+                   AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
+             patch("app.modules.execution_agent.execute_next_node", _exec_side):
+            from app.modules.execution_agent import execute_all_nodes
+            _collect_sse_raw(execute_all_nodes("job-261"))
+
+        progress_lines = [
+            r for r in caplog.records
+            if "exec_node_still_running" in r.getMessage()
+        ]
+        assert progress_lines, (
+            f"expected \u22651 'exec_node_still_running' log line from \u00a717.261 "
+            f"watchdog; got: {[r.getMessage() for r in caplog.records]}"
+        )
+        # The log line carries job_id and node_key for grep-debugging hangs.
+        msg = progress_lines[0].getMessage()
+        assert "job=job-261" in msg, f"missing job_id in log: {msg!r}"
+        assert "node=T1" in msg, f"missing node_key in log: {msg!r}"
+
+    def test_fast_exec_emits_no_progress_log(self, caplog):
+        """A node that finishes within one keepalive tick must NOT produce
+        any `exec_node_still_running` lines \u2014 the watchdog only fires after
+        the timeout elapses without keepalive_stop being set."""
+        from app.config import settings
+        import logging
+
+        db, mock_session = _make_sse_db(dag_node_count=1)
+        # Default sse_keepalive_seconds=15.0 vs instant exec \u2014 no tick fires.
+        with caplog.at_level(logging.INFO, logger="app.modules.execution_agent"), \
+             patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job",
+                   AsyncMock(return_value={"status": "executing", "id": "j1"})), \
+             patch("app.modules.execution_agent._peek_next_node",
+                   AsyncMock(side_effect=[_node("T1", "X", "LLM"), None])), \
+             patch("app.modules.execution_agent.execute_next_node",
+                   AsyncMock(side_effect=[_done("T1", "X"), _COMPLETE])):
+            from app.modules.execution_agent import execute_all_nodes
+            _collect_sse_raw(execute_all_nodes("j1"))
+
+        progress_lines = [
+            r for r in caplog.records
+            if "exec_node_still_running" in r.getMessage()
+        ]
+        assert not progress_lines, (
+            f"watchdog should not fire on fast exec; got: "
+            f"{[r.getMessage() for r in progress_lines]}"
+        )

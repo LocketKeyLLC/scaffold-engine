@@ -14473,6 +14473,30 @@ Existing `TestRerankEmptyItems::test_empty_items_triggers_fallback` continues to
 
 ---
 
+### §17.261 `_keepalive_loop` wired as progress watchdog — close §17.258 🔴 #3 (2026-05-24)
+
+§17.258's third red item. Pre-fix, `app/modules/execution_agent.py::execute_all_nodes` defined two nearly-identical functions: `_heartbeat_producer` (lines 1517-1525, wired into the SSE stream as the per-tick `: keepalive\n\n` emitter) and `_keepalive_loop` (lines 1505-1513, body literally `pass`, never invoked anywhere). The comment inside `_keepalive_loop` (`pass  # heartbeat tick — handled below`) strongly suggested an earlier draft that was abandoned when the queue-based `_heartbeat_producer` was written; the operator confirmed during the §17.258 audit that the intent was to wire it up, not delete it.
+
+**Design choice: progress watchdog, not stall-killer.** The body could plausibly have been (a) a cancel-on-stall watchdog, (b) a periodic stats emitter, or (c) a redundant heartbeat. Picked (b) — pure observability — because it's the minimum-risk wiring: zero new behavior for callers, no new config knobs, identical lifecycle to `_heartbeat_producer`. The reaper (`cleanup.py::reap_stale_jobs`) still owns hung-job recovery on the 30-min `node_orphan_threshold_minutes` sweep; this is a faster grep-debugging signal for the in-flight case.
+
+**Wiring at `app/modules/execution_agent.py:1502-1572`:**
+- `_keepalive_loop` body becomes: each tick (after `asyncio.wait_for(keepalive_stop.wait(), timeout=settings.sse_keepalive_seconds)` raises `TimeoutError`), emit `logger.info("exec_node_still_running: job=%s node=%s elapsed_s=%.1f", job_id, node["node_key"] if node else "unknown", time.monotonic() - _node_start_t)`.
+- New `_node_start_t = time.monotonic()` captured outside the closure before either task spawns, so the elapsed counter is real per-node wall-clock, not loop-iteration-relative.
+- `ka_task = asyncio.create_task(_keepalive_loop())` immediately after the existing `hb_task = asyncio.create_task(_heartbeat_producer())` — same cancellation pattern (`ka_task.cancel()` + `await ka_task` in the `try/except (asyncio.CancelledError, Exception)` finally), same module-global `keepalive_stop` signal.
+- Pure observability — `exec_task` lifecycle is unchanged. The watchdog cannot cancel exec, cannot mutate state, cannot affect SSE output. Worst case (logger backend wedges) is a swallowed log line.
+
+**Test-suite delta:** +2 tests in new `TestKeepaliveProgressWatchdog` (`test_sse_streaming.py`):
+- `test_long_running_exec_emits_progress_log` — patches `settings.sse_keepalive_seconds=0.05`; injects an exec mock that awaits `asyncio.sleep(0.18)` on the first call (~3 watchdog ticks fire during the wait). Asserts ≥1 `exec_node_still_running` `caplog.record` and that the message carries `job=job-261` + `node=T1`.
+- `test_fast_exec_emits_no_progress_log` — default `sse_keepalive_seconds=15.0`, instant exec; asserts zero progress log lines. Guards against a regression where the watchdog logs on every call regardless of timeout.
+
+**caplog gotcha caught during test development.** `execution_agent.py:46` uses `logger = logging.getLogger(__name__)` → logger name `app.modules.execution_agent`, not `scaffold` (per the §16.2 Pattern A invariant for module-level loggers). `caplog.at_level(logging.INFO, logger="app.modules.execution_agent")` is the correct scope.
+
+**Pre-existing test-infra issue surfaced but NOT in scope for §17.261.** During regression check (`pytest tests/test_sse_streaming.py tests/test_execution_agent_sse.py tests/test_execution_agent_concurrency.py`), 3 tests in `TestExecuteAllNodesAbnormalExit` + `TestExecutionConcurrencyCap` fail with `ValueError: The future belongs to a different loop`. Verified pre-existing: same failures reproduce on `main` pre-§17.261 with the same file-order. Root cause: `test_sse_streaming.py`'s sync `_collect_sse_raw` calls `asyncio.new_event_loop()` per invocation; `execute_all_nodes`'s outer-finally calls `_spawn_cleanup_task` even on clean exits (line 1705), leaking a `_cleanup_stuck_running_job` task into module-global `_CLEANUP_TASKS` bound to the now-dead loop. Next test calling `drain_cleanup_tasks` chokes on the cross-loop reference. Logged as a candidate for a separate §-entry; not in §17.261's scope.
+
+**§17.258 status after this commit.** All three 🔴 items closed (§17.259, §17.260, §17.261). 🟡 (3) + 🟢 (3) + test gaps (5) remain as the next work surface.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
