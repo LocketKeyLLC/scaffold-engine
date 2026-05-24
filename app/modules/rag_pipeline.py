@@ -1065,13 +1065,15 @@ async def ingest_entries(
                 sim_score = float(top_hit.score)
 
                 if sim_score >= dedup_threshold:
-                    # The exact-hash filter at L738-750 catches identity matches
-                    # in serial flow. Concurrent ingests can race past it (Entry
-                    # A is mid-pipeline with hash H; Entry B reaches Pass 1
-                    # before A is upserted, also passes Pass 1; Pass 3 sees A
-                    # already in Milvus). Reject by similarity unconditionally
-                    # here so the racing duplicate doesn't slip into the
-                    # version-chain branch.
+                    # The Pass 1 exact-hash filter (search above for
+                    # "Pass 1: normalize + exact-hash filter") catches identity
+                    # matches in serial flow. Concurrent ingests can race past
+                    # it (Entry A is mid-pipeline with hash H; Entry B reaches
+                    # Pass 1 before A is upserted, also passes Pass 1; Pass 3
+                    # sees A already in Milvus). Reject by similarity
+                    # unconditionally here so the racing duplicate doesn't slip
+                    # into the version-chain branch. §17.265 — replaced the
+                    # pre-§17.265 "L738-750" line reference; line numbers rot.
                     existing_eid = top_hit.entity.get("entry_id", str(top_hit.id))
                     logger.info(
                         "dedup_rejected: sim=%.4f title='%s' existing='%s'",

@@ -420,6 +420,11 @@ class Pipeline:
         # orchestrator's /assist/_chatmap endpoint so subcommands accept
         # an optional <session_id>. Default on; flip off to force users
         # back to explicit session IDs (debugging or shared-chat setups).
+        # §17.265 — router-only by design. The other four pipelines
+        # (execution_handler, dag_viewer, gt_browser, prompt_inspector)
+        # do not handle /assist subcommands, so the valve would be inert
+        # there. Do NOT replicate it for "consistency" — it would suggest
+        # behavior that does not exist.
         assist_session_memory_enabled: bool = True
 
         # Model overrides

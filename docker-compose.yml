@@ -346,6 +346,10 @@ services:
     mem_limit: 2560m
     # 999:1000 is the redis user/group baked into redis:8-alpine.
     # /data is already chowned redis:redis in the existing volume.
+    # §17.265 — verified against the pinned digest above:
+    #   docker run --rm redis:8-alpine@sha256:81b6f81d6a6c5b9019231a2e8eb10085e3a139a34f833dcc965a8a959b040b72 id redis
+    #   → uid=999(redis) gid=1000(redis)
+    # Re-run if/when the digest is bumped.
     user: "999:1000"
     command: >
       redis-server --save 60 1000

@@ -14563,6 +14563,27 @@ Full `test_rag_pipeline.py`: 59 → 61 passing.
 
 ---
 
+### §17.265 bundled 🟢 cleanups — close §17.258 🟢 #1, #2, #3 (2026-05-24)
+
+Three comment-only cleanups from §17.258's 🟢 tier batched as flagged in the §17.264 entry. No logic touched, no test reruns needed (parse-check via `ast.parse` + `docker compose config --quiet`).
+
+**Cleanup A — `app/modules/rag_pipeline.py:1068` stale line reference.** The audit flagged a comment that said "The exact-hash filter at L738-750…" but the cited code now lives at lines 978-1010 (a >200-line drift from re-organization in the §17.x series). Rewrote the reference to be **searchable not numeric**: `(search above for "Pass 1: normalize + exact-hash filter")` — survives any future line shuffle. Includes a §17.265 marker explaining why line numbers rot.
+
+**Cleanup B — `docker-compose.yml:347` Redis user/group verification.** The audit flagged the `999:1000` comment as "unverified against current digest." Verified live:
+```
+docker run --rm redis:8-alpine@sha256:81b6f81d6a6c5b9019231a2e8eb10085e3a139a34f833dcc965a8a959b040b72 id redis
+→ uid=999(redis) gid=1000(redis)
+```
+Comment is correct; appended a §17.265 block with the exact verification command + digest so the next operator (or the next digest bump) can re-verify in 1 paste rather than guessing. The mapping (`user: "999:1000"`) is unchanged.
+
+**Cleanup C — `pipelines/scaffold_router.py:418` `assist_session_memory_enabled` valve presence note.** The audit flagged the valve as missing from the other four pipelines (`execution_handler`, `dag_viewer`, `gt_browser`, `prompt_inspector`) and suggested "add a no-op on the others or document that it's router-only." Documented it: a §17.265 block on the valve's docstring explains the valve is **router-only by design** because the other four pipelines do not handle `/assist` subcommands, and explicitly tells future readers DO NOT replicate it for "consistency" — that would suggest behavior that does not exist. No JSON/template changes (those are operator-edited and a static docs note in valves.json doesn't survive bootstrap).
+
+**Auditor's claim B was a verified-true finding** (digest comment was correct), **A was a stale-data finding** (line numbers had rotted), **C was a documentation gap** (the absence was intentional but undocumented). All three closed by the same comment-edit pattern: add a §-marker to make the verification (or the decision) self-evident to the next reader.
+
+**§17.258 status after §17.265.** All three severity tiers closed: 🔴 (§17.259, §17.260, §17.261), 🟡 (§17.262, §17.263, §17.264), 🟢 (§17.265). The 5 test gaps from the audit remain as the work surface for next §-entries. The audit itself is **fully resolved**; new findings should open a new §17.x audit cycle rather than reusing §17.258's slot.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
