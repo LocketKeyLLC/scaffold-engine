@@ -25,11 +25,25 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Dev deps live in the same venv but only the runtime stage prunes them.
 RUN pip install --no-cache-dir -r requirements-dev.txt
 
-# Pre-download reranker weights (Task #16) into a stage-shared cache dir.
+# §17.243 — pre-download reranker weights into the HF cache at the
+# layout sentence-transformers actually reads from at runtime.
+#
+# HF_HOME is the standard env var; HF's snapshot_download then writes
+# to ``$HF_HOME/hub/models--<org>--<repo>/...`` — which is exactly
+# where sentence-transformers' CrossEncoder load looks. Without
+# setting HF_HOME here, the old layout was ``cache_dir/models--*/``
+# (no /hub) and the production code path (which uses
+# HF_HOME=/code/.cache/huggingface from compose) silently bypassed
+# the baked cache and re-downloaded on every fresh deployment.
+#
+# Net image size unchanged — same ~600 MB of weights, just at the
+# right path. Fresh deployments now run the orchestrator + harness
+# sidecars in HF_HUB_OFFLINE mode from the image's pre-baked cache
+# (no rate-limited HF Hub round-trip; see §17.239).
+ENV HF_HOME=/code/.cache/huggingface
 RUN python -c "\
 from huggingface_hub import snapshot_download; \
-snapshot_download('tomaarsen/Qwen3-Reranker-0.6B-seq-cls', \
-                  cache_dir='/code/.cache/huggingface')"
+snapshot_download('tomaarsen/Qwen3-Reranker-0.6B-seq-cls')"
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -66,6 +80,11 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 # and `cd /code/cli && python -m scaffold_cli ...` work without compose
 # having to re-declare them on every service.
 ENV PYTHONPATH="/code:/code/sdk"
+# §17.243 — image-intrinsic HF_HOME (matches the builder pre-bake path
+# above). Compose still sets this for clarity, but the image is now
+# self-contained — a fresh `docker run scaffold-engine:dev` will find
+# the cached reranker without any external configuration.
+ENV HF_HOME="/code/.cache/huggingface"
 
 # Prune dev-only packages so this stage carries prod deps only.
 COPY requirements-dev.txt /tmp/requirements-dev.txt
@@ -129,6 +148,9 @@ ENV VIRTUAL_ENV=/opt/venv
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 ENV PYTHONPATH="/code:/code/sdk"
+# §17.243 — same HF_HOME as runtime stage. Dev image is also a sidecar
+# substrate; harness sidecars need to find the cached reranker.
+ENV HF_HOME="/code/.cache/huggingface"
 
 COPY --from=builder --chown=scaffold:scaffold /code/.cache /code/.cache
 

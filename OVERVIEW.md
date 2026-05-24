@@ -11993,6 +11993,224 @@ harness-robustness thread.
 
 ---
 
+### §17.243 Dockerfile cache pre-bake — fix layout so the image-baked reranker is actually reachable (2026-05-24)
+
+Closes §17.242 candidate A — "`Dockerfile` cache pre-bake to eliminate
+the fresh-deployment + wrong-model failure modes at the image layer."
+Surprise finding: **the Dockerfile already had a pre-bake at lines
+28-32 (commented "Task #16"), but it was writing the model to a path
+sentence-transformers never reads from at runtime.** The image's
+~600 MB of weights have been structurally invisible to the production
+code path since the pre-bake landed — every fresh deployment quietly
+re-downloaded the model on first orchestrator boot, populating the
+named volume from scratch. After that initial network round-trip, the
+named volume persisted across restarts and everything *looked* fine,
+which is why the bug had survived.
+
+§17.243 is more "fix the existing broken pre-bake" than "add a new
+pre-bake." Net image-size change: ~0.
+
+**The bug.**
+
+Builder pre-bake (pre-§17.243):
+
+```dockerfile
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('tomaarsen/Qwen3-Reranker-0.6B-seq-cls', \
+                  cache_dir='/code/.cache/huggingface')"
+```
+
+`snapshot_download(cache_dir=X)` writes to `X/models--<org>--<repo>/`
+— **no `/hub` subdir**. So the model landed at:
+
+```
+/code/.cache/huggingface/
+├── CACHEDIR.TAG
+├── .locks/models--tomaarsen--Qwen3-Reranker-0.6B-seq-cls/
+└── models--tomaarsen--Qwen3-Reranker-0.6B-seq-cls/
+```
+
+At runtime, sentence-transformers' `CrossEncoder` reads from
+`HF_HUB_CACHE`, which defaults to `$HF_HOME/hub`. With
+`HF_HOME=/code/.cache/huggingface` (set by compose at runtime, NOT in
+the Dockerfile), `HF_HUB_CACHE` resolves to
+`/code/.cache/huggingface/hub` — a directory that **did not exist** in
+the image-baked cache.
+
+So:
+- The image's 600 MB pre-bake at `/code/.cache/huggingface/models--*/`
+  was structurally invisible to the production code path.
+- On every fresh deployment, the orchestrator's first
+  `_get_cross_encoder()` call triggered an online HF Hub download
+  into `/code/.cache/huggingface/hub/models--*/`.
+- The new download populated the named volume mounted at that path.
+- Subsequent reboots found the model in the now-populated volume; the
+  pre-bake never participated.
+
+**Verification of the bug (pre-fix image):**
+
+```
+$ docker run --rm scaffold-engine:dev ls /code/.cache/huggingface
+CACHEDIR.TAG
+models--tomaarsen--Qwen3-Reranker-0.6B-seq-cls
+$ docker run --rm scaffold-engine:dev ls /code/.cache/huggingface/hub
+ls: cannot access '/code/.cache/huggingface/hub': No such file or directory
+```
+
+**Fix.**
+
+Three changes in `Dockerfile`:
+
+1. **Builder stage** — set `ENV HF_HOME=/code/.cache/huggingface`
+   BEFORE the pre-bake `RUN`, then drop the explicit `cache_dir`
+   argument so `snapshot_download` uses the HF_HOME-derived default
+   (`HF_HOME/hub`):
+
+```dockerfile
+ENV HF_HOME=/code/.cache/huggingface
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('tomaarsen/Qwen3-Reranker-0.6B-seq-cls')"
+```
+
+2. **Runtime stage** — add `ENV HF_HOME="/code/.cache/huggingface"`
+   so the image is self-documenting (compose's HF_HOME setting
+   becomes redundant; a `docker run scaffold-engine:dev` works
+   without external env config).
+
+3. **Dev stage** — same `ENV HF_HOME=...` so harness sidecars find
+   the cache without an explicit env-file load.
+
+**Post-fix cache layout:**
+
+```
+$ docker run --rm scaffold-engine:dev ls /code/.cache/huggingface
+hub
+xet
+$ docker run --rm scaffold-engine:dev ls /code/.cache/huggingface/hub
+CACHEDIR.TAG
+models--tomaarsen--Qwen3-Reranker-0.6B-seq-cls
+```
+
+Now matches the layout sentence-transformers expects.
+
+**Verification — fresh sidecar, no named volume, offline mode.**
+
+```
+$ docker run --rm --memory 6g --user 1000:1000 -e HF_HUB_OFFLINE=1 \
+    scaffold-engine:dev python3 -c "
+from sentence_transformers import CrossEncoder
+import time
+t0 = time.monotonic()
+m = CrossEncoder('tomaarsen/Qwen3-Reranker-0.6B-seq-cls', trust_remote_code=True)
+print(f'OK — loaded from image-baked cache in {time.monotonic()-t0:.1f}s')
+"
+OK — loaded from image-baked cache in 0.9s
+```
+
+A fresh container with NO volume mount, NO network access (offline
+mode), loads the reranker in **0.9 s**. The image-baked cache is
+now usable.
+
+Live orchestrator restart with the new image:
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --force-recreate scaffold-orchestrator
+$ # healthy at t=7s
+$ docker logs scaffold-orchestrator | grep crossencoder
+"crossencoder_loading: model=tomaarsen/Qwen3-Reranker-0.6B-seq-cls attempt=1/3"
+"crossencoder_loaded: elapsed_s=1.9"
+"reranker_prewarmed"
+```
+
+Production code path unchanged — still 1.9 s reranker prewarm (the
+named volume already had the model from the pre-§17.243 first-boot
+download; the new image's layout doesn't conflict because Docker
+overlays the volume on top of the image's path).
+
+**What this eliminates.**
+
+| Failure mode | Pre-§17.243 | Post-§17.243 |
+|---|---|---|
+| Fresh deployment, no named volume | First orchestrator boot blocks on HF Hub download (~30-60 s if successful, indefinitely if rate-limited or offline) | Named volume auto-inherits from image cache; orchestrator + sidecars work immediately, no network |
+| Volume reset / corrupt | Same as fresh — re-downloads | Same as fresh — works from image |
+| HF Hub rate-limited (the §17.238/§17.239 scenario) | Hangs indefinitely on first model load | Works offline; image cache is enough |
+| Harness sidecar without volume mount | Falls back to RRF or hangs | Works (the §17.239 test confirms 0.9 s load) |
+| Wrong MODEL_RERANKER vs cached model | §17.242 catches it; operator boots orchestrator to download | Same diagnostic; orchestrator boot now succeeds offline because the image-baked cache matches the configured model |
+
+**Net image size — unchanged.**
+
+The pre-fix image already carried ~600 MB of weights (just at the
+wrong path). The fix moves the same weights to the right path. No
+duplicate cache, no growth.
+
+```
+$ docker image ls scaffold-engine:dev --format "{{.Size}}"
+4.37GB
+```
+
+(Pre-fix was the same.)
+
+**Files.**
+
+- `Dockerfile`:
+  - Builder stage: `ENV HF_HOME=/code/.cache/huggingface` added
+    before the pre-bake `RUN`; `cache_dir=` argument dropped from
+    `snapshot_download` so it uses the HF_HOME-derived default.
+  - Runtime stage: `ENV HF_HOME="/code/.cache/huggingface"` added
+    so the image is self-contained.
+  - Dev stage: same `ENV HF_HOME=...` added.
+  - Comments cite §17.243 inline.
+- `OVERVIEW.md` — this entry.
+
+No app code change. No test change. No compose change required (the
+existing `HF_HOME: /code/.cache/huggingface` in compose at line 251
+is now redundant with the image ENV, but harmless; keeping it for
+clarity).
+
+**Why drop `cache_dir=` rather than change it to `cache_dir='/code/.cache/huggingface/hub'`.**
+
+Both approaches put the files at the right path. Dropping the arg
+and using HF_HOME is more robust — if a future huggingface_hub
+release changes the layout convention (e.g. adds another subdir
+between HF_HOME and `models--*`), the pre-bake automatically
+follows the same convention sentence-transformers reads from. With
+an explicit `cache_dir='.../hub'`, we'd be hardcoded to the current
+layout.
+
+**What §17.243 does NOT change.**
+
+- The compose `HF_HOME: /code/.cache/huggingface` line — kept for
+  the moment; it's now redundant but harmless. Removing it would be
+  a separate cosmetic commit.
+- The named-volume mount semantics — `scaffold-engine_hf-cache`
+  still mounts at the cache path; the image's pre-bake populates a
+  fresh volume on first creation, the existing volume's contents
+  shadow the image's on subsequent runs.
+- Reranker model identity — still
+  `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`. A future
+  `MODEL_RERANKER` swap would require a corresponding Dockerfile
+  pre-bake update; the §17.242 freshness check would catch the
+  mismatch at harness time.
+
+**Open follow-ups.**
+
+1. **§17.244 candidate A** — `Dockerfile` pre-bake should derive
+   the model name from `MODEL_RERANKER` rather than hardcoding
+   it. Currently both the Dockerfile string and `app/config.py`'s
+   default carry the model name; drift is possible. Read
+   `MODEL_RERANKER` from `.env` at build time (or pass via
+   `--build-arg`). ~5 lines.
+2. **Compose cleanup** — remove the now-redundant `HF_HOME:` line
+   in `docker-compose.yml`. Pure cosmetic; logged.
+3. **§17.234 candidate B / §17.237 candidate C** (still open) —
+   smaller reranker model. The §17.243 pre-bake makes model
+   swapping easier (rebuild the image with a different
+   `MODEL_RERANKER` → fresh cache layout for the new model).
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
