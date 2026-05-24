@@ -23,6 +23,11 @@ jobs:
   unit-tests:
     name: Unit Tests (no live services)
     runs-on: ubuntu-latest
+    # §17.276 — bound runtime. Dev-image suite finishes well under 5 min
+    # on a hot runner; cap at 15 to fail loud if Postgres/probe stalls
+    # rather than burning the runner's 6-hour default ceiling. Matches
+    # ci.yml's 10-min smoke + 20-min integration tier.
+    timeout-minutes: 15
 
     services:
       postgres:

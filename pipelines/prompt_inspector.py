@@ -195,9 +195,21 @@ class Pipeline:
             )
             if resp.status_code != 200:
                 hint = self._drift_hint() if resp.status_code == 401 else ""
-                return f"❌ Error: {resp.json().get('detail', resp.text)}{hint}"
+                # §17.276 — orchestrator may return 4xx/5xx with HTML body;
+                # bare .json() would raise ValueError before .get() ran.
+                try:
+                    detail = resp.json().get("detail", resp.text)
+                except ValueError:
+                    detail = resp.text[:200] or "(non-JSON body)"
+                return f"❌ Error: {detail}{hint}"
 
-            data = resp.json()
+            # §17.276 — non-JSON 200 body would have crashed pre-fix.
+            try:
+                data = resp.json()
+            except ValueError as e:
+                return f"❌ Prompts list: orchestrator returned non-JSON body ({e}); raw: {resp.text[:200]}"
+            if not isinstance(data, dict):
+                return f"❌ Prompts list: orchestrator reply not a dict; raw: {str(data)[:200]}"
             nodes = data.get("nodes", [])
             lines = [
                 f"## 📋 Prompts for Job `{job_id[:8]}...`\n",
@@ -233,9 +245,20 @@ class Pipeline:
             )
             if resp.status_code != 200:
                 hint = self._drift_hint() if resp.status_code == 401 else ""
-                return f"❌ Error: {resp.json().get('detail', resp.text)}{hint}"
+                # §17.276 — same defensive pattern as _list above.
+                try:
+                    detail = resp.json().get("detail", resp.text)
+                except ValueError:
+                    detail = resp.text[:200] or "(non-JSON body)"
+                return f"❌ Error: {detail}{hint}"
 
-            d = resp.json()
+            # §17.276 — non-JSON 200 body would have crashed pre-fix.
+            try:
+                d = resp.json()
+            except ValueError as e:
+                return f"❌ Prompt view: orchestrator returned non-JSON body ({e}); raw: {resp.text[:200]}"
+            if not isinstance(d, dict):
+                return f"❌ Prompt view: orchestrator reply not a dict; raw: {str(d)[:200]}"
             status = d.get("status", "?")
             s_icon = STATUS_ICONS.get(status, status)
             model = d.get("assigned_model") or "default"

@@ -14919,6 +14919,23 @@ Full file 14 → 17 passing in the relevant classes. No regressions.
 
 ---
 
+### §17.276 bundled 🟡 items — prompt_inspector JSON guards + test.yml timeout (2026-05-24)
+
+§17.273's two 🟡 items, batched per §17.265 precedent (small + thematically narrow).
+
+**Cleanup A — `pipelines/prompt_inspector.py` lines 198, 202, 236, 240.** The audit flagged 198 and 236 (error-path `resp.json().get('detail', resp.text)` — if 4xx/5xx body is HTML, `.json()` raises `ValueError` before `.get()` is reached). Reading the surrounding code revealed each method has a SECOND bare `resp.json()` on the 200 path too (lines 202 + 240) — same vulnerability class, same fix shape. Outer `try/except requests.exceptions.RequestException` catches connection errors but NOT `ValueError`. Both methods fixed end-to-end:
+
+- `_list` method (`/prompts/{job_id}` index): error path wraps `.json()` in try/except → falls back to `resp.text[:200]` for the detail; 200 path applies the §17.259/§17.275 three-layer pattern (try/except ValueError + isinstance dict check + `❌ Prompts list: ...` error message).
+- `_view` method (`/prompts/{job_id}/{node_key}` detail): same pattern, `❌ Prompt view: ...` message.
+
+**Cleanup B — `.github/workflows/test.yml:25` adds `timeout-minutes: 15` on `unit-tests` job.** Default GitHub Actions job timeout is 6 hours; a stuck Postgres probe (e.g. the 60s asyncpg-handshake regression §17.179 documented and the 2s cap §17.179-follow-up tightened) would have burned the full ceiling instead of failing fast. 15 minutes matches the dev-image test suite's actual runtime (well under 5 min on a hot runner) plus headroom for service-startup. Mirrors `ci.yml`'s 10-min smoke + 20-min integration tiers.
+
+**No new tests.** The prompt_inspector fix shape is byte-equivalent to the §17.275 sync-return-handler pattern that `TestSyncActionJsonGuards::test_jobs_list_action_handles_non_json_body` already pins. Writing a whole new `tests/test_prompt_inspector_pipeline.py` just to assert the identical guard would be scope creep — the existing `tests/test_prompt_inspector_module.py` covers the BACKEND module, not the pipeline. Logged as a candidate test-gap for a future §-entry (pipelines/prompt_inspector.py has zero pipeline-level test coverage; one shared `pipeline_json_guards` parametrized test across dag_viewer, prompt_inspector, gt_browser would close the gap).
+
+**§17.273 closeout status.** All 7 🔴 + both 🟡 closed (§17.274 + §17.275 + §17.276). 3 🟢 + 4 test gaps remain. Operator already pre-committed the 🟢 direction in §17.273: metrics.py → public counter (one of the 🟢 items), test.yml timeout-minutes done above. Remaining 🟢 work: scripts/*.sh `set -euo pipefail` sweep, observability/otel.py DEBUG-swallow hardening.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
