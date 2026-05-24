@@ -15005,6 +15005,42 @@ Full suite delta: +30 tests across two new files. No regressions.
 
 ---
 
+### §17.279 ngspice sidecar tests — pins the §17.140 audit invariant — close §17.273 test-gap #4 (2026-05-24)
+
+§17.273's final test gap. `app/sim/ngspice.py`'s docstring states the load-bearing audit contract:
+
+> Every call writes one row to `sim_runs` *before* returning, even when the sidecar is unreachable. The audit row is the proof that the orchestrator attempted verification; a missing row would let a downstream report cite a sim run that never happened.
+
+Pre-§17.279, that contract was un-pinned. A regression that swapped the early-return order — e.g. an "optimization" that skips the DB write when `body is None` — would have shipped green. The chain of dependents (report rendering at `app/sim/report.py`, the "every numeric claim ties back through `sim_run_ids[]`" invariant) all assume the audit row exists.
+
+**Test-suite delta:** +14 tests in new `tests/test_sim_ngspice.py`:
+
+| Path | Test | Asserts |
+|---|---|---|
+| Pure-function | `test_sha256_is_deterministic_and_sensitive` | Same input → same hash; one-byte diff → different hash; matches stdlib SHA-256 |
+| Precondition | `test_empty_netlist_raises_value_error_no_sim_run` (×3 parametrize: `""`, `"   "`, `"\n\n\t  \n"`) | Empty/whitespace netlist → `ValueError` BEFORE any sidecar call OR sim_runs write — invalid by contract, not a runtime failure |
+| Happy path | `test_happy_path_writes_sim_run_and_returns_populated_result` | Sidecar 200 + ok=True → populated `NgspiceResult` + audit row carries every field |
+| **Audit invariant** | `test_sidecar_unreachable_writes_sim_run_with_ok_false` | `httpx.ConnectError` → `ok=False, stderr="...unreachable"`, **sim_runs row STILL written** (load-bearing) |
+| Audit invariant | `test_sidecar_http_5xx_writes_sim_run_with_ok_false` | HTTP 503 from sidecar → ok=False + audit row |
+| Audit invariant | `test_sidecar_timeout_writes_sim_run_with_timed_out_true` | sidecar reports `timed_out=True` → result.timed_out=True + audit row carries flag |
+| Audit invariant | `test_sidecar_non_zero_exit_writes_sim_run_with_exit_code_preserved` | ngspice exits 1 → ok=False, exit_code=1 preserved, stderr captured |
+| Audit invariant | `test_sidecar_returns_malformed_json_writes_sim_run_with_ok_false` | resp.json() raises ValueError → treated as transport failure + audit row |
+| Audit-trail wiring | `test_job_id_and_dag_node_id_forwarded_to_sim_runs_row` | Caller-provided IDs land in the row so reports can join back |
+| Audit-trail wiring | `test_no_job_or_dag_node_id_writes_nulls` | Defaults: NULL job_id/dag_node_id |
+| Config plumbing | `test_timeout_defaults_to_settings_when_unspecified` | `timeout_s=None` → `settings.ngspice_run_timeout_s` reaches sidecar JSON body |
+| Config plumbing | `test_timeout_explicit_overrides_settings` | Explicit `timeout_s=X` wins over settings |
+
+**Mock infrastructure** (worth recording for future sidecar test files):
+- `_mock_db_for_insert()` returns `(db, sim_run_id)` — db.execute returns a row whose `scalar_one()` is the UUID; db.commit is an `AsyncMock`.
+- `_mock_httpx_response(body, status)` returns a `MagicMock(spec=httpx.Response)` with `.json()` returning the body and `.raise_for_status()` either no-op (2xx) or raising `httpx.HTTPStatusError` (≥400).
+- `_ngspice_client_returning(resp_or_exc)` returns an `AsyncMock(spec=httpx.AsyncClient)` whose `.post()` either returns the response OR raises the exception.
+
+Test boundary: at `get_ngspice_client()`. The sidecar's actual HTTP behavior is out of scope (covered by docker-side smoke tests).
+
+**§17.273 closeout — TRULY FULL.** All 7 🔴 + both 🟡 + all 3 🟢 + all 4 test gaps closed. Audit thread terminates at §17.279 with zero deferred items. Total: 6 commits (§17.274–§17.279) over the audit-fix cycle, mirroring the §17.258 → §17.272 arc shape (10 commits there; the §17.273 cycle was tighter because two original §17.273 test-gaps were already closed pre-cycle — secret-redaction by `TestRedactSecrets`, CancelledError by §17.274's own test addition).
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
