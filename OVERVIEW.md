@@ -13005,6 +13005,129 @@ No app code change. No test change. Defaults unchanged.
 
 ---
 
+### §17.249 Cleanup stale `pipelines/_next_actions/` + `_sse_events/` leftover dirs (2026-05-24)
+
+Closes §17.248 candidate A — "cleanup the stale `_next_actions/` and
+`_sse_events/` directories under `pipelines/`." These were
+runtime-state directories created by an earlier OWUI pipelines-loader
+run, before §17.212 moved the vendor `.py` files into
+`pipelines/_vendor/`. After §17.212 the loader no longer recognizes
+them as pipelines, but the per-pipeline runtime dirs they left behind
+persisted — visible as inert empty directories at the
+`pipelines/` top level, each holding only a stale `valves.json` from
+the §17.248 `make sync-api-key` run.
+
+**Why they're safe to delete.**
+
+| Check | Pre-§17.249 | Post-§17.249 |
+|---|---|---|
+| Vendor `.py` files (`_next_actions.py`, `_sse_events.py`) | live in `pipelines/_vendor/` (§17.212 fix) | unchanged |
+| Vendor leftover dirs (`pipelines/_next_actions/`, `pipelines/_sse_events/`) | each holds only `valves.json` (80 B); no Python code; not scanned by the OWUI loader's top-level `*.py` glob | **deleted** |
+| OWUI loader behavior on subdirs | skipped (§17.212 documented) | unchanged |
+| `make sync-api-key` reach into the stale dirs | wrote `valves.json` because the shell glob `pipelines/*/valves.json` matched | no longer matches (dirs gone) |
+| `make doctor` section 11 surface count | 10 (5 canonical + 2 vendor leftover + bashrc + 2 containers) | 8 (5 canonical + bashrc + 2 containers) — canonical |
+| Doctor PASS | yes (all surfaces happened to agree post-§17.248) | yes (cleaner) |
+
+**Verification — full sequence.**
+
+```
+$ rm -rf pipelines/_next_actions pipelines/_sse_events
+$ bash scripts/doctor.sh | grep -A 12 "API key 6-surface"
+== API key 6-surface sync (read-side) ==
+  INFO  reference (.env): sk-scaffold…af46
+  PASS  pipelines/dag_viewer/valves.json matches .env
+  PASS  pipelines/execution_handler/valves.json matches .env
+  PASS  pipelines/gt_browser/valves.json matches .env
+  PASS  pipelines/prompt_inspector/valves.json matches .env
+  PASS  pipelines/scaffold_router/valves.json matches .env
+  PASS  ~/.bashrc matches .env
+  PASS  scaffold-orchestrator container matches .env
+  PASS  open-webui-pipelines container matches .env
+  PASS  all 6 surfaces agree on SCAFFOLD_API_KEY (sk-scaffold…af46)
+
+$ docker restart open-webui-pipelines
+$ curl http://localhost:9099/
+{"status":true}
+
+$ docker logs open-webui-pipelines | grep "Loaded module"
+Loaded module: prompt_inspector
+Loaded module: scaffold_router
+Loaded module: gt_browser
+Loaded module: dag_viewer
+Loaded module: execution_handler
+
+$ ls pipelines/_next_actions pipelines/_sse_events
+ls: cannot access 'pipelines/_next_actions': No such file or directory
+ls: cannot access 'pipelines/_sse_events': No such file or directory
+```
+
+All 5 canonical pipelines load cleanly. Stale dirs stay deleted
+across the container restart — the OWUI loader doesn't recreate them
+(it only creates per-pipeline runtime dirs for `.py` files it
+finds at the top level, and the relevant `.py` files now live under
+`_vendor/`).
+
+**The deeper question: should `sync_api_key.sh` skip vendor-leftover dirs?**
+
+The §17.249 cleanup removes the symptom. The underlying
+`scripts/sync_api_key.sh` shell glob `pipelines/*/valves.json` would
+re-find any future leftover dir + write an `api_key` into it. Not a
+real defect because:
+
+1. The §17.212 fix means the OWUI loader never creates leftover dirs
+   for vendor `.py` files anymore (vendor lives in `_vendor/`,
+   subdir invisible to the top-level scan). Future leftover dirs
+   would only appear if an operator manually creates one.
+2. If a leftover dir DID appear, `sync-api-key` writing into it is
+   benign — the `valves.json` is inert, and the doctor section 11
+   reports it as a "matching" surface (extra noise, no failure).
+
+So §17.249's scope stays at "remove the existing two dirs." A future
+hardening would teach `sync_api_key.sh` to skip dirs that match a
+denylist (e.g., the `_*` prefix used by vendor helpers), but that's
+§17.250 territory — not blocking and not motivated by a concrete
+bug.
+
+**Files.**
+
+- `OVERVIEW.md` — this entry.
+- `pipelines/_next_actions/` and `pipelines/_sse_events/` — deleted.
+  **Not committed** (the directories were gitignored runtime state,
+  same as `valves.json` per §17.35).
+
+No app code change. No test change. No commit content beyond
+OVERVIEW.md.
+
+**What §17.249 does NOT change.**
+
+- The §17.212 fix or any `_vendor/` content — unchanged. The `.py`
+  files at `pipelines/_vendor/_next_actions.py` and
+  `pipelines/_vendor/_sse_events.py` are the canonical home.
+- The 5 canonical pipelines (`scaffold_router`, `dag_viewer`,
+  `gt_browser`, `execution_handler`, `prompt_inspector`) and their
+  runtime state — unchanged.
+- The `make sync-api-key` script — unchanged. If a future leftover
+  dir appears, the script will still write to its `valves.json`;
+  the §17.224 doctor section 11 will still report it as an
+  agreeing surface. Hardening logged as §17.250 candidate A.
+- `make ci-tier-2` — still passes end-to-end. The §17.249 cleanup
+  reduces the surface count doctor reports but doesn't change any
+  pass/fail outcome.
+
+**Open follow-ups.**
+
+1. **§17.250 candidate A** — teach `scripts/sync_api_key.sh` to
+   skip `_*`-prefixed subdirs (the vendor-helper naming
+   convention). Defense-in-depth against any future leftover
+   recurrence. ~2 lines.
+2. **§17.249 candidate B** (carried from §17.248) — register a
+   self-hosted GitHub Actions runner so the §17.247 tier 2
+   workflow actually fires on push to main. Operator-side.
+3. **§17.234 candidate B / §17.237 candidate C / §17.236 A/C /
+   §17.232 A/B/C / F3** — unchanged status.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
