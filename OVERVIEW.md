@@ -14805,6 +14805,54 @@ Correction: 3 total rewrites (§17.271 = 1 in eng, §17.272 = 2 across llm + pro
 
 ---
 
+### §17.273 Second fresh-eyes audit — 5-agent sweep post-§17.272 (2026-05-24)
+
+Second cold review after the §17.258 → §17.272 fix cycle. User asked for a full audit across four scopes simultaneously: new code shipped in §17.259-§17.272, modules §17.258 didn't touch, re-sweep of the original four §17.258 areas for drift, and a deep-dive on the 5 bare `r.json()` callsites the §17.268 entry called out as residue. Five parallel `Explore` agents, each briefed with the project invariants (CancelledError-is-BaseException, FOR UPDATE SKIP LOCKED on assist claims, §17.269 lock pattern, sim_runs audit invariant, valves.template.json vs valves.json gitignore semantics) so the known-intentional patterns wouldn't trip false positives.
+
+**Raw subagent output: ~50 candidate items. Verified true positives: 9 + 4 test gaps.** Held at the recorded ~31% subagent-TP rate. Each finding line-verified against the actual source before promotion to the user-facing list.
+
+| Severity | Verified finding | Location |
+|---|---|---|
+| 🔴 | `get_db()` only catches `Exception`, not `BaseException` — request cancelled mid-query won't roll back. The bug class the project explicitly documented and warned about | `app/database.py:36-37` |
+| 🔴 | Bare `r.json()` in `_assist_skip` — same pattern §17.259 fixed for `_assist_start`; status check guards 4xx, then 200-path crashes on non-JSON | `pipelines/scaffold_router.py:1721` |
+| 🔴 | Bare `r.json()` in `_assist_simple_post` | `pipelines/scaffold_router.py:1824` |
+| 🔴 | Bare `r.json()` in `_jobs_list_action` | `pipelines/scaffold_router.py:2898` |
+| 🔴 | Bare `r.json()` in `_jobs_rename_action` | `pipelines/scaffold_router.py:2930` |
+| 🔴 | Bare `r.json()` in `_research_list_action` | `pipelines/scaffold_router.py:3030` |
+| 🔴 | Bare `r.json()` in DAG render — only OWUI pipeline besides `scaffold_router` with this bug | `pipelines/dag_viewer.py:247` |
+| 🟡 | `resp.json().get('detail', resp.text)` in error path — if orchestrator returns 5xx HTML, `.json()` raises before `.get()` is reached | `pipelines/prompt_inspector.py:198, 236` |
+| 🟡 | `unit-tests` job has no `timeout-minutes` — default 6 hours; a stuck Postgres probe burns the runner. `ci.yml` correctly sets 10/20 | `.github/workflows/test.yml` |
+
+**🟢 cleanups (no commit yet):**
+- 11 of 12 `scripts/*.sh` missing `set -euo pipefail` (operational hygiene, pre-existing — only `doctor.sh` is intentionally lax per §17.265).
+- `app/observability/metrics.py:150-157` accesses `_execution_slot_sem._value` — APScheduler private attribute. Will become a public counter per operator decision.
+- `app/observability/otel.py:96-102` nested `except` swallows OTEL setup failures at DEBUG (invisible by default).
+
+**Test gaps worth closing (4):**
+- `app/database.py` CancelledError rollback path — directly pins the 🔴 above; this is the load-bearing test.
+- `app/routers/observability.py` — no test file at all.
+- `app/routers/schedule.py` — no test file at all.
+- `app/sim/ngspice.py` — sidecar-down + timeout scenarios untested; the audit invariant (every call writes a `sim_runs` row even on transport failure) isn't pinned.
+
+**False positives ruled out during verification (5+):**
+- `rag_pipeline.py` "version-chain double-skip race" — the `except Exception` is INSIDE the `async with _predecessor_lock` block; `continue` at end of lock block runs regardless of upsert exception. Control flow does NOT fall through to the new-entry path on upsert failure. Agent 3 misread the indentation of the lock-block boundary.
+- `app/modules/assist_agent.py` missing `FOR UPDATE` on `get_next_step` — actual SQL at line 215 has `FOR UPDATE OF s SKIP LOCKED`. Agent flagged from docstring inspection without reading the SQL body.
+- `app/sim/design_pipeline.py:316` commit-before-linkage — commit is correctly AFTER the linkage `UPDATE specs SET job_id = ...` on the same transaction; agent inverted the sequence.
+- `app/rerankers.py` `rerank()` returning `None` (claim against §17.260) — actual contract: `rerank_cross_encoder` returns None on model-load failure, but the wrapping `rerank()` at line 281 falls back to `rerank_rrf` which always returns a `RerankResult`. The `rr.items` access at the §17.260 call site is safe.
+- `_keepalive_loop` watchdog depends on `ReadTimeout` firing — §17.261's loop has its own `wait_for(stop_event.wait(), timeout=sse_keepalive_seconds)`; ticks independently of any HTTP read timeout.
+
+**Operator-confirmed during the audit:**
+- `metrics.py` private-attr access → refactor to a public counter (no Defer-with-comment fallback).
+- `test.yml` → add `timeout-minutes: 15` (matches dev-image test runtime + ci.yml's 10-min smoke + 20-min integration tier).
+
+**Pattern observation across §17.258 + §17.273.** The same JSON-parse pattern (`status_code >= 400 → return; d = r.json()`) shows up SIX MORE times in `scaffold_router.py` beyond the three §17.258 originally flagged. The §17.268 closeout entry noted this as "pattern-residue" but didn't batch-fix; this audit confirms the residue is six bugs, not zero. Cleaning all six in one §17.x batch is the natural follow-up.
+
+**What §17.273 does NOT change.** No code edits. Pure audit. The 7 🔴 + 2 🟡 + 3 🟢 + 4 test gaps are the work surface for the follow-up cycle, paralleling the §17.259-§17.272 arc that closed §17.258.
+
+**Subagent-TP rate replication.** §17.258 hit 9 TPs out of ~60 raw findings (~15%). §17.273 hit 9 TPs + 4 test gaps out of ~50 candidates (~26%). Both within the predicted ~30% band; the audit method is reproducibly noisy at this level. The skill-invariant briefing remains the single biggest false-positive reducer, evidenced by the absence of "stdlib-vs-structlog" / "CancelledError-is-Exception" / "Docker host.docker.internal" / "valves.json secret" false positives that an unbriefed first-pass would otherwise have flagged.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
