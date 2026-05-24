@@ -13128,6 +13128,151 @@ OVERVIEW.md.
 
 ---
 
+### §17.250 `sync_api_key.sh` skips `_*`-prefixed subdirs — defense-in-depth against vendor-leftover recurrence (2026-05-24)
+
+Closes §17.249 candidate A — "teach `scripts/sync_api_key.sh` to
+skip `_*`-prefixed subdirs." §17.249 removed the two existing
+vendor-leftover directories (`pipelines/_next_actions/`,
+`pipelines/_sse_events/`) and noted that the `sync_api_key.sh` shell
+glob `pipelines/*/valves.json` would silently write a `valves.json`
+into any future leftover dir of the same shape. The §17.249 entry
+deferred the hardening on the grounds that the §17.212 fix means
+the OWUI loader shouldn't create such dirs anymore — but
+defense-in-depth here is a 2-line guard at low cost.
+
+**Fix.**
+
+Inside the `pipelines/*/valves.json` glob loop in
+`scripts/sync_api_key.sh`, check the basename for the `_` prefix
+(the project-wide vendor-helper convention; see §17.212) and `continue`
+with a dimmed-skip message:
+
+```bash
+for valves in "$REPO_ROOT"/pipelines/*/valves.json; do
+    name="$(basename "$(dirname "$valves")")"
+    # §17.250 — skip `_*`-prefixed subdirs. The OWUI pipelines loader
+    # treats `_*` as the vendor-helper naming convention (per §17.212,
+    # `pipelines/_vendor/*.py` is where shared modules live; top-level
+    # subdirs prefixed with `_` are loader-leftover state from before
+    # §17.212 and should NOT receive a writable api_key. …
+    if [[ "$name" == _* ]]; then
+        printf '  %s↷%s pipelines/%s/valves.json — skipped (vendor-helper dir; §17.250)\n' \
+            "$C_DIM" "$C_RST" "$name"
+        continue
+    fi
+    result="$(KEY=$KEY python3 - "$valves" <<'PY'
+    …
+```
+
+Eleven-line inline comment justifies the guard inline so a future
+operator reading the script sees why `_*` is special.
+
+**Verification — both branches.**
+
+```
+$ # HAPPY PATH (post-§17.249 clean state — 5 canonical pipelines only):
+$ make sync-api-key
+→ syncing SCAFFOLD_API_KEY (source: /home/aedefruscio/scaffold-engine/.env)
+
+  - pipelines/dag_viewer/valves.json — already up to date
+  - pipelines/execution_handler/valves.json — already up to date
+  - pipelines/gt_browser/valves.json — already up to date
+  - pipelines/prompt_inspector/valves.json — already up to date
+  - pipelines/scaffold_router/valves.json — already up to date
+  - /home/aedefruscio/.bashrc — already up to date
+
+Done. changed=0, already-aligned=6
+```
+
+The clean state reports the canonical 5 pipelines + bashrc. No
+mention of the §17.249-deleted `_next_actions/` or `_sse_events/` —
+they don't exist on disk, so the glob doesn't see them. If a
+future leftover appears, the guard catches it:
+
+```
+$ # FAIL PATH (synthetic leftover dir injected):
+$ mkdir -p pipelines/_test_leftover
+$ echo '{}' > pipelines/_test_leftover/valves.json
+$ make sync-api-key | grep _test
+  ↷ pipelines/_test_leftover/valves.json — skipped (vendor-helper dir; §17.250)
+$ rm -rf pipelines/_test_leftover  # cleanup
+```
+
+The skip uses a dim ANSI marker (`↷`) consistent with the
+already-up-to-date `-` marker — operators reading the output see
+the SKIP without it looking like a problem.
+
+**Why `_*` is the right glob.**
+
+The project's vendor-helper naming convention is the leading
+underscore — established by §17.212's `pipelines/_vendor/` and the
+two `_next_actions.py` / `_sse_events.py` modules inside it. Any
+top-level `pipelines/_xxx/` subdir is, by convention, either:
+
+1. A leftover from a pre-§17.212 loader run (the case §17.249
+   cleaned up + §17.250 hardens against re-introduction).
+2. A future vendor-helper-related subdir the operator
+   intentionally created.
+
+Either way, it shouldn't receive an `api_key` from the sync
+script — vendor helpers don't have a `Pipeline` class, don't
+expose valves to OWUI, and don't need an authenticated channel.
+
+**Why the §17.224 doctor section 11 stays unchanged.**
+
+The doctor's read-side check iterates the same `pipelines/*/valves.json`
+glob. Post-§17.250, if a leftover dir exists with a `valves.json`,
+the doctor would still try to read it. Two scenarios:
+
+1. **Leftover dir + outdated `valves.json` from a prior pre-§17.250
+   sync** — doctor reports it as a "matching surface" or "drifted
+   surface" depending on contents. Benign noise; cleanup is the
+   §17.249 `rm -rf` pattern.
+2. **Leftover dir created post-§17.250** — sync-api-key skips it
+   so the `valves.json` (if any) inside is whatever the operator
+   wrote manually. Doctor reads + reports drift if any.
+
+The doctor section 11 hardening (e.g. teach it to skip `_*`-prefixed
+dirs too) is logged as §17.251 candidate A — symmetric to this
+change but in the read-side script.
+
+**Files.**
+
+- `scripts/sync_api_key.sh` — 11-line guard added inside the
+  pipelines/*/valves.json loop (after `name=$(basename …)`,
+  before the python `result=` block).
+- `OVERVIEW.md` — this entry.
+
+No app code change. No test change. No compose change. Default
+settings unchanged.
+
+**What §17.250 does NOT change.**
+
+- The §17.212 vendor-layout decision — unchanged. `pipelines/_vendor/`
+  remains the canonical home for shared helpers.
+- The §17.224 doctor section 11 — unchanged. It still iterates the
+  same glob; the symmetric guard belongs there but is a separate
+  small change. Logged.
+- The `make sync-api-key` semantics on canonical (`[a-z]*`) dirs —
+  unchanged. The 5 canonical pipelines + bashrc + container envs
+  continue to be the 8 surfaces the doctor reports against.
+
+**Open follow-ups.**
+
+1. **§17.251 candidate A** — mirror the §17.250 `_*` skip in
+   `scripts/doctor.sh` section 11. Defense-in-depth on the
+   read-side too. ~3 lines. Not blocking — current doctor
+   behavior is correct, just noisy if a leftover reappears.
+2. **§17.249 candidate B / §17.234 B / §17.237 C / §17.236 A/C /
+   §17.232 A/B/C / F3** — unchanged status.
+
+The vendor-leftover regression class — created by §17.212's vendor
+move, surfaced by §17.224's read-side check, cleaned by §17.249,
+hardened by §17.250 — is closed. Six §-entries across the
+incident-to-defense lifecycle.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

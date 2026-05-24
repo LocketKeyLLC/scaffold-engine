@@ -116,6 +116,19 @@ fi
 shopt -s nullglob
 for valves in "$REPO_ROOT"/pipelines/*/valves.json; do
     name="$(basename "$(dirname "$valves")")"
+    # §17.250 — skip `_*`-prefixed subdirs. The OWUI pipelines loader
+    # treats `_*` as the vendor-helper naming convention (per §17.212,
+    # `pipelines/_vendor/*.py` is where shared modules live; top-level
+    # subdirs prefixed with `_` are loader-leftover state from before
+    # §17.212 and should NOT receive a writable api_key. The §17.249
+    # cleanup removed the two existing such dirs; this guard prevents
+    # them from being re-written if they reappear (e.g. an operator
+    # manually creates one, or an old image revives the loader state).
+    if [[ "$name" == _* ]]; then
+        printf '  %s↷%s pipelines/%s/valves.json — skipped (vendor-helper dir; §17.250)\n' \
+            "$C_DIM" "$C_RST" "$name"
+        continue
+    fi
     result="$(KEY="$KEY" python3 - "$valves" <<'PY'
 import json, os, sys
 path = sys.argv[1]
