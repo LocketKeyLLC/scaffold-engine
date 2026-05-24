@@ -217,3 +217,83 @@ class TestLlmLatencyHistogram:
         body = client.get("/metrics").text
         # Same first-bucket landing as latency_ms=0 — no exception.
         assert 'scaffold_llm_latency_seconds_count{model="qwen3:4b",provider="ollama"} 1.0' in body
+
+
+class TestRerankerLatencyHistogram:
+    """§17.256 — scaffold_reranker_latency_seconds labeled by effective
+    knob values.
+
+    Locks the dashboard contract: an operator wiring up
+    `histogram_quantile(0.95, sum by (max_candidates) (...))` depends on
+    these label names and the labeled-int-as-string format.
+    """
+
+    def test_metric_family_present_at_zero_count(self, client):
+        """The histogram is registered even before any reranker call —
+        an operator's first /metrics scrape after boot still sees the
+        family name + HELP/TYPE preamble."""
+        body = client.get("/metrics").text
+        assert "scaffold_reranker_latency_seconds" in body
+        assert "# HELP scaffold_reranker_latency_seconds" in body
+        assert "# TYPE scaffold_reranker_latency_seconds histogram" in body
+
+    def test_latency_observed_in_correct_bucket(self, client):
+        """A 7.5 s call lands in le="10.0" but NOT le="5.0"."""
+        _metrics.record_reranker_call(
+            max_candidates=5, doc_truncate=250, latency_ms=7500.0,
+        )
+        body = client.get("/metrics").text
+        assert (
+            'scaffold_reranker_latency_seconds_bucket'
+            '{doc_truncate="250",le="10.0",max_candidates="5"} 1.0'
+        ) in body
+        assert (
+            'scaffold_reranker_latency_seconds_bucket'
+            '{doc_truncate="250",le="5.0",max_candidates="5"} 0.0'
+        ) in body
+
+    def test_labels_carry_effective_knobs_as_strings(self, client):
+        """Labels are strings even when the values represent ints —
+        Prometheus convention. The operator dashboard query
+        `... {max_candidates="5"}` must work."""
+        _metrics.record_reranker_call(
+            max_candidates=10, doc_truncate=500, latency_ms=17200.0,
+        )
+        body = client.get("/metrics").text
+        # Bucket lines carry both labels with int-as-string values.
+        assert 'max_candidates="10"' in body
+        assert 'doc_truncate="500"' in body
+
+    def test_distinct_knob_combos_produce_distinct_series(self, client):
+        """The dashboard's per-knob breakdown depends on series
+        separation — two calls at different (max, trunc) cells must
+        not collapse into one series."""
+        _metrics.record_reranker_call(
+            max_candidates=5, doc_truncate=250, latency_ms=7000.0,
+        )
+        _metrics.record_reranker_call(
+            max_candidates=10, doc_truncate=500, latency_ms=17000.0,
+        )
+        body = client.get("/metrics").text
+        # Each cell has its own _count line.
+        assert (
+            'scaffold_reranker_latency_seconds_count'
+            '{doc_truncate="250",max_candidates="5"} 1.0'
+        ) in body
+        assert (
+            'scaffold_reranker_latency_seconds_count'
+            '{doc_truncate="500",max_candidates="10"} 1.0'
+        ) in body
+
+    def test_negative_latency_clamped(self, client):
+        """Same defense-in-depth as record_llm_call — a negative latency
+        (clock jitter, mock arithmetic) lands in the smallest bucket
+        without raising."""
+        _metrics.record_reranker_call(
+            max_candidates=10, doc_truncate=500, latency_ms=-100.0,
+        )
+        body = client.get("/metrics").text
+        assert (
+            'scaffold_reranker_latency_seconds_count'
+            '{doc_truncate="500",max_candidates="10"} 1.0'
+        ) in body

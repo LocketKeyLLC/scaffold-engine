@@ -73,6 +73,19 @@ http_request_duration_seconds = Histogram(
     registry=registry,
 )
 
+# §17.256 — reranker latency keyed on the EFFECTIVE knobs used per call.
+# Buckets calibrated against this hardware (T480, 4-core CPU): the
+# §17.238 Pareto matrix observed wall times from ~5 s (max=5, trunc=250)
+# to ~234 s (max=20, trunc=2000). Buckets cover that whole range plus
+# headroom for outliers and skip-rerank zero-latency observations.
+reranker_latency_seconds = Histogram(
+    "scaffold_reranker_latency_seconds",
+    "Reranker wall-clock latency (seconds), labeled by effective knob values.",
+    ["max_candidates", "doc_truncate"],
+    buckets=(0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300),
+    registry=registry,
+)
+
 alerts_emitted_total = Counter(
     "scaffold_alerts_emitted_total",
     "Alerts emitted by app.observability.alerts.emit (post-dedup).",
@@ -183,6 +196,36 @@ def record_llm_call(*, provider: str, model: str, success: bool, latency_ms: int
     except Exception:
         # Metrics must never break the LLM call path.
         logger.debug("record_llm_call_metrics_failed", exc_info=True)
+
+
+def record_reranker_call(*, max_candidates: int, doc_truncate: int, latency_ms: float) -> None:
+    """§17.256 — hot-path hook from rag_pipeline._rerank.
+
+    Emits ``scaffold_reranker_latency_seconds`` keyed on the EFFECTIVE
+    reranker knobs (§17.234 / §17.252) so operators can build dashboards
+    that compare latency across knob configurations:
+
+        scaffold_reranker_latency_seconds{max_candidates="5",doc_truncate="250"}
+
+    Cardinality protection: max_candidates and doc_truncate are bounded
+    by the Pydantic validators in ``RagInput`` (1-512 × 100-20000) and
+    by operator-side `.env` choice. In practice operators use a small
+    set of values (~5-10 each), so cardinality stays in the dozens of
+    series. If a future operator workflow widens that, switch to a
+    bucketed label (e.g. "low"/"med"/"high") — see §17.256's inline
+    comment for the trade-off.
+
+    Mirrors ``record_llm_call`` / ``record_http_request`` shape: metric
+    write must never raise; the caller's hot path is more important
+    than the dashboard.
+    """
+    try:
+        reranker_latency_seconds.labels(
+            max_candidates=str(int(max_candidates)),
+            doc_truncate=str(int(doc_truncate)),
+        ).observe(max(0.0, float(latency_ms)) / 1000.0)
+    except Exception:
+        logger.debug("record_reranker_call_metrics_failed", exc_info=True)
 
 
 def record_http_request(*, method: str, path_template: str, status: int, duration_s: float) -> None:

@@ -14028,6 +14028,199 @@ choke point covered + contract-tested.
 
 ---
 
+### §17.256 `scaffold_reranker_latency_seconds` Prometheus histogram — close §17.255 candidate A (2026-05-24)
+
+Closes §17.255 candidate A — "Prometheus exporter that turns the
+`reranker_decision` log fields into per-knob latency histograms."
+The §17.255 log contract was the foundation; §17.256 wires that
+contract into the existing §17.61 Prometheus exposition surface so
+operators can build dashboards that compare reranker latency across
+knob configurations.
+
+**Fix.**
+
+Three additions in the existing observability surface (matches the
+§17.61 / §17.187 / §17.192 pattern):
+
+1. **New metric** in `app/observability/metrics.py`:
+
+```python
+reranker_latency_seconds = Histogram(
+    "scaffold_reranker_latency_seconds",
+    "Reranker wall-clock latency (seconds), labeled by effective knob values.",
+    ["max_candidates", "doc_truncate"],
+    buckets=(0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300),
+    registry=registry,
+)
+```
+
+Buckets calibrated against the §17.238 Pareto matrix's observed
+range: 5 s (`max=5, trunc=250`) → 234 s (`max=20, trunc=2000`). The
+0.5 s bucket gives headroom for cache-hit-fast paths if §17.117's
+`cache_hit_upstream` event ever short-circuits the rerank step;
+300 s covers the worst-case observed pre-§17.232 latency.
+
+2. **New hook** `record_reranker_call(max_candidates, doc_truncate, latency_ms)`
+   in the same module, mirroring `record_llm_call` /
+   `record_http_request` exactly:
+
+```python
+def record_reranker_call(*, max_candidates: int, doc_truncate: int, latency_ms: float) -> None:
+    try:
+        reranker_latency_seconds.labels(
+            max_candidates=str(int(max_candidates)),
+            doc_truncate=str(int(doc_truncate)),
+        ).observe(max(0.0, float(latency_ms)) / 1000.0)
+    except Exception:
+        logger.debug("record_reranker_call_metrics_failed", exc_info=True)
+```
+
+`try/except` is the established "metrics must never break the hot
+path" pattern. Negative-latency clamp + labels-as-strings match the
+existing helpers.
+
+3. **Call site** in `app/modules/rag_pipeline.py::_rerank`,
+   immediately after the §17.254 `reranker_decision` log line:
+
+```python
+from app.observability.metrics import record_reranker_call
+record_reranker_call(
+    max_candidates=max_cand,
+    doc_truncate=doc_trunc,
+    latency_ms=rr.latency_ms,
+)
+```
+
+Uses the same resolved `max_cand` / `doc_trunc` locals that the
+§17.253 metadata echo and §17.254 log line use. The deferred import
+is intentional — keeps the observability module out of the import
+graph of `rag_pipeline` at startup, so a future refactor of the
+metrics surface doesn't ripple through the rerank hot path.
+
+**Verification — live `/rag` populates the metric.**
+
+Fired `curl POST /rag {"query":"truncation","domain":"eng",
+"top_k":5,"max_candidates":5,"doc_truncate":250}` against a freshly
+restarted orchestrator. `/metrics` immediately reflects:
+
+```
+# HELP scaffold_reranker_latency_seconds Reranker wall-clock latency …
+# TYPE scaffold_reranker_latency_seconds histogram
+scaffold_reranker_latency_seconds_bucket{doc_truncate="250",le="0.5",max_candidates="5"} 0.0
+scaffold_reranker_latency_seconds_bucket{doc_truncate="250",le="1.0",max_candidates="5"} 0.0
+scaffold_reranker_latency_seconds_bucket{doc_truncate="250",le="2.5",max_candidates="5"} 0.0
+scaffold_reranker_latency_seconds_bucket{doc_truncate="250",le="5.0",max_candidates="5"} 0.0
+scaffold_reranker_latency_seconds_bucket{doc_truncate="250",le="10.0",max_candidates="5"} 1.0
+…
+scaffold_reranker_latency_seconds_count{doc_truncate="250",max_candidates="5"} 1.0
+scaffold_reranker_latency_seconds_sum{doc_truncate="250",max_candidates="5"} 7.638164782023523
+```
+
+7.638 s observation lands cleanly in `le="10.0"` (not `le="5.0"`).
+Labels `max_candidates="5"` and `doc_truncate="250"` match the
+per-call override. The wall time matches the §17.238 Pareto-floor
+cell `(5, 250)` empirical baseline.
+
+**Tests — 5 new in `tests/test_observability_metrics.py`.**
+
+`TestRerankerLatencyHistogram` (5):
+
+| Test | Pins |
+|---|---|
+| `test_metric_family_present_at_zero_count` | metric is registered + HELP/TYPE preamble emitted even before any rerank call (catches a future commit that lazily registers and breaks fresh-boot dashboards) |
+| `test_latency_observed_in_correct_bucket` | 7500 ms observation → `le="10.0"` bumps by 1, `le="5.0"` stays at 0 |
+| `test_labels_carry_effective_knobs_as_strings` | `max_candidates="10"` + `doc_truncate="500"` present in exposition (Prometheus int-as-string convention) |
+| `test_distinct_knob_combos_produce_distinct_series` | two calls at different cells → two `_count` lines, neither aliased |
+| `test_negative_latency_clamped` | negative `latency_ms` lands without raising (clock-jitter defense, matches `record_llm_call`) |
+
+**Cardinality consideration.**
+
+Labels `max_candidates × doc_truncate` are unbounded by the
+schema (Pydantic validates 1-512 × 100-20000) but in practice
+operators use a small set of values (~5-10 per axis from §17.238's
+Pareto map). Series count stays in the dozens.
+
+If a future operator workflow widens the spread (e.g. a parameter
+sweep job exercises every combination), cardinality could explode.
+The §17.256 inline comment documents this trade-off — the mitigation
+would be a bucketed label (`"low"`/`"med"`/`"high"`). Not blocking
+today; the current usage pattern doesn't risk it.
+
+**Files.**
+
+- `app/observability/metrics.py` — `reranker_latency_seconds`
+  histogram registration + `record_reranker_call` hook (~30 lines
+  including the 11-line inline §17.256 comment).
+- `app/modules/rag_pipeline.py::_rerank` — 6-line call site after
+  the §17.254 log line (deferred import + record_reranker_call
+  invocation).
+- `tests/test_observability_metrics.py` — `TestRerankerLatencyHistogram`
+  class with 5 tests.
+- `OVERVIEW.md` — this entry.
+
+No schema change. No defaults change.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_rag_pipeline.py tests/test_rag_result_cache.py \
+    tests/test_rag_pipeline_smoke.py tests/test_observability_metrics.py \
+    -q --timeout=30
+117 passed in 13.77s   (112 pre-§17.256 + 5 new)
+```
+
+Live `/metrics` shape verified above. Live `/rag` populates the
+histogram as expected (7.638 s in `le="10.0"`).
+
+**What §17.256 does NOT change.**
+
+- The existing `scaffold_llm_latency_seconds` / `scaffold_http_*`
+  metrics — unchanged.
+- `prometheus_client` registry behavior — `reset_for_tests` already
+  clears per-collector state generically; no special-case needed.
+- The §17.55 alert sinks (`alert_p95_latency_ms_threshold`, etc.)
+  in `app/observability/thresholds.py` — they target LLM latency,
+  not reranker latency. A future reranker-latency alert rule
+  could mirror that pattern; logged as §17.257 candidate A.
+
+**Open follow-ups.**
+
+1. **§17.257 candidate A** — alert rule for reranker latency p95
+   breach. Mirrors `alert_p95_latency_ms_threshold` for the
+   LLM-latency case. ~5 lines in `app/observability/thresholds.py`
+   plus a Grafana / Prometheus alert YAML in `docs/observability.md`
+   (§17.193).
+2. **Grafana dashboard JSON** — a starter dashboard JSON with
+   the §17.246 / §17.256 metrics pre-wired. Operator-facing nice-
+   to-have; out of repo scope for now.
+3. **§17.249 B / §17.234 B / §17.237 C / §17.236 A / §17.232 A/B/C
+   / F3** — unchanged status.
+
+The reranker-knob lifecycle now spans:
+
+| § | Surface | What it adds |
+|---|---|---|
+| 17.232 | mem_limit | unblock |
+| 17.233 / 17.235 | global defaults | retune |
+| 17.234 / 17.252 | RagInput body | per-call override |
+| 17.236 / 17.237 / 17.238 | research | matrix + break-points + Pareto |
+| 17.239–242 | harness | sidecar hardening |
+| 17.243 / 17.244 | image cache | pre-bake aligned + parameterized |
+| 17.245–247 | drift gates | doctor + CI tier 1 + tier 2 |
+| 17.253 | response | metadata echo |
+| 17.254 | logs | structured-log echo |
+| 17.255 | log contract | caplog tests |
+| **17.256** | **metrics** | **Prometheus histogram with operator-grep labels** |
+
+25 §-entries. Reranker knobs are tunable, verifiable in the
+response, grep-able in journald, contract-tested at every layer,
+AND queryable from Prometheus for dashboards. The
+"operator-visible reranker tuning surface" thread reaches natural
+close at the dashboard layer.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

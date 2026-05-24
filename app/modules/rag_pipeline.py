@@ -553,6 +553,15 @@ async def _rerank(
             rerank_doc_truncate=doc_trunc,
         ),
     )
+    # §17.256 — Prometheus histogram keyed on the same effective knobs
+    # the log line above carries. Same hot-path-safe shape as
+    # record_llm_call / record_http_request: never raises.
+    from app.observability.metrics import record_reranker_call
+    record_reranker_call(
+        max_candidates=max_cand,
+        doc_truncate=doc_trunc,
+        latency_ms=rr.latency_ms,
+    )
 
     results.sort(key=lambda r: r.final_score, reverse=True)
     return results[:top_k], meta
