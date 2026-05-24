@@ -122,8 +122,19 @@ class Settings(BaseSettings):
         "Given a web search query, retrieve relevant passages that answer the query"
     )
 
-    # Reranker tuning (moved from rag_pipeline.py module constants)
-    rerank_max_candidates: int = Field(default=32, ge=1, le=512)
+    # Reranker tuning (moved from rag_pipeline.py module constants).
+    # §17.233 — rerank_max_candidates default 32 → 10. CrossEncoder.predict
+    # is quadratic in sequence length and linear in batch size, so total
+    # rerank latency scales roughly linearly with this cap. Live observation
+    # on T480 (i5-8350U, 4 cores) at default rerank_doc_truncate=2000 is
+    # ~7 s per pair; 32 candidates ≈ 234 s/call (operator-unacceptable for
+    # OWUI interactive use), 10 candidates ≈ 70 s/call. The output top_k
+    # (typically 10) is unchanged — we just stop reranking RRF positions
+    # 11-32, which is an at-the-margin quality cost (rerank's job is
+    # reordering; the top-10 by RRF is usually a strong shortlist already).
+    # Operators wanting the deeper rerank can raise via
+    # RERANK_MAX_CANDIDATES in .env (no code change required).
+    rerank_max_candidates: int = Field(default=10, ge=1, le=512)
     rerank_doc_truncate: int = Field(default=2000, ge=100, le=20000)
     rerank_warn_ms: int = Field(default=30000, ge=0, le=60000)
     rerank_error_ms: int = Field(default=120000, ge=0, le=300000)

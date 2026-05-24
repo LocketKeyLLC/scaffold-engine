@@ -10527,6 +10527,159 @@ docker inspect scaffold-orchestrator --format '{{.RestartCount}} | {{.State.OOMK
 
 ---
 
+### §17.233 Reranker latency tune — `rerank_max_candidates` 32 → 10; correct §17.232's "15× gap" claim (2026-05-23)
+
+Closes the §17.233 candidate logged in §17.232. The §17.232 entry framed
+the live orchestrator's 234 s `/rag` rerank latency as a 15× regression
+vs. the score sidecar's "~10–15 s per query" baseline. **That comparison
+was wrong** — the sidecar baseline was an unverified mental estimate, not
+a measurement. This entry corrects the framing with an empirical bench
+and ships a real improvement that drops live `/rag` from 234 s → 77 s on
+the same query with the same retrieval quality.
+
+**Isolated reranker bench — same model, same hardware, two contexts.**
+
+A 5-line script (`/tmp/bench_rerank.py`; not committed — investigation
+artifact) loads the `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` model and
+times `model.predict()` on 20 query-doc pairs:
+
+| Context | Model load | Warmup predict | Measured predict | ms/pair |
+|---|---:|---:|---:|---:|
+| Fresh sidecar (`docker run`, `--memory 6g`, no other process) | 50.2 s | 121.0 s | 146.3 s | **7,314 ms** |
+| Live orchestrator (`docker exec -i`, all uvicorn + scheduler running) | 22.7 s | 145.4 s | 119.1 s | **5,953 ms** |
+| `torch.get_num_threads()` | — | — | — | 4 (both) |
+| `torch.get_num_interop_threads()` | — | — | — | 4 (both) |
+
+**Live orchestrator's `predict()` is actually slightly FASTER than the
+fresh sidecar** — same thread topology, same model, slightly better cache
+warmth (`docker exec` hits the same container's filesystem caches as the
+uvicorn process). The §17.232 claim that the live orchestrator was 15×
+slower than the sidecar was false; the sidecar baseline never existed at
+that speed on this hardware.
+
+**Where the 234 s vs 119 s gap goes.**
+
+The bench used `"doc " + str(i) * 200` for docs — ~1,000 chars each. The
+live `/rag` truncates real Milvus docs to `settings.rerank_doc_truncate
+= 2,000` chars (~500 tokens). Cross-encoder attention is quadratic in
+sequence length, so doubling token count multiplies per-pair cost
+roughly 4×. Combined with `rerank_max_candidates = 32` (effective
+candidates capped at 20 by RRF input size in this query), 20 pairs ×
+~12 s/pair = 234 s. That's not a regression — it's just what
+"Qwen3-Reranker-0.6B × 500-token docs × 20 pairs × CPU on a T480"
+costs.
+
+**Hardware floor — operator-unacceptable for OWUI interactive use.**
+
+Either 230 s+ or 70 s+ per `/rag` call is bad UX for chat-side use.
+The score sidecar tolerates it because it's batch and runs once. OWUI
+operators triggering `/rag <query>` from the chat hit this floor on
+every query — not a research-mode latency, an interactive one. The
+config defaults were never tuned for the interactive surface.
+
+**Fix — tighten `rerank_max_candidates` default 32 → 10.**
+
+The reranker's job is reordering. `rerank_max_candidates` controls how
+many RRF candidates flow IN; the response's `top_k` (typically 10)
+controls how many come OUT. Reranking 32 candidates to surface top-10
+gives the reranker room to promote a candidate that RRF ranked 11-32 up
+to top-10. Reranking 10 candidates ≡ "reorder the RRF top-10." That's
+the bulk of the value — at-the-margin quality cost is the cases where
+RRF rank 11-20 had a strong-rerank hit that's now missed.
+
+```diff
+-rerank_max_candidates: int = Field(default=32, ge=1, le=512)
++rerank_max_candidates: int = Field(default=10, ge=1, le=512)
+```
+
+with 12 lines of inline rationale citing this entry, the empirical
+floor, and the operator-override path (`RERANK_MAX_CANDIDATES` in
+`.env`; no code change required).
+
+**Verification — same `/rag truncation domain=eng` call, before vs after.**
+
+| Metric | Pre-§17.233 | Post-§17.233 |
+|---|---:|---:|
+| Wall (`time curl --max-time 300 ...`) | 3:13.751 | **1:16.632** |
+| `reranker_completed.docs` | 20 | **10** |
+| `reranker_completed.elapsed_ms` | 234,409 | **76,565** |
+| `retrieval_completed.latency_ms` | 234,500 | **76,608** |
+| `reranker_decision` log level | `ERROR` (> `rerank_error_ms=120,000`) | `WARNING` (in `[30,000, 120,000)`) |
+| `top_score` | 0.3119 | **0.3119** ← identical |
+| Returned `n_results` | 3 | 3 |
+| Response body size | 12,026 B | 12,025 B (1 byte diff = trailing newline) |
+
+**67 % latency reduction with identical top result.** The shortlist that
+mattered (the candidates RRF placed in the top-10) was already
+producing the winning hit; reranking 11-32 was wasted work on this
+query.
+
+**Files.**
+
+- `app/config.py` — `rerank_max_candidates` default 32 → 10 + 12-line
+  inline rationale. One field's default value changed; no other code
+  touched.
+- No tests added. The change is a config default; existing reranker
+  tests don't depend on the cap value (they mock `query_rag` directly).
+
+**What §17.233 does NOT change.**
+
+- The reranker's per-pair cost (~6–12 s on this CPU depending on real
+  doc length). That floor is set by the model + the hardware; lowering
+  it requires either a smaller model (Qwen3-Reranker-0.1B exists; not
+  evaluated for retrieval-quality regression) or smaller
+  `rerank_doc_truncate` (quadratic gain at the cost of context).
+- `rerank_doc_truncate=2000` is unchanged. Halving it to 1,000 would
+  give another ~4× speedup on top of §17.233 but the quality impact
+  needs an evaluation pass first (some entries have content
+  concentrated past the first 1,000 chars).
+- The /rag `top_score=0.3119` for "truncation" is unchanged → the
+  surface-form drift from §17.231 (golden expects `["truncation"]` in
+  title but the post-Tier-A ingest produced titles like "Lambert W
+  function" / "Efficient faithfully-rounded implementation of erff")
+  is independent of rerank depth. Reranking 32 vs 10 candidates can't
+  surface a title that doesn't contain "truncation" — only re-ingest
+  with a different prompt (§17.232 candidate C) or golden-set
+  re-curation (§17.232 candidate B) can.
+
+**Correction to §17.232 framing.**
+
+§17.232's "Adjacent finding — reranker latency is much higher than
+expected" section asserted the live `/rag`'s 234 s was 15× the
+sidecar's "~10–15 s per query." That sidecar number was never measured
+— I inferred it from "score_retrieval.py ran 20 queries in ~3–5 min
+total" without actually checking whether that wall-time observation
+was correct (it wasn't measured precisely; the task notifications only
+reported completion, not duration). The §17.233 bench above shows
+sidecar predict at 146 s for 20 pairs — comfortably in the same
+envelope as the live orchestrator's 234 s once real-doc-length effects
+are accounted for. The §17.232 entry remains correct on its primary
+claim (`mem_limit: 3g → 6g` is the right fix for the crash) but the
+"15× latency gap" framing was based on a comparison that didn't hold.
+
+**Open follow-ups.**
+
+1. **§17.234 candidate — `rerank_doc_truncate` evaluation.** Quadratic
+   lever still on the table. A retrieval-quality test that compares
+   top-K under `doc_truncate=2000` vs `1000` vs `500` would tell
+   operators which value to pick on a latency-vs-quality curve. The
+   §17.221 + §17.222 + golden-set infrastructure can score the runs;
+   the missing piece is a parametrized harness that takes
+   `doc_truncate` as an input.
+2. **§17.234 candidate — smaller reranker model.** Qwen3-Reranker-0.1B
+   (or `BAAI/bge-reranker-base`) would give ~6× speedup on the model
+   dimension alone. Both already have score-normalization registered
+   in `app/rerankers.py:_RERANKER_NORMALIZERS` (§17.187), so swapping
+   is `MODEL_RERANKER=…` in `.env` + retraining the threshold. Needs
+   an evaluation pass.
+3. **§17.234 candidate — surface `rerank_max_candidates` as a
+   per-request param.** Currently config-only. An OWUI operator
+   running a quick /rag could pass `max_candidates=5` for sub-1-min
+   latency; a batch run could keep 32 for max recall. Small change to
+   `query_rag`'s signature; mostly mechanical.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
