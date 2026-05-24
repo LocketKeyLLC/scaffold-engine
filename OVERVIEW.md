@@ -11719,6 +11719,130 @@ inspect`` rather than N).
 
 ---
 
+### §17.241 Harness pre-flight HF-cache content probe — fail fast on empty volume (2026-05-24)
+
+Closes §17.240 candidate A — "extend the probe to verify the cache
+has actual content." §17.240 caught the "volume missing" case but
+silently passed the "volume exists, contents empty" case — a manually
+created volume, or one whose contents got wiped — which would still
+produce a sidecar failure cascade at model-load time, just one
+diagnostic step further into the pipeline.
+
+**The gap §17.241 closes.**
+
+A volume can be present (`docker volume inspect` returns 0) yet
+contain no sentence-transformers cache. Three real-world ways this
+happens:
+
+1. **Stray volume from the §17.239 debug path.** Mounting
+   `-v hf-cache:...` (without the `scaffold-engine_` prefix) on a
+   `docker run` causes Docker to auto-create an empty `hf-cache`
+   volume. This volume now exists on the host alongside the
+   populated `scaffold-engine_hf-cache`. An operator who later
+   sets `_HF_CACHE_VOLUME = "hf-cache"` thinking it's the right
+   name passes §17.240's check and fails per-sidecar.
+2. **Manual `docker volume create`.** Setting up a new deployment,
+   an operator pre-creates the volume name before the orchestrator
+   has populated it.
+3. **Volume reset.** `docker volume rm scaffold-engine_hf-cache &&
+   docker volume create scaffold-engine_hf-cache` between
+   orchestrator boots leaves the named volume empty.
+
+All three cases pass §17.240 (volume exists) but fail at the model-
+load step of each sidecar (no model files to read). The diagnostic
+quality is the same as the pre-§17.240 cascade: N identical
+backtraces, no clear pointer at the actual cause.
+
+**Fix.**
+
+New `_check_hf_cache_content()` called from `main()` immediately
+after `_check_hf_cache_volume()`. Shells out to a tiny `docker run`
+that mounts the cache volume read-only and `ls /x/hub`. Three
+branches:
+
+| `ls` outcome | Diagnosis |
+|---|---|
+| Returns 0 with at least one `models--*` line | **PASS** — cache populated |
+| Returns 0 with empty / non-`models--*` content | `volume is empty — no 'models--*' directories under hub/` + remediation pointing at orchestrator boot |
+| Returns non-zero (e.g. `/x/hub` missing) | `'hub/' subdir is unreadable` + the docker stderr verbatim |
+
+The `docker run` uses the locally-cached `scaffold-engine:dev` image
+(already pulled for the harness sidecars themselves), so the probe
+adds ~2-3 s to harness startup — negligible relative to the multi-
+minute per-cell wall.
+
+**Verification — both branches against real volumes.**
+
+```
+$ # HAPPY PATH (scaffold-engine_hf-cache, populated):
+$ python3 -c "from scripts.eval_doc_truncate import _check_hf_cache_content; _check_hf_cache_content()"
+# silent — pass
+
+$ # FAIL PATH (hf-cache, the empty stray from §17.239 debug):
+$ python3 -c "
+> import importlib.util
+> spec = importlib.util.spec_from_file_location('m', 'scripts/eval_doc_truncate.py')
+> m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+> m._HF_CACHE_VOLUME = 'hf-cache'
+> m._check_hf_cache_content()
+> "
+HF cache volume 'hf-cache' exists but the 'hub/' subdir is unreadable.
+  stderr: ls: cannot access '/x/hub': No such file or directory
+```
+
+Live harness against the populated cache + a previously-cached cell
+runs both probes silently and proceeds to the summary unchanged.
+
+**Why a `docker run` instead of reading host paths.**
+
+The volume's host mountpoint (`/var/lib/docker/volumes/<name>/_data`)
+is root-owned. The harness runs as the operator's user (uid 1000),
+who can't read it directly. Shelling out to a container side-steps
+the permission issue with no privilege escalation. ~2-3 s is fast
+enough that operators won't notice.
+
+**Why probe in `main()` not `_run_cell`.**
+
+Same rationale as §17.240. Cache content is session-level state
+(it doesn't change between cells of a run). Probe once per session,
+not N times.
+
+**Files.**
+
+- `scripts/eval_doc_truncate.py`:
+  - New `_check_hf_cache_content()` helper.
+  - One-line call from `main()` after `_check_hf_cache_volume()`.
+
+No app code change. No test change. Default settings unchanged.
+
+**What §17.241 does NOT change.**
+
+- The harness still hardcodes `_HF_CACHE_VOLUME` (§17.240 design
+  decision). Dynamic detection across multiple matching volumes
+  isn't easier with the content probe — the probe identifies which
+  volume has content, but choosing among several content-bearing
+  volumes still needs operator input.
+- The cache freshness check — §17.241 only confirms `models--*`
+  directories EXIST. It doesn't verify the model files inside are
+  uncorrupted or current. A pre-§17.187 model cache (different
+  reranker) would pass §17.241 but produce wrong reranker results.
+  Out of scope; logged.
+
+**Open follow-ups.**
+
+1. **§17.242 candidate A** — cache freshness check. Verify the
+   exact `models--tomaarsen--Qwen3-Reranker-0.6B-seq-cls`
+   directory is present (not just any `models--*`). Catches the
+   "stale cache for a different reranker model" case. ~3 lines on
+   top of §17.241.
+2. **Dockerfile cache pre-bake** (still logged) — eliminates the
+   "empty volume" failure mode at the image layer. Image grows
+   ~600 MB; trade-off TBD.
+3. **§17.234 candidate B / §17.237 candidate C** — smaller
+   reranker model. Unchanged status.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

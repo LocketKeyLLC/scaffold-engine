@@ -85,6 +85,55 @@ def _check_hf_cache_volume() -> None:
         )
 
 
+def _check_hf_cache_content() -> None:
+    """§17.241 — deep-verify: volume exists AND holds a real model cache.
+
+    §17.240 only checks that the volume exists. An empty-but-present
+    volume (manually created, or one whose contents were wiped) would
+    pass §17.240 but still produce sidecar failures at model-load time
+    — every sidecar would die at sentence-transformers' "model not
+    found in offline mode" error. Detecting the empty-volume case
+    here surfaces the same actionable diagnostic the §17.240 case
+    does.
+
+    Implementation: shell out to a tiny `docker run` that lists the
+    `hub/` subdir under the volume's mount. If no `models--*`
+    directories are present, the cache is empty and the harness
+    must fail before any sidecar fires.
+    """
+    try:
+        proc = subprocess.run(
+            ["docker", "run", "--rm",
+             "-v", f"{_HF_CACHE_VOLUME}:/x:ro",
+             "scaffold-engine:dev",
+             "ls", "/x/hub"],
+            capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        raise SystemExit("docker CLI not found in PATH.")
+    if proc.returncode != 0:
+        raise SystemExit(
+            f"HF cache volume '{_HF_CACHE_VOLUME}' exists but the 'hub/' "
+            f"subdir is unreadable.\n  stderr: {proc.stderr.strip()}"
+        )
+    has_models = any(
+        line.startswith("models--")
+        for line in proc.stdout.splitlines()
+    )
+    if not has_models:
+        raise SystemExit(
+            f"HF cache volume '{_HF_CACHE_VOLUME}' is empty — no\n"
+            f"'models--*' directories under hub/. The volume exists\n"
+            f"but no sentence-transformers model has ever been cached\n"
+            f"into it.\n"
+            f"\n"
+            f"Fix: boot the orchestrator and wait for it to download\n"
+            f"     the CrossEncoder model:\n"
+            f"       docker compose up -d scaffold-orchestrator\n"
+            f"       # wait for /health to report 'healthy'\n"
+        )
+
+
 def _cell_filename(point: list[tuple[str, int]]) -> str:
     """File name for a (knob,value) cell — supports both 1-D and N-D."""
     parts = "_".join(f"{k}_{v}" for k, v in point)
@@ -328,7 +377,8 @@ def main() -> int:
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    _check_hf_cache_volume()  # §17.240 — fail fast before the first sidecar
+    _check_hf_cache_volume()   # §17.240 — volume present?
+    _check_hf_cache_content()  # §17.241 — volume has a real model cache?
 
     if args.matrix:
         axes = _parse_matrix(args.matrix)
