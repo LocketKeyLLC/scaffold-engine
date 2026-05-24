@@ -83,6 +83,8 @@ printf '%s│%s  10. Cold-backup mount guard       (no /mnt/adamssd in compose/.
     "$C_INFO" "$C_RST"
 printf '%s│%s  11. API key 6-surface sync        (read-side: .env + 5x valves.json + bashrc + 2 containers)\n' \
     "$C_INFO" "$C_RST"
+printf '%s│%s  12. MODEL_RERANKER default drift  (Dockerfile ARG ↔ app/config.py ↔ .env.example — §17.245)\n' \
+    "$C_INFO" "$C_RST"
 printf '%s└──%s pass --explain to see what each section verifies inline.\n\n' \
     "$C_INFO" "$C_RST"
 
@@ -443,6 +445,46 @@ else:
             printf '  %s┃%s %sDRIFT:%s %d surface(s) disagree with .env. Fix: %smake sync-api-key%s (no arg → propagate .env value).\n' \
                 "$C_ERR" "$C_RST" "$C_ERR" "$C_RST" "$SYNC_MISMATCH" "$C_INFO" "$C_RST"
         fi
+    fi
+fi
+
+# ---- 12. MODEL_RERANKER default drift (§17.245) ----------------------
+#
+# Closes §17.244's open follow-up. The reranker model name appears as
+# a default in three places:
+#   * app/config.py:173  — runtime canonical (settings.model_reranker)
+#   * Dockerfile         — ARG MODEL_RERANKER=<default>
+#   * .env.example       — commented-out reference for operators
+# §17.244 reduced the drift risk by making the Dockerfile ARG default
+# track app/config.py and forwarding .env via build.args. This check
+# is the regression guard: a future edit that touches one site but
+# not the others fires red on the next `make doctor`.
+hdr "MODEL_RERANKER default drift"
+explain() { :; }  # no-op if not defined elsewhere (defensive)
+explain "Asserts the model name default matches across the three sites that ship it (Dockerfile ARG, app/config.py field default, .env.example comment). A future edit that updates one without the others would silently produce a Dockerfile that pre-bakes the wrong reranker — caught at build time but invisible until then. Source-of-truth chain: .env -> compose build.args -> Dockerfile ARG -> snapshot_download; app/config.py provides the runtime fallback. See §17.244 + §17.245."
+
+reranker_dockerfile=$(grep -E '^ARG MODEL_RERANKER=' Dockerfile 2>/dev/null | head -1 | sed 's/^ARG MODEL_RERANKER=//')
+reranker_config=$(grep -E '^    model_reranker: str = ' app/config.py 2>/dev/null | head -1 | sed 's/^    model_reranker: str = "\(.*\)"$/\1/')
+reranker_envexample=$(grep -E '^# MODEL_RERANKER=' .env.example 2>/dev/null | head -1 | sed 's/^# MODEL_RERANKER=//')
+
+# Report missing extractions individually so the operator sees which
+# file failed parsing (the regex may have drifted) before the
+# equality check fires.
+if [[ -z "$reranker_dockerfile" ]]; then
+    fail "could not extract MODEL_RERANKER from Dockerfile (expected line: 'ARG MODEL_RERANKER=...')"
+elif [[ -z "$reranker_config" ]]; then
+    fail "could not extract model_reranker from app/config.py (expected line: '    model_reranker: str = \"...\"')"
+elif [[ -z "$reranker_envexample" ]]; then
+    fail "could not extract MODEL_RERANKER from .env.example (expected line: '# MODEL_RERANKER=...')"
+else
+    info "Dockerfile  : $reranker_dockerfile"
+    info "config.py   : $reranker_config"
+    info ".env.example: $reranker_envexample"
+    if [[ "$reranker_dockerfile" == "$reranker_config" && \
+          "$reranker_config" == "$reranker_envexample" ]]; then
+        pass "all 3 sites agree on '$reranker_config'"
+    else
+        fail "MODEL_RERANKER default drift across 3 sites — see values above. Fix: pick the canonical value and update the other 2."
     fi
 fi
 

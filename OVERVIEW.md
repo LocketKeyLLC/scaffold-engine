@@ -12367,6 +12367,163 @@ No app code change. No test change. Default settings unchanged.
 
 ---
 
+### §17.245 `make doctor` section 12 — `MODEL_RERANKER` default drift across 3 sites (2026-05-24)
+
+Closes §17.244 candidate A — "CI / `make doctor` lint asserting the
+3 default-value sites match." §17.244 made the source-of-truth chain
+(`.env` → compose `build.args` → Dockerfile `ARG` → snapshot_download)
+load-bearing for the build, but the **default values** at each end of
+that chain are still hand-maintained. The risk: a future edit that
+updates one of the three sites (Dockerfile ARG default,
+`app/config.py:173` field default, `.env.example:118` commented
+reference) without the others silently produces a Dockerfile that
+pre-bakes the wrong reranker. The mismatch is invisible until either
+a fresh deployment hits it (§17.243 cache pre-bake bakes the
+wrong model) or `make doctor` runs at all.
+
+§17.245 adds that `make doctor` section.
+
+**Fix.**
+
+Section 12 in `scripts/doctor.sh` (between the §17.224 6-surface
+sync section and the summary). Extracts the literal default from
+each of the three sites and asserts they're all equal:
+
+| Site | Extraction grep |
+|---|---|
+| `Dockerfile` | `grep -E '^ARG MODEL_RERANKER='` |
+| `app/config.py` | `grep -E '^    model_reranker: str = '` (4-space indent matches the Pydantic field line) |
+| `.env.example` | `grep -E '^# MODEL_RERANKER='` (commented-out reference) |
+
+Three outcomes:
+
+1. **All 3 match** — single `PASS` line with the agreed-on value.
+2. **Any 1 extraction returned empty** — `FAIL` naming the parsing
+   site (regex drifted; manual fix needed).
+3. **All 3 extracted but values disagree** — `FAIL` with all 3
+   values shown above the FAIL line so the operator sees the
+   mismatch directly and which file is the outlier. Remediation:
+   "pick the canonical value and update the other 2."
+
+Verification — section produces `INFO` lines for each value before
+the equality check so the operator always sees the full picture, not
+just the binary verdict.
+
+**Banner updated.**
+
+`make doctor`'s opening section list now includes section 12 in the
+same row format as §17.205 + §17.223 + §17.224:
+
+```
+12. MODEL_RERANKER default drift  (Dockerfile ARG ↔ app/config.py ↔ .env.example — §17.245)
+```
+
+**Verification — both branches.**
+
+```
+$ bash scripts/doctor.sh
+…
+== MODEL_RERANKER default drift ==
+  INFO  Dockerfile  : tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+  INFO  config.py   : tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+  INFO  .env.example: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+  PASS  all 3 sites agree on 'tomaarsen/Qwen3-Reranker-0.6B-seq-cls'
+
+$ # Inject drift:
+$ sed -i 's/^ARG MODEL_RERANKER=tomaarsen\/Qwen3-Reranker-0.6B-seq-cls/ARG MODEL_RERANKER=DRIFTED-FOR-TEST\/some-other-model/' Dockerfile
+$ bash scripts/doctor.sh | grep -A 6 'MODEL_RERANKER default drift'
+== MODEL_RERANKER default drift ==
+  INFO  Dockerfile  : DRIFTED-FOR-TEST/some-other-model
+  INFO  config.py   : tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+  INFO  .env.example: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+  FAIL  MODEL_RERANKER default drift across 3 sites — see values above.
+        Fix: pick the canonical value and update the other 2.
+
+$ git checkout Dockerfile  # restore
+```
+
+Per-site values printed BEFORE the verdict so the operator can see
+which file is the outlier without re-running with shell parsing.
+
+**Why all three sites continue to exist.**
+
+After §17.244, the source-of-truth chain handles the **runtime
+behavior**: `.env`'s `MODEL_RERANKER` (operator override) flows
+through compose's `build.args` to the Dockerfile's `ARG`. The
+chain is correct.
+
+But the **defaults** are hand-maintained at three sites because
+each serves a different concern:
+
+| Site | Concern |
+|---|---|
+| `app/config.py:173` | Runtime canonical — what the app loads if nothing in `.env`. |
+| `Dockerfile ARG` default | Build canonical — what the image pre-bakes if no `--build-arg` and no compose-forwarded value. |
+| `.env.example:118` (commented) | Operator-facing documentation — shows the canonical value as a sample for a custom-deployment template. |
+
+Consolidating to one wouldn't work — the Dockerfile is read at
+build time, before Python imports app/config.py; .env.example is
+shipped in the repo, not generated from config.py at release.
+
+The drift-check is the right shape: keep the 3 sites + verify
+they match.
+
+**Why a doctor section rather than a CI gate.**
+
+Three reasons:
+
+1. **`make doctor` is already the operator's reflex** for "is my
+   stack OK?" The drift class fits the same diagnostic surface.
+2. **CI doesn't run on every operator edit.** A local edit that
+   creates drift would land in a commit, get caught at next
+   `make doctor`, and be fixed before push. The CI version would
+   catch it later, after the bad commit landed.
+3. **§17.205 banner + §17.223/§17.224 precedent.** Recent additions
+   to doctor follow the same shape: extract canonical values,
+   compare, FAIL with operator-actionable diagnosis. §17.245 fits
+   the established pattern.
+
+A CI gate could be added on top (run `make doctor` in CI and
+gate merges on FAIL=0), but that's a separate, broader change —
+logged as a candidate but not blocking.
+
+**Files.**
+
+- `scripts/doctor.sh`:
+  - New section 12 (`MODEL_RERANKER default drift`) between the
+    §17.224 6-surface sync section and the summary.
+  - Banner section list updated to include row 12.
+  - 15-line `explain` block documents the source-of-truth chain
+    and the regression-guard rationale.
+  - Uses existing `fail`/`pass`/`info` helpers; counts as a real
+    FAIL in `$FAIL` for the summary line.
+- `OVERVIEW.md` — this entry.
+
+No app code change. No test change. Defaults unchanged.
+
+**What §17.245 does NOT change.**
+
+- The 3 sites stay 3 sites. The drift-check makes the multi-site
+  arrangement safe, not unified.
+- `make doctor`'s exit-code semantics — section 12 contributes to
+  the existing `FAIL` counter; a drift fires red and bumps the
+  total failure count, matching §17.223/§17.224's behavior.
+- CI integration — left as a separate concern; the precedent CI
+  workflows under `.github/workflows/` could `run: make doctor`
+  on every push, but that's a follow-up commit.
+
+**Open follow-ups.**
+
+1. **§17.246 candidate A** — CI workflow that runs `make doctor`
+   on every push and gates merges on `FAIL=0`. Catches drift at
+   PR time, not just at next operator edit. ~10 lines of YAML.
+2. **Compose cleanup** (still logged from §17.243) — remove the
+   now-redundant `HF_HOME:` line in `docker-compose.yml`.
+3. **§17.234 candidate B / §17.237 candidate C** (still open) —
+   smaller reranker model.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
