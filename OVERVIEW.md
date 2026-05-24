@@ -14972,6 +14972,39 @@ No new tests for otel.py (the change is a log-level constant; not test-meaningfu
 
 ---
 
+### §17.278 router tests — observability + schedule — close §17.273 test-gaps #2 + #3 (2026-05-24)
+
+Two new test files, one commit (similar shape: FastAPI `TestClient` + `dependency_overrides` for `require_api_key` and `get_db` + delegating-module mocks). Both routers had **zero pipeline-level test coverage** pre-§17.278; the only existing tests were for the underlying modules (`observability_rollups`, `scheduler`).
+
+**`tests/test_router_observability.py` — +17 tests** covering all 4 endpoints in `app/routers/observability.py`:
+- `GET /observability/llm` — delegation, provider/model filter forwarding, `window_minutes` Query bounds (3 parametrized failures at 0/10081/-1)
+- `GET /observability/errors` — default unfiltered path, `resolved=false&since_minutes=60&limit=10` filter forwarding, `limit` Query bounds (3 cases)
+- `GET /observability/jobs` — delegation + `limit` Query bounds (2 cases)
+- `PATCH /observability/errors/{error_id}` — invalid-UUID 422 short-circuit (no DB call), 404-on-not-found (no commit), happy-path 200 with `ErrorLogResolveResponse` shape + commit, un-resolve path (`resolved=false` → `resolved_at=None`)
+
+**`tests/test_router_schedule.py` — +13 tests** covering all 3 endpoints in `app/routers/schedule.py`:
+- `POST /schedule` — happy path (cron parse + model-validation + add_schedule + commit), 3 parametrized bad-cron cases (gibberish, 4-field, out-of-range minute), bad-timezone case, scheduler-failure rollback path (502 + `db.rollback`, no commit)
+- `GET /schedule` — paginated payload shape (COUNT + page), `limit` bounds (3 cases), `offset` negative bound
+- `DELETE /schedule/{id}` — happy path (delete_schedule returns True → commit), 404 on not-found (no commit)
+
+**Shared mocking patterns** worth recording for future router tests:
+- `app.dependency_overrides[require_api_key] = lambda: "test"` bypasses the auth surface (covered separately in `tests/test_auth.py`).
+- `app.dependency_overrides[get_db] = async_generator_yielding_mock` injects an `AsyncMock` session per test.
+- Delegating-module calls (`observability_rollups.llm_rollup`, `app.scheduler.add_schedule`, `app.utils.model_validation._require_valid_models`) are patched with `AsyncMock(return_value=...)` to keep the test boundary at the HTTP-handler shape.
+- `parametrize` for Query()-validation bounds reads well: `[0, 10081, -1]` for `1 <= window <= 10080`.
+
+**§17.273 test-gap status after §17.278.**
+| # | Topic | Status |
+|---|---|---|
+| 1 | `app/database.py` CancelledError | already closed in §17.274 (`test_get_db_rolls_back_on_cancelled_error`) |
+| 2 | `app/routers/observability.py` | **closed (+17 tests)** |
+| 3 | `app/routers/schedule.py` | **closed (+13 tests)** |
+| 4 | `app/sim/ngspice.py` sidecar/timeout | next: §17.279 |
+
+Full suite delta: +30 tests across two new files. No regressions.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
