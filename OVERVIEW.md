@@ -14704,6 +14704,47 @@ Closes the real concurrency bug surfaced + pinned in §17.267. The pre-fix race:
 
 ---
 
+### §17.270 flatten sweeper for pre-§17.269 branched version chains (2026-05-24)
+
+Closes the second deferred item from §17.269 ("pre-existing branched chains would need a flatten sweeper"). New script `scripts/flatten_branched_chains.py` walks Milvus, detects branched chains (multiple rows sharing the same `supersedes_id`), and re-links them into linear chains ordered by `created_at` ASC. Dry-run by default, `--apply` to mutate.
+
+**Algorithm — BFS-from-roots with per-node sibling flatten.** For each domain (or one if `--domain X`): (1) one paginated `collection.query` pulls every row's `entry_id`, `version`, `supersedes_id`, `created_at`; (2) build a `children_by_parent` adjacency map; (3) BFS from each root (`supersedes_id == ""`); (4) at each node, sort children by `created_at` ASC — oldest stays linked to the parent (no rewrite needed if already correct), each subsequent sibling becomes the successor of the previous (rewrite: `supersedes_id` → previous sibling's `entry_id`, `version` → previous sibling's version + 1); (5) recurse into children with their post-flatten versions, so cascading branches (e.g. D originally linked to a re-versioned C) get their versions bumped to follow the new chain.
+
+**Why oldest-first ordering.** Preserves chronological order — operator intuition is "the row that was committed first becomes v=2; later concurrent writers become v=3, v=4, ...". The newest sibling among a race-cohort becomes the new tail of the chain, which matches what would have happened under §17.269's serialized flow had the lock been in place at ingest time.
+
+**Why the lock is on OLD predecessor, not NEW.** Each rewrite changes a child's `supersedes_id` from OLD to NEW. A walk from OLD looking for successors might see this row briefly mid-rewrite; locking OLD via §17.269's `_predecessor_lock` serializes our rewrite with any such walk. A walk from NEW sees either pre-rewrite (no row) or post-rewrite (row linked) — both are consistent intermediate states, no torn read. Locking OLD is sufficient.
+
+**Idempotent.** A second pass on already-flat data finds zero branches because the sorted-sibling logic at each node returns 0 or 1 children (linear → first sibling already correctly linked → no rewrite needed). `test_apply_is_idempotent` is the regression guard.
+
+**Cycle protection.** BFS visit count capped at `4 × row_count` per root (`_BFS_GUARD_FACTOR`). If pathological data forms a cycle (A → B → A) and somehow has a root, the cap trips and the root is abandoned with `flatten_bfs_cap` error log. `test_cycle_is_aborted_by_bfs_cap` covers the rootless-cycle case (BFS never starts — clean exit).
+
+**Test-suite delta:** +10 tests in new `tests/test_flatten_branched_chains.py`:
+- `test_linear_chain_finds_no_branches` — `A → B → C`, no action
+- `test_two_way_branch_dry_run_reports_one_rewrite` — `A → {B, C}`, dry-run plans 1 rewrite, NO upsert fires
+- `test_two_way_branch_apply_relinks_younger_sibling` — same shape, `--apply` actually upserts C with `supersedes=B, version=3`; the `pg_advisory_xact_lock` SQL fires; commit is awaited
+- `test_three_way_branch_apply_produces_linear_chain` — `A → {B, C, D}` → linear `A → B → C → D` with versions 2/3/4
+- `test_cascading_branch_under_a_branched_node` — `A → {B, C}`, `C → D`; post-flatten D inherits C's new version (v=4) — proves the BFS recursion updates the local model so children of re-versioned nodes follow correctly
+- `test_apply_is_idempotent` — `--apply` twice; second pass is no-op
+- `test_empty_domain_is_no_op` — empty corpus → (0, 0)
+- `test_dry_run_does_not_acquire_lock` — DRY-RUN must NEVER call `async_session` (lock is only acquired on actual rewrite)
+- `test_cycle_is_aborted_by_bfs_cap` — `A.supersedes=B, B.supersedes=A` with no root → clean exit
+- `test_apply_logs_upsert_failure_but_continues` — one transient Milvus failure logs `flatten_upsert_failed` but the sweep continues; subsequent rewrites still succeed
+
+Stateful collection mock (`_make_stateful_collection`) captures upserts and mutates the in-mock row in place so subsequent queries see the rewrite — what production Milvus does after upsert+flush. Same shape as §17.269's `_make_stateful_collection_with_supersede_match`; the two helpers diverge because flatten queries by entry_id (single-row fetch for the upsert round-trip) whereas the §17.269 ingest test queries via semantic search.
+
+**Live empirical verification.** Dry-run against the actual `eng` partition on this host found **ONE real branched chain** — predecessor `scaffold-cache-control-header-1ab100bb` has two children both at v=2 (`scaffold-http-caching-25b5cbab` and `scaffold-http-caching-266a9406`). This is the first real-world evidence that the §17.267 race actually fired in production (likely during a `/research` burst that ingested HTTP-caching content twice concurrently). The script reports the plan; the `--apply` decision is operator-side (logged but not run here). Exit code 1 returned correctly (dry-run + branches found).
+
+**CLI contract:**
+- `python scripts/flatten_branched_chains.py` — dry-run all domains, exits 1 if any branches
+- `python scripts/flatten_branched_chains.py --domain eng` — scope to one
+- `python scripts/flatten_branched_chains.py --apply` — actually rewrite, exits 0 on success
+- `--verbose` for DEBUG logging
+- Exit codes: 0 clean, 1 branches-in-dry-run, 2 argument error, 3 Milvus/Postgres error
+
+**§17.267 / §17.269 / §17.270 close-out.** Race documented (§17.267) → race fixed in code (§17.269) → race-residue in production data sweepable (§17.270). The remaining open item from §17.269 — live concurrent end-to-end verification with real Postgres + Milvus + two clients — stays deferred as a separately-tracked integration test candidate.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
