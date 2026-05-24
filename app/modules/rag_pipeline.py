@@ -474,6 +474,7 @@ async def _rerank(
     top_k: int,
     *,
     max_candidates: int | None = None,
+    doc_truncate: int | None = None,
 ) -> tuple[list[RagResult], dict[str, Any]]:
     """Rerank via CrossEncoder. Returns (ranked, meta).
 
@@ -481,6 +482,8 @@ async def _rerank(
 
     §17.234 — ``max_candidates`` overrides ``settings.rerank_max_candidates``
     per call. When None, the config default applies (post-§17.233: 10).
+    §17.252 — ``doc_truncate`` overrides ``settings.rerank_doc_truncate``
+    per call. When None, the config default applies (post-§17.235: 500).
     """
     meta: dict[str, Any] = {"backend": None, "skipped_rerank": False, "warnings": []}
 
@@ -488,7 +491,7 @@ async def _rerank(
         return [], meta
 
     max_cand = int(max_candidates if max_candidates is not None else settings.rerank_max_candidates)
-    doc_trunc = int(settings.rerank_doc_truncate)
+    doc_trunc = int(doc_truncate if doc_truncate is not None else settings.rerank_doc_truncate)
     warn_ms = int(settings.rerank_warn_ms)
     error_ms = int(settings.rerank_error_ms)
 
@@ -609,6 +612,7 @@ async def query_rag(
     include_history: bool = False,
     query_intent: str = "general",
     max_candidates: int | None = None,
+    doc_truncate: int | None = None,
 ) -> "RagResponseDict":
     """Full RAG pipeline: embed → search → fuse → rerank → filter → supersede-sweep.
 
@@ -640,6 +644,7 @@ async def query_rag(
         query, domain, top_k, confidence_threshold,
         skip_rerank, include_history, query_intent,
         max_candidates=max_candidates,
+        doc_truncate=doc_truncate,
     )
     if cached is not None:
         meta = cached.setdefault("metadata", {})
@@ -691,7 +696,7 @@ async def query_rag(
         if skip_rerank:
             rerank_meta["skipped_rerank"] = True
     else:
-        ranked, rerank_meta = await _rerank(query, fused, top_k, max_candidates=max_candidates)
+        ranked, rerank_meta = await _rerank(query, fused, top_k, max_candidates=max_candidates, doc_truncate=doc_truncate)
 
     warnings.extend(rerank_meta.get("warnings", []))
     backend = rerank_meta.get("backend")
@@ -816,6 +821,7 @@ async def query_rag(
         skip_rerank, include_history, query_intent,
         response,
         max_candidates=max_candidates,
+        doc_truncate=doc_truncate,
     )
     return response
 

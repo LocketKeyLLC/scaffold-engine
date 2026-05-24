@@ -518,6 +518,16 @@ class RagInput(BaseModel):
     # ~7s per pair on CPU with default doc_truncate=2000; see §17.233).
     # Same bounds as the underlying setting.
     max_candidates: int | None = Field(default=None, ge=1, le=512)
+    # §17.252 (closes §17.236 candidate C) — per-request override for
+    # settings.rerank_doc_truncate. When None (default), the global
+    # config value applies. When set, controls how many characters of
+    # each doc the CrossEncoder sees — the QUADRATIC lever (sequence-
+    # length-squared attention) vs §17.234's LINEAR lever (candidate
+    # count). §17.235's sweep showed truncate=500 holds quality on
+    # this corpus while a smaller value (250) regresses g007 because
+    # its matching content lives between chars 250-500. Same bounds as
+    # the underlying setting.
+    doc_truncate: int | None = Field(default=None, ge=100, le=20000)
 
 
 class GtInput(BaseModel):

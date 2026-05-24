@@ -60,12 +60,18 @@ def _canonical_payload(
     include_history: bool,
     query_intent: str,
     max_candidates: int | None = None,
+    doc_truncate: int | None = None,
 ) -> str:
     # §17.234 — max_candidates added with default=None for backward-
     # compat with existing cached entries (a call that doesn't pass it
     # gets the same key as pre-§17.234). Explicit values produce a
     # different key so a max_candidates=5 request doesn't hit cache from
     # a max_candidates=32 request and vice versa.
+    # §17.252 — doc_truncate added with the same default=None /
+    # explicit-value-keys-differently semantic. A doc_truncate=250
+    # request reranks against shorter doc representations than a
+    # doc_truncate=2000 request → different shortlist → different cache
+    # row.
     return json.dumps(
         {
             "query": query,
@@ -76,6 +82,7 @@ def _canonical_payload(
             "include_history": include_history,
             "query_intent": query_intent,
             "max_candidates": max_candidates,
+            "doc_truncate": doc_truncate,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -91,12 +98,14 @@ def make_key(
     include_history: bool,
     query_intent: str,
     max_candidates: int | None = None,
+    doc_truncate: int | None = None,
 ) -> str:
     """Build the Redis key for a query_rag call."""
     payload = _canonical_payload(
         query, domain, top_k, confidence_threshold,
         skip_rerank, include_history, query_intent,
         max_candidates=max_candidates,
+        doc_truncate=doc_truncate,
     )
     h = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     domain_seg = domain if domain else "all"
@@ -144,6 +153,7 @@ class RagResultCache:
         query_intent: str,
         *,
         max_candidates: int | None = None,
+        doc_truncate: int | None = None,
     ) -> dict[str, Any] | None:
         """Return cached response or None on miss / gate-off / Redis error."""
         if not settings.cache_rag_results:
@@ -154,6 +164,7 @@ class RagResultCache:
             query, domain, top_k, confidence_threshold,
             skip_rerank, include_history, query_intent,
             max_candidates=max_candidates,
+            doc_truncate=doc_truncate,
         )
         try:
             r = await self._get_redis()
@@ -194,6 +205,7 @@ class RagResultCache:
         response: dict[str, Any],
         *,
         max_candidates: int | None = None,
+        doc_truncate: int | None = None,
     ) -> bool:
         """Store a response. Returns True on write, False on skip/error.
 
@@ -210,6 +222,7 @@ class RagResultCache:
             query, domain, top_k, confidence_threshold,
             skip_rerank, include_history, query_intent,
             max_candidates=max_candidates,
+            doc_truncate=doc_truncate,
         )
         try:
             value = json.dumps(response, separators=(",", ":")).encode("utf-8")

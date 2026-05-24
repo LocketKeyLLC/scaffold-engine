@@ -13432,6 +13432,152 @@ incident-to-defense lifecycle.
 
 ---
 
+### §17.252 `/rag` `doc_truncate` per-request override — close §17.236 candidate C (2026-05-24)
+
+Closes §17.236 candidate C — "per-request `doc_truncate` override
+on `RagInput`." Mirrors the §17.234 `max_candidates` plumbing line-
+for-line; the two reranker knobs now share the same operator-facing
+shape:
+
+| Knob | Global default | Per-request field | Effect |
+|---|---|---|---|
+| `rerank_max_candidates` | 10 (§17.233) | `max_candidates: int \| None` (§17.234) | linear lever — count of docs reranked |
+| `rerank_doc_truncate` | 500 (§17.235) | `doc_truncate: int \| None` (§17.252, this entry) | quadratic lever — chars per doc passed to the reranker |
+
+**The two-axis operating surface.**
+
+`/rag` callers can now hit any cell of the §17.238 2-D Pareto matrix
+per call instead of per-deploy. Example operator decisions
+post-§17.252:
+
+- Default — `{"query":"…"}` → `(max=10, trunc=500)` Pareto corner.
+- Fastest possible — `{"max_candidates":5, "doc_truncate":250}` →
+  the `(5, 250)` latency-floor corner (~6.7 s/query per §17.238).
+- Deep-context — `{"doc_truncate":2000}` → preserves max=10
+  shortlist but lets the reranker see full doc bodies; ~3× the
+  default latency.
+- Wide shortlist for high-recall research — `{"max_candidates":20,
+  "doc_truncate":500}` → the §17.232-era effective config.
+
+The §17.238 matrix entry already proved `(max=10, trunc=500)` is
+the Pareto-optimal default; §17.252 just makes the rest of the
+surface reachable per-call.
+
+**Plumbing — same shape as §17.234, file-for-file.**
+
+| File | §17.234 change (recap) | §17.252 change |
+|---|---|---|
+| `app/schemas.py` | added `max_candidates` to `RagInput` | added `doc_truncate` next to it (10-line inline comment cites §17.235) |
+| `sdk/scaffold_client/schemas.py` | byte-equal vendor | `make sync-schemas` |
+| `app/routers/rag.py` | passes `body.max_candidates` to `_query_rag` | also passes `body.doc_truncate` |
+| `app/modules/rag_pipeline.py::query_rag` | added kwarg | added second kwarg |
+| `app/modules/rag_pipeline.py::_rerank` | `max_cand = int(max_candidates if ... else settings)` | `doc_trunc = int(doc_truncate if ... else settings)` |
+| `app/utils/rag_result_cache.py::_canonical_payload` / `make_key` / `RagResultCache.get/put` | added `max_candidates` to the cache key | added `doc_truncate` to the cache key |
+
+Cache-key semantics match §17.234's: `None` (default) gets the
+same key as omitted-arg (backward-compat with cached entries from
+before this rollout); explicit values produce different keys so
+two callers with different overrides don't share a cached row.
+
+**Tests — 4 new in `test_rag_pipeline.py` + 4 new in `test_rag_result_cache.py`.**
+
+`TestRerankDocTruncateOverride` (4):
+
+| Test | Pins |
+|---|---|
+| `test_override_truncates_doc_chars` | `doc_truncate=200` × 5 docs × 1000 chars → reranker receives 5 strings each exactly 200 chars |
+| `test_none_falls_back_to_settings` | `doc_truncate=None` → uses `settings.rerank_doc_truncate` (500 post-§17.235); docs longer than the setting get truncated to settings value |
+| `test_override_with_short_content_no_padding` | `doc_truncate=500` on 50-char docs → 50-char strings (Python slice doesn't pad) |
+| `test_independent_of_max_candidates` | `max_candidates=4, doc_truncate=150` together → 4 docs of 150 chars each; the two knobs compose without aliasing |
+
+`TestMakeKey` (4 new):
+
+| Test | Pins |
+|---|---|
+| `test_doc_truncate_change_changes_key` | `doc_truncate=250` ≠ `doc_truncate=2000` cache keys |
+| `test_doc_truncate_none_distinct_from_explicit` | `None` ≠ `500` (stats can distinguish default vs explicit) |
+| `test_doc_truncate_default_arg_matches_explicit_none` | omitted ≡ `None` (backward-compat) |
+| `test_max_candidates_and_doc_truncate_compose_into_key` | All 4 combos of `{max_candidates=5,10} × {doc_truncate=500,1000}` produce distinct keys — no aliasing on either axis |
+
+Updates to existing mock fixtures: `mock_rerank` and `low_rerank`
+both gained `doc_truncate=None` kwarg (additive — accepts and
+ignores; only matters at the real CrossEncoder boundary).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_rag_pipeline.py \
+    tests/test_rag_result_cache.py \
+    tests/test_rag_pipeline_smoke.py \
+    -q --timeout=30
+88 passed in 8.76s   (80 pre-§17.252 + 8 new for §17.252)
+
+$ make check-schemas
+✓ sdk/scaffold_client/schemas.py is in sync with app/schemas.py.
+
+$ # Live OpenAPI exposes the new field with correct bounds:
+$ curl -s http://localhost:8000/openapi.json | jq '.components.schemas.RagInput.properties.doc_truncate.anyOf'
+[
+  { "type": "integer", "maximum": 20000.0, "minimum": 100.0 },
+  { "type": "null" }
+]
+```
+
+Orchestrator recreated post-edit; healthy at t=8s. Reranker prewarm
+unchanged (image-baked cache from §17.243 still serves).
+
+**Files.**
+
+- `app/schemas.py` — added `doc_truncate` field to `RagInput`.
+- `sdk/scaffold_client/schemas.py` — byte-equal vendor (`make sync-schemas`).
+- `app/routers/rag.py` — handler passes `body.doc_truncate` through.
+- `app/modules/rag_pipeline.py` — `query_rag` + `_rerank` thread
+  the override; cache get/put calls include it.
+- `app/utils/rag_result_cache.py` — `_canonical_payload` + `make_key`
+  + `RagResultCache.get` + `RagResultCache.put` all gain the
+  `doc_truncate` kwarg.
+- `tests/test_rag_pipeline.py` — `TestRerankDocTruncateOverride`
+  class (4 tests); 2 mock-fixture updates.
+- `tests/test_rag_result_cache.py` — 4 new `TestMakeKey` cases.
+- `OVERVIEW.md` — this entry.
+
+No app-routing change beyond the field add. No test framework
+change. Default settings unchanged.
+
+**What §17.252 does NOT change.**
+
+- `settings.rerank_doc_truncate` default (500) — unchanged.
+  §17.235 established that as the Pareto-optimal default.
+- `settings.rerank_max_candidates` default (10) — unchanged.
+- The §17.238 matrix harness — still useful for finding the
+  default. §17.252 makes the per-call surface match the per-deploy
+  surface.
+- OWUI `pipelines/scaffold_router.py`'s `/rag` body — unchanged
+  (still sends `{"query": text, "top_k": 5}`). §17.236 falsified
+  per-default adoption of `max_candidates=5`; the same analysis
+  applies to `doc_truncate=250` (it regressed g007 in the §17.238
+  matrix). The per-request lever is here for power users; the
+  chat-side default stays at the global config.
+
+**Open follow-ups.**
+
+1. **§17.253 candidate A** — render the two reranker knobs in
+   the `/rag` response `metadata` so operators can see what
+   shortlist depth + doc truncate the result was computed at.
+   ~10 lines in `query_rag`. Helps debugging when an operator
+   passes an override and wants to confirm it was applied.
+2. **§17.234 candidate B / §17.237 candidate C** — smaller
+   reranker model. Now that both knobs are per-call, swapping
+   the model is the remaining lever for a deeper redesign.
+3. **OWUI integration — sticky overrides per chat.** A future
+   `pipelines/scaffold_router.py` enhancement could let an
+   operator set `/rag max=5 trunc=250 my-query` and have the
+   pipeline thread the override into the `/rag` body. Out of
+   scope; logged.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

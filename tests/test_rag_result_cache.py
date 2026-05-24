@@ -103,6 +103,37 @@ class TestMakeKey:
         b = make_key("q", "eng", 5, 0.3, False, False, "general", max_candidates=None)
         assert a == b
 
+    # §17.252 — doc_truncate is part of the key. Mirrors max_candidates
+    # semantics: explicit values produce different keys; omitted ≡ None
+    # for backward compat.
+    def test_doc_truncate_change_changes_key(self):
+        a = make_key("q", "eng", 5, 0.3, False, False, "general", doc_truncate=250)
+        b = make_key("q", "eng", 5, 0.3, False, False, "general", doc_truncate=2000)
+        assert a != b
+
+    def test_doc_truncate_none_distinct_from_explicit(self):
+        a = make_key("q", "eng", 5, 0.3, False, False, "general", doc_truncate=None)
+        b = make_key("q", "eng", 5, 0.3, False, False, "general", doc_truncate=500)
+        assert a != b
+
+    def test_doc_truncate_default_arg_matches_explicit_none(self):
+        a = make_key("q", "eng", 5, 0.3, False, False, "general")
+        b = make_key("q", "eng", 5, 0.3, False, False, "general", doc_truncate=None)
+        assert a == b
+
+    def test_max_candidates_and_doc_truncate_compose_into_key(self):
+        """Each pair-combo produces a distinct cache key — no axes alias."""
+        a = make_key("q", "eng", 5, 0.3, False, False, "general",
+                     max_candidates=10, doc_truncate=500)
+        b = make_key("q", "eng", 5, 0.3, False, False, "general",
+                     max_candidates=10, doc_truncate=1000)
+        c = make_key("q", "eng", 5, 0.3, False, False, "general",
+                     max_candidates=5,  doc_truncate=500)
+        # All three combos must differ pairwise.
+        assert a != b
+        assert a != c
+        assert b != c
+
 
 # ---------------------------------------------------------------------------
 # _is_cacheable

@@ -37,6 +37,7 @@ async def query_rag(body: RagInput):
         domain=body.domain,
         query_intent=body.query_intent,
         max_candidates=body.max_candidates,
+        doc_truncate=body.doc_truncate,
     )
     if result.get("status") == "error":
         raise HTTPException(

@@ -56,12 +56,13 @@ def _patch_rag_deps(
     if keyword_results is None:
         keyword_results = []
 
-    async def mock_rerank(query, results, top_k, *, max_candidates=None):
+    async def mock_rerank(query, results, top_k, *, max_candidates=None, doc_truncate=None):
         """New contract: _rerank returns (ranked, meta).
 
         §17.234 — max_candidates kwarg added; mock accepts and ignores
         (mock returns the input results in their existing order; the
         kwarg only matters at the real CrossEncoder boundary).
+        §17.252 — doc_truncate kwarg added; same accept-and-ignore.
         """
         for r in results:
             r.rerank_score = r.rrf_score
@@ -625,6 +626,129 @@ class TestRerankMaxCandidatesOverride:
 
 
 # ===========================================================================
+# §17.252 — per-request doc_truncate override
+# ===========================================================================
+
+class TestRerankDocTruncateOverride:
+    """_rerank honors per-call doc_truncate; falls back to settings when None."""
+
+    def _make_long_results(self, n, content_len):
+        """Build n results whose content is exactly content_len chars."""
+        from app.modules.rag_pipeline import RagResult
+        return [
+            RagResult(
+                content="x" * content_len,
+                entry_id=f"e{i}",
+                rrf_score=1.0 - i * 0.01,
+            )
+            for i in range(n)
+        ]
+
+    def test_override_truncates_doc_chars(self):
+        """doc_truncate=200 → each doc passed to the reranker is at most 200 chars."""
+        from app.modules.rag_pipeline import _rerank
+
+        fake_rr = MagicMock()
+        fake_rr.items = []
+        fake_rr.backend = "mock"
+        fake_rr.latency_ms = 1.0
+
+        # 5 docs × 1000 chars each — well above the override of 200.
+        results = self._make_long_results(5, 1000)
+        captured_docs = []
+
+        def capture(query, docs, top_k):
+            captured_docs.extend(docs)
+            return fake_rr
+
+        with patch("app.modules.rag_pipeline.cross_encoder_rerank", side_effect=capture):
+            _run(_rerank("q", results, top_k=10, doc_truncate=200))
+
+        assert all(len(d) == 200 for d in captured_docs), (
+            f"expected all {len(captured_docs)} docs at exactly 200 chars; "
+            f"saw lengths {[len(d) for d in captured_docs]}"
+        )
+
+    def test_none_falls_back_to_settings(self):
+        """doc_truncate=None uses settings.rerank_doc_truncate."""
+        from app.modules.rag_pipeline import _rerank
+        from app.config import settings
+
+        fake_rr = MagicMock()
+        fake_rr.items = []
+        fake_rr.backend = "mock"
+        fake_rr.latency_ms = 1.0
+
+        # Make content longer than any plausible setting so truncation
+        # always bites.
+        results = self._make_long_results(3, settings.rerank_doc_truncate + 500)
+        captured_docs = []
+
+        def capture(query, docs, top_k):
+            captured_docs.extend(docs)
+            return fake_rr
+
+        with patch("app.modules.rag_pipeline.cross_encoder_rerank", side_effect=capture):
+            _run(_rerank("q", results, top_k=10, doc_truncate=None))
+
+        expected_len = int(settings.rerank_doc_truncate)
+        assert all(len(d) == expected_len for d in captured_docs), (
+            f"expected all docs truncated to {expected_len} (settings default); "
+            f"saw lengths {[len(d) for d in captured_docs]}"
+        )
+
+    def test_override_with_short_content_no_padding(self):
+        """doc_truncate=500 on 50-char docs returns 50-char strings (no padding)."""
+        from app.modules.rag_pipeline import _rerank
+
+        fake_rr = MagicMock()
+        fake_rr.items = []
+        fake_rr.backend = "mock"
+        fake_rr.latency_ms = 1.0
+
+        results = self._make_long_results(3, 50)
+        captured_docs = []
+
+        def capture(query, docs, top_k):
+            captured_docs.extend(docs)
+            return fake_rr
+
+        with patch("app.modules.rag_pipeline.cross_encoder_rerank", side_effect=capture):
+            _run(_rerank("q", results, top_k=10, doc_truncate=500))
+
+        assert all(len(d) == 50 for d in captured_docs), (
+            "Python slice [:500] on 50-char string returns 50-char string"
+        )
+
+    def test_independent_of_max_candidates(self):
+        """doc_truncate and max_candidates compose; per-call values both apply."""
+        from app.modules.rag_pipeline import _rerank
+
+        fake_rr = MagicMock()
+        fake_rr.items = []
+        fake_rr.backend = "mock"
+        fake_rr.latency_ms = 1.0
+
+        results = self._make_long_results(20, 1000)
+        captured_docs = []
+
+        def capture(query, docs, top_k):
+            captured_docs.extend(docs)
+            return fake_rr
+
+        with patch("app.modules.rag_pipeline.cross_encoder_rerank", side_effect=capture):
+            _run(_rerank("q", results, top_k=10,
+                         max_candidates=4, doc_truncate=150))
+
+        assert len(captured_docs) == 4, (
+            f"max_candidates=4 → 4 docs; got {len(captured_docs)}"
+        )
+        assert all(len(d) == 150 for d in captured_docs), (
+            f"doc_truncate=150 → each doc 150 chars; got {[len(d) for d in captured_docs]}"
+        )
+
+
+# ===========================================================================
 # Confidence Threshold Relaxation
 # ===========================================================================
 
@@ -638,7 +762,7 @@ class TestConfidenceThreshold:
             {"content": "Low C", "entry_id": "e3", "vector_score": 0.1},
         ])
 
-        async def low_rerank(query, results, top_k, *, max_candidates=None):
+        async def low_rerank(query, results, top_k, *, max_candidates=None, doc_truncate=None):
             for r in results:
                 r.final_score = 0.1  # below default 0.8
             meta = {"backend": "mock", "skipped_rerank": False, "warnings": []}
