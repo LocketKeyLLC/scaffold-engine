@@ -109,7 +109,23 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
                     )
                     await session.commit()
             except Exception as db_err:
-                logger.error("Failed to persist error log: %s", db_err)
+                # §17.263 — DB write failure is exactly when we most need
+                # the trace; pre-fix this branch logged only db_err and
+                # dropped the original context (error_type, request path,
+                # traceback). Now emit a self-contained fallback entry so
+                # operators reading journald don't lose the bridge to the
+                # original failure. Traceback is redacted because journald
+                # has broader read access than auth-gated /observability/errors.
+                logger.error(
+                    "error_log_db_write_failed: db_error=%s | "
+                    "original_error_type=%s method=%s path=%s original_error=%s",
+                    db_err, error_type, request.method, request.url.path,
+                    error_msg_safe,
+                )
+                logger.error(
+                    "error_log_db_write_failed_traceback:\n%s",
+                    _redact_secrets(tb)[:4000],
+                )
 
             # §17.183: typed upstream-down classification. Pre-§17.183 every
             # unhandled exception bubbled to a generic 500 "Internal Server

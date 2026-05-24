@@ -158,6 +158,47 @@ def test_persistence_failure_does_not_break_response(app_with_endpoints):
     assert r.json()["error"] == "ValueError"
 
 
+def test_persistence_failure_logs_full_context_to_journald(app_with_endpoints, caplog):
+    """§17.263 — when the DB write fails, the original error's full context
+    (error_type, request path, redacted traceback) must reach journald.
+    Pre-fix, only db_err was logged — the trace operators needed to debug
+    why /explode failed was silently dropped exactly when the DB was down.
+    Closes 17.258 yellow #2."""
+    import logging
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(side_effect=RuntimeError("db is down"))
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with caplog.at_level(logging.ERROR, logger="scaffold.errors"), \
+         patch("app.middleware.error_logging.async_session", return_value=cm):
+        client = TestClient(app_with_endpoints, raise_server_exceptions=False)
+        r = client.get("/explode")
+
+    assert r.status_code == 500  # response still works (existing invariant)
+
+    msgs = [rec.getMessage() for rec in caplog.records]
+    fallback = [m for m in msgs if "error_log_db_write_failed" in m
+                and "traceback" not in m]
+    traceback_log = [m for m in msgs if "error_log_db_write_failed_traceback" in m]
+
+    assert fallback, f"expected fallback context line; got: {msgs}"
+    # The fallback line must carry: db_error, original_error_type, method,
+    # path, original_error — all needed to bridge journald back to the
+    # exception this DB write was trying to persist.
+    line = fallback[0]
+    assert "db is down" in line, f"missing db_err in fallback: {line!r}"
+    assert "original_error_type=" in line, f"missing error_type: {line!r}"
+    assert "method=GET" in line, f"missing method: {line!r}"
+    assert "path=/explode" in line, f"missing path: {line!r}"
+    assert "original_error=" in line, f"missing original_error: {line!r}"
+
+    assert traceback_log, f"expected traceback fallback line; got: {msgs}"
+    # The redacted traceback line is what operators need to debug the
+    # underlying exception — pre-fix this was the dropped piece.
+    assert "Traceback" in traceback_log[0] or "traceback" in traceback_log[0], \
+        f"expected actual traceback content: {traceback_log[0]!r}"
+
+
 # ---------- _redact_secrets unit tests (§17.162) ----------
 
 class TestRedactSecrets:

@@ -14525,6 +14525,24 @@ Existing `TestRerankEmptyItems::test_empty_items_triggers_fallback` continues to
 
 ---
 
+### §17.263 error-logging middleware preserves full context on DB-write failure — close §17.258 🟡 #2 (2026-05-24)
+
+§17.258's second yellow item. `app/middleware/error_logging.py:111-112` had a try/except around the `error_logs` INSERT whose failure handler was `logger.error("Failed to persist error log: %s", db_err)` — discarding everything the DB write was trying to persist (the original exception's `error_type`, `request.method`, `request.url.path`, the traceback `tb`). Exactly when the DB is unhealthy (so errors are flowing AND the audit table can't accept them), the only durable record of what went wrong was being thrown away. journald saw the bare db_err with no bridge to the original failure that triggered the cascade.
+
+**Two-log fallback at `app/middleware/error_logging.py:111-130`.** Same broad `except Exception` (the rule that DB failure must not break the response is unchanged — `test_persistence_failure_does_not_break_response` continues to pass), but the body now emits two structured `logger.error` lines:
+
+1. **`error_log_db_write_failed: db_error=<X> | original_error_type=<Y> method=<M> path=<P> original_error=<safe>`** — single-line, greppable, carries every field needed to cross-reference an operator's journald grep back to the in-flight request. `original_error` uses `error_msg_safe` (post-redaction), not `error_msg_raw`, because journald has broader read access than the auth-gated `/observability/errors` endpoint.
+2. **`error_log_db_write_failed_traceback:\n<redacted_tb>`** — the traceback itself, redacted via the existing `_redact_secrets` pass. Capped at 4000 chars to match the DB column ceiling. Separate log entry so multi-line tracebacks survive log-line-length truncation in shipping pipelines.
+
+**Test-suite delta:** +1 test in `test_error_logging_middleware.py`:
+- `test_persistence_failure_logs_full_context_to_journald` — re-uses the existing `app_with_endpoints` fixture and the `cm.__aenter__ = AsyncMock(side_effect=RuntimeError("db is down"))` DB-down mock from `test_persistence_failure_does_not_break_response`. Asserts the response stays at 500 (existing invariant) AND the captured `scaffold.errors` log records contain (a) the fallback context line with `db is down`, `original_error_type=`, `method=GET`, `path=/explode`, `original_error=`, and (b) the traceback fallback line with actual Traceback content. Logger name caught at `scaffold.errors` (line 33: `logger = logging.getLogger("scaffold.errors")`) — distinct from the broader `app.modules.execution_agent` logger used in §17.261.
+
+**No behavior change in the happy path.** The DB write still succeeds normally; the new branch only fires on the exception path that previously dropped context. Full `test_error_logging_middleware.py`: 43 → 44 passing.
+
+**Operator note.** A pre-§17.263 deployment with frequent DB-write failures would have logged `Failed to persist error log: <db_err>` lines with no way to cross-reference them to the requests that failed. Post-§17.263 the same scenario produces a complete grep-able trail: search journald for `error_log_db_write_failed`, find the `path=` to identify the endpoint, find the matching `_traceback` line for the stack. The §17.262 SSE fix uses the same fallback principle — observability survives the failure of its primary channel.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
