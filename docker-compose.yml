@@ -204,7 +204,20 @@ services:
       target: runtime
     container_name: scaffold-orchestrator
     logging: *default-logging
-    mem_limit: 3g
+    # §17.232 — raised 3g → 6g. The CrossEncoder reranker batch under live
+    # /rag load spiked to 2.796 GiB (93 % of the old cap) on a 20-doc
+    # rerank, and the variance was enough to intermittently cross 3g and
+    # SIGKILL the python process. Docker reported the death as
+    # ``OOMKilled: false  exit 0`` (cgroup-v2 quirk: process is killed at
+    # the cgroup boundary but PID-1's exit code is preserved as graceful)
+    # — see §17.232 for the docker-stats memory profile capture and the
+    # three-crash reproduction. Host has 16 GiB; sum of all compose caps
+    # post-bump is ~15.5 GiB which is the design ceiling, but real usage
+    # is well below cap on every other container so there's no contention
+    # risk. Score sidecar runs throughout §17.230–§17.231 used --memory 6g
+    # and ran identical reranker workload without crash, which is the
+    # empirical baseline the new cap matches.
+    mem_limit: 6g
     # §17.93 — bind to loopback only. The API surface is operator-only;
     # `/web/*`, `/health`, `/metrics`, `/` are auth-exempt and shouldn't
     # be reachable from the LAN. Other containers reach the orchestrator

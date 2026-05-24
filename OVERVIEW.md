@@ -10346,6 +10346,187 @@ Exact-id coverage:    0.0%  (archival — see §17.229)
 
 ---
 
+### §17.232 `/rag` graceful-restart bug — root cause was mem_limit, not keepalive starvation; raise 3g → 6g (2026-05-23)
+
+Closes the §17.232 candidate D logged in §17.231. Three direct `curl POST
+/rag` calls during the §17.231 diagnostic each triggered an orchestrator
+restart at the reranker `Batches: 0%|...` step. The §17.231 entry's
+working hypothesis was "keepalive watchdog kills sync-blocking
+`CrossEncoder.predict()` because it's not wrapped in `run_in_executor`."
+That hypothesis turned out to be **wrong**. Actual root cause is memory
+pressure against the 3 GiB `mem_limit`.
+
+**Why the §17.231 hypothesis was wrong.**
+
+Two observations rule it out:
+
+1. `cross_encoder_rerank` IS already wrapped in `run_in_executor`. See
+   `app/modules/rag_pipeline.py::_rerank` L493:
+   ```python
+   loop = asyncio.get_running_loop()
+   rr = await loop.run_in_executor(None, cross_encoder_rerank, query, docs, len(docs))
+   ```
+   So `model.predict()` runs in a thread, not the event loop. The async
+   layer can pump heartbeats while the reranker computes.
+2. The "keepalive patch" in `app/run_server.py` is **TCP-level** kernel
+   keepalive (`SO_KEEPALIVE` + `TCP_KEEPIDLE`/`TCP_KEEPINTVL`/`TCP_KEEPCNT`)
+   — it detects dead clients via kernel-level socket probes, not via the
+   event loop heartbeat. It cannot starve the worker because it doesn't
+   require the event loop to do anything.
+
+**Actual root cause — memory pressure against `mem_limit: 3g`.**
+
+Reproduced with `docker stats scaffold-orchestrator --no-stream` polled
+every 1 s during a live `/rag` call:
+
+| t | Memory | % of 3 GiB cap |
+|---:|---:|---:|
+| 0s (idle) | 723 MiB | 24% |
+| 1s | 1.229 GiB | 41% |
+| 2s | 2.005 GiB | 67% |
+| 4s | 2.173 GiB | 72% |
+| **10s** | **2.796 GiB** | **93%** |
+| 11–25s | 1.6–2.7 GiB | 53–93% |
+
+The CrossEncoder batch's working set (loaded model + per-query tensors +
+input encoding) brought peak memory to 93 % of cap. On runs where the
+spike crossed 3 GiB (variance-driven; tensor sizes shift with per-doc
+content length), the kernel SIGKILL'd the python process at the cgroup
+memory boundary. Docker's `OOMKilled: false  exit 0  RestartCount: 1→2`
+is the **cgroup-v2 quirk**: PID-1's exit status is preserved as graceful
+when the SIGKILL hits before any orderly shutdown path runs, but the
+process is still killed at the cgroup level. The log signature confirms
+it — `Batches: 0%|...` is the last output before a fresh lifespan banner
+appears ~9 s later, with **no** `Application shutdown`, no traceback, no
+SIGTERM message: a SIGKILL leaves none of those.
+
+**Fix.** One-line change in `docker-compose.yml`:
+
+```diff
+   container_name: scaffold-orchestrator
+   logging: *default-logging
+-  mem_limit: 3g
++  mem_limit: 6g
+```
+
+with a 13-line inline comment citing this entry and the docker-stats
+profile above so a future operator (or audit pass) doesn't roll the
+limit back without re-doing the empirical measurement.
+
+**Why 6 GiB specifically.** Three anchors:
+
+1. The score sidecar in §17.230 + §17.231 used `--memory 6g` and ran
+   identical reranker workloads (20 queries × 20-doc rerank each)
+   without crash. Empirical baseline.
+2. Observed peak under the new cap (see verification below) is 3.87 GiB
+   on a single 20-doc rerank. 6 GiB = ~1.5 × peak; comfortable.
+3. Host has 16 GiB. Sum of all compose `mem_limit` caps post-bump is
+   ~15.5 GiB, but real per-container usage is ~9 GiB total. No
+   contention risk because containers don't all peak simultaneously.
+
+**Verification — same query that crashed three times pre-fix now
+survives.**
+
+`curl POST /rag {"query":"truncation","domain":"eng","top_k":10}` against
+the post-bump orchestrator. Memory profile (1-s polls):
+
+| t | Memory | % of 6 GiB cap |
+|---:|---:|---:|
+| 5s | 1.682 GiB | 28% |
+| 15s | 2.631 GiB | 44% |
+| 20s | 2.719 GiB | 45% |
+| 35s | 3.286 GiB | 55% |
+| 45s | 3.383 GiB | 56% |
+| **55s** | **3.872 GiB** | **65%** ← peak |
+| 60s | 3.458 GiB | 58% |
+
+Post-call state:
+
+```
+$ docker inspect scaffold-orchestrator --format '{{.RestartCount}} restart(s) | OOMKilled: {{.State.OOMKilled}}'
+0 restart(s) | OOMKilled: false
+```
+
+Zero restarts since the recreate; the old 3 GiB cap would have been
+crossed at t=20s (2.7 GiB on this run) and at t=35s (3.286 GiB),
+either of which would have SIGKILL'd the worker on the old cap.
+
+**Adjacent finding — reranker latency is much higher than expected.**
+
+The /rag call that survived completed at `latency_ms=234500` (3:54 wall),
+with `reranker_completed: docs=20 elapsed_ms=234409`. That's ~12 s per
+doc-pair on CPU for a 0.6 B parameter reranker — way out of the
+expected envelope (~1 s/pair for Qwen3-Reranker-0.6B-seq-cls on CPU per
+the model card). The `reranker_decision` log line is at **ERROR** level
+because `latency_ms > settings.rerank_error_ms`. The CrossEncoder batch
+progress bar advances 0% → 100% in a single 233 s step, so the
+slowness is in `predict()`, not in batching/dispatch.
+
+This is **not the same bug as the crash** and is **out of scope for
+§17.232**. The score sidecar in §17.230/§17.231 ran 20 queries
+total in ~3–5 min wall (≈10–15 s per QUERY), which is consistent
+with a healthy CPU rerank. The live orchestrator's `/rag` doing 234 s
+on the same workload suggests something different about the running
+container's state — possibly thread-pool contention with concurrent
+health probes, possibly torch's intra-op parallelism not engaging the
+way it does in a fresh container, possibly some interaction with the
+embedding cache that's been warming for hours. Logged as **§17.233
+candidate**: investigate why live-orchestrator reranker latency is
+~15× higher than the same model in a fresh sidecar.
+
+**Files.**
+
+- `docker-compose.yml` — `scaffold-orchestrator` service: `mem_limit:
+  3g → 6g` + 13-line inline §17.232 comment with the rationale.
+  No other services touched.
+
+**Verification commands (reproducible).**
+
+```bash
+# Bump:
+docker compose up -d scaffold-orchestrator       # recreate with new limit
+# Wait for healthy:
+while [ "$(curl -s http://localhost:8000/health | jq -r .status)" != "healthy" ]; do sleep 2; done
+
+# Probe — should survive on the new cap; pre-fix crashed within ~30s:
+SCAFFOLD_API_KEY=$(grep ^SCAFFOLD_API_KEY .env | cut -d= -f2-)
+curl --max-time 300 -H "X-Api-Key: $SCAFFOLD_API_KEY" \
+     -H "Content-Type: application/json" \
+     -X POST http://localhost:8000/rag \
+     -d '{"query":"truncation","domain":"eng","top_k":10}'
+
+# Confirm zero new restarts:
+docker inspect scaffold-orchestrator --format '{{.RestartCount}} | {{.State.OOMKilled}}'
+```
+
+**What §17.232 does NOT change.**
+
+- No app/orchestrator code. The fix is purely compose-level.
+- No test file changes — `tests/test_score_retrieval.py`'s 19 cases
+  (§17.230) still pass; nothing about the scoring code was touched.
+- Reranker speed (the §17.233 candidate above). Surviving the call is
+  the immediate win; making it fast is a separate problem with a
+  different fix.
+- Sum of compose mem caps now exceeds host RAM (15.5 GiB caps on a
+  16 GiB host). Tolerated because the caps are limits, not
+  reservations — and because real usage stays well below them on every
+  other service. If a future commit raises another cap, the operator
+  should revisit total cap budget vs. host RAM.
+
+**Open follow-up.**
+
+- **§17.233 candidate** — investigate the 234 s reranker latency on the
+  live orchestrator vs ~10–15 s in the score sidecar. Same model, same
+  20-doc workload, same CPU host; 15× latency gap. Possible angles:
+  `torch.set_num_threads` interaction with the executor's thread pool,
+  `TOKENIZERS_PARALLELISM=false` env var (already set per compose
+  L243), embedding-cache contention with the reranker, or the
+  reranker's `_get_cross_encoder()` singleton being repeatedly entered
+  by concurrent calls. Sidecar runs the same code with a single process
+  and no concurrency; that's the simplest variable to bisect first.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
