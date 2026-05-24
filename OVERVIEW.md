@@ -13273,6 +13273,165 @@ incident-to-defense lifecycle.
 
 ---
 
+### §17.251 `scripts/doctor.sh` section 11 skips `_*`-prefixed subdirs — symmetric with §17.250 (2026-05-24)
+
+Closes §17.250 candidate A — "mirror the `_*` skip in `scripts/doctor.sh`
+section 11." Symmetric defense-in-depth on the read-side of the API-key
+sync invariant: pre-§17.251 the doctor's section 11 silently skipped
+vendor-leftover dirs ONLY when their `valves.json` was `{}` (i.e. no
+`api_key` field). A leftover dir whose `valves.json` somehow got a
+populated `api_key` — manual edit, future operator workflow we
+haven't anticipated — would slip through as an "agreeing" or
+"drifted" surface depending on the value.
+
+§17.250 already prevents `sync_api_key.sh` from writing to these
+dirs. §17.251 closes the matching read-side window so a leftover
+that an operator manually edits (e.g. while debugging) doesn't pollute
+the doctor verdict.
+
+**Fix.**
+
+Inside section 11's `pipelines/*/valves.json` loop, add an explicit
+`_*` prefix skip BEFORE the `has_key` probe runs:
+
+```bash
+for valves in "$REPO_ROOT"/pipelines/*/valves.json; do
+    name="$(basename "$(dirname "$valves")")"
+    # §17.251 — symmetric with §17.250's sync-side guard: skip
+    # `_*`-prefixed subdirs (the vendor-helper naming convention
+    # per §17.212). …
+    if [[ "$name" == _* ]]; then
+        info "pipelines/$name/valves.json skipped (vendor-helper dir per §17.251)"
+        continue
+    fi
+    # has_key returns "PRESENT" or "ABSENT"; vkey is "" when absent.
+    …
+```
+
+Eight-line inline comment cites §17.212 + §17.250 so future readers
+see the full convention chain.
+
+**Why an `INFO` line instead of silent skip.**
+
+The pre-§17.251 silent skip on `has_key=ABSENT` was correct for the
+`{}` case but invisible to the operator. §17.251 surfaces the skip
+as a regular `INFO` log line so an operator running `make doctor`
+sees:
+
+1. WHICH leftover dirs are present (the name appears),
+2. THAT they're being skipped,
+3. WHY (the §-reference points at the convention doc).
+
+Visible diagnostic > silent benign behavior. The skip doesn't bump
+`SYNC_MISMATCH`, doesn't trigger `fail` — purely informational.
+
+**Verification — both branches.**
+
+```
+$ # HAPPY PATH (post-§17.249 clean state):
+$ bash scripts/doctor.sh | grep -A 12 "API key 6-surface"
+== API key 6-surface sync (read-side) ==
+  INFO  reference (.env): sk-scaffold…af46
+  PASS  pipelines/dag_viewer/valves.json matches .env
+  PASS  pipelines/execution_handler/valves.json matches .env
+  PASS  pipelines/gt_browser/valves.json matches .env
+  PASS  pipelines/prompt_inspector/valves.json matches .env
+  PASS  pipelines/scaffold_router/valves.json matches .env
+  PASS  ~/.bashrc matches .env
+  PASS  scaffold-orchestrator container matches .env
+  PASS  open-webui-pipelines container matches .env
+  PASS  all 6 surfaces agree on SCAFFOLD_API_KEY (sk-scaffold…af46)
+
+$ # FAIL PATH (synthetic mkdir + manually drifted api_key):
+$ mkdir -p pipelines/_test_leftover
+$ echo '{"api_key": "sk-some-other-key-12345"}' > pipelines/_test_leftover/valves.json
+$ bash scripts/doctor.sh | grep -A 13 "API key 6-surface"
+== API key 6-surface sync (read-side) ==
+  INFO  reference (.env): sk-scaffold…af46
+  PASS  pipelines/dag_viewer/valves.json matches .env
+  PASS  pipelines/execution_handler/valves.json matches .env
+  PASS  pipelines/gt_browser/valves.json matches .env
+  PASS  pipelines/prompt_inspector/valves.json matches .env
+  PASS  pipelines/scaffold_router/valves.json matches .env
+  INFO  pipelines/_test_leftover/valves.json skipped (vendor-helper dir per §17.251)
+  PASS  ~/.bashrc matches .env
+  PASS  scaffold-orchestrator container matches .env
+  PASS  open-webui-pipelines container matches .env
+  PASS  all 6 surfaces agree on SCAFFOLD_API_KEY (sk-scaffold…af46)
+
+$ rm -rf pipelines/_test_leftover  # cleanup
+```
+
+The leftover with a populated-but-wrong `api_key` is surfaced as
+`INFO ... skipped` instead of either:
+
+| Pre-§17.251 outcome | Post-§17.251 outcome |
+|---|---|
+| Silently skipped (when `valves.json={}`) | INFO logged (visible, dim) |
+| Counted as `PASS` (when api_key matched .env by chance) | INFO logged (skipped) |
+| Counted as `FAIL drift` (when api_key differed) | **INFO logged** (NOT counted as drift) |
+
+The third row is the load-bearing change: pre-§17.251, a leftover
+with a drifted api_key would have produced a `FAIL` line and
+incremented `SYNC_MISMATCH`, potentially failing `make doctor`'s
+exit code. Post-§17.251, leftovers are convention-skipped and
+don't pollute the operator's view of canonical-pipeline drift.
+
+**Symmetric pattern summary.**
+
+| Side | Script | Section | Pre-§17.250 / §17.251 | Post |
+|---|---|---|---|---|
+| Write | `scripts/sync_api_key.sh` | pipelines glob loop | wrote api_key to `_*` dirs | skips with dim `↷` marker (§17.250) |
+| Read | `scripts/doctor.sh` | section 11 | only silent-skipped `{}` valves.json | skips all `_*` dirs with `INFO` marker (§17.251) |
+
+The write-side and read-side now share the convention.
+
+**Files.**
+
+- `scripts/doctor.sh` — 12-line inline guard (comment + `if-fi`)
+  inside section 11's `pipelines/*/valves.json` loop.
+- `OVERVIEW.md` — this entry.
+
+No app code change. No test change. Default settings unchanged.
+
+**What §17.251 does NOT change.**
+
+- The §17.250 write-side skip — unchanged.
+- The §17.224 doctor section 11 verdict logic — unchanged (the
+  surface count + agreement check still operate on the 5 canonical
+  pipelines + bashrc + 2 containers).
+- Vendor-helper convention — `_*` prefix; documented in §17.212
+  and now enforced symmetrically across the read + write paths.
+
+The "vendor-leftover regression class" is now defended at all four
+choke points:
+
+| § | Surface | Role |
+|---|---|---|
+| 17.212 | `pipelines/_vendor/` | canonical home for vendor `.py` files |
+| 17.224 | `scripts/doctor.sh` § 11 | reports leftover state |
+| 17.249 | (operator action) | cleans existing leftovers |
+| 17.250 | `scripts/sync_api_key.sh` | write-side skip — prevents recurrence |
+| **17.251** | **`scripts/doctor.sh` § 11** | **read-side skip — neutralizes any leftover that does appear** |
+
+Closed across 5 §-entries plus the §17.246 doctor section that adds
+the related `MODEL_RERANKER` drift gate. Six §-entries total in the
+incident-to-defense lifecycle.
+
+**Open follow-ups.**
+
+1. **§17.249 candidate B** — register a self-hosted GitHub Actions
+   runner so the §17.247 tier 2 workflow fires on push to main.
+   Operator-side; documented but blocked on the runner setup.
+2. **Compose cleanup** (still logged from §17.243) — remove the
+   now-redundant `HF_HOME:` line in `docker-compose.yml`.
+3. **§17.234 candidate B / §17.237 candidate C / §17.236 A/C /
+   §17.232 A/B/C / F3** — unchanged status. The harness +
+   pre-flight + CI gates from §17.230–§17.250 give those a
+   regression-gating surface when they land.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

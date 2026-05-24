@@ -354,6 +354,19 @@ else
         shopt -s nullglob
         for valves in "$REPO_ROOT"/pipelines/*/valves.json; do
             name="$(basename "$(dirname "$valves")")"
+            # §17.251 — symmetric with §17.250's sync-side guard: skip
+            # `_*`-prefixed subdirs (the vendor-helper naming convention
+            # per §17.212). The pre-§17.251 `has_key=ABSENT` branch
+            # below silently skipped only when valves.json was `{}`;
+            # a leftover dir whose `valves.json` got a populated
+            # api_key by manual edit (post-§17.250 sync-api-key would
+            # also skip it, so this is the only way) would slip
+            # through as a "matching" surface — extra agreeing noise.
+            # Explicit prefix-skip surfaces the convention.
+            if [[ "$name" == _* ]]; then
+                info "pipelines/$name/valves.json skipped (vendor-helper dir per §17.251)"
+                continue
+            fi
             # has_key returns "PRESENT" or "ABSENT"; vkey is "" when absent.
             read -r has_key vkey < <(python3 -c '
 import json, sys
