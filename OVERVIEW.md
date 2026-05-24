@@ -13578,6 +13578,152 @@ change. Default settings unchanged.
 
 ---
 
+### §17.253 `/rag` response metadata surfaces the effective reranker knobs (2026-05-24)
+
+Closes §17.252 candidate A — "surface the effective reranker knobs
+in `/rag` response metadata so an operator can confirm a per-request
+override was applied." Without this, a caller passing
+`{"max_candidates":5,"doc_truncate":250}` had to read latency to
+guess whether the override actually fired; the response said nothing
+about which shortlist depth or doc-truncate the reranker ran at.
+
+**Fix.**
+
+Two fields added to `response["metadata"]` in `query_rag`:
+
+```python
+"rerank_max_candidates": int(
+    max_candidates if max_candidates is not None
+    else settings.rerank_max_candidates
+),
+"rerank_doc_truncate": int(
+    doc_truncate if doc_truncate is not None
+    else settings.rerank_doc_truncate
+),
+```
+
+Both report the **resolved** int — operator never sees `None` even
+when they passed no override. The metadata reads the same shape
+whether the values came from `.env`, the per-request body, or the
+config defaults.
+
+| Caller passed | metadata reports |
+|---|---|
+| No override | `(settings.rerank_max_candidates, settings.rerank_doc_truncate)` |
+| `{"max_candidates":5}` | `(5, settings.rerank_doc_truncate)` |
+| `{"doc_truncate":250}` | `(settings.rerank_max_candidates, 250)` |
+| `{"max_candidates":5,"doc_truncate":250}` | `(5, 250)` |
+
+**Tests — 3 new + 1 enhanced.**
+
+`TestQueryRagHappyPath::test_returns_metadata_with_new_fields`
+(enhanced from §17.234's earlier shape) — now also asserts the two
+new keys are present as integers. Catches a future regression that
+drops either field from the response.
+
+`TestRerankMetadataResolution` (3 new):
+
+| Test | Pins |
+|---|---|
+| `test_metadata_shows_settings_defaults_when_no_override` | no kwargs → metadata equals `settings.rerank_*` resolved as int |
+| `test_metadata_shows_explicit_override_values` | `max_candidates=7, doc_truncate=750` → metadata exactly echoes 7 and 750 |
+| `test_metadata_shows_resolved_int_when_one_axis_overridden` | mixed — one explicit, one default → both surface as resolved ints; neither leaks `None` |
+
+**Verification — live `/rag truncation domain=eng max=5 trunc=250`.**
+
+```
+$ curl -s -H "Content-Type: application/json" -H "X-Api-Key: $KEY" \
+    -X POST http://localhost:8000/rag \
+    -d '{"query":"truncation","domain":"eng","top_k":5,"max_candidates":5,"doc_truncate":250}' \
+  | jq '.metadata | {rerank_max_candidates, rerank_doc_truncate, reranker_backend, latency_ms}'
+{
+  "rerank_max_candidates": 5,
+  "rerank_doc_truncate": 250,
+  "reranker_backend": "CrossEncoder",
+  "latency_ms": 9626.5
+}
+
+real    0m9.656s
+```
+
+Both override values echo correctly. `latency_ms: 9626` matches the
+`(max=5, trunc=250)` cell of the §17.238 Pareto matrix (predicted
+6.7 s/query reranker + search/embed/RRF overhead ≈ ~10 s). The
+operator sees the override took effect in the metadata + in the
+wall-clock — no guessing.
+
+**Why surface the resolved value rather than the raw input.**
+
+A caller-facing field that echoes the raw input (None on omit)
+would force the operator to do the resolution themselves to read
+the actual setting. The resolved-int shape eliminates that step:
+the metadata always shows the real number the reranker used, so
+log analysis, dashboards, and bug reports all carry the
+load-bearing value directly.
+
+**Files.**
+
+- `app/modules/rag_pipeline.py` — two new metadata fields in
+  `query_rag`'s response dict (10-line addition; 8 lines of
+  inline §17.253 comment + 2 lines of dict items).
+- `tests/test_rag_pipeline.py`:
+  - `test_returns_metadata_with_new_fields` enhanced (4 new
+    assertion lines + the two key-presence checks).
+  - New `TestRerankMetadataResolution` class with 3 tests.
+- `OVERVIEW.md` — this entry.
+
+No app routing change. No schema change. No defaults change.
+
+**What §17.253 does NOT change.**
+
+- The RagInput schema — unchanged. The two override fields
+  themselves landed in §17.234 + §17.252; §17.253 only adds the
+  echo in the response.
+- The `/exec/status` response — also has a `metadata` block but
+  that's a separate API surface. The §17.234 + §17.252 + §17.253
+  chain is the `/rag` story; if `/exec/status` needs analogous
+  echo for future per-job rerank overrides, that's a separate
+  small change.
+- The OpenAPI snapshot for `/rag` — the response shape is
+  `dict[str, Any]` not a typed model, so the new fields show up
+  automatically without an OpenAPI regen. (The §17.203 `/rag/dedup`
+  used `response_model=DedupLogResponse`; `/rag` itself stayed
+  permissive.)
+
+**Open follow-ups.**
+
+1. **§17.254 candidate A** — log the override values at INFO level
+   alongside `reranker_decision` in the orchestrator log so
+   operators can grep for "operator passed max=5" runs in journal
+   without parsing every JSON response. ~3 lines in `_rerank`.
+2. **§17.249 B / §17.234 B / §17.237 C / §17.236 A / §17.232 A/B/C
+   / F3** — unchanged status. The reranker-per-call thread is
+   now operator-complete: tunable, verifiable, defaulted to a
+   Pareto-optimal point.
+
+The reranker-knob lifecycle is closed across the
+§17.232 → §17.253 sequence:
+
+| § | Role |
+|---|---|
+| 17.232 | mem_limit fix unblocked any reranker work |
+| 17.233 | global default `max_candidates: 32 → 10` |
+| 17.234 | `max_candidates` per-request override |
+| 17.235 | global default `doc_truncate: 2000 → 500` |
+| 17.236 | falsified `max=5` as a chat-side default |
+| 17.237 | break-point sweep located 8→9 transition |
+| 17.238 | 2-D matrix mapped the Pareto frontier |
+| 17.239–242 | harness hardening so the matrix can be re-run |
+| 17.243–244 | image cache pre-bake aligned with config |
+| 17.245–247 | drift gates + CI integration |
+| 17.252 | `doc_truncate` per-request override |
+| **17.253** | **metadata echo so overrides are operator-visible** |
+
+22 §-entries; reranker tuning surface is now fully operator-
+accessible with regression coverage at every choke point.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

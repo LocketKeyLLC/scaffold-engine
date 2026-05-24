@@ -814,6 +814,21 @@ async def query_rag(
             "reranker_backend": backend,
             "warnings": warnings,
             "latency_ms": latency_ms,
+            # §17.253 — surface the EFFECTIVE reranker knobs used for
+            # this call so an operator passing a per-request override
+            # (§17.234 max_candidates, §17.252 doc_truncate) can
+            # confirm it was applied. None override → settings default;
+            # explicit value → that value. Both shown as the resolved
+            # int even when None was passed, so the operator always
+            # sees the actual numbers the reranker ran with.
+            "rerank_max_candidates": int(
+                max_candidates if max_candidates is not None
+                else settings.rerank_max_candidates
+            ),
+            "rerank_doc_truncate": int(
+                doc_truncate if doc_truncate is not None
+                else settings.rerank_doc_truncate
+            ),
         },
     }
     await rag_cache.put(

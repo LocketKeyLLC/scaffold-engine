@@ -152,10 +152,16 @@ class TestQueryRagHappyPath:
         for key in [
             "reranked", "reranker_backend", "warnings",
             "skipped_rerank", "below_threshold", "fell_back_to_top3",
+            # §17.253 — effective reranker knobs surfaced in metadata
+            "rerank_max_candidates", "rerank_doc_truncate",
         ]:
             assert key in md, f"Missing metadata key: {key}"
         assert md["reranker_backend"] == "mock"
         assert md["warnings"] == []
+        # §17.253 — metadata values are resolved ints (not None even when
+        # no override was passed)
+        assert isinstance(md["rerank_max_candidates"], int)
+        assert isinstance(md["rerank_doc_truncate"], int)
 
 
 # ===========================================================================
@@ -868,3 +874,51 @@ class TestIngestContract:
         import app.modules.rag_pipeline as rp
         with pytest.raises(ValueError):
             _run(rp.ingest_entries([{"title": "t", "content": "x"}], domain=""))
+
+
+# ===========================================================================
+# §17.253 — reranker-knob resolution surfaced in /rag metadata
+# ===========================================================================
+
+class TestRerankMetadataResolution:
+    """metadata.rerank_{max_candidates,doc_truncate} reflect the effective
+    values used: settings.* when no per-request override, explicit value
+    when overridden."""
+
+    def test_metadata_shows_settings_defaults_when_no_override(self):
+        from app.modules.rag_pipeline import query_rag
+        from app.config import settings
+
+        with _PatchStack(_patch_rag_deps()):
+            result = _run(query_rag("q", domain="eng", confidence_threshold=0.0))
+        md = result["metadata"]
+        assert md["rerank_max_candidates"] == int(settings.rerank_max_candidates)
+        assert md["rerank_doc_truncate"]   == int(settings.rerank_doc_truncate)
+
+    def test_metadata_shows_explicit_override_values(self):
+        from app.modules.rag_pipeline import query_rag
+
+        with _PatchStack(_patch_rag_deps()):
+            result = _run(query_rag(
+                "q", domain="eng", confidence_threshold=0.0,
+                max_candidates=7, doc_truncate=750,
+            ))
+        md = result["metadata"]
+        assert md["rerank_max_candidates"] == 7
+        assert md["rerank_doc_truncate"]   == 750
+
+    def test_metadata_shows_resolved_int_when_one_axis_overridden(self):
+        """Override one axis, leave the other default — metadata shows the
+        explicit override + the settings fallback as resolved ints."""
+        from app.modules.rag_pipeline import query_rag
+        from app.config import settings
+
+        with _PatchStack(_patch_rag_deps()):
+            result = _run(query_rag(
+                "q", domain="eng", confidence_threshold=0.0,
+                max_candidates=3,  # explicit
+                # doc_truncate omitted → settings default
+            ))
+        md = result["metadata"]
+        assert md["rerank_max_candidates"] == 3
+        assert md["rerank_doc_truncate"]   == int(settings.rerank_doc_truncate)
