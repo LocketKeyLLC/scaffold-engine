@@ -36,14 +36,22 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 # HF_HOME=/code/.cache/huggingface from compose) silently bypassed
 # the baked cache and re-downloaded on every fresh deployment.
 #
+# §17.244 — model name is now a build ARG (default matches
+# settings.model_reranker in app/config.py:173). Compose forwards
+# the .env value via build.args so a `MODEL_RERANKER=…` swap in
+# .env + `docker compose build scaffold-orchestrator` bakes the
+# new model into the image — keeping the Dockerfile, .env, and
+# app/config.py defaults aligned at deploy time.
+#
 # Net image size unchanged — same ~600 MB of weights, just at the
 # right path. Fresh deployments now run the orchestrator + harness
 # sidecars in HF_HUB_OFFLINE mode from the image's pre-baked cache
 # (no rate-limited HF Hub round-trip; see §17.239).
+ARG MODEL_RERANKER=tomaarsen/Qwen3-Reranker-0.6B-seq-cls
 ENV HF_HOME=/code/.cache/huggingface
 RUN python -c "\
 from huggingface_hub import snapshot_download; \
-snapshot_download('tomaarsen/Qwen3-Reranker-0.6B-seq-cls')"
+snapshot_download('${MODEL_RERANKER}')"
 
 
 # ────────────────────────────────────────────────────────────────────────────

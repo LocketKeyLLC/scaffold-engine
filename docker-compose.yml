@@ -202,6 +202,14 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
+      # §17.244 — forward MODEL_RERANKER to the builder pre-bake so the
+      # image's HF cache matches whatever app/config.py + .env will
+      # resolve at runtime. Default tracks settings.model_reranker in
+      # app/config.py:173. An operator changing reranker swaps `.env`
+      # and rebuilds (`docker compose build scaffold-orchestrator`);
+      # no manual Dockerfile edit needed.
+      args:
+        MODEL_RERANKER: ${MODEL_RERANKER:-tomaarsen/Qwen3-Reranker-0.6B-seq-cls}
     container_name: scaffold-orchestrator
     logging: *default-logging
     # §17.232 — raised 3g → 6g. The CrossEncoder reranker batch under live

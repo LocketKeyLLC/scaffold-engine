@@ -12211,6 +12211,162 @@ layout.
 
 ---
 
+### §17.244 Dockerfile `MODEL_RERANKER` as build ARG — avoid Dockerfile/config.py drift (2026-05-24)
+
+Closes §17.243 candidate A — "Dockerfile pre-bake should derive the
+model name from `MODEL_RERANKER` rather than hardcoding it." After
+§17.243 there were three places the reranker model name lived:
+
+| Place | Pre-§17.244 value |
+|---|---|
+| `app/config.py:173` `settings.model_reranker` | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` (canonical) |
+| `.env.example:118` commented-out reference | same |
+| `Dockerfile:46` pre-bake `snapshot_download(...)` | **hardcoded as a string literal** |
+
+Drift risk: an operator who edits `.env`'s `MODEL_RERANKER`, restarts
+the orchestrator, and DOESN'T rebuild the image now has a runtime
+config pointing at one model while the image-baked cache holds a
+different one — the §17.242 freshness check catches the mismatch
+at harness time, but the orchestrator itself would fall back to an
+online download (or hang offline). The §17.243 fix made the
+image-baked cache **usable** for the first time; §17.244 makes it
+**accurate** for the configured model.
+
+**Fix.**
+
+Two changes — one in each of the two files that reference the model
+name structurally:
+
+1. **`Dockerfile`** — replace the hardcoded string with a build-time
+   `ARG`:
+
+```dockerfile
+ARG MODEL_RERANKER=tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+ENV HF_HOME=/code/.cache/huggingface
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('${MODEL_RERANKER}')"
+```
+
+The ARG default matches `app/config.py:173` so a plain
+`docker build` (or compose build with no env override) produces
+the same image as pre-§17.244.
+
+2. **`docker-compose.yml`** — wire the build arg through compose so
+   `.env`'s `MODEL_RERANKER` value (if set) propagates to the
+   build automatically:
+
+```yaml
+build:
+  context: .
+  dockerfile: Dockerfile
+  target: runtime
+  args:
+    MODEL_RERANKER: ${MODEL_RERANKER:-tomaarsen/Qwen3-Reranker-0.6B-seq-cls}
+```
+
+The `${MODEL_RERANKER:-default}` expansion uses the .env value if
+present, otherwise falls back to the canonical default. So the
+single source of truth is now **`.env` (with `app/config.py` as
+the canonical fallback)**; the Dockerfile's ARG default and the
+compose's expansion default both track that.
+
+**Operator workflow — model swap.**
+
+Pre-§17.244 (4-step, drift-prone):
+
+1. `vi .env` → set `MODEL_RERANKER=<new>`.
+2. `vi Dockerfile` → update line 46 to match.
+3. `vi app/config.py` → update line 173 default (or leave at the
+   canonical and rely on env override).
+4. `docker compose build scaffold-orchestrator && docker compose up -d`.
+
+Post-§17.244 (2-step):
+
+1. `vi .env` → set `MODEL_RERANKER=<new>`.
+2. `docker compose build scaffold-orchestrator && docker compose up -d`.
+
+The Dockerfile no longer needs touching for a model swap. (The
+`app/config.py` default still represents the canonical model; an
+operator who wants the change to be permanent — survive a `.env`
+deletion — edits that too, but it's no longer load-bearing for
+the build path.)
+
+**Verification — rebuild with default ARG.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml build scaffold-orchestrator
+…
+ scaffold-orchestrator  Built
+
+$ docker run --rm scaffold-engine:dev ls /code/.cache/huggingface/hub
+CACHEDIR.TAG
+models--tomaarsen--Qwen3-Reranker-0.6B-seq-cls
+```
+
+Cache layout unchanged (still the §17.243-fixed `hub/models--*/`).
+Image semantically identical to the pre-§17.244 §17.243 image; only
+the plumbing changed.
+
+**Live orchestrator restart with the new image:**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --force-recreate scaffold-orchestrator
+$ # healthy at t=8s
+$ docker logs scaffold-orchestrator | grep -E "crossencoder_loaded|reranker_prewarmed"
+"crossencoder_loaded: elapsed_s=1.8"
+"reranker_prewarmed"
+```
+
+Production code path unchanged.
+
+**Files.**
+
+- `Dockerfile` — `ARG MODEL_RERANKER=<canonical>` added; the
+  `snapshot_download(...)` literal replaced with `${MODEL_RERANKER}`
+  expansion. 14-line inline comment cites §17.244 + explains the
+  source-of-truth chain (.env → ARG → snapshot_download).
+- `docker-compose.yml` — `build.args.MODEL_RERANKER` line added
+  with shell-style `${MODEL_RERANKER:-default}` fallback. 7-line
+  inline comment cites §17.244.
+- `OVERVIEW.md` — this entry.
+
+No app code change. No test change. Default settings unchanged.
+
+**What §17.244 does NOT change.**
+
+- The `app/config.py:173` default — kept at the canonical value.
+  `app/config.py` remains the runtime source of truth; `.env`
+  is the operator override path; the Dockerfile/compose ARG
+  tracks the latter at build time.
+- `.env.example:118` — still has the commented `# MODEL_RERANKER=...`
+  reference. Worth uncommenting if an operator wants to make the
+  value explicit; left commented so the canonical default
+  (config.py) wins by default.
+- The compose `HF_HOME:` line — still redundant per §17.243's
+  note; deferred.
+- Drift detection across the THREE places — there's no automated
+  gate yet that asserts `Dockerfile ARG default == config.py
+  default == .env.example default`. A future CI lint could check
+  this. Logged as candidate.
+
+**Open follow-ups.**
+
+1. **§17.245 candidate A** — CI / `make doctor` lint that asserts
+   the three default values (Dockerfile ARG, config.py field
+   default, .env.example commented-out reference) match. Catches
+   the drift §17.244 reduces but doesn't eliminate. ~15 lines of
+   shell. Probably belongs in `scripts/doctor.sh` next to the
+   §17.223/§17.224 §-entries.
+2. **Compose cleanup** — remove the now-redundant `HF_HOME:`
+   line in `docker-compose.yml` (per §17.243's note). Cosmetic.
+3. **§17.234 candidate B / §17.237 candidate C** (still open) —
+   smaller reranker model. With §17.244, swapping is now a
+   `.env` edit + rebuild. The harness's §17.242 freshness check
+   would catch the mismatch if an operator forgets the rebuild.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
