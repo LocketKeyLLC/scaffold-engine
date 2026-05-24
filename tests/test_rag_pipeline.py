@@ -922,3 +922,105 @@ class TestRerankMetadataResolution:
         md = result["metadata"]
         assert md["rerank_max_candidates"] == 3
         assert md["rerank_doc_truncate"]   == int(settings.rerank_doc_truncate)
+
+
+# ===========================================================================
+# §17.255 — reranker_decision log line carries the effective knob values
+# ===========================================================================
+
+class TestRerankDecisionLogContent:
+    """The §17.254 log fields lock the operator-grep contract.
+
+    `docker logs scaffold-orchestrator | grep '"rerank_max_candidates": 5'`
+    is the operator's way of finding every call that ran at max=5.
+    Without these tests, a future refactor that drops the fields
+    from the `extra` dict would break that recipe silently.
+    """
+
+    def _make_results(self, n):
+        from app.modules.rag_pipeline import RagResult
+        return [
+            RagResult(content="x" * 100, entry_id=f"e{i}", rrf_score=1.0 - i*0.01)
+            for i in range(n)
+        ]
+
+    def _mock_rr(self, n_items):
+        """Build a fake RerankResult with N scored items."""
+        mock = MagicMock()
+        mock.items = [
+            MagicMock(index=i, score=0.5 + i*0.01, text=f"doc{i}")
+            for i in range(n_items)
+        ]
+        mock.backend = "MockCE"
+        mock.latency_ms = 5.0
+        return mock
+
+    def test_log_carries_settings_defaults_when_no_override(self, caplog):
+        import logging
+        from app.modules.rag_pipeline import _rerank
+        from app.config import settings
+
+        with caplog.at_level(logging.INFO, logger="scaffold.rag"):
+            with patch("app.modules.rag_pipeline.cross_encoder_rerank",
+                       return_value=self._mock_rr(3)):
+                _run(_rerank("q", self._make_results(3), top_k=10))
+
+        recs = [r for r in caplog.records if r.message == "reranker_decision"]
+        assert len(recs) == 1
+        r = recs[0]
+        assert r.rerank_max_candidates == int(settings.rerank_max_candidates)
+        assert r.rerank_doc_truncate   == int(settings.rerank_doc_truncate)
+
+    def test_log_carries_explicit_override_values(self, caplog):
+        import logging
+        from app.modules.rag_pipeline import _rerank
+
+        with caplog.at_level(logging.INFO, logger="scaffold.rag"):
+            with patch("app.modules.rag_pipeline.cross_encoder_rerank",
+                       return_value=self._mock_rr(3)):
+                _run(_rerank("q", self._make_results(3), top_k=10,
+                             max_candidates=7, doc_truncate=750))
+
+        recs = [r for r in caplog.records if r.message == "reranker_decision"]
+        assert len(recs) == 1
+        r = recs[0]
+        assert r.rerank_max_candidates == 7
+        assert r.rerank_doc_truncate   == 750
+
+    def test_log_carries_resolved_int_when_one_axis_overridden(self, caplog):
+        import logging
+        from app.modules.rag_pipeline import _rerank
+        from app.config import settings
+
+        with caplog.at_level(logging.INFO, logger="scaffold.rag"):
+            with patch("app.modules.rag_pipeline.cross_encoder_rerank",
+                       return_value=self._mock_rr(3)):
+                _run(_rerank("q", self._make_results(3), top_k=10,
+                             max_candidates=4))
+                # doc_truncate omitted → settings default
+
+        recs = [r for r in caplog.records if r.message == "reranker_decision"]
+        assert len(recs) == 1
+        r = recs[0]
+        assert r.rerank_max_candidates == 4
+        assert r.rerank_doc_truncate   == int(settings.rerank_doc_truncate)
+
+    def test_log_field_types_are_int_never_none(self, caplog):
+        """Defensive: even with no override, fields must be int (not None
+        or string). Catches a future refactor that accidentally swaps
+        the resolved-int for the raw input."""
+        import logging
+        from app.modules.rag_pipeline import _rerank
+
+        with caplog.at_level(logging.INFO, logger="scaffold.rag"):
+            with patch("app.modules.rag_pipeline.cross_encoder_rerank",
+                       return_value=self._mock_rr(3)):
+                _run(_rerank("q", self._make_results(3), top_k=10))
+
+        recs = [r for r in caplog.records if r.message == "reranker_decision"]
+        assert len(recs) == 1
+        r = recs[0]
+        assert isinstance(r.rerank_max_candidates, int)
+        assert isinstance(r.rerank_doc_truncate, int)
+        assert r.rerank_max_candidates is not None
+        assert r.rerank_doc_truncate is not None

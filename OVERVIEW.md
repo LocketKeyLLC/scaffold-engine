@@ -13893,6 +13893,141 @@ close on the symmetric-visibility thread.
 
 ---
 
+### §17.255 `reranker_decision` log content — `caplog` regression tests (2026-05-24)
+
+Closes §17.254 candidate A — "`caplog`-based unit test for
+`reranker_decision` log content if a downstream consumer ever
+depends on the shape." The shape IS load-bearing for at least one
+existing operator workflow: the §17.254 grep recipe
+(`docker logs scaffold-orchestrator | grep '"rerank_max_candidates": 5'`).
+A future refactor that drops the two §17.254 fields from the
+`extra=dict(...)` block would break that recipe silently — the
+suite would stay green because no test pinned the log shape.
+
+§17.255 adds that regression guard.
+
+**Fix.**
+
+New `TestRerankDecisionLogContent` class in
+`tests/test_rag_pipeline.py`. Uses pytest's `caplog` fixture +
+`caplog.at_level(logging.INFO, logger="scaffold.rag")` to capture
+the `reranker_decision` `LogRecord` from `_rerank`, then asserts
+the two §17.254 fields are attached and carry the right values.
+
+Four tests:
+
+| Test | Pins |
+|---|---|
+| `test_log_carries_settings_defaults_when_no_override` | no kwargs → `r.rerank_max_candidates == settings.rerank_max_candidates` AND `r.rerank_doc_truncate == settings.rerank_doc_truncate` |
+| `test_log_carries_explicit_override_values` | `max_candidates=7, doc_truncate=750` → log fields exactly 7 and 750 |
+| `test_log_carries_resolved_int_when_one_axis_overridden` | mixed — one explicit, one default → both resolved to ints, neither leaks `None` |
+| `test_log_field_types_are_int_never_none` | defensive — both fields are `isinstance int` AND `is not None`. Catches a refactor that accidentally swaps the resolved-int for the raw input (which would be `None` on the default branch) |
+
+The fourth test is the load-bearing one: it locks the contract
+that the log fields are always concrete ints, not None-on-default.
+Without it, an author refactoring `_rerank` could swap
+`max_cand` (resolved) for `max_candidates` (raw) in the log call
+and pass every other §17.234/§17.252/§17.253 test — but break the
+§17.254 operator grep recipe.
+
+**Why this is the first `caplog`-based test in the file.**
+
+`tests/test_rag_pipeline.py` had no prior log-content assertions —
+all prior tests assert on `query_rag` return shape, `_rerank` mock
+call sites, or `cache.put` keys. The §17.254 entry called out
+the gap explicitly and deferred this test to §17.255 because:
+
+1. Before §17.254 the log line didn't carry the load-bearing
+   fields — no contract to pin.
+2. After §17.254 the log line carries fields a real operator
+   recipe depends on — contract worth pinning.
+
+§17.255 establishes the `caplog`-based pattern for any future
+log-shape regression guards. The new class uses
+`caplog.at_level(INFO, logger="scaffold.rag")` to scope the
+capture (only `scaffold.rag` records, not the entire test process's
+log noise) and filters records by `r.message == "reranker_decision"`
+to drop the routine `reranker_completed` lines that the
+`app/rerankers.py` layer also emits.
+
+**Mock infrastructure — minimal.**
+
+The test class uses the same `patch("app.modules.rag_pipeline.cross_encoder_rerank", ...)` pattern as the §17.234 and §17.252 override tests. A `_mock_rr` helper builds a fake `RerankResult` with N items + a `MockCE` backend marker so `_rerank` can complete its sort + score-computation + log-emit chain without a real CrossEncoder.
+
+The `rrf_score` field on the input `RagResult`s is set to a
+declining sequence so the post-rerank `min_score`/`top_score`/
+`score_spread` computations have non-zero inputs (the
+`_rerank` code computes `max(scores) - min(scores)` etc.; with
+N=3 items at distinct scores the math is well-defined).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_rag_pipeline.py \
+    -q --timeout=30 -k "RerankDecisionLog"
+4 passed, 53 deselected in 1.74s
+
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_rag_pipeline.py tests/test_rag_result_cache.py tests/test_rag_pipeline_smoke.py \
+    -q --timeout=30
+95 passed in 9.38s   (91 pre-§17.255 + 4 new)
+```
+
+**Files.**
+
+- `tests/test_rag_pipeline.py` — `TestRerankDecisionLogContent`
+  class with 4 tests + `_make_results` and `_mock_rr` helpers.
+  No production code touched.
+- `OVERVIEW.md` — this entry.
+
+No app code change. No schema change. No defaults change.
+
+**What §17.255 does NOT change.**
+
+- The `reranker_decision` log line itself — unchanged from §17.254.
+- The other `app/rerankers.py::reranker_completed` log line that
+  fires inside `rerank_cross_encoder()` — not pinned here. That
+  one is per-batch and lives a layer down from the per-request
+  knob context; if a future operator workflow depends on its
+  shape, a separate test pins it.
+- The `caplog` capture scope. Pinned to `logger="scaffold.rag"`
+  here; broader log-content tests (e.g. across multiple loggers)
+  would use a different `caplog.at_level()` config.
+
+**Coverage map post-§17.255.**
+
+| §17.254 surface | Pinned by | What breaks if removed |
+|---|---|---|
+| `rerank_max_candidates` field present + resolved int | §17.255 four tests | `grep '"rerank_max_candidates": 5'` operator recipe |
+| `rerank_doc_truncate` field present + resolved int | §17.255 four tests | same |
+| Both fields are int, never None | §17.255 `test_log_field_types_are_int_never_none` | dashboards / alerting rules that depend on numeric parsing |
+
+**Open follow-ups.**
+
+1. **§17.256 candidate A** — Prometheus exporter that turns the
+   `reranker_decision` log fields into per-knob latency histograms
+   (`reranker_latency_seconds{max_candidates="5",doc_truncate="250"}`).
+   Would give the operator a dashboard view of "which knobs are
+   slow under load." Not blocking — the §17.255 log contract is
+   the foundation; the exporter is a separate consumer.
+2. **§17.249 B / §17.234 B / §17.237 C / §17.236 A / §17.232 A/B/C
+   / F3** — unchanged.
+
+The "operator-visible reranker tuning surface" is now contractually
+guaranteed end-to-end:
+
+| Surface | Visible at | Locked by |
+|---|---|---|
+| Input | Request body schema | OpenAPI snapshot (§17.234 / §17.252) |
+| Computed | `query_rag` resolution | §17.234 / §17.252 unit tests |
+| Response | `metadata.rerank_*` | §17.253 `TestRerankMetadataResolution` (3 tests) |
+| Log | `reranker_decision` extra fields | **§17.255 `TestRerankDecisionLogContent` (4 tests)** |
+
+Reranker-knob lifecycle: §17.232 → §17.255, 24 entries, every
+choke point covered + contract-tested.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
