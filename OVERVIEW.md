@@ -14853,6 +14853,39 @@ Second cold review after the §17.258 → §17.272 fix cycle. User asked for a f
 
 ---
 
+### §17.274 `get_db()` catches BaseException so CancelledError triggers rollback — close §17.273 🔴 #1 (2026-05-24)
+
+§17.273's first red item, and the most consequential one — it sits in the FastAPI dependency every router uses. Pre-fix at `app/database.py:36-37`:
+
+```python
+async with async_session() as session:
+    try:
+        yield session
+    except Exception:
+        await session.rollback()
+        raise
+```
+
+`asyncio.CancelledError` is a `BaseException` subclass, NOT an `Exception` subclass — the documented project invariant (memory `feedback_cancellederror_basexception.md`). Starlette raises `CancelledError` into the dependency-generator when the HTTP client disconnects mid-request. With the pre-fix `except Exception`, that path skipped the rollback entirely: the in-flight transaction stayed open, row-level locks acquired by the cancelled query hung around until the connection's eventual pool-GC. Under load (e.g., a Server-Sent Events stream where browser tab-close cancels mid-query), this could leak transactions and exhaust pool capacity.
+
+**One-line fix:** `except Exception` → `except BaseException`. Still re-raises so Starlette's cancellation propagates. Same broadening catches `KeyboardInterrupt`, `SystemExit`, and `GeneratorExit` — all the operationally-meaningful cancellation paths benefit from the rollback. The docstring now explicitly documents the BaseException requirement + cites §17.274 + names CancelledError as the load-bearing case.
+
+**Test-suite delta:** +5 tests in new `tests/test_database.py` (`app/database.py` had no test file pre-§17.274):
+
+1. **`test_get_db_rolls_back_on_exception`** — baseline; plain `ValueError` raised via `gen.athrow()` triggers rollback. Locks in the existing (still-correct) Exception path.
+2. **`test_get_db_rolls_back_on_cancelled_error`** — **the load-bearing test**. `gen.athrow(asyncio.CancelledError())` triggers rollback + re-raise. Pre-fix this assertion would have failed (rollback skipped, CancelledError leaked silently).
+3. **`test_get_db_rolls_back_on_keyboard_interrupt`** — defense in depth; Ctrl-C during a long query still releases the transaction cleanly.
+4. **`test_get_db_no_rollback_on_normal_completion`** — drives the generator via `__anext__()` to natural `StopAsyncIteration` (FastAPI's normal teardown path). Asserts rollback was NOT called — the §17.274 broadening didn't widen rollback to clean-completion paths.
+5. **`test_get_db_rolls_back_on_generator_exit`** — `gen.aclose()` raises `GeneratorExit` (also `BaseException`); post-fix this correctly triggers rollback. Documents the harmless-when-already-committed behavior.
+
+**Mocking pattern.** `_mock_session_ctx()` helper returns `(session, factory)` where `factory()` returns an `AsyncMock` context manager whose `__aenter__` yields the session. `patch("app.database.async_session", factory)` swaps the session-maker at the call site. The tests use `async for db in gen` + `gen.athrow(...)` to simulate the FastAPI-equivalent exception injection, then `assert_awaited_once()` on `session.rollback`.
+
+**Behavior change vs §17.273's pre-fix state.** `aclose()` previously did NOT rollback (Exception-only catch); post-§17.274 it does. Test #5 makes this explicit. The new behavior is correct: a cancelled request whose generator is closed without commit should release the transaction, not leak it. Routes that commit-then-finish naturally exit via `StopAsyncIteration` (test #4) and skip the rollback — no double-rollback risk.
+
+**Suite:** new `test_database.py` 0 → 5 passing. No regressions elsewhere (the change is additive to the exception class hierarchy).
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

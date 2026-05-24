@@ -28,11 +28,19 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency — yields an async database session.
 
-    Callers commit explicitly. Teardown only rolls back on unhandled exception.
+    Callers commit explicitly. Teardown rolls back on ANY unhandled
+    exception, including ``asyncio.CancelledError``.
+
+    §17.274 — must catch ``BaseException``, not ``Exception``.
+    ``CancelledError`` is a ``BaseException`` subclass (not Exception);
+    Starlette raises it when the client disconnects mid-request. The
+    pre-§17.274 ``except Exception`` would let CancelledError leak past
+    the rollback, leaving the transaction in an inconsistent state and
+    holding row-level locks until the connection's eventual GC.
     """
     async with async_session() as session:
         try:
             yield session
-        except Exception:
+        except BaseException:
             await session.rollback()
             raise
