@@ -159,6 +159,29 @@ groups:
         annotations:
           summary: "Scaffold executor at 100% capacity for 30+ minutes"
           description: "Check `POST /jobs/cleanup` for orphans and `/health` for stuck node_orphan rows."
+
+      # 6. §17.257 — Reranker p95 latency exceeds the operator-
+      #    tolerance budget. Threshold 60s catches the unusually-slow
+      #    case without false-alarming operators who deliberately
+      #    raised RERANK_DOC_TRUNCATE (the §17.238 matrix's `trunc=2000`
+      #    cell legitimately runs at ~52s/call). `by (max_candidates,
+      #    doc_truncate, le)` keeps the rule firing per-knob-config so
+      #    an operator who passes `{"max_candidates":20,"doc_truncate":2000}`
+      #    via the §17.234/§17.252 per-request override sees the alert
+      #    tagged with that specific config, not a fleet-wide average.
+      - alert: ScaffoldRerankerP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(scaffold_reranker_latency_seconds_bucket[10m]))
+              by (le, max_candidates, doc_truncate)
+          ) > 60
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reranker p95 > 60s at (max_candidates={{ $labels.max_candidates }}, doc_truncate={{ $labels.doc_truncate }})"
+          description: "Check `reranker_decision` log lines (§17.254) for the same (max_candidates, doc_truncate) tuple to confirm the load. If the config is intentional (deep-context research), raise this rule's threshold. Otherwise inspect `/health` for orchestrator memory pressure or container restarts (§17.232)."
 ```
 
 ## Cross-references
@@ -168,8 +191,13 @@ groups:
   Fires `cost.window_exceeded` / `latency.p95_exceeded` /
   `oncall.errors_unresolved` to the `system_alerts` table; the
   Prometheus alert rules above are a complementary external pathway.
+  The §17.257 reranker p95 alert is **Prometheus-only** — there's no
+  internal-check equivalent yet because reranker calls aren't logged
+  to a DB rollup the way LLM calls are (`observability_rollups.by_model`).
+  See §17.258 candidate A in the OVERVIEW for the DB-backed mirror.
 - `app/observability/alerts.py` — alert emission + dedup. Read by the
   `/observability/alerts` endpoint and the `scaffold alerts` CLI.
 - `OVERVIEW.md` §17.132 (embedding cache pressure), §17.135 (embedder
-  drift detection), §17.140-§17.142 (sim-sidecar audit rows) for the
+  drift detection), §17.140-§17.142 (sim-sidecar audit rows),
+  §17.256 (reranker latency histogram), §17.257 (this entry) for the
   history of how each metric came to be.
