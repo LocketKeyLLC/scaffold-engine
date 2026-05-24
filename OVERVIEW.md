@@ -14543,6 +14543,26 @@ Existing `TestRerankEmptyItems::test_empty_items_triggers_fallback` continues to
 
 ---
 
+### §17.264 RAG cache-hit defensive copy — close §17.258 🟡 #3 (2026-05-24)
+
+§17.258's third yellow item. The audit flagged `app/modules/rag_pipeline.py:678-681` for `cached.setdefault("metadata", {}); meta["cache_hit"] = True; return cached` — mutating the dict returned by `rag_cache.get()`. The concern: if the Redis client returned shared dict references, concurrent callers would leak `cache_hit=True` into each other's responses.
+
+**Verified the audit's specific concern is a false positive in the current implementation.** `app/utils/rag_result_cache.py:170-194` shows `get()` does `r.get(key)` (returns bytes from aioredis) → `json.loads(blob)` (line 181, always produces a fresh dict). There is no in-process cache layer; every cache hit deserialises from Redis bytes, so two concurrent `get()` calls always return two distinct dict objects. Shared-ref leakage is impossible *today*.
+
+**But the underlying smell is real.** The `setdefault + mutate` pattern is brittle: any future addition of an in-process LRU in front of Redis (for sub-millisecond cache hits — a plausible §17.x candidate), or any future caller that passes the same dict through `query_rag` twice, would silently reintroduce the bug. The fix is essentially free and locks in the no-shared-state invariant explicitly.
+
+**Three-line copy at `rag_pipeline.py:678-689`:** before mutating, shallow-copy the outer dict (`response = dict(cached)`), copy the metadata sub-dict (`response["metadata"] = dict(response.get("metadata") or {})`), then set `cache_hit=True` on the COPY. The original `cached` dict is untouched. The metadata copy is necessary because we mutate one of its keys — a single-level `dict(cached)` would still alias the inner metadata dict.
+
+**Test-suite delta:** +2 tests in new `TestRagCacheHitNoMutationLeak` (`test_rag_pipeline.py`):
+- `test_cache_hit_does_not_mutate_source_dict` — uses `AsyncMock(return_value=source)` so the mock cache hands out THE SAME PYTHON OBJECT on every `.get()` call (simulating the hypothetical future-LRU shared-ref bug). Runs `query_rag` twice. Asserts: (a) both responses report `metadata.cache_hit=True`, (b) the source dict's metadata STILL doesn't contain `cache_hit` (no leak back), (c) `id(source["metadata"])` is unchanged (we didn't replace the sub-dict), (d) the two responses don't share their outer or metadata dicts (so a mutation by one caller can't leak into the other). This is the load-bearing test — without the fix it would fail on assertion (b) on the second call.
+- `test_cache_hit_returns_cache_hit_metadata` — sanity check that `cache_hit=True` still reaches the caller. The fix is internal; the wire contract is unchanged.
+
+Full `test_rag_pipeline.py`: 59 → 61 passing.
+
+**§17.258 status after §17.262 + §17.263 + §17.264.** All three 🟡 items closed. 🟢 (3) + test gaps (5) remain. 🟢 are pure cleanups (stale line comments, redis user/group comment, assist_session_memory_enabled valve presence) — candidate batch for a single follow-up commit.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

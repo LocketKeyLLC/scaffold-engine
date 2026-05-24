@@ -676,9 +676,18 @@ async def query_rag(
         doc_truncate=doc_truncate,
     )
     if cached is not None:
-        meta = cached.setdefault("metadata", {})
-        meta["cache_hit"] = True
-        return cached
+        # §17.264 — defensive shallow copy. The current Redis-backed
+        # rag_cache.get() round-trips through json.loads, so each call
+        # yields a fresh dict and shared-ref leakage is impossible today.
+        # Copying anyway locks in the no-shared-state invariant so a
+        # future in-process LRU in front of Redis (or any caller that
+        # passes the same dict through twice) can't leak cache_hit=True
+        # into a sibling response. The metadata sub-dict is copied too —
+        # we mutate one of its keys.
+        response = dict(cached)
+        response["metadata"] = dict(response.get("metadata") or {})
+        response["metadata"]["cache_hit"] = True
+        return response
 
     loop = asyncio.get_running_loop()
     collection = await loop.run_in_executor(None, _get_collection)

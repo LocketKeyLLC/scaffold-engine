@@ -548,6 +548,83 @@ class TestRerankEmptyItems:
 # §17.260 — partial reranker output must trigger same fallback as empty
 # ===========================================================================
 
+class TestRagCacheHitNoMutationLeak:
+    """§17.264 — cache-hit path must not mutate the cached payload, so two
+    concurrent callers can't leak metadata.cache_hit=True (or any other
+    mutation) into each other's responses. Pre-fix, ``cached.setdefault
+    ("metadata", {}); meta["cache_hit"] = True`` mutated the dict the
+    cache returned. The current Redis-backed get() yields a fresh
+    json.loads dict per call so today's behavior is safe — this test
+    locks in the no-shared-state invariant so a future in-process LRU
+    layer in front of Redis can't reintroduce the bug. Closes
+    17.258 yellow #3."""
+
+    def test_cache_hit_does_not_mutate_source_dict(self):
+        """If the cache returns the SAME Python object twice (simulating
+        a hypothetical shared-ref bug from a future in-process LRU),
+        query_rag must not leak cache_hit=True back into the source."""
+        # Source dict that the mock cache will hand out twice — represents
+        # the bytes that round-trip through Redis today, OR (post-future-
+        # LRU) the in-memory cached object.
+        source = {
+            "status": "ok",
+            "results": [],
+            "metadata": {"latency_ms": 42.0},
+        }
+        original_metadata_id = id(source["metadata"])
+
+        # Mock the cache to return the SAME dict twice. AsyncMock with
+        # return_value returns the same object on every call — exactly
+        # the shared-ref scenario the fix protects against.
+        mock_cache = MagicMock()
+        mock_cache.get = AsyncMock(return_value=source)
+
+        with patch(
+            "app.modules.rag_pipeline.get_rag_result_cache",
+            return_value=mock_cache,
+        ):
+            from app.modules.rag_pipeline import query_rag
+            r1 = _run(query_rag("q1", domain="eng", confidence_threshold=0.0))
+            r2 = _run(query_rag("q2", domain="eng", confidence_threshold=0.0))
+
+        # Both callers see cache_hit=True in their own response
+        assert r1["metadata"]["cache_hit"] is True
+        assert r2["metadata"]["cache_hit"] is True
+
+        # But the source dict (which the cache handed out) must be UNTOUCHED:
+        # no cache_hit key, and the metadata sub-dict is the original object.
+        assert "cache_hit" not in source["metadata"], (
+            f"cache_hit leaked back into source.metadata: {source['metadata']}"
+        )
+        assert id(source["metadata"]) == original_metadata_id, (
+            "source metadata sub-dict was replaced (should not have been)"
+        )
+
+        # And the two responses must NOT share their outer or metadata dicts —
+        # otherwise a mutation by one caller would leak into the other.
+        assert r1 is not r2, "two cache hits returned the same outer dict"
+        assert r1["metadata"] is not r2["metadata"], (
+            "two cache hits returned the same metadata sub-dict"
+        )
+
+    def test_cache_hit_returns_cache_hit_metadata(self):
+        """Sanity: the cache-hit path still surfaces cache_hit=True to the
+        caller (the behavior change of the fix is internal only)."""
+        source = {"status": "ok", "results": [], "metadata": {}}
+        mock_cache = MagicMock()
+        mock_cache.get = AsyncMock(return_value=source)
+
+        with patch(
+            "app.modules.rag_pipeline.get_rag_result_cache",
+            return_value=mock_cache,
+        ):
+            from app.modules.rag_pipeline import query_rag
+            r = _run(query_rag("q", domain="eng", confidence_threshold=0.0))
+
+        assert r["status"] == "ok"
+        assert r["metadata"]["cache_hit"] is True
+
+
 class TestRerankPartialItems:
     """§17.260 — _rerank must warn + fall back to RRF when reranker returns
     fewer items than docs submitted. Pre-fix, the missing slots silently
