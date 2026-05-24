@@ -14392,6 +14392,48 @@ The reranker-knob lifecycle now adds Prometheus alerting:
 
 ---
 
+### §17.258 Fresh-eyes "vibe-coded" audit — 4-area sweep (2026-05-24)
+
+User-requested cold review: "audit on the assumption the programmer vibe-coded it." Four parallel `Explore` subagents covered core orchestrator (`app/` minus RAG), RAG (`app/modules/rag_pipeline.py`, `_rag_*`, `rerankers.py`, `quality_rerank.py`, `routers/rag.py`, research stack), OWUI pipelines (`pipelines/` ex-vendor), and infra (`Dockerfile`, compose, `scripts/`, `.github/`, requirements, `milvus-config/`). Each was briefed with the skill's invariants so the known-intentional patterns (middleware reverse-order, stdlib-logger + structlog-formatter, async-wrap-blocking-libs, 5-place API-key sync) wouldn't trip false positives.
+
+**Raw subagent output: ~60 items. Verified true positives: 9.** Consistent with the project's recorded ~31% TP rate for subagent findings.
+
+| Severity | Verified finding | Location |
+|---|---|---|
+| 🔴 | `_assist_start` calls `r.json()` + bare dict indexing (`d["session_id"]`, `d["job_id"]`, `d["pending_steps"]`) with no try/except — malformed orchestrator reply crashes the generator mid-yield | `pipelines/scaffold_router.py:1591,1596` |
+| 🔴 | Reranker partial-failure path falls back to RRF score for missing slots then sorts a mixed-scale list — silent rank corruption when reranker returns fewer items than submitted | `app/modules/rag_pipeline.py:509-518` |
+| 🔴 | `_keepalive_loop` defined but never invoked; `_heartbeat_producer` is the live path. User confirmed `_keepalive_loop` was meant to be wired up — missing wiring, not dead code | `app/modules/execution_agent.py:1505` |
+| 🟡 | SSE reader thread (`daemon=True`) not explicitly stopped on early generator exit; `.join(timeout=5)` only runs on clean break | `pipelines/scaffold_router.py:2156-2255` |
+| 🟡 | Error-logging middleware writes traces to Postgres in a try/except that discards on failure — exactly when the trace is most needed | `app/middleware/error_logging.py:96-112` |
+| 🟡 | RAG cache `setdefault("metadata", {})` mutates the returned dict; if the Redis client returns shared references, concurrent calls leak `cache_hit=True` into each other | `app/modules/rag_pipeline.py:668` |
+| 🟢 | Stale line-number reference in comment (`# L738-750`) — actual cited code now at 980-992 | `app/modules/rag_pipeline.py:1048` |
+| 🟢 | Redis user/group comment (`999:1000`) unverified against current `redis:8-alpine@sha256:81b...` digest | `docker-compose.yml:349` |
+| 🟢 | `assist_session_memory_enabled` valve exists only on `scaffold_router`, absent on the other four pipelines | `pipelines/*/valves.template.json` |
+
+**Test gaps worth closing (5):**
+- `tests/test_auth.py` — no test for the `/web/*` / `/static/*` path-prefix bypass in `_AUTH_EXEMPT_PREFIXES`.
+- `error_logging.py:43-51` — secret-redaction regex untested.
+- Version-chain race — two `/research` runs simultaneously matching the same RAG entry at cosine 0.90-0.95 can produce branching chains instead of the linear-chain invariant.
+- Reranker partial-failure — no test mocks fewer scores than docs submitted.
+- `_assist_start` / `_assist_next` / `_assist_submit` — no test exercises HTTP 200 with malformed JSON body.
+
+**False positives ruled out during verification:**
+- `valves.json` "API key leak" — files are gitignored; `valves.template.json` (committed) ships an empty `api_key`. The live `sk-scaffold-...` value the agent found is in the local-only file, not the repo.
+- `scripts/doctor.sh:10` missing `set -e` — intentional. A diagnostic that bails on first failure can't report subsequent ones.
+- RRF `_key()` `content[:200]` collision — code comment explicitly accepts the trade-off; not a bug.
+- `triage_timeout: 86400` in `valves.template.json` — confirmed intentional by user.
+- `_synthesize_idea` / triage `r.json()` access — actually wrapped in outer try/except; agent missed the scope.
+
+**Operator-confirmed during the audit:**
+- Triage timeout stays at 86400.
+- `_keepalive_loop` should be wired up, not deleted (upgrades from 🟢 cleanup to 🔴 bug).
+
+**What §17.258 does NOT change.** No code edits. Pure audit. The 9 verified findings + 5 test gaps are the work surface for follow-up §-entries.
+
+**Method note for future audits.** Briefing each subagent with the project's intentional invariants (from the `scaffold-engine` skill) cut the false-positive rate noticeably vs. the unbriefed baseline, but the residual ~70% still required line-by-line verification before the user saw the list. Verification beats trust.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
