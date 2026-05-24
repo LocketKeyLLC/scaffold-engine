@@ -14434,6 +14434,27 @@ User-requested cold review: "audit on the assumption the programmer vibe-coded i
 
 ---
 
+### §17.259 `_assist_start` JSON-parse hardening — close §17.258 🔴 #1 (2026-05-24)
+
+§17.258's first red item. Pre-fix, `pipelines/scaffold_router.py::_assist_start` called `r.json()` with no try/except, then indexed `d["session_id"]`, `d["job_id"]`, `d["pending_steps"]` with bare lookups. A 200-status orchestrator reply with non-JSON body, or a JSON body missing `session_id`, crashed the generator mid-yield with `ValueError` / `KeyError` — the OWUI chat thread saw a half-rendered message and no recovery hook.
+
+**Three layered guards added at `pipelines/scaffold_router.py:1591-1602`:**
+
+1. `try: d = r.json() / except ValueError` — `requests.Response.json()` raises `ValueError` (or `requests.exceptions.JSONDecodeError`, a `ValueError` subclass) on a non-JSON body. Catch yields `❌ Assist start: orchestrator returned non-JSON body ...; raw: <first 200 chars>` and returns. Single `ValueError` catch covers both.
+2. `sid = d.get("session_id") if isinstance(d, dict) else None / if not sid: yield ❌ ... return` — `session_id` is load-bearing (it threads into `_assist_remember` and `_assist_next`); missing = hard stop with `❌ Assist start: orchestrator reply missing 'session_id'; raw: ...`. The `isinstance(d, dict)` is defense against a JSON body that parses to a list or scalar.
+3. `resp_job_id = d.get("job_id", job_id) / pending = d.get("pending_steps", "?")` — both are display-only. Missing `job_id` falls back to the input parameter (same value the user typed at `/assist <job_id>`); missing `pending_steps` renders `?`. Session-started banner still shows in both fallback cases — UX preserved when the orchestrator's reply schema drifts.
+
+**Test-suite delta:** +3 tests in `TestAssistChatMemory` (`test_scaffold_router_commands.py`):
+- `test_start_handles_non_json_body` — `_make_response(200, "not json at all")` reaches the `ValueError` catch; output contains `❌` + `non-JSON`.
+- `test_start_handles_missing_session_id` — `_make_response(200, {"job_id": "job-1", "pending_steps": 3})` reaches the missing-key guard; output contains `❌` + `session_id`.
+- `test_start_tolerates_missing_optional_fields` — `_make_response(200, {"session_id": _UUID_A})` (no `job_id`, no `pending_steps`) renders the banner with the input job_id and `?` for pending count; `_assist_next` still wires through.
+
+Full class: 7 → 10 passing. No regressions in the existing 7. `_make_response`'s string-body path raises `ValueError` from `MagicMock.json.side_effect`, so the test is a literal byte-equal of the production failure mode.
+
+**Other bare `r.json()` callsites in the same file** (lines 736, 781, 1255, 1366, 1591, 1616, 1651, 1661, 1692, 1775, 1794, 1961, 2026) were noted in the §17.258 audit's test-gaps section but not in the blocker list — they're either wrapped in outer try/except (triage at 736, `_synthesize_idea` at 781) or in less user-visible code paths. Hardening them in batch is logged as a candidate follow-up but deferred — §17.259 closes the 🔴 item as flagged.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

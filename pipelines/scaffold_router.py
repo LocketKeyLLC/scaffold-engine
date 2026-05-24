@@ -1588,12 +1588,19 @@ class Pipeline:
             yield f"❌ Connection error: {e}"; return
         if r.status_code >= 400:
             yield f"❌ Could not start assist session: HTTP {r.status_code} {r.text[:200]}"; return
-        d = r.json()
-        sid = d["session_id"]
+        try:
+            d = r.json()
+        except ValueError as e:
+            yield f"❌ Assist start: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+        sid = d.get("session_id") if isinstance(d, dict) else None
+        if not sid:
+            yield f"❌ Assist start: orchestrator reply missing `session_id`; raw: {str(d)[:200]}"; return
         self._assist_remember(chat_id, session_id=sid)
+        resp_job_id = d.get("job_id", job_id)
+        pending = d.get("pending_steps", "?")
         yield (
             f"🤝 **Assist session started** — `{sid}`\n\n"
-            f"Job `{d['job_id']}` is now in `assisted_executing` ({d['pending_steps']} pending step(s)).\n\n"
+            f"Job `{resp_job_id}` is now in `assisted_executing` ({pending} pending step(s)).\n\n"
             f"Fetching first step...\n\n---\n\n"
         )
         yield from self._assist_next(sid, chat_id=chat_id)

@@ -1332,3 +1332,52 @@ class TestAssistChatMemory:
         assert posts and posts[0][2]["node_key"] == "T7", \
             f"expected node_key='T7' from chat memory; got: {posts}"
 
+    def test_start_handles_non_json_body(self, pipe, monkeypatch):
+        """§17.259 — orchestrator returns HTTP 200 with non-JSON body.
+
+        Pre-fix, `r.json()` raised ValueError mid-generator, crashing the
+        chat thread with no recovery. Post-fix, yields an `❌` line and
+        returns cleanly."""
+        _log, responses = _http_call_log(monkeypatch)
+        responses[("post", "/assist/start")] = _make_response(200, "not json at all")
+
+        out = "".join(pipe.pipe("/assist job-1", "m", [], self._body_with_chat("chat-G")))
+        assert "❌" in out and "non-JSON" in out, \
+            f"expected JSON-parse error yield; got: {out!r}"
+
+    def test_start_handles_missing_session_id(self, pipe, monkeypatch):
+        """§17.259 — orchestrator returns HTTP 200 + valid JSON, no session_id.
+
+        Pre-fix, `d['session_id']` raised KeyError mid-generator. Post-fix,
+        yields an `❌` line and returns cleanly."""
+        _log, responses = _http_call_log(monkeypatch)
+        responses[("post", "/assist/start")] = _make_response(
+            200, {"job_id": "job-1", "pending_steps": 3},  # no session_id
+        )
+
+        out = "".join(pipe.pipe("/assist job-1", "m", [], self._body_with_chat("chat-H")))
+        assert "❌" in out and "session_id" in out, \
+            f"expected missing-session_id error yield; got: {out!r}"
+
+    def test_start_tolerates_missing_optional_fields(self, pipe, monkeypatch):
+        """§17.259 — orchestrator returns session_id but no job_id/pending_steps.
+
+        These are display-only fields; session_id is the only load-bearing
+        key. Pre-fix, KeyError on `d['job_id']`. Post-fix, falls back to
+        the input job_id and renders `?` for unknown pending count."""
+        _log, responses = _http_call_log(monkeypatch)
+        responses[("post", "/assist/start")] = _make_response(
+            200, {"session_id": _UUID_A},  # no job_id, no pending_steps
+        )
+        responses[("get", f"/assist/{_UUID_A}/next")] = _make_response(
+            200, {"session_id": _UUID_A, "node_key": "T1", "title": "step",
+                  "status": "active", "depends_on": []},
+        )
+        responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
+
+        out = "".join(pipe.pipe("/assist job-99", "m", [], self._body_with_chat("chat-I")))
+        # Session-started banner should still render, falling back to input job_id
+        # and showing "?" for the unknown pending-steps count.
+        assert "job-99" in out, f"expected input job_id fallback; got: {out!r}"
+        assert "? pending" in out, f"expected '?' for unknown pending count; got: {out!r}"
+
