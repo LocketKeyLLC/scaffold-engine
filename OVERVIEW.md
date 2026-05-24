@@ -14745,6 +14745,38 @@ Stateful collection mock (`_make_stateful_collection`) captures upserts and muta
 
 ---
 
+### §17.271 §17.270 sweeper applied to live eng partition (2026-05-24)
+
+Operator-invoked run of the §17.270 sweeper against the live `eng` partition. Mutates 1 row; this is the residual data correction for the single branch §17.270's dry-run surfaced.
+
+**Before (dry-run, exit 1 — branch present):**
+```
+flatten_branch: domain=eng parent=scaffold-cache-control-header-1ab100bb
+                siblings=2 (['scaffold-http-caching-25b5cbab',
+                             'scaffold-http-caching-266a9406'])
+flatten_rewrite [DRY-RUN]: entry_id=scaffold-http-caching-266a9406
+                supersedes: 'scaffold-cache-control-header-1ab100bb'
+                         -> 'scaffold-http-caching-25b5cbab'
+                version: 2 -> 3
+```
+
+**Apply (exit 0):** `flatten_summary: mode=APPLY domains=1 branches=1 rewrites=1`. Single upsert landed; row `scaffold-http-caching-266a9406` now has `supersedes_id=scaffold-http-caching-25b5cbab`, `version=3`. Predecessor lock fired (the §17.269 `_predecessor_lock` on `scaffold-cache-control-header-1ab100bb`) — the rewrite was atomic with respect to any concurrent ingest targeting the same predecessor.
+
+**After (dry-run, exit 0 — chain linear):** `flatten_summary: mode=DRY-RUN domains=1 branches=0 rewrites=0`. Idempotence proven on live data.
+
+**Resulting chain:**
+```
+scaffold-cache-control-header-1ab100bb (v=1)
+  → scaffold-http-caching-25b5cbab     (v=2, supersedes=...header-1ab...)
+    → scaffold-http-caching-266a9406   (v=3, supersedes=...caching-25b5cbab)
+```
+
+The older sibling (`25b5cbab`, by `created_at`) stays linked to the original predecessor; the younger (`266a9406`) re-links as the v=3 successor. Retrieval-side: `include_history=true` returns all three; default (filter superseded) returns only the v=3 tail. The §17.267 production race-residue is now reconciled.
+
+**Scope of this run.** Only `--domain eng`. Other domains untouched by this run; a follow-up sweep across all domains would surface any branches in `rag`, `llm`, `spec`, `code`, `qa`, `prompt`. The §17.270 script's empirical evidence so far is one branch in `eng`; the §17.267 race window has been open across all five-then-seven domains for the same duration, so a `prompt`/`rag` branch is possible but unconfirmed.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
