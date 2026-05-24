@@ -1723,51 +1723,71 @@ class Pipeline:
         import queue as _q
         import threading as _th
         q: _q.Queue = _q.Queue()
+        # §17.262 — early-exit plumbing so a GeneratorExit (client
+        # disconnect) tears down the daemon reader within reader.join's
+        # 5s window instead of leaving it alive until the 24h SSE timeout.
+        stop_event = _th.Event()
+        r_holder: list = []
         reader = _th.Thread(
             target=self._stream_sse_to_queue,
-            args=(url, body, q), daemon=True,
+            args=(url, body, q),
+            kwargs={"stop_event": stop_event, "r_holder": r_holder},
+            daemon=True,
         )
         reader.start()
-        while True:
-            try:
-                msg_type, f1, f2 = q.get(timeout=self.valves.keepalive_interval)
-            except _q.Empty:
-                yield "​"; continue
-            if msg_type == "connected":
-                continue
-            if msg_type == "heartbeat":
-                yield "​"; continue
-            if msg_type == "http_error":
-                yield f"⚠️ Handoff failed (HTTP {f1}): {(f2 or '')[:200]}"; return
-            if msg_type == "error":
-                yield f"\n⚠️ Connection error: {f1}"; return
-            if msg_type == "done":
-                break
-            event_type, data = f1, f2
-            try:
-                payload = json.loads(data)
-            except Exception:
-                continue
-            # §17.190: event-name vocabulary lives in pipelines/_vendor/_sse_events.py
-            # (byte-equal vendor of app/sse_events.py). Pre-§17.190 the two
-            # branches below matched ``"node_started"`` / ``"node_completed"``
-            # — neither of which is ever emitted by the orchestrator. Those
-            # were dead branches; the assist UI lost node-progress rendering
-            # during the post-handoff autonomous run. Names now match the
-            # actual NODE_START / NODE_DONE emitter constants.
-            if event_type == _SSE.ASSIST_HANDOFF_STARTED:
-                yield f"\n🟢 Autonomous executor took over `{payload.get('node_key', '?')}`.\n"
-            elif event_type == _SSE.ASSIST_HANDOFF_DONE:
-                yield f"\n✅ Handoff complete. Run `/assist next {payload.get('session_id', '?')}` to continue.\n"
-            elif event_type == _SSE.NODE_START:
-                yield f"  ▶ {payload.get('node_key', '?')} — {payload.get('title', '?')}\n"
-            elif event_type == _SSE.NODE_DONE:
-                yield f"  ✓ {payload.get('node_key', '?')} (model: {payload.get('model', '?')})\n"
-            elif event_type == _SSE.NODE_FAILED:
-                yield f"  ✗ {payload.get('node_key', '?')}: {payload.get('error', '?')}\n"
-            elif event_type == _SSE.ERROR:
-                yield f"\n⚠️ {payload.get('detail') or payload}\n"; return
+        try:
+            while True:
+                try:
+                    msg_type, f1, f2 = q.get(timeout=self.valves.keepalive_interval)
+                except _q.Empty:
+                    yield "​"; continue
+                if msg_type == "connected":
+                    continue
+                if msg_type == "heartbeat":
+                    yield "​"; continue
+                if msg_type == "http_error":
+                    yield f"⚠️ Handoff failed (HTTP {f1}): {(f2 or '')[:200]}"; return
+                if msg_type == "error":
+                    yield f"\n⚠️ Connection error: {f1}"; return
+                if msg_type == "done":
+                    break
+                event_type, data = f1, f2
+                try:
+                    payload = json.loads(data)
+                except Exception:
+                    continue
+                # §17.190: event-name vocabulary lives in pipelines/_vendor/_sse_events.py
+                # (byte-equal vendor of app/sse_events.py). Pre-§17.190 the two
+                # branches below matched ``"node_started"`` / ``"node_completed"``
+                # — neither of which is ever emitted by the orchestrator. Those
+                # were dead branches; the assist UI lost node-progress rendering
+                # during the post-handoff autonomous run. Names now match the
+                # actual NODE_START / NODE_DONE emitter constants.
+                if event_type == _SSE.ASSIST_HANDOFF_STARTED:
+                    yield f"\n🟢 Autonomous executor took over `{payload.get('node_key', '?')}`.\n"
+                elif event_type == _SSE.ASSIST_HANDOFF_DONE:
+                    yield f"\n✅ Handoff complete. Run `/assist next {payload.get('session_id', '?')}` to continue.\n"
+                elif event_type == _SSE.NODE_START:
+                    yield f"  ▶ {payload.get('node_key', '?')} — {payload.get('title', '?')}\n"
+                elif event_type == _SSE.NODE_DONE:
+                    yield f"  ✓ {payload.get('node_key', '?')} (model: {payload.get('model', '?')})\n"
+                elif event_type == _SSE.NODE_FAILED:
+                    yield f"  ✗ {payload.get('node_key', '?')}: {payload.get('error', '?')}\n"
+                elif event_type == _SSE.ERROR:
+                    yield f"\n⚠️ {payload.get('detail') or payload}\n"; return
 
+        finally:
+            # §17.262 — runs on GeneratorExit (client disconnect) AND on
+            # clean break/return. Closing r forces iter_lines to raise →
+            # reader's try/except exits; stop_event covers the
+            # ReadTimeout cycle path. join's 5s is the upper bound.
+            stop_event.set()
+            if r_holder:
+                try:
+                    r_holder[0].close()
+                except Exception:
+                    pass
+            reader.join(timeout=5)
     def _assist_simple_post(self, session_id: str, action: str) -> Generator[str, None, None]:
         try:
             r = _HTTP_SESSION.post(
@@ -2045,6 +2065,9 @@ class Pipeline:
 
     def _stream_sse_to_queue(
         self, url: str, payload: dict, event_queue: queue.Queue,
+        *,
+        stop_event: "threading.Event | None" = None,
+        r_holder: "list | None" = None,
     ) -> None:
         """POST `url` and stream SSE events into event_queue.
 
@@ -2056,6 +2079,13 @@ class Pipeline:
           ("event", "stream_stalled", json_payload)     # after 5x keepalive silent
           ("error",        exception_str, None)
           ("done",         None, None)
+
+        §17.262 — Optional early-exit plumbing. Pass ``stop_event`` and
+        ``r_holder=[]`` to allow the consumer to signal shutdown when its
+        generator exits early (e.g. client disconnect → GeneratorExit).
+        The consumer's finally block sets ``stop_event`` and calls
+        ``r_holder[0].close()`` to force ``iter_lines`` to raise; this
+        function observes ``stop_event`` on each ReadTimeout cycle.
         """
         keep = self.valves.keepalive_interval
         max_idle = max(300, 5 * keep)
@@ -2076,6 +2106,13 @@ class Pipeline:
             event_queue.put(("error", f"cannot reach orchestrator: {e}", None)); return
         except Exception as e:
             event_queue.put(("error", str(e), None)); return
+
+        # §17.262 — expose the live Response to the consumer so it can
+        # close() on early exit. Must run BEFORE the status-code check
+        # so a 4xx still gets the close-path treatment (no-op since the
+        # body has already been read in r.text[:400]).
+        if r_holder is not None:
+            r_holder.append(r)
 
         if r.status_code >= 400:
             try:
@@ -2132,6 +2169,12 @@ class Pipeline:
                     event_queue.put(("done", None, None))
                     return
                 except requests.exceptions.ReadTimeout:
+                    # §17.262 — observe early-exit signal here. The consumer's
+                    # finally sets stop_event when its generator closes; we
+                    # bail without emitting heartbeat to drain cleanly.
+                    if stop_event is not None and stop_event.is_set():
+                        event_queue.put(("done", None, None))
+                        return
                     idle_seconds += keep
                     if idle_seconds >= max_idle:
                         event_queue.put((
@@ -2159,107 +2202,127 @@ class Pipeline:
         self, url_path: str, body: dict,
     ) -> Generator[str, None, None]:
         q = queue.Queue()
+        # §17.262 — early-exit plumbing so a GeneratorExit (client
+        # disconnect) tears down the daemon reader within reader.join's
+        # 5s window instead of leaving it alive until the 24h SSE
+        # timeout expires.
+        stop_event = threading.Event()
+        r_holder: list = []
         url = f"{self.valves.orchestrator_url}{url_path}"
         reader = threading.Thread(
             target=self._stream_sse_to_queue,
-            args=(url, body, q), daemon=True,
+            args=(url, body, q),
+            kwargs={"stop_event": stop_event, "r_holder": r_holder},
+            daemon=True,
         )
         reader.start()
 
-        while True:
-            try:
-                msg_type, f1, f2 = q.get(timeout=self.valves.keepalive_interval)
-            except queue.Empty:
-                yield "\u200b"; continue
-
-            if msg_type == "connected":
-                continue
-            if msg_type == "heartbeat":
-                yield "\u200b"; continue
-            if msg_type == "http_error":
+        try:
+            while True:
                 try:
-                    err = json.loads(f2).get("detail", f2[:200])
+                    msg_type, f1, f2 = q.get(timeout=self.valves.keepalive_interval)
+                except queue.Empty:
+                    yield "\u200b"; continue
+
+                if msg_type == "connected":
+                    continue
+                if msg_type == "heartbeat":
+                    yield "\u200b"; continue
+                if msg_type == "http_error":
+                    try:
+                        err = json.loads(f2).get("detail", f2[:200])
+                    except Exception:
+                        err = (f2 or "")[:200]
+                    yield f"⚠️ Research failed (HTTP {f1}): {err}"
+                    return
+                if msg_type == "error":
+                    yield f"\n⚠️ Connection error during research: {f1}"
+                    return
+                if msg_type == "done":
+                    break
+
+                event_type, data = f1, f2
+                try:
+                    payload = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+
+                if event_type == "heartbeat":
+                    yield "\u200b"
+                elif event_type == "stream_stalled":
+                    yield f"\n⚠️ **Stream stalled** — no data in {payload.get('idle_seconds','?')}s. Closing.\n"
+                    return
+                elif event_type == "error":
+                    yield from self._render_error_event(payload); return
+                elif event_type == "research_started":
+                    yield f"📊 Depth: {payload.get('depth','?')} | Max iterations: {payload.get('max_iterations','?')}\n\n"
+                elif event_type == "decomposition_complete":
+                    facets = payload.get("facets", [])
+                    yield f"🧩 Decomposed into {len(facets)} facets: {', '.join(facets)}\n"
+                    yield f"   Complexity: {payload.get('complexity','?')} | Queries: {payload.get('query_count','?')}\n\n"
+                elif event_type == "iteration_started":
+                    yield f"--- **Iteration {payload.get('iteration','?')}** ---\n"
+                elif event_type == "search_complete":
+                    yield f"🔍 Found {payload.get('results_found',0)} new results ({payload.get('total_urls',0)} URLs searched)\n"
+                elif event_type == "extraction_complete":
+                    yield f"📝 Extracted {payload.get('entries_extracted',0)} entries\n"
+                elif event_type == "ingestion_complete":
+                    yield f"💾 Ingested {payload.get('entries_ingested',0)} entries ({payload.get('total_rejected',0)} duplicates rejected)\n"
+                elif event_type == "iteration_complete":
+                    yield "\n"
+                elif event_type == "gap_analysis":
+                    yield f"📈 Coverage: {payload.get('coverage_pct','?')}%"
+                    gaps = payload.get("gap_facets", [])
+                    if gaps:
+                        yield f" | Gaps: {', '.join(gaps)}"
+                    yield "\n"
+                    if payload.get("assessment"):
+                        yield f"   {payload['assessment']}\n"
+                    yield "\n"
+                elif event_type == "convergence":
+                    yield f"✅ Converged: {payload.get('reason','')}\n\n"
+                elif event_type == "awaiting_reply":
+                    sid = payload.get("session_id", "?")
+                    mins = payload.get("expires_in_seconds", 3600) // 60
+                    yield "---\n\n⏸️ **Research paused — need your input**\n\n"
+                    yield f"**Question:** {payload.get('question','')}\n\n"
+                    yield f"**Session:** `{sid}` (expires in {mins} min)\n\n"
+                    yield f"**To continue:** type `/research/reply {sid} <your answer>`\n"
+                    yield "**To abandon:** do nothing — the session auto-cancels on expiry.\n\n"
+                    return
+                elif event_type == "research_resumed":
+                    yield f"▶️ Resuming session `{payload.get('session_id','?')}` from iteration {payload.get('iteration','?')}\n"
+                    yield f"   Reply injected: _{payload.get('reply','')}_\n\n"
+                elif event_type == "research_complete":
+                    total = payload.get("total_ingested", 0)
+                    entries = payload.get("total_entries", 0)
+                    iterations = payload.get("iterations", 0)
+                    mins = payload.get("duration_ms", 0) / 60000
+                    yield "---\n\n**Research Complete**\n\n"
+                    yield f"- **Topic:** {payload.get('topic','?')}\n"
+                    yield f"- **Entries extracted:** {entries}\n"
+                    yield f"- **Ingested:** {total}\n"
+                    yield f"- **Iterations:** {iterations}\n"
+                    yield f"- **Duration:** {mins:.1f} min\n\n"
+                    if payload.get("summary"):
+                        yield f"**Summary:**\n\n{payload['summary']}\n\n"
+                    yield "---\n\n**Next steps:**\n\n"
+                    yield "- `/go` to build a project plan from this research\n"
+                    yield "- `/research <subtopic> --depth deep` to explore further\n"
+                    yield "- `/rag <query>` to query what was ingested\n"
+
+        finally:
+            # §17.262 — runs on GeneratorExit (client disconnect) AND on
+            # clean break/return. Closing r forces iter_lines to raise →
+            # reader's try/except exits; stop_event covers the
+            # ReadTimeout cycle path. join's 5s is the upper bound.
+            stop_event.set()
+            if r_holder:
+                try:
+                    r_holder[0].close()
                 except Exception:
-                    err = (f2 or "")[:200]
-                yield f"⚠️ Research failed (HTTP {f1}): {err}"
-                return
-            if msg_type == "error":
-                yield f"\n⚠️ Connection error during research: {f1}"
-                return
-            if msg_type == "done":
-                break
-
-            event_type, data = f1, f2
-            try:
-                payload = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-
-            if event_type == "heartbeat":
-                yield "\u200b"
-            elif event_type == "stream_stalled":
-                yield f"\n⚠️ **Stream stalled** — no data in {payload.get('idle_seconds','?')}s. Closing.\n"
-                return
-            elif event_type == "error":
-                yield from self._render_error_event(payload); return
-            elif event_type == "research_started":
-                yield f"📊 Depth: {payload.get('depth','?')} | Max iterations: {payload.get('max_iterations','?')}\n\n"
-            elif event_type == "decomposition_complete":
-                facets = payload.get("facets", [])
-                yield f"🧩 Decomposed into {len(facets)} facets: {', '.join(facets)}\n"
-                yield f"   Complexity: {payload.get('complexity','?')} | Queries: {payload.get('query_count','?')}\n\n"
-            elif event_type == "iteration_started":
-                yield f"--- **Iteration {payload.get('iteration','?')}** ---\n"
-            elif event_type == "search_complete":
-                yield f"🔍 Found {payload.get('results_found',0)} new results ({payload.get('total_urls',0)} URLs searched)\n"
-            elif event_type == "extraction_complete":
-                yield f"📝 Extracted {payload.get('entries_extracted',0)} entries\n"
-            elif event_type == "ingestion_complete":
-                yield f"💾 Ingested {payload.get('entries_ingested',0)} entries ({payload.get('total_rejected',0)} duplicates rejected)\n"
-            elif event_type == "iteration_complete":
-                yield "\n"
-            elif event_type == "gap_analysis":
-                yield f"📈 Coverage: {payload.get('coverage_pct','?')}%"
-                gaps = payload.get("gap_facets", [])
-                if gaps:
-                    yield f" | Gaps: {', '.join(gaps)}"
-                yield "\n"
-                if payload.get("assessment"):
-                    yield f"   {payload['assessment']}\n"
-                yield "\n"
-            elif event_type == "convergence":
-                yield f"✅ Converged: {payload.get('reason','')}\n\n"
-            elif event_type == "awaiting_reply":
-                sid = payload.get("session_id", "?")
-                mins = payload.get("expires_in_seconds", 3600) // 60
-                yield "---\n\n⏸️ **Research paused — need your input**\n\n"
-                yield f"**Question:** {payload.get('question','')}\n\n"
-                yield f"**Session:** `{sid}` (expires in {mins} min)\n\n"
-                yield f"**To continue:** type `/research/reply {sid} <your answer>`\n"
-                yield "**To abandon:** do nothing — the session auto-cancels on expiry.\n\n"
-                return
-            elif event_type == "research_resumed":
-                yield f"▶️ Resuming session `{payload.get('session_id','?')}` from iteration {payload.get('iteration','?')}\n"
-                yield f"   Reply injected: _{payload.get('reply','')}_\n\n"
-            elif event_type == "research_complete":
-                total = payload.get("total_ingested", 0)
-                entries = payload.get("total_entries", 0)
-                iterations = payload.get("iterations", 0)
-                mins = payload.get("duration_ms", 0) / 60000
-                yield "---\n\n**Research Complete**\n\n"
-                yield f"- **Topic:** {payload.get('topic','?')}\n"
-                yield f"- **Entries extracted:** {entries}\n"
-                yield f"- **Ingested:** {total}\n"
-                yield f"- **Iterations:** {iterations}\n"
-                yield f"- **Duration:** {mins:.1f} min\n\n"
-                if payload.get("summary"):
-                    yield f"**Summary:**\n\n{payload['summary']}\n\n"
-                yield "---\n\n**Next steps:**\n\n"
-                yield "- `/go` to build a project plan from this research\n"
-                yield "- `/research <subtopic> --depth deep` to explore further\n"
-                yield "- `/rag <query>` to query what was ingested\n"
-
-        reader.join(timeout=5)
+                    pass
+            reader.join(timeout=5)
 
     def _execute_and_stream(
         self, job_id: str, total_nodes: int,
@@ -2267,9 +2330,16 @@ class Pipeline:
         q = queue.Queue()
         url = f"{self.valves.orchestrator_url}/execute/all"
         body = {"job_id": job_id, "model_overrides": self._model_overrides()}
+        # §17.262 — early-exit plumbing so a GeneratorExit (client
+        # disconnect) tears down the daemon reader within reader.join's
+        # 5s window instead of leaving it alive until the 24h SSE timeout.
+        stop_event = threading.Event()
+        r_holder: list = []
         reader = threading.Thread(
             target=self._stream_sse_to_queue,
-            args=(url, body, q), daemon=True,
+            args=(url, body, q),
+            kwargs={"stop_event": stop_event, "r_holder": r_holder},
+            daemon=True,
         )
         reader.start()
 
@@ -2278,55 +2348,67 @@ class Pipeline:
         compile_status = None
         stalled = False
 
-        while True:
-            try:
-                msg_type, f1, f2 = q.get(timeout=self.valves.keepalive_interval)
-            except queue.Empty:
-                yield "\u200b"; continue
+        try:
+            while True:
+                try:
+                    msg_type, f1, f2 = q.get(timeout=self.valves.keepalive_interval)
+                except queue.Empty:
+                    yield "\u200b"; continue
 
-            if msg_type == "connected":
-                continue
-            if msg_type == "heartbeat":
-                yield "\u200b"; continue
-            if msg_type == "http_error":
-                if f1 == 409:
-                    yield "That question is already being processed. Please wait."
+                if msg_type == "connected":
+                    continue
+                if msg_type == "heartbeat":
+                    yield "\u200b"; continue
+                if msg_type == "http_error":
+                    if f1 == 409:
+                        yield "That question is already being processed. Please wait."
+                        return
+                    hint = self._drift_hint() if f1 == 401 else ""
+                    yield f"⚠️ Execution failed (HTTP {f1}). Please try again.{hint}"
                     return
-                hint = self._drift_hint() if f1 == 401 else ""
-                yield f"⚠️ Execution failed (HTTP {f1}). Please try again.{hint}"
-                return
-            if msg_type == "error":
-                yield from self._recover_from_disconnect(job_id)
-                return
-            if msg_type == "done":
-                break
+                if msg_type == "error":
+                    yield from self._recover_from_disconnect(job_id)
+                    return
+                if msg_type == "done":
+                    break
 
-            event_type, data = f1, f2
-            if event_type == "stream_stalled":
+                event_type, data = f1, f2
+                if event_type == "stream_stalled":
+                    try:
+                        p = json.loads(data) if data else {}
+                    except json.JSONDecodeError:
+                        p = {}
+                    yield (f"\n⚠️ **Stream stalled** — no data for {p.get('idle_seconds','?')}s. "
+                           f"Execution may still be running; use `/results {job_id}` to check.\n")
+                    stalled = True
+                    continue
+
+                yield from self._handle_sse_event(event_type, data, failed_nodes)
+
+                if event_type == "pipeline_complete":
+                    try:
+                        payload = json.loads(data)
+                        compiled_output = payload.get("compiled_output", "")
+                        if not compiled_output and payload.get("compiled_output_available"):
+                            compiled_output = self._poll_compiled_output(job_id)
+                        compile_status = payload.get("compile_status", "complete")
+                        for fn in payload.get("failed_nodes", []) or []:
+                            failed_nodes.append(fn)
+                    except json.JSONDecodeError:
+                        pass
+
+        finally:
+            # §17.262 — runs on GeneratorExit (client disconnect) AND on
+            # clean break/return. Closing r forces iter_lines to raise →
+            # reader's try/except exits; stop_event covers the
+            # ReadTimeout cycle path. join's 5s is the upper bound.
+            stop_event.set()
+            if r_holder:
                 try:
-                    p = json.loads(data) if data else {}
-                except json.JSONDecodeError:
-                    p = {}
-                yield (f"\n⚠️ **Stream stalled** — no data for {p.get('idle_seconds','?')}s. "
-                       f"Execution may still be running; use `/results {job_id}` to check.\n")
-                stalled = True
-                continue
-
-            yield from self._handle_sse_event(event_type, data, failed_nodes)
-
-            if event_type == "pipeline_complete":
-                try:
-                    payload = json.loads(data)
-                    compiled_output = payload.get("compiled_output", "")
-                    if not compiled_output and payload.get("compiled_output_available"):
-                        compiled_output = self._poll_compiled_output(job_id)
-                    compile_status = payload.get("compile_status", "complete")
-                    for fn in payload.get("failed_nodes", []) or []:
-                        failed_nodes.append(fn)
-                except json.JSONDecodeError:
+                    r_holder[0].close()
+                except Exception:
                     pass
-
-        reader.join(timeout=5)
+            reader.join(timeout=5)
         if stalled:
             return
 

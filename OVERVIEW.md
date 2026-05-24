@@ -14497,6 +14497,34 @@ Existing `TestRerankEmptyItems::test_empty_items_triggers_fallback` continues to
 
 ---
 
+### §17.262 SSE reader-thread early-exit teardown — close §17.258 🟡 #1 (2026-05-24)
+
+§17.258's first yellow item, generalised. The audit flagged `pipelines/scaffold_router.py:2156-2255` (`_research_and_stream_raw`) as having a daemon reader thread that wasn't explicitly stopped on early generator exit — `reader.join(timeout=5)` sat OUTSIDE any try/finally, so a `GeneratorExit` (raised when OWUI closes the chat tab mid-stream, or any `return` inside the yield loop) skipped the join entirely. The thread then sat alive until the upstream stream-timeout fired (24h on this host per §17.258 confirmation), holding an open HTTP connection to the orchestrator.
+
+**Same bug pattern in TWO sibling consumers**, fixed in the same commit per the "same root cause, same fix" rule:
+- `_execute_and_stream` (`/execute/all`) — had `reader.join(timeout=5)` outside try/finally, same skip on `GeneratorExit`.
+- `_stream_sse_with_keepalive` (assist-handoff path) — had NO `reader.join` AT ALL, even on clean exit. The daemon thread leaked unconditionally.
+
+**Three-layer teardown.** The producer (`_stream_sse_to_queue`) can be blocked in either `r.iter_lines(...)` (waiting on a socket read) or in the `except requests.exceptions.ReadTimeout` cycle (waiting for the per-read timeout). Neither path checks a Python event between iterations. The fix wires both:
+
+1. **`stop_event` (threading.Event).** Checked at the top of every `ReadTimeout` cycle. If set, the producer emits `("done", None, None)` and returns instead of incrementing `idle_seconds` + emitting heartbeat. Covers the case where the upstream is silent (heartbeat-only) and the consumer wants to bail.
+2. **`r_holder` (list-wrapped reference).** The producer appends the live `requests.Response` to it after construction (before the status-code check, so 4xx still gets close-path treatment). The consumer's finally calls `r_holder[0].close()` which forces `iter_lines` to raise — the producer's outer `try/except Exception` block catches it and exits cleanly. Covers the case where the upstream is actively streaming and the consumer wants to bail.
+3. **`reader.join(timeout=5)` MOVED into the finally.** 5s is the upper bound; with the two signals above, normal teardown completes in microseconds.
+
+**Signature change at `pipelines/scaffold_router.py:2046-2070`:** `_stream_sse_to_queue` gains two new keyword-only parameters: `stop_event: threading.Event | None = None` and `r_holder: list | None = None`. Both default to `None` so any existing call site that didn't pass them keeps working (back-compat for tests + curl-style ad-hoc callers).
+
+**Three consumer rewrites** all follow the same shape — declare `stop_event = threading.Event()` and `r_holder: list = []` before the `Thread` construction, thread them through via `kwargs={"stop_event": stop_event, "r_holder": r_holder}`, wrap the `while True:` loop in `try:` + `finally:` that signals stop, closes the response (best-effort), and joins. The `_stream_sse_with_keepalive` consumer uses `_th.Thread` / `_th.Event` (aliased import); the constructor for the event matches the local alias.
+
+**Test-suite delta:** +2 tests in new `TestSSEEarlyExitTeardown` (`test_scaffold_router_sse.py`):
+- `test_consumer_signals_stop_on_generator_close` — patches `_stream_sse_to_queue` with a fake that captures the kwargs + populates `r_holder`. Drives the consumer's generator until it yields, then calls `gen.close()`. Asserts `stop_event.is_set()` and `r_holder[0].close.called` post-close — proves the finally fired on `GeneratorExit`.
+- `test_stream_sse_to_queue_honors_stop_event_in_read_timeout` — pre-sets `stop_event`, mocks `iter_lines` to raise `ReadTimeout`, calls the producer directly. Asserts `"done"` appears in the queue and `"heartbeat"` does not. Proves the producer-side short-circuit works.
+
+**Test fixture update:** `TestSSEStreamStalled::test_stream_stalled_event_renders_warning` (existing) had a fake `_stream_sse_to_queue(url, body, q)` signature that didn't accept the new kwargs; pre-fix attempt to call with kwargs raised `TypeError` inside the daemon thread, silently swallowed, and the consumer waited forever on the empty queue (30s pytest-timeout). Widened the fixture to `def fake_streamer(url, body, q, **kwargs)` — strictly additive, no production behavior change. Full scaffold_router test suite: 86 → 88 passing.
+
+**Editing technique (worth remembering for similar wide rewrites).** The Edit tool choked on zero-width-space characters (U+200B) in the loop body, repeatedly serializing them as `🔴`-style escape pairs that don't survive UTF-8 round-trip. Solution: a Python script that uses `ast.parse` to verify post-edit, slices the file by precise markers (`def_marker`, `"        while True:"`, `"        reader.join(timeout=5)"`), and re-indents the loop body by `"    " + line if line.strip() else line` to preserve blank lines. Both consumers were rewritten in a single atomic script with the same helper.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

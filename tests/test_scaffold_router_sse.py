@@ -45,7 +45,10 @@ class TestSSEStreamStalled:
     """#8.12: Stream stall detected; reader emits stream_stalled event."""
 
     def test_stream_stalled_event_renders_warning(self, pipe):
-        def fake_streamer(url, body, q):
+        # §17.262 — fake_streamer now accepts **kwargs (stop_event, r_holder)
+        # because consumers thread the early-exit signals through to the
+        # reader. The fixture ignores them; production reader uses them.
+        def fake_streamer(url, body, q, **kwargs):
             q.put(("connected", None, None))
             q.put(("event", "stream_stalled",
                    json.dumps({"idle_seconds": 50, "max_idle": 50})))
@@ -72,4 +75,86 @@ class TestSSEStreamStalled:
             assert connect == 30
             assert read == max(30, pipe.valves.keepalive_interval)
             assert kw["stream"] is True
+
+
+@pytest.mark.smoke
+class TestSSEEarlyExitTeardown:
+    """§17.262 — when the consumer generator exits early (client disconnect
+    → GeneratorExit, or any return/raise inside the yield loop), the daemon
+    reader thread must shut down via the stop_event + r.close() signals.
+    Pre-fix, reader.join was outside try/finally and never ran on early
+    exit; reader stayed alive until the 24h SSE timeout. Closes 17.258 yellow #1."""
+
+    def test_consumer_signals_stop_on_generator_close(self, pipe):
+        """When the consumer's generator is .close()'d mid-stream, the
+        finally must fire — setting stop_event and closing the response."""
+        import threading
+        captured = {}
+
+        def fake_streamer(url, body, q, **kwargs):
+            # Capture the stop_event + r_holder for post-close assertions.
+            captured["stop_event"] = kwargs.get("stop_event")
+            captured["r_holder"] = kwargs.get("r_holder")
+            # Populate r_holder with a fake response so the consumer's
+            # finally calls close() on it.
+            fake_response = MagicMock()
+            kwargs["r_holder"].append(fake_response)
+            captured["fake_response"] = fake_response
+            # Emit one event so the consumer yields once, then sit idle
+            # (the test will .close() the generator before we'd otherwise
+            # produce more output).
+            q.put(("connected", None, None))
+            q.put(("event", "research_started",
+                   json.dumps({"depth": "shallow", "max_iterations": 1})))
+            # Block on stop_event so the daemon reader emulates a long-running
+            # producer that exits only when signalled. reader.join(timeout=5)
+            # in the consumer's finally will see this exit.
+            if kwargs["stop_event"] is not None:
+                kwargs["stop_event"].wait(timeout=10)
+
+        with patch.object(pipe, "_stream_sse_to_queue", side_effect=fake_streamer):
+            gen = pipe._research_and_stream_raw("/research", {"topic": "x"})
+            # Pull one chunk to drive the generator into the loop, then close.
+            chunks = []
+            for chunk in gen:
+                chunks.append(chunk)
+                if "Depth" in chunk:  # research_started rendered
+                    break
+            gen.close()  # forces GeneratorExit → consumer's finally fires
+
+        # Post-close: stop_event must be set and fake_response.close() called.
+        assert captured["stop_event"] is not None, "stop_event must be threaded through"
+        assert captured["stop_event"].is_set(), \
+            "consumer's finally must signal stop on GeneratorExit"
+        assert captured["fake_response"].close.called, \
+            "consumer's finally must close r_holder[0] on early exit"
+
+    def test_stream_sse_to_queue_honors_stop_event_in_read_timeout(self, pipe):
+        """§17.262 reader-side guard: when stop_event is set, the next
+        ReadTimeout cycle must emit ('done', None, None) and return,
+        rather than incrementing idle_seconds + emitting heartbeat."""
+        import threading
+        import requests
+        stop_event = threading.Event()
+        stop_event.set()  # pre-set: first ReadTimeout cycle must exit
+
+        with patch("scaffold_router._HTTP_SESSION.post") as mp:
+            resp = MagicMock(status_code=200)
+            # Make iter_lines raise ReadTimeout each call. With stop_event
+            # already set, the very first ReadTimeout must short-circuit
+            # the loop instead of emitting a heartbeat.
+            resp.iter_lines.side_effect = requests.exceptions.ReadTimeout()
+            mp.return_value = resp
+            q = _queue.Queue()
+            pipe._stream_sse_to_queue("http://x/y", {}, q, stop_event=stop_event)
+
+        # Drain queue and check we got ('connected', ...) then ('done', ...)
+        # — NOT a 'heartbeat' (which is what the pre-§17.262 path emitted).
+        msgs = []
+        while not q.empty():
+            msgs.append(q.get_nowait())
+        msg_types = [m[0] for m in msgs]
+        assert "done" in msg_types, f"expected 'done' on stop_event short-circuit; got: {msg_types}"
+        assert "heartbeat" not in msg_types, \
+            f"stop_event short-circuit must skip heartbeat; got: {msg_types}"
 
