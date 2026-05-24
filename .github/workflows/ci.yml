@@ -94,6 +94,14 @@ jobs:
       - name: Verify next_actions vendor is in sync (§17.195)
         run: make check-next-actions
 
+      # §17.246 — gate on MODEL_RERANKER default alignment across the
+      # 3 sites it ships at. Same logic as `make doctor` section 12
+      # (§17.245), but file-only so it runs on a stock CI runner
+      # without a docker compose stack. Catches drift at PR time,
+      # not just at next operator `make doctor`.
+      - name: Verify MODEL_RERANKER default agrees across 3 sites (§17.245)
+        run: make check-rerank-drift
+
       - name: Run ci-smoke tests
         env:
           SCAFFOLD_API_KEY: "test-key-for-ci"

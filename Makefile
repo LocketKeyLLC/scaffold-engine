@@ -6,7 +6,7 @@ COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
 API_URL   ?= http://localhost:8000
 
-.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions idea resume explain whatnow confirm retry skip node-logs config audit
+.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift idea resume explain whatnow confirm retry skip node-logs config audit
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -244,6 +244,29 @@ check-next-actions: ## §17.195 — Verify pipelines/_vendor/_next_actions.py is
 		exit 1; \
 	fi
 	@echo "✓ pipelines/_vendor/_next_actions.py is in sync with sdk/scaffold_client/next_actions.py."
+
+check-rerank-drift: ## §17.245 — Verify MODEL_RERANKER default matches across Dockerfile ARG ↔ app/config.py ↔ .env.example (CI gate; mirrors doctor section 12)
+	@DKR=$$(grep -E '^ARG MODEL_RERANKER=' Dockerfile | head -1 | sed 's/^ARG MODEL_RERANKER=//'); \
+	CFG=$$(grep -E '^    model_reranker: str = ' app/config.py | head -1 | sed 's/^    model_reranker: str = "\(.*\)"$$/\1/'); \
+	ENV=$$(grep -E '^# MODEL_RERANKER=' .env.example | head -1 | sed 's/^# MODEL_RERANKER=//'); \
+	if [ -z "$$DKR" ] || [ -z "$$CFG" ] || [ -z "$$ENV" ]; then \
+		printf '\033[1;31m✗ failed to extract MODEL_RERANKER from one of the 3 sites:\033[0m\n'; \
+		printf '  Dockerfile  : [%s]\n' "$$DKR"; \
+		printf '  config.py   : [%s]\n' "$$CFG"; \
+		printf '  .env.example: [%s]\n' "$$ENV"; \
+		printf '\033[1;33m  Fix: a grep regex has drifted; restore the canonical line shape or update this make target.\033[0m\n'; \
+		exit 1; \
+	fi; \
+	if [ "$$DKR" = "$$CFG" ] && [ "$$CFG" = "$$ENV" ]; then \
+		printf '✓ MODEL_RERANKER default agrees across 3 sites: %s\n' "$$DKR"; \
+	else \
+		printf '\033[1;31m✗ MODEL_RERANKER default drift across 3 sites:\033[0m\n'; \
+		printf '  Dockerfile  : %s\n' "$$DKR"; \
+		printf '  config.py   : %s\n' "$$CFG"; \
+		printf '  .env.example: %s\n' "$$ENV"; \
+		printf '\033[1;33m  Fix: pick the canonical value (typically settings.model_reranker in app/config.py:173) and update the other 2.\033[0m\n'; \
+		exit 1; \
+	fi
 
 ## ──────────────────────────────────────────────
 ## Build & Ops

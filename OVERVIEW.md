@@ -12524,6 +12524,160 @@ No app code change. No test change. Defaults unchanged.
 
 ---
 
+### §17.246 CI step — gate merges on `MODEL_RERANKER` 3-site default alignment (2026-05-24)
+
+Closes §17.245 candidate A — "CI workflow that runs `make doctor`
+on every push and gates merges on `FAIL=0`." Caveat: `make doctor`
+as a whole requires a live compose stack (probes containers,
+volumes, /health). CI on `ubuntu-latest` doesn't have that.
+
+The actionable subset of `make doctor` for CI is the **file-only
+drift check** — §17.245's section 12 only reads three text files
+and compares strings; it runs anywhere `grep` + `sed` are
+installed. §17.246 lifts that subset into its own `make` target
+and a CI step that mirrors the existing §17.186 / §17.190 /
+§17.195 vendor-check pattern.
+
+**Fix.**
+
+1. **New `make check-rerank-drift` target** in `Makefile`,
+   alongside `check-schemas` / `check-sse-events` /
+   `check-next-actions`. Replicates §17.245's section 12 logic
+   inline (three greps + equality check); exits non-zero on
+   drift with all 3 values + remediation. Added to `.PHONY` so
+   it always runs.
+
+   Happy path output:
+   ```
+   ✓ MODEL_RERANKER default agrees across 3 sites: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+   ```
+
+   Drift output (sed-injected `DRIFTED-FOR-TEST/x` into Dockerfile):
+   ```
+   ✗ MODEL_RERANKER default drift across 3 sites:
+     Dockerfile  : DRIFTED-FOR-TEST/x
+     config.py   : tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+     .env.example: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+     Fix: pick the canonical value (typically settings.model_reranker
+          in app/config.py:173) and update the other 2.
+   make: *** [Makefile:249: check-rerank-drift] Error 1
+   ```
+
+2. **New CI step** in `.github/workflows/ci.yml` placed
+   immediately after `check-next-actions` (§17.195) — same
+   vendor/drift gating cohort. Five-line YAML addition + a
+   five-line comment block explaining why this is the doctor
+   subset that fits a stock CI runner.
+
+**Why this isn't `make doctor` run as a whole.**
+
+`make doctor`'s sections 2-11 all need live Docker state:
+- 2. Network + volumes — `docker volume ls`
+- 3. Containers — `docker ps`
+- 4. Orchestrator /health — needs the orchestrator running
+- 5. Ollama — needs host Ollama at 172.18.0.1:11434
+- 6. OpenAI — only relevant in deployment
+- 7-11. API key / auth / migrations / mount guard / 6-surface — all need a populated compose stack
+
+A CI runner doesn't have any of that without spinning the full
+stack — which is the cost the existing CI tier 1 (smoke unit
+tests) is deliberately avoiding (~30-90 s for the gate vs ~10-15
+min for full-stack startup).
+
+Section 12 — the §17.245 drift check — is the **only** section
+that's file-only. §17.246 lifts that subset out so CI can gate
+on it without paying the full-stack cost. The other sections
+remain operator-side (`make doctor` locally before pushing).
+
+A future tier 2 of CI (the commented-out integration block in
+`ci.yml:129-160`) WOULD have the full stack and could run
+`make doctor` whole-cloth — that's a separate scope; logged.
+
+**Why a make target rather than inlining the grep in CI.**
+
+Three reasons:
+1. Operators get the same gate locally via `make check-rerank-drift`
+   (matches `make check-schemas` / `check-sse-events` /
+   `check-next-actions` mental model).
+2. The CI step stays one-liner (`run: make check-rerank-drift`)
+   — easy to scan in PR diffs and stable across CI workflow
+   changes.
+3. Centralizing the regex in one file (the Makefile target)
+   means a future grep-pattern change updates ONE place, not
+   `scripts/doctor.sh` + `.github/workflows/ci.yml`.
+
+The duplication with `scripts/doctor.sh` section 12 is the
+trade-off: both contain similar grep+compare logic. Acceptable
+because the doctor version produces richer terminal output
+(banner, explain block, INFO lines BEFORE the verdict) and the
+make target keeps the verdict tight enough to scan in a CI log
+line. A future refactor could extract a `scripts/check_rerank_drift.sh`
+that both call; not worth the indirection right now.
+
+**Verification — both branches via local `make check-rerank-drift`.**
+
+```
+$ make check-rerank-drift
+✓ MODEL_RERANKER default agrees across 3 sites: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+
+$ sed -i 's/^ARG MODEL_RERANKER=tomaarsen\/Qwen3-Reranker-0.6B-seq-cls/ARG MODEL_RERANKER=DRIFTED-FOR-TEST\/x/' Dockerfile
+$ make check-rerank-drift
+✗ MODEL_RERANKER default drift across 3 sites:
+  Dockerfile  : DRIFTED-FOR-TEST/x
+  config.py   : tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+  .env.example: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+  Fix: pick the canonical value (typically settings.model_reranker in app/config.py:173) and update the other 2.
+make: *** [Makefile:249: check-rerank-drift] Error 1
+$ # exit=2 (make wraps the non-zero exit)
+$ git checkout Dockerfile  # restore
+```
+
+YAML lint: `.github/workflows/ci.yml` parses clean via Python's
+`yaml.safe_load`.
+
+**Files.**
+
+- `Makefile`:
+  - New `check-rerank-drift` target.
+  - `.PHONY` line updated to include the new target.
+- `.github/workflows/ci.yml`:
+  - New step "Verify MODEL_RERANKER default agrees across 3 sites
+    (§17.245)" between the §17.195 next_actions check and the
+    `ci-smoke` tests.
+- `OVERVIEW.md` — this entry.
+
+No app code change. No test change. Defaults unchanged.
+
+**What §17.246 does NOT change.**
+
+- The drift-check logic itself — still §17.245's three greps +
+  equality check. §17.246 just moves the file-only subset to a
+  CI-gateable place.
+- The doctor section 12 from §17.245 — kept; operators still get
+  the diagnostic + INFO-before-verdict output via `make doctor`.
+- The other doctor sections (2-11) — still operator-side only.
+  A tier 2 CI that boots the stack could call `make doctor` as
+  a whole; that's a separate scope (logged).
+- Other reranker-related drift (e.g. `score_range_info` registry
+  in `app/rerankers.py:_RERANKER_NORMALIZERS` that should track
+  the configured model) — out of scope for §17.246; a separate
+  check could be added under the same target if it becomes
+  load-bearing.
+
+**Open follow-ups.**
+
+1. **§17.247 candidate A** — tier 2 CI workflow that boots a
+   compose stack and runs `make doctor` whole-cloth + the full
+   golden retrieval test suite. Heavier CI cost (~10-15 min);
+   gates on full-stack regressions. The commented-out block at
+   `.github/workflows/ci.yml:129-160` is the starting point.
+2. **Compose cleanup** (still logged from §17.243) — remove the
+   now-redundant `HF_HOME:` line in `docker-compose.yml`.
+3. **§17.234 candidate B / §17.237 candidate C** — smaller
+   reranker model. Unchanged status.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
