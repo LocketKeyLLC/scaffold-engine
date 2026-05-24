@@ -14634,6 +14634,43 @@ Full `test_dedup_rejection.py`: 4 → 6 passing. `asyncio` import added at file 
 
 ---
 
+### §17.268 `_assist_next` + `_assist_submit` JSON-parse hardening — close §17.258 test-gap #5 (2026-05-24)
+
+§17.258's last test gap. The audit flagged `_assist_start` / `_assist_next` / `_assist_submit` for unguarded `r.json()` calls; §17.259 closed `_assist_start`. The remaining two endpoints had the same bug pattern:
+
+- `pipelines/scaffold_router.py:1628` (`_assist_next`) — bare `step = r.json()` then `step.get("node_key")`. Non-JSON body → `ValueError` mid-yield. Wrong-shape body (list/scalar instead of dict) → `AttributeError` on `.get()`.
+- `pipelines/scaffold_router.py:1673` (`_assist_submit`) — bare `d = r.json()` then `d['status']` (line 1675, hard KeyError) inside the `no_op` branch. A `no_op=True` reply with missing `status` field would crash the generator.
+
+**Same three-layer fix applied per endpoint** (mirrors the §17.259 pattern):
+
+1. `try: ... = r.json() / except ValueError` — non-JSON yields `❌ Assist {next|submit}: orchestrator returned non-JSON body ...`.
+2. `if not isinstance(d, dict): yield ❌ ... return` — defense against list/scalar JSON bodies.
+3. `.get()` fallbacks for previously-hard dict accesses (`d['status']` → `d.get("status", "?")` in the `no_op` banner).
+
+**Test-suite delta:** +4 tests in `TestAssistChatMemory` (`test_scaffold_router_commands.py`):
+
+- `test_next_handles_non_json_body` — `/next` returns string body; consumer yields `❌` + `non-JSON` and returns cleanly.
+- `test_next_handles_non_dict_body` — `/next` returns valid JSON list `["wrong", "shape"]` (patched via `r.json.return_value = [...]` directly since `_make_response` can only do dict-vs-string). Consumer yields `❌` + `not a dict`.
+- `test_submit_handles_non_json_body` — `/submit` returns string body; consumer yields `❌` + `non-JSON`.
+- `test_submit_no_op_tolerates_missing_status` — `/submit` returns `{"no_op": True}` with NO `status` field. Pre-fix: `KeyError` mid-yield. Post-fix: banner renders with `` `?` `` fallback.
+
+Full `TestAssistChatMemory`: 10 → 14 passing. Existing 10 unaffected.
+
+**Pattern-residue note for next audit cycle.** Five bare `r.json()` callsites remain in `scaffold_router.py` (lines 1704 `_assist_skip`, 1807 `_assist_simple_post`, 2913, 2951, 3041 — outside the assist surface). The §17.258 audit only flagged the three explicitly user-visible assist endpoints; widening the guard to the others is logged as a candidate for a §17.x batch follow-up but not in scope for the test-gap closure work.
+
+**§17.258 fully closed.** All five test gaps resolved:
+| # | Topic | Status |
+|---|---|---|
+| 1 | auth `/web/` `/static/` bypass | §17.266 (+15 tests) |
+| 2 | error_logging secret-redaction regex | already covered (`TestRedactSecrets`); audit false positive |
+| 3 | version-chain concurrency race | §17.267 (+2 tests, documented bug + flip-on-fix contract) |
+| 4 | reranker partial-failure rank corruption | §17.260 (+2 tests, fix bundled) |
+| 5 | `_assist_*` malformed JSON | §17.259 + §17.268 (+7 tests, fix bundled per endpoint) |
+
+**§17.258 audit close-out (10 commits, §17.259-§17.268):** 3 🔴 + 3 🟡 + 3 🟢 + 4 test gaps closed (the 5th was a verified false positive). One real concurrency bug surfaced in §17.267 (version-chain branch race) — documented + pinned but fix deferred to a separate §-entry. Subagent TP rate held at the predicted ~31% across the full work cycle: ~60 raw findings → 9 verified for code edits + 4 verified test gaps → 13 actionable items.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

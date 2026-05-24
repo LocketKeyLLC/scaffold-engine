@@ -1625,7 +1625,15 @@ class Pipeline:
             yield f"❌ Session `{session_id}` not found."; return
         if r.status_code >= 400:
             yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
-        step = r.json()
+        # §17.268 — mirror §17.259's _assist_start guards. Pre-fix this was
+        # bare r.json() + step.get(...); a non-JSON body would crash the
+        # generator with ValueError mid-yield.
+        try:
+            step = r.json()
+        except ValueError as e:
+            yield f"❌ Assist next: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+        if not isinstance(step, dict):
+            yield f"❌ Assist next: orchestrator reply not a dict; raw: {str(step)[:200]}"; return
         # Refresh remembered last_node_key when /next claims a real step.
         # Skip on terminal-status responses where node_key is None.
         if step.get("node_key"):
@@ -1670,9 +1678,18 @@ class Pipeline:
                 ); return
         if r.status_code >= 400:
             yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
-        d = r.json()
+        # §17.268 — mirror §17.259's _assist_start guards.
+        try:
+            d = r.json()
+        except ValueError as e:
+            yield f"❌ Assist submit: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+        if not isinstance(d, dict):
+            yield f"❌ Assist submit: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
         if d.get("no_op"):
-            yield f"ℹ️ Step `{node_key}` already `{d['status']}`. No change."; return
+            # `d['status']` was a hard access pre-§17.268; .get() preserves
+            # the banner when status is omitted from a non-standard reply.
+            status_val = d.get("status", "?")
+            yield f"ℹ️ Step `{node_key}` already `{status_val}`. No change."; return
         next_nk = d.get("next_node_key")
         # Update remembered node so the next `/assist submit` (no args) is
         # right. None on terminal => clear it so we don't suggest a

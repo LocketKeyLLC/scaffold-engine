@@ -1381,3 +1381,78 @@ class TestAssistChatMemory:
         assert "job-99" in out, f"expected input job_id fallback; got: {out!r}"
         assert "? pending" in out, f"expected '?' for unknown pending count; got: {out!r}"
 
+    # -- §17.268: extend §17.259 JSON-parse hardening to /next and /submit --
+
+    def test_next_handles_non_json_body(self, pipe, monkeypatch):
+        """§17.268 — /assist next: orchestrator returns HTTP 200 with non-JSON.
+        Pre-fix, `r.json()` raised ValueError mid-yield (same bug §17.259 fixed
+        for _assist_start). Now yields an `❌` line and returns cleanly."""
+        _log, responses = _http_call_log(monkeypatch)
+        responses[("get", "/assist/_chatmap/chat-J")] = _make_response(
+            200, {"chat_id": "chat-J", "session_id": _UUID_A, "last_node_key": None},
+        )
+        responses[("get", f"/assist/{_UUID_A}/next")] = _make_response(
+            200, "not json at all",
+        )
+
+        out = "".join(pipe.pipe("/assist next", "m", [], self._body_with_chat("chat-J")))
+        assert "❌" in out and "non-JSON" in out, \
+            f"expected JSON-parse error yield; got: {out!r}"
+
+    def test_next_handles_non_dict_body(self, pipe, monkeypatch):
+        """§17.268 — /assist next: orchestrator returns valid JSON but not
+        a dict (e.g. a list or scalar). Pre-fix, `step.get(...)` raised
+        AttributeError. Now yields `❌` cleanly."""
+        _log, responses = _http_call_log(monkeypatch)
+        responses[("get", "/assist/_chatmap/chat-K")] = _make_response(
+            200, {"chat_id": "chat-K", "session_id": _UUID_A, "last_node_key": None},
+        )
+        # _make_response treats list/scalar by setting r.json to a side_effect
+        # that raises ValueError. Use a dict with the wrong shape instead —
+        # patch r.json to return a list directly to exercise the isinstance
+        # guard.
+        bad_resp = _make_response(200, {})
+        bad_resp.json.return_value = ["wrong", "shape"]
+        responses[("get", f"/assist/{_UUID_A}/next")] = bad_resp
+
+        out = "".join(pipe.pipe("/assist next", "m", [], self._body_with_chat("chat-K")))
+        assert "❌" in out and "not a dict" in out, \
+            f"expected not-a-dict error yield; got: {out!r}"
+
+    def test_submit_handles_non_json_body(self, pipe, monkeypatch):
+        """§17.268 — /assist submit: orchestrator returns HTTP 200 with non-JSON.
+        Pre-fix, `r.json()` then `d.get(...)` would crash. Now yields `❌` cleanly."""
+        _log, responses = _http_call_log(monkeypatch)
+        responses[("get", "/assist/_chatmap/chat-L")] = _make_response(
+            200, {"chat_id": "chat-L", "session_id": _UUID_A, "last_node_key": "T7"},
+        )
+        responses[("post", f"/assist/{_UUID_A}/submit")] = _make_response(
+            200, "not json at all",
+        )
+        responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
+
+        msg = "/assist submit\n```\nevidence here\n```"
+        out = "".join(pipe.pipe(msg, "m", [], self._body_with_chat("chat-L")))
+        assert "❌" in out and "non-JSON" in out, \
+            f"expected JSON-parse error yield; got: {out!r}"
+
+    def test_submit_no_op_tolerates_missing_status(self, pipe, monkeypatch):
+        """§17.268 — /assist submit: when orchestrator returns `no_op=true`
+        without a `status` field, the banner should still render with `?`
+        instead of crashing on `d['status']`. Pre-fix this was a hard KeyError."""
+        _log, responses = _http_call_log(monkeypatch)
+        responses[("get", "/assist/_chatmap/chat-M")] = _make_response(
+            200, {"chat_id": "chat-M", "session_id": _UUID_A, "last_node_key": "T7"},
+        )
+        # no_op response with NO status key (the regression case).
+        responses[("post", f"/assist/{_UUID_A}/submit")] = _make_response(
+            200, {"no_op": True},
+        )
+        responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
+
+        msg = "/assist submit\n```\nevidence here\n```"
+        out = "".join(pipe.pipe(msg, "m", [], self._body_with_chat("chat-M")))
+        # Banner renders with "?" fallback, no crash.
+        assert "ℹ️" in out and "already" in out and "`?`" in out, \
+            f"expected no_op banner with '?' fallback; got: {out!r}"
+
