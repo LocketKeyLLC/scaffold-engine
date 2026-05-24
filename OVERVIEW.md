@@ -9971,6 +9971,170 @@ Mean MRR:          0.000
 
 ---
 
+### §17.230 Golden-set scoring switched to title-substring matching — close §17.229's slug-match-fails branch (2026-05-23)
+
+Closes the §17.230 candidate logged in §17.229. The exact `entry_id` match
+shape in `scripts/score_retrieval.py` produced a hard 0/20 against the
+§17.229 regrown corpus because topic-mode ingest stamps every entry with
+a per-run `-<8 char hash>` suffix that doesn't survive re-ingestion — even
+when the LLM-generated title is identical, the hash changes. §17.211's
+slug-match-assumption gate landed on the "fails" branch and the right next
+step was to switch the matching scheme.
+
+**Choice.** Title-substring matching with **AND-of-substrings** (every
+substring in `expected_titles_contain` must appear in a retrieved title,
+case-insensitive). Two alternatives were considered:
+
+| Option | Pros | Cons | Decision |
+|---|---|---|---|
+| Title-substring (AND) | Discriminative ("Kahn" + "algorithm" doesn't false-positive on generic algorithms docs); survives hash + minor reword drift; `golden_set.json` already carries `expected_titles_contain` for all 20 pairs | Substring lists must be curated to be discriminative | **shipped** |
+| Title-substring (OR) | Maximum permissive; trivial to write | False-positives explode (a single token like "algorithm" matches dozens of unrelated entries) | rejected |
+| Content-hash | Most robust (re-derives from canonical text, drift-proof) | Requires every entry's `content_hash` stamped at ingest + a re-fetch path; non-trivial wiring across all 8 producer types | deferred — option for §17.231+ if substring proves insufficient |
+
+**`expected_titles_contain` was already populated** for every one of the 20
+goldens (set during the 2026-05-08 W.8 rebaseline) — the field has been
+sitting there as a secondary metric while the brittle `expected_entry_ids`
+remained primary. §17.230 promotes it to primary; `expected_entry_ids`
+stays in the JSON and is reported as the `exact_id_coverage` archival
+metric so operators can see the delta against pre-§17.230 baselines
+without re-running.
+
+**`scripts/score_retrieval.py` rewrite.**
+
+| Pre-§17.230 surface | Post-§17.230 surface |
+|---|---|
+| `_recall_at_k(expected_set, retrieved, k)` | `_title_hit_at_k(expected_substrs, titles, k)` |
+| `_mrr(expected_set, retrieved)` | `_title_mrr(expected_substrs, titles)` |
+| — | `_title_matches(title, substrs)` (helper used by both above) |
+| `QueryResult.expected_ids/retrieved_ids/hit/recall_at_k/mrr` | `QueryResult.expected_titles/expected_entry_ids/retrieved_titles/retrieved_ids/title_hit_at_5/title_hit_at_10/title_mrr/exact_id_hit` |
+| `summary.coverage/mean_recall_at_5/mean_recall_at_10/mean_mrr` | `summary.coverage_at_5/coverage_at_10/mean_title_mrr/exact_id_coverage` + `schema="title_substring_v1"` for downstream consumers to gate on |
+
+The `title_hit_at_{5,10}` fields are booleans (binary coverage at the
+given top-k cutoff), not the multi-entity recall the old shape used. The
+substring pattern represents one topical target per query — a multi-entity
+recall makes no sense when the "expected set" is a pattern rather than a
+set of IDs. `coverage_at_5` = fraction of queries with at least one title
+match in top 5; same for `coverage_at_10`. `mean_title_mrr` averages
+`1/rank of first matching title` (or 0 if no match).
+
+**Why AND not OR — the load-bearing invariant.** A single golden's
+`expected_titles_contain` list (e.g. `["Kahn", "algorithm"]`) represents
+the discriminative tokens of the expected title. An OR semantic would let
+any "algorithm" title score a hit on a Kahn query — that's noise, not
+signal. The AND semantic is what makes the metric trustworthy. Pinned by
+`test_one_substring_missing_blocks_match` + `test_and_semantic_at_k` +
+`test_and_semantic_picks_first_full_match` in
+`tests/test_score_retrieval.py`.
+
+**`tests/fixtures/golden_set.json` bumped to v1.2.** No pair edits; only
+metadata:
+
+- `version` 1.1 → 1.2
+- `updated_at` 2026-05-07 → 2026-05-23
+- `rebaseline` reshaped from single-dict to list (preserves the W.8
+  2026-05-08 entry, appends the §17.230 entry with `kb_size=685`,
+  harness/note pointing at OVERVIEW.md §17.230).
+
+**Verification — live re-run against the §17.229 regrown corpus.**
+
+```
+$ docker run --rm --network ai-network --env-file ~/scaffold-engine/.env \
+    --memory 6g --user 1000:1000 \
+    -v ~/scaffold-engine:/code:ro -v /tmp:/host-tmp -w /code \
+    scaffold-engine:dev \
+    python3 scripts/score_retrieval.py --output /host-tmp/retrieval_report_v2.json
+============================================================
+Retrieval Quality Report (§17.230 — title-substring matching)
+============================================================
+Queries:              20
+Coverage @5:          15.0%
+Coverage @10:         15.0%
+Mean MRR (title):     0.150
+Exact-id coverage:    0.0%  (archival — see §17.229)
+============================================================
+```
+
+**The three hits** (all at rank 1, identical between top-5 and top-10):
+
+| Query | Substrs | Title-match source |
+|---|---|---|
+| `how do I handle cache invalidation correctly` | `[cache, invalidation]` | Tier A source #2 (Redis caching) |
+| `HTTP compression dictionary transport feature` | `[compression, dictionary]` | Tier A source #4 (gzip vs brotli) |
+| `how does lossless compression work` | `[lossless, compression]` | Tier A source #4 (gzip vs brotli) |
+
+The other 17 queries miss because their topic source isn't in the
+corpus yet (Tier B targets — Keycloak, Bitnami Milvus, FastAPI Docker,
+Qwen3 reranker, eventual consistency, Vector telemetry, web security,
+storage quotas) or the Tier A source ingested entries under titles whose
+roots don't share substrings with the goldens (Kahn algorithm, gRPC vs
+REST, OAuth2 proxy, etc. — the LLM produced different surface forms).
+
+**Score delta against §17.229.**
+
+| Metric | §17.229 (exact-id) | §17.230 (title-substring) |
+|---|---:|---:|
+| Coverage @5  | 0.0% | **15.0%** |
+| Coverage @10 | 0.0% | **15.0%** |
+| Mean MRR     | 0.000 | **0.150** |
+| Exact-id coverage (archival) | 0.0% | 0.0% |
+
+The exact-id archival metric remains 0/20 (as expected; the hash drift
+problem still exists on that dimension and always will under topic-mode
+re-ingestion). The actionable metric — title-substring — now has signal:
+0/20 → 3/20 is real progress, and a future ingest pass landing one more
+Tier A or B target would visibly move the headline number.
+
+**Files.**
+
+- `scripts/score_retrieval.py` — rewritten scoring math (§17.230 header
+  + new helpers `_title_matches` / `_title_hit_at_k` / `_title_mrr` +
+  reshaped `QueryResult` + reshaped `summary` schema with
+  `schema="title_substring_v1"` discriminator).
+- `tests/fixtures/golden_set.json` — version 1.1 → 1.2; `updated_at`
+  refreshed; `rebaseline` reshaped to list with the §17.230 entry
+  appended. No pair content changes (the data was already correct).
+- `tests/test_score_retrieval.py` — 19 tests covering the AND-of-
+  substrings invariant, case-insensitivity, k-truncation, MRR rank
+  calculation, and score_query's preserved-archival-exact-id-hit
+  behavior. Replaces the 8 pre-§17.230 tests that targeted the old
+  `_recall_at_k` / `_mrr` API (those helpers are removed).
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_score_retrieval.py -v --timeout=30
+…
+============================== 19 passed in 3.05s ==============================
+```
+
+**Open follow-ups.**
+
+1. **§17.231 candidate** (originally logged in §17.229) — Truncation
+   source #6 retry. Now actionable under §17.230's new metric — a
+   successful retry would add a 4th title-match (`truncation`
+   substring → "truncation-in-mathematics-and-computer-science" or
+   "truncation-definition" entry). Held; cheap to schedule when the
+   user wants the +1/20.
+2. **§17.232 candidate** (originally logged in §17.229) — Tier B
+   re-ingest (keycloak / bitnami-milvus / fastapi-docker-image /
+   eventual-consistency / vector-telemetry / docker-image-qwen3-
+   reranker-vllm / web-security / content-security-policy). Held.
+   Each Tier B source landed would visibly move the headline coverage;
+   estimated ceiling with all of Tier B + the Truncation retry is ~12/20
+   (60%) because some goldens (g002 `topological sorting`, g006 `Kahn
+   algorithm vs DFS`, g010 `gRPC vs REST`, g014 `OAuth2 proxy`) target
+   Tier A sources that landed entries under different surface forms.
+3. **Sidecar provenance-fetch Postgres auth fail** — still observed
+   (§17.229 logged it). Decorative-only at score time; not blocking. A
+   separate small commit if it bothers operators.
+4. **`test_retrieval_golden.py` ↔ `golden_set.json` duplication** —
+   `test_retrieval_golden.py` keeps its own hardcoded `GOLDEN_QUERIES`
+   list (7 entries, substring-matching) separate from the 20-pair JSON.
+   Unifying would let one source of truth drive both the regression
+   tests and the score harness. Out of scope for §17.230; logged.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
