@@ -10135,6 +10135,217 @@ $ docker exec scaffold-orchestrator pytest tests/test_score_retrieval.py -v --ti
 
 ---
 
+### §17.231 Truncation source retry — ingest succeeded, score unchanged; surface-form drift exposed (2026-05-23)
+
+Closes the §17.231 candidate logged in §17.229 + §17.230. Re-ran the
+Truncation source (Tier A #6) that timed out at the 60-min curl cap in
+§17.229, this time with `--max-time 5400` (90 min). The retry completed
+cleanly in 71 min wall (`duration_ms=4265262`). The §17.230 title-substring
+score stayed flat at 3/20 — and the diagnostic that explains why is the
+material finding of this entry.
+
+**Ingest outcome.**
+
+| Metric | §17.229 (timed out) | §17.231 (this retry) |
+|---|---|---|
+| Wall duration | 60 min cap hit | **71 min · completed** |
+| URLs searched | unknown (timeout) | 40 |
+| Queries decomposed | unknown | 4 |
+| Entries extracted | 0 (timed out before iteration_complete) | 68 |
+| Entries ingested | 0 | **47** (new=47, versioned=0, rejected=1, skipped_hash=16) |
+| Milvus `entry_count` | 685 (no change) | **685 → 732 (+47)** |
+
+Direct evidence (curl-captured SSE summary):
+
+```
+event: research_complete
+data: {"session_id": "f94630a4-93a3-488d-a4d7-7f5e78af6ac3",
+       "topic": "Truncation vs rounding in computer science and mathematics",
+       "mode": "topic", "domain": "eng", "depth": "shallow",
+       "duration_ms": 4265262, "iterations": 1,
+       "total_entries": 68, "total_ingested": 47,
+       "new": 47, "versioned": 0, "rejected": 1, "skipped_hash": 16,
+       "total_urls_searched": 40, "total_queries": 4, ...}
+```
+
+**Score outcome — coverage stayed flat at 3/20.**
+
+| Metric | post-§17.230 (kb=685) | post-§17.231 (kb=732) |
+|---|---:|---:|
+| Coverage @5 | 15.0% | 15.0% |
+| Coverage @10 | 15.0% | 15.0% |
+| Mean title MRR | 0.150 | 0.150 |
+| Exact-id coverage (archival) | 0.0% | 0.0% |
+
+The expected uplift was g004 (`when should I truncate versus round numbers`,
+`expected_titles_contain=["truncation"]`) flipping from miss to hit, taking
+coverage to 4/20 (20%). It did not. Score sidecar returned 3 results for
+g004:
+
+```
+1. HTML performance optimization
+2. Vector database - Wikipedia
+3. Vector database - Wikipedia
+```
+
+— none containing "truncation".
+
+**Root cause — surface-form drift in LLM title extraction.**
+
+Direct Milvus query against the `eng` partition (302 entries sampled,
+including the 47 fresh Truncation ingests): of the most recent 30 entries
+(all from this session), the titles look like:
+
+| Title (sample) |
+|---|
+| Accurate computation of principal branch of the Lambert W function with standard C math library |
+| Can I discard the complex portion of results generated with scipy.linalg.logm? |
+| Can one emulate bitwise arithmetic "and" or "or" using only non-bitwise operations? |
+| Compute (a*b)%n FAST for 64-bit unsigned arguments in C(++) on x86-64 platforms? |
+| Efficient faithfully-rounded implementation of error function erff() |
+| How can I generalize Diamond Tiling to higher dimensions? |
+| How does C# implicitly cast terms of integral types to terms of double? |
+| Internationalization |
+| Is there a way to simulate multithreading in DOS, …  |
+
+None of these contain "truncation" — even though they all came from the
+"Truncation vs rounding in computer science and mathematics" topic.
+Substring audit confirms: 3 of 302 sampled entries contain "truncat"
+case-insensitive (`Are there any programming languages in which int()
+rounds (rather than truncates)?`, `datetime2 truncate to the last full 30
+minute period`, `OffsetDateTime nano truncate after save do DB`) — and
+those are likely older entries, not from this session.
+
+The LLM-extraction step (the `RECORD_ENTRIES` tool call inside
+`_extract_entries`) is generating titles that **summarize the source
+page** (a StackOverflow question's literal title, a Wikipedia article's
+name, a forum post's subject) rather than **summarize the relationship to
+the research topic**. SearXNG returned 40 URLs covering rounding /
+floating-point / integer casting / numerical analysis — all relevant to
+truncation as a concept — but the per-page extraction inherits the
+page's own surface wording, not the topic's. So the page about Lambert W
+function gets ingested as "Lambert W function" rather than something like
+"Truncation considerations in Lambert W evaluation".
+
+This is a deeper variant of the §17.211 slug-match brittleness. §17.230
+fixed the hash-suffix half (`-054cfbad` doesn't survive re-ingest); §17.231
+exposes the title-root half: even the title's lexical roots drift from
+what the queried topic suggests. The current `golden_set.json` substrings
+were calibrated against the §17.211 archaeology, which assumed topic-mode
+titles would carry the topic's own words. They don't.
+
+**Decision — no change to scoring or goldens in this commit.**
+
+Three reasons:
+
+1. The §17.230 metric is still working as designed. AND-of-substrings was
+   the correct lighter-weight choice over content-hash for §17.230's scope.
+   The new finding is about the **goldens' substring lists**, not the
+   matcher.
+2. Loosening individual substrings (e.g., g004 → `["truncation",
+   "round", "rounding", "floating-point", "integer"]` with OR semantic)
+   would surface entries semantically, but at the cost of false positives
+   that the §17.230 AND semantic was specifically designed to avoid.
+   Re-introducing OR weakens the discriminative signal.
+3. A proper fix is one of: (a) hand-curate every golden's substr list
+   against the LLM's actual title patterns (manual labour; per-pair); (b)
+   ship content-hash matching (deferred per §17.230 — requires per-
+   producer raw_upstream_hash wiring already started in §17.218–§17.220
+   for GH/HF/arXiv but not topic-mode SearXNG-derived pages); (c) change
+   the extraction prompt to bias titles toward the topic rather than the
+   source page (structural — affects all future ingests).
+
+None of (a)/(b)/(c) fit a quick follow-up; logged as §17.232 candidates.
+§17.231's commit ships only the OVERVIEW entry — the ingest already
+landed; the diagnostic is the deliverable.
+
+**Adjacent issue — orchestrator crashes on direct `/rag`.**
+
+During the §17.231 diagnostic, three direct `curl POST /rag` calls (with
+queries `truncation`, `truncation in mathematics`, and the original g004
+phrasing) each triggered an orchestrator restart. Cluster behavior:
+
+- Exit code 0 (graceful), `OOMKilled: false` per `docker inspect`. Not
+  a memory limit.
+- Restarts happened ~25–60 s after the request. Each request returned
+  empty (`real 3m13s` curl with 5-min cap, zero bytes received).
+- Orchestrator logs show `search_executed: vector_hits=20 keyword_hits=3
+  query='truncation'` then immediately the reranker `Batches: 0%|...`
+  bar, then a fresh lifespan startup banner ~7s later. The reranker
+  batch step is where the worker dies.
+- `RestartCount` 0 → 2 across the §17.231 session.
+
+Pattern strongly suggests the §17.179 / §17.169 keepalive-watchdog
+(`[run_server] installing keepalive patch (idle=10s intvl=5s cnt=3,
+detect ~25s)`) is shutting down a worker that's busy in the reranker's
+sync `predict()` call and not pumping the event loop fast enough to send
+HTTP keepalives. The score sidecar's 6g-memory single-process
+invocations (used throughout §17.230 + §17.231) ran the same reranker
+against 20 queries without issue because they had no HTTP server / no
+keepalive layer.
+
+This is **separate from §17.231's scope**. Logged as a §17.232 candidate:
+"Reranker `Batches: 0%|...` step starves the keepalive heartbeat,
+worker is killed mid-request; investigate `_get_cross_encoder().predict()`
+wrapping (likely needs `run_in_executor` despite already being in an
+async context, OR a keepalive-aware timeout exemption)."
+
+**Files.** No code/test changes. OVERVIEW.md only.
+
+**Verification.**
+
+```
+$ curl -s http://localhost:8000/health | jq '.checks.milvus.entry_count'
+732
+
+$ docker run --rm --network ai-network --env-file ~/scaffold-engine/.env \
+    --memory 6g --user 1000:1000 \
+    -v ~/scaffold-engine:/code:ro -v /tmp:/host-tmp -w /code \
+    scaffold-engine:dev \
+    python3 scripts/score_retrieval.py --output /host-tmp/retrieval_report_v3.json
+============================================================
+Retrieval Quality Report (§17.230 — title-substring matching)
+============================================================
+Queries:              20
+Coverage @5:          15.0%
+Coverage @10:         15.0%
+Mean MRR (title):     0.150
+Exact-id coverage:    0.0%  (archival — see §17.229)
+============================================================
+```
+
+`tests/test_score_retrieval.py` unchanged from §17.230 baseline: still
+19 passing.
+
+**Open follow-ups.**
+
+1. **§17.232 candidate A — Tier B re-ingest.** Now lower-confidence as a
+   coverage lever given the §17.231 finding (LLM-derived titles drift
+   away from goldens' substr lists). Tier B sources would land entries
+   under similarly drifted titles; expected uplift ≪ what §17.211's
+   table estimated. Hold pending a goldens-or-extraction fix.
+2. **§17.232 candidate B — goldens substring re-curation.** Manual pass
+   over every golden to add fallback substrings against the LLM's actual
+   ingested title patterns. Cheap; per-pair; would move the headline
+   number. But weakens the AND semantic's discriminative power and pins
+   the test fixture to one re-ingest's specific titles.
+3. **§17.232 candidate C — extraction prompt rewrite.** Bias
+   `RECORD_ENTRIES` to produce titles relating ingested content **to
+   the research topic** rather than echoing the source page's surface
+   form. Structural — affects all future topic-mode ingests; needs
+   regression-test scaffolding so the title quality doesn't itself
+   degrade.
+4. **§17.232 candidate D — orchestrator `/rag` reranker keepalive
+   starvation.** Each direct `/rag` call in §17.231's diagnostic
+   triggered a graceful worker restart at the reranker batch step.
+   Likely the keepalive-watchdog killing a sync-blocking
+   `CrossEncoder.predict()`. Separate concrete defect; high-impact
+   because operators using OWUI hit `/rag` constantly. Investigate
+   `app/modules/rag_pipeline.py::_rerank` and `app/rerankers.py`
+   `predict()` wrapping.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
