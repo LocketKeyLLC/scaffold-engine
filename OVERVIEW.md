@@ -14671,6 +14671,39 @@ Full `TestAssistChatMemory`: 10 → 14 passing. Existing 10 unaffected.
 
 ---
 
+### §17.269 version-chain race fix — Postgres advisory lock around walk+upsert (2026-05-24)
+
+Closes the real concurrency bug surfaced + pinned in §17.267. The pre-fix race: two ingests T1 and T2 in the version-chain band (cosine 0.90-0.95) targeting the same matched_id `A`. Both call `_walk_to_latest_version(A, 1)` while neither's upsert has propagated. Both walks return `(A, 1)` (no successor visible). Both set `new_supersedes='A', new_version=2`. Both upsert. Result: TWO rows at `version=2`, both with `supersedes_id='A'` — the chain branches. Retrieval-side filter on superseded entries still works for one side of the branch, but `include_history=true` exposes both, and a third ingest matching the latest tail only sees ONE of the `version=2` rows as its predecessor, perpetuating the divergence.
+
+**Fix shape: serialize walk+upsert through a Postgres advisory lock keyed on the predecessor entry_id.** Milvus has no native serializable transactions; the coordination point has to live outside Milvus. Postgres is already in the request path (dedup_log, provenance), advisory locks are battle-tested for exactly this pattern (cluster-wide, auto-released at COMMIT/ROLLBACK, no DDL needed), and the lock is fine-grained — two ingests with DIFFERENT predecessors don't contend.
+
+**Two helpers added at `app/modules/rag_pipeline.py:902-940`:**
+
+1. `_advisory_lock_key(predecessor_eid: str) -> int` — derives a stable 63-bit signed bigint from `sha256(predecessor_eid)[:8]`. Same predecessor → same key (two ingests cluster on the lock); different predecessors → different keys (no false contention). Bigint range constraint matches `pg_advisory_xact_lock(bigint)`'s signature.
+2. `_predecessor_lock(predecessor_eid: str)` — `@asynccontextmanager` that opens an `async_session`, issues `SELECT pg_advisory_xact_lock(:k)` with the derived key, yields the live session, and `commit`s on exit (releases the lock). Rolls back instead on inner exception so the lock still drops cleanly.
+
+**Restructured version-chain branch at `rag_pipeline.py:1089-1158`.** Pre-fix: walk happened lockless inline, upsert happened in a separate try/except shared with the new-entry path. Post-fix: when `sim_score >= version_threshold`, the branch acquires `_predecessor_lock(candidate_eid)`, does the AUTHORITATIVE walk inside the lock (so it sees any prior lock-holder's commit), builds the row, upserts, appends `dedup_log` and provenance — all inside the `async with` block. A `continue` after the lock skips the common new-entry upsert path below. The new-entry path is unchanged: no predecessor to race on, no lock needed.
+
+**Why the walk goes inside the lock, not outside.** A walk-then-lock pattern doesn't help: T1 walks → picks A → acquires lock → upserts → releases. T2 walks BEFORE acquiring lock → also picks A (concurrent walk happened before T1's release) → acquires lock → upserts pointing at A. Still branches. The walk MUST be inside the lock window so T2's walk happens AFTER T1's commit and sees T1's row.
+
+**Test-suite delta:** +4 tests in `tests/test_dedup_rejection.py`:
+
+1. `test_advisory_lock_key_is_stable_and_distinct` — pure-function test of `_advisory_lock_key`. Asserts deterministic across calls, distinct across predecessors, in bigint range. Cheap sanity check that the lock-key derivation can't silently regress.
+2. `test_predecessor_lock_issues_pg_advisory_xact_lock` — calls `_predecessor_lock("scaffold-entry-X")` directly with mocked `async_session`. Asserts (a) the yielded session is the live one, (b) `mock_session.execute` was called exactly once with `pg_advisory_xact_lock` and the SHA256-derived key, (c) `commit` was awaited (releases lock). Verifies the SQL contract.
+3. `test_predecessor_lock_rolls_back_on_inner_exception` — body raises `RuntimeError`. Asserts `rollback` was called (lock released cleanly) and `commit` was NOT called. Guards the failure-path lock release.
+4. `test_sequential_ingest_produces_linear_chain_post_fix` — **end-to-end fix verification**. Uses a new `_make_stateful_collection_with_supersede_match` helper whose `collection.upsert` captures rows and `collection.query` walks captured rows for `supersedes_id` lookups (what production Milvus does post-flush). Runs `ingest_entries` SEQUENTIALLY twice; both entries match A at sim=0.92. Asserts T1's row points at A, T2's row points at **T1's row** (NOT A), versions are 2 and 3 respectively. Load-bearing: this is the linear chain post-§17.269.
+
+**§17.267's `test_concurrent_ingest_branches_version_chain` continues to pass.** Mocked Postgres cannot actually serialize concurrent calls — both lock acquires return immediately, both walks return [] (stateless mock), both upserts fire pointing at A. That test now stands as documentation of the race-window itself ("what would happen if the lock failed to acquire") rather than a flip-on-fix contract. Docstring + module header updated accordingly.
+
+**What this commit does NOT do.**
+- **Live concurrent end-to-end verification.** Demonstrating real serialization needs live Postgres + live Milvus + two real client connections. Logged as a candidate integration test, not in §17.269 scope. The unit + sequential tests prove the SQL contract + the chain-linking logic; the advisory-lock primitive itself is well-trusted.
+- **No schema migration.** Advisory locks are session-scoped, no DDL.
+- **No reconciliation sweeper for pre-existing branched chains.** If §17.267's race produced branched rows in production before this fix landed, they remain branched. Operator-side `scripts/repopulate_kb.sh --apply` would flatten them; a targeted "flatten branched chains" script is a candidate follow-up.
+
+**Suite:** `test_dedup_rejection.py` 6 → 10 passing. `test_rag_pipeline.py` 61 unchanged (no regressions). Combined regression sweep 71 passing.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

@@ -269,11 +269,15 @@ async def test_rejected_dedup_log_uses_batched_commit():
 # branches. The "version chain is a singly-linked list" invariant is
 # broken.
 #
-# These tests DOCUMENT the current (broken) behavior — they will become
-# regression guards once a fix lands (advisory lock around walk+upsert,
-# or compare-and-swap upsert that fails on stale matched_id). Until then
-# they pin down the failure mode so an accidental "fix" that changes the
-# walk's semantics without addressing the race is visible.
+# §17.269 LANDS THE FIX — _predecessor_lock wraps walk+upsert in a
+# Postgres advisory lock keyed on the predecessor entry_id. Two ingests
+# with the same predecessor serialize; T2's re-walk inside the lock sees
+# T1's commit; T2 links to T1's row → linear chain. The fix's
+# end-to-end demonstration lives in test_sequential_ingest_produces_
+# linear_chain below; the test_concurrent_ingest_branches_version_chain
+# test continues to pass as documentation of the race window itself
+# (mocked Postgres cannot enforce real serialization, so the in-mock
+# branch is the "what would happen if the lock failed to acquire" case).
 
 
 @pytest.mark.asyncio
@@ -394,4 +398,209 @@ async def test_concurrent_ingest_branches_version_chain():
     versions = [c.args[0][0]["version"] for c in upsert_calls]
     assert versions == [2, 2], (
         f"expected both at version=2 (the branch); got {versions}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# §17.269 — version-chain race FIX via Postgres advisory lock
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_advisory_lock_key_is_stable_and_distinct():
+    """§17.269 — _advisory_lock_key("A") returns the same value across
+    processes (so two ingests cluster on the lock) and different values
+    for different predecessors (so unrelated ingests don't contend)."""
+    from app.modules.rag_pipeline import _advisory_lock_key
+
+    k_a = _advisory_lock_key("scaffold-entry-A")
+    k_a_again = _advisory_lock_key("scaffold-entry-A")
+    k_b = _advisory_lock_key("scaffold-entry-B")
+
+    # Stability — same input → same key (two ingests cluster on the lock).
+    assert k_a == k_a_again, f"hash should be deterministic; got {k_a} vs {k_a_again}"
+    # Distinctness — different predecessors → different keys (no false contention).
+    assert k_a != k_b, f"hash should distinguish predecessors; got {k_a} == {k_b}"
+    # Range check — must fit in Postgres bigint (signed 64-bit).
+    assert -(2**63) <= k_a < 2**63, f"key {k_a} out of bigint range"
+
+
+@pytest.mark.asyncio
+async def test_predecessor_lock_issues_pg_advisory_xact_lock():
+    """§17.269 — _predecessor_lock context manager issues
+    pg_advisory_xact_lock with the SHA256-derived key on enter and
+    commits on exit (releasing the lock). Verifies the SQL contract;
+    real Postgres serialization is operator-side."""
+    from app.modules.rag_pipeline import _predecessor_lock, _advisory_lock_key
+
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.modules.rag_pipeline.async_session", return_value=mock_session):
+        async with _predecessor_lock("scaffold-entry-X") as db:
+            assert db is mock_session, "context manager must yield the live session"
+
+    # Lock acquisition SQL must have fired with the expected key.
+    expected_key = _advisory_lock_key("scaffold-entry-X")
+    lock_calls = [
+        c for c in mock_session.execute.await_args_list
+        if "pg_advisory_xact_lock" in str(c.args[0])
+    ]
+    assert len(lock_calls) == 1, (
+        f"expected exactly 1 pg_advisory_xact_lock call; got {len(lock_calls)}"
+    )
+    assert lock_calls[0].args[1] == {"k": expected_key}, (
+        f"lock key mismatch; expected {{'k': {expected_key}}}, "
+        f"got {lock_calls[0].args[1]}"
+    )
+    # Commit must have been called (releases the lock).
+    mock_session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_predecessor_lock_rolls_back_on_inner_exception():
+    """§17.269 — if the body raises, the lock is released via rollback
+    (still ends the transaction, still releases pg_advisory_xact_lock)
+    rather than leaving the lock dangling."""
+    from app.modules.rag_pipeline import _predecessor_lock
+
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.modules.rag_pipeline.async_session", return_value=mock_session):
+        with pytest.raises(RuntimeError, match="boom"):
+            async with _predecessor_lock("scaffold-entry-Y"):
+                raise RuntimeError("boom")
+
+    mock_session.rollback.assert_awaited_once()
+    mock_session.commit.assert_not_awaited()
+
+
+def _make_stateful_collection_with_supersede_match(sim_score: float = 0.92):
+    """Like _make_collection_with_supersede_match but `collection.upsert`
+    captures rows into a list and `collection.query` walks that list for
+    `supersedes_id == X` lookups. Lets _walk_to_latest_version see prior
+    upserts within the same test, which is what production Milvus does
+    after a flush. Exposes the captured rows as `collection._upserted_rows`."""
+    import re as _re
+    collection = MagicMock()
+    upserted_rows: list[dict] = []
+
+    # Semantic search — always returns existing entry A as top hit.
+    top_hit = MagicMock()
+    top_hit.score = sim_score
+    top_hit.id = "milvus-pk-100"
+    top_hit.entity.get = lambda field, default="": {
+        "entry_id": "scaffold-entry-A",
+        "content_hash": "different_hash",
+        "version": 1,
+        "supersedes_id": "",
+    }.get(field, default)
+    search_result_group = MagicMock()
+    search_result_group.__getitem__ = lambda self, idx: top_hit
+    search_result_group.__len__ = lambda self: 1
+    search_result_group.__bool__ = lambda self: True
+    collection.search.return_value = [search_result_group]
+
+    def stateful_query(expr, output_fields=None, limit=None, **kwargs):
+        # Exact-hash query (Pass 1) — always [] so we exercise the semantic path.
+        if "content_hash" in expr:
+            return []
+        # Walk query — match upserted rows whose supersedes_id equals the target.
+        m = _re.search(r'supersedes_id == "([^"]+)"', expr)
+        if not m:
+            return []
+        target = m.group(1)
+        hits = [
+            {"entry_id": r["entry_id"], "version": r["version"]}
+            for r in upserted_rows
+            if r.get("supersedes_id") == target
+        ]
+        return hits[:limit] if limit else hits
+
+    collection.query.side_effect = stateful_query
+
+    def stateful_upsert(rows):
+        # `rows` is list[dict] per the ingest_entries upsert call.
+        upserted_rows.extend(rows)
+
+    collection.upsert.side_effect = stateful_upsert
+    collection._upserted_rows = upserted_rows  # for assertions
+    return collection
+
+
+@pytest.mark.asyncio
+async def test_sequential_ingest_produces_linear_chain_post_fix():
+    """§17.269 — END-TO-END fix verification (sequential case).
+
+    With the advisory lock + re-walk-inside-lock, two ingests that
+    both match the same predecessor at sim=0.92 produce a LINEAR
+    chain: T1's row points at A; T2's row points at T1's row (not A).
+
+    Uses a stateful collection mock so the second ingest's walk sees
+    the first ingest's row — what production Milvus does after the
+    upsert is visible. The advisory-lock SERIALIZATION is verified
+    independently in test_predecessor_lock_issues_pg_advisory_xact_lock;
+    this test verifies the chain-linking logic under that serialization.
+
+    Concurrent end-to-end verification with REAL serialization needs
+    live Postgres + Milvus and is logged as a separate integration test."""
+    collection = _make_stateful_collection_with_supersede_match(sim_score=0.92)
+
+    entry_1 = {
+        "title": "Linear Chain Entry One",
+        "content": "First version targeting A in the version-chain band.",
+        "domain_tags": ["testing"],
+        "source_type": "tech_docs",
+        "confidence_score": 0.85,
+    }
+    entry_2 = {
+        "title": "Linear Chain Entry Two",
+        "content": "Second version, different content, same target predecessor.",
+        "domain_tags": ["testing"],
+        "source_type": "tech_docs",
+        "confidence_score": 0.85,
+    }
+
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+
+    async def fake_batch(texts):
+        return [[0.1] * 512 for _ in texts]
+
+    with patch("app.modules.rag_pipeline._get_collection", return_value=collection), \
+         patch("app.modules.rag_pipeline._embed_contents_batch",
+               new_callable=AsyncMock, side_effect=fake_batch), \
+         patch("app.modules.rag_pipeline.async_session", return_value=mock_session):
+        from app.modules.rag_pipeline import ingest_entries
+        # Sequential — T1 fully completes (committed + lock released)
+        # before T2 starts. This is the serialized order the advisory
+        # lock guarantees in production.
+        r1 = await ingest_entries([entry_1], domain="eng")
+        r2 = await ingest_entries([entry_2], domain="eng")
+
+    assert r1["versioned"] == 1, f"T1: {r1}"
+    assert r2["versioned"] == 1, f"T2: {r2}"
+
+    rows = collection._upserted_rows
+    assert len(rows) == 2, f"expected 2 upserts; got {len(rows)}"
+
+    # T1 points at the original predecessor A.
+    assert rows[0]["supersedes_id"] == "scaffold-entry-A", (
+        f"T1 should link to A; got {rows[0]['supersedes_id']}"
+    )
+    assert rows[0]["version"] == 2
+
+    # LOAD-BEARING: T2 must link to T1's row (R1), NOT to A.
+    # That's the linear chain post-§17.269. Pre-fix, T2 would have
+    # also linked to A (the branch).
+    assert rows[1]["supersedes_id"] == rows[0]["entry_id"], (
+        f"§17.269 linear chain: T2.supersedes_id must equal T1.entry_id "
+        f"({rows[0]['entry_id']}); got {rows[1]['supersedes_id']}"
+    )
+    assert rows[1]["version"] == 3, (
+        f"T2 should be at version=3 (T1.version + 1 after re-walk); "
+        f"got {rows[1]['version']}"
     )

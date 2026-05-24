@@ -33,6 +33,7 @@ import hashlib
 import logging
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
@@ -899,6 +900,49 @@ def _content_hash(text_: str) -> str:
     return hashlib.sha256(normalize_cache_text(text_).encode()).hexdigest()
 
 
+def _advisory_lock_key(predecessor_eid: str) -> int:
+    """§17.269 — derive a stable 63-bit signed bigint from predecessor_eid.
+
+    Used as the key for `pg_advisory_xact_lock`. Two ingests targeting the
+    same predecessor compute the same key → serialize. Different
+    predecessors compute different keys → no contention.
+    """
+    h = hashlib.sha256(predecessor_eid.encode("utf-8")).digest()[:8]
+    return int.from_bytes(h, "big", signed=True)
+
+
+@asynccontextmanager
+async def _predecessor_lock(predecessor_eid: str):
+    """§17.269 — Postgres advisory lock keyed on a predecessor entry_id.
+
+    Yields the live AsyncSession. Lock is acquired via
+    `pg_advisory_xact_lock(key)` and held until the transaction commits
+    at `__aexit__`. Two concurrent ingests in the version-chain band
+    (cosine 0.90-0.95) targeting the same matched_id serialize through
+    this lock; different matched_ids do not contend.
+
+    The lock window MUST span: walk-forward → upsert → commit. The
+    re-walk inside the lock sees any prior holder's just-committed
+    successor row, so the next ingest links to the new tail (linear
+    chain) instead of branching from the stale predecessor.
+
+    Closes the §17.267 race documented in
+    `tests/test_dedup_rejection.py::test_concurrent_ingest_branches_version_chain`.
+    """
+    key = _advisory_lock_key(predecessor_eid)
+    async with async_session() as db:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"),
+            {"k": key},
+        )
+        try:
+            yield db
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+
 async def _walk_to_latest_version(
     collection: Collection,
     entry_id: str,
@@ -1087,27 +1131,74 @@ async def ingest_entries(
                     stats["rejected"] += 1
                     continue
                 elif sim_score >= version_threshold:
-                    # Walk forward to latest version to avoid mid-chain pointers.
+                    # §17.269 — version-chain entries do walk + upsert
+                    # inside the predecessor lock so two concurrent ingests
+                    # targeting the same matched_id serialize. The re-walk
+                    # inside the lock sees the prior holder's commit, so
+                    # the chain stays LINEAR instead of branching.
+                    # `continue` at the end of the lock block skips the
+                    # common upsert path below; new-entry path falls through.
                     candidate_eid = top_hit.entity.get("entry_id", str(top_hit.id))
                     candidate_version = int(top_hit.entity.get("version", 1))
-                    latest_eid, latest_version = await _walk_to_latest_version(
-                        collection, candidate_eid, candidate_version, safe_domain
-                    )
-                    new_version = latest_version + 1
-                    new_supersedes = latest_eid
                     version_sim_score = sim_score
-                    logger.info(
-                        "version_chain_linked: v%d supersedes='%s' sim=%.4f title='%s'",
-                        new_version, latest_eid, sim_score, p["title"][:50],
-                    )
-                    # §17.172 — DO NOT append the 'versioned' dedup_log row
-                    # here. The pre-§17.172 code wrote it eagerly and broke
-                    # the invariant when the follow-up Milvus upsert failed.
-                    # The append now happens inside the upsert try-block
-                    # below, gated on success of collection.upsert().
+                    async with _predecessor_lock(candidate_eid):
+                        # Authoritative walk happens HERE, inside the lock.
+                        # Pre-§17.269 the walk was lockless and the result
+                        # raced with concurrent upserts (see §17.267 docs).
+                        latest_eid, latest_version = await _walk_to_latest_version(
+                            collection, candidate_eid, candidate_version, safe_domain
+                        )
+                        new_version = latest_version + 1
+                        new_supersedes = latest_eid
+                        logger.info(
+                            "version_chain_linked: v%d supersedes='%s' sim=%.4f title='%s'",
+                            new_version, latest_eid, sim_score, p["title"][:50],
+                        )
+                        _slug = re.sub(r"[^a-z0-9]+", "-", p["title"].lower()).strip("-")[:60]
+                        topic_slug = _slug or "untitled"
+                        entry_id = f"scaffold-{topic_slug}-{p['ch'][:8]}"
+                        row = [{
+                            "entry_id": entry_id,
+                            "title": p["title"],
+                            "canonical_text": p["content"],
+                            "domain": domain,
+                            "domain_tags": p["domain_tags"],
+                            "confidence_score": float(p["confidence"]),
+                            "source_type": p["source_type"],
+                            "source_url": p["source_url"],
+                            "content_hash": p["ch"],
+                            "model_id": settings.model_embedder_id,
+                            "version": new_version,
+                            "supersedes_id": new_supersedes,
+                            "created_at": now,
+                            "updated_at": now,
+                            "expires_at": compute_expires_at(p["source_type"], now),
+                            "dense_vector": vector,
+                        }]
+                        try:
+                            await loop.run_in_executor(
+                                None, lambda r=row: collection.upsert(r)
+                            )
+                            stats["versioned"] += 1
+                            # §17.172 — dedup_log 'versioned' append happens
+                            # AFTER the upsert succeeds (gated). Tuple shape
+                            # mirrors the rejection branch above.
+                            dedup_log_writes.append(
+                                (p["ch"], new_supersedes, version_sim_score, "versioned")
+                            )
+                            if p["provenance"] or p["raw_upstream_hash"]:
+                                provenance_writes.append(
+                                    (entry_id, p["provenance"] or {}, p["raw_upstream_hash"])
+                                )
+                        except Exception as e:
+                            logger.warning("ingest_upsert_failed: %s", e)
+                    # Lock released; row recorded. Skip the new-entry path.
+                    continue
         except Exception as e:
             logger.debug("semantic_dedup_failed: %s", e)
 
+        # §17.269 — only NEW entries (no predecessor) reach here. Version-
+        # chain entries took the lock + upsert path above and `continue`d.
         _slug = re.sub(r"[^a-z0-9]+", "-", p["title"].lower()).strip("-")[:60]
         topic_slug = _slug or "untitled"
         entry_id = f"scaffold-{topic_slug}-{p['ch'][:8]}"
@@ -1135,23 +1226,7 @@ async def ingest_entries(
             await loop.run_in_executor(
                 None, lambda r=row: collection.upsert(r)
             )
-            if new_supersedes:
-                stats["versioned"] += 1
-                # §17.172 — dedup_log 'versioned' append now happens HERE
-                # (post-upsert success), gated on the upsert above. Pre-fix
-                # this INSERT ran before the upsert, so an upsert failure
-                # left the audit ledger claiming a version chain that
-                # didn't materialize. Tuple shape mirrors the rejection
-                # branch; uses version_sim_score captured in the supersede
-                # branch in the dedup loop above.
-                dedup_log_writes.append(
-                    (p["ch"], new_supersedes, version_sim_score, "versioned")
-                )
-            else:
-                stats["new"] += 1
-            # Provenance is written when EITHER the producer supplied a
-            # provenance dict OR a raw_upstream_hash. Either alone is
-            # enough to populate a row; both are common pairings.
+            stats["new"] += 1
             if p["provenance"] or p["raw_upstream_hash"]:
                 provenance_writes.append((entry_id, p["provenance"] or {}, p["raw_upstream_hash"]))
         except Exception as e:
