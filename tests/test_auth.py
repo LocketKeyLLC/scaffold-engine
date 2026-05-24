@@ -111,3 +111,83 @@ async def test_explicit_auth_disabled_returns_empty(_api_key_unset):
     """
     result = await _api_key_unset.require_api_key(_mk_request("/dag/abc"), key=None)
     assert result == ""
+
+
+# ===========================================================================
+# §17.266 — _AUTH_EXEMPT_PREFIXES regression tests (test-gap from §17.258)
+# ===========================================================================
+#
+# The /web/ + /static/ prefix bypass is security-sensitive: any future
+# change that adds /admin/* or drops a trailing slash would silently
+# expose authenticated endpoints. Pre-§17.266 the prefix logic at
+# auth.py:54 had no test coverage — only the exact-path /health bypass
+# was guarded.
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("path", [
+    "/web/",                # bare prefix
+    "/web/index.html",      # one segment
+    "/web/static/css/main.css",  # nested
+    "/static/",             # bare prefix
+    "/static/css/app.css",  # nested
+    "/static/js/bundle.min.js",
+])
+async def test_exempt_prefix_paths_bypass_without_key(_api_key_set, path):
+    """Every path under /web/ and /static/ must bypass auth WITHOUT a key.
+    The native web UI and its CSS load from a browser that doesn't carry
+    the X-API-Key header — embedded SDK Client supplies the key on the
+    loopback HTTP call to the real endpoints."""
+    result = await _api_key_set.require_api_key(_mk_request(path), key=None)
+    assert result == "", f"path {path!r} must bypass auth without a key"
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("path", [
+    # §17.266 — prefix-confusable paths that must NOT bypass. If someone
+    # ever changes _AUTH_EXEMPT_PREFIXES to ("/web", "/static") (dropping
+    # the trailing slash), every entry below would slip through.
+    "/webhook",                  # starts with /web but is a real endpoint
+    "/webhooks/incoming",        # /webhooks plural
+    "/staticfile",               # starts with /static but is a real endpoint
+    "/statics",                  # /statics plural (hypothetical)
+    "/admin/web/",               # /web appears mid-path
+    "/admin/static/",            # /static appears mid-path
+    "/api/v1/web",               # /web as a final segment, no trailing slash
+])
+async def test_prefix_confusable_paths_require_key(_api_key_set, path):
+    """Paths that LOOK like they might bypass but don't. Guards against
+    a future maintainer dropping the trailing slash on the exempt prefix
+    tuple — which would silently exempt /webhook, /staticfile, etc."""
+    with pytest.raises(HTTPException) as exc_info:
+        await _api_key_set.require_api_key(_mk_request(path), key=None)
+    assert exc_info.value.status_code == 401, (
+        f"path {path!r} must require auth (would slip through if "
+        f"_AUTH_EXEMPT_PREFIXES dropped trailing slashes)"
+    )
+
+
+@pytest.mark.smoke
+async def test_exempt_prefix_does_not_validate_key_when_present(_api_key_set):
+    """A request that hits an exempt prefix WITH a (wrong) key still
+    bypasses — the prefix check fires before key validation. Locks in
+    that the exempt prefixes are unconditional, not "exempt-if-no-key"."""
+    result = await _api_key_set.require_api_key(
+        _mk_request("/web/index.html"), key="totally-wrong-key",
+    )
+    assert result == "", "exempt prefix must bypass even when a wrong key is supplied"
+
+
+@pytest.mark.smoke
+async def test_exempt_prefixes_set_shape_is_loadable(_api_key_set):
+    """Sanity: the constant is iterable as a tuple of strings, every
+    entry ends with '/'. Guards against typos like ``"/web"`` (missing
+    slash) sneaking in."""
+    prefixes = _api_key_set._AUTH_EXEMPT_PREFIXES
+    assert isinstance(prefixes, tuple), f"expected tuple, got {type(prefixes)}"
+    for p in prefixes:
+        assert isinstance(p, str), f"prefix {p!r} is not a string"
+        assert p.endswith("/"), (
+            f"prefix {p!r} missing trailing '/' — would match too broadly "
+            f"(e.g. /web matches /webhook). See §17.266."
+        )

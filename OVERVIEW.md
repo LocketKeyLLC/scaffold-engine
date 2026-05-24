@@ -14584,6 +14584,27 @@ Comment is correct; appended a §17.265 block with the exact verification comman
 
 ---
 
+### §17.266 `_AUTH_EXEMPT_PREFIXES` regression tests — close §17.258 test-gap #1 (2026-05-24)
+
+§17.258 flagged five test gaps; this entry closes the first. `tests/test_auth.py` had no coverage for `_AUTH_EXEMPT_PREFIXES = ("/web/", "/static/")` — the prefix-based bypass that lets the browser-facing native web UI load without an `X-API-Key` header. Existing tests only guarded `_AUTH_EXEMPT_PATHS` (the exact-match `/health`, `/`, `metrics_path` set). A future maintainer who:
+- Added `/admin/*` to the exempt prefixes by mistake, OR
+- Dropped the trailing slash (`"/web"` instead of `"/web/"`), thereby silently exempting `/webhook`, `/staticfile`, etc.
+
+…would have shipped that change with green CI. Tests added in this commit catch both classes of regression.
+
+**Test-suite delta:** +15 tests in `tests/test_auth.py`:
+
+1. **`test_exempt_prefix_paths_bypass_without_key`** (6 parametrized cases) — `/web/`, `/web/index.html`, `/web/static/css/main.css`, `/static/`, `/static/css/app.css`, `/static/js/bundle.min.js`. Each asserts `require_api_key(req, key=None)` returns `""` (the success sentinel for bypass paths).
+2. **`test_prefix_confusable_paths_require_key`** (7 parametrized cases) — the load-bearing negative cases: `/webhook`, `/webhooks/incoming`, `/staticfile`, `/statics`, `/admin/web/`, `/admin/static/`, `/api/v1/web`. Every one would silently bypass if someone dropped the trailing slash in `_AUTH_EXEMPT_PREFIXES`. Each asserts `HTTPException` with `status_code=401`.
+3. **`test_exempt_prefix_does_not_validate_key_when_present`** — `/web/index.html` with a (wrong) key still bypasses; the prefix check fires before key validation. Locks in that the bypass is unconditional, not "bypass-if-no-key" — important because a misconfigured client sending the wrong key shouldn't get a confusing 401 on the web-UI route.
+4. **`test_exempt_prefixes_set_shape_is_loadable`** — sanity check that the constant is a tuple of strings AND every entry ends with `/`. This is the cheapest possible guard against the "dropped trailing slash" failure mode — even if someone forgets to add a path-level test, this shape check fires on the constant itself.
+
+Existing 5 tests unchanged. Full `test_auth.py`: 5 → 20 passing. Fixture reuse — both new test groups use the existing `_api_key_set` fixture, no new boilerplate.
+
+**Audit false-positive noted.** §17.258 also flagged "error_logging.py:43-51 — secret-redaction regex untested." Verified during §17.266 prep that `TestRedactSecrets` in `test_error_logging_middleware.py:204+` already has 12 test methods covering `_REDACT_SK`, `_REDACT_BEARER`, `_REDACT_URL_CREDS`, `_REDACT_KV`, and several no-false-positive cases. That gap was already closed pre-audit — original verification pass missed it. Subtracts one item from the §17.258 test-gap list (5 → 4 actual gaps).
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
