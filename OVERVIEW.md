@@ -14605,6 +14605,35 @@ Existing 5 tests unchanged. Full `test_auth.py`: 5 → 20 passing. Fixture reuse
 
 ---
 
+### §17.267 version-chain concurrency-race documentation tests — close §17.258 test-gap #3 (2026-05-24)
+
+§17.258's third test gap, plus a **confirmed real concurrency bug** found while writing the test. The race window:
+
+1. Existing entry A at `version=1, supersedes_id=""` (chain tail).
+2. Ingest T1: new entry with hash H1, matches A at cosine 0.92 (version-chain band 0.90-0.95). Calls `_walk_to_latest_version('A', 1)` → returns `('A', 1)` (no successor). Sets `new_supersedes='A', new_version=2`. Begins upsert.
+3. Concurrently, ingest T2 (different content, hash H2) matches A at cosine 0.93. Reaches `_walk_to_latest_version` BEFORE T1's upsert has propagated. Walk also returns `('A', 1)`. Sets `new_supersedes='A', new_version=2`. Begins upsert.
+4. Both upserts land. Result: **two distinct rows at `version=2`, both with `supersedes_id='A'`**. The chain has branched. The "version chain is a singly-linked list" invariant is violated; `_walk_to_latest_version` from A onward becomes nondeterministic — `collection.query(expr='supersedes_id == "A"', limit=1)` returns whichever Milvus surfaces first.
+
+**No synchronization currently exists** at `app/modules/rag_pipeline.py:902-938`. Same-entry concurrent ingests are not serialized by advisory lock, mutex, or compare-and-swap. The retrieval path filters superseded entries by default, so a branched chain reads as one of the two `version=2` rows being "winner" — but `include_history=true` exposes both, and a third ingest matching the latest tail will only see ONE of the version=2 rows as its predecessor, perpetuating the divergence.
+
+**Test-suite delta:** +2 tests in `tests/test_dedup_rejection.py`:
+
+1. **`test_walk_returns_same_eid_when_no_successor_exists`** — direct unit test of `_walk_to_latest_version`. Two concurrent walks via `asyncio.gather` against a mocked collection where `query` returns `[]` (no successor — the race-window state). Both walks return `('A', 1)`. The `collection.query.call_count >= 2` assertion confirms there's no in-process cache short-circuiting; both walks really did query Milvus, both really did see the no-successor state. Pins down the **race precondition**.
+
+2. **`test_concurrent_ingest_branches_version_chain`** — end-to-end race demo. Two `ingest_entries` calls via `asyncio.gather`, both targeting a collection where the semantic search returns the same matched entry A at sim=0.92. Different entry content/hashes so the Pass 1 exact-hash filter doesn't catch them. Asserts: (a) both ingests report `versioned=1`, (b) `collection.upsert` was called exactly twice, (c) **both upserts used the same `supersedes_id`** (the branch), (d) both at `version=2`.
+
+**Both tests PASS.** Test #2's pass is **the proof of the bug** — it asserts the broken behavior. When a fix lands (likely an advisory lock around walk+upsert, or a CAS upsert that fails on stale matched_id), the load-bearing assertion will need to flip from "both supersedes_id equal" to "exactly one upsert succeeded; the other was rejected or retried onto the new tail." Test docstrings document the flip-on-fix contract explicitly.
+
+**Why pin the broken behavior rather than xfail?** xfail would let an accidental "fix" that merely changes the walk's behavior without addressing concurrency slip past CI. Asserting the specific failure mode catches that case — any walk-semantics change has to consciously update the test, which forces the author to think about whether they actually addressed the race.
+
+Full `test_dedup_rejection.py`: 4 → 6 passing. `asyncio` import added at file top (was absent).
+
+**§17.258 test-gap status after §17.267.** Closed: #1 (auth prefix bypass, §17.266), #3 (version-chain race, this entry), #4 (reranker partial-failure, §17.260). Verified false positive: #2 (secret-redaction, already had `TestRedactSecrets`). Remaining: #5 (`_assist_next` + `_assist_submit` malformed-JSON tests — `_assist_start` was already covered in §17.259).
+
+**Out-of-scope-by-design but logged.** The race FIX is a separate §-entry candidate. Options: (a) advisory lock keyed on matched_id across walk+upsert, (b) optimistic CAS upsert that rejects on stale predecessor, (c) post-hoc reconciliation sweeper that flattens branched chains. Decision deferred to operator; tests stand as the regression guard either way.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
