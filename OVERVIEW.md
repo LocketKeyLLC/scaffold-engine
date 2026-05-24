@@ -11469,6 +11469,120 @@ the first load anyway).
 
 ---
 
+### §17.239 Harness sidecars share the orchestrator HF cache + go offline — close §17.238 candidate A (2026-05-24)
+
+Closes §17.238 candidate A — "`HF_HUB_OFFLINE=1` on harness sidecars."
+The §17.238 matrix sweep's 6th sidecar (max=10, doc_truncate=1000)
+hung indefinitely between sentence-transformers' "unauthenticated
+requests to HF Hub" warning and the "Loading weights" progress bar.
+Diagnosis: HF Hub was rate-limiting the unauthenticated account
+after 5 rapid-fire sidecars in the same session, even though every
+sidecar had the model fully cached locally — the online probe
+sentence-transformers makes on every CrossEncoder() load was the
+chokepoint, not the actual model download.
+
+**Three-line fix turned into a three-step debug — worth recording.**
+
+The §17.238 entry proposed a 2-line fix (`HF_HUB_OFFLINE=1`).
+Reality required three steps:
+
+1. **`HF_HUB_OFFLINE=1` alone broke the model load**, because the
+   sidecar's image does NOT have an image-baked HF cache —
+   pre-§17.239 sidecars were always downloading fresh from HF Hub.
+   Without the online probe and without a local cache, the model
+   can't load: coverage collapsed to 10% / 0.8 s per query
+   (fallback to RRF, no reranker active).
+2. **Sharing the `scaffold-engine_hf-cache` named volume into the
+   sidecar gives it a real local cache.** The orchestrator's
+   compose mounts that volume at `/code/.cache/huggingface` (per
+   `HF_HOME=/code/.cache/huggingface` baked into the image). Mounting
+   the same volume at the same path inside the sidecar FAILED with
+   docker `exit=125 / "read-only file system"` — the sidecar's
+   `-v $PWD:/code:ro` parent bind made it impossible to create the
+   nested mount point.
+3. **Mount the cache at a fresh path NOT under /code, then redirect
+   `HF_HOME` to point at it.** `-v scaffold-engine_hf-cache:/sidecar-hf:ro`
+   + `-e HF_HOME=/sidecar-hf` works around the nested-mount
+   restriction. sentence-transformers reads `HF_HOME` at import
+   time to locate its cache; pointing it at a sidecar-private path
+   side-steps the read-only parent.
+
+**Verification — same (max=10, doc_truncate=1000) cell that hung in
+§17.238.**
+
+| | Pre-§17.239 (no fix) | §17.239 attempt 1 (offline only, no cache mount) | §17.239 attempt 2 (cache+offline, mount at /code) | **§17.239 final (cache+offline, mount at /sidecar-hf + HF_HOME redirect)** |
+|---|---|---|---|---|
+| outcome | hung ~6 h | sidecar ran, reranker silently fell back to RRF | docker `exit=125` (ro fs collision) | **15.0% / 25.0 s/query — matches §17.235's 15%/28.5s** |
+| coverage@5 | n/a (hung) | 10.0% | n/a | **15.0%** |
+| s/query | n/a | 0.8 (RRF, not reranking) | n/a | **25.0** (consistent with §17.235's 1-D sweep) |
+
+The §17.235 baseline at this exact knob point was 15% / 28.5 s/query.
+§17.239's 25.0 s/query is 12% faster than that older measurement —
+within run-to-run variance for the Qwen3-Reranker-0.6B-seq-cls on a
+4-core CPU (~7 s/pair with variance on doc-tokenization).
+
+**Files.**
+
+- `scripts/eval_doc_truncate.py`:
+  - New `_HF_CACHE_VOLUME = "scaffold-engine_hf-cache"` module constant
+    (configurable for non-default compose project names).
+  - `_run_cell` adds three flags per sidecar:
+    `-e HF_HUB_OFFLINE=1`, `-e HF_HOME=/sidecar-hf`,
+    `-v scaffold-engine_hf-cache:/sidecar-hf:ro`.
+  - Inline comment explains the three-step debug path so a future
+    operator hitting a related symptom finds the explanation
+    inline.
+
+No app code change. No test change. Defaults unchanged.
+
+**Why the `:ro` on the cache mount.**
+
+The sidecar should never write to the orchestrator's HF cache —
+sentence-transformers can corrupt cached files mid-load if multiple
+processes write simultaneously (rare but real on this volume since
+the orchestrator may also be active). The `:ro` flag makes the
+volume read-only for the sidecar; combined with `HF_HUB_OFFLINE=1`
+nothing will try to write anyway (no fresh downloads happen). The
+combination is correctness-by-construction.
+
+**What §17.239 does NOT change.**
+
+- The image's `Dockerfile` and `HF_HOME` setting — unchanged.
+- The orchestrator's HF cache contents — unchanged.
+- The matrix data table in §17.238 — unchanged. The (10, 1000) cell
+  that was "FAIL" in §17.238 now has 15.0% / 25.0 s/query data, but
+  this matches the §17.235 entry's earlier 1-D sweep point that
+  §17.238 had already used to fill in the table. The conclusions
+  (Pareto frontier is {(5, 250), (10, 500)}; (10, 500) is on the
+  frontier; no code-default change) are unchanged.
+- Coverage of `_HF_CACHE_VOLUME` in the harness itself — hardcoded
+  default. Operators with renamed COMPOSE_PROJECT_NAME edit one line.
+  A dynamic lookup (e.g. `docker volume ls | grep hf-cache`) would
+  be more portable but adds shell-out logic for marginal benefit;
+  the default value matches the canonical setup.
+
+**Open follow-ups.**
+
+1. **§17.240 candidate A — harness pre-flight volume probe.** The
+   harness should verify `_HF_CACHE_VOLUME` exists before launching
+   the first sidecar and emit a clear "volume not found; run `make
+   build` to populate the cache" error if it doesn't. Catches the
+   COMPOSE_PROJECT_NAME-mismatch case at the front instead of
+   producing 6 confusing FAILs. ~10 lines.
+2. **`Dockerfile` cache pre-bake** — bake the CrossEncoder model
+   into the prod image at build time so a fresh deployment can run
+   harness sidecars without first booting the orchestrator to
+   populate the cache. The dev-image cycle's `pip install` already
+   pulls sentence-transformers; adding a `RUN python3 -c "from
+   sentence_transformers import CrossEncoder; CrossEncoder('…')"`
+   layer materializes the weights into the image. Trade: image
+   size grows by ~600 MB. Logged but not blocking; §17.239 works
+   for the current deployment without it.
+3. **§17.234 candidate B / §17.237 candidate C** (still open) —
+   smaller reranker model. Unchanged status.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

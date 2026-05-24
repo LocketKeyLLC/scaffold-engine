@@ -43,6 +43,12 @@ _KNOB_ENV = {
     "max_candidates": "RERANK_MAX_CANDIDATES",
 }
 
+# §17.239 — named volume holding the CrossEncoder cache. The default
+# matches what `docker compose` produces from this repo
+# (COMPOSE_PROJECT_NAME=scaffold-engine → `<project>_hf-cache`).
+# Operators who have renamed the compose project should update this.
+_HF_CACHE_VOLUME = "scaffold-engine_hf-cache"
+
 
 def _cell_filename(point: list[tuple[str, int]]) -> str:
     """File name for a (knob,value) cell — supports both 1-D and N-D."""
@@ -81,12 +87,40 @@ def _run_cell(
         "--env-file", str(env_file),
         "--memory", "6g",
         "--user", "1000:1000",
+        # §17.239 — share the orchestrator's HF cache + go offline.
+        #
+        # The orchestrator container has HF_HOME=/code/.cache/huggingface
+        # (baked into the image) and a named volume
+        # scaffold-engine_hf-cache mounted at that path. The
+        # CrossEncoder model files live there.
+        #
+        # Sidecars need to (a) mount the same volume so they see the
+        # cache, (b) override HF_HOME to point at the sidecar's mount
+        # location (we can't nest the mount under the read-only /code
+        # bind), and (c) set HF_HUB_OFFLINE=1 so sentence-transformers
+        # skips the rate-limited online probe — without OFFLINE=1
+        # every sidecar makes an unauthenticated HF Hub round-trip
+        # even when the model is cached, and after ~5 rapid sidecars
+        # HF starts 429-ing the requests and the model load hangs
+        # indefinitely (the §17.238 stall).
+        #
+        # /sidecar-hf is an arbitrary path NOT under /code; HF_HOME
+        # redirection makes sentence-transformers look there for the
+        # cache directory.
+        #
+        # Volume name is hardcoded as the default compose project
+        # would produce; if you override COMPOSE_PROJECT_NAME the
+        # mount target changes. Update _HF_CACHE_VOLUME at the top
+        # of this module if you've renamed the compose project.
+        "-e", "HF_HUB_OFFLINE=1",
+        "-e", "HF_HOME=/sidecar-hf",
     ]
     for knob, value in point:
         cmd += ["-e", f"{_KNOB_ENV[knob]}={value}"]
     cmd += [
         "-v", f"{repo_root}:/code:ro",
         "-v", f"{out_dir}:/host-tmp",
+        "-v", f"{_HF_CACHE_VOLUME}:/sidecar-hf:ro",
         "-w", "/code",
         "scaffold-engine:dev",
         "python3", "scripts/score_retrieval.py",
