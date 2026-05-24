@@ -11843,6 +11843,156 @@ No app code change. No test change. Default settings unchanged.
 
 ---
 
+### §17.242 Harness pre-flight reranker model-name freshness check — close §17.241 candidate A (2026-05-24)
+
+Closes §17.241 candidate A — "model-name freshness check." §17.241
+passes if any `models--*` directory is present in the HF cache. A
+stale cache holding the wrong reranker (e.g. `ms-marco` from a prior
+`MODEL_RERANKER` value, but not the currently-configured
+`Qwen3-Reranker-0.6B-seq-cls`) would pass §17.241 but still fail at
+model-load time — sentence-transformers in offline mode (per
+§17.239) 404s the lookup for an uncached model.
+
+**The gap §17.242 closes.**
+
+Three real-world ways a cache holds the wrong model:
+
+1. **`MODEL_RERANKER` env-var change.** Operator edits `.env` from
+   one reranker to another; the cache reflects the previous
+   download.
+2. **Image rebuild that included an explicit model in the cache
+   layer.** A future `Dockerfile` pre-bake (the §17.239 follow-up
+   candidate) that hardcodes a specific model could drift from the
+   `.env` value across deployments.
+3. **Cross-deployment volume share.** An operator backups/restores
+   the volume from a different deployment with a different reranker
+   configured.
+
+All three pass §17.241 (cache has SOME `models--*`) but fail at the
+first sidecar's CrossEncoder load.
+
+**Fix.**
+
+New `_check_hf_cache_freshness()` called from `main()` after
+`_check_hf_cache_content()`. Two-step:
+
+1. **Resolve the configured reranker.** Shell out to a tiny config-
+   read sidecar: `python3 -c "from app.config import settings;
+   print(settings.model_reranker)"` against the live `.env`. Same
+   image, same `--user 1000:1000`, no networking. ~2-3 s.
+2. **Map to the HF cache dir convention** and assert it's present:
+   ``"models--" + model.replace("/", "--")`` (HF replaces `/` with
+   `--` in cache filenames). Looks up the listing via the
+   memoized `_list_hf_cache_hub()`.
+
+On miss:
+
+```
+HF cache holds models, but not the configured reranker.
+  configured: settings.model_reranker = 'BAAI/bge-reranker-large'
+  expected cache dir: models--BAAI--bge-reranker-large
+  cached dirs in 'scaffold-engine_hf-cache': ['models--tomaarsen--Qwen3-Reranker-0.6B-seq-cls']
+
+Fix (either):
+  • Boot the orchestrator with the current MODEL_RERANKER value …
+  • Revert MODEL_RERANKER in .env to one of the cached models …
+```
+
+The error lists the actually-cached models so operators see both
+options without spelunking the volume.
+
+**Refactor — single cache-listing query memoized across §17.241 + §17.242.**
+
+Both probes need `ls /x/hub` on the volume. Pre-§17.242 each ran
+its own `docker run`, paying ~3 s twice. §17.242 introduces
+`_list_hf_cache_hub()` — a module-level memoized helper that runs
+the listing once on first call and serves subsequent calls from a
+process-local cache. §17.241 was rewritten to use it. Total probe
+overhead now ~5 s (one volume-inspect + one volume-listing + one
+config-read), down from ~8 s if each probe ran its own listing
+shellout.
+
+**Soft-fail on settings-read errors.**
+
+If the config-read sidecar fails (`.env` unreadable, image missing,
+etc.), the freshness check returns silently. Rationale: §17.240
+and §17.241 are the load-bearing checks; §17.242 is defense-in-depth.
+A false alarm here would block an operator who legitimately wants
+to run the harness in an unusual config-resolution state. The
+weaker behavior (pass-through when uncertain) loses some signal
+but preserves the operator's escape hatch.
+
+**Verification — both branches.**
+
+```
+$ # HAPPY PATH (real Qwen3 model in cache, .env points at it):
+$ python3 -c "
+> from scripts.eval_doc_truncate import (
+>     _check_hf_cache_volume, _check_hf_cache_content, _check_hf_cache_freshness,
+> )
+> _check_hf_cache_volume()
+> _check_hf_cache_content()
+> _check_hf_cache_freshness()
+> "
+# silent — all three pass
+
+$ # FAIL PATH (monkeypatched config returns BAAI/bge-reranker-large,
+$ # which is NOT in the cache; cache has only Qwen3):
+HF cache holds models, but not the configured reranker.
+  configured: settings.model_reranker = 'BAAI/bge-reranker-large'
+  expected cache dir: models--BAAI--bge-reranker-large
+  cached dirs in 'scaffold-engine_hf-cache': ['models--tomaarsen--Qwen3-Reranker-0.6B-seq-cls']
+  …
+```
+
+Live harness against the populated cache + a previously-cached cell
+runs all three probes silently and proceeds to the matrix summary
+unchanged.
+
+**Files.**
+
+- `scripts/eval_doc_truncate.py`:
+  - New `_HF_CACHE_HUB_LISTING` module-level memo + `_list_hf_cache_hub()`
+    helper.
+  - `_check_hf_cache_content()` rewritten to use `_list_hf_cache_hub()`
+    instead of running its own `docker run`.
+  - New `_check_hf_cache_freshness()` helper.
+  - One-line call from `main()` after the §17.241 content probe.
+
+No app code change. No test change. Default settings unchanged.
+
+**What §17.242 does NOT change.**
+
+- The model-version freshness check. §17.242 only verifies the
+  *directory* exists; not that the model files inside are
+  uncorrupted, the right snapshot revision, or the latest from
+  HF Hub. The orchestrator's lifespan model load would catch
+  corruption (sentence-transformers raises) — at harness time,
+  any directory match is good enough.
+- The hardcoded `_HF_CACHE_VOLUME` name. Same trade-off as
+  §17.240/§17.241; dynamic detection still has the "multiple
+  hf-cache-named volumes" disambiguation problem.
+
+**Open follow-ups.**
+
+1. **§17.243 candidate A** — Dockerfile cache pre-bake (still
+   logged from §17.239/§17.240/§17.241). Bakes the reranker model
+   into the image at build time, eliminating the "fresh deployment
+   never booted" and "wrong model cached" failure modes at the
+   image layer. Image grows ~600 MB; trade-off still TBD.
+2. **§17.234 candidate B / §17.237 candidate C** (still open) —
+   smaller reranker model. The §17.242 freshness check would catch
+   the model-swap drift automatically when an operator updates
+   `MODEL_RERANKER` and re-runs the harness without booting the
+   orchestrator first.
+
+The harness now has three layers of pre-flight defense
+(§17.240 volume / §17.241 content / §17.242 freshness) and an
+offline-cache + memoized listing pattern. Natural close on the
+harness-robustness thread.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

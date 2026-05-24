@@ -85,22 +85,22 @@ def _check_hf_cache_volume() -> None:
         )
 
 
-def _check_hf_cache_content() -> None:
-    """§17.241 — deep-verify: volume exists AND holds a real model cache.
+# §17.242 — cache the cache-listing so §17.241 + §17.242 share one
+# `docker run ls` shellout instead of paying the ~3 s round-trip twice.
+_HF_CACHE_HUB_LISTING: list[str] | None = None
 
-    §17.240 only checks that the volume exists. An empty-but-present
-    volume (manually created, or one whose contents were wiped) would
-    pass §17.240 but still produce sidecar failures at model-load time
-    — every sidecar would die at sentence-transformers' "model not
-    found in offline mode" error. Detecting the empty-volume case
-    here surfaces the same actionable diagnostic the §17.240 case
-    does.
 
-    Implementation: shell out to a tiny `docker run` that lists the
-    `hub/` subdir under the volume's mount. If no `models--*`
-    directories are present, the cache is empty and the harness
-    must fail before any sidecar fires.
+def _list_hf_cache_hub() -> list[str]:
+    """Return the names of subdirs under hub/ in the HF cache volume.
+
+    Memoized — the first call runs a docker-run that mounts the volume
+    read-only and lists hub/; subsequent calls return the cached
+    result. Raises SystemExit on unrecoverable docker-side errors
+    (those would have shown up before; this is defense-in-depth).
     """
+    global _HF_CACHE_HUB_LISTING
+    if _HF_CACHE_HUB_LISTING is not None:
+        return _HF_CACHE_HUB_LISTING
     try:
         proc = subprocess.run(
             ["docker", "run", "--rm",
@@ -116,10 +116,23 @@ def _check_hf_cache_content() -> None:
             f"HF cache volume '{_HF_CACHE_VOLUME}' exists but the 'hub/' "
             f"subdir is unreadable.\n  stderr: {proc.stderr.strip()}"
         )
-    has_models = any(
-        line.startswith("models--")
-        for line in proc.stdout.splitlines()
-    )
+    _HF_CACHE_HUB_LISTING = proc.stdout.split()
+    return _HF_CACHE_HUB_LISTING
+
+
+def _check_hf_cache_content() -> None:
+    """§17.241 — deep-verify: volume exists AND holds a real model cache.
+
+    §17.240 only checks that the volume exists. An empty-but-present
+    volume (manually created, or one whose contents were wiped) would
+    pass §17.240 but still produce sidecar failures at model-load time
+    — every sidecar would die at sentence-transformers' "model not
+    found in offline mode" error. Detecting the empty-volume case
+    here surfaces the same actionable diagnostic the §17.240 case
+    does.
+    """
+    listing = _list_hf_cache_hub()
+    has_models = any(name.startswith("models--") for name in listing)
     if not has_models:
         raise SystemExit(
             f"HF cache volume '{_HF_CACHE_VOLUME}' is empty — no\n"
@@ -131,6 +144,64 @@ def _check_hf_cache_content() -> None:
             f"     the CrossEncoder model:\n"
             f"       docker compose up -d scaffold-orchestrator\n"
             f"       # wait for /health to report 'healthy'\n"
+        )
+
+
+def _check_hf_cache_freshness() -> None:
+    """§17.242 — verify the cache holds the CONFIGURED reranker model.
+
+    §17.241 passes if any `models--*` directory is present, but a
+    stale cache that holds e.g. ms-marco from a prior MODEL_RERANKER
+    value but NOT the currently-configured Qwen3-Reranker would
+    still fail at model-load time — sentence-transformers in offline
+    mode would 404 the lookup.
+
+    Resolves MODEL_RERANKER from the live settings (via a tiny
+    config-read sidecar) and asserts the corresponding HF cache
+    directory (`models--<org>--<model>`) is present in the volume.
+    On miss, surfaces the exact mismatch + remediation options.
+
+    Soft-fails on settings-read errors (returns silently): the
+    common cause is .env being unreadable in the sidecar context,
+    and §17.241's coarser check would have flagged a totally-empty
+    cache already. This check is the third layer of defense; not
+    the only one.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    env_file = repo_root / ".env"
+
+    try:
+        cfg = subprocess.run(
+            ["docker", "run", "--rm",
+             "--env-file", str(env_file), "--user", "1000:1000",
+             "-v", f"{repo_root}:/code:ro", "-w", "/code",
+             "scaffold-engine:dev",
+             "python3", "-c", "from app.config import settings; print(settings.model_reranker)"],
+            capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        return  # docker missing — §17.240/§17.241 caught it
+    if cfg.returncode != 0 or not cfg.stdout.strip():
+        # Couldn't determine the configured reranker — be conservative
+        # and skip the freshness check rather than false-alarm.
+        return
+    model = cfg.stdout.strip().splitlines()[-1]  # last line guards against config warnings
+    expected = "models--" + model.replace("/", "--")
+    listing = _list_hf_cache_hub()
+    if expected not in listing:
+        raise SystemExit(
+            f"HF cache holds models, but not the configured reranker.\n"
+            f"  configured: settings.model_reranker = {model!r}\n"
+            f"  expected cache dir: {expected}\n"
+            f"  cached dirs in '{_HF_CACHE_VOLUME}': {sorted(d for d in listing if d.startswith('models--'))}\n"
+            f"\n"
+            f"Fix (either):\n"
+            f"  • Boot the orchestrator with the current MODEL_RERANKER\n"
+            f"    value so sentence-transformers downloads the model:\n"
+            f"      docker compose up -d scaffold-orchestrator\n"
+            f"      # wait for /health to report 'healthy'\n"
+            f"  • Revert MODEL_RERANKER in .env to one of the cached\n"
+            f"    models above and restart the orchestrator.\n"
         )
 
 
@@ -377,8 +448,9 @@ def main() -> int:
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    _check_hf_cache_volume()   # §17.240 — volume present?
-    _check_hf_cache_content()  # §17.241 — volume has a real model cache?
+    _check_hf_cache_volume()    # §17.240 — volume present?
+    _check_hf_cache_content()   # §17.241 — volume has a model cache?
+    _check_hf_cache_freshness() # §17.242 — and it's the CONFIGURED one?
 
     if args.matrix:
         axes = _parse_matrix(args.matrix)
