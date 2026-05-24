@@ -11277,6 +11277,198 @@ position 9 hypothesis.
 
 ---
 
+### §17.238 2-D `(max_candidates × doc_truncate)` matrix sweep — current defaults are Pareto-optimal; no change (2026-05-24)
+
+Closes §17.237 candidate A — "2-D matrix sweep." Generalized
+``scripts/eval_doc_truncate.py`` to support N-axis sweeps, ran a 2×3
+matrix, and combined it with §17.235's earlier 1-D truncate sweep
+data to map the full operating surface. The result is: **the
+post-§17.235 defaults (`max_candidates=10`, `doc_truncate=500`) sit
+on the Pareto frontier** — no tested setting is strictly better on
+both coverage and latency.
+
+**Harness extension.**
+
+Added a ``--matrix`` flag taking ``knob1=v1,v2,v3`` (1-D) or
+``knob1=v1,v2,v3:knob2=v4,v5,v6`` (2-D) syntax. Internally,
+``_run_one`` was generalized to ``_run_cell`` which takes a list of
+``(knob, value)`` tuples and emits one ``-e <ENV>=<value>`` per
+axis on the ``docker run``. The pre-§17.238 ``--knob``/``--values``
+CLI is preserved via a back-compat shim. New ``_summarize_matrix``
+renders four stacked panels (cov@5, cov@10, mrr, s/query) so
+operators can read the latency vs quality trade-off at a glance.
+
+Usage:
+
+```bash
+# 1-D (back-compat)
+python3 scripts/eval_doc_truncate.py --knob max_candidates --values 5,7,10
+
+# 2-D matrix
+python3 scripts/eval_doc_truncate.py \
+    --matrix "max_candidates=5,10:doc_truncate=250,500,1000"
+```
+
+Files touched: ``scripts/eval_doc_truncate.py`` only.
+
+**The matrix.**
+
+Ran ``max_candidates ∈ {5, 10} × doc_truncate ∈ {250, 500, 1000}``.
+Five of six cells completed cleanly; the (max=10, doc_truncate=1000)
+sidecar hung indefinitely between the `Warning: unauthenticated
+requests to the HF Hub` line and the `Loading weights` progress bar
+— a known but-uninstrumented sentence-transformers wait, likely
+triggered by HF rate-limiting after five rapid-fire sidecars in a
+row. Killed the sidecar after ~6 hours; the harness recorded `FAIL`
+for that cell.
+
+**§17.235's earlier 1-D truncate sweep at max=10 ((max=10) implicit)
+provides the missing (10, 1000) value** — same code path, same KB,
+just an older filename convention. Combined picture:
+
+**Coverage @ top-5 (= top-10; reranker promotes hits to top-1 when in
+shortlist, so @5 == @10 throughout):**
+
+| | trunc=250 | trunc=500 | trunc=1000 | trunc=2000 |
+|---:|:---:|:---:|:---:|:---:|
+| **max=5** | 10.0 % | 10.0 % | 10.0 % | (not tested) |
+| **max=10** | **10.0 %** | **15.0 %** | **15.0 %** | **15.0 %** (§17.235) |
+
+**Latency (s/query):**
+
+| | trunc=250 | trunc=500 | trunc=1000 | trunc=2000 |
+|---:|---:|---:|---:|---:|
+| **max=5** | 6.7 | 9.4 | 13.6 | (not tested) |
+| **max=10** | 12.1 | 17.2 | 28.5 | 52.0 |
+
+**Per-query bisection across the regressing cells.**
+
+The 15 % → 10 % regression is always the same single query —
+**g007 `how do I handle cache invalidation correctly`**:
+
+| Setting | g007 status |
+|---|---|
+| (max=5, *) | MISS — entry sits at RRF rank 9, out of max=5 shortlist (§17.236 + §17.237) |
+| (max=10, trunc=250) | MISS — entry IS in the rerank shortlist, but the first 250 chars of its content don't contain enough discriminative signal for the reranker to score it above competitors |
+| (max=10, trunc=500) | HIT @ rank 1 — current default |
+| (max=10, trunc=1000) | HIT @ rank 1 (§17.235 data) |
+| (max=10, trunc=2000) | HIT @ rank 1 (§17.235 data) |
+
+So **g007 needs BOTH `max ≥ 9` AND `trunc ≥ 500` simultaneously**. The
+two knobs aren't independent — they fail multiplicatively, not
+additively. This is a finding the 1-D sweeps couldn't surface; only
+the matrix shows it.
+
+g017 (compression dictionary) and g019 (lossless compression) hit at
+every tested combination — their matching content is in the first
+250 chars AND they sit at RRF positions ≤ 5.
+
+**Pareto-frontier analysis.**
+
+Plotting (coverage, -latency) pairs over the matrix:
+
+| Cell | cov | s/query | Dominated by? |
+|---|---:|---:|---|
+| (5, 250) | 10.0 % | 6.7 | (10, 250) ← same cov, more latency, but… |
+| (10, 250) | 10.0 % | 12.1 | (5, 250) ← strict-domination (same cov, faster) |
+| (5, 500) | 10.0 % | 9.4 | (5, 250) ← strict-domination |
+| (5, 1000) | 10.0 % | 13.6 | (5, 250) ← strict-domination |
+| (10, 500) | **15.0 %** | **17.2** | **on frontier** (best cov, lowest latency at that cov) |
+| (10, 1000) | 15.0 % | 28.5 | (10, 500) ← strict-domination (same cov, faster) |
+| (10, 2000) | 15.0 % | 52.0 | (10, 500) ← strict-domination |
+
+**Pareto frontier = {(5, 250), (10, 500)}**:
+
+- `(5, 250)` — fastest possible at 10 % coverage (the latency-floor
+  corner for operators willing to drop g007).
+- `(10, 500)` — best coverage we can reach (the quality-ceiling
+  corner; the current post-§17.235 default).
+
+No tested setting sits between them with intermediate-on-both — the
+g007 multiplicative requirement makes the curve discrete: you either
+have g007 or you don't, and getting it costs you `(max=10, trunc≥500)`.
+
+**Decision — no code change.**
+
+The current default `(max=10, trunc=500)` is the quality-ceiling
+corner of the frontier. The latency-floor corner (5, 250) is
+already accessible per-call via the §17.234 override — operators
+who want sub-7-s `/rag` at the cost of g007 can request
+`{"max_candidates":5}` and the orchestrator's `doc_truncate=500`
+will be hit anyway (the truncate setting matters less when
+max_candidates=5 already drops coverage). For deeper latency
+operators can also set `RERANK_DOC_TRUNCATE=250` in `.env` to slot
+into the (5, 250) corner.
+
+**Files.**
+
+- ``scripts/eval_doc_truncate.py`` — added ``--matrix`` flag,
+  ``_run_cell``, ``_summarize_matrix``, ``_parse_matrix``,
+  ``_cell_filename``. Pre-§17.238 ``--knob``/``--values`` CLI
+  preserved via the ``_run_one`` back-compat shim.
+- ``OVERVIEW.md`` — this entry.
+
+No app code change. No test change. Default settings unchanged.
+
+**Verification.**
+
+```
+$ python3 scripts/eval_doc_truncate.py \
+    --matrix "max_candidates=5,10:doc_truncate=250,500,1000" \
+    --out-dir /tmp/eval_doc_truncate
+matrix sweep (2-D): max_candidates∈[5, 10] × doc_truncate∈[250, 500, 1000]
+…
+========================================================================================
+2-D matrix sweep — max_candidates × doc_truncate
+========================================================================================
+
+--- Coverage @ top-5  (rows: max_candidates, cols: doc_truncate) ---
+max_candidates|     250|     500|    1000|
+------------------------------------------
+             5|   10.0%|   10.0%|   10.0%|
+            10|   10.0%|   15.0%|    FAIL|
+…
+```
+
+5/6 cells (the (10, 1000) FAIL was the HF-Hub-stall sidecar; the
+§17.235 truncate sweep covers that point).
+
+**Sidecar HF-Hub stall — known issue, logged for §17.239 candidate.**
+
+The 6th consecutive sidecar (max=10, trunc=1000) hung indefinitely
+between the `Warning: unauthenticated requests to the HF Hub` line
+and the `Loading weights` progress bar. Container alive (`Up 6 h`)
+at ~0 % CPU and ~476 MiB resident — Python imported, model load
+never started. Likely HF Hub rate-limiting the unauthenticated
+account after 5 rapid lookups in a session. Workarounds (any of):
+
+- `HF_HUB_OFFLINE=1` in the sidecar env to force local-cache-only
+  lookups (skips the rate-limited online probe).
+- `HF_TOKEN=<personal token>` to raise the per-IP rate limit.
+- Spacing sidecars by 60+ s to avoid burst-mode throttling.
+
+Out of scope for §17.238; logged as **§17.239 candidate A** for a
+small harness extension that sets `HF_HUB_OFFLINE=1` by default on
+sidecar runs (the model is in the shared `hf-cache` volume after
+the first load anyway).
+
+**Open follow-ups.**
+
+1. **§17.239 candidate A** — `HF_HUB_OFFLINE=1` on harness sidecars.
+   Eliminates the rate-limit stall. 2-line change.
+2. **§17.234 candidate B / §17.237 candidate C** (still open) —
+   smaller reranker model. The §17.238 matrix shows the quality floor
+   on Qwen3-0.6B is fixed at 15 % by g007's RRF+truncate
+   requirements; a different reranker model could change BOTH the
+   floor and the per-pair latency, potentially shifting the entire
+   Pareto frontier.
+3. **§17.239 candidate B** — re-run the matrix after a future ingest
+   pass that closes the §17.231 surface-form drift. The break-point
+   queries are functions of the current corpus; new ingests can move
+   them.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
