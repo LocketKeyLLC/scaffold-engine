@@ -13724,6 +13724,175 @@ accessible with regression coverage at every choke point.
 
 ---
 
+### §17.254 `reranker_decision` log line carries the effective knob values (2026-05-24)
+
+Closes §17.253 candidate A — "log override values at INFO level
+alongside `reranker_decision` so operators can grep journald for
+specific reranker configurations without parsing every JSON response."
+
+§17.253 surfaced the resolved reranker knobs in the `/rag` response
+metadata — operator-visible at the API boundary. §17.254 surfaces
+the same two values in the orchestrator's `reranker_decision`
+structured-log line — operator-visible at the journald boundary.
+Symmetric coverage: caller-side (response) + observer-side (logs).
+
+**Fix — 2-line addition.**
+
+The existing `_log_reranker("reranker_decision", extra=dict(...))`
+call in `_rerank` already computes `max_cand` and `doc_trunc` as
+resolved ints at the top of the function. Two new fields in the
+`extra` dict:
+
+```python
+_log_reranker(
+    "reranker_decision",
+    extra=dict(
+        query=query[:200],
+        backend=rr.backend,
+        n_candidates=len(docs),
+        top_score=…,
+        min_score=…,
+        score_spread=…,
+        latency_ms=round(rr.latency_ms, 1),
+        # §17.254 — log the EFFECTIVE knob values …
+        rerank_max_candidates=max_cand,
+        rerank_doc_truncate=doc_trunc,
+    ),
+)
+```
+
+Same resolved-int shape as §17.253: never `None`, even when no
+override was passed. An operator who wants to find every call that
+ran at `max_candidates=5` can:
+
+```bash
+docker logs scaffold-orchestrator | grep '"rerank_max_candidates": 5'
+```
+
+…without parsing per-result JSON payloads or correlating against
+the original request.
+
+**Verification — live `/rag truncation` with overrides.**
+
+```
+$ curl -s -X POST .../rag \
+    -d '{"query":"truncation","domain":"eng","top_k":5,
+         "max_candidates":5,"doc_truncate":250}'
+
+$ docker logs scaffold-orchestrator | grep reranker_decision | tail -1
+{
+  "event": "reranker_decision",
+  "request_id": "cfeb01fee4da4c31a2a54569f616b450",
+  "logger": "scaffold.rag",
+  "level": "info",
+  "query": "truncation",
+  "backend": "CrossEncoder",
+  "n_candidates": 5,
+  "top_score": 0.0039,
+  "min_score": 0.0005,
+  "score_spread": 0.0034,
+  "latency_ms": 7461.3,
+  "rerank_max_candidates": 5,        ← new in §17.254
+  "rerank_doc_truncate": 250,        ← new in §17.254
+  "timestamp": "2026-05-24T15:19:08.439332Z"
+}
+```
+
+Bonus observation surfaced by the new log fields: at `(max=5,
+trunc=250)` the top_score collapses from the `0.3119` we see at
+`(max=10, trunc=500)` (per §17.235's sweep) to `0.0039` — same
+query, same KB, vastly different reranker confidence. The §17.238
+matrix's claim that `(5, 250)` is a real quality drop is now
+visible at the per-call log level too, not just in summary
+coverage statistics.
+
+**Why log the resolved ints (same as §17.253).**
+
+A log field that echoed the raw input (`null` on omit) would force
+the operator to do the resolution from `.env` every time they
+grepped. The resolved-int shape eliminates that step: every
+`reranker_decision` log line carries the actual numbers the
+reranker ran with, so:
+
+- `grep '"rerank_doc_truncate": 250'` finds explicit `doc_truncate=250`
+  overrides AND any default-routed call where `.env` set
+  `RERANK_DOC_TRUNCATE=250`.
+- The downstream analysis doesn't have to chase the `.env` value at
+  the time of the call.
+
+For operator triage this is the load-bearing semantic.
+
+**Why no new dedicated unit test for log content.**
+
+The `_rerank` function uses the SAME `max_cand` and `doc_trunc`
+local variables for the per-pair slicing AND the metadata echo
+(§17.253) AND the log line (§17.254). The §17.234 / §17.252 /
+§17.253 tests already cover those variables' resolution semantics
+end-to-end through the `_rerank` → response chain. A separate log-
+capture test would only re-test the same resolution; the existing
+suite is the regression guard.
+
+Adding `caplog`-based log-content tests is a new pattern this
+file doesn't use today. Logged as **§17.255 candidate A** —
+worthwhile if log-line shape becomes load-bearing for a downstream
+consumer (dashboard, alerting rule, etc.) and we need an explicit
+contract test.
+
+**Files.**
+
+- `app/modules/rag_pipeline.py` — 10-line addition (8-line inline
+  comment + 2-line dict items) in `_rerank`'s `reranker_decision`
+  log call.
+- `OVERVIEW.md` — this entry.
+
+No test change (rationale above). No schema change. No defaults
+change.
+
+**Symmetric coverage map.**
+
+| Surface | Field carries the resolved knobs | Added in |
+|---|---|---|
+| `RagInput` request body | `max_candidates` / `doc_truncate` (operator INPUT) | §17.234 / §17.252 |
+| `/rag` response metadata | `rerank_max_candidates` / `rerank_doc_truncate` (resolved int) | §17.253 |
+| Orchestrator log (`reranker_decision`) | `rerank_max_candidates` / `rerank_doc_truncate` (resolved int) | **§17.254** |
+
+Caller, response-consumer, and log-observer all see the same
+resolved values. No surface is blind to which knobs the reranker
+ran at.
+
+**What §17.254 does NOT change.**
+
+- The structured-log shape — same `_log_reranker(...)` shape; just
+  two more fields in `extra`. Downstream log parsers see the new
+  fields as additive JSON keys; no breakage.
+- The log level — still INFO / WARNING / ERROR based on
+  `latency_ms` per the §17.232/§17.233 thresholds.
+- The `reranker_completed` log line in `app/rerankers.py` — that
+  one is a layer down (per-batch summary at the CrossEncoder
+  level) and doesn't see the per-request knobs. The
+  `reranker_decision` line is the right level for caller-visible
+  knobs.
+
+**Open follow-ups.**
+
+1. **§17.255 candidate A** — `caplog`-based unit test for the
+   `reranker_decision` log content if a downstream consumer
+   (Prometheus exporter, alerting rule, ELK pipeline) ever needs
+   to depend on the shape. Not currently load-bearing. ~10 lines.
+2. **§17.234 candidate B / §17.237 candidate C** (still open) —
+   smaller reranker model. Both §17.253 and §17.254 surfaces
+   automatically pick up the new model name via the existing
+   `backend` field; the per-call knob echo is model-independent.
+3. **§17.249 B / §17.236 A / §17.232 A/B/C / F3** — unchanged status.
+
+The reranker-knob lifecycle (§17.232 → §17.254, 23 entries) now
+covers: unblock → defaults → per-call → research → harness →
+image pre-bake → drift gates → metadata echo → log echo. Every
+surface that touches the reranker is operator-visible. Natural
+close on the symmetric-visibility thread.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

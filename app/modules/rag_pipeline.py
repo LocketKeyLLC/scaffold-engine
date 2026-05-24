@@ -542,6 +542,15 @@ async def _rerank(
             min_score=round(min(scores), 4) if scores else 0.0,
             score_spread=round(max(scores) - min(scores), 4) if scores else 0.0,
             latency_ms=round(rr.latency_ms, 1),
+            # §17.254 — log the EFFECTIVE knob values (per-call override
+            # or settings fallback) so an operator grepping journald
+            # for `reranker_decision` sees what shortlist depth + doc
+            # truncate the call ran at, without parsing the per-result
+            # JSON payload. The §17.253 metadata echo serves the
+            # response-side caller; these two fields serve the
+            # operator-side log-tailer.
+            rerank_max_candidates=max_cand,
+            rerank_doc_truncate=doc_trunc,
         ),
     )
 
