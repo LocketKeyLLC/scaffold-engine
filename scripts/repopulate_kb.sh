@@ -36,6 +36,12 @@
 # Exits non-zero if any ingestion's SSE stream surfaces an error event
 # OR the orchestrator's post-run /health milvus.entry_count didn't grow.
 
+# §17.277 — strict mode. -e: exit on unhandled non-zero; -u: error
+# on unset vars; -o pipefail: surface non-final pipe failures. Each
+# script's existing vars use ${VAR:-default} or explicit checks, so
+# adding -u doesn't change semantics.
+set -euo pipefail
+
 set -euo pipefail
 
 # ── ANSI helpers ──────────────────────────────────────────────────────

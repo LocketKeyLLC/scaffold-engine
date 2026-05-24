@@ -14936,6 +14936,42 @@ Full file 14 → 17 passing in the relevant classes. No regressions.
 
 ---
 
+### §17.277 bundled 🟢 cleanups — close §17.273 🟢 #1, #2, #3 (2026-05-24)
+
+Three independent cleanups batched per the §17.265 precedent. Each warranted only a small change; combined commit + single §-entry keeps the cycle clean.
+
+**Cleanup A — `app/observability/metrics.py:_executor_inflight` no longer reaches into a private semaphore attr.** §17.273 flagged the direct read of `_execution_slot_sem._value` as a coupling between the telemetry module and the slot mechanism's internals. The operator-confirmed direction was to refactor to a public counter (vs. keep with a comment).
+
+Implementation: added `executor_inflight_count() -> int` to `app/modules/execution_agent.py:74` — the module that OWNS the semaphore. The private-attr read is still required (asyncio's `Semaphore` exposes no public inflight count), but it now lives in the owning module, so external readers (metrics, future health endpoints) consume a sanctioned signature. `metrics.py:149` now does `from app.modules.execution_agent import executor_inflight_count`. The pre-fix comment ("Touching the private `_value` is acceptable here...") is replaced by a §17.277 marker pointing at the new accessor.
+
+A "true counter" (mutating a separate integer on acquire/release) was considered and rejected: two sources of truth (semaphore + counter) drift on bug paths, and the wrapper keeps a single authoritative value while still hiding the private read behind a stable API.
+
+**Cleanup B — `app/observability/otel.py:97, 102` bumps swallowed instrumentation failures from `logger.debug` to `logger.warning`.** Pre-fix, a missing `opentelemetry-instrumentation-httpx` or `opentelemetry-instrumentation-asyncpg` package would silently lose distributed-trace coverage on the affected protocol — DEBUG is invisible by default in this deployment's log config. WARNING surfaces it on the normal log stream while still not aborting the OTEL init (best-effort intact). Two-line change.
+
+**Cleanup C — three `scripts/*.sh` gain `set -euo pipefail`.** Audit claimed "11 of 12 missing" — verification revealed the agent's heuristic (like my initial check) only scanned the first 10 lines, missing `set` lines that lived below the long comment headers. **Reality: 3 of 12 truly missing.**
+
+| Script | Pre-§17.277 | Post-§17.277 |
+|---|---|---|
+| `bootstrap.sh`, `bootstrap-host.sh`, `chown_named_volumes.sh`, `costs_rollup.sh`, `init.sh`, `quarterly_calibration_pr.sh`, `sync_valves.sh` | `set -euo pipefail` already present (audit FP) | unchanged |
+| `doctor.sh`, `smoke_design_pipeline.sh` | `set -uo pipefail` — intentional omission of `-e` for diagnostic-style multi-check flow per §17.265 | unchanged |
+| `repopulate_kb.sh`, `repopulate_kb_tier_a.sh`, `sync_api_key.sh` | nothing | **added `set -euo pipefail`** with §17.277 marker comment |
+
+Atomic Python script added the strict-mode block after the shebang+comment header of each true-positive script; `bash -n` syntax-checked all 11 afterward (all clean). Operator-side smoke testing of the destructive ones (repopulate_kb*) is the next-level validation step but isn't blocking — the scripts use `${VAR:-default}` form for environment variables that may be unset, so `-u` doesn't change their semantics on a runtime-clean execution.
+
+**Audit observation worth recording.** §17.273's "11 of 12" claim and my initial verification both fell to the same trap: `head -10 | grep '^set'` misses long-header scripts. A more honest heuristic is `grep -n '^set ' "$f" | head -1` against the full file; the audit grep would have surfaced the existing strict-mode lines at lines 13-30. Logged for the next audit cycle's invariant-briefing.
+
+**Test-suite delta:** +4 tests in new `TestExecutorInflightCount` (`tests/test_execution_agent_concurrency.py`):
+- `test_returns_zero_when_semaphore_uninitialized` — lifespan pre-warmup state
+- `test_returns_zero_when_no_slots_held` — happy idle path
+- `test_returns_one_when_one_slot_held` — async acquire/release round-trip
+- `test_returns_cap_when_all_slots_held` — full-saturation read
+
+No new tests for otel.py (the change is a log-level constant; not test-meaningful) or for the scripts (operator-side smoke testing is the validation). Suite: `test_execution_agent_concurrency.py` 12 → 16 passing; observability metrics + rollups unchanged.
+
+**§17.273 closeout — FULL.** All 7 🔴 + both 🟡 + all 3 🟢 closed across §17.274 + §17.275 + §17.276 + §17.277. Remaining: 4 test gaps (database.py CancelledError already covered by §17.274, app/routers/observability.py, app/routers/schedule.py, app/sim/ngspice.py timeout). Actually 3 test gaps — §17.274 already pinned the CancelledError rollback path. The §17.273 → §17.277 arc closes with 4 commits and zero unresolved findings.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

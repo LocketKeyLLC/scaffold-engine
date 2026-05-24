@@ -494,3 +494,47 @@ class TestCrossJobConcurrencyInvariant:
         # Neither should have queued — cap was 2 and only 2 jobs ran.
         assert "queued" not in types_a
         assert "queued" not in types_b
+
+
+# ===========================================================================
+# §17.277 — public executor_inflight_count() (replaces metrics.py's
+# direct private-attr access to _execution_slot_sem._value)
+# ===========================================================================
+
+
+@pytest.mark.smoke
+class TestExecutorInflightCount:
+    """§17.277 — sanctioned public accessor for the metrics module +
+    future health endpoints. Encapsulates the private-attr read."""
+
+    def test_returns_zero_when_semaphore_uninitialized(self, monkeypatch):
+        """Lifespan pre-warmup / fresh-process state — returns 0 cleanly."""
+        ea._reset_execution_slot_sem()  # ensure uninitialized
+        assert ea.executor_inflight_count() == 0
+
+    def test_returns_zero_when_no_slots_held(self, monkeypatch, _cap_one):
+        """Cap=1, nobody holding the slot → inflight=0."""
+        _ = ea._get_execution_slot_sem()  # lazy-init
+        assert ea.executor_inflight_count() == 0
+
+    async def test_returns_one_when_one_slot_held(self, monkeypatch, _cap_one):
+        """Cap=1, one acquire → inflight=1. Release → back to 0."""
+        sem = ea._get_execution_slot_sem()
+        await sem.acquire()
+        try:
+            assert ea.executor_inflight_count() == 1
+        finally:
+            sem.release()
+        assert ea.executor_inflight_count() == 0
+
+    async def test_returns_cap_when_all_slots_held(self, monkeypatch):
+        """Cap=3, three acquires → inflight=3 (full)."""
+        monkeypatch.setattr(settings, "execution_global_concurrency", 3)
+        ea._reset_execution_slot_sem()
+        sem = ea._get_execution_slot_sem()
+        await sem.acquire(); await sem.acquire(); await sem.acquire()
+        try:
+            assert ea.executor_inflight_count() == 3
+        finally:
+            sem.release(); sem.release(); sem.release()
+        assert ea.executor_inflight_count() == 0

@@ -142,17 +142,16 @@ calibration_last_failure_timestamp = Gauge(
 )
 
 
-# Live executor concurrency — read from the lazily-initialized semaphore
-# at scrape time. Touching the private `_value` is acceptable here:
-# telemetry is read-only, and asyncio.Semaphore exposes no public
-# inflight count.
+# Live executor concurrency — read at scrape time via the public
+# accessor in execution_agent. §17.277 — pre-fix this module reached
+# into ``_execution_slot_sem._value`` directly, coupling telemetry to
+# the slot mechanism's private state. Now it consumes the sanctioned
+# ``executor_inflight_count()`` interface; the private-attr read stays
+# encapsulated in the semaphore-owning module.
 def _executor_inflight() -> float:
     try:
-        from app.modules.execution_agent import _execution_slot_sem
-        if _execution_slot_sem is None:
-            return 0.0
-        cap = settings.execution_global_concurrency
-        return float(max(0, cap - _execution_slot_sem._value))
+        from app.modules.execution_agent import executor_inflight_count
+        return float(executor_inflight_count())
     except Exception:
         return 0.0
 

@@ -71,6 +71,26 @@ def _reset_execution_slot_sem() -> None:
     _execution_slot_sem = None
 
 
+def executor_inflight_count() -> int:
+    """§17.277 — public read of in-flight ``execute_all_nodes`` concurrency
+    slots. Telemetry-only; returns ``0`` when the semaphore hasn't been
+    initialized yet (lifespan pre-warmup or fresh test fixture).
+
+    Encapsulates the access to ``asyncio.Semaphore._value``: the stdlib
+    exposes no public inflight count, so the private read has to live
+    SOMEWHERE. Putting it in the module that owns the semaphore (here,
+    not in ``app/observability/metrics.py``) means future changes to
+    the slot mechanism stay co-located with the readers, and external
+    callers (``metrics.py``, future health endpoints) consume a
+    sanctioned signature instead of reaching into another module's
+    private state.
+    """
+    if _execution_slot_sem is None:
+        return 0
+    cap = settings.execution_global_concurrency
+    return max(0, cap - _execution_slot_sem._value)
+
+
 # ---------------------------------------------------------------------------
 # Sprint X.24 — detached cleanup tasks for cancelled execute_all_nodes runs.
 # Live verification surfaced that ``await`` calls inside execute_all_nodes'

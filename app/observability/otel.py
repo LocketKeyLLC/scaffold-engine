@@ -90,16 +90,21 @@ def init_tracing(app) -> bool:
 
         # httpx + asyncpg are best-effort — we wire what's installed and
         # log per-instrumentation failures without aborting the whole init.
+        # §17.277 — bumped DEBUG → WARNING. DEBUG is invisible by default;
+        # a misconfigured OTEL endpoint (or a missing instrumentation
+        # package) would silently lose distributed-trace coverage without
+        # any operator-visible signal. WARNING surfaces it on the normal
+        # log stream while still not aborting init (best-effort intact).
         try:
             from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
             HTTPXClientInstrumentor().instrument()
         except Exception as exc:
-            logger.debug("otel_httpx_instrument_failed: err=%s", exc)
+            logger.warning("otel_httpx_instrument_failed: err=%s", exc)
         try:
             from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
             AsyncPGInstrumentor().instrument()
         except Exception as exc:
-            logger.debug("otel_asyncpg_instrument_failed: err=%s", exc)
+            logger.warning("otel_asyncpg_instrument_failed: err=%s", exc)
 
         _initialized = True
         logger.info(
