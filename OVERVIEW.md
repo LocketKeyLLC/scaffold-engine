@@ -16892,6 +16892,67 @@ The `test_help_calls_out_tz_flag` is load-bearing — it pins the visible naming
 
 ---
 
+### §17.313 `/status` vs `/jobs` disambiguation (2026-05-25)
+
+Fourteenth post-§17.280 UX item. Closes the last named tangent from §17.312's outro. /status and /jobs both surface "what jobs do I have?" but serve different operator intents:
+
+| Surface | Purpose | What it has |
+|---|---|---|
+| `/status` | At-a-glance dashboard | Status-count table + recent jobs + actionable Next-steps from orchestrator |
+| `/jobs` | Management list | Filter / find / rename / delete subcommands, 📌 active-job marker (§17.309), Next-actions footer (§17.309) |
+
+Pre-§17.313 the two surfaces had **no cross-reference**. An operator landing on /status who wanted to rename or filter had to know /jobs exists. An operator landing on /jobs who wanted at-a-glance counts had to know /status exists. Both undiscoverable from each other.
+
+**Four additive affordances.**
+
+1. **/status cross-reference footer.** After the existing recent-jobs table + Next-steps block, append one line: `💡 For filter / find / rename / delete, use /jobs (or /jobs help).` Single-line; doesn't duplicate /jobs's own footer; points operators at the management surface when their intent is action-on-id rather than overview.
+
+2. **/jobs footer extended.** The §17.309 /jobs footer had 3 lines (/results, /cost, /jobs help). §17.313 adds a 4th: `- /status — at-a-glance dashboard with counts by state`. Symmetric cross-reference; both surfaces now teach the other.
+
+3. **📌 active-job marker on /status.** Mirror of §17.309's /jobs UX. When §17.307's cache has a recalled job for the chat AND that job appears in /status's recent-jobs slice, the row gets the 📌 prefix. **Full-id match** (collision guard). Synergy with §17.307 + §17.309 + §17.311.
+
+4. **/status empty state.** When total=0 + no recent + no nonzero counts, surface the §17.300 welcome's starter exemplars instead of just `## 📊 Job Status — 0 total, 0 active`. Same shape as §17.309's /jobs empty state. The nonzero-counts case (operator has history but no recent activity) does NOT trigger the empty state — the counts table is informative on its own.
+
+**Symmetry between /jobs and /status footers.**
+
+```
+/status footer:                              /jobs footer:
+💡 For filter / find / rename / delete,      💡 **Next:**
+   use /jobs (or /jobs help).                - /results <id>
+                                             - /cost <id>
+                                             - /status — at-a-glance dashboard
+                                             - /jobs help — find / rename / delete / filter
+```
+
+The /jobs footer is richer (it carries 4 next-actions) because /jobs is the higher-traffic surface — operators arriving at /jobs have more next-action options. /status is the lower-traffic dashboard — its footer just needs the one cross-reference for operators who need to take action.
+
+**Plumbing.** `chat_id` flows through one new path: `pipe()` → `_handle_command(msg, chat_id=...)` → `/status` dispatch passes it to `_render_status(data, chat_id=...)` → recall via `self._active_job_recall(chat_id)` → prefix the matching row. Backwards-compatible (default value).
+
+**Why no filter/find subcommands on /status.** Considered adding `/status running` (counts filtered by status) or `/status find foo` (recent jobs matching topic). Rejected — these are already /jobs subcommands. Duplicating them on /status would erase the distinction the cross-reference works to establish. /status stays as the dashboard; /jobs stays as the management surface.
+
+**Test-suite delta:** +22 tests in `tests/test_scaffold_router_status_vs_jobs.py` across 6 classes:
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestStatusCrossRefFooter` | 3 | footer present on populated /status; appears after recent table; suppressed on empty state |
+| `TestStatusActiveJobMarker` | 4 | marker prefixes recalled row; no marker without recall; no marker without chat_id; full-id match required (collision guard) |
+| `TestStatusEmptyState` | 5 | empty state header + message + welcome starters (3); nonzero-counts case does NOT trigger empty state |
+| `TestJobsFooterIncludesStatus` | 1 | /jobs footer now has /status as 4th line + retains the 3 §17.309 lines |
+| `TestStatusContentPreserved` | 3 | pre-§17.313 counts table + recent table + actionable Next-steps block unchanged |
+| `TestSourceShapeRegressionGuard` | 6 | both helpers anchored; `_render_status` signature; dispatch threading; cross-ref phrase; /jobs footer's /status line; 📌 prefix block |
+
+The `test_nonzero_counts_skip_empty_state` is load-bearing — it pins the contract that the empty state only fires when the operator is BRAND NEW (no jobs anywhere). An operator with 50 completed jobs but no recent ones must see the counts table, not the "Get started" exemplars. A refactor that collapses the empty-state condition to `total == 0` (without the additional counts-empty check) would regress the experienced operator's surface.
+
+The `test_full_id_match_required` is the §17.313 mirror of §17.309's same-named guard — both pin the architectural decision to compare full ids, not short ids.
+
+**Pre-existing tests preserved.** `test_scaffold_router_commands.py::TestHandleCommand::test_status_command` and `test_network_timeout` / `test_connection_error` for /status all continue to pass — §17.313 is purely additive (cross-ref footer + marker + empty state). The pre-existing assertions on short-id + title presence in /status output still satisfy.
+
+**Cost.** +24 LOC in `_render_status` (empty-state branch + 📌 marker + cross-ref footer) + 12 LOC new `_status_empty_state()` helper + 1 LOC dispatch (chat_id arg) + 1 LOC /jobs footer extension. Total ~38 LOC in `pipelines/scaffold_router.py`. Operator-facing cost: zero on dashboards with 0 nonzero counts and 0 recent (empty state replaces existing terse header); ~1 line added as cross-ref footer on populated /status.
+
+**§17.300-§17.313 close the management-panel disambiguation.** Three panels (/jobs §17.309, /research §17.310, /schedule §17.312) + the cross-reference between the two job-overview surfaces (§17.313). Operators landing on any management surface can navigate to any other via a footer hint. Remaining items: state-altering §17.307 expansion (`/exec retry`, `/skip`, `/execute`) with confirmation-friction model, model selection ergonomics. The state-altering expansion is now the highest-leverage remaining axis — it's the only operator action that requires retyping the 36-char UUID in the current surface.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

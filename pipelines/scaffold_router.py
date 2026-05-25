@@ -2486,7 +2486,9 @@ class Pipeline:
                 )
                 if r.status_code >= 400:
                     return self._fmt(r)
-                return self._render_status(r.json())
+                # §17.313 — pass chat_id for the 📌 active-job marker
+                # (synergy with §17.307).
+                return self._render_status(r.json(), chat_id=chat_id)
 
             # ----- U.8.D — diagnostics + admin parity -------------------
             if cmd == "/exec":
@@ -2529,10 +2531,20 @@ class Pipeline:
     # ------------------------------------------------------------------
     # /status renderer
     # ------------------------------------------------------------------
-    def _render_status(self, data: dict) -> str:
+    def _render_status(
+        self, data: dict, *, chat_id: str | None = None,
+    ) -> str:
         counts = data.get("status_counts") or {}
         total = data.get("total_jobs", 0)
         recent = data.get("recent_jobs") or []
+
+        # §17.313 — friendly empty state. Pre-§17.313 `/status` with
+        # nothing in the system rendered just the header. Match the
+        # §17.309 /jobs empty-state pattern: surface the welcome
+        # starters so brand-new operators have a copy-pasteable path
+        # forward.
+        if total == 0 and not recent and not any(counts.values()):
+            return self._status_empty_state()
 
         # Active = anything not in a terminal state
         terminal = {"completed", "failed", "cancelled", "blocked"}
@@ -2548,6 +2560,14 @@ class Pipeline:
             lines.append("|---|---:|")
             for k, v in sorted(nonzero, key=lambda kv: -kv[1]):
                 lines.append(f"| {k} | {v} |")
+
+        # §17.313 — active-job recall for 📌 marker (synergy with
+        # §17.307 / §17.309). Match on FULL id only (no short-id
+        # collisions). chat_id may be None for curl-only callers.
+        active_id = None
+        recalled = self._active_job_recall(chat_id)
+        if recalled:
+            active_id = recalled.get("job_id")
 
         if recent:
             icon = {
@@ -2565,10 +2585,15 @@ class Pipeline:
                 st = j.get("status", "?")
                 jid = j.get("id", "?")
                 short = jid[:8] if isinstance(jid, str) else "?"
+                # §17.313 — 📌 prefix on the §17.307-recalled row.
+                prefix = "📌 " if active_id and jid == active_id else ""
                 title = (j.get("title") or "")[:60]
                 nc = j.get("node_count", 0)
                 upd = (j.get("updated_at") or "")[:16].replace("T", " ")
-                lines.append(f"| {icon.get(st, '')} {st} | `{short}` | {title} | {nc} | {upd} |")
+                lines.append(
+                    f"| {icon.get(st, '')} {st} | {prefix}`{short}` "
+                    f"| {title} | {nc} | {upd} |"
+                )
 
             actionable = next(
                 (j for j in recent if j.get("next_actions")
@@ -2587,7 +2612,35 @@ class Pipeline:
                         lines.append(f"• `{cmd}` — {desc}")
                     elif a.get("endpoint"):
                         lines.append(f"• `{a.get('method','GET')} {a['endpoint']}` — {desc}")
+
+        # §17.313 — cross-reference footer. /status is the at-a-glance
+        # dashboard; /jobs is the management list. Help operators pick
+        # the right surface for the action they want.
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append(
+            "💡 For filter / find / rename / delete, use "
+            "`/jobs` (or `/jobs help`)."
+        )
         return "\n".join(lines)
+
+    @staticmethod
+    def _status_empty_state() -> str:
+        """§17.313 — empty state for `/status` (no jobs in the system).
+        Mirror of §17.309's /jobs empty state: surface §17.300
+        welcome's starter exemplars so a brand-new operator (or one
+        with all jobs cleaned up) has a path forward."""
+        return (
+            "## 📊 Job Status\n\n"
+            "_No jobs yet._\n\n"
+            "**Get started:**\n"
+            "- `/idea Build a CLI that converts screenshots to PDF` "
+            "— kick off Phase 1 directly\n"
+            "- `/research kubernetes best practices` — "
+            "autonomous web research + ingest\n"
+            "- _Or describe an idea in the chat and type `/go`._"
+        )
 
 
     # ------------------------------------------------------------------
@@ -2793,14 +2846,18 @@ class Pipeline:
             active_id = recalled.get("job_id")
         rows = ["", "| Status | ID | Title | Nodes | Updated |", "|---|---|---|---:|---|"]
         rows.extend(self._format_job_row(j, active_id=active_id) for j in jobs)
-        # §17.309 — next-actions hint footer. Three copy-pasteable
-        # commands an operator typically wants after scanning the list.
+        # §17.309 — next-actions hint footer. Copy-pasteable commands
+        # an operator typically wants after scanning the list.
         # Mirror the Next-block shape from §17.303 / §17.305.
+        # §17.313 — added /status as the 4th line to disambiguate the
+        # two job-overview surfaces (/status = dashboard with counts;
+        # /jobs = management list).
         footer = (
             "\n\n---\n\n"
             "💡 **Next:**\n"
             "- `/results <id>` — view output / progress / failure detail\n"
             "- `/cost <id>` — cost + latency rollup\n"
+            "- `/status` — at-a-glance dashboard with counts by state\n"
             "- `/jobs help` — find / rename / delete / filter"
         )
         return "\n".join([header] + rows) + footer
