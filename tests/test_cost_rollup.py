@@ -88,7 +88,12 @@ class TestGetJobCostTotals:
 
     async def test_db_error_fails_open(self):
         """Missing llm_call_logs table or transient DB failure → zero shape,
-        not 500. /exec/status's hot path can't tolerate telemetry breakage."""
+        not 500. /exec/status's hot path can't tolerate telemetry breakage.
+
+        §17.284 — the fallback now carries ``data_source: "error"`` so
+        callers can tell apart "no calls logged yet" (data_source="ok")
+        from "the query just blew up" (data_source="error").
+        """
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=RuntimeError("relation does not exist"))
         result = await get_job_cost_totals("job-1", db)
@@ -98,6 +103,7 @@ class TestGetJobCostTotals:
             "total_completion_tokens": 0,
             "total_latency_ms": 0,
             "call_count": 0,
+            "data_source": "error",
         }
 
 
@@ -220,6 +226,110 @@ class TestGetJobCostsKindBreakdown:
         # Totals and by_provider remain populated — fail-open is partial.
         assert result["total_cost_usd"] == pytest.approx(0.05)
         assert len(result["by_provider"]) == 1
+        # §17.284 — composite data_source downgrades to "error" when ANY
+        # component query raises, even though totals + by_provider are
+        # real. Operator-facing semantics: "trust the numbers? not fully."
+        assert result["data_source"] == "error"
+
+
+@pytest.mark.smoke
+class TestDataSourceFlag:
+    """§17.284 — every rollup return carries data_source ("ok" | "error").
+
+    The flag distinguishes a real empty rollup ("ok") from a fail-open
+    fallback after a DB error ("error"). Pre-§17.284 both shapes looked
+    identical: ``{total_cost_usd: 0, call_count: 0}``. /exec/status's
+    operator couldn't tell "no calls logged yet" from "the cost query
+    just blew up — check the logs."
+    """
+
+    async def test_real_zero_carries_ok_source(self):
+        """A job with no logged calls (COUNT==0 row returns clean) is
+        explicitly ``data_source="ok"`` — zeros are real, no DB error.
+        """
+        db = _mock_db({
+            "total_cost_usd": 0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_latency_ms": 0,
+            "call_count": 0,
+        })
+        result = await get_job_cost_totals("job-empty", db)
+        assert result["call_count"] == 0
+        assert result["data_source"] == "ok"
+
+    async def test_populated_data_carries_ok_source(self):
+        """A normal rollup with real data is data_source="ok"."""
+        db = _mock_db({
+            "total_cost_usd": 0.123,
+            "total_prompt_tokens": 5000,
+            "total_completion_tokens": 2000,
+            "total_latency_ms": 45000,
+            "call_count": 23,
+        })
+        result = await get_job_cost_totals("job-busy", db)
+        assert result["call_count"] == 23
+        assert result["data_source"] == "ok"
+
+    async def test_no_row_returned_still_ok_source(self):
+        """If ``mappings().first()`` returns None (no row matched, atypical
+        with COALESCE COUNT but possible if the WHERE clause is stricter
+        than the test mock implies), the helper still returns "ok" — the
+        absence of a row is structurally distinct from a raised exception.
+        """
+        db = _mock_db(None)
+        result = await get_job_cost_totals("job-nonexistent", db)
+        assert result["data_source"] == "ok"
+        assert result["call_count"] == 0
+
+    async def test_db_error_carries_error_source(self):
+        """Pinned by the updated ``test_db_error_fails_open`` above; this
+        is the §17.284 contract from the operator's perspective: an
+        error-source rollup MUST NOT be silently treated as "no data."
+        """
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=RuntimeError("relation does not exist"))
+        result = await get_job_cost_totals("job-broken", db)
+        assert result["data_source"] == "error"
+
+    async def test_composite_ok_when_all_three_queries_succeed(self):
+        """``get_job_costs`` rolls up three queries; if all succeed, the
+        composite data_source is "ok" — even with empty breakdowns."""
+        db = _mock_db(
+            {
+                "total_cost_usd": 0.05, "total_prompt_tokens": 10000,
+                "total_completion_tokens": 4000, "total_latency_ms": 60000,
+                "call_count": 10,
+            },
+            breakdown_rows=[],
+            kind_rows=[],
+        )
+        result = await get_job_costs("job-1", db)
+        assert result["data_source"] == "ok"
+
+    async def test_composite_error_when_breakdown_query_fails(self):
+        """If only the by_provider query raises (totals + kind succeed),
+        the composite data_source is still "error" — never silently mix
+        valid totals with a failed breakdown."""
+        totals = {
+            "total_cost_usd": 0.05, "total_prompt_tokens": 10000,
+            "total_completion_tokens": 4000, "total_latency_ms": 60000,
+            "call_count": 10,
+        }
+        totals_result = MagicMock()
+        totals_result.mappings.return_value.first.return_value = totals
+        kind_result = MagicMock()
+        kind_result.mappings.return_value.all.return_value = []
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[
+            totals_result,
+            RuntimeError("breakdown query exploded"),
+            kind_result,
+        ])
+        result = await get_job_costs("job-1", db)
+        assert result["data_source"] == "error"
+        # The totals that DID succeed remain visible — fail-open is partial.
+        assert result["total_cost_usd"] == pytest.approx(0.05)
 
 
 # ---------------------------------------------------------------------------

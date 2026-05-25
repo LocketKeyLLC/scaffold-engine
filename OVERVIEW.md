@@ -15197,6 +15197,47 @@ Two SO-fetcher / Reddit-fetcher integration assertions further down the file (`a
 
 **§17.280 closeout progress (cumulative).** §17.281 closed 🔴 #1. §17.282 closed 🟡 #1. §17.283 closes 🟡 #2. Remaining: three 🟡, four 🟢 (informational), nine UX.
 
+### §17.284 rollup helpers carry `data_source` flag — close §17.280 🟡 #3 (2026-05-24)
+
+§17.280's third yellow item. `app/modules/cost_rollup.py` and `app/modules/observability_rollups.py` both fail open on transient DB errors and return their respective zero/empty shapes. Pre-§17.284 a real empty rollup (job with no calls logged yet, or empty window) was indistinguishable from a fall-through after a raised exception — operators reading `/exec/status` saw `{total_cost_usd: 0, call_count: 0}` either way.
+
+**Fix:** every fail-open return carries `data_source: Literal["ok", "error"]`.
+
+- `"ok"` — query ran cleanly. Zeros (if any) are real.
+- `"error"` — at least one component query raised. The shape is a fallback; operator should re-poll or check `scaffold.cost_rollup` / `scaffold.observability` debug logs.
+
+**Production touch points (6 fail-open sites + 1 schema):**
+
+| File | Function | Behaviour change |
+|---|---|---|
+| `app/modules/cost_rollup.py` | `_zero_totals` | adds `data_source` kwarg (default `"ok"`) |
+| | `get_job_cost_totals` | error path returns `_zero_totals(data_source="error")`; normal path emits `"ok"` |
+| | `get_job_costs` | tracks per-component success (`breakdown_ok`, `kind_ok`) + inherits `totals["data_source"]`; composite downgrades to `"error"` if ANY of the 3 component queries raised |
+| `app/modules/observability_rollups.py` | `llm_rollup` | sets `data_source = "error"` on exception, default `"ok"` |
+| | `recent_errors` | same |
+| | `recent_jobs_costs` | same |
+| `app/schemas.py` | `JobCostsResponse` | adds `data_source: Literal["ok", "error"] = "ok"`. Default keeps existing payloads valid; explicit `"error"` flows through Pydantic serialization. SDK mirror synced via `cp app/schemas.py sdk/scaffold_client/schemas.py` (§17.157 rule). |
+
+**Composite-error semantic decision.** `get_job_costs` runs three queries (totals / by_provider / by_kind). When ONE fails, the partial dict still surfaces the data that DID succeed — but the composite `data_source` is `"error"`. Operator-facing meaning: "trust the totals? not fully — re-poll." Alternative considered: per-component flag (e.g. `totals_source`, `breakdown_source`, `kind_source`). Rejected as over-engineered for the current consumer set; a single composite flag is enough to drive the "show / grey-out / warn" dashboard decision. Per-component granularity becomes worth it only when a UI starts rendering per-section reliability.
+
+**Why `data_source` as a top-level (non-prefixed) key.** Considered `_source` (underscore-prefix metadata convention) and rejected — operators reading the JSON directly should see the flag with the same prominence as the totals it qualifies. Adding a top-level key is backward-compatible for any consumer using dict access (`d["total_cost_usd"]`); the only consumer that could break is one with strict Pydantic `extra="forbid"`, and the SDK schemas were updated in the same commit.
+
+**Test-suite delta:** +13 new tests + 3 updated assertions across two files.
+
+| File | Class | New tests | Updated |
+|---|---|---|---|
+| `tests/test_cost_rollup.py` | `TestDataSourceFlag` | 6 (real-zero=ok, populated=ok, no-row=ok, db-error=error, composite-ok, composite-error) | 1 — `test_db_error_fails_open` asserts `data_source: "error"` |
+| | `TestGetJobCostsKindBreakdown.test_kind_breakdown_fails_open_on_db_error` | — | extended to assert `data_source == "error"` (composite downgrade) |
+| `tests/test_observability_rollups.py` | `TestDataSourceFlag` | 7 (empty/populated/error per helper × 3 helpers, minus one redundant) | 2 — both `test_db_error_fails_open` cases assert `data_source: "error"` |
+
+The 6+7 new tests pin both directions of the contract per helper: ok-source for clean queries (whether they return rows or not) and error-source for raised exceptions. `test_composite_error_when_breakdown_query_fails` is the load-bearing case for `get_job_costs` — it sets up a db that raises only on the second of three queries and asserts the composite still rolls up as `"error"`.
+
+**Backward compatibility.** Existing consumers that ignore the new field continue to work unchanged (dict-access pattern). Pydantic-typed consumers via the SDK pick up the new field automatically once they sync. The default `"ok"` preserves the historical "everything is fine" implicit contract for any caller that doesn't yet inspect the flag.
+
+**Test-suite delta:** +13. Cost rollup + observability rollups cluster: 41 passing. SDK schema-parity + execution_handler clusters: 33 passing. Endpoint cluster (`/jobs/{id}/costs`, `/observability/llm`, `/observability/errors`, `/observability/jobs`): 8 passing — Pydantic schema accepts the field through `response_model` serialization. No regressions.
+
+**§17.280 closeout progress (cumulative).** §17.281 closed 🔴 #1. §17.282 closed 🟡 #1. §17.283 closed 🟡 #2. §17.284 closes 🟡 #3. Remaining: two 🟡 (#4 gt_browser Milvus expression, #5 assist mirror divergence), four 🟢 (informational), nine UX.
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).

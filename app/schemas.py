@@ -636,6 +636,13 @@ class JobCostsResponse(BaseModel):
     §17.90 added ``by_kind`` — same shape, grouped by ``call_kind``.
     Useful for splitting compile-time synthesis spend from execution
     spend (W.7 follow-up).
+
+    §17.284 added ``data_source`` (``"ok"`` | ``"error"``). The rollup
+    fails open on transient DB errors and returns the zero-shape rather
+    than 500ing — pre-§17.284 that was indistinguishable from a real
+    empty rollup. ``"error"`` here means at least one of the three
+    component queries (totals / by_provider / by_kind) raised; operators
+    should re-poll or check logs before trusting the numbers.
     """
     job_id: str
     total_cost_usd: float
@@ -645,6 +652,7 @@ class JobCostsResponse(BaseModel):
     call_count: int
     by_provider: list[JobCostsBreakdownItem]
     by_kind: list[JobCostsKindItem] = []
+    data_source: Literal["ok", "error"] = "ok"
 
 
 class JobSynthesisOverrideInput(BaseModel):

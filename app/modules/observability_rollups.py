@@ -15,6 +15,11 @@ Three readers over the existing telemetry tables:
 
 Same fail-open contract as ``cost_rollup``: a missing telemetry
 table or transient DB error returns the zero/empty shape, never 500.
+
+§17.284 — every return carries ``data_source`` (``"ok"`` | ``"error"``)
+so callers can distinguish a real empty rollup (no data in window) from
+a fail-open fallback (query raised). Mirrors the same flag added to
+``cost_rollup`` in §17.284.
 """
 from __future__ import annotations
 
@@ -67,6 +72,7 @@ async def llm_rollup(
     ``total_cost_usd``, and ``by_model`` list. Fail-open: empty list
     + zero totals on any DB error.
     """
+    data_source = "ok"
     try:
         rows = await db.execute(
             text(_LLM_ROLLUP_SQL),
@@ -83,6 +89,7 @@ async def llm_rollup(
             "(returning empty)", window_minutes, provider, model, exc,
         )
         records = []
+        data_source = "error"
 
     by_model = [
         {
@@ -106,6 +113,7 @@ async def llm_rollup(
         "total_calls": sum(b["calls"] for b in by_model),
         "total_cost_usd": round(sum(b["cost_usd"] for b in by_model), 6),
         "by_model": by_model,
+        "data_source": data_source,
     }
 
 
@@ -147,6 +155,7 @@ async def recent_errors(
     no time filter, 50 newest. Caller passes ``resolved=False`` for an
     oncall view of "what's still broken."
     """
+    data_source = "ok"
     try:
         rows = await db.execute(
             text(_ERRORS_SQL),
@@ -163,6 +172,7 @@ async def recent_errors(
             "(returning empty)", resolved, since_minutes, limit, exc,
         )
         records = []
+        data_source = "error"
 
     errors = [
         {
@@ -190,6 +200,7 @@ async def recent_errors(
         },
         "count": len(errors),
         "errors": errors,
+        "data_source": data_source,
     }
 
 
@@ -239,6 +250,7 @@ async def recent_jobs_costs(
     so the expensive-jobs view is first. Useful for "what's been
     expensive in the last hour/day" without paging through /jobs.
     """
+    data_source = "ok"
     try:
         rows = await db.execute(
             text(_JOBS_COSTS_SQL),
@@ -251,6 +263,7 @@ async def recent_jobs_costs(
             "(returning empty)", window_minutes, limit, exc,
         )
         records = []
+        data_source = "error"
 
     jobs = [
         {
@@ -270,4 +283,5 @@ async def recent_jobs_costs(
         "count": len(jobs),
         "total_cost_usd": round(sum(j["cost_usd"] for j in jobs), 6),
         "jobs": jobs,
+        "data_source": data_source,
     }

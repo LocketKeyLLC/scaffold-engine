@@ -15,6 +15,21 @@ Both fail open: a missing ``llm_call_logs`` table (test env without
 the J.3 migration) or a transient DB error returns the zero-shape
 rather than 500ing. Telemetry consumers should still get *a*
 response, just with all-zero values.
+
+§17.284 — every fail-open return carries ``data_source`` (``"ok"`` |
+``"error"``). Pre-§17.284 a zero rollup was indistinguishable from a
+transient DB failure that fell through to the zero shape — operators
+reading ``/exec/status`` on a job with no calls yet saw the same dict
+as on a job whose query just blew up. Callers can now distinguish:
+
+  - ``data_source == "ok"``: query ran, the zeros (if any) are real.
+  - ``data_source == "error"``: at least one component query raised;
+    the shape is a fallback and the operator should re-poll or look at
+    logs.
+
+Composite responses (``get_job_costs``) downgrade to ``"error"`` if
+ANY component query failed — never silently mix valid totals with a
+failed breakdown without flagging it.
 """
 from __future__ import annotations
 
@@ -71,13 +86,16 @@ _KIND_BREAKDOWN_SQL = """
 """
 
 
-def _zero_totals() -> dict[str, Any]:
+def _zero_totals(*, data_source: str = "ok") -> dict[str, Any]:
+    """Zero-shape totals dict. ``data_source`` distinguishes a real empty
+    rollup (``"ok"``) from a fail-open fallback (``"error"``)."""
     return {
         "total_cost_usd": 0.0,
         "total_prompt_tokens": 0,
         "total_completion_tokens": 0,
         "total_latency_ms": 0,
         "call_count": 0,
+        "data_source": data_source,
     }
 
 
@@ -87,6 +105,10 @@ async def get_job_cost_totals(job_id: str, db) -> dict[str, Any]:
     Used by ``execution_handler.execution_status`` to surface a
     lightweight ``costs`` block on every ``/exec/status`` call. Single
     SUM query — cheap to add to a hot path.
+
+    §17.284 — return dict carries ``data_source`` (``"ok"`` | ``"error"``).
+    Real zero (no calls logged yet) is ``"ok"``; DB failure fallback is
+    ``"error"`` so callers can tell the two apart.
     """
     try:
         row = await db.execute(text(_TOTALS_SQL), {"jid": str(job_id)})
@@ -96,15 +118,16 @@ async def get_job_cost_totals(job_id: str, db) -> dict[str, Any]:
             "get_job_cost_totals_failed: job=%s error=%s "
             "(returning zero totals)", job_id, exc,
         )
-        return _zero_totals()
+        return _zero_totals(data_source="error")
     if rec is None:
-        return _zero_totals()
+        return _zero_totals(data_source="ok")
     return {
         "total_cost_usd": float(rec["total_cost_usd"] or 0.0),
         "total_prompt_tokens": int(rec["total_prompt_tokens"] or 0),
         "total_completion_tokens": int(rec["total_completion_tokens"] or 0),
         "total_latency_ms": int(rec["total_latency_ms"] or 0),
         "call_count": int(rec["call_count"] or 0),
+        "data_source": "ok",
     }
 
 
@@ -118,6 +141,12 @@ async def get_job_costs(job_id: str, db) -> dict[str, Any]:
     a 500).
     """
     totals = await get_job_cost_totals(job_id, db)
+    # §17.284 — track per-query failure so the composite response can
+    # report its data_source honestly: if ANY of the three queries fell
+    # through to a fail-open shape, the outer dict is marked "error".
+    breakdown_ok = True
+    kind_ok = True
+
     try:
         rows = await db.execute(text(_BREAKDOWN_SQL), {"jid": str(job_id)})
         records = rows.mappings().all()
@@ -127,6 +156,7 @@ async def get_job_costs(job_id: str, db) -> dict[str, Any]:
             "(returning empty breakdown)", job_id, exc,
         )
         records = []
+        breakdown_ok = False
 
     # §17.90 — kind breakdown is a separate fail-open query so a missing
     # column (pre-migration test env) or transient DB error returns an
@@ -142,6 +172,7 @@ async def get_job_costs(job_id: str, db) -> dict[str, Any]:
             "(returning empty kind breakdown)", job_id, exc,
         )
         kind_records = []
+        kind_ok = False
 
     by_provider = [
         {
@@ -166,9 +197,19 @@ async def get_job_costs(job_id: str, db) -> dict[str, Any]:
         }
         for r in kind_records
     ]
+    # §17.284 — composite data_source: "error" if ANY component query
+    # raised. ``totals`` already carries its own data_source from
+    # ``get_job_cost_totals``; we OR it with the per-breakdown flags
+    # here. The inner ``totals["data_source"]`` is overwritten by the
+    # composite value via the ``**totals`` spread + this trailing key.
+    totals_ok = totals.get("data_source", "ok") == "ok"
+    composite_source = (
+        "ok" if (totals_ok and breakdown_ok and kind_ok) else "error"
+    )
     return {
         "job_id": str(job_id),
         **totals,
         "by_provider": by_provider,
         "by_kind": by_kind,
+        "data_source": composite_source,
     }

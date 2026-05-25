@@ -120,11 +120,13 @@ class TestLlmRollup:
     async def test_db_error_fails_open(self):
         db = _mock_db_raises(RuntimeError("relation does not exist"))
         result = await llm_rollup(window_minutes=60, db=db)
+        # §17.284 — fail-open shape carries data_source="error".
         assert result == {
             "window_minutes": 60,
             "total_calls": 0,
             "total_cost_usd": 0.0,
             "by_model": [],
+            "data_source": "error",
         }
 
 
@@ -241,12 +243,80 @@ class TestRecentJobsCosts:
     async def test_db_error_fails_open(self):
         db = _mock_db_raises(RuntimeError("jobs missing"))
         result = await recent_jobs_costs(window_minutes=60, db=db)
+        # §17.284 — fail-open shape carries data_source="error".
         assert result == {
             "window_minutes": 60,
             "count": 0,
             "total_cost_usd": 0.0,
             "jobs": [],
+            "data_source": "error",
         }
+
+
+# ---------------------------------------------------------------------------
+# §17.284 — data_source ("ok" | "error") contract across all three helpers.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+class TestDataSourceFlag:
+    """§17.284 — distinguish a real empty rollup from a fail-open fallback.
+
+    Pre-§17.284 the dashboards reading these endpoints couldn't tell the
+    difference between "no LLM traffic in the window" and "the rollup
+    query just blew up — the zeros are a placeholder." Each helper now
+    carries ``data_source`` so dashboards can grey-out / warn / re-poll
+    accordingly.
+    """
+
+    async def test_llm_rollup_empty_carries_ok_source(self):
+        """No rows in the window (empty result set) → data_source="ok"."""
+        db = _mock_db_rows([])
+        result = await llm_rollup(window_minutes=60, db=db)
+        assert result["by_model"] == []
+        assert result["data_source"] == "ok"
+
+    async def test_llm_rollup_populated_carries_ok_source(self):
+        """Real rollup with rows → data_source="ok"."""
+        db = _mock_db_rows([
+            {"provider": "openai", "model": "gpt-4o", "calls": 3,
+             "successes": 3, "failures": 0,
+             "cost_usd": 0.04, "prompt_tokens": 6000,
+             "completion_tokens": 2000, "latency_ms_sum": 25000,
+             "latency_ms_p50": 8000, "latency_ms_p95": 12000,
+             "latency_ms_p99": 13000},
+        ])
+        result = await llm_rollup(window_minutes=60, db=db)
+        assert len(result["by_model"]) == 1
+        assert result["data_source"] == "ok"
+
+    async def test_llm_rollup_db_error_carries_error_source(self):
+        """DB error → empty shape + data_source="error"."""
+        db = _mock_db_raises(RuntimeError("table missing"))
+        result = await llm_rollup(window_minutes=60, db=db)
+        assert result["data_source"] == "error"
+
+    async def test_recent_errors_empty_carries_ok_source(self):
+        db = _mock_db_rows([])
+        result = await recent_errors(db=db)
+        assert result["count"] == 0
+        assert result["data_source"] == "ok"
+
+    async def test_recent_errors_db_error_carries_error_source(self):
+        db = _mock_db_raises(RuntimeError("error_logs missing"))
+        result = await recent_errors(db=db)
+        assert result["data_source"] == "error"
+
+    async def test_recent_jobs_costs_empty_carries_ok_source(self):
+        db = _mock_db_rows([])
+        result = await recent_jobs_costs(window_minutes=60, db=db)
+        assert result["count"] == 0
+        assert result["data_source"] == "ok"
+
+    async def test_recent_jobs_costs_db_error_carries_error_source(self):
+        db = _mock_db_raises(RuntimeError("jobs missing"))
+        result = await recent_jobs_costs(window_minutes=60, db=db)
+        assert result["data_source"] == "error"
 
 
 # ---------------------------------------------------------------------------
