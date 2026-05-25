@@ -15304,6 +15304,48 @@ The happy-path tests use a local `_result()` helper that mirrors `tests/test_ass
 
 **§17.280 closeout — yellow done.** All 5 🟡 items closed across §17.282 → §17.286. The 🔴 was closed in §17.281. Cycle shape mirrors §17.273 → §17.279 exactly: one entry per fix, OVERVIEW + code + test in the same commit. Remaining §17.280 work: four 🟢 (informational complexity flags — flagged-for-awareness, not blocking) and nine UX items. Operator can decide cycle order from here; no audit item is load-bearing.
 
+### §17.287 unknown-command suggestion already wired — close §17.280 UX #1 (audit-only) (2026-05-24)
+
+§17.280's first UX item flagged that "Unknown `/`-prefixed input falls through to triage with no feedback" and that `_suggest_command()` was "only wired into `_handle_command()`, not the front-door dispatch."
+
+**Audit result — premise false.** Re-read the dispatch path:
+
+- `pipelines/scaffold_router.py:1011-1015` (pipe() catch-all):
+  ```python
+  if msg.startswith("/"):
+      result = self._handle_command(msg)
+      if result:
+          yield result
+      return
+  ```
+- `pipelines/scaffold_router.py:2729-2734` (inside `_handle_command`, unknown-command fall-through):
+  ```python
+  close = _suggest_command(cmd)
+  if close:
+      hint = "\n".join(f"  - `{c}`" for c in close)
+      return (f"Unknown command: `{cmd}`\n\n"
+              f"Closest matches:\n{hint}\n\n"
+              f"Type `/help` for the full list.")
+  ```
+
+Confirmed live by invoking `_handle_command("/resarch kubernetes pods")` in the dev container — returns the "Unknown command: `/resarch` ... Closest matches: `/research` ..." reply. The audit missed that `_handle_command` IS the front-door for slash-prefixed input via the line-1011 catch-all; the fall-through inside `_handle_command` already calls `_suggest_command`. Plus subcommand handlers (`/jobs`, `/research/...`, `/model`, `/schedule`) all pass their own candidate pools through `_suggest_command(token, candidates=...)` for sub-token typos — see `pipelines/scaffold_router.py:2909`, `:3055`, `:3465`, `:3578`.
+
+**What §17.287 does.** Mirrors §17.282's pattern — pin the existing invariant with regression tests rather than touch production code that already correctly implements it. Adds `tests/test_scaffold_router_unknown_command.py` (+11 tests) covering both the unit-level helper and the dispatch-level wiring:
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestSuggestCommandHelper` | 5 | difflib cutoff/n-cap contract; custom-candidate-pool kwarg works |
+| `TestHandleCommandUnknownPath` | 4 | typo returns suggestions in "Closest matches" block; far-away input falls back to "/help" hint; suggestion block is markdown-bullet shape; known command (`/help`) is NOT routed through suggestion path |
+| `TestSourceShapeRegressionGuard` | 2 | regex anchor on `pipe()` catch-all (`if msg.startswith("/"): … self._handle_command(msg)`); `close = _suggest_command(cmd)` line preserved in `_handle_command` |
+
+The source-shape guards close the gap that pure behavioural tests leave: a future refactor that swaps the suggestion call for a static "Unknown command" message (without breaking the close-typo test under `n=3 cutoff=0.6` happenstance) would still slip past behaviour-only tests for any input difflib happens to reject. The two anchor tests catch that drift directly.
+
+**Subagent-TP rate replication, micro.** §17.280's UX block had 9 items; 1 already-implemented (this one) is a 1/9 = ~11% slot. Combined with the 🔴 + 🟡 ratio (5 of 6 valid = 83% TP) the audit's overall TP rate lands at 10/15 ≈ 67% — substantially above the 30% baseline because verification this cycle was tighter (read CPython source for §17.282, live-invoked the dispatch for §17.287). Audit-only closeouts will continue to surface as UX items get worked.
+
+**Test-suite delta:** +11. scaffold_router unknown-command + adjacent: 11 passing. No production change → no regression surface.
+
+**§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287 closes UX #1 (audit-only). Remaining: four 🟢 (informational), eight UX (#2-9).
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
