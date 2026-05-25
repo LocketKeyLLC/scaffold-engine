@@ -1070,7 +1070,12 @@ class Pipeline:
         ):
             yield from self._handle_assist(msg, body=body); return
         if self._is_cmd(msg, "/execute"):
-            yield from self._handle_execute(msg); return
+            # §17.314 — pass chat_id to support the confirmation-
+            # friction recall path. State-altering recall: show 📌
+            # + require explicit `/execute confirm` to fire.
+            yield from self._handle_execute(
+                msg, chat_id=self._chat_id_from_body(body),
+            ); return
         if self._is_cmd(msg, "/confirm"):
             yield from self._handle_confirm(msg, body=body); return
 
@@ -1284,9 +1289,51 @@ class Pipeline:
             "(list / find / rename / delete / reply / schedule)\n"
         )
 
-    def _handle_execute(self, msg: str) -> Generator[str, None, None]:
+    def _handle_execute(
+        self, msg: str, *, chat_id: str | None = None,
+    ) -> Generator[str, None, None]:
         parts = msg.split()
+
+        # §17.314 — confirmation-friction recall pilot for state-
+        # altering commands. /execute kicks off all pending DAG nodes,
+        # so we can't auto-substitute the recalled id like /results
+        # (§17.307) or /logs (§17.311) — a muscle-memory `/execute`
+        # alone could fire on the wrong job. Instead: show the recalled
+        # job via 📌, list 3 options, require explicit `/execute
+        # confirm` to fire on the recalled id.
+        if len(parts) == 2 and parts[1].lower() == "confirm":
+            recalled = self._active_job_recall(chat_id)
+            if not recalled or not recalled.get("job_id"):
+                yield (
+                    "❌ `/execute confirm` requires an active job in chat "
+                    "memory, but none is set.\n\n"
+                    "Pass an explicit job_id: `/execute <job_id>`. "
+                    "Use `/jobs` to list active jobs."
+                )
+                return
+            rid = recalled["job_id"]
+            yield self._active_job_hint(rid, recalled.get("title"))
+            yield f"Executing all nodes for job `{rid}`...\n\n"
+            yield from self._execute_and_stream(rid, 0)
+            return
+
         if len(parts) < 2:
+            recalled = self._active_job_recall(chat_id)
+            if recalled and recalled.get("job_id"):
+                rid = recalled["job_id"]
+                short = rid[:8] if len(rid) >= 8 else rid
+                title = recalled.get("title")
+                title_part = f" — _{title}_" if title else ""
+                yield (
+                    f"📌 Active job in this chat: `{short}`{title_part}.\n\n"
+                    f"⚠️ `/execute` runs ALL pending DAG nodes — "
+                    f"state-altering.\n\n"
+                    f"- Type `/execute confirm` to run on `{short}`\n"
+                    f"- Type `/execute <other_job_id>` to target a "
+                    f"different job\n"
+                    f"- Or check the job first: `/results {short}`"
+                )
+                return
             yield (
                 "Usage: `/execute <job_id>`\n"
                 "Example: `/execute 01ab243e`\n\n"

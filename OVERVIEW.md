@@ -16953,6 +16953,88 @@ The `test_full_id_match_required` is the §17.313 mirror of §17.309's same-name
 
 ---
 
+### §17.314 `/execute` adopts §17.307 with confirmation-friction (2026-05-25)
+
+Fifteenth post-§17.280 UX item. First pilot of the **state-altering §17.307 expansion**. After §17.307's read-only pilot held across §17.308-§17.313, §17.314 begins extending recall to state-altering commands. `/execute` is the cohort's simplest member (single-arg, terminal action), making it the right pilot vehicle for the new confirmation-friction model before tackling `/exec retry`'s two-arg complexity or `/skip`'s dual semantics.
+
+**The friction model.** Read-only recall (§17.307, §17.311) auto-substitutes the cached id and surfaces a 📌 hint:
+
+```
+/results  →  📌 Using job abc1234e — _my CLI_.  [body follows]
+```
+
+That contract works because `/results` is idempotent — operator typos can't cause irreversible state changes. State-altering commands need a deliberate gate: **show the recalled job + require an explicit `confirm` word** before firing:
+
+```
+/execute (recall hit) →
+  📌 Active job in this chat: `abc1234e` — _my CLI_.
+
+  ⚠️ `/execute` runs ALL pending DAG nodes — state-altering.
+
+  - Type `/execute confirm` to run on `abc1234e`
+  - Type `/execute <other_job_id>` to target a different job
+  - Or check the job first: `/results abc1234e`
+
+/execute confirm →
+  📌 Using active job `abc1234e` — _my CLI_.
+  Executing all nodes for job `abc1234e`...
+  [streaming output]
+```
+
+A muscle-memory bare `/execute` no longer fires anything — it just surfaces the recalled job and the 3 options. The `confirm` word is the explicit gate.
+
+**Three options on the recall surface — deliberate composition.**
+
+| # | Option | Operator intent |
+|---|---|---|
+| 1 | `/execute confirm` | "Yes, run on the recalled job" |
+| 2 | `/execute <other_job_id>` | "No, target a different job" |
+| 3 | `/results abc1234e` | "I forgot — let me look first" |
+
+Option 3 is the **load-bearing escape hatch**. Operators in the recall path may have forgotten they have an active job (long chat gap, switched between threads). Pointing them at /results teaches the diagnose-first pattern before any state-altering action — a discoverability win that read-only recall doesn't need.
+
+**Behavior matrix.**
+
+| Input | Cache state | Action |
+|---|---|---|
+| `/execute` | hit | Show 📌 + 3 options. No action. |
+| `/execute` | miss | Pre-§17.314 Usage error. |
+| `/execute confirm` | hit | Fire on recalled id. Show 📌 hint. |
+| `/execute confirm` | miss | Friendly error pointing at `/execute <id>`. |
+| `/execute <id>` | any | Fire on explicit id. No 📌. |
+| `/execute <placeholder>` | any | §17.301 rejection (unchanged). |
+
+The "any" rows in the explicit-id path are the contract: **explicit id never consults the cache**. State-altering operations on an explicit id trust the operator — they typed it, honor it. No risk of cache stomp.
+
+**`confirm` keyword detection.** Case-insensitive (`/execute CONFIRM` works). Single token only (`/execute confirm abc1234e` would route through the existing two-arg path which expects parts[1] as an id — would fail placeholder check if "confirm" doesn't look like a job id, which it doesn't). This is a deliberate constraint: `confirm` must be the SOLE argument to trigger the recall fire. Future state-altering commands (/exec retry, /skip) may need richer `confirm` semantics; §17.314 keeps it simple.
+
+**Plumbing.** `chat_id` flows through one new path: pipe()'s /execute dispatch → `_handle_execute(msg, chat_id=...)` → recall via `_active_job_recall(chat_id)` → either show 3 options (bare path) OR fire stream (confirm path).
+
+**Test-suite delta:** +18 tests in `tests/test_scaffold_router_execute_confirm.py` across 6 classes:
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestRecallHitOptions` | 4 | active job + title surfaced; bare /execute does NOT fire stream; state-altering warning visible; all 3 options present (`confirm`, `<other>`, `/results escape`) |
+| `TestExecuteConfirm` | 4 | confirm + recall = stream fires on recalled id + 📌 hint shown; confirm + no recall = friendly error; confirm + no chat_id = friendly error; confirm case-insensitive |
+| `TestExplicitIdOverridesRecall` | 2 | explicit id never consults cache; explicit + no recall works |
+| `TestColdCacheBare` | 2 | bare /execute with no recall = pre-§17.314 Usage error; bare with no chat_id = Usage |
+| `TestPlaceholderRejection` | 1 | §17.301 `<job_id>` rejection still fires; no stream |
+| `TestSourceShapeRegressionGuard` | 5 | `_handle_execute` accepts chat_id; pipe→handler threading; `confirm` keyword branch; state-altering warning phrasing; all 3 option templates anchored |
+
+The `test_recall_hit_does_not_execute` is the load-bearing safety assertion — it pins the contract that bare `/execute` on recall hit never fires the orchestrator. Regressing to "auto-substitute like /results" would defeat the entire confirmation-friction model.
+
+The `test_recall_hit_offers_all_three_options` is the discoverability anchor — the 3-options surface is what teaches operators the diagnose-first pattern. Dropping option 3 (the /results escape) would leave only "proceed or pivot to another job" with no "let me look first" pathway.
+
+**Pre-existing /execute tests preserved.** `tests/test_scaffold_router_placeholder_ux.py::TestExecutePlaceholderUx` (3 tests: bare → Usage, placeholder rejected, real-id streams) all continue to pass — they call `_handle_execute("/execute")` without `chat_id=` so the default `chat_id=None` suppresses the recall path; behavior matches pre-§17.314.
+
+**Cost.** +33 LOC in `_handle_execute` (the recall-hit + confirm branches + signature change) + 3 LOC in pipe dispatch (chat_id threading). Total ~36 LOC in `pipelines/scaffold_router.py`. Operator-facing cost: zero on cold cache and explicit-id paths (unchanged); ~6-line surface on the recall-hit path (3 options + warning + 📌); ~2-line surface on the confirm-fires path (📌 + Executing banner).
+
+**Next state-altering targets.** `/exec retry <id> <node>` — most-requested per §17.304's post-failure Next-block pattern. Two-arg signature adds complexity: the `confirm` keyword could conflict with a node_key named "confirm" (unlikely but worth a guard); operator might want to retry the active job's failed node without typing node_key (orchestrator can surface "most recent failure" but that's a separate plumbing thread). `/skip <id> [<node>]` has dual semantics (list candidates vs do-skip) — needs its own design pass. Each will land as a separate §-entry once the §17.314 pattern validates in real usage.
+
+**§17.300-§17.314 polish four layers.** Canonical flow surfaces (§17.300-§17.308) + three management panels (§17.309, §17.310, §17.312) + dual-surface disambiguation (§17.313) + active-job memory across all 3 read-only id-takers (§17.307, §17.311) + the first state-altering recall pilot with confirmation-friction (§17.314). Three of four cohort members (/results, /cost, /logs read-only; /execute state-altering) now reach active-job-memory; /exec retry and /skip remain.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
