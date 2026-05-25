@@ -2252,7 +2252,9 @@ class Pipeline:
                     headers=self._auth_headers(),
                     timeout=self.valves.stream_timeout,
                 )
-                return self._fmt(r)
+                # §17.303 — render success with a pre-filled Next-block
+                # so operators don't have to scan JSON for the job_id.
+                return self._render_ideate_response(r)
             if cmd == "/dag":
                 if len(parts) < 2:
                     return (
@@ -3145,6 +3147,87 @@ class Pipeline:
         if r.status_code >= 400:
             return f"⚠️ Error {r.status_code}: {data.get('message') or data.get('detail') or r.text[:200]}"
         return f"```json\n{json.dumps(data, indent=2)}\n```"
+
+    # ------------------------------------------------------------------
+    # §17.303 — focused renderers for job-id-producing success paths
+    # ------------------------------------------------------------------
+
+    def _render_ideate_response(self, r: requests.Response) -> str:
+        """§17.303 — render Phase 1 (`/idea` → /ideate) success with a
+        pre-filled Next-block instead of a raw JSON dump.
+
+        Falls back to ``_fmt(r)`` for:
+          * HTTP ≥ 400 (existing error rendering)
+          * Non-JSON 200 body
+          * 200 body without ``job_id`` (defensive)
+
+        The orchestrator's pre-§17.303 ``message`` field already
+        suggests ``Reply /confirm <job_id> to proceed`` — but the
+        placeholder is the LITERAL string ``<job_id>``, not the real
+        id. The renderer fills in the actual id so operators can
+        copy-paste straight to the next turn.
+        """
+        if r.status_code >= 400:
+            return self._fmt(r)
+        try:
+            data = r.json()
+        except Exception:
+            return self._fmt(r)
+        if not isinstance(data, dict) or not data.get("job_id"):
+            return self._fmt(r)
+
+        job_id = data["job_id"]
+        status = data.get("status", "?")
+        brief = data.get("refined_brief") or {}
+        feasibility = data.get("feasibility") or {}
+
+        lines: list[str] = [
+            f"✅ **Job created** `{job_id}` (status: `{status}`)\n",
+        ]
+        # Refined brief summary — title + 1-line description if present.
+        brief_title = brief.get("title") if isinstance(brief, dict) else None
+        if brief_title:
+            lines.append(f"**Refined brief:** {brief_title}")
+        # Feasibility verdict (a 2026-04 audit added structured fields).
+        if isinstance(feasibility, dict):
+            feasible = feasibility.get("feasible")
+            confidence = feasibility.get("confidence")
+            if feasible is not None:
+                verdict = "✅ feasible" if feasible else "⚠️ infeasible"
+                conf_str = (
+                    f" (confidence: {confidence:.2f})"
+                    if isinstance(confidence, (int, float)) else ""
+                )
+                lines.append(f"**Feasibility:** {verdict}{conf_str}")
+        # Surface the feasibility-fallback warning if the orchestrator
+        # set it (pre-§17.303 it lived in the ``message`` field; we
+        # extract it explicitly so the next-block stays clean).
+        msg = data.get("message", "")
+        if isinstance(msg, str) and "Feasibility check failed" in msg:
+            lines.append(
+                "\n⚠️ Feasibility check failed; using best-effort defaults. "
+                "Review the brief above."
+            )
+
+        lines.append("\n**Next steps:**")
+        lines.append(
+            f"- `/confirm {job_id}` — auto-chain Phase 2 "
+            f"(research → compile → DAG → execute)"
+        )
+        lines.append(
+            f"- `/confirm {job_id} <your feedback>` — adjust the brief "
+            f"before proceeding"
+        )
+        lines.append(f"- `/results {job_id}` — peek at current state")
+        lines.append(f"- `/cost {job_id}` — see costs so far")
+
+        # Append the raw JSON as a smaller footer so operators who want
+        # the full payload still have it.
+        lines.append(
+            f"\n<details><summary>Full Phase 1 response</summary>\n\n"
+            f"```json\n{json.dumps(data, indent=2)}\n```\n\n</details>"
+        )
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # /model command system

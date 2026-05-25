@@ -16187,6 +16187,96 @@ Source-shape counts (≥ 5 for jobs, ≥ 3 for research) are the load-bearing an
 
 **§17.300 + §17.301 + §17.302 together complete the foundational OWUI UX layer.** §17.300 makes the first message productive; §17.301 makes the second-tier commands self-explanatory; §17.302 makes every error operator-actionable. Future work in this thread is incremental polish on top of the foundation.
 
+### §17.303 `/idea` success surfaces pre-filled Next-block (2026-05-25)
+
+Fourth post-§17.280 UX item. After §17.300–§17.302 set the foundation (discovery, self-explanation, recovery), §17.303 fills the gap between "first command succeeded" and "now what".
+
+**Problem.** Pre-§17.303 `/idea Build a thing` returned a raw JSON dump from `_fmt(r)`:
+
+```json
+{
+  "job_id": "abc1234e-d5f6-...",
+  "status": "awaiting_confirmation",
+  "refined_brief": {"title": "...", ...},
+  "feasibility": {"feasible": true, "confidence": 0.85},
+  "message": "Reply /confirm <job_id> to proceed, or /confirm <job_id> <feedback> to adjust."
+}
+```
+
+Three operator-facing problems with the JSON-dump shape:
+
+1. **job_id buried** — operator has to scan a multi-line JSON to find it
+2. **placeholder leak** — the orchestrator's `message` field uses the LITERAL string `<job_id>`, not the real id. Operators trying to copy-paste `/confirm <job_id>` send the placeholder to the orchestrator, which then 422s.
+3. **no command discovery** — `/confirm` is the only command surfaced; `/results`, `/cost`, `/confirm <id> <feedback>` are operator-discoverable only via `/help` or muscle-memory.
+
+**Fix.** New `_render_ideate_response(r)` method renders the success path as a focused markdown summary with the actual job_id filled in everywhere:
+
+```
+✅ **Job created** `abc1234e-d5f6-...` (status: `awaiting_confirmation`)
+
+**Refined brief:** Build a CLI that converts screenshots to PDF
+**Feasibility:** ✅ feasible (confidence: 0.85)
+
+**Next steps:**
+- `/confirm abc1234e-d5f6-...` — auto-chain Phase 2 (research → compile → DAG → execute)
+- `/confirm abc1234e-d5f6-... <your feedback>` — adjust the brief before proceeding
+- `/results abc1234e-d5f6-...` — peek at current state
+- `/cost abc1234e-d5f6-...` — see costs so far
+
+<details><summary>Full Phase 1 response</summary>
+
+```json
+{ ... full payload ... }
+```
+</details>
+```
+
+The operator now sees:
+- **job_id at the top** (no scanning)
+- **summary of what was refined** (so they can sanity-check the LLM's interpretation)
+- **feasibility verdict** with confidence (gates the decision to proceed vs adjust)
+- **4 pre-filled next commands** — copy-pasteable, the actual id substituted in
+- **collapsed JSON footer** for operators who want the full payload (debugging)
+
+**The four-command discovery set on `/idea` success** mirrors §17.300's welcome-preamble four-command set but is intent-shaped: from a fresh job, the four actions an operator might want are (a) proceed as-is, (b) adjust then proceed, (c) check state, (d) check cost. Each gets its own pre-filled line so there's no ambiguity about which command to run next.
+
+**Failure paths fall through to `_fmt(r)`.** Four fallback cases preserved:
+
+| Case | Fallback |
+|---|---|
+| HTTP ≥ 400 | `_fmt`'s existing error rendering (`Error 422: validation failed` etc.) |
+| Non-JSON 200 body | `_fmt`'s `HTTP 200: <text>` shape |
+| 200 + non-dict JSON | same |
+| 200 + dict without `job_id` | `_fmt`'s raw JSON dump — defensive against orchestrator contract drift |
+
+The defensive fallback (200 without job_id) is load-bearing — without it, a drifted orchestrator response would crash the renderer mid-format. With it, the operator sees the raw JSON and can report the drift.
+
+**Why not also fix `/confirm` and `/research` success paths.** Considered:
+
+- **`/confirm`** — already streams SSE events with progress + the auto-chain flow surfaces follow-on commands implicitly. The synchronous-confirm JSON-dump path is rarer (operators usually want the streaming view).
+- **`/research`** — also SSE-streams; the final `research_complete` event already carries session_id + summary. Already covered.
+
+`/idea` is the unique gap because it's the only common Phase 1 endpoint that returns a synchronous JSON payload (no SSE stream).
+
+**Test-suite delta:** +16 tests in `tests/test_scaffold_router_ideate_next_block.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestIdeateSuccessRendering` | 8 | actual job_id at top (NOT placeholder); refined brief title surfaced; feasibility verdict + confidence formatted; infeasible verdict; feasibility-fallback warning surfaced when message carries it; all 4 next-commands have pre-filled real id; /confirm vs /confirm-with-feedback distinguished; full JSON footer preserved |
+| `TestIdeateErrorFallback` | 4 | 4xx → `_fmt`; 5xx → `_fmt`; non-JSON 200 → `_fmt`; 200 without job_id → `_fmt` (defensive) |
+| `TestIdeateRoutedThroughRenderer` | 1 | `_handle_command("/idea ...")` actually routes through the new renderer (catches a future revert to `_fmt`) |
+| `TestSourceShapeRegressionGuard` | 3 | `_render_ideate_response` method anchored in source; `/idea` dispatch calls it; all 4 next-command template lines present |
+
+The "placeholder leak" test (`test_actual_job_id_surfaced_at_top`) is load-bearing — it explicitly asserts that the orchestrator's `<job_id>` literal does NOT appear above the Next-block. A regression where the renderer surfaced the `message` field verbatim would tell operators to copy-paste the literal placeholder.
+
+**Cost.** ~70 LOC for the renderer + 4 lines at the dispatch site. The output is longer per `/idea` call (~30 lines vs ~10 of JSON), but every line is operator-actionable. The collapsed `<details>` footer preserves the full payload for debug-mode operators.
+
+**OWUI `<details>` rendering caveat.** Some OWUI versions render `<details><summary>` as collapsible blocks; others render them inline as plain text. Either way the JSON is accessible — the worst case is a slightly verbose response. The Next-block always renders normally.
+
+**Test-suite delta:** +16. scaffold_router cluster (10 test files including §17.300–§17.303): in flight at commit time; no regression surface anticipated (purely additive — the only behavior change is on `/idea` success, which a separate test path drives).
+
+**§17.303 is the first "polish" item past the §17.300–§17.302 foundation.** The thread now has 4 in-place wins: discovery (§17.300), self-explanation (§17.301), recovery (§17.302), and post-action signposting (§17.303). Next plausible items: `/confirm` post-Phase-2 surfacing (mirror of §17.303 for the synchronous-confirm path); active-job chat memory (carry job_id across turns so operators don't have to re-type it); multi-line evidence input UX for `/assist submit`.
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
