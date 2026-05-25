@@ -44,7 +44,14 @@ def _load_module():
         "app.modules", "app.modules.idea_refinement",
         "app.modules.gt_extractor", "app.modules.rag_pipeline",
         "app.database",
+        # §17.290 — added ``app.utils.job_utils`` (host of ``fail_job``)
+        # because ideation_workflow.py imports from it; without this stub
+        # the loader hit ``ModuleNotFoundError: No module named
+        # 'app.utils.job_utils'`` and every Phase-2 test silently skipped.
+        # Symptom existed pre-§17.290 — the audit's verification step
+        # surfaced it. All existing tests gain real runs from this fix.
         "app.utils", "app.utils.llm_parsing", "app.utils.topic_detection",
+        "app.utils.job_utils",
         "sqlalchemy", "sqlalchemy.ext", "sqlalchemy.ext.asyncio",
         "sqlalchemy.orm", "sqlalchemy.sql",
         "structlog", "aiohttp", "asyncpg",

@@ -15431,6 +15431,33 @@ The chat-side `test_error_source_zero_calls_emits_warning_banner` is the load-be
 
 **§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287 closed UX #1. §17.288 closed UX #2. §17.289 closes UX #3. Remaining: four 🟢 (informational), six UX (#4-9).
 
+### §17.290 Phase 2 compile-failure HTTP status → 500 — close §17.280 UX #4 (2026-05-24)
+
+§17.280's fourth UX item. `app/modules/ideation_workflow.py:368` returned `http_status: 502` (Bad Gateway) on Phase 2 compile failure. Defensible per HTTP semantics — the LLM is "upstream" — but inconsistent with the rest of the function:
+
+- The generic-exception path (line 378-383) `raise`s, which FastAPI converts to **500** via the workflow router's default `result.get("http_status", 500)`.
+- The 404 (job-not-found, line 239) and 409 (status-conflict, line 251) paths above have genuine client-error semantics — `awaiting_confirmation` was missed at the API boundary — and stay as-is.
+- No remediation hint in `app/modules/recovery.py::NEXT_ACTIONS` keys off 502 vs 500. Operators see the same `/confirm <job_id>` retry advice either way.
+
+**Fix.** Flip the explicit 502 to 500 with a §17.290 comment naming the audit reasoning. The lone 502 in the codebase is gone (`grep -rn 'http_status.*502' app/` returns empty). Considered the audit's alternative — "document the 502-means-LLM-upstream convention" — and rejected: the generic-exception path covers many upstream failures (SearXNG, Milvus, model server) but collapses to 500 via re-raise; classifying those properly would be a much wider refactor for no operator-visible benefit, since recovery semantics are uniform across all in-band Phase 2 failures.
+
+**Side win — Phase 2 tests un-skipped.** First test run on the new tests + the existing `test_ideation_workflow_phase2.py` cluster returned "11 skipped" with reason `"ideation_workflow.py not loadable in this environment"`. Traced to the loader at `tests/_ideation_workflow_shared.py:_load_module` — the stub list covers `app.utils` and submodules `llm_parsing` / `topic_detection`, but `ideation_workflow.py:42` imports `fail_job` from `app.utils.job_utils`, which the stub list missed. The `app.utils` MagicMock made Python report `'app.utils' is not a package` when resolving the submodule, blocking module load. Added `"app.utils.job_utils"` to the stub list — symptom is pre-§17.290 (the import has been there for a while; the silent-skip drifted in), but the audit's verification step is what surfaced it. **All Phase 2 + Phase 1 + cancel cluster tests transition from SKIPPED to PASSED in this environment.** That's 5 (Phase 1) + 6 (Phase 2) + (cancel) tests recovering real coverage on this host.
+
+**Test-suite delta:** +5 new tests + 1 loader stub fix.
+
+| File | Class / Tests | Pins |
+|---|---|---|
+| `tests/test_ideation_workflow_compile_failure_500.py` | `TestCompileFailureHttpStatus` (2) | **load-bearing** — compile-parse failure returns 500; LLM-unsuccess (transport / HTTP error) returns 500 |
+| | `TestOtherPhase2StatusesUnchanged` (2) | 404 (job-not-found) and 409 (status-conflict) preserved — guard against an over-eager future "standardize all to 500" refactor that would lose genuine client-error semantics |
+| | `TestSourceShapeRegressionGuard` (1) | `"http_status": 502` is absent from source; `§17.290` comment stays anchored so the next reader sees why the branch is 500 |
+| `tests/_ideation_workflow_shared.py` (loader) | — | adds `app.utils.job_utils` to the stub list. Unblocks 11+ previously-skipped tests. |
+
+**Backward compatibility.** No SDK / consumer behavior change — the workflow router already defaults missing `http_status` to 500 (`app/routers/workflow.py:63`). External clients that were dispatching on `502 → "LLM problem"` get the same operator-facing remediation as before via the existing recovery flow, just under code 500 alongside the other Phase 2 failures.
+
+**Test-suite delta:** +5 dedicated to §17.290; loader fix unblocks 5+6 previously-skipped pre-existing tests. Ideation workflow + compile-failure + Phase 1 + cancel cluster: 16 passing (was 0/11 skipped in this env). No regressions.
+
+**§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287 closed UX #1. §17.288 closed UX #2. §17.289 closed UX #3. §17.290 closes UX #4. Remaining: four 🟢 (informational), five UX (#5-9).
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).

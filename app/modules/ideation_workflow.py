@@ -357,6 +357,16 @@ async def research_and_compile(
         workflow = parse_json_object(resp.text) if resp.success else None
         if workflow is None:
             # Compile failure is fatal — do not emit empty workflow_steps.
+            # §17.290 — uniform 500 for all in-band Phase 2 failures.
+            # Pre-§17.290 this branch returned 502 (Bad Gateway, on the
+            # theory that the LLM is upstream). Inconsistent with the
+            # generic-exception path below (which `raise`s → FastAPI 500)
+            # and operator-orthogonal — no remediation hint in
+            # `recovery.py::NEXT_ACTIONS` keys off 502 vs 500, and the
+            # `/confirm` re-try path is the same either way. Standardize
+            # on 500 so consumers don't need to special-case the code.
+            # 404 (job-not-found) and 409 (status-conflict) above stay —
+            # those are genuinely client-error semantics.
             err = f"compile step failed (llm_success={resp.success}): {getattr(resp, 'error', None)}"
             logger.error("phase2_compile_failed: job_id=%s error=%s", job_id, err)
             async with async_session() as fail_db:
@@ -365,7 +375,7 @@ async def research_and_compile(
                 "job_id": job_id,
                 "status": "failed",
                 "error": err,
-                "http_status": 502,
+                "http_status": 500,
             }
 
     except asyncio.CancelledError:
