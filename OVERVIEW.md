@@ -16449,6 +16449,70 @@ The `test_recovery_scenario_chains_results_then_retry` assertion is load-bearing
 
 ---
 
+### §17.307 active-job chat memory — pilot for `/results` + `/cost` (2026-05-25)
+
+Eighth post-§17.280 UX item. After §17.300-§17.306 closed the discovery surface, the highest-friction operator action remaining was the **36-char UUID copy-paste** that every job-id-taking command requires. Operators with one active job per chat (the common case) paid the UUID-paste tax every turn.
+
+**Pilot scope.** Pick the two highest-frequency id-takers (`/results` and `/cost`) and the most natural writer site (`/idea` success), then validate the UX before expanding.
+
+| Site | Role | Action |
+|---|---|---|
+| `/idea <text>` success → `_render_ideate_response` | Writer | After extracting `job_id` from the /ideate response, cache `(chat_id, job_id, title)` in-pipeline |
+| `/results` invoked with no explicit id | Reader | If cache hit → use cached id + prepend 📌 hint; if cache miss → pre-§17.307 Usage error |
+| `/cost` invoked with no explicit id | Reader | Same recall-then-hint pattern |
+
+**The 📌 hint.** Every recalled-id response leads with a single visible line:
+
+```
+📌 Using active job `abc1234e` — _Build a CLI that converts screenshots to PDF_ (most recent in this chat). Pass an explicit job_id to override.
+```
+
+The hint is non-negotiable — operators MUST see which job was recalled so a stale cache (e.g., across a long chat gap where the operator started a different job) doesn't silently route their `/results` to the wrong place. The 8-char short id matches `/jobs` listing's display; the title (from refined_brief) provides a second recognition handle.
+
+**Why in-pipeline (not orchestrator chatmap).** The `/assist` chatmap uses `POST /assist/_chatmap/{chat_id}` for cross-replica session continuity. Active-job memory is a UX cache, not a cross-request session — its scope is "save the operator one UUID paste." Pipeline restarts force the operator to re-paste the UUID once; that's an acceptable failure mode for a pilot. If the pilot validates the UX, persisting via a future `/jobs/_chatmap/{chat_id}` endpoint is a follow-up. Keeping the pilot in-pipeline = revertable with a single commit.
+
+**Conservative defaults.**
+- Cache miss + no explicit id → **unchanged** Usage error from §17.301. No surprise; cold caches behave exactly like pre-§17.307.
+- Explicit id always overrides. The recall path is short-circuited at the `len(parts) < 2` check; operators passing an id never see the 📌 hint.
+- Valve `active_job_memory_enabled: bool = True` defaults on. Operators who want the pre-§17.307 behavior flip it off.
+- Failed `/idea` (4xx, non-JSON, missing job_id) does NOT write the cache. A non-existent id would route subsequent /results to a 404.
+
+**Plumbing.** `chat_id` flows through one new path: `pipe()` reads `body["metadata"]["chat_id"]` via `_chat_id_from_body()`, then passes it to `_handle_command(msg, chat_id=...)`, which threads it through to `_handle_results`, `_handle_cost`, and `_render_ideate_response`. The `_handle_command` signature change is backwards compatible (`chat_id: str | None = None`). The `/assist` dispatch already had its own chat_id wiring (`/assist/_chatmap` predates this); §17.307 follows the same pattern for non-assist commands.
+
+**Reader implementation pattern: recursion.** Each reader checks `len(parts) < 2`, recalls if cached, then recursively calls itself with the recalled id as an explicit `parts[1]`. The recursive call short-circuits the recall branch (parts now has length 2), and the existing 10+ return paths (200 compiled output, 404, 4xx, timeout, ConnectionError, running, failed, awaiting_confirmation, …) all flow through unchanged. The recall path prepends the 📌 hint once, then returns `hint + self._handle_results([parts[0], rid])`. Cheap, contained, no risk of forgetting a return path.
+
+**Why pilot rather than full sweep.** Active-job memory affects identity resolution across the router. Risk areas:
+
+1. **Cross-chat confusion** — operator switches chats, expects fresh state, recalls stale id. Mitigated by the visible 📌 hint with title.
+2. **Surprise factor** — operator types `/results` expecting a Usage error (to remember the command shape), gets actual output. Mitigated by valve toggle.
+3. **Cache lifetime** — pipeline restart clears all caches; operator on a long-running chat sees memory disappear. Acceptable for the pilot; if UX validates, persist via orchestrator.
+
+Validating with the two highest-frequency readers (which together account for most non-execution `<job_id>` typing) lets us observe real operator behavior before expanding to `/exec retry`, `/logs`, `/skip`, `/jobs rename/delete`, `/execute`, `/dag`, `/confirm`. Each of those has different stakes (retry / skip alter execution state; rename/delete are destructive; /exec retry is post-failure) and benefits from being added deliberately rather than as a batch.
+
+**Test-suite delta:** +34 tests in `tests/test_scaffold_router_active_job_memory.py` across 9 classes:
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestRememberRecallHelpers` | 6 | round-trip; overwrites; None/empty chat_id falsy-guard; timestamp recorded; cross-chat isolation |
+| `TestValveGate` | 2 | remember + recall both no-op when valve off |
+| `TestActiveJobHint` | 5 | shows 8-char id (not full UUID); title appears when present + omitted cleanly when absent; carries "override" instruction; ends with `\n\n` for clean prepend |
+| `TestIdeaSeedsMemory` | 3 | /idea success seeds; no chat_id = no write; failed response = no write |
+| `TestResultsReader` | 4 | recall hit produces 📌 + standard body + uses recalled id; cache miss = Usage error; explicit id overrides (no hint, no substitution); no chat_id = no recall |
+| `TestCostReader` | 3 | mirror of /results — recall / Usage / override |
+| `TestEndToEndFlow` | 1 | canonical journey: /idea → /results with no args → recalled id flows through (Usage NOT shown) |
+| `TestDispatchPlumbing` | 4 | all 4 functions have `chat_id` kwarg (catches a refactor that drops the threading) |
+| `TestSourceShapeRegressionGuard` | 6 | each helper + valve + pipe() threading + writer call site anchored in source |
+
+The `test_explicit_id_overrides_memory` assertions in both reader classes are load-bearing — they pin "no surprise" by verifying the explicit-arg path NEVER consults the cache. A future refactor that always prepends the hint (even with explicit args) would break operator expectation and silently override their typed id.
+
+**Cost.** +6 LOC valve, +18 LOC helpers (remember / recall / hint), +6 LOC writer site, +12 LOC reader sites. Total ~42 LOC in `pipelines/scaffold_router.py`. Operator-facing cost: zero when memory is cold (unchanged behavior); ~1 prepended line when warm.
+
+**What's deferred from this pilot.** Per the staging-then-expand approach: `/exec retry`, `/jobs rename/delete`, `/skip`, `/logs`, `/execute`, `/dag`, `/confirm` all keep their current explicit-id-required behavior. A follow-up entry will expand to them once the pilot's UX is validated in actual chat usage. The valve gives operators a way to opt out if the pilot misbehaves; the in-pipeline storage means a misbehavior fix is one commit and a container restart.
+
+**Why this is the right next step.** §17.300-§17.306 made the surface discoverable; §17.307 reduces the typing tax on the discovered surface. Both axes (discovery + friction) are necessary — surface a UUID nobody can find AND make them re-type it = two compounding frictions. Closing one without the other leaves the other dominant.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

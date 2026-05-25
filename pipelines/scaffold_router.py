@@ -446,6 +446,18 @@ class Pipeline:
         # preamble per chat — subsequent turns are unaffected.
         show_welcome_on_first_turn: bool = True
 
+        # §17.307 — active-job chat memory (pilot). When true, /idea
+        # success caches `chat_id → job_id` in-pipeline; `/results`
+        # and `/cost` invoked with NO args fall back to that cached
+        # id and surface a 📌 hint instead of the bare Usage error.
+        # Explicit args always override. Falls through to Usage error
+        # when memory is empty (no surprise; behavior unchanged when
+        # the cache is cold). Cache lives in-pipeline (not in the
+        # orchestrator chatmap) — pilot is scoped to a single
+        # pipeline replica; UUID re-type is the recovery if the
+        # pipelines container restarts.
+        active_job_memory_enabled: bool = True
+
         # Model overrides
         model_general: str = "qwen3-vl:235b-instruct-cloud"
         model_verifier: str = "qwen2.5:7b"
@@ -1063,7 +1075,11 @@ class Pipeline:
             yield from self._handle_confirm(msg, body=body); return
 
         if msg.startswith("/"):
-            result = self._handle_command(msg)
+            # §17.307 — extract chat_id for active-job memory. Same
+            # source as the /assist chatmap path.
+            result = self._handle_command(
+                msg, chat_id=self._chat_id_from_body(body),
+            )
             if result:
                 yield result
             return
@@ -1432,6 +1448,43 @@ class Pipeline:
 
     def _assist_forget(self, chat_id: str | None) -> None:
         return _assist.assist_forget(self, chat_id)
+
+    # §17.307 — active-job chat memory. Mirrors the assist chatmap
+    # shape (remember / recall) but in-pipeline (no orchestrator
+    # roundtrip; the chatmap endpoint exists for /assist's cross-
+    # request session continuity — active-job memory is a UX cache
+    # that survives within a single pipeline replica). Pilot scope:
+    # /idea writes; /results and /cost read.
+    def _active_job_remember(
+        self, chat_id: str | None, job_id: str, *, title: str | None = None,
+    ) -> None:
+        if not chat_id or not self.valves.active_job_memory_enabled:
+            return
+        if not hasattr(self, "_active_jobs_by_chat"):
+            self._active_jobs_by_chat = {}
+        self._active_jobs_by_chat[chat_id] = {
+            "job_id": job_id,
+            "title": title,
+            "remembered_at": time.time(),
+        }
+
+    def _active_job_recall(self, chat_id: str | None) -> dict | None:
+        if not chat_id or not self.valves.active_job_memory_enabled:
+            return None
+        return getattr(self, "_active_jobs_by_chat", {}).get(chat_id)
+
+    @staticmethod
+    def _active_job_hint(job_id: str, title: str | None) -> str:
+        """§17.307 — render the 📌 hint prepended to recalled-id
+        responses. Operator must always be able to see WHICH job was
+        recalled so they can recognize a stale cache (e.g., across
+        long chat gaps) and pass an explicit id instead."""
+        short = job_id[:8] if len(job_id) >= 8 else job_id
+        title_part = f" — _{title}_" if title else ""
+        return (
+            f"📌 Using active job `{short}`{title_part} (most recent "
+            f"in this chat). Pass an explicit job_id to override.\n\n"
+        )
 
     def _resolve_session_id(
         self, args: list, chat_id: str | None,
@@ -2284,7 +2337,7 @@ class Pipeline:
     # Single-string command dispatcher
     # ------------------------------------------------------------------
 
-    def _handle_command(self, msg: str) -> str:
+    def _handle_command(self, msg: str, chat_id: str | None = None) -> str:
         parts = msg.split(None, 2)
         cmd = parts[0].lower()
 
@@ -2296,7 +2349,7 @@ class Pipeline:
             if cmd == "/schedule":
                 return self._handle_schedule(msg)
             if cmd == "/results":          # #8.1
-                return self._handle_results(parts)
+                return self._handle_results(parts, chat_id=chat_id)
             if cmd == "/jobs":
                 return self._handle_jobs(msg)
             if cmd == "/idea":
@@ -2313,7 +2366,9 @@ class Pipeline:
                 )
                 # §17.303 — render success with a pre-filled Next-block
                 # so operators don't have to scan JSON for the job_id.
-                return self._render_ideate_response(r)
+                # §17.307 — pass chat_id so successful /idea seeds
+                # active-job memory for this chat.
+                return self._render_ideate_response(r, chat_id=chat_id)
             if cmd == "/dag":
                 if len(parts) < 2:
                     return (
@@ -2406,7 +2461,7 @@ class Pipeline:
 
             # ----- J.3.c — cost rollup for a job ------------------------
             if cmd == "/cost":
-                return self._handle_cost(parts)
+                return self._handle_cost(parts, chat_id=chat_id)
 
             close = _suggest_command(cmd)
             if close:
@@ -3068,8 +3123,19 @@ class Pipeline:
                 lines.append(f"- `/skip {job_id} {node_key}`{title_part}\n")
         return "".join(lines)
 
-    def _handle_results(self, parts: list) -> str:
+    def _handle_results(
+        self, parts: list, *, chat_id: str | None = None,
+    ) -> str:
+        # §17.307 — when no explicit id, try active-job memory before
+        # falling back to the §17.301 Usage error. Empty cache + no
+        # arg = unchanged Usage error (no surprise). The recursive
+        # call passes an explicit id so this branch is not re-entered.
         if len(parts) < 2:
+            recalled = self._active_job_recall(chat_id)
+            if recalled and recalled.get("job_id"):
+                rid = recalled["job_id"]
+                hint = self._active_job_hint(rid, recalled.get("title"))
+                return hint + self._handle_results([parts[0], rid])
             return (
                 "Usage: `/results <job_id>`\n"
                 "Example: `/results 01ab243e`\n\n"
@@ -3211,7 +3277,9 @@ class Pipeline:
     # §17.303 — focused renderers for job-id-producing success paths
     # ------------------------------------------------------------------
 
-    def _render_ideate_response(self, r: requests.Response) -> str:
+    def _render_ideate_response(
+        self, r: requests.Response, *, chat_id: str | None = None,
+    ) -> str:
         """§17.303 — render Phase 1 (`/idea` → /ideate) success with a
         pre-filled Next-block instead of a raw JSON dump.
 
@@ -3225,6 +3293,10 @@ class Pipeline:
         placeholder is the LITERAL string ``<job_id>``, not the real
         id. The renderer fills in the actual id so operators can
         copy-paste straight to the next turn.
+
+        §17.307 — on success, seed active-job memory so subsequent
+        `/results` and `/cost` invocations without an explicit id
+        recall this job_id automatically.
         """
         if r.status_code >= 400:
             return self._fmt(r)
@@ -3239,6 +3311,16 @@ class Pipeline:
         status = data.get("status", "?")
         brief = data.get("refined_brief") or {}
         feasibility = data.get("feasibility") or {}
+
+        # §17.307 — seed active-job memory. Best-effort + gated on the
+        # valve + chat_id. Runs before rendering so a render exception
+        # doesn't strand the cache.
+        brief_title_for_cache = (
+            brief.get("title") if isinstance(brief, dict) else None
+        )
+        self._active_job_remember(
+            chat_id, job_id, title=brief_title_for_cache,
+        )
 
         lines: list[str] = [
             f"✅ **Job created** `{job_id}` (status: `{status}`)\n",
@@ -3681,7 +3763,9 @@ class Pipeline:
             lines.append(f"| {name} | {icon} {status} | {lat} |")
         return "\n".join(lines)
 
-    def _handle_cost(self, parts: list) -> str:
+    def _handle_cost(
+        self, parts: list, *, chat_id: str | None = None,
+    ) -> str:
         """J.3.c — render the per-job cost rollup from /jobs/{id}/costs.
 
         Shows totals + a per-(provider, model) breakdown table. Falls
@@ -3689,8 +3773,16 @@ class Pipeline:
         job has no telemetry (call_count == 0), which is also the
         zero-shape J.3.b returns for jobs that ran before the
         migration was applied.
+
+        §17.307 — when no explicit id, try active-job memory before
+        falling back to Usage error.
         """
         if len(parts) < 2:
+            recalled = self._active_job_recall(chat_id)
+            if recalled and recalled.get("job_id"):
+                rid = recalled["job_id"]
+                hint = self._active_job_hint(rid, recalled.get("title"))
+                return hint + self._handle_cost([parts[0], rid])
             return "Usage: `/cost <job_id>`"
         if _is_placeholder(parts[1]):
             return "It looks like job_id is missing or a placeholder. Try `/cost 01ab243e`."

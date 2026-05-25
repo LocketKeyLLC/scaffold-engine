@@ -128,8 +128,11 @@ class TestSourceShapeRegressionGuard:
         # immediately followed (within a few lines) by `_handle_command(msg)`.
         # Use a regex over a short window so cosmetic whitespace tweaks
         # don't break the guard.
+        # §17.307 — the call now passes chat_id for active-job memory.
+        # Loosen the anchor: `_handle_command(\\n? msg` allows the
+        # post-§17.307 multi-line shape and any future kwarg additions.
         m = re.search(
-            r'if msg\.startswith\("/"\):.{0,200}?self\._handle_command\(msg\)',
+            r'if msg\.startswith\("/"\):.{0,300}?self\._handle_command\(\s*\n?\s*msg',
             src, re.DOTALL,
         )
         assert m is not None, (

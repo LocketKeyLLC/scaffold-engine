@@ -220,7 +220,12 @@ class TestSourceShapeRegressionGuard:
     def test_idea_command_calls_render_ideate(self):
         """The dispatch site for `/idea` must call the renderer."""
         src = self._src()
-        assert "self._render_ideate_response(r)" in src, (
+        # §17.307 — the call now passes chat_id for active-job memory.
+        # Loosen to anchor `_render_ideate_response(r` with optional
+        # kwargs trailing.
+        assert "self._render_ideate_response(r, chat_id=" in src or (
+            "self._render_ideate_response(r)" in src
+        ), (
             "§17.303 regression: the `/idea` dispatch no longer calls "
             "`_render_ideate_response`. Pre-§17.303 it called `_fmt`; "
             "reverting to that loses the Next-block UX."
