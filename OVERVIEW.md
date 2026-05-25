@@ -16622,6 +16622,63 @@ The `test_leading_blank_line_preserved` and `test_node_key_on_continuation_line_
 
 ---
 
+### §17.309 `/jobs` default-listing UX (2026-05-25)
+
+Tenth post-§17.280 UX item. The first tangent past the canonical surface. `/jobs` is the operator's "where are my jobs" panel — surfaced as a starter from §17.300's welcome, named in /help (§17.306), and used constantly across sessions. Pre-§17.309 the surface was a bare table:
+
+```
+## 📋 Jobs — 25 of 47
+
+| Status | ID | Title | Nodes | Updated |
+| ✅ completed | `abc1234e` | … | 5 | 2026-05-25 11:14 |
+…
+```
+
+Empty results dropped to a terse `_No matching jobs._` with no discoverable next step. Operators arriving from the welcome saw a wall of rows with no hint about WHAT to do with them. The /jobs help subcommand existed (`/jobs help`) but operators had to know to type it.
+
+**Three additive affordances.** Keep the table contract unchanged (every existing row format + filter + status still works); add three things AROUND it:
+
+| Affordance | Trigger | Shape |
+|---|---|---|
+| **Empty state (unfiltered)** | `/jobs` with zero results | "_No jobs yet._" + the §17.300 welcome's starter exemplars (`/idea …screenshots to PDF`, `/research …kubernetes best practices`, chat → `/go`) |
+| **Empty state (filtered)** | `/jobs failed`, `/jobs find foo`, etc. with zero results | terse "_No matching jobs._" + a one-line broadening hint (suggesting `/jobs` no-filter or `/jobs find`) — operator already has context, just needs a wider net |
+| **Next-actions footer** | populated results | `💡 **Next:**` block with `/results <id>`, `/cost <id>`, `/jobs help` (mirror of the Next-block shape from §17.303 / §17.305) |
+| **📌 active-job marker** | §17.307 cache hit + recalled job in displayed list | `📌` prefix on that row's short id, so "what was I working on?" is visible at a glance |
+
+The empty-state split is deliberate: unfiltered miss = "you're new here" (offer starters); filtered miss = "your filter is too narrow" (suggest broadening). Re-onboarding an active operator who just typed a too-specific filter would be condescending.
+
+**The 📌 marker — cross-cutting synergy with §17.307.** /jobs is the natural "did I already create a job for this?" surface. Pre-§17.309 operators had to mentally cross-reference the most-recent /idea response against the table. Post-§17.309 the row is marked. The match is on **full id** (not short id) so collisions can't sneak through — even if two jobs share the first 8 chars, only the exact recalled id gets the 📌.
+
+**Plumbing.** `chat_id` flows through one new path: `pipe()` → `_handle_command(msg, chat_id=...)` → `_handle_jobs(msg, chat_id=...)` → `_jobs_list_action(status, query, chat_id=...)` → recall via `self._active_job_recall(chat_id)` → `_format_job_row(j, active_id=...)` → prefix the matching row. All four signatures are backwards-compatible (default values).
+
+**Why not group by status (active vs done).** Considered splitting the table into "Active" and "Finished" sections. Rejected because:
+
+1. The current sort (updated_at desc) already bubbles active jobs to the top — pending/running/executing rows naturally cluster at the top of the table.
+2. Grouping adds visual noise (section headers + dividers) on every /jobs invocation, even when there's only one section's worth of jobs.
+3. Status filtering already exists (`/jobs completed`, `/jobs failed`) — operators who want one group can ask for it explicitly.
+
+**Why not a status-summary line.** Considered "3 active, 7 completed, 1 failed (showing 25 of 47)" above the table. Rejected because the orchestrator's `/jobs` endpoint returns the visible slice (25 jobs) but not status-level counts across the FULL set. Computing from the visible slice would be misleading when total > 25. Could be added in a follow-up if the orchestrator gains a `?status_counts=true` param.
+
+**Test-suite delta:** +24 tests in `tests/test_scaffold_router_jobs_list_ux.py` across 6 classes:
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestEmptyStateUnfiltered` | 4 | empty state branch fires; both starters (`/idea`, `/research`) match §17.300's welcome verbatim; chat → /go path included |
+| `TestEmptyStateFiltered` | 3 | filtered miss stays terse + suggests broadening; full "Get started" block NOT shown (no re-onboarding active operators) |
+| `TestNextActionsFooter` | 3 | footer present on populated results; appears BELOW the table; suppressed on empty state (would be contradictory) |
+| `TestActiveJobMarker` | 4 | 📌 prefixes the matched row; no marker without recall; no marker without chat_id; **full-id match required** (catches a short-id collision bug) |
+| `TestFilterBehaviorPreserved` | 2 | status filter still threads through query params; find query still preserved |
+| `TestDispatchPlumbing` | 3 | all 3 signatures accept the new kwargs |
+| `TestSourceShapeRegressionGuard` | 5 | `_jobs_empty_state` helper + starter exemplars + footer marker + active-prefix line + pipe() threading anchored |
+
+The `test_marker_absent_when_active_job_not_in_list` assertion is load-bearing — it pins the full-id match. A future "optimize: compare short ids" refactor would silently mark wrong rows when short-id collisions exist (improbable per UUID but possible in test fixtures and edge cases).
+
+**Cost.** +27 LOC in `_jobs_list_action` + new `_jobs_empty_state` helper (~12 LOC) + 5 LOC in `_format_job_row` (active prefix + kwarg). Total ~44 LOC. Operator-facing cost: ~5 lines added to empty-state output; ~5 lines added as footer on populated results. No change to row layout when no 📌 marker.
+
+**§17.300-§17.309 now polish every operator-visible surface in the canonical flow** — welcome, /help reference, in-flow Next-blocks, error-recovery hints, id-resolution shortcuts, evidence-parsing ergonomics, and the /jobs panel. Remaining tangents: `/research` mode discovery (operators don't know about `github:` / `openapi:` prefixes without reading help), model selection ergonomics, and the §17.307 expansion to state-altering commands.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

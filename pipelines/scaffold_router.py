@@ -2351,7 +2351,8 @@ class Pipeline:
             if cmd == "/results":          # #8.1
                 return self._handle_results(parts, chat_id=chat_id)
             if cmd == "/jobs":
-                return self._handle_jobs(msg)
+                # §17.309 — pass chat_id for the active-job 📌 marker.
+                return self._handle_jobs(msg, chat_id=chat_id)
             if cmd == "/idea":
                 if len(parts) < 2:
                     return "Usage: /idea <description>"
@@ -2557,18 +2558,23 @@ class Pipeline:
         if not hasattr(self, "_pending_deletes"):
             self._pending_deletes = {}
 
-    def _format_job_row(self, j: dict) -> str:
+    def _format_job_row(
+        self, j: dict, *, active_id: str | None = None,
+    ) -> str:
         icon = {
             "completed": "✅", "failed": "❌", "cancelled": "🚫",
             "blocked": "⛔", "awaiting_confirmation": "⏸️",
             "executing": "⏳", "running": "⏳", "planning": "🧠",
             "researching": "🔍", "refining": "✏️", "pending": "⏳",
         }.get(j.get("status", ""), "")
-        short = (j.get("id") or "")[:8]
+        full_id = j.get("id") or ""
+        short = full_id[:8]
+        # §17.309 — 📌 prefix on the §17.307-remembered active job.
+        active_prefix = "📌 " if active_id and full_id == active_id else ""
         upd = (j.get("updated_at") or "")[:16].replace("T", " ")
         return (
-            f"| {icon} {j.get('status','')} | `{short}` | {j.get('title','')[:60]} "
-            f"| {j.get('node_count', 0)} | {upd} |"
+            f"| {icon} {j.get('status','')} | {active_prefix}`{short}` "
+            f"| {j.get('title','')[:60]} | {j.get('node_count', 0)} | {upd} |"
         )
 
     def _format_session_row(self, sess: dict) -> str:
@@ -2616,7 +2622,7 @@ class Pipeline:
         "cancelled", "blocked",
     }
 
-    def _handle_jobs(self, msg: str) -> str:
+    def _handle_jobs(self, msg: str, *, chat_id: str | None = None) -> str:
         """Top-level /jobs command dispatcher."""
         self._ensure_pending_deletes()
         parts = msg.split(None, 3)
@@ -2624,16 +2630,22 @@ class Pipeline:
 
         # /jobs (no args) -> list
         if not sub:
-            return self._jobs_list_action(status=None, query=None)
+            return self._jobs_list_action(
+                status=None, query=None, chat_id=chat_id,
+            )
 
         if sub == "help":
             return self._jobs_help()
         if sub in self._VALID_JOB_STATUSES:
-            return self._jobs_list_action(status=sub, query=None)
+            return self._jobs_list_action(
+                status=sub, query=None, chat_id=chat_id,
+            )
         if sub == "find":
             if len(parts) < 3:
                 return "Usage: `/jobs find <text>`"
-            return self._jobs_list_action(status=None, query=" ".join(parts[2:]))
+            return self._jobs_list_action(
+                status=None, query=" ".join(parts[2:]), chat_id=chat_id,
+            )
         if sub == "rename":
             if len(parts) < 4:
                 return (
@@ -2677,7 +2689,9 @@ class Pipeline:
             hint = "\n\nClosest matches:\n" + "\n".join(f"  - `/jobs {c}`" for c in close)
         return f"Unknown subcommand: `/jobs {sub}`{hint}\n\n" + self._jobs_help()
 
-    def _jobs_list_action(self, status, query) -> str:
+    def _jobs_list_action(
+        self, status, query, *, chat_id: str | None = None,
+    ) -> str:
         params = {"limit": 25}
         if status:
             params["status"] = status
@@ -2712,11 +2726,58 @@ class Pipeline:
         if header_bits:
             header += f" — filtered ({', '.join(header_bits)})"
         header += f" — {len(jobs)} of {total}"
+        # §17.309 — friendlier empty state. When no jobs match, surface
+        # starter commands (mirror §17.300 welcome's exemplars) so the
+        # operator has a copy-pasteable path forward instead of a
+        # terse "No matching jobs." line.
         if not jobs:
-            return header + "\n\n_No matching jobs._"
+            if status or query:
+                # Filtered miss: keep terse — the operator typed a
+                # specific filter, suggest broadening rather than
+                # restarting.
+                return (
+                    header + "\n\n_No matching jobs._\n\n"
+                    "💡 Try `/jobs` (no filter) to see everything, "
+                    "or `/jobs find <text>` to search by title."
+                )
+            # Unfiltered empty: brand-new user or all jobs cleaned up.
+            return self._jobs_empty_state(header)
+        # §17.309 — active-job 📌 marker. If §17.307 has a remembered
+        # job for this chat and it's in the displayed list, prefix
+        # its row so the operator can spot "what was I working on?"
+        # at a glance.
+        active_id = None
+        recalled = self._active_job_recall(chat_id)
+        if recalled:
+            active_id = recalled.get("job_id")
         rows = ["", "| Status | ID | Title | Nodes | Updated |", "|---|---|---|---:|---|"]
-        rows.extend(self._format_job_row(j) for j in jobs)
-        return "\n".join([header] + rows)
+        rows.extend(self._format_job_row(j, active_id=active_id) for j in jobs)
+        # §17.309 — next-actions hint footer. Three copy-pasteable
+        # commands an operator typically wants after scanning the list.
+        # Mirror the Next-block shape from §17.303 / §17.305.
+        footer = (
+            "\n\n---\n\n"
+            "💡 **Next:**\n"
+            "- `/results <id>` — view output / progress / failure detail\n"
+            "- `/cost <id>` — cost + latency rollup\n"
+            "- `/jobs help` — find / rename / delete / filter"
+        )
+        return "\n".join([header] + rows) + footer
+
+    def _jobs_empty_state(self, header: str) -> str:
+        """§17.309 — friendly empty state for unfiltered /jobs. Surface
+        the §17.300 welcome's starter commands so a brand-new operator
+        (or one who just cleared their job history) has a path forward."""
+        return (
+            f"{header}\n\n"
+            "_No jobs yet._\n\n"
+            "**Get started:**\n"
+            "- `/idea Build a CLI that converts screenshots to PDF` "
+            "— kick off Phase 1 directly\n"
+            "- `/research kubernetes best practices` — "
+            "autonomous web research + ingest\n"
+            "- _Or describe an idea in the chat and type `/go`._"
+        )
 
     def _jobs_rename_action(self, job_id: str, title: str) -> str:
         try:
