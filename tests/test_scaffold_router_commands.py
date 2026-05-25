@@ -959,8 +959,24 @@ class TestU8DCommands:
         assert "/exec retry" in out
 
     def test_exec_retry_missing_args(self, pipe):
-        out = pipe._handle_command("/exec retry abc-123")
-        assert "Usage" in out
+        """§17.315 — single-arg `/exec retry` no longer returns a flat
+        "Usage" line. It now branches on whether the arg is UUID-
+        shaped:
+
+          - UUID-shaped → "Usage" hint pointing at the 2-arg form
+            (job_id without node_key)
+          - non-UUID → friendly error pointing at the 2-arg form, no
+            fire (this test's path; "abc-123" isn't UUID-shaped)
+
+        Both branches preserve the original intent (1 arg → guided
+        back to 2-arg shape, no orchestrator POST). Loosen the
+        assertion to match both: the operator gets a /exec retry
+        recovery hint, and no POST is issued.
+        """
+        with patch("scaffold_router._HTTP_SESSION.post") as mp:
+            out = pipe._handle_command("/exec retry abc-123")
+        mp.assert_not_called()
+        assert "/exec retry" in out
 
     @patch("scaffold_router._HTTP_SESSION.post")
     def test_exec_retry_rejects_placeholder(self, mock_post, pipe):

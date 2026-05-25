@@ -2539,7 +2539,9 @@ class Pipeline:
 
             # ----- U.8.D — diagnostics + admin parity -------------------
             if cmd == "/exec":
-                return self._handle_exec(parts)
+                # §17.315 — pass chat_id for /exec retry's tiered
+                # confirmation-friction recall paths.
+                return self._handle_exec(parts, chat_id=chat_id)
             if cmd == "/cleanup":
                 return self._handle_cleanup()
             if cmd == "/config":
@@ -3868,7 +3870,9 @@ class Pipeline:
     # U.8.D — chat parity for /exec, /cleanup, /config, /logs, /health
     # ------------------------------------------------------------------
 
-    def _handle_exec(self, parts: list) -> str:
+    def _handle_exec(
+        self, parts: list, *, chat_id: str | None = None,
+    ) -> str:
         # _handle_command splits with maxsplit=2 so parts[2] (if present) is
         # the post-subcommand tail as one string. Re-split it here.
         if len(parts) < 2 or parts[1] == "help":
@@ -3878,8 +3882,72 @@ class Pipeline:
         sub = parts[1].lower()
         tail = parts[2].split() if len(parts) > 2 else []
         if sub == "retry":
-            if len(tail) < 2:
+            # §17.315 — tiered confirmation-friction recall for the
+            # state-altering /exec retry. Three friction tiers based on
+            # operator specificity:
+            #   0 args  → 3 options (operator typed nothing concrete)
+            #   1 arg, UUID-shaped → Usage error (ambiguous — could be
+            #     job_id-with-missing-node OR node_key-named-like-uuid)
+            #   1 arg, non-UUID → auto-substitute job_id from recall +
+            #     fire (operator specified the node — intent is clear)
+            #   2+ args → existing path (unchanged)
+            if len(tail) == 0:
+                recalled = self._active_job_recall(chat_id)
+                if recalled and recalled.get("job_id"):
+                    rid = recalled["job_id"]
+                    short = rid[:8] if len(rid) >= 8 else rid
+                    title = recalled.get("title")
+                    title_part = f" — _{title}_" if title else ""
+                    return (
+                        f"📌 Active job: `{short}`{title_part}.\n\n"
+                        f"⚠️ `/exec retry` re-runs a failed/blocked "
+                        f"node — state-altering.\n\n"
+                        f"- Type `/exec retry <node_key>` "
+                        f"(uses active job)\n"
+                        f"- Type `/exec retry <other_job_id> <node_key>` "
+                        f"to target a different job\n"
+                        f"- Or check the job first: `/results {short}`"
+                    )
                 return "Usage: `/exec retry <job_id> <node_key>`"
+            if len(tail) == 1:
+                only = tail[0]
+                if self._UUID_RE.match(only):
+                    # UUID-shaped single arg is ambiguous (operator
+                    # typed job_id but forgot node_key). Refuse to
+                    # guess — point at the 2-arg form.
+                    return (
+                        "Usage: `/exec retry <job_id> <node_key>`\n\n"
+                        f"Looks like you typed a job_id (`{only[:8]}`) "
+                        f"without a node_key. Add the node: "
+                        f"`/exec retry {only[:8]} <node_key>`.\n\n"
+                        "💡 Use `/results <job_id>` to see failed nodes "
+                        "with prefilled retry commands."
+                    )
+                # Non-UUID single arg: operator specified node_key but
+                # not job_id. Auto-substitute from recall.
+                if _is_placeholder(only):
+                    return ("It looks like node_key is a placeholder. "
+                            "Try `/exec retry T2` (active job will be "
+                            "used) or `/exec retry 01ab243e T2`.")
+                recalled = self._active_job_recall(chat_id)
+                if not recalled or not recalled.get("job_id"):
+                    return (
+                        f"❌ No active job in chat memory to retry "
+                        f"`{only}` on.\n\n"
+                        f"Pass an explicit job_id: "
+                        f"`/exec retry <job_id> {only}`. "
+                        f"Use `/jobs` to list active jobs."
+                    )
+                rid = recalled["job_id"]
+                hint = self._active_job_hint(rid, recalled.get("title"))
+                r = _HTTP_SESSION.post(
+                    f"{self.valves.orchestrator_url}/exec/retry",
+                    json={"job_id": rid, "node_key": only},
+                    headers=self._auth_headers(),
+                    timeout=self.valves.request_timeout,
+                )
+                return hint + self._fmt(r)
+            # 2+ args — existing explicit path, unchanged.
             job_id, node_key = tail[0], tail[1]
             if _is_placeholder(job_id) or _is_placeholder(node_key):
                 return ("It looks like job_id or node_key is a placeholder. "

@@ -17035,6 +17035,81 @@ The `test_recall_hit_offers_all_three_options` is the discoverability anchor —
 
 ---
 
+### §17.315 `/exec retry` adopts §17.307 with tiered confirmation-friction (2026-05-25)
+
+Sixteenth post-§17.280 UX item. Second state-altering recall pilot. §17.314 introduced the confirmation-friction model on `/execute` (single-arg, binary: 3-options or fire). `/exec retry` is the cohort's most-requested member (per §17.304's post-failure Next-block pattern surfacing `/exec retry {job_id} {nk}` rows for every failed node) and has a **two-arg signature** that lets the friction model become **tiered** based on operator specificity.
+
+**The four-tier model.**
+
+| Tier | Input | Operator specificity | Action |
+|---|---|---|---|
+| 0 args | `/exec retry` | None | 3-options surface (§17.314 friction) |
+| 1 arg, UUID-shaped | `/exec retry abc1234e-…` | Wrong shape — job_id without node_key | Refuse + Usage pointer at 2-arg form |
+| 1 arg, non-UUID | `/exec retry T3` | Node_key specified deliberately | Auto-substitute job_id from recall + fire + 📌 |
+| 2 args | `/exec retry <job_id> T3` | Full explicit | Existing path (unchanged) |
+
+**Why no friction on the single-non-UUID-arg path.** §17.314's friction exists because a bare `/execute` is muscle-memory ambiguous — the operator might be done typing AND the action is irreversible. `/exec retry T3` is unambiguously deliberate — the operator typed a specific node key, no muscle memory typo could produce that. The recall-substituted job_id is safe because the failure mode (wrong job for the node_key) is a visible 404, not destructive state mutation.
+
+The tiered model elevates the **§17.307 contract** based on operator intent strength:
+
+- Zero specificity → friction (§17.314's 3-options)
+- Partial specificity → no friction, auto-substitute (§17.315's contribution)
+- Full specificity → no friction, fire (§17.307 baseline)
+
+This is the right abstraction because state-altering risk scales with ambiguity, not with state-altering-ness itself. A deliberate `/exec retry T3` is no more risky than an explicit two-arg form — the operator showed intent in both cases.
+
+**The UUID-single-arg refusal — load-bearing.** When an operator types `/exec retry abc1234e-d5f6-…` (just a UUID), the parser CAN'T tell whether they meant:
+
+1. job_id, forgetting node_key (most common)
+2. A node_key named like a UUID (essentially impossible per orchestrator conventions but technically allowed)
+3. A pasted id that needs a node_key
+
+Auto-substituting node_key from anywhere (last failure? most-recent node?) would fire state-altering action on a guess. **Refuse + point at the 2-arg form**, pre-filling the typed short_id for paste-save. Operators learn the right shape from the error; the alternative (silent guess) costs trust.
+
+**The 3-options bare-recall surface (mirror of §17.314).**
+
+```
+📌 Active job: `abc1234e` — _my CLI_.
+
+⚠️ `/exec retry` re-runs a failed/blocked node — state-altering.
+
+- Type `/exec retry <node_key>` (uses active job)
+- Type `/exec retry <other_job_id> <node_key>` to target a different job
+- Or check the job first: `/results abc1234e`
+```
+
+Option 1 is **`/exec retry <node_key>`**, NOT `/exec retry confirm`. The §17.314 `confirm` keyword exists because `/execute` has no other deliberate-action shape — `/execute confirm` is the only operator-typed token short of pasting the full UUID. `/exec retry` has `<node_key>` as that token. The `<node_key>` IS the operator's deliberate-action signal; no separate `confirm` is needed.
+
+**Why no `/exec retry confirm` keyword.** Considered for symmetry with §17.314. Rejected because:
+
+1. `/exec retry` requires TWO pieces of information (job, node). `confirm` can only collapse one of them.
+2. `/exec retry confirm` (no node_key) is semantically broken — what node? Surfacing "needs a node_key" after typing `confirm` is worse UX than just showing the 3-options surface on bare `/exec retry`.
+3. The `<node_key>` requirement is itself a deliberate-action gate — the operator typed something concrete.
+
+**Plumbing.** `chat_id` flows through `_handle_command` → `/exec` dispatch → `_handle_exec(parts, chat_id=...)` → branches based on `len(tail)` and `_UUID_RE.match(only)`. Backwards-compatible: `_handle_exec(parts, *, chat_id: str | None = None)`.
+
+**Test-suite delta:** +19 tests in `tests/test_scaffold_router_exec_retry_recall.py` across 5 classes:
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestBareRetryWithRecall` | 5 | active job + title surfaced; bare retry does NOT issue POST; state-altering warning; all 3 options (`<node_key>`, `<other_id> <node_key>`, `/results escape`); no-recall = pre-§17.315 Usage |
+| `TestSingleUUIDArgRefused` | 2 | UUID single-arg returns Usage (no fire); short_id pre-filled to save re-paste; no-chat_id case same shape |
+| `TestSingleNodeKeyAutoFire` | 4 | non-UUID single + recall = POST fires with recalled job_id + typed node_key + 📌 hint; cold cache = friendly error pre-filling node_key in 2-arg suggestion; no chat_id = same error; placeholder rejection on single arg |
+| `TestExplicitTwoArgUnchanged` | 3 | 2-arg explicit POST + no 📌; explicit overrides recall (cache never consulted); 2-arg placeholder still rejected |
+| `TestSourceShapeRegressionGuard` | 5 | `_handle_exec` chat_id signature; pipe→handler threading; `len(tail) == 0` and `len(tail) == 1` branches; UUID-refusal phrasing; auto-substitute (`"node_key": only`) pattern |
+
+The `test_recall_hit_does_not_fire_post` is the §17.315 mirror of §17.314's `test_recall_hit_does_not_execute` — both pin the contract that the bare-recall surface NEVER fires state-altering action. They're the foundation of the friction model.
+
+The `test_single_node_recall_hit_auto_fires` is the new §17.315 contract — it pins the tiered model's defining behavior (operator specificity unlocks no-friction recall). A refactor that adds the §17.314 3-options surface to the single-node-key path would regress to the binary model.
+
+**Pre-existing /exec retry tests preserved.** 4 tests in `tests/test_scaffold_router_commands.py` (`test_exec_retry`, `test_exec_help_when_no_subcommand`, `test_exec_retry_missing_args`, `test_exec_retry_rejects_placeholder`) cover the 2-arg explicit path + help dispatch + 1-arg recovery + placeholder rejection. Updated 1: `test_exec_retry_missing_args` asserted a bare "Usage" line for 1-arg input. Post-§17.315 the 1-arg path branches (UUID→Usage; non-UUID→friendly error). Loosened to assert `/exec retry` recovery hint + no POST — both branches satisfy this stronger contract.
+
+**Cost.** +52 LOC in `_handle_exec` (the new 0-arg and 1-arg branches + signature change) + 3 LOC in dispatch. Total ~55 LOC in `pipelines/scaffold_router.py`. Operator-facing cost: zero on cold cache and 2-arg explicit (unchanged); ~6-line surface on bare-recall path; ~1-line 📌 hint on auto-fire path.
+
+**§17.300-§17.315 polish four layers.** Canonical flow + three management panels + dual-surface disambiguation + active-job memory across **5 of 6 commands**: /results /cost /logs (read-only, §17.307 + §17.311), /execute /exec retry (state-altering, §17.314 + §17.315). Only `/skip` remains — and its dual semantics (bare `/skip <id>` lists candidates; `/skip <id> <node>` performs skip) need their own design pass. The §17.314 + §17.315 patterns established here (binary vs tiered friction) provide the design vocabulary for /skip and any future state-altering recall additions.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
