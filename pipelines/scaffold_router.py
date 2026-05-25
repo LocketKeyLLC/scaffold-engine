@@ -1231,7 +1231,18 @@ class Pipeline:
     def _handle_execute(self, msg: str) -> Generator[str, None, None]:
         parts = msg.split()
         if len(parts) < 2:
-            yield "Usage: `/execute <job_id>`"
+            yield (
+                "Usage: `/execute <job_id>`\n"
+                "Example: `/execute 01ab243e`\n\n"
+                "💡 Use `/jobs` to list your active jobs and copy a job_id."
+            )
+            return
+        # §17.301 — placeholder check
+        if _is_placeholder(parts[1]):
+            yield (
+                "It looks like job_id is missing or a placeholder. "
+                "Try `/execute 01ab243e` (use `/jobs` to find a real id)."
+            )
             return
         job_id = parts[1]
         yield f"Executing all nodes for job `{job_id}`...\n\n"
@@ -2244,7 +2255,17 @@ class Pipeline:
                 return self._fmt(r)
             if cmd == "/dag":
                 if len(parts) < 2:
-                    return "Usage: /dag <job_id>"
+                    return (
+                        "Usage: `/dag <job_id>`\n"
+                        "Example: `/dag 01ab243e`\n\n"
+                        "💡 Use `/jobs` to list your active jobs and copy a job_id."
+                    )
+                # §17.301 — placeholder check, mirror /idea + /skip pattern
+                if _is_placeholder(parts[1]):
+                    return (
+                        "It looks like job_id is missing or a placeholder. "
+                        "Try `/dag 01ab243e` (use `/jobs` to find a real id)."
+                    )
                 r = _HTTP_SESSION.post(
                     f"{self.valves.orchestrator_url}/dag",
                     json={"job_id": parts[1], "model_overrides": self._model_overrides()},
@@ -2495,11 +2516,38 @@ class Pipeline:
             return self._jobs_list_action(status=None, query=" ".join(parts[2:]))
         if sub == "rename":
             if len(parts) < 4:
-                return "Usage: `/jobs rename <job_id> <new title>`"
+                return (
+                    "Usage: `/jobs rename <job_id> <new title>`\n"
+                    "Example: `/jobs rename 01ab243e My Improved Title`\n\n"
+                    "💡 Use `/jobs` to list active jobs and copy a job_id."
+                )
+            # §17.301 — placeholder checks on both args
+            if _is_placeholder(parts[2]):
+                return (
+                    "It looks like job_id is missing or a placeholder. "
+                    "Try `/jobs rename 01ab243e My Improved Title`."
+                )
+            if _is_placeholder(parts[3]):
+                return (
+                    "It looks like the new title is missing or a placeholder. "
+                    "Try `/jobs rename 01ab243e My Improved Title`."
+                )
             return self._jobs_rename_action(parts[2], parts[3])
         if sub == "delete":
             if len(parts) < 3:
-                return "Usage: `/jobs delete <job_id>`"
+                return (
+                    "Usage: `/jobs delete <job_id>`\n"
+                    "Example: `/jobs delete 01ab243e`\n\n"
+                    "💡 Use `/jobs` to list active jobs and copy a job_id.\n"
+                    "Add `confirm` to skip the confirmation prompt: "
+                    "`/jobs delete 01ab243e confirm`."
+                )
+            # §17.301 — placeholder check
+            if _is_placeholder(parts[2]):
+                return (
+                    "It looks like job_id is missing or a placeholder. "
+                    "Try `/jobs delete 01ab243e` (use `/jobs` to find a real id)."
+                )
             job_id = parts[2]
             confirm = (len(parts) > 3 and parts[3].strip().lower() == "confirm")
             return self._jobs_delete_action(job_id, confirm)
@@ -2936,7 +2984,17 @@ class Pipeline:
 
     def _handle_results(self, parts: list) -> str:
         if len(parts) < 2:
-            return "Usage: `/results <job_id>`"
+            return (
+                "Usage: `/results <job_id>`\n"
+                "Example: `/results 01ab243e`\n\n"
+                "💡 Use `/jobs` to list your active jobs and copy a job_id."
+            )
+        # §17.301 — placeholder check
+        if _is_placeholder(parts[1]):
+            return (
+                "It looks like job_id is missing or a placeholder. "
+                "Try `/results 01ab243e` (use `/jobs` to find a real id)."
+            )
         job_id = parts[1].strip()
 
         try:

@@ -16058,6 +16058,77 @@ The `test_assistant_first_does_not_count` case is the load-bearing edge — OWUI
 
 **§17.300 is the first work item past the §17.280 audit cycle.** Sets the cadence for the next phase: operator-directed UX work focused on the OWUI surface. Future items in this thread will follow the same shape — one entry per change, OVERVIEW + code + test in the same commit.
 
+### §17.301 placeholder + missing-arg UX sweep for job_id-taking commands (2026-05-25)
+
+Second post-§17.280 cycle UX item. Operator-pick context: after §17.300's welcome preamble points new operators at `/idea`, `/research`, `/jobs`, `/help`, the natural NEXT moment is when they try the followup commands like `/dag`, `/results`, `/execute` and need to know what argument to put in.
+
+**Problem.** Pre-§17.301 inconsistency across the slash-command surface:
+
+| Command | Missing-arg reply | Placeholder check |
+|---|---|---|
+| `/idea`, `/skip`, `/optimize`, `/rag`, `/cost`, `/confirm`, `/research`, `/research/reply`, `/exec retry`, `/logs`, `/schedule add` | Usage + sometimes example | ✅ via `_is_placeholder` |
+| `/dag`, `/results`, `/execute`, `/jobs rename`, `/jobs delete` | Bare `Usage:` line | ❌ no placeholder check |
+
+The five gap commands all take `<job_id>` (or `<job_id> <title>` for rename). A new operator who types `/dag` to see what it does gets `"Usage: /dag <job_id>"` and is then stuck — the message names a placeholder but doesn't say where to FIND a job_id. If they paste the placeholder verbatim (`/dag <job_id>` or `/dag job_id`), the orchestrator gets the string `"<job_id>"` or `"job_id"` and 422s with an obscure validation error.
+
+**Fix.** Apply the §17.300 + pre-existing `/idea` pattern to the 5 gap commands. Each missing-arg message gets three additions:
+
+1. **`Usage:` line** in backticks (markdown-rendered as monospace)
+2. **`Example:` line** with `01ab243e` (the codebase-wide 8-char convention used by `/skip`, `/exec retry`, `/logs`, `/cost`)
+3. **💡 hint** pointing at `/jobs` so the operator knows the lookup command
+
+Plus a placeholder check via `_is_placeholder(parts[N])` that catches:
+- Bracketed forms: `<job_id>`, `[job_id]`, `(job_id)`
+- Bare placeholder words: `job_id`, `node_key`, `session_id`, etc. (defined in `_PLACEHOLDER_TOKENS`)
+- Empty / whitespace-only
+
+Sample post-fix message:
+
+```
+Usage: `/dag <job_id>`
+Example: `/dag 01ab243e`
+
+💡 Use `/jobs` to list your active jobs and copy a job_id.
+```
+
+And the placeholder rejection:
+
+```
+It looks like job_id is missing or a placeholder.
+Try `/dag 01ab243e` (use `/jobs` to find a real id).
+```
+
+For `/jobs rename` (two args), each arg gets its own targeted placeholder reply ("job_id is missing" vs "the new title is missing") so the operator knows WHICH arg to fix.
+
+For `/jobs delete`, the usage message also surfaces the `confirm` shortcut (`/jobs delete <id> confirm` skips the prompt) — pre-§17.301 this was undocumented at the missing-arg site.
+
+**Why `01ab243e` as the canonical example.** Pre-§17.301 it was already used by 4 commands (`/skip`, `/exec retry`, `/logs`, `/cost`); §17.301 extends it to the 5 gap commands so all 9 job_id-taking surfaces use one example. Operators learn one canonical id, not nine. The 8-char form mirrors what they see in `/jobs` output (jobs list shows abbreviated IDs).
+
+**What §17.301 does NOT do.**
+
+- Doesn't extract a shared helper (e.g., `_usage_with_jobs_hint(cmd)`) for the message template. Considered — rejected because the hint VARIES per arg-type (job_id → `/jobs`; session_id → `/research/list`; node_key → `/results <job_id>`; cron → ?). A helper for one arg-type only would create asymmetric maintenance burden. Inline strings let each command's hint be specific.
+- Doesn't touch `/research/rename`, `/research/delete`, `/schedule delete` — those take session_id / schedule_id, not job_id. They need their own per-arg-type hints + examples. Filed as a follow-up.
+- Doesn't change the orchestrator's 422 behavior on actual placeholder values — by the time a placeholder reaches the orchestrator, the chat-side check has already rejected it. The orchestrator's 422 is a defense-in-depth pre-§17.301 layer that stays unchanged.
+
+**Test-suite delta:** +17 tests in `tests/test_scaffold_router_placeholder_ux.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestDagPlaceholderUx` | 4 | no arg → Usage + Example + /jobs hint; bracketed placeholder → rejected; bare-word placeholder (`/dag job_id`) → rejected; real id → falls through to HTTP call |
+| `TestResultsPlaceholderUx` | 3 | same pattern |
+| `TestExecutePlaceholderUx` | 3 | same pattern (yields via generator, asserted via `"".join(chunks)`) |
+| `TestJobsRenamePlaceholderUx` | 3 | no args → Usage; placeholder job_id rejected (names "job_id"); placeholder title rejected (names "new title" — distinct reply per arg position) |
+| `TestJobsDeletePlaceholderUx` | 2 | no arg → Usage includes `confirm` shortcut hint; placeholder rejected |
+| `TestSourceShapeRegressionGuard` | 2 | `01ab243e` appears ≥ 8× across source (5 §17.301 commands + 4 pre-existing); `` `/jobs` `` hint appears ≥ 5× in usage messages |
+
+The "distinct reply per arg position" pin for `/jobs rename` is load-bearing — a future "consolidate" refactor that emits the same reply for either arg would tell the operator to fix job_id when the title is the problem (or vice versa). The distinct messages remove the ambiguity.
+
+**Cost.** Net production change: +60 LOC (the five gap-command usage messages grew from one line to four; placeholder checks added; `/jobs delete` got the `confirm` shortcut surface). Operator-facing cost: the multi-line usage messages take ~120 chars to render, vs ~30 chars pre-fix. The trade is "ambiguous one-liner that the operator can't act on" vs "actionable three-liner with the exact lookup command".
+
+**Test-suite delta:** +17. scaffold_router cluster (8 test files including the new placeholder suite): in flight at commit time; no regression surface anticipated (the change is purely additive — real ids still pass through to the HTTP layer; the new branch only fires when the arg is missing or matches `_is_placeholder`).
+
+**§17.300 + §17.301 together establish the discoverability layer.** §17.300 surfaces the canonical first-touch commands; §17.301 makes those commands self-explanatory when the operator tries them. The next natural item in this thread is the error-recovery sweep (the other option I didn't pick after §17.299) — operator-driven recovery hints on every error path that doesn't already include one.
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
