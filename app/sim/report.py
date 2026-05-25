@@ -313,7 +313,7 @@ async def _fetch_chunk_content(
         def _sync():
             return collection.query(
                 expr=expr,
-                output_fields=["entry_id", "title", "content", "source_url"],
+                output_fields=["entry_id", "title", "canonical_text", "source_url"],
                 limit=max(1, len(entry_ids) * 2),
             )
 
@@ -321,7 +321,7 @@ async def _fetch_chunk_content(
         return {
             r["entry_id"]: {
                 "title": r.get("title", "") or "",
-                "content": r.get("content", "") or "",
+                "content": r.get("canonical_text", "") or "",
                 "source_url": r.get("source_url", "") or "",
             }
             for r in rows

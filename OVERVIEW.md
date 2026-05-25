@@ -17440,6 +17440,58 @@ The `fake`/`m`/`qwen` zero-token rows (621 + 380 + 190 + 156 + 88 + 68 calls) ar
 
 ---
 
+### §17.319 `sim/report.py` Milvus field rename — `content` → `canonical_text` (2026-05-25)
+
+Closes §17.318 finding #6. The §17.148 sim-report stage queried Milvus with `output_fields=["entry_id", "title", "content", "source_url"]`, but the `toon_v2` collection's text column was renamed `canonical_text` somewhere along the §17.83 → §17.110 RAG ingestion arc. Every other producer migrated (`app/modules/rag_pipeline.py`, `_rag_entry.py`, `_rag_protocol.py`, `gt_browser.py`, `openapi_ingest.py`, `milvus_utils.py`); `app/sim/report.py` was missed.
+
+The broken call lived inside a broad `try / except Exception` that swallowed the `MilvusException: (code=65535, message=field content not exist)` and returned `{}`. The orchestrator emitted one `report.chunk_content_fetch_failed` warning per call but no operator-visible error — every sim-report citation rendered with empty quote text, then degraded to `ReportCitation(available=False)` downstream. §17.318 surfaced the failure mode by grepping the orchestrator log; without that audit it would have stayed invisible.
+
+**Surgical change — two lines.** `app/sim/report.py:316,324`:
+
+```diff
+-                output_fields=["entry_id", "title", "content", "source_url"],
++                output_fields=["entry_id", "title", "canonical_text", "source_url"],
+...
+-                "content": r.get("content", "") or "",
++                "content": r.get("canonical_text", "") or "",
+```
+
+The Milvus boundary now reads the right field; the consumer-facing dict shape (`chunk["content"]` at `report.py:451`) is preserved. **L451 is untouched** — the public chunk dict still exposes a `"content"` key; the rename is at the storage boundary only.
+
+**Why not also rename the consumer-side key.** Considered `chunk["content"]` → `chunk["canonical_text"]` at L451 for symmetry. Rejected — the consumer key is module-internal (the dict is built and consumed in the same file) and the name `content` is the right semantic for "the body of this citation chunk." Renaming both would have churned the slicing line for no clarity win.
+
+**Regression guard.** Two new `@pytest.mark.smoke` tests in `tests/test_report.py` under a §17.319-labelled section:
+
+| Test | Pins |
+|---|---|
+| `test_fetch_chunk_content_requests_canonical_text_from_milvus` | `output_fields` list is exactly `["entry_id", "title", "canonical_text", "source_url"]`; `"content"` is **not** in the list; the public-facing returned dict still exposes `"content"`, `"title"`, `"source_url"` (consumer-shape preserved) |
+| `test_fetch_chunk_content_handles_missing_canonical_text` | If Milvus returns a row without `canonical_text`, `result[id]["content"]` is `""` (not `None`, not `"None"`, not `KeyError`) |
+
+Both tests use a `_FakeCollection` whose `query()` records the `output_fields` argument — a unit assertion, no live Milvus needed. **The reason the pre-existing suite missed the bug:** `_fetch_chunk_content` is monkey-patched out across all 19 `build_report` tests (`_patch_fetches` at `test_report.py:135`), so the actual Milvus-bound code path was never exercised in CI. The new tests target the un-mocked function directly.
+
+**Verification (post-patch, live).**
+
+In-container against the running `toon_v2` collection:
+
+```
+$ docker exec scaffold-orchestrator python3 -c '... _fetch_chunk_content([id1, id2, id3]) ...'
+scaffold-accept-encoding-header-7e292cd4:           content_len=4490
+scaffold-accessibility-and-spatial-patterns-90a675fe: content_len=4144
+scaffold-accurate-computation-of-principal-branch-...: content_len=5624
+```
+
+Pre-§17.319 every entry returned `{}` (function-level swallow → empty map). Post-§17.319 each citation carries 4–6 KB of canonical text. The dev-compose `./app:/code/app:ro` bind-mount made the patched module visible inside the running orchestrator without a restart — see `feedback_compose_depends_on_cascade` and the §17.62 hermetic-prod note for the dev/prod distinction.
+
+`grep -c chunk_content_fetch_failed` on the last 200 lines of orchestrator logs: **0** (pre-fix: 5 in a single second on 2026-05-25 12:42).
+
+**Test-suite delta.** `tests/test_report.py`: 19 → **21 passed** (+2 net). No deletions, no rewrites. Smoke-tagged, so the change shows up in `make ci-smoke` immediately. `pytest tests/test_report.py -q` → `21 passed in 2.72s` in the dev image.
+
+**Whose responsibility was this.** §17.148 wrote `_fetch_chunk_content` with the then-correct `content` field name. The Milvus collection rename landed in a separate commit during §17.83's 3-tier ingest work. There's no audit trail linking the two — that's exactly the kind of cross-module coupling §17.318's "schema-introspection regression test" suggestion would catch. A stronger version of the §17.319 guard would query the live `Collection.schema.fields` set and fail if any `output_fields` string isn't a member. **Deferred** — it requires either a live Milvus in CI or a stubbed schema-fixture file kept in sync with migrations; both are larger changes than a §17.318-finding bugfix warrants. Logged as a §17.x candidate for the next infrastructure-cleanup cohort.
+
+**Operator-facing change.** Operators running `GET /device-sizings/{id}/report` (or `/digital-sizings/{id}/report`) now see populated `snippet` text on every resolvable citation instead of `[content unavailable]`. The §17.148 graceful-degradation banner still fires when the chunk genuinely can't be fetched (Milvus down, entry_id stale) — only the field-name-mismatch failure mode is closed.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

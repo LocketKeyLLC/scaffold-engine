@@ -551,3 +551,77 @@ def test_render_markdown_analog_still_uses_spice_fence():
     assert "```spice" in md
     assert "## Final SystemVerilog Source" not in md
     assert "- **Kind:** analog" in md
+
+
+# ---------------------------------------------------------------------------
+# §17.319 — Milvus output_fields regression guard
+# ---------------------------------------------------------------------------
+# §17.148 shipped `_fetch_chunk_content` querying output_fields=[..., "content", ...].
+# The toon_v2 collection's text column is named `canonical_text`, not `content`,
+# so every call raised MilvusException 65535 ("field content not exist") and was
+# swallowed by the broad try/except → every sim-report citation rendered with
+# blank quote text. §17.318's full-system audit surfaced the warning line in
+# orchestrator logs. These tests anchor the rename and would have caught it.
+
+
+@pytest.mark.smoke
+def test_fetch_chunk_content_requests_canonical_text_from_milvus(monkeypatch):
+    """The Milvus output_fields list must request `canonical_text` (the toon_v2
+    schema's text column) — NOT `content`, which does not exist on the
+    collection. Catches a reintroduction of the §17.148→§17.318 silent bug."""
+    import asyncio
+
+    captured: dict[str, object] = {}
+
+    class _FakeCollection:
+        def query(self, *, expr, output_fields, limit):
+            captured["expr"] = expr
+            captured["output_fields"] = list(output_fields)
+            captured["limit"] = limit
+            return [
+                {
+                    "entry_id": "chunk-X",
+                    "title": "T",
+                    "canonical_text": "BODY",
+                    "source_url": "u",
+                }
+            ]
+
+    monkeypatch.setattr(
+        "app.sim.report.get_collection", lambda: _FakeCollection()
+    )
+
+    result = asyncio.run(report_mod._fetch_chunk_content(["chunk-X"]))
+
+    assert captured["output_fields"] == [
+        "entry_id",
+        "title",
+        "canonical_text",
+        "source_url",
+    ]
+    assert "content" not in captured["output_fields"]
+    # Returned shape still exposes the public-facing "content" key to the
+    # citation consumer (chunk["content"] at report.py L451) — the rename is
+    # at the Milvus boundary only.
+    assert result["chunk-X"]["content"] == "BODY"
+    assert result["chunk-X"]["title"] == "T"
+    assert result["chunk-X"]["source_url"] == "u"
+
+
+@pytest.mark.smoke
+def test_fetch_chunk_content_handles_missing_canonical_text(monkeypatch):
+    """If a row from Milvus lacks the canonical_text field for any reason,
+    the consumer dict's `content` value must be `""` (not the literal
+    string "None" or a KeyError). Mirrors the `r.get(..., "") or ""` shape."""
+    import asyncio
+
+    class _FakeCollection:
+        def query(self, *, expr, output_fields, limit):
+            return [{"entry_id": "chunk-Y", "title": "T", "source_url": "u"}]
+
+    monkeypatch.setattr(
+        "app.sim.report.get_collection", lambda: _FakeCollection()
+    )
+
+    result = asyncio.run(report_mod._fetch_chunk_content(["chunk-Y"]))
+    assert result["chunk-Y"]["content"] == ""
