@@ -187,13 +187,13 @@ def render_step(step: dict) -> str:
         f"**Depends on:** {deps_str}\n\n"
         f"{upstream_block}"
         f"**Task prompt:**\n\n```\n{step.get('base_prompt', '')}\n```\n\n"
-        f"**When done, submit your evidence:**\n"
-        f"````\n"
+        f"**When done, submit your evidence:**\n\n"
+        f"```\n"
         f"/assist submit\n"
-        f"```\n"
-        f"<your output here — command output, file diff, summary, anything>\n"
-        f"```\n"
-        f"````\n"
+        f"<paste your output here — newlines and indentation preserved>\n"
+        f"```\n\n"
+        f"_Code fences (```) are optional. Content after the command "
+        f"line is captured as-is._\n"
     )
 
 
@@ -226,7 +226,10 @@ def handle_assist(
         arg1 = parts[1]
         # /assist <subcommand> ... — route to subcommand handler
         if arg1 in ("next", "submit", "skip", "handoff", "pause", "resume", "done", "friction"):
-            yield from dispatch_assist_sub(pipe, arg1, parts[2:], fenced, chat_id=chat_id); return
+            yield from dispatch_assist_sub(
+                pipe, arg1, parts[2:], fenced,
+                chat_id=chat_id, raw_head=head,
+            ); return
         # Otherwise treat arg1 as job_id
         job_id = arg1
         yield from assist_start(pipe, job_id, chat_id=chat_id); return
@@ -234,13 +237,17 @@ def handle_assist(
     # Slash-form subcommands: /assist/next, /assist/submit, etc.
     if cmd.startswith("/assist/"):
         sub = cmd.split("/", 2)[2]  # "next" / "submit" / ...
-        yield from dispatch_assist_sub(pipe, sub, parts[1:], fenced, chat_id=chat_id); return
+        yield from dispatch_assist_sub(
+            pipe, sub, parts[1:], fenced,
+            chat_id=chat_id, raw_head=head,
+        ); return
 
     yield pipe._ASSIST_HELP
 
 
 def dispatch_assist_sub(
     pipe, sub: str, args: list, fenced: str, *, chat_id: str | None,
+    raw_head: str | None = None,
 ) -> Generator[str, None, None]:
     # Resolve session_id: explicit UUID arg > recalled-from-chat.
     sid, rest = resolve_session_id(pipe, args, chat_id)
@@ -261,7 +268,22 @@ def dispatch_assist_sub(
                 "❌ No node specified and no recent step in chat memory. "
                 "Run `/assist next` first, or pass `<node_key>` explicitly."
             ); return
-        evidence = fenced or (" ".join(rest[1:]) if len(rest) > 1 else "")
+        # §17.308 — multi-line evidence ergonomics. When no fence is
+        # present AND the operator pasted multi-line content after the
+        # command line, capture lines 2+ as evidence (whitespace and
+        # newlines preserved). Guard with a node_key-presence check on
+        # the first line so the "node_key was on a continuation line"
+        # edge case keeps the pre-§17.308 whitespace-join behavior.
+        multi_line_evidence = ""
+        if not fenced and raw_head and "\n" in raw_head:
+            first_line, _, after = raw_head.partition("\n")
+            if node_key in first_line and after.strip():
+                multi_line_evidence = after
+        evidence = (
+            fenced
+            or multi_line_evidence
+            or (" ".join(rest[1:]) if len(rest) > 1 else "")
+        )
         yield from assist_submit(pipe, sid, node_key, evidence, chat_id=chat_id); return
     if sub == "skip":
         if not sid:

@@ -16513,6 +16513,115 @@ The `test_explicit_id_overrides_memory` assertions in both reader classes are lo
 
 ---
 
+### §17.308 multi-line `/assist submit` evidence ergonomics (2026-05-25)
+
+Ninth post-§17.280 UX item. After §17.307 closed the chat-memory friction for read commands, the next concrete friction is **multi-line evidence parsing in `/assist submit`**. Operators pause execution mid-DAG via `/assist`, perform the step manually (run a command, edit a file, get LLM output), then paste evidence back via `/assist submit <node>`. The evidence is often multi-line: stack traces, file diffs, command output, structured summaries.
+
+**Pre-§17.308 corruption.** The parser at `pipelines/_vendor/_assist_handlers.py:215` extracts evidence via:
+
+```python
+head, fenced = extract_fenced(msg)
+parts = head.split(None, 4)
+# … node_key = rest[0]
+evidence = fenced or (" ".join(rest[1:]) if len(rest) > 1 else "")
+```
+
+`split(None, 4)` collapses all whitespace runs (including newlines) at the first 4 boundaries, then `" ".join(rest[1:])` rejoins with single spaces. Symptoms when operators pasted multi-line content without code fences:
+
+1. **Leading blank lines stripped** — `/assist submit T2\n\nbig content` → evidence loses the leading `\n`. The decision-context "I'm sending you this:" cue is gone.
+2. **Stray spaces inserted at token boundaries** — when the parse boundary lands inside indented content (e.g., before a leading-space line), the join inserts an extra space.
+3. **Multiple-newline-between-words collapsed** — `Line A\n\n\nLine B` becomes `Line A Line B` if both ended up on the same side of the split boundary.
+
+The fenced form (triple-backtick wrap) escaped all this, but the help text used a confusing 4-backtick nested fence that few operators decoded on first read.
+
+**Fix shape.** Capture multi-line content explicitly when no fence is present AND the message contains a newline:
+
+```python
+multi_line_evidence = ""
+if not fenced and raw_head and "\n" in raw_head:
+    first_line, _, after = raw_head.partition("\n")
+    if node_key in first_line and after.strip():
+        multi_line_evidence = after
+evidence = (
+    fenced                # operator-explicit wins
+    or multi_line_evidence
+    or (" ".join(rest[1:]) if len(rest) > 1 else "")
+)
+```
+
+Plumbing: `dispatch_assist_sub` gains a `raw_head: str | None = None` kwarg. Both call sites in `handle_assist` pass `raw_head=head`. The `head` is the post-fence-stripped message (still preserving newlines).
+
+**Three-way precedence.** `fenced > multi_line > whitespace-join`:
+
+1. **Fenced wins** — operator wrapped their evidence in triple backticks because they wanted explicit framing. Don't second-guess.
+2. **Multi-line beats join** — when newline + node_key-on-first-line + non-empty tail, the as-is capture preserves what the operator pasted.
+3. **Join is the fallback** — single-line inline evidence (`/assist submit T2 done`) still works exactly as it did pre-§17.308.
+
+**The `node_key in first_line` guard.** When operators type the multi-line form, they put the command + node_key on line 1 and evidence on subsequent lines:
+
+```
+/assist submit T2
+<evidence content>
+```
+
+If instead they typed:
+
+```
+/assist submit
+T2
+<evidence content>
+```
+
+…then the partition at first newline would split node_key out of the evidence. The guard checks that node_key appears on the first line — if it doesn't, we fall back to the pre-§17.308 whitespace-join (which handles this edge case correctly via `split(None, 4)`'s newline-traversing behavior). Backward-compatible for the rare edge case.
+
+**Help text simplified.** The pre-§17.308 `render_step` help block used 4-backtick fence nesting:
+
+```
+\`\`\`\`
+/assist submit
+\`\`\`
+<your output>
+\`\`\`
+\`\`\`\`
+```
+
+That's hard to read in OWUI (the outer 4-backticks render as a code block containing 3-backticks; the structure is non-obvious). Post-§17.308 the help shows a single 3-backtick example + a one-line note:
+
+```
+**When done, submit your evidence:**
+
+\`\`\`
+/assist submit
+<paste your output here — newlines and indentation preserved>
+\`\`\`
+
+_Code fences (\`\`\`) are optional. Content after the command line is captured as-is._
+```
+
+The note teaches the new affordance directly. Operators who DO want fences (e.g., to wrap something that contains literal triple-backticks of their own) can still use them; fenced beats multi-line in the precedence ladder.
+
+**Test-suite delta:** +19 tests in `tests/test_scaffold_router_assist_multiline_evidence.py` across 7 classes:
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestSingleLineEvidence` | 2 | inline single-line still captured via the join path; empty tail = empty evidence |
+| `TestMultiLineEvidence` | 5 | simple multi-line preserved; indented code block preserves indentation; leading blank line preserved (the headline pre-§17.308 corruption); stack trace verbatim; underscore node keys (STEP_1) work |
+| `TestFencedTakesPriority` | 2 | fenced beats multi-line tail; fenced with language tag (e.g., `python`) still strips the tag |
+| `TestEdgeCases` | 3 | node_key on continuation line → falls back to pre-§17.308 join (backward compat); whitespace-only tail = no evidence; trailing-space-no-newline = single-line path |
+| `TestSlashFormParity` | 1 | `/assist/submit` (slash-form) routes through the same parser |
+| `TestRenderStepHelpUpdate` | 2 | help text advertises "newlines and indentation preserved" + the "fences optional" note; no longer uses 4-backtick nesting |
+| `TestSourceShapeRegressionGuard` | 4 | `raw_head` kwarg present in `dispatch_assist_sub`; `multi_line_evidence` variable used with correct precedence; `node_key in first_line` guard anchored; both call sites pass `raw_head=head` |
+
+The `test_leading_blank_line_preserved` and `test_node_key_on_continuation_line_falls_back` tests are load-bearing: the first pins the headline operator-visible fix; the second pins the backward-compat edge case that, if regressed, would silently route node_key into evidence and produce orchestrator errors.
+
+**Test patching gotcha (worth recording).** The vendor module `pipelines/_vendor/_assist_handlers.py` is loaded via `importlib.util.spec_from_file_location` under the module name `scaffold_router_assist` — the underscore-prefixed `_vendor/` directory is invisible to OWUI auto-discovery (this is intentional; see [[project_post_ssd_migration_state]]). Standard import paths like `pipelines._vendor._assist_handlers` don't resolve. Tests must reach the vendor via `scaffold_router._assist` (the attribute set on `scaffold_router.py` at module load). The §17.308 test file documents the pattern in its setup comment so future test authors don't hit this.
+
+**Cost.** +5 LOC in `dispatch_assist_sub` (the multi_line_evidence block + the kwarg signature), +2 LOC each at the two call sites (passing `raw_head=head`), +1 net LOC in `render_step` (the help block grew by 1 line, shrunk by 4 in the fence-nesting cleanup). Total ~12 LOC in `_vendor/_assist_handlers.py`. Operator-facing cost: zero when not using `/assist submit`; correct multi-line capture when used.
+
+**§17.300-§17.308 close the canonical operator surface.** Discovery (§17.300, §17.306), in-flow signposts (§17.301-§17.305), id-resolution friction (§17.307), and evidence-parsing friction (§17.308). The remaining UX surfaces are tangents: `/jobs` default-listing UX, `/research` mode discovery, model selection ergonomics. The pilot from §17.307 (expand active-job memory to `/exec retry`, `/skip`, etc.) is also pending real-usage validation.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
