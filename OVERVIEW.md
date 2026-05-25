@@ -15493,6 +15493,58 @@ The partial-bypass case is the load-bearing one — it's the case where the oper
 
 **§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.290 closed UX #1-4. §17.291 closes UX #5. Remaining: four 🟢 (informational), four UX (#6-9).
 
+### §17.292 `push_to_github` returns structured `category` for failure dispatch — close §17.280 UX #6 (2026-05-24)
+
+§17.280's sixth UX item. `app/modules/gt_extractor.py::push_to_github` returned a free-text `reason` field on every failure path:
+
+```python
+return {"pushed": False, "reason": f"GitHub GET failed: {resp.status_code}"}
+```
+
+A UI consumer trying to dispatch retry behavior by KIND (rate-limit backoff vs auth re-prompt vs not-found path-edit) had to regex-parse the free-text — fragile, and brittle to drift in the error strings. Two of the seven failure paths used an informal `"rate_limit: ..."` / `"not_found: ..."` prefix, but the convention wasn't enforced and a UI couldn't trust it.
+
+**Fix — closed string-set + helper.**
+
+Promote the failure shape to `{pushed: False, category, detail, reason}` with a closed `category` enum:
+
+| Category | Triggers |
+|---|---|
+| `config` | missing `settings.github_token` |
+| `auth` | HTTP 401 / 403 |
+| `not_found` | HTTP 404 (failure path only — read-404 is "new file" success) / `GitHubRepoNotFoundError` |
+| `rate_limit` | HTTP 429 / `GitHubRateLimitError` |
+| `server` | HTTP 5xx |
+| `network` | `Connect*` / `Timeout*` exceptions (heuristic on class name) |
+| `unknown` | catch-all — anything outside the named buckets |
+
+Three small helpers carry the dispatch:
+
+- `_push_category_for_status(status)` — HTTP status code → category
+- `_push_category_for_exception(exc)` — exception class name → category (substring heuristic on `Connect` / `Timeout` / `Network` so we don't have to import every httpx/socket type at the module level)
+- `_push_failure(category, detail, *, reason=None)` — canonical dict builder
+
+`reason` is preserved verbatim — pre-§17.292 consumers reading the field continue to work. New consumers dispatch off `category`. The default `reason` when omitted is `f"{category}: {detail}"`, which extends the informal pattern the two specific exception paths already used.
+
+**Why heuristic on class name for the exception classifier.** Considered `isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, ...))` and rejected — would require importing httpx at module level (it's already imported elsewhere but the import surface is narrow here), and a future swap to `aiohttp` or a custom transport would need a parallel branch. The class-name substring approach catches every `*Connect*` / `*Timeout*` / `*Network*` exception across transport libraries with one branch, and the explicit test `test_classifier_uses_class_name_not_isinstance` pins that behavior so a future "tighten to isinstance" refactor is reviewable.
+
+**Backward compatibility.** Existing consumers reading only `reason` continue to work — same key, same string content. The `category` and `detail` fields are purely additive. The pre-§17.292 `{"pushed": False, "reason": ...}` two-key literal pattern is gone from production source; a source-shape regression guard fails review if it returns.
+
+**Test-suite delta:** +31 tests in `tests/test_gt_extractor_push_categories.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestStatusClassifier` | 13 (incl 9 parametrize) | every named status maps correctly; **`other_4xx_maps_to_unknown`** (parametrized 400/410/418/422) pins the catch-all — anything outside named buckets falls through to `unknown`, NOT to a heuristic guess |
+| `TestExceptionClassifier` | 4 | `httpx.ConnectError` / `httpx.ReadTimeout` → `network`; `ValueError` → `unknown`; **a synthetic `FakeNetworkTimeout` class** also maps to `network` via the class-name substring — pinning the heuristic shape |
+| `TestPushFailureShape` | 4 | helper builds `{pushed: False, category, detail, reason}`; default `reason` carries `"{category}: {detail}"`; explicit `reason=` overrides |
+| `TestPushToGithubFailureCategories` | 8 (async) | end-to-end each failure path → expected category. Includes a **happy-path 404-on-read test** to pin that "file doesn't exist yet" is success, not a `not_found` failure (subtle — same status code, different meaning by call site) |
+| `TestSourceShapeRegressionGuard` | 2 | every category constant string is present in source (closed-set anchor); the bare `{"pushed": False, "reason": ...}` two-key literal is absent (so a regression that bypasses `_push_failure` shows up) |
+
+The 404-on-read sanity test is load-bearing — without it, a future "be consistent" refactor that flips that branch to also return `category=not_found` would silently break the happy-path file-creation flow. The status code is the same (404) but the semantic is opposite (read-404 = "new file, proceed"; create-404 = "owner/repo missing, fail").
+
+**Test-suite delta:** +31. gt_extractor cluster (existing + push categories): 62 passing. No regressions.
+
+**§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.291 closed UX #1-5. §17.292 closes UX #6. Remaining: four 🟢 (informational), three UX (#7-9).
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).

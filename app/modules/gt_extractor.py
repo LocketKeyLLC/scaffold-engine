@@ -203,6 +203,66 @@ def _normalize_legacy_keys(entries: list[dict]) -> list[dict]:
 # GitHub push
 # ---------------------------------------------------------------------------
 
+# §17.292 — operator-facing categories for push_to_github failures. The
+# return dict carries `category` so UIs / CLIs can dispatch retry
+# behavior by kind (rate-limit → backoff + retry-after, auth → re-auth
+# prompt, not_found → ask-for-path) instead of regex-parsing the
+# free-text `reason` field. The string set is closed — adding a new
+# category here is the only way to introduce one.
+_PUSH_CATEGORY_CONFIG = "config"            # missing settings / token
+_PUSH_CATEGORY_AUTH = "auth"                # 401, 403
+_PUSH_CATEGORY_NOT_FOUND = "not_found"      # 404, GitHubRepoNotFoundError
+_PUSH_CATEGORY_RATE_LIMIT = "rate_limit"    # 429, GitHubRateLimitError
+_PUSH_CATEGORY_SERVER = "server"            # 5xx
+_PUSH_CATEGORY_NETWORK = "network"          # connection / timeout
+_PUSH_CATEGORY_UNKNOWN = "unknown"          # catch-all
+
+
+def _push_category_for_status(status: int) -> str:
+    """Map a GitHub HTTP status to a §17.292 failure category."""
+    if status in (401, 403):
+        return _PUSH_CATEGORY_AUTH
+    if status == 404:
+        return _PUSH_CATEGORY_NOT_FOUND
+    if status == 429:
+        return _PUSH_CATEGORY_RATE_LIMIT
+    if 500 <= status < 600:
+        return _PUSH_CATEGORY_SERVER
+    return _PUSH_CATEGORY_UNKNOWN
+
+
+def _push_category_for_exception(exc: Exception) -> str:
+    """Map an unexpected exception to a §17.292 failure category.
+
+    Heuristic — checks the exception class name so we don't have to
+    import every httpx/socket type up here. Network-class errors share
+    the ``Connect`` / ``Timeout`` substrings; everything else is
+    ``unknown`` (preserves the pre-§17.292 catch-all behaviour while
+    still giving the UI a stable dispatch token).
+    """
+    name = type(exc).__name__
+    if "Timeout" in name or "Connect" in name or "Network" in name:
+        return _PUSH_CATEGORY_NETWORK
+    return _PUSH_CATEGORY_UNKNOWN
+
+
+def _push_failure(
+    category: str, detail: str, *, reason: str | None = None,
+) -> dict:
+    """Build the §17.292 standard push-failure dict.
+
+    ``reason`` is kept for backward compatibility with consumers that
+    haven't migrated to ``category``/``detail`` yet — defaults to
+    ``"{category}: {detail}"`` so the legacy string stays readable.
+    """
+    return {
+        "pushed": False,
+        "category": category,
+        "detail": detail,
+        "reason": reason if reason is not None else f"{category}: {detail}",
+    }
+
+
 async def push_to_github(
     rows: list[str],
     file_path: str,
@@ -218,7 +278,11 @@ async def push_to_github(
     positional signature backward-compatible with existing callers.
     """
     if not settings.github_token:
-        return {"pushed": False, "reason": "github_token not set in settings"}
+        return _push_failure(
+            _PUSH_CATEGORY_CONFIG,
+            "github_token not set in settings",
+            reason="github_token not set in settings",
+        )
 
     owner = owner or settings.gt_github_owner
     repo = repo or settings.gt_github_repo
@@ -244,7 +308,13 @@ async def push_to_github(
         elif resp.status_code == 404:
             existing = _new_toon_header(file_path)
         else:
-            return {"pushed": False, "reason": f"GitHub GET failed: {resp.status_code}"}
+            # §17.292 — note: 404 on this read path is success
+            # (new-file case, handled above). Other 4xx/5xx flow here.
+            return _push_failure(
+                _push_category_for_status(resp.status_code),
+                f"GitHub GET failed: {resp.status_code}",
+                reason=f"GitHub GET failed: {resp.status_code}",
+            )
 
         # 2. Append new rows
         updated = existing
@@ -269,7 +339,11 @@ async def push_to_github(
         )
         check_github_rate_limit(create_resp)
         if create_resp.status_code not in (200, 201):
-            return {"pushed": False, "reason": f"Branch creation failed: {create_resp.status_code}"}
+            return _push_failure(
+                _push_category_for_status(create_resp.status_code),
+                f"Branch creation failed: {create_resp.status_code}",
+                reason=f"Branch creation failed: {create_resp.status_code}",
+            )
 
         # 5. Get file SHA on new branch (if present)
         branch_resp = await client.get(
@@ -296,7 +370,11 @@ async def push_to_github(
         )
         check_github_rate_limit(put_resp)
         if put_resp.status_code not in (200, 201):
-            return {"pushed": False, "reason": f"Push failed: {put_resp.status_code}"}
+            return _push_failure(
+                _push_category_for_status(put_resp.status_code),
+                f"Push failed: {put_resp.status_code}",
+                reason=f"Push failed: {put_resp.status_code}",
+            )
 
         # 7. Open PR
         pr_resp = await client.post(
@@ -322,13 +400,23 @@ async def push_to_github(
 
     except GitHubRateLimitError as e:
         logger.warning("GitHub rate limit exhausted: %s", e)
-        return {"pushed": False, "reason": f"rate_limit: {e}"}
+        # §17.292 — preserve the pre-existing `"rate_limit: ..."` reason
+        # string for backward compatibility while adding the structured
+        # `category` field. Consumers reading either field continue to
+        # work; new consumers should dispatch off `category`.
+        return _push_failure(
+            _PUSH_CATEGORY_RATE_LIMIT, str(e), reason=f"rate_limit: {e}",
+        )
     except GitHubRepoNotFoundError as e:
         logger.warning("GitHub repo not found: %s", e)
-        return {"pushed": False, "reason": f"not_found: {e}"}
+        return _push_failure(
+            _PUSH_CATEGORY_NOT_FOUND, str(e), reason=f"not_found: {e}",
+        )
     except Exception as e:
         logger.error("GitHub push failed: %s", e, exc_info=True)
-        return {"pushed": False, "reason": str(e)}
+        return _push_failure(
+            _push_category_for_exception(e), str(e), reason=str(e),
+        )
 
 
 # ---------------------------------------------------------------------------
