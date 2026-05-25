@@ -15862,6 +15862,66 @@ Pipeline cluster post-fix: 300 passing in the cluster regression check. No regre
 
 **§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.295 closed UX #1-9. §17.296 closed 🟢 #1. §17.297 closes 🟢 #2. Remaining: two 🟢 (#3 research_agent 2501 LOC, #4 execution_agent + rag_pipeline next-largest).
 
+### §17.298 research_agent direct modes → app/modules/research_modes/ package — close §17.280 🟢 #3 (2026-05-25)
+
+§17.280's third 🟢 (informational) item — first cycle work after midnight; the audit thread crosses days. The audit text:
+
+> ``app/modules/research_agent.py`` is 2501 LOC bundling decompose / search / extract / gap-analysis / summary + four direct modes (OpenAPI / GitHub / HF / Forum) with shared session lifecycle. Producer modes could be lifted into ``app/modules/research_modes/<mode>.py`` files with a dispatch table in the main module, mirroring how ``app/utils/{github,hf,forum}_ingest.py`` already split out the fetchers.
+
+**Fix.** Created the package + four mode modules:
+
+| File | LOC | Purpose |
+|---|---|---|
+| `app/modules/research_modes/__init__.py` | 28 | Package header documenting the extraction + late-import pattern |
+| `app/modules/research_modes/openapi.py` | 115 | `run_research_openapi_mode` — fetch + validate spec, one entry per endpoint |
+| `app/modules/research_modes/github.py` | 192 | `run_research_github_mode` — repo tree + releases + issues/PRs + discussions |
+| `app/modules/research_modes/hf.py` | 136 | `run_research_hf_mode` — model_card / dataset_card / paper_abstract / space metadata |
+| `app/modules/research_modes/forum.py` | 170 | `run_research_forum_mode` — SO / HN / arXiv / Reddit / Wiki |
+
+`research_agent.py` shrinks from **2501 → 2011 LOC** (−490 LOC, ~20% reduction). The four mode bodies are gone; in their place sits an alias block that re-binds the public vendor names to their pre-§17.298 underscore-private aliases:
+
+```python
+from app.modules.research_modes import (
+    forum as _forum_mode,
+    github as _github_mode,
+    hf as _hf_mode,
+    openapi as _openapi_mode,
+)
+
+_run_research_openapi_mode = _openapi_mode.run_research_openapi_mode
+_run_research_github_mode = _github_mode.run_research_github_mode
+_run_research_hf_mode = _hf_mode.run_research_hf_mode
+_run_research_forum_mode = _forum_mode.run_research_forum_mode
+```
+
+The dispatch in `run_research` (the if/elif chain at line ~2170 calling each mode) **doesn't change**. Tests patching `_run_research_*_mode` on `research_agent` continue to work because the names are still present — just rebound to the vendor functions.
+
+**Circular import broken via late binding.** Each mode function needs `_ingest_and_finalize_direct` from `research_agent`, but `research_agent` imports the modes at module-load time. Resolution: the mode bodies `from app.modules.research_agent import _ingest_and_finalize_direct` INSIDE the `run_*` function body, not at module top. Python caches the module object after the first import; subsequent calls are cheap. Standard Python late-import pattern; documented inline at each callsite + in `research_modes/__init__.py`.
+
+**Why no dispatch table.** The audit suggested "a dispatch table in the main module" — considered and deferred. The if/elif chain in `run_research` does per-mode parser invocation (e.g. `_parse_github_ref(topic)` for github, `_parse_so_ref(topic)` for so) and per-mode arg-shaping. A table would have to encode (parser → handler → arg-builder) per entry, which IS cleaner long-term but is a separate refactor with its own design choices (where do parsers live? does the table belong in research_modes or research_agent?). §17.298 keeps the audit's first-principles win — modes-as-files — without introducing a second design vector. Future audit work can layer the dispatch table on top.
+
+**URL + PDF modes stay inline.** The audit only named OpenAPI / GitHub / HF / Forum. URL (`_run_research_url_mode`, ~220 LOC) and PDF (`_run_research_pdf_mode`, ~168 LOC) share the topic-loop's LLM extract path (`_extract_entries`, `_unload_ollama_model`, `_classify_extract_no_entries_reason`) which doesn't separate cleanly from the topic flow. Lifting them would either duplicate the helpers or move them too — a different audit item.
+
+**Test-suite delta:** +17 new tests in `tests/test_research_modes_package.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestResearchModesPackageExports` | 8 (2× 4 parametrize) | each mode module is importable; each `run_research_<mode>_mode` is an async-generator (`async for evt in ...` dispatch invariant) |
+| `TestResearchAgentAliasesIdentity` | 4 (parametrize) | each `research_agent._run_research_<mode>_mode is research_modes.<mode>.run_research_<mode>_mode` — identity, not equality, so a re-inlined body would fail |
+| `TestSourceShapeRegressionGuard` | 5 | mode-specific import bundles absent from `research_agent.py` source (openapi: `fetch_and_parse_spec`; github: `fetch_repo_discussions`; hf: `from app.utils.hf_ingest import fetch_hf`; forum: combined `fetch_arxiv` + `fetch_so_answers` + `fetch_wiki_pages` triple-anchor); the four alias assignments are present in source |
+
+The identity check in `TestResearchAgentAliasesIdentity` is the core invariant — without it, behavioral tests could pass even if someone re-inlined the body and the alias pointed at the inline copy (the dispatch would still work). The forum-mode source-shape test uses a triple-anchor (3 distinct imports must ALL be absent) because two of them appear individually elsewhere in `research_agent.py` for unrelated reasons.
+
+**Lessons recorded for future mode extractions.**
+
+1. **Late imports inside function bodies** are the right pattern when the shared-helper module imports the vendor — sidesteps the circular import without splitting the helpers into a separate `_shared.py`. Cheap on repeat calls (Python module cache).
+2. **Alias-back the names** — `_run_research_*_mode = ...` at the top of `research_agent.py` keeps the dispatch + every test patching the legacy names working byte-for-byte. Renaming to public would be a separate breaking change.
+3. **Source-shape anchors must be unique to the body being checked.** First-cut test for forum used `fetch_arxiv` alone — that string appeared in `research_agent.py` for an unrelated reason. Switched to a 3-string AND-anchor that's distinctive to the forum body.
+
+**Test-suite delta:** +17. Research + ideation cluster (research_agent core + helpers + ingestion + summary + extract + bypass + pause/resume + pdf + url + ssrf + new package + ideation phase 1+2): **175 passing**. No regressions.
+
+**§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.295 closed UX #1-9. §17.296-§17.297 closed 🟢 #1-2. §17.298 closes 🟢 #3. Remaining: one 🟢 (#4 execution_agent + rag_pipeline next-largest).
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
