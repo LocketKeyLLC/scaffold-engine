@@ -437,6 +437,15 @@ class Pipeline:
         # behavior that does not exist.
         assist_session_memory_enabled: bool = True
 
+        # §17.300 — first-turn welcome preamble. When a brand-new chat
+        # receives a natural-language message, the pipeline prepends a
+        # small "here's how this works" block ahead of the triage
+        # response so first-touch operators see the canonical flow
+        # without typing `/help`. Slash commands skip the preamble
+        # (operators using commands already know the surface). One
+        # preamble per chat — subsequent turns are unaffected.
+        show_welcome_on_first_turn: bool = True
+
         # Model overrides
         model_general: str = "qwen3-vl:235b-instruct-cloud"
         model_verifier: str = "qwen2.5:7b"
@@ -711,6 +720,41 @@ class Pipeline:
         """Word-boundary command match (#8.6): first token equals one of commands."""
         first = self._first_token(msg)
         return first in {c.lower() for c in commands}
+
+    # ------------------------------------------------------------------
+    # §17.300 — first-touch welcome
+    # ------------------------------------------------------------------
+
+    _WELCOME_PREAMBLE = (
+        "👋 **Welcome to Scaffold Engine.**\n\n"
+        "You can take either path:\n\n"
+        "**A) Chat naturally to refine your idea** — describe what you "
+        "want to build (you just did 👆), then type `/go` when the plan "
+        "feels right.\n\n"
+        "**B) Jump straight in with one command:**\n"
+        "- `/idea Build a CLI that converts screenshots to PDF` — kick off "
+        "Phase 1 directly\n"
+        "- `/research kubernetes best practices` — autonomous web "
+        "research + ingest\n"
+        "- `/jobs` — see what's already running\n"
+        "- `/help` — full command surface (22 commands)\n\n"
+        "---\n\n"
+    )
+
+    @staticmethod
+    def _is_first_turn(messages: list[dict]) -> bool:
+        """True when the user has sent exactly one user-message in this chat.
+
+        OWUI passes the full chat history to ``pipe()``; on a brand-new
+        chat the user's first message is the only user-role entry. Any
+        prior assistant turns (e.g., an OWUI greeting added by another
+        pipeline) are ignored — we count user-role only.
+        """
+        user_count = sum(
+            1 for m in (messages or [])
+            if isinstance(m, dict) and m.get("role") == "user"
+        )
+        return user_count <= 1
 
     # ------------------------------------------------------------------
     # Triage / synthesis
@@ -1023,6 +1067,17 @@ class Pipeline:
             if result:
                 yield result
             return
+
+        # §17.300 — first-touch welcome preamble. Natural-language input
+        # AND brand-new chat AND valve enabled → prepend the canonical
+        # flow + jump-in commands so the operator sees the surface
+        # without typing `/help` first. Triage still runs and answers
+        # their actual question; the preamble is additive.
+        if (
+            self.valves.show_welcome_on_first_turn
+            and self._is_first_turn(messages)
+        ):
+            yield self._WELCOME_PREAMBLE
 
         yield self._call_triage(messages)
 

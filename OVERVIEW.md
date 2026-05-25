@@ -15984,6 +15984,80 @@ The retry_failed_node source-shape test uses a TWO-anchor AND combination becaus
 
 Both patterns now have multiple precedents in the codebase. The audit's "no specific complaint" framing is met materially — adding to the host files is no longer the default.
 
+### §17.300 first-touch welcome preamble for new OWUI chats (2026-05-25)
+
+First post-§17.280 cycle work. Operator-directed focus on making the OWUI experience easier, smoother, simpler — picked "first-touch + new-chat experience" as the entry-point scope. The §17.280 cycle closed nine specific UX gaps (typo suggestions, retry hints, structured failure categories, etc.); §17.300 takes the next step by surfacing the discovery layer at the moment it matters most — turn one of a brand-new chat.
+
+**Problem.** Pre-§17.300, a user who opens a new OWUI chat and types natural language gets only the triage LLM's response — no signposting toward the canonical flow (chat→/go→/confirm), no visibility into the 22-command surface, no example to copy-paste. The user has to discover `/help` exists. New operators end up either staying in indefinite triage chat (slow) or abandoning before finding `/idea` / `/research`.
+
+**Fix.** Detect first-turn natural-language input. Prepend a brief, copy-pasteable welcome block before the triage response:
+
+```
+👋 **Welcome to Scaffold Engine.**
+
+You can take either path:
+
+**A) Chat naturally to refine your idea** — describe what you want to
+build (you just did 👆), then type `/go` when the plan feels right.
+
+**B) Jump straight in with one command:**
+- `/idea Build a CLI that converts screenshots to PDF` — kick off
+  Phase 1 directly
+- `/research kubernetes best practices` — autonomous web research +
+  ingest
+- `/jobs` — see what's already running
+- `/help` — full command surface (22 commands)
+
+---
+```
+
+Triage then runs normally and answers their question. Preamble is additive — never blocks, never replaces.
+
+**Detection contract.** `_is_first_turn(messages)` counts user-role messages in the history. If `≤ 1`, the user has just sent their first message. The current message is in the history by the time `pipe()` sees it, so the threshold is `<= 1`, not `== 0`. Assistant pre-seed messages (OWUI may inject a greeting) don't count — only user turns trip the threshold.
+
+**Skip conditions** (all four must hold for the preamble to fire — any one False skips it):
+
+| Condition | Why |
+|---|---|
+| Valve `show_welcome_on_first_turn` is True | Admin opt-out for power-user deployments |
+| Message is natural-language (not slash command) | Operators using slash commands already know the surface |
+| `len([m for m in messages if m["role"] == "user"]) <= 1` | Already past first-touch |
+| Triage path reached (not handled by an earlier dispatch branch) | Preamble only attached to the triage reply, not to any command output |
+
+**Why valve-default-True.** Default-off would hide the first-touch UX behind an admin toggle. The audit invariant is that first-touch IS the default behavior; an admin who has memorized the surface can flip the valve. `test_valve_default_is_true` in the regression suite pins this.
+
+**Why a single one-shot preamble, not a recurring banner.** Tried two designs in my head:
+
+1. Preamble once on turn 1 — visible during first touch, invisible after.
+2. Persistent banner on every triage response — always-on signposting.
+
+(2) would be obnoxious — operators see it 50× per chat. (1) is the right size for the discovery problem: brand-new operators see it; everyone else doesn't.
+
+**Why the 4-command discovery set** (`/idea`, `/research`, `/jobs`, `/help`). Smallest set that covers the three canonical first-turn intents:
+- "I have an idea" → `/idea <text>` jumps straight to Phase 1
+- "I want to learn about X" → `/research <topic>`
+- "What's running already?" → `/jobs`
+- "I'm lost" → `/help`
+
+Adding more commands to the preamble would inflate the cognitive cost of scanning it (the entire point is to be skim-able). Dropping any of the four leaves a gap.
+
+**Test-suite delta:** +14 tests in `tests/test_scaffold_router_welcome.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestFirstTurnWelcomeFires` | 3 | natural-language first turn → preamble appears; preamble emits BEFORE triage output (order matters); 4 canonical commands present in preamble |
+| `TestWelcomeSkipsWhenNotApplicable` | 4 | slash command first turn → no preamble; second turn → no preamble; assistant-pre-seeded first user turn → still gets preamble (user count is the threshold, not raw message count); valve disabled → no preamble |
+| `TestIsFirstTurnHelper` | 5 | empty/None messages → True; single user msg → True; assistant-only → True; 2 user msgs → False |
+| `TestSourceShapeRegressionGuard` | 2 | "Welcome to Scaffold Engine" string + all 4 canonical commands present in source; valve default-True anchor |
+
+The `test_assistant_first_does_not_count` case is the load-bearing edge — OWUI may inject a greeting before the user's first turn; if we counted ALL messages instead of user-only, an assistant-greeting chat would skip the welcome. User-only is correct.
+
+**Cost.** Net codebase: +47 LOC (Valve field + WELCOME_PREAMBLE constant + `_is_first_turn` helper + 6 lines in `pipe()`). Operator-facing cost: ~120 chars of preamble text once per chat, never on subsequent turns. The preamble is markdown — OWUI renders it as a sub-section, not a wall of text.
+
+**Test-suite delta:** +14. scaffold_router cluster (9 test files): in flight at commit time; no regression surface anticipated (the change is purely additive — slash commands hit their existing dispatch branches before the welcome check; the only behavioral diff is "natural-language first turn now gets a preamble").
+
+**§17.300 is the first work item past the §17.280 audit cycle.** Sets the cadence for the next phase: operator-directed UX work focused on the OWUI surface. Future items in this thread will follow the same shape — one entry per change, OVERVIEW + code + test in the same commit.
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
