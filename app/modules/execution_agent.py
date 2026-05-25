@@ -993,13 +993,27 @@ async def execute_next_node(
                 verification_reason=timeout_msg,
             )
             await _log_execution(db, job_id, node_id, "error", timeout_msg)
+        # §17.294 — operator-actionable message. Pre-§17.294 this was
+        # a generic one-liner with no context. The structured fields
+        # (`node_key`, `error`) already carried the data, but the
+        # `message` is the surface the chat / CLI renders inline — so
+        # the recovery command + timeout setting name now live here
+        # too. (`execution_node_timeout_seconds` in the audit text was
+        # a typo for `node_timeout_seconds`, verified in
+        # app/config.py:379; using the real name so a `make doctor` /
+        # env-grep lands on the right knob.)
         return {
             "status": "failed",
             "node_key": node_key,
             "title": title,
             "error": timeout_msg,
             "reason": "timeout",
-            "message": "Node timed out. Review timeout settings or retry.",
+            "message": (
+                f"Node `{node_key}` timed out after "
+                f"{settings.node_timeout_seconds}s. "
+                f"Retry with `/exec retry {job_id} {node_key}` or raise "
+                f"`node_timeout_seconds`."
+            ),
         }
     except Exception as e:
         logger.error("node_execution_failed: node='%s' error=%s", title, e)

@@ -15609,6 +15609,64 @@ The operator now sees "missing comma at line 3" immediately instead of scanning 
 
 **§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.292 closed UX #1-6. §17.293 closes UX #7. Remaining: four 🟢 (informational), two UX (#8-9).
 
+### §17.294 node-timeout message enriched with node_key, timeout value, retry command — close §17.280 UX #8 (2026-05-24)
+
+§17.280's eighth UX item. `app/modules/execution_agent.py:1002-1003`'s node-timeout branch returned a generic operator-facing message:
+
+```python
+"message": "Node timed out. Review timeout settings or retry.",
+```
+
+The structured fields (`node_key`, `error`) carried the actual data — the `timeout_msg` string at line 973-976 was already rich:
+
+```python
+timeout_msg = (
+    f"Node '{node_key}' timed out after {elapsed}s "
+    f"(limit: {settings.node_timeout_seconds}s)"
+)
+```
+
+But the `message` field — the surface that chat / CLI typically renders inline — was a stub. Operator saw it, learned nothing actionable, had to dig the `error` field for context.
+
+**Fix.** Enrich the `message` field to mirror what the audit suggested:
+
+```python
+"message": (
+    f"Node `{node_key}` timed out after "
+    f"{settings.node_timeout_seconds}s. "
+    f"Retry with `/exec retry {job_id} {node_key}` or raise "
+    f"`node_timeout_seconds`."
+),
+```
+
+The operator now sees, in one line:
+- The **node key** (which node to retry)
+- The **actual timeout value** (so they can tell whether the limit is 60s or 600s without scanning logs)
+- A **copy-pasteable retry command** (`/exec retry <job_id> <node_key>` — the chat-form shape; matches the existing `pipelines/scaffold_router.py::_handle_exec` subcommand at line 3693+)
+- The **real setting name** to raise (`node_timeout_seconds`)
+
+**Audit-text correction recorded.** §17.280 suggested `execution_node_timeout_seconds` and `/exec/retry/<job>/<key>`. Both were wrong — verified the live names in `app/config.py:379` (`node_timeout_seconds`) and `pipelines/scaffold_router.py` (`/exec retry <job_id> <node_key>` chat-form, `POST /exec/retry` REST-form). Used the real names so a `make doctor` / env-grep / chat-typeahead lands on the right knob.
+
+**Test-suite delta:** +7 source-shape regression tests in `tests/test_execution_agent_timeout_message.py`.
+
+| Test | Pins |
+|---|---|
+| `test_message_includes_node_key` | `Node \`{node_key}\` timed out` template fragment present |
+| `test_message_includes_actual_timeout_value` | `{settings.node_timeout_seconds}s.` interpolation present |
+| `test_message_includes_retry_command` | `/exec retry {job_id} {node_key}` template present (chat-form, NOT the audit's typo path-style) |
+| `test_message_names_node_timeout_seconds_setting` | the setting name `node_timeout_seconds` is in the recovery hint |
+| `test_real_setting_exists` | `settings.node_timeout_seconds` actually exists — defensive against a future config rename that would silently break the message |
+| `test_pre_fix_generic_message_removed` | the pre-§17.294 literal stub is absent from source (catches a drive-by "simplify" revert) |
+| `test_audit_comment_anchored` | the inline `§17.294` audit citation stays |
+
+Why source-shape primary, no behavioral test: behavioral coverage would require mocking the full `execute_next_node` Phase 1 + 2 + 3 DB choreography (claim node, set status, log execution) just to drive `asyncio.wait_for` into the timeout branch. The §17.294 change is a single-line message format — its correctness IS the string content, which a source anchor pins better than a behavioral assertion would (a future drive-by simplification could pass behavioral coverage by happening to keep the recognized tokens while losing the recovery command). The 6 token-presence anchors collectively cover the full operator-facing contract.
+
+**Mocking-overhead lesson recorded.** The earlier §17.286 (assist mirror divergence) needed similar end-to-end coverage and the test setup was substantial — 4 mock DB responses, `_maybe_finalize_session` chain, replan policy stub. For a one-line message string change, that overhead exceeds the value. Source anchors on each operator-facing token (key name, setting name, command shape) catch the same drift class.
+
+**Test-suite delta:** +7. execution_agent cluster (autocomplete + slot_leak + compile + sse + concurrency + retry + feedback + timeout_message + prompt_build + upstream_fetch + tools): 121 passing. No regressions.
+
+**§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.293 closed UX #1-7. §17.294 closes UX #8. Remaining: four 🟢 (informational), one UX (#9 — `blocked_nodes` failed-vs-pending disambiguation).
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
