@@ -17193,6 +17193,97 @@ The §17.307 pilot's 36-char UUID copy-paste tax is now eliminated across every 
 
 ---
 
+### §17.317 `/health` discoverability polish (2026-05-25)
+
+Eighteenth post-§17.280 UX item. /health is the diagnostic surface operators reach when things break — §17.302's recovery hints across `/status`, `/results`, `/logs`, `/cost`, `/jobs`, `/schedule`, and the orchestrator-unreachable banners all point at `/health` as the probe. But pre-§17.317 the surface itself was a bare 3-column subsystem table:
+
+```
+## 🩺 Health
+
+| Subsystem | Status | Latency |
+|---|---|---:|
+| postgresql | ✅ up | 4 ms |
+| ollama | ✅ up | 12 ms |
+| milvus | ❌ down | 5000 ms |
+| redis | ✅ up | 3 ms |
+```
+
+No overall verdict — operators had to scan all rows to know whether anything was broken. No recovery commands when something was down — operator sees "milvus: ❌ down" and is on their own. JSON dump on HTTP errors via `_fmt(r)`. Orchestrator unreachable returned the unhelpful `requests.exceptions.ConnectionError` traceback.
+
+**Three additive affordances.**
+
+1. **Single-line verdict above the table.** Operators scan top-down — verdict first, details second:
+
+   ```
+   ✅ **All 4 subsystems up.**
+   ```
+   or
+   ```
+   ⚠️ **2 of 4 subsystems down:** `postgresql`, `milvus`.
+   ```
+
+   Backtick-wrapped subsystem names so a quick copy gives operators something to grep in `docker compose ps`.
+
+2. **Recovery footer when anything is down.** Generic 4-command block (no hardcoded service names beyond the always-known `scaffold-orchestrator`):
+
+   ```
+   💡 **Recovery:**
+   - Inspect: `docker compose ps` (verify each subsystem's container is running)
+   - Restart a service: `docker compose restart <service>` (use the name from `ps`)
+   - Logs: `docker compose logs --tail=50 <service>`
+   - Retry: `/health` once the container is healthy (milvus boots slowly — give it ~30 s)
+   ```
+
+   The milvus-slow-boot hint is specific because it's the #1 source of "retry / refresh" loops in the diagnostic workflow.
+
+3. **Orchestrator-unreachable path with the same affordances.** Pre-§17.317 a connection error / timeout to `/health` propagated as a Python traceback. Post-§17.317 it renders a friendly recovery block with scaffold-orchestrator-specific commands:
+
+   ```
+   ⚠️ Cannot reach orchestrator `/health` at `http://...` (refused).
+
+   💡 **Recovery:**
+   - Verify: `docker compose ps` (is `scaffold-orchestrator` running?)
+   - Restart: `docker compose restart scaffold-orchestrator`
+   - Logs: `docker compose logs --tail=50 scaffold-orchestrator`
+   - Retry: `/health` once the container is healthy.
+   ```
+
+   This closes the loop from §17.302's "orchestrator unreachable → try `/health`" — operators arriving at `/health` because /status timed out shouldn't hit ANOTHER bare error.
+
+**4xx/5xx on /health itself.** When the orchestrator IS reachable but `/health` returns 4xx/5xx (e.g., a probe crashed server-side), the response pairs the existing `_fmt(r)` JSON with the generic recovery footer. The JSON shows what happened; the footer points at the fix.
+
+**Why generic commands (not service-specific).** Considered hardcoding `docker compose restart scaffold-postgres` per subsystem. Rejected — deployments vary (some operators rename services, some run native installs, ollama runs on host not in compose). A generic `<service>` placeholder with the inspect-first instruction (`docker compose ps`) works across deployments. The single exception is `scaffold-orchestrator` in the unreachable path, which is always the known service name across deployments.
+
+**Why no per-subsystem hint rows.** Considered adding a "What to try" column to the subsystem table (e.g., milvus → "restart milvus-standalone; wait 30s"). Rejected because:
+
+1. The table is already 3 columns + status icon + latency — adding a 4th column blows up width and pushes the data off-screen on smaller chat panes.
+2. Most operator-facing fixes are the same 4 commands regardless of subsystem. Repeating per-row would clutter without helping.
+3. The verdict line names down subsystems explicitly — operators have the targeting info.
+
+**Test-suite delta:** +18 tests in `tests/test_scaffold_router_health_ux.py` across 5 classes:
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestAllUpVerdict` | 3 | verdict present with count; appears above table; no recovery footer (clean) |
+| `TestSomeDownVerdict` | 3 | verdict names down subsystems with backticks; recovery footer present; milvus slow-boot hint |
+| `TestOrchestratorUnreachable` | 3 | ConnectionError + Timeout both render friendly shape with scaffold-orchestrator commands; 4xx response pairs raw error with recovery footer |
+| `TestExistingRenderPreserved` | 4 | header, table columns, row format (icons + latency), unknown-status `ℹ️` all preserved |
+| `TestSourceShapeRegressionGuard` | 5 | both helpers (`_render_health_recovery_footer`, `_render_health_unreachable`); verdict phrasing; 4 recovery commands + milvus hint anchored; orchestrator-specific service name anchored |
+
+The `test_milvus_slow_boot_hint_present` is the **specificity anchor** — generic recovery commands are useful, but the milvus-slow-boot detail is the difference between operators retrying too fast (wasting cycles thinking it's broken) and waiting the right amount. A refactor that homogenizes the footer would silently drop this signal.
+
+The `TestOrchestratorUnreachable` suite is **load-bearing for the §17.302 → §17.317 recovery chain** — every § that points at /health relies on /health itself being able to surface a recovery surface even when the orchestrator is gone.
+
+**Pre-existing /health test preserved.** `tests/test_scaffold_router_commands.py::test_health_renders_subsystem_table` asserts only subsystem name presence + ✅/❌ icons — both unchanged. Passes without modification.
+
+**Cluster regression:** 506/506 passed across 23 test files, exit-0.
+
+**Cost.** +~70 LOC: two new static helpers (`_render_health_recovery_footer` ~12 LOC, `_render_health_unreachable` ~15 LOC); verdict-tracking logic in `_handle_health` (~10 LOC); recovery-footer + verdict-insert glue (~6 LOC); error-path branches (~10 LOC). Operator-facing cost: zero on all-up path beyond the 1-line verdict; ~6-line footer on any-down path; full recovery block on orchestrator-unreachable path (replacing the pre-§17.317 traceback).
+
+**§17.300-§17.317 polish the operator's entire visible surface — including the diagnostic surface they reach when things break.** Canonical flow + management panels + dual-surface disambiguation + active-job recall cohort + the diagnostic. The remaining items are genuinely niche tangents: `/optimize` UX (prompt optimizer used by tuners), `/model` ergonomics (model-per-role config used by tuners), `/research/pdf` upload flow polish, `/cleanup` output. None have the operator-facing leverage of the §17.300-§17.317 cohort.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

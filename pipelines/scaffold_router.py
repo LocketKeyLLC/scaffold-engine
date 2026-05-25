@@ -4169,13 +4169,26 @@ class Pipeline:
         return "\n".join(lines)
 
     def _handle_health(self) -> str:
-        r = _HTTP_SESSION.get(
-            f"{self.valves.orchestrator_url}/health",
-            headers=self._auth_headers(),
-            timeout=self.valves.request_timeout,
-        )
+        try:
+            r = _HTTP_SESSION.get(
+                f"{self.valves.orchestrator_url}/health",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.Timeout:
+            # §17.317 — friendly recovery shape when /health itself is
+            # unreachable. Operators arrive at /health from §17.302's
+            # "cannot reach orchestrator → try /health" recovery hints,
+            # so the next layer down also needs a recovery surface.
+            return self._render_health_unreachable("timed out")
+        except requests.exceptions.ConnectionError:
+            return self._render_health_unreachable("refused")
         if r.status_code >= 400:
-            return self._fmt(r)
+            # §17.317 — pair the raw error with a recovery footer
+            # (rather than the bare _fmt JSON dump). The orchestrator
+            # is reachable but the /health endpoint errored — still
+            # actionable.
+            return self._fmt(r) + self._render_health_recovery_footer()
         data = r.json() if isinstance(r.json(), dict) else {}
         checks = data.get("checks", {})
         if not checks:
@@ -4184,6 +4197,10 @@ class Pipeline:
         DOWN = {"down", "fail", "error", "unhealthy"}
         lines = ["## 🩺 Health", "", "| Subsystem | Status | Latency |",
                  "|---|---|---:|"]
+        # §17.317 — track down subsystems for the verdict header and
+        # recovery footer.
+        down_names: list[str] = []
+        up_count = 0
         for name, info in checks.items():
             if isinstance(info, dict):
                 status = str(info.get("status", "?"))
@@ -4191,10 +4208,70 @@ class Pipeline:
             else:
                 status = str(info)
                 latency = None
-            icon = "✅" if status.lower() in UP else ("❌" if status.lower() in DOWN else "ℹ️")
+            lower = status.lower()
+            icon = "✅" if lower in UP else ("❌" if lower in DOWN else "ℹ️")
             lat = f"{latency} ms" if latency is not None else "—"
             lines.append(f"| {name} | {icon} {status} | {lat} |")
+            if lower in UP:
+                up_count += 1
+            elif lower in DOWN:
+                down_names.append(name)
+        # §17.317 — single-line verdict above the table for at-a-glance
+        # scan. Operators landing here from §17.302's recovery hint want
+        # "is it broken or not?" first, details second. Insert verdict
+        # at index 2 (between the title and the empty line that the
+        # original "##" header expected).
+        total = len(checks)
+        if not down_names:
+            verdict = f"✅ **All {total} subsystems up.**"
+        else:
+            names_fmt = ", ".join(f"`{n}`" for n in down_names)
+            verdict = (
+                f"⚠️ **{len(down_names)} of {total} subsystems down:** "
+                f"{names_fmt}."
+            )
+        lines.insert(1, "")
+        lines.insert(2, verdict)
+        # §17.317 — recovery footer only when something's down. All-up
+        # path stays clean.
+        if down_names:
+            lines.append(self._render_health_recovery_footer())
         return "\n".join(lines)
+
+    @staticmethod
+    def _render_health_recovery_footer() -> str:
+        """§17.317 — recovery footer for /health when subsystems are
+        down. Generic across deployments (no hardcoded service names
+        beyond `scaffold-orchestrator`, which is always known)."""
+        return (
+            "\n\n---\n\n"
+            "💡 **Recovery:**\n"
+            "- Inspect: `docker compose ps` "
+            "(verify each subsystem's container is running)\n"
+            "- Restart a service: "
+            "`docker compose restart <service>` "
+            "(use the name from `ps`)\n"
+            "- Logs: `docker compose logs --tail=50 <service>`\n"
+            "- Retry: `/health` once the container is healthy "
+            "(milvus boots slowly — give it ~30 s)"
+        )
+
+    def _render_health_unreachable(self, reason: str) -> str:
+        """§17.317 — friendly recovery shape when the orchestrator's
+        /health endpoint itself is unreachable. Mirror of §17.302's
+        connection-error pattern but with diagnostic-specific
+        commands."""
+        url = self.valves.orchestrator_url
+        return (
+            f"⚠️ Cannot reach orchestrator `/health` at `{url}` "
+            f"({reason}).\n\n"
+            f"💡 **Recovery:**\n"
+            f"- Verify: `docker compose ps` (is `scaffold-orchestrator` "
+            f"running?)\n"
+            f"- Restart: `docker compose restart scaffold-orchestrator`\n"
+            f"- Logs: `docker compose logs --tail=50 scaffold-orchestrator`\n"
+            f"- Retry: `/health` once the container is healthy."
+        )
 
     def _handle_cost(
         self, parts: list, *, chat_id: str | None = None,
