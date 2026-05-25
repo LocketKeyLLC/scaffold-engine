@@ -3592,6 +3592,58 @@ class Pipeline:
     # /schedule command system (#8.9)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _schedule_help() -> str:
+        """§17.312 — richer /schedule help. Mirror of §17.310's
+        /research mode panel + §17.309's /jobs UX patterns: table of
+        subcommands + Examples block teaching cron flavors + Flags
+        section calling out `--depth` and `--tz` explicitly."""
+        return (
+            "**`/schedule` — Recurring research crons**\n\n"
+            "| Command | What it does |\n"
+            "|---|---|\n"
+            "| `/schedule list` | Show all schedules |\n"
+            "| `/schedule add \"<cron>\" <topic>` | Create a recurring research |\n"
+            "| `/schedule add \"<cron>\" --depth=<lvl> --tz=<IANA> <topic>` "
+            "| Create with flags |\n"
+            "| `/schedule delete <id>` | Remove a schedule |\n"
+            "\n"
+            "**Cron format:** `minute hour day month weekday` (UTC by default)\n\n"
+            "**Examples:**\n"
+            "- `/schedule add \"0 9 * * 1\" kubernetes news` "
+            "— Mondays at 9am UTC\n"
+            "- `/schedule add \"0 0 * * *\" daily AI roundup` "
+            "— every day at midnight UTC\n"
+            "- `/schedule add \"0 9 * * 1\" --tz=America/New_York "
+            "kubernetes news` — 9am ET\n"
+            "\n"
+            "**Flags:**\n"
+            "- `--depth shallow | medium | deep` — research iteration "
+            "count (default: medium)\n"
+            "- `--tz <IANA>` — timezone for the cron expression "
+            "(default: UTC)\n"
+        )
+
+    @staticmethod
+    def _schedule_empty_state() -> str:
+        """§17.312 — friendly empty state for `/schedule list`. Pre-fix
+        was a single-line starter; post-fix surfaces 3 cron flavors
+        + the `--tz` tip so non-UTC operators discover the flag."""
+        return (
+            "## 🗓 Schedules\n\n"
+            "_No schedules yet._\n\n"
+            "**Get started — pick a cron shape:**\n"
+            "- `/schedule add \"0 9 * * 1\" kubernetes news` "
+            "— Mondays at 9am UTC\n"
+            "- `/schedule add \"0 0 * * *\" daily AI roundup` "
+            "— every day at midnight UTC\n"
+            "- `/schedule add \"0 9 * * 1\" --tz=America/New_York "
+            "kubernetes news` — 9am ET\n"
+            "\n"
+            "_Cron format: `minute hour day month weekday`. "
+            "Run `/schedule help` for flags and more shapes._"
+        )
+
     def _handle_schedule(self, msg: str) -> str:
         parts = msg.split(None, 2)
         sub = parts[1].lower() if len(parts) > 1 else "help"
@@ -3606,15 +3658,9 @@ class Pipeline:
                 hint = "\n\nClosest matches:\n" + "\n".join(f"  - `/schedule {c}`" for c in close)
             return f"Unknown subcommand: `/schedule {sub}`{hint}\n\nRun `/schedule help` for the full list."
         if sub == "help":
-            return (
-                "**Schedule commands:**\n"
-                "- `/schedule list` — show all schedules\n"
-                "- `/schedule add <cron> [--depth=<shallow|medium|deep>] <topic>`\n"
-                "  Example: `/schedule add \"0 9 * * 1\" --depth=medium kubernetes news`\n"
-                "- `/schedule delete <id>`\n\n"
-                "Cron format: `minute hour day month weekday` (UTC)\n"
-                "Depth defaults to `medium`."
-            )
+            # §17.312 — richer help with table + Examples + Flags
+            # (mirror of §17.310's /research mode panel shape).
+            return self._schedule_help()
 
         if sub == "list":
             try:
@@ -3624,8 +3670,11 @@ class Pipeline:
                 rows = r.json().get("schedules", [])
             except Exception as exc:
                 return f"❌ Failed to list schedules: {exc}"
+            # §17.312 — friendlier empty state (3 cron flavors + tz tip)
+            # and a next-actions footer on populated results (mirror of
+            # §17.309's /jobs UX).
             if not rows:
-                return "No schedules yet. Try `/schedule add \"0 9 * * 1\" kubernetes news`"
+                return self._schedule_empty_state()
             lines = ["| ID | Topic | Cron | Depth | Next Run | Runs | Failures |",
                      "|----|-------|------|-------|----------|------|----------|"]
             for s in rows:
@@ -3634,7 +3683,14 @@ class Pipeline:
                     f"{s['depth']} | {s.get('next_run_at') or '—'} | "
                     f"{s['run_count']} | {s['failure_count']} |"
                 )
-            return "\n".join(lines)
+            footer = (
+                "\n\n---\n\n"
+                "💡 **Next:**\n"
+                "- `/schedule add \"<cron>\" <topic>` — create another\n"
+                "- `/schedule delete <id>` — remove a schedule\n"
+                "- `/schedule help` — full reference (cron syntax + flags)"
+            )
+            return "\n".join(lines) + footer
 
         if sub == "add":
             # CommandParser shared with /research (Tier 1 #1, #2, #3, #5).

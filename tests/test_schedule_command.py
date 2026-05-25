@@ -33,8 +33,16 @@ class TestScheduleHelp:
         assert "list" in out and "add" in out and "delete" in out
 
     def test_help_subcommand(self, pipe):
+        """§17.312 — help renamed to "Recurring research crons" + a
+        table-format reference. The pre-§17.312 heading "Schedule
+        commands" is gone. Loosen the assertion to just `/schedule`
+        + at least one subcommand row, which both shapes satisfy."""
         out = pipe._handle_schedule("/schedule help")
-        assert "Schedule commands" in out
+        assert "/schedule" in out
+        # At least one of the canonical subcommands must be named.
+        assert "/schedule list" in out
+        assert "/schedule add" in out
+        assert "/schedule delete" in out
 
     def test_unknown_sub_returns_help(self, pipe):
         """Unknown sub should emit a short pointer to `/schedule help` rather

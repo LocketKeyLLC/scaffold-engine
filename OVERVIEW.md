@@ -16832,6 +16832,66 @@ The `test_404_path_still_works_with_recall` assertion is the highest-value addit
 
 ---
 
+### §17.312 `/schedule` listing UX (2026-05-25)
+
+Thirteenth post-§17.280 UX item. Third management surface polished after §17.309 (`/jobs`) and §17.310 (`/research`). `/schedule` manages recurring research crons (`/research` invoked on a cadence). Lower-traffic than `/jobs` but the same friction shape: terse empty state, missing footer, sparse help.
+
+**Three rough spots pre-§17.312.**
+
+| Surface | Pre-§17.312 | Friction |
+|---|---|---|
+| `/schedule list` (empty) | `No schedules yet. Try /schedule add "0 9 * * 1" kubernetes news` | Single starter, no `--tz` hint, single cron shape |
+| `/schedule list` (populated) | 7-column table, no footer | No copy-pasteable next command after scanning |
+| `/schedule help` | 5-line bullet list | No Examples section, `--tz` hidden in parser help, single cron exemplar |
+
+**§17.312 mirrors the §17.309 + §17.310 polish patterns.** Three additive helpers:
+
+1. **`_schedule_empty_state()`** — header + "_No schedules yet._" + 3 cron flavors (weekly UTC / daily UTC / timezone-specific) + cron-format reminder + pointer to `/schedule help`. The 3 cron exemplars teach distinct shapes (5-field anatomy + `--tz` flag) rather than a single canned form.
+
+2. **Next-actions footer on populated list** — `💡 **Next:**` block with `/schedule add`, `/schedule delete`, `/schedule help`. Mirror of §17.309's `/jobs` footer shape.
+
+3. **`_schedule_help()`** — replaces the bullet list with a 4-row command table + Examples section (same 3 cron flavors as empty state, deliberately) + Flags section explicitly naming `--depth` and `--tz`. Mirror of §17.310's `/research` mode panel shape.
+
+**The three cron exemplars (shared between empty state and help).**
+
+```
+/schedule add "0 9 * * 1" kubernetes news                         — Mondays at 9am UTC
+/schedule add "0 0 * * *" daily AI roundup                        — every day at midnight UTC
+/schedule add "0 9 * * 1" --tz=America/New_York kubernetes news   — 9am ET
+```
+
+The first two teach the cron 5-field anatomy. The third teaches `--tz` — the highest-leverage hidden flag pre-§17.312 (operators in non-UTC timezones who didn't read the parser's `--help` typed `0 9 * * 1` expecting their local 9am and got UTC 9am instead).
+
+**Why three exemplars (not five, not one).** Three is the operator's "I see the pattern" threshold:
+
+- One exemplar = "here's the syntax" (memorize)
+- Three = "here's the shape" (generalize)
+- Five+ = "here's the manual" (skim past)
+
+The §17.300 welcome (3 starters) and §17.310 `/research` modes (5 mode rows) both use this threshold deliberately.
+
+**Why not change the table columns.** Considered adding a Status column (active/paused) or removing the Failures column. Rejected — the 7-column shape is already information-dense; column changes have higher operator-recognition cost than additive sections (header/footer). The current sort + the Next Run column already let operators see "what's running next" at a glance.
+
+**Test-suite delta:** +23 tests in `tests/test_scaffold_router_schedule_ux.py` across 5 classes:
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestEmptyState` | 4 | header + "_No schedules yet._" + Get started block; all 3 cron flavors present; cron format named ("minute hour day month weekday"); points at /schedule help |
+| `TestNextActionsFooter` | 4 | footer present on populated list; all 3 commands in footer; footer appears below table; footer absent on empty state |
+| `TestScheduleHelp` | 6 | command table column header; Examples section + all 3 cron flavors; `--tz` flag explicitly named; `--depth` flag named; cron format explained; `/schedule` no-args falls through to help |
+| `TestExistingBehaviorPreserved` | 3 | unknown-subcommand still suggests close matches; `/schedule add --help` still routes through parser help; §17.302's /schedule delete 404 hint preserved |
+| `TestSourceShapeRegressionGuard` | 6 | both helpers (`_schedule_help`, `_schedule_empty_state`) anchored; 3 cron exemplar phrases anchored; footer marker anchored; dispatch routes through helpers (not inlined) |
+
+The `test_help_calls_out_tz_flag` is load-bearing — it pins the visible naming of `--tz` outside an example string. A refactor that buries `--tz` back in the parser help (where pre-§17.312 it lived) would silently regress the timezone-discovery UX.
+
+**Pre-existing /schedule tests preserved.** 16 tests in `tests/test_schedule_command.py` cover help / list / add / delete behavior. Updated 1: `test_help_subcommand` pinned the pre-§17.312 phrase "Schedule commands" which §17.312 renamed to "Recurring research crons". Rewritten to assert on subcommand presence (`/schedule list`, `/schedule add`, `/schedule delete`) instead of the heading, which both shapes satisfy.
+
+**Cost.** +33 LOC for `_schedule_empty_state` + `_schedule_help` (the two static helpers) + 5 LOC for the dispatch threading + footer append in `_handle_schedule`. Total ~38 LOC in `pipelines/scaffold_router.py`. Operator-facing cost: zero on add / delete / unknown branches (unchanged); ~6 lines added to empty state, ~5 lines to populated list footer, ~10 lines to help text — all on commands the operator deliberately ran to learn.
+
+**§17.300-§17.312 polish three layers.** Canonical flow surfaces (§17.300-§17.308) + the three highest-traffic operator panels (`/jobs` in §17.309, `/research` in §17.310, `/schedule` in §17.312) + the §17.307 active-job memory pilot across all 3 read-only id-takers (§17.311). Remaining tangents: state-altering expansion of §17.307 (`/exec retry`, `/skip`) with a confirmation-friction model, model selection ergonomics, and `/status` vs `/jobs` disambiguation (operators might be confused about when to use which).
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
