@@ -600,6 +600,13 @@ def _render_cost_rollup(status_data: dict, costs_data: dict | None) -> None:
 
     click.echo()
     click.echo("costs:")
+    # §17.289 — `data_source` was added in §17.284 so consumers can
+    # distinguish "no calls yet" from "the rollup query failed and the
+    # zeros are a fallback". Surface the error case here as a single-line
+    # warning above the numbers — pre-§17.289 a busy job with a telemetry
+    # outage rendered identically to a fresh job with no LLM calls.
+    if totals.get("data_source") == "error":
+        click.echo("  ⚠ telemetry query failed; figures may be stale or incomplete")
     cost = float(totals.get("total_cost_usd") or 0.0)
     click.echo(f"  total:    ${cost:.4f}")
     click.echo(f"  calls:    {totals.get('call_count', 0)}")

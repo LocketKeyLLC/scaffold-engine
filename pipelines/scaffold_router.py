@@ -3875,21 +3875,35 @@ class Pipeline:
         completion_tokens = int(data.get("total_completion_tokens") or 0)
         latency_ms = int(data.get("total_latency_ms") or 0)
         breakdown = data.get("by_provider") or []
+        # §17.289 — `data_source` was added in §17.284 so callers can
+        # distinguish "no calls yet" (data_source="ok") from "the rollup
+        # query failed and these zeros are a fallback" (data_source=
+        # "error"). UX-3 surfaces the flag here so a zero-cost rollup on
+        # a busy job is no longer indistinguishable from a green run.
+        data_source = data.get("data_source", "ok")
 
         header = (
             f"## 💰 Cost — `{job_id[:8]}`  "
             f"${cost:.4f}  ({calls} call{'s' if calls != 1 else ''})"
         )
+        # §17.289 — error-source warning prepended to BOTH the zero-calls
+        # branch and the populated-data branch. The numbers below may
+        # be a fail-open fallback; tell the operator that explicitly.
+        error_banner = (
+            "\n\n⚠️ **Telemetry query failed** — figures may be stale or "
+            f"incomplete. Re-run `/cost {job_id}` or check orchestrator logs."
+            if data_source == "error" else ""
+        )
         if calls == 0:
-            return (
-                header + "\n\n_(no LLM calls logged for this job yet — "
-                "either it hasn't run, or it was created before "
-                "telemetry was enabled)_"
+            zero_reason = (
+                "_(no LLM calls logged for this job yet — either it hasn't "
+                "run, or it was created before telemetry was enabled)_"
             )
+            return header + error_banner + "\n\n" + zero_reason
 
         latency_s = latency_ms / 1000.0
         lines = [
-            header, "",
+            header + error_banner, "",
             f"**Tokens:** prompt={prompt_tokens:,} · completion={completion_tokens:,}",
             f"**Latency:** {latency_ms:,} ms ({latency_s:.1f} s total LLM time)",
         ]

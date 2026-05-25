@@ -15388,6 +15388,49 @@ The `test_only_wait_actions_treated_as_empty_and_fallback_fires` case is load-be
 
 **§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287 closed UX #1 (audit-only). §17.288 closes UX #2. Remaining: four 🟢 (informational), seven UX (#3-9).
 
+### §17.289 `/cost` + CLI cost rollup surface `data_source=error` — close §17.280 UX #3 (2026-05-24)
+
+§17.280's third UX item — the operator-facing layer of the 🟡-3 issue §17.284 closed. §17.284 added `data_source: "ok" | "error"` to every rollup return dict so consumers could distinguish a real empty rollup from a fail-open fallback. UX-3 is the consumer-side: pre-§17.289, both the chat `/cost <job_id>` command and the CLI `_render_cost_rollup` rendered zero-totals identically regardless of the flag — a busy job with a broken telemetry path looked like a fresh "no calls yet" job.
+
+**Fix — two consumer surfaces.**
+
+- **`pipelines/scaffold_router.py::_handle_cost`** (chat). Reads `data_source = data.get("data_source", "ok")` after parsing the response. When `"error"`, prepends a ⚠️ banner to the cost header with a re-run hint:
+  ```
+  ⚠️ **Telemetry query failed** — figures may be stale or incomplete.
+  Re-run `/cost {job_id}` or check orchestrator logs.
+  ```
+  The banner fires on BOTH the zero-calls branch (so the "no LLM calls logged" message now sits next to the warning instead of replacing it) and the populated-data branch (so partial-fail composite cases — totals ok, breakdown raised — still warn).
+
+- **`cli/scaffold_cli/main.py::_render_cost_rollup`**. Same flag check; emits a one-line warning above the numbers when `data_source == "error"`:
+  ```
+  costs:
+    ⚠ telemetry query failed; figures may be stale or incomplete
+    total:    $0.0000
+    ...
+  ```
+  The position between `costs:` header and `total:` line keeps the marker grep-friendly for scripted consumers tail-N-scraping the output.
+
+**Backward compatibility.** Both surfaces default to silent (no warning) when `data_source` is missing entirely — pre-§17.284 orchestrators omit the field, and the consumers should not regress for those. The default-`"ok"` semantic is reused: only an explicit `"error"` triggers the warning.
+
+**Why two surface fixes — not a shared helper.** Considered factoring the warning string into a shared utility. Rejected: the OWUI pipeline container doesn't share imports with the orchestrator / CLI venvs (the §17.212 OWUI-discovery-no-imports constraint), so a "shared helper" would need to be vendored into both `pipelines/_vendor/` and `cli/`. Two short string-literal warnings, both two-line additions, is cheaper than maintaining a vendor sync for this small piece. Pattern matches `STATUS_ICONS` replication across the 5 pipeline files (§17.280-🟢-2's informational flag).
+
+**Test-suite delta:** +6 chat-side tests + 5 CLI-side tests = **+11 total**.
+
+| File | Class / Tests | Pins |
+|---|---|---|
+| `tests/test_cost_data_source_surfaces.py` | `TestChatCostHandlerSurface` (5) | ok+0 calls → no warning; **error+0 calls → warning** (load-bearing); error+real data → still warns; ok+real data → no warning; missing `data_source` → default-ok behavior |
+| | `TestSourceShapeRegressionGuard` (1) | the `data_source = data.get("data_source", "ok")` read + "Telemetry query failed" banner string stay anchored |
+| `cli/tests/test_cost_data_source.py` | `TestDataSourceWarning` (4) | ok → no warning; error → warning between `costs:` and `total:` lines; lightweight `/exec/status` fallback path also warns when error-source; missing field default |
+| | `TestSourceShapeRegressionGuard` (1) | `totals.get("data_source") == "error"` check + "telemetry query failed" string stay anchored in CLI source |
+
+The chat-side `test_error_source_zero_calls_emits_warning_banner` is the load-bearing case the audit specifically flagged: a busy job whose rollup query failed (so call_count=0 in the fallback shape) WAS indistinguishable from a fresh job; now the warning is on screen.
+
+**Test-file split lesson — CLI tests live under `cli/tests/`.** First test cut put CLI tests in the orchestrator's `tests/` tree; they failed with `ModuleNotFoundError: scaffold_cli` because the orchestrator dev image doesn't install the CLI's separate venv (CLI runs via `make test-cli`, which `cd cli/ && pytest tests/`). Split the file: chat tests in `tests/test_cost_data_source_surfaces.py` run via `make test`; CLI tests in `cli/tests/test_cost_data_source.py` run via `make test-cli`. Both test files keep their own source-shape regression guards — they don't share helpers because they don't share an import root.
+
+**Test-suite delta:** +11. Chat cluster (test_cost_data_source_surfaces): 6 passing. CLI suite (test-cli): 140 passing including the 5 new tests. No regressions.
+
+**§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287 closed UX #1. §17.288 closed UX #2. §17.289 closes UX #3. Remaining: four 🟢 (informational), six UX (#4-9).
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
