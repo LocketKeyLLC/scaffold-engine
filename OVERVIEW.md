@@ -15922,6 +15922,68 @@ The identity check in `TestResearchAgentAliasesIdentity` is the core invariant �
 
 **§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.295 closed UX #1-9. §17.296-§17.297 closed 🟢 #1-2. §17.298 closes 🟢 #3. Remaining: one 🟢 (#4 execution_agent + rag_pipeline next-largest).
 
+### §17.299 execution_agent retry helpers → app/modules/execution_retry.py — close §17.280 🟢 #4 (audit DONE) (2026-05-25)
+
+§17.280's fourth and final 🟢 item. The audit text was explicitly "no specific complaint" — flagged because both modules touch hot paths and further additions should land in dedicated sub-modules rather than continuing to grow the host file. Operator-picked to extract the verifier+retry path so the convention is materially established.
+
+**Scope reality check.** Initial estimate of "400-500 LOC" was wrong. Reading the actual code surfaced that:
+
+- ``_verify_output`` already lives in ``execution_verify.py`` (pre-§17.299 extraction at unknown vintage); the re-export at line 41 was the audit-trail.
+- The auto-retry budget consumption in ``execute_all_nodes`` (around line 1700) is interleaved with SSE event emission + control-flow ``continue`` statements — extracting it would require a callback or generator-return-decision protocol that adds indirection without simplifying the call site.
+- Two functions WERE cleanly liftable: ``_format_reviewer_feedback`` (18 LOC, builds the retry-prompt block) and ``retry_failed_node`` (120 LOC, the ``/exec/retry`` request path).
+
+§17.299 lifts those 138 LOC into ``app/modules/execution_retry.py`` (196 LOC including comprehensive header). Honest scope is less ambitious than the AskUserQuestion option text suggested.
+
+**Fix.**
+
+| File | Before | After | Δ |
+|---|---|---|---|
+| `app/modules/execution_agent.py` | 1818 | 1692 | **−126 (−6.9%)** |
+| `app/modules/execution_retry.py` | — | 196 | +196 (new) |
+
+execution_agent re-imports both names so existing call sites + tests work byte-for-byte:
+
+```python
+from app.modules.execution_retry import _format_reviewer_feedback  # noqa: E402
+# ... later in the file ...
+from app.modules.execution_retry import retry_failed_node  # noqa: E402
+```
+
+`_build_prompt`'s call site continues using `_format_reviewer_feedback(node)`. The `/exec/retry` router at `app/routers/workflow.py` imports `retry_failed_node` from `app.modules.execution_agent` — unchanged. The auto-retry budget loop in `execute_all_nodes` uses the re-export. Identity-equal aliases (the `is` check passes), so tests patching `app.modules.execution_agent.retry_failed_node` still affect the auto-retry loop.
+
+**What stayed in execution_agent.**
+
+- The `execute_all_nodes` auto-retry budget consumption (around line 1700) — interleaved with SSE emit + control flow. Extracting it would need a generator-return-decision protocol.
+- The Phase 3 verify section in `execute_next_node` (around line 1097, calling `_verify_output`) — already imports from `execution_verify`.
+- The W.1 prompt-injection logic in `_build_prompt` — it just *calls* `_format_reviewer_feedback`; the formatting concern moved but the prompt-building concern stays here.
+
+**Test-suite delta:** +11 new tests in `tests/test_execution_retry_module.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestExecutionRetryExports` | 3 | module imports both names; reviewer-feedback is sync (the `_build_prompt` call site); retry_failed_node is async (awaited from `/exec/retry` + auto-retry loop) |
+| `TestExecutionAgentAliasIdentity` | 2 | each `execution_agent.<name> is execution_retry.<name>` — identity catches re-inlined bodies |
+| `TestSourceShapeRegressionGuard` | 4 | inline reviewer-feedback body absent (anchored on its unique docstring opener); inline retry_failed_node body absent (AND-anchor on the Stage-4 BFS comment + the downstream_map type-annotated assignment, neither alone unique to the function); both re-import lines present in execution_agent source |
+
+The retry_failed_node source-shape test uses a TWO-anchor AND combination because either anchor alone could plausibly appear elsewhere; only together do they identify the lifted body. Same lesson as §17.298's forum-mode source guard.
+
+**Test-suite delta:** +11. execution_agent cluster (13 test files including the new retry module): **140 passing**. No regressions.
+
+---
+
+**§17.280 — AUDIT DONE.** All 1 🔴 + 5 🟡 + 9 UX + 4 🟢 items closed across §17.281 → §17.299. **19 fix commits** over 2 days (2026-05-24 → 2026-05-25); shape mirrors §17.273 → §17.279 exactly (one entry per fix; OVERVIEW + code + test in the same commit each time).
+
+**Test-suite delta across the whole cycle:** roughly +205 new tests (+160 for the 🔴+🟡+UX block; +45 for the four 🟢 refactors) + reactivation of 11 previously-skipped Phase 2 tests (§17.290 loader stub fix).
+
+**Subagent-TP rate replication, final.** §17.258 → 15%. §17.273 → 26%. §17.280 → 30% on initial verification; ultimately 18/19 items were genuine work (one — UX-1 — turned out to be audit-only since the code already implemented the suggestion). The 95% post-verification work-acceptance rate is the audit-method's load-bearing property: false positives surface during initial file-line verification, not during the fix cycle.
+
+**Hot-path-file convention established.** The four 🟢 refactors establish the pattern for future audit work: any further additions to scaffold_router, research_agent, execution_agent, or rag_pipeline that exceed a coherent boundary should land in a dedicated sub-module:
+
+- OWUI pipelines: `pipelines/_vendor/<concern>.py` (loaded via the `importlib.util.spec_from_file_location` bootstrap to evade OWUI's auto-discovery)
+- Orchestrator modules: `app/modules/<concern>.py` or `app/modules/<package>/<mode>.py` (normal Python package imports with late binding to resolve circular dependencies)
+
+Both patterns now have multiple precedents in the codebase. The audit's "no specific complaint" framing is met materially — adding to the host files is no longer the default.
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
