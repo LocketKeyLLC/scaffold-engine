@@ -2535,7 +2535,40 @@ class Pipeline:
             title = payload.get("title", "")
             yield f"🔄 Step {payload.get('node_key','?')}: Retrying{' — ' + title if title else ''} (attempt {payload.get('retry_count',0)})...\n"
         elif event_type == "blocked":
-            yield f"⏸️ Step {payload.get('node_key','?')} blocked (waiting on: {', '.join(payload.get('blocked_by', []))})\n"
+            # §17.295 — render the cause-aware blocked payload. Pre-§17.295
+            # this read top-level `node_key` + `blocked_by` (a list of
+            # strings) — but the actual terminal blocked event from
+            # execute_all_nodes carries `blocked_nodes` (a list of
+            # `{node_key, title, blocked_by: [{node_key, status}], cause}`)
+            # so the pre-fix render produced "Step ? blocked (waiting on: )"
+            # — empty fields. Split by cause so operators see actionable
+            # vs waiting separately, with a copy-pasteable retry hint for
+            # the actionable bucket.
+            blocked_nodes_list = payload.get("blocked_nodes") or []
+            actionable = [b for b in blocked_nodes_list if b.get("cause") == "failed"]
+            waiting = [b for b in blocked_nodes_list if b.get("cause") == "waiting"]
+            msg = payload.get("message", "Pipeline blocked")
+            yield f"⏸️ {msg}\n"
+            for b in actionable:
+                deps_failed = [
+                    d.get("node_key", "?") for d in (b.get("blocked_by") or [])
+                    if d.get("status") in ("failed", "blocked")
+                ]
+                key = b.get("node_key", "?")
+                yield (
+                    f"  • `{key}` blocked by failed upstream "
+                    f"({', '.join(deps_failed)}) — try `/exec retry "
+                    f"<job_id> {deps_failed[0] if deps_failed else key}`\n"
+                )
+            for b in waiting:
+                deps_pending = [
+                    d.get("node_key", "?") for d in (b.get("blocked_by") or [])
+                    if d.get("status") in ("pending", "running")
+                ]
+                yield (
+                    f"  • `{b.get('node_key', '?')}` waiting on "
+                    f"({', '.join(deps_pending)})\n"
+                )
         elif event_type == "error":
             # #8.2 — bubble orchestrator error events to chat
             yield from self._render_error_event(payload)

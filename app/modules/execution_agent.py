@@ -706,31 +706,88 @@ async def execute_next_node(
             except Exception as exc:
                 logger.warning("partial_compile_failed: job=%s error=%s", job_id, str(exc))
 
+            # §17.295 — distinguish "blocked by failed upstream" (operator
+            # needs `/exec retry`) from "blocked by pending/running upstream"
+            # (operator just waits). Pre-§17.295 the response merged both
+            # under a single ambiguous label, AND the query only included
+            # pending-blocked-by-failed nodes — pending-blocked-by-pending
+            # nodes were silently dropped, hiding the actual wait state
+            # from operators.
             blocked_nodes = []
+            actionable_count = 0
+            waiting_count = 0
             try:
                 _all = await db.execute(
                     text("SELECT node_key, title, status, depends_on FROM dag_nodes WHERE job_id = :jid"),
                     {"jid": job_id},
                 )
                 _rows = _all.fetchall()
-                failed_keys = {r.node_key for r in _rows if r.status == "failed"}
+                status_by_key = {r.node_key: r.status for r in _rows}
+                # Statuses that mean "dep is unfinished — caller is blocked".
+                # `done` / `skipped` are success-terminal; anything else here
+                # is a live blocker. The cause precedence below classifies
+                # the dominant kind.
+                _non_terminal = {"failed", "blocked", "pending", "running"}
                 for r in _rows:
-                    if r.status == "pending":
-                        deps = r.depends_on if isinstance(r.depends_on, list) else []
-                        blocked_by = [k for k in deps if k in failed_keys]
-                        if blocked_by:
-                            blocked_nodes.append({
-                                "node_key": r.node_key,
-                                "title": r.title,
-                                "blocked_by": blocked_by,
-                            })
+                    if r.status != "pending":
+                        continue
+                    deps = r.depends_on if isinstance(r.depends_on, list) else []
+                    blocked_by_objs = [
+                        {"node_key": k, "status": status_by_key.get(k, "unknown")}
+                        for k in deps
+                        if status_by_key.get(k, "done") in _non_terminal
+                    ]
+                    if not blocked_by_objs:
+                        continue
+                    # Cause precedence: any failed/blocked dep → "failed"
+                    # (operator action: retry / skip). Otherwise deps are
+                    # pending or running → "waiting" (operator: wait).
+                    dep_statuses = {b["status"] for b in blocked_by_objs}
+                    if dep_statuses & {"failed", "blocked"}:
+                        cause = "failed"
+                        actionable_count += 1
+                    else:
+                        cause = "waiting"
+                        waiting_count += 1
+                    blocked_nodes.append({
+                        "node_key": r.node_key,
+                        "title": r.title,
+                        "blocked_by": blocked_by_objs,
+                        "cause": cause,
+                    })
             except Exception as exc:
                 logger.warning("blocked_node_query_failed: job=%s error=%s", job_id, str(exc))
 
+            # §17.295 — cause-aware top-level message so operators see the
+            # split without needing to walk the per-node list.
+            if actionable_count and waiting_count:
+                message = (
+                    f"No executable nodes — {actionable_count} need action "
+                    f"(failed upstream), {waiting_count} waiting on upstream."
+                )
+            elif actionable_count:
+                message = (
+                    f"No executable nodes — {actionable_count} blocked by "
+                    f"failed upstream. Use `/exec retry <job_id> <node_key>`."
+                )
+            elif waiting_count:
+                message = (
+                    f"No executable nodes — {waiting_count} waiting on "
+                    f"upstream to finish."
+                )
+            else:
+                # No pending nodes had unfinished deps but _get_next_node
+                # still returned None. Rare (e.g. all nodes already
+                # terminal but autocomplete didn't fire yet). Keep the
+                # pre-§17.295 generic message for this edge case.
+                message = "No executable nodes — dependencies not satisfied"
+
             return {
                 "status": "blocked",
-                "message": "No executable nodes — dependencies not satisfied",
+                "message": message,
                 "blocked_nodes": blocked_nodes,
+                "actionable_count": actionable_count,
+                "waiting_count": waiting_count,
             }
 
         # Node claimed. Snapshot fields we need after session closes.

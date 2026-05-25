@@ -15667,6 +15667,74 @@ Why source-shape primary, no behavioral test: behavioral coverage would require 
 
 **§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.293 closed UX #1-7. §17.294 closes UX #8. Remaining: four 🟢 (informational), one UX (#9 — `blocked_nodes` failed-vs-pending disambiguation).
 
+### §17.295 `blocked_nodes` splits failed-upstream from waiting-upstream — close §17.280 UX #9 (UX done) (2026-05-24)
+
+§17.280's ninth and final UX item. `execute_next_node`'s blocked-branch response (line 730-734 pre-fix) had three operator-facing gaps:
+
+1. **`blocked_by` carried only node_keys** — caller couldn't tell what kind of blocker each dep was.
+2. **Pending-blocked-by-pending nodes were dropped entirely** — the pre-fix query filtered to "pending nodes whose deps include a failed key", so nodes waiting only on `pending` / `running` upstream were invisible to operators.
+3. **Generic top-level `message`** — same string ("No executable nodes — dependencies not satisfied") whether the blockage was retryable (failed upstream) or just slow (waiting upstream). Different remediations under one ambiguous label.
+
+Plus a discovered-during-fix consumer bug: `pipelines/scaffold_router.py:2538` rendered the terminal `blocked` SSE event by reading top-level `node_key` + `blocked_by` (strings) from the payload — but the actual payload carries `blocked_nodes` (a list of objects). Result: chat showed `⏸️ Step ? blocked (waiting on: )` — empty fields. The §17.295 production-shape change is what makes the render work meaningfully.
+
+**Fix — three layers, two files.**
+
+1. **Production shape** (`app/modules/execution_agent.py:709-789`). Replace the simple `blocked_by = [k for k in deps if k in failed_keys]` filter with a richer walk:
+
+    ```python
+    blocked_by_objs = [
+        {"node_key": k, "status": status_by_key.get(k, "unknown")}
+        for k in deps
+        if status_by_key.get(k, "done") in {"failed", "blocked", "pending", "running"}
+    ]
+    if dep_statuses & {"failed", "blocked"}:
+        cause = "failed"          # actionable (retry / skip)
+    else:
+        cause = "waiting"          # operator waits for upstream
+    ```
+
+    Per-node fields: `node_key`, `title`, `blocked_by: [{node_key, status}]`, `cause: "failed" | "waiting"`.
+    Top-level fields: `actionable_count`, `waiting_count`, `message` (cause-aware).
+
+2. **Cause precedence**. `failed` ⊕ `blocked` deps → `cause="failed"`; otherwise (only `pending` / `running` deps) → `cause="waiting"`. `blocked` upstream is treated as `failed` because it's a transitive failure — the operator still needs to retry / skip somewhere further up the DAG. The audit collapsed both into "failed upstream"; matching that two-bucket shape keeps the chat render simple.
+
+3. **Chat render** (`pipelines/scaffold_router.py:2537+`). Rewrite the `blocked` event handler to iterate `blocked_nodes`, split by `cause`, and emit a separate bullet line per node with the right remediation hint:
+
+    ```
+    ⏸️ <message>
+      • `T2` blocked by failed upstream (T1) — try `/exec retry <job_id> T1`
+      • `T4` waiting on (T3)
+    ```
+
+**Top-level message wording.** Three branches by count combination:
+
+| Counts | Message |
+|---|---|
+| failed only | `"No executable nodes — N blocked by failed upstream. Use \`/exec retry <job_id> <node_key>\`."` |
+| waiting only | `"No executable nodes — N waiting on upstream to finish."` |
+| both | `"No executable nodes — A need action (failed upstream), B waiting on upstream."` |
+| neither (edge case) | pre-fix generic message — kept as defensive fallback for the "all nodes terminal but autocomplete didn't fire" race |
+
+**Test-suite delta:** +11 tests in `tests/test_execution_agent_blocked_cause.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestBlockedCausePrecedence` | 5 | failed-upstream → cause="failed", actionable_count++; pending-upstream → cause="waiting", waiting_count++ (**load-bearing — pre-§17.295 these were dropped**); mixed failed+pending deps → cause="failed" (precedence wins); done/skipped deps don't block; `blocked` upstream → cause="failed" (transitive-failure handling) |
+| `TestBlockedTopLevelMessage` | 3 | failed-only message includes "/exec retry" hint; waiting-only does NOT include retry hint; mixed counts include both bucket descriptions |
+| `TestSourceShapeRegressionGuard` | 3 | `blocked_by` carries `{node_key, status}` dict objects in production source (not the pre-fix bare-string list); the precedence intersection `{"failed", "blocked"}` is present (so a drive-by simplification can't silently mis-classify transitive failures); the chat render reads the `cause` field |
+
+`test_blocked_dep_treated_as_failed_cause` is the load-bearing precedence pin — a future "simpler is better" refactor that drops the `"blocked"` from the intersection set would silently mis-classify deep DAGs where the proximate dep is `blocked` rather than `failed`. The test asserts the transitive-failure case ends up actionable, not waiting.
+
+**Test-mock setup pattern recorded.** The blocked branch sits behind `_get_next_node → None`, `_all_nodes_done → False`, then 3 DB calls (compiled-output SELECT, status UPDATE, blocked-detail SELECT). The test helpers (`_make_blocked_branch_db`, `_drive_to_blocked_branch`) bundle that into a 5-line mock so each behavior test stays focused on the rows. Future tests targeting this branch should reuse the helpers.
+
+**Side-discovery: chat render was broken pre-§17.295.** The `event_type == "blocked"` handler at `pipelines/scaffold_router.py:2537-2538` read top-level `node_key` + `blocked_by` from the payload, but the terminal blocked event carries `blocked_nodes` (a list). Pre-§17.295 the chat showed `⏸️ Step ? blocked (waiting on: )` — empty fields. The §17.295 render rewrite fixes both the field-mismatch AND adds cause-aware splitting in one pass.
+
+**Test-suite delta:** +11. execution_agent + scaffold_router cluster (blocked-cause + sse + compile + autocomplete + slot_leak + timeout_message + retry + commands + sse + results_running_fallback): in flight at commit time. No regression surface anticipated — the change is purely additive to the response shape (existing fields preserved) plus a render rewrite that was already broken.
+
+**§17.280 closeout — UX DONE.** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.295 closed UX #1-9. **All operator-facing items closed across 15 commits.** Remaining §17.280 work: four 🟢 informational complexity flags (scaffold_router monolith 3941 LOC, STATUS_ICONS replicated ×5, research_agent 2501 LOC, execution_agent + rag_pipeline next-largest) — flagged-for-awareness only, not blocking.
+
+The §17.280 audit closes with the same shape as §17.273 → §17.279: one entry per fix, OVERVIEW + code + test in the same commit. 15 fix commits over 1 day; 1 🔴, 5 🟡, 9 UX. Test-suite delta across the whole cycle: roughly +160 new tests + reactivation of 11 previously-skipped tests (§17.290 loader fix).
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
