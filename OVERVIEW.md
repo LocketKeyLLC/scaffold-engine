@@ -16765,6 +16765,73 @@ The `test_no_args_does_not_fall_through_to_placeholder` assertion is load-bearin
 
 ---
 
+### §17.311 `/logs` adopts §17.307's active-job memory (2026-05-25)
+
+Twelfth post-§17.280 UX item. First validated expansion of the §17.307 pilot. After §17.307's `/results` + `/cost` pilot held up across §17.308 (multi-line assist evidence), §17.309 (/jobs UX with 📌 marker synergy), and §17.310 (/research mode discovery) without cross-cutting issues, §17.311 extends the active-job recall pattern to `/logs` — the **third** read-only id-taker.
+
+**Why /logs is the right next step.** Among the deferred commands from §17.307:
+
+| Command | Stakes | Pilot fit |
+|---|---|---|
+| `/logs <id>` | Read-only — DAG state with output preview | ✅ Same risk profile as /results / /cost |
+| `/exec retry <id> <node>` | State-altering — re-runs a node | ⚠️ Defer until pilot validates further |
+| `/skip <id> [node]` | State-altering — marks node skipped | ⚠️ Defer |
+| `/jobs rename/delete <id>` | Destructive | ⚠️ Defer (the rename/delete confirmation flow handles its own UX) |
+| `/execute <id>` | State-altering — kicks off pending nodes | ⚠️ Defer |
+| `/dag <id>` | Read-only — DAG view | ⚠️ Internal/scripted (per /help comment); skip |
+| `/confirm <id>` | State-transitioning — Phase 1 → Phase 2 | ⚠️ Has its own /idea Next-block UX (§17.303) |
+
+/logs is the unambiguous next read-only target. Closing it leaves only the state-altering commands open for a future expansion that adds explicit-confirmation safeguards (e.g., "📌 Using job `abc1234e` — type **`/exec retry abc1234e T3 confirm`** to proceed" for state-altering recall — a deliberate friction tax against typos).
+
+**Implementation.** Same recursion-as-prepend pattern from §17.307:
+
+```python
+def _handle_logs(self, parts, *, chat_id=None):
+    if len(parts) < 2:
+        recalled = self._active_job_recall(chat_id)
+        if recalled and recalled.get("job_id"):
+            rid = recalled["job_id"]
+            hint = self._active_job_hint(rid, recalled.get("title"))
+            return hint + self._handle_logs([parts[0], rid])
+        return (
+            "Usage: `/logs <job_id>`\n"
+            "Example: `/logs 01ab243e`\n\n"
+            "💡 Use `/jobs` to list your active jobs and copy a job_id."
+        )
+    # ... existing body (unchanged)
+```
+
+Recursive self-call with explicit id short-circuits the `<2` branch the second time through, so all existing return paths (404, 4xx, `_fmt`, empty-nodes branch, full-table render) flow through unchanged. Single-method, contained, low-risk.
+
+**Bonus: Usage-error upgrade.** Pre-§17.311 /logs's Usage was a one-liner: `Usage: /logs <job_id>`. The other §17.301 commands (/results, /dag, /execute, /jobs rename/delete) all got upgraded to the richer shape (Example line + 💡 /jobs hint). /logs was missed in that sweep. §17.311 also brings it up to the §17.301 standard — same shape across the cohort:
+
+```
+Usage: `/logs <job_id>`
+Example: `/logs 01ab243e`
+
+💡 Use `/jobs` to list your active jobs and copy a job_id.
+```
+
+**Test-suite delta:** +12 tests in `tests/test_scaffold_router_logs_active_job_memory.py` across 5 classes:
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestLogsReader` | 5 | recall hit → 📌 + body + uses recalled id; cache miss → richer Usage (Example line + /jobs hint); explicit id overrides; no chat_id = no recall; placeholder rejection on explicit `<job_id>` still fires |
+| `TestRecursionPattern` | 2 | 404 path still works with recall (operator sees they used a stale recall); empty-nodes branch still rendered |
+| `TestCrossChatIsolation` | 1 | chat B can't see chat A's memory |
+| `TestDispatchPlumbing` | 1 | `_handle_logs` accepts `chat_id` kwarg |
+| `TestSourceShapeRegressionGuard` | 3 | pipe→handler chat_id threading; `hint + self._handle_logs([...])` recursion pattern; §17.301-shape Usage anchored |
+
+The `test_404_path_still_works_with_recall` assertion is the highest-value addition — it pins a specific operator scenario (the cache is stale because the recalled job was deleted) and verifies BOTH the 📌 hint AND the 404 body surface. Operators in this state need to see the hint (so they know what was attempted) AND the error (so they take corrective action).
+
+**Pre-existing /logs tests preserved.** Three existing /logs tests in `tests/test_scaffold_router_commands.py` (renders node table; missing-id → Usage; placeholder rejection) continue to pass because §17.311 only changes the no-arg branch when a chat_id is BOTH passed AND has a cache hit. The pre-existing tests pass `_handle_command("/logs")` with default chat_id=None, so the existing recall path is suppressed.
+
+**Cost.** +14 LOC in `_handle_logs` (recall branch + Usage upgrade) + 1 LOC dispatch (chat_id arg). Total ~15 LOC in `pipelines/scaffold_router.py`. Operator-facing cost: zero on cold cache; ~1 line of 📌 hint when warm.
+
+**§17.307 pilot now covers 3 of 3 read-only id-takers.** /results + /cost + /logs. The pilot's UX has held through 4 subsequent UX additions (§17.308-§17.310) with no cross-cutting issues or test regressions. Next plausible step on this axis: design the state-altering expansion's confirmation-friction model and validate on `/exec retry` (the most-requested state-altering command per the §17.304 Next-block pattern). Or pivot to model selection ergonomics, `/schedule` listing UX, or other tangents.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

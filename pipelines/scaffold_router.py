@@ -2496,7 +2496,8 @@ class Pipeline:
             if cmd == "/config":
                 return self._handle_config(parts)
             if cmd == "/logs":
-                return self._handle_logs(parts)
+                # §17.311 — extend §17.307 active-job recall to /logs.
+                return self._handle_logs(parts, chat_id=chat_id)
             if cmd == "/health":
                 return self._handle_health()
 
@@ -3802,9 +3803,25 @@ class Pipeline:
             lines.append(f"_…{len(fields) - 60} more (filter to narrow)._")
         return "\n".join(lines)
 
-    def _handle_logs(self, parts: list) -> str:
+    def _handle_logs(
+        self, parts: list, *, chat_id: str | None = None,
+    ) -> str:
+        # §17.311 — extend §17.307 active-job memory pattern to /logs
+        # (third read-only id-taker after /results + /cost). Same
+        # contract: cache hit + no arg = recall + 📌 hint; cache miss
+        # = the §17.301-style Usage error (richer than the pre-§17.311
+        # terse one-liner).
         if len(parts) < 2:
-            return "Usage: `/logs <job_id>`"
+            recalled = self._active_job_recall(chat_id)
+            if recalled and recalled.get("job_id"):
+                rid = recalled["job_id"]
+                hint = self._active_job_hint(rid, recalled.get("title"))
+                return hint + self._handle_logs([parts[0], rid])
+            return (
+                "Usage: `/logs <job_id>`\n"
+                "Example: `/logs 01ab243e`\n\n"
+                "💡 Use `/jobs` to list your active jobs and copy a job_id."
+            )
         if _is_placeholder(parts[1]):
             return "It looks like job_id is missing or a placeholder. Try `/logs 01ab243e`."
         job_id = parts[1]
