@@ -15458,6 +15458,41 @@ The chat-side `test_error_source_zero_calls_emits_warning_banner` is the load-be
 
 **§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287 closed UX #1. §17.288 closed UX #2. §17.289 closed UX #3. §17.290 closes UX #4. Remaining: four 🟢 (informational), five UX (#5-9).
 
+### §17.291 `topic_classifier_bypass` log carries `total_urls` denominator — close §17.280 UX #5 (2026-05-24)
+
+§17.280's fifth UX item. `app/modules/research_agent.py:_extract_entries` emitted
+
+```
+topic_classifier_bypass: bypassed_urls=5 bypassed_entries=12 distill_urls=20
+```
+
+with no denominator. An operator reading the log couldn't tell `5 bypassed` apart from "5 bypassed out of 5 search results" (broken classifier — every URL was eligible) vs "5 bypassed out of 100" (5% rate, normal). Same numerator, different signal entirely.
+
+**Fix.** Add `total_urls=%d` (the input-result count) as the first field of the log payload:
+
+```
+topic_classifier_bypass: total_urls=25 bypassed_urls=5 bypassed_entries=12 distill_urls=20
+```
+
+Operator can now compute bypass rate (5/25 = 20%) directly from the log line. Existing fields (`bypassed_urls`, `bypassed_entries`, `distill_urls`) kept in place + same order so any structured-log consumer parsing by key name is unaffected; only an ordinal-positional consumer would notice the new leading field.
+
+**Why not also add `total_entries`.** Considered. Rejected: at the log emission point the distill loop hasn't run yet, so the only "entries" counted are bypass-path entries. Emitting that count as a "total" would mislead — it isn't a total, just the bypass-path subtotal. Operators read `bypassed_entries` in the context of the bypass path; a misleading "total" hurts more than the missing one helps.
+
+**Audit framing nit (recorded for the next audit pass).** §17.280 called this an "SSE event". It's a `logger.info` line, not SSE. Same UX gap, narrower fix surface (no client-side schema change), no event-name compatibility concerns. Future audits should distinguish the two — they have different downstream consumers (log aggregators vs. SSE clients).
+
+**Test-suite delta:** +4 new tests in `tests/test_research_agent_bypass_denominator.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestBypassLogIncludesTotalUrls` | 3 | full-bypass case (all 7 URLs bypass) → `total_urls=7`; **partial-bypass case** (2 SO URLs bypass, 1 distilled) → `total_urls=3` not 2 (load-bearing — pins that `total_urls` is the INPUT count, not the bypass-eligible subset); no-bypass case → no log emitted (the `if bypass_url_count > 0` guard preserved) |
+| `TestSourceShapeRegressionGuard` | 1 | `total_urls=%d` in format string + `len(results), bypass_url_count` arg order preserved — pins both ends of the printf-style contract |
+
+The partial-bypass case is the load-bearing one — it's the case where the operator-facing meaning of the denominator matters most. A future refactor that accidentally emits `total_urls=bypass_count` (e.g. by inlining `len(bypass_results)` instead of `len(results)`) would silently regress the operator's ability to compute the bypass rate; this test catches that drift directly.
+
+**Test-suite delta:** +4. Research-agent cluster (core + helpers + ingestion + summary + extract-no-entries + bypass): 65 passing. No regressions.
+
+**§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.290 closed UX #1-4. §17.291 closes UX #5. Remaining: four 🟢 (informational), four UX (#6-9).
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).

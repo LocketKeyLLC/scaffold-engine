@@ -561,9 +561,17 @@ async def _extract_entries(
             expanded_results.append(r)
 
     if bypass_url_count > 0:
+        # §17.291 — `total_urls` is the denominator the operator needs:
+        # `bypassed_urls=5` is ambiguous without it (5/5 = broken
+        # classifier eligible-everything, vs 5/100 = 5% bypass rate
+        # which is normal). `bypassed_entries` is a per-chunk count
+        # from the bypass path only; the corresponding total isn't
+        # knowable here because the distill loop below hasn't run yet
+        # — operators read it in the context of the bypass path.
         logger.info(
-            "topic_classifier_bypass: bypassed_urls=%d bypassed_entries=%d distill_urls=%d",
-            bypass_url_count, bypass_entry_count,
+            "topic_classifier_bypass: total_urls=%d bypassed_urls=%d "
+            "bypassed_entries=%d distill_urls=%d",
+            len(results), bypass_url_count, bypass_entry_count,
             len({r.get("url") for r in expanded_results if r.get("url")}),
         )
 
