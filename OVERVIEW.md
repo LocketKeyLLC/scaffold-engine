@@ -16277,6 +16277,63 @@ The "placeholder leak" test (`test_actual_job_id_surfaced_at_top`) is load-beari
 
 **§17.303 is the first "polish" item past the §17.300–§17.302 foundation.** The thread now has 4 in-place wins: discovery (§17.300), self-explanation (§17.301), recovery (§17.302), and post-action signposting (§17.303). Next plausible items: `/confirm` post-Phase-2 surfacing (mirror of §17.303 for the synchronous-confirm path); active-job chat memory (carry job_id across turns so operators don't have to re-type it); multi-line evidence input UX for `/assist submit`.
 
+### §17.304 post-execution Next-block at the journey end (2026-05-25)
+
+Fifth post-§17.280 UX item. Mirror of §17.303 at the END of the operator journey: when `/execute/all` (or the /confirm auto-chain that ends there) yields its compiled output.
+
+**Reframing during scoping.** Initially planned to mirror §17.303 for `/confirm` post-Phase-2. Reading the code: `/confirm` is actually a multi-stage auto-chain that flows straight through research → DAG → execute, never stopping at a "Phase 2 complete, what's next?" moment. The TRUE Phase-2-complete moment is when `/execute/all`'s SSE stream emits `pipeline_complete` and `_execute_and_stream` yields the compiled output.
+
+**Pre-§17.304 gap.** Five terminal yields in `_execute_and_stream`:
+
+| Branch | Pre-§17.304 yield |
+|---|---|
+| Happy path (compiled_output present, no failures) | compiled_output |
+| Partial path (compile_status == "partial", failed_nodes present) | failure-list table + compiled_output |
+| Fallback: orchestrator GET succeeds, compiled output found | fallback compiled_output |
+| Fallback: orchestrator GET succeeds, no output | `"✅ All steps completed. Use \`/results <id>\` for details."` |
+| Fallback: orchestrator GET fails or non-200 | same |
+| Fallback: GET raises | same |
+
+Only the last three branches included ANY signpost, and that single signpost was the bare `/results` hint. Operators on the happy path got the result with no follow-on commands at all.
+
+**Fix.** `_render_completion_next_block(job_id, failed_nodes)` renders a Next-block appended to every terminal yield:
+
+```
+---
+
+**Next steps:**
+- `/exec retry abc1234 T3` ("Summarize findings") — retry this failed step
+- `/exec retry abc1234 T7` ("Generate report") — retry this failed step
+- `/results abc1234` — full status + node-by-node detail
+- `/cost abc1234` — see total LLM cost + latency rollup
+```
+
+On the happy path (no failures), the retry rows are omitted and `/jobs rename` is added so the operator can label the finished work for later lookup. On the partial path, retry rows for each failed_node come FIRST (operator-action priority over inspection), the rename suggestion is suppressed (fix first, tune later).
+
+**Why retry rows have title-quote suffixes.** A failed node may have a node_key like `T3` and a title like "Summarize findings". The retry command needs the node_key (orchestrator dispatches on it), but the title is what the operator REMEMBERS. The suffix `("Summarize findings")` lets the operator visually disambiguate when there are multiple failed nodes — they see what BROKE before deciding which to retry.
+
+**Five call sites, one renderer.** The renderer is called at every terminal yield (happy path + 4 fallback branches in the no-compiled-output path). A future "consolidate fallbacks" refactor that drops one of the call sites would leave operators on that branch stranded. The source-shape regression guard counts the call sites (≥ 5) to catch the drift.
+
+**Defensive against misshapen failed_nodes.** The `failed_nodes` list comes from the SSE `pipeline_complete` payload, which is dict-shaped per the orchestrator contract. The renderer defensively skips non-dict entries (`isinstance(fn, dict)` check) — pre-§17.304's failed-node table also did this; the Next-block matches the same defensive posture.
+
+**No-title failed nodes.** A failed_node with only `node_key` (no title) renders without the empty-quotes suffix — `f' (\"{title}\")' if title else ""` ensures no malformed `("")` slipped through.
+
+**Test-suite delta:** +11 tests in `tests/test_scaffold_router_completion_next_block.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestCompletionNextBlockHappyPath` | 3 | all 3 happy-path commands present (/results, /cost, /jobs rename); /exec retry NOT present when no failures; placeholder leak (`<job_id>`) absent — mirrors §17.303's placeholder-leak guard |
+| `TestCompletionNextBlockPartialPath` | 5 | /exec retry row per failed_node with title-quote suffix; retry rows appear ABOVE results/cost (operator-action priority); /jobs rename suppressed on partial; title-less node renders without empty-quotes; non-dict failed_node skipped silently (defensive) |
+| `TestSourceShapeRegressionGuard` | 3 | renderer method anchored; ≥ 5 call sites in `_execute_and_stream`; `/exec retry {job_id} {nk}` template anchored (both placeholders pre-filled by renderer) |
+
+The "retry rows appear ABOVE results/cost" pin is the load-bearing operator-priority assertion — a future "alphabetize the list" refactor would reorder and silently degrade the UX (operator scans top-to-bottom expecting actionable commands first).
+
+**Cost.** ~45 LOC for the renderer + 4 lines at each of 5 call sites = ~25 added at call sites. Operator-facing cost: the Next-block adds 4-N lines (where N = failed_nodes count) per execution completion. On a clean run that's 4 lines; on a partial-failure run with 3 failed nodes, 6 lines. Minor real estate, big actionability win.
+
+**Test-suite delta:** +11. scaffold_router cluster (12 test files including §17.300–§17.304): in flight at commit time; no regression surface anticipated (the renderer appends; doesn't modify the existing yields).
+
+**§17.303 + §17.304 are bookends.** §17.303 surfaces next steps at the START of the operator journey (after `/idea`); §17.304 surfaces them at the END (after compiled output). The middle moments — mid-execution SSE events — already carry context via the surrounding stream. The discovery layer is materially complete at the journey-entry-point and journey-exit-point boundaries.
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).

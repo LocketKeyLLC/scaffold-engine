@@ -2055,6 +2055,10 @@ class Pipeline:
                 yield compiled_output
             else:
                 yield compiled_output
+            # §17.304 — post-completion Next-block: operator just saw the
+            # output; surface the canonical follow-on commands so they
+            # don't have to remember `/cost` / `/results` from /help.
+            yield self._render_completion_next_block(job_id, failed_nodes)
         else:
             yield "\n⏳ Fetching final output...\n"
             time.sleep(3)
@@ -2068,12 +2072,52 @@ class Pipeline:
                     fallback = sr.json().get("compiled_output", "")
                     if fallback:
                         yield fallback
+                        yield self._render_completion_next_block(job_id, failed_nodes)
                     else:
-                        yield f"✅ All steps completed. Use `/results {job_id}` for details."
+                        yield f"✅ All steps completed."
+                        yield self._render_completion_next_block(job_id, failed_nodes)
                 else:
-                    yield f"✅ All steps completed. Use `/results {job_id}` for details."
+                    yield f"✅ All steps completed."
+                    yield self._render_completion_next_block(job_id, failed_nodes)
             except Exception:
-                yield f"✅ All steps completed. Use `/results {job_id}` for details."
+                yield f"✅ All steps completed."
+                yield self._render_completion_next_block(job_id, failed_nodes)
+
+    # §17.304 — post-execution Next-block. Mirrors §17.303's /idea
+    # Next-block at the OTHER end of the operator journey: after
+    # /execute/all (or the /confirm auto-chain) yields its compiled
+    # output. Pre-§17.304 operators saw the result + "Use `/results`
+    # for details" as the sole signpost. Now: a small bulleted list
+    # of the canonical follow-on commands, with the real job_id
+    # pre-filled per §17.303's pattern, plus an `/exec retry` row
+    # per failed node when the compile was partial.
+    def _render_completion_next_block(
+        self, job_id: str, failed_nodes: list,
+    ) -> str:
+        lines: list[str] = ["\n\n---\n\n**Next steps:**"]
+        # `/exec retry` rows first when there are failures — operator
+        # action is highest-leverage on those.
+        if failed_nodes:
+            for fn in failed_nodes:
+                if isinstance(fn, dict):
+                    nk = fn.get("node_key", "?")
+                    title = fn.get("title", "")
+                    suffix = f" (\"{title}\")" if title else ""
+                    lines.append(
+                        f"- `/exec retry {job_id} {nk}`{suffix} — retry "
+                        f"this failed step"
+                    )
+        lines.append(f"- `/results {job_id}` — full status + node-by-node detail")
+        lines.append(f"- `/cost {job_id}` — see total LLM cost + latency rollup")
+        if not failed_nodes:
+            # Only suggest the friction commands when there's nothing
+            # broken to fix first — operator decision tree is "fix vs
+            # tune", not all four at once.
+            lines.append(
+                f"- `/jobs rename {job_id} <new title>` — set a memorable "
+                f"title for later lookup"
+            )
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # SSE event renderers
