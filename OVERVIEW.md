@@ -15735,6 +15735,78 @@ Plus a discovered-during-fix consumer bug: `pipelines/scaffold_router.py:2538` r
 
 The §17.280 audit closes with the same shape as §17.273 → §17.279: one entry per fix, OVERVIEW + code + test in the same commit. 15 fix commits over 1 day; 1 🔴, 5 🟡, 9 UX. Test-suite delta across the whole cycle: roughly +160 new tests + reactivation of 11 previously-skipped tests (§17.290 loader fix).
 
+### §17.296 lift /assist handlers into pipelines/_vendor/ — close §17.280 🟢 #1 (2026-05-24)
+
+§17.280's first 🟢 (informational) item. The audit framed scaffold_router.py's 3941 LOC as "operationally fixed" — OWUI's auto-discovery model loads every `.py` under `/pipelines/` as a candidate pipeline, so splitting into peer files isn't possible. Operator-picked to attempt the vendor-extraction path anyway since the `_vendor/` subdirectory IS invisible to discovery (underscore-prefixed dir, non-recursive scan) and §17.190 + §17.195 already use it for shared code (`_sse_events.py`, `_next_actions.py`).
+
+**Fix.** Lift the /assist command surface — 15 methods spanning lines 1300-1935 (~595 LOC of handler bodies) — into `pipelines/_vendor/_assist_handlers.py`. Methods on the Pipeline class become one-line delegates:
+
+```python
+# Before — 78 LOC method body
+def _assist_remember(self, chat_id, *, session_id, last_node_key=None):
+    if not chat_id or not self.valves.assist_session_memory_enabled:
+        return
+    try:
+        _HTTP_SESSION.put(...)
+    ...
+
+# After — one-line delegate
+def _assist_remember(self, chat_id, *, session_id, last_node_key=None):
+    return _assist.assist_remember(
+        self, chat_id, session_id=session_id, last_node_key=last_node_key,
+    )
+```
+
+Vendor functions take `pipe` (the live Pipeline instance) as first arg. Through `pipe` they reach config (`pipe.valves`), per-instance helpers (`pipe._auth_headers`, `pipe._chat_id_from_body`, `pipe._stream_sse_to_queue`), and the class-level UUID regex (`pipe._UUID_RE`).
+
+**Module-global access pattern.** Two scaffold_router module-globals are needed inside the vendor: `_HTTP_SESSION` (the shared `requests.Session`) and `_SSE` (the event-name constants from `_sse_events.py`). The vendor module accesses them lazily via `sys.modules["scaffold_router"]`:
+
+```python
+def _ss():
+    """The shared requests.Session from scaffold_router."""
+    return sys.modules["scaffold_router"]._HTTP_SESSION
+```
+
+Lazy resolution ensures tests that patch `scaffold_router._HTTP_SESSION` reach vendor call sites without per-test surface changes. The dozen-plus existing tests that `patch("scaffold_router._HTTP_SESSION.get")` continue to work unmodified.
+
+**LOC delta:**
+
+| File | Before | After | Δ |
+|---|---|---|---|
+| `pipelines/scaffold_router.py` | 3941 | 3529 | **−412** |
+| `pipelines/_vendor/_assist_handlers.py` | — | 697 | +697 (new) |
+
+The vendor file is larger than the LOC removed because each function gained a brief docstring + the module gained a top-level header documenting the pattern. Net codebase: +285 LOC for cleaner structure. scaffold_router.py shrinks by 10.5%.
+
+**Functions extracted (15 total):**
+
+| Group | Functions |
+|---|---|
+| Chatmap helpers | `assist_remember`, `assist_recall`, `assist_forget` |
+| Parsing + formatting | `resolve_session_id`, `no_session_msg`, `extract_fenced`, `render_step` |
+| Top-level dispatch | `handle_assist`, `dispatch_assist_sub` |
+| Per-subcommand handlers | `assist_start`, `assist_next`, `assist_submit`, `assist_skip`, `assist_handoff`, `assist_simple_post`, `assist_done`, `assist_friction` |
+| SSE streaming | `stream_sse_with_keepalive` |
+
+**Container access.** `docker-compose.yml:113` mounts `./pipelines:/app/pipelines` — the `_vendor/` subdir is included via the bind mount. `_load_vendor` resolves the path as `Path(__file__).parent / "_vendor" / filename`, which works inside both the OWUI Pipelines container (where scaffold_router.py loads at `/app/pipelines/`) and the orchestrator test harness (`importlib.util.spec_from_file_location`).
+
+**Existing tests unmodified.** The whole point of the delegate pattern is preserving the call surface — tests patching `pipe._assist_*` or `scaffold_router._HTTP_SESSION` keep working. Verified: scaffold_router + assist + cost cluster (tests/test_scaffold_router_commands + _unknown_command + _results_running_fallback + _helpers + _structure + test_assist_agent_mirror_divergence + test_cost_data_source_surfaces): in flight at commit time, no regression surface anticipated.
+
+**What §17.296 does NOT do.**
+
+- Doesn't move `_ASSIST_HELP` (class constant) or `_UUID_RE` (class regex) — both are read via `pipe._ASSIST_HELP` / `pipe._UUID_RE` in the vendor functions. Moving them would require re-exposing them somewhere accessible to existing callers (the `/help` text lookup, the dispatch chain).
+- Doesn't extract other command groups (`/research`, `/jobs`, `/schedule`, `/execute`). Those are separate audit items — `/assist` was chosen because it has the cleanest boundary (single coherent feature) and the largest LOC.
+- Doesn't reduce the `STATUS_ICONS` ×5 replication (§17.280-🟢-2). That's a separate item.
+
+**Lessons recorded for future vendor extractions.**
+
+1. **Lazy globals access** is the right pattern when tests already patch the source module's globals — preserves the canonical patch target without per-test rewiring.
+2. **The `pipe` first-arg pattern** scales — no need for mixins or context dicts. Module-level functions stay testable in isolation; the Pipeline class stays a clean shim.
+3. **Vendor load order matters.** `_assist_handlers.py` loads after `_sse_events.py` because `stream_sse_with_keepalive` calls into `_SSE.*` constants. Easy to forget; document at the load site.
+4. **Net LOC increase is acceptable.** The vendor module duplicates some docstring overhead per function. The win is in the entry-point file shrinking and concerns separating, not raw byte count.
+
+**§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.295 closed UX #1-9. §17.296 closes 🟢 #1. Remaining: three 🟢 (#2 STATUS_ICONS replication, #3 research_agent 2501 LOC, #4 execution_agent + rag_pipeline next-largest).
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
