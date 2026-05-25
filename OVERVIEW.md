@@ -15238,6 +15238,39 @@ The 6+7 new tests pin both directions of the contract per helper: ok-source for 
 
 **§17.280 closeout progress (cumulative).** §17.281 closed 🔴 #1. §17.282 closed 🟡 #1. §17.283 closed 🟡 #2. §17.284 closes 🟡 #3. Remaining: two 🟡 (#4 gt_browser Milvus expression, #5 assist mirror divergence), four 🟢 (informational), nine UX.
 
+### §17.285 gt_browser domain validator switches to VALID_DOMAINS allowlist + formatter-boundary recheck — close §17.280 🟡 #4 (2026-05-24)
+
+§17.280's fourth yellow item. `app/modules/gt_browser.py` built Milvus expression clauses (`'domain == "<value>"'`) via f-string interpolation after a `validate_domain` pass. The validator was a regex sanitizer (`_DOMAIN_BAD_RE = r'[\x00-\x1f"\\]'` plus a 128-char length cap) — anything not matching the bad-char regex passed through. Injection-proofness depended entirely on the regex catching every character the Milvus expression parser would mis-interpret. A future Milvus version or a parser-grammar change could break the contract silently.
+
+**Fix:** switch from regex-sanitizer to strict-allowlist membership.
+
+- **`validate_domain` now checks membership in `VALID_DOMAINS`** (the same frozenset `app.config` already exports and that `gt_search`'s fan-out + `rag_pipeline._iter_search_domains` already use as the canonical partition set). Anything not one of the 7 known partition names (`prompt`, `rag`, `eng`, `llm`, `spec`, `code`, `qa`) is a hard `HTTPException(400)`.
+- **New helper `_domain_expr_clause(d)`** builds the expression clause and re-validates against `VALID_DOMAINS` at the formatter boundary. Both `gt_list` (was line 114) and `gt_search` (was line 180) go through it — the raw f-string and string-concat patterns are gone.
+
+**Why allowlist over sanitizer.** A sanitizer reasons about characters and has to anticipate every Milvus parser quirk (new operators, escape sequences, encoding aliases). An allowlist reasons about VALUES — the validator no longer needs to know anything about Milvus's grammar. Reduces the surface area to a 7-element set check.
+
+**Why the second-layer formatter boundary check.** `_domain_expr_clause` re-validates because `validate_domain` runs at the request edge, but the helper sits closer to the Milvus call. A future refactor that routes domain strings through a different path (e.g. a private helper that forgets to call the validator) still cannot emit an unsafe clause. Belt-and-braces — costs one frozenset membership check per call, gains drift-immunity.
+
+**Test-suite delta:** +24 new tests in `tests/test_gt_browser_domain_safety.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestValidateDomainAllowlist` | 8 (incl. 7 parametrize) | `None` passthrough, each VALID_DOMAINS value accepts, empty string rejects, non-string type rejects, unknown domain rejects, case-sensitivity, whitespace rejects |
+| `TestValidateDomainRejectsInjection` | 10 (parametrize) | quote-break, backslash-quote, `1=1`, `''=''`, `||`, NUL, newline, semicolon, UNION, path traversal, >128-char overflow — all 400 |
+| `TestDomainExprClauseFormatterBoundary` | 11 (incl. 7 parametrize) | each VALID_DOMAINS value emits expected `domain == "<d>"` clause; unknown domain raises at formatter (defensive recheck); quote/backslash in input rejected at formatter; clause shape conforms to `r'domain == "[a-z]{2,6}"'` regex |
+| `TestSourceShapeRegressionGuard` | 2 | the pre-§17.285 `f'domain == "{domain}"'` and string-concat shapes are absent from source; the `s not in VALID_DOMAINS` membership-check line is present |
+
+The injection-payload parametrize is the load-bearing block — every payload that previously would have passed (no quote/backslash) is now rejected because it's not in the allowlist. The source-shape regression guards close the gap behavioural tests leave: a future refactor that re-inlines the f-string would slip past behaviour-only tests if it happened to be called with allowlist-valid inputs.
+
+**What §17.285 does NOT change.**
+
+- `_DOMAIN_BAD_RE` is removed — it was load-bearing only for the old sanitizer path. The allowlist makes the regex redundant. Length-cap is also gone — VALID_DOMAINS' longest value is 6 chars; the implicit cap is structural.
+- Other Milvus-expression sites with the same shape (`research_verify.py` lines 92/132 raw f-strings, `rag_pipeline.py` numerous sites that already use `_escape_literal`) are out of scope for §17.285. `rag_pipeline.py` is the closest correct example — it uses a proper `_escape_literal` + a thin `_domain_expr` helper. `research_verify.py`'s naked f-string is a fresh concern worth flagging as a follow-up (the `d` it interpolates comes from `_iter_search_domains` so VALID_DOMAINS-trusted in current code paths, but the pattern is fragile under future drift). Filing a §17.x-flagged follow-up rather than expanding this fix.
+
+**Test-suite delta:** +24. gt_browser + gt_browser_module + new safety suite: 63 passing. No regressions.
+
+**§17.280 closeout progress (cumulative).** §17.281 closed 🔴 #1. §17.282 closed 🟡 #1. §17.283 closed 🟡 #2. §17.284 closed 🟡 #3. §17.285 closes 🟡 #4. Remaining: one 🟡 (#5 assist mirror divergence), four 🟢 (informational), nine UX.
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).

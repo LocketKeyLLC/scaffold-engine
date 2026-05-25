@@ -43,7 +43,6 @@ def _milvus_safe(fn):
 
 
 _ENTRY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-_DOMAIN_BAD_RE = re.compile(r'[\x00-\x1f"\\]')
 
 
 def validate_entry_id(s: str) -> str:
@@ -54,10 +53,22 @@ def validate_entry_id(s: str) -> str:
 
 
 def validate_domain(s: str | None) -> str | None:
-    """Reject quote, backslash, newline, control chars in domain filter."""
+    """Allowlist-validate a domain against ``VALID_DOMAINS``.
+
+    §17.285 — pre-§17.285 this was a regex sanitizer that rejected
+    control chars + ``"`` + ``\\``. That made injection-proofness depend on
+    the regex catching every char Milvus's expression parser would
+    mis-interpret — a fragile contract. Switched to a strict
+    membership check against ``VALID_DOMAINS`` (the same frozenset
+    used by partition-key fan-out at ``gt_search`` and by
+    ``rag_pipeline._iter_search_domains``). Any input that's not one
+    of the 7 known partitions is now a hard 400 — quotes, backslashes,
+    and entire injection clauses are rejected by virtue of not being
+    in the allowlist.
+    """
     if s is None:
         return None
-    if not isinstance(s, str) or len(s) > 128 or _DOMAIN_BAD_RE.search(s):
+    if not isinstance(s, str) or s not in VALID_DOMAINS:
         raise HTTPException(status_code=400, detail="invalid domain")
     return s
 
@@ -65,6 +76,21 @@ def validate_domain(s: str | None) -> str | None:
 def _get_collection() -> Collection:
     """Connect to Milvus and return the collection handle."""
     return get_collection(raise_on_missing=True)  # type: ignore[return-value]
+
+
+def _domain_expr_clause(d: str) -> str:
+    """Build a single-domain Milvus expression clause.
+
+    §17.285 — formatter-boundary re-check. ``validate_domain`` runs at
+    the request edge; this helper guards against a future refactor that
+    routes a domain string into the expression without going through
+    that path. If ``d`` isn't in ``VALID_DOMAINS`` (the same allowlist
+    the validator uses), raise rather than emit a string that Milvus
+    might misparse. Belt-and-braces against drift.
+    """
+    if d not in VALID_DOMAINS:
+        raise HTTPException(status_code=400, detail="invalid domain")
+    return f'domain == "{d}"'
 
 
 def _supersede_clause(include_history: bool) -> str:
@@ -111,7 +137,7 @@ async def gt_list(
 
         expr = _join_expr(
             "entry_id != ''",
-            f'domain == "{domain}"' if domain else "",
+            _domain_expr_clause(domain) if domain else "",
             _supersede_clause(include_history),
         )
 
@@ -177,7 +203,7 @@ async def gt_search(
         merged: dict[str, dict] = {}
         for d in domains_to_search:
             expr = _join_expr(
-                'domain == "' + d + '"',
+                _domain_expr_clause(d),
                 _supersede_clause(include_history),
             )
             results = col.search(
