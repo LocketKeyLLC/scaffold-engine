@@ -17110,6 +17110,89 @@ The `test_single_node_recall_hit_auto_fires` is the new §17.315 contract — it
 
 ---
 
+### §17.316 `/skip` adopts §17.307 — closes the active-job recall cohort (2026-05-25)
+
+Seventeenth post-§17.280 UX item. **Sixth and final cohort member** to adopt active-job memory. /skip is unique because it has dual semantics that map cleanly onto the §17.314/§17.315 tiered model PLUS adds a new tier — the **informational read** path.
+
+**The dual-semantics challenge.** Pre-§17.316 /skip already had a dual contract per §17.215 E1:
+
+| Input | Action |
+|---|---|
+| `/skip <job_id>` | List candidate nodes (informational) |
+| `/skip <job_id> <node_key>` | Perform skip (state-altering) |
+
+§17.316's tiered model has to respect BOTH semantics. The result is the cohort's richest model:
+
+| Input | Cache | Action |
+|---|---|---|
+| `/skip` (0 args) | hit | 📌 + **list candidates from recalled job** (informational, no friction) |
+| `/skip` (0 args) | miss | Pre-§17.316 Usage error |
+| `/skip <UUID>` or `/skip <8-hex>` | any | List candidates (existing §17.215 E1, unchanged) |
+| `/skip <node_key>` (non-job-id-shaped) | hit | 📌 + auto-skip on recalled job (state-altering, no friction — §17.315 pattern) |
+| `/skip <node_key>` | miss | Friendly error pre-filling typed node_key in 2-arg suggestion |
+| `/skip <job_id> <node>` | any | Existing explicit skip POST |
+
+**The 0-args informational path is §17.316's unique contribution.** /execute (§17.314) and /exec retry (§17.315) both fire state-altering action at 0 args, so their 0-args recall paths need friction. /skip's 0-args produces a candidate listing — **read-only**, no state mutation, safe to auto-recall. This makes /skip's 0-args path the §17.307 read-only pattern applied to a state-altering command's informational branch.
+
+**The unifying principle across §17.307 → §17.316.** Friction proportional to ambiguity × state-altering-ness:
+
+```
+ambiguous + state-altering  → friction (§17.314 binary, §17.315 0-args)
+ambiguous + informational    → auto-substitute (§17.316 0-args)
+deliberate + state-altering  → auto-substitute (§17.315/§17.316 1-arg)
+deliberate + informational   → auto-substitute (§17.307 1-arg)
+```
+
+State-altering risk scales with ambiguity. A deliberate input (typed node_key, typed `confirm`) IS itself the operator's friction. Conversely, ambiguous-but-informational inputs (bare /skip on a recalled job) need no friction because the worst case is just a listing the operator can ignore.
+
+**Bonus fix: short_id detection.** Pre-§17.316 the §17.315 `/exec retry` UUID-arg check used `_UUID_RE` which matches only full UUIDs (8-4-4-4-12 hex with dashes). But operators routinely type **8-char short_ids** — the canonical orchestrator-accepted form used throughout §-doc examples (`/results 01ab243e`, `/skip 01ab243e T2`, etc.). The §17.316 fix adds `_JOB_ID_TOKEN_RE` matching both shapes:
+
+```
+^[0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$
+```
+
+Used by both `/exec retry` (§17.315) and `/skip` (§17.316) single-arg detection. Without this, `/skip 01ab243e` would have misclassified the short_id as a node_key and tried to auto-skip on the recalled job — silently breaking §17.215 E1's pre-§17.316 contract.
+
+**Refactor: inline /skip block extracted to `_handle_skip`.** Pre-§17.316 /skip was an inline block in `_handle_command` (~20 LOC). §17.316 adds 4 new branches (0-args recall, 1-arg UUID, 1-arg non-UUID recall, 1-arg non-UUID cold) totaling ~50 LOC of new logic. Mirror of §17.315's `_handle_exec` extraction — keeps `_handle_command` readable.
+
+**Test-suite delta:** +20 tests in `tests/test_scaffold_router_skip_recall.py` across 6 classes:
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestBareSkipWithRecall` | 3 | 0-args + recall = 📌 + candidates fetched on recalled id; cold = Usage error; no chat_id = Usage |
+| `TestSingleUUIDListsCandidates` | 2 | 1-arg job_id-shaped = candidates listed; explicit id never consults cache |
+| `TestSingleNodeKeyAutoSkip` | 4 | 1-arg non-UUID + recall = POST with recalled job + typed node_key + 📌; cold = friendly error pre-filling node_key; no chat_id same; error mentions bare /skip <id> as discovery path |
+| `TestExplicitTwoArgSkip` | 4 | 2-arg explicit POST + no 📌; explicit overrides recall; both placeholder cases rejected |
+| `TestDispatchPlumbing` | 2 | `_handle_skip` accepts chat_id; dispatch via `_handle_command` reaches the recall path |
+| `TestSourceShapeRegressionGuard` | 5 | `_handle_skip` extracted; dispatch routes through it; 0-args recall pattern; 1-arg job_id_token branch; non-UUID auto-substitute |
+
+The `test_single_node_error_mentions_bare_skip_option` is the **discoverability anchor** — when an operator types `/skip T3` with no active job, the error must teach them about the listing affordance (`/skip <id>` lists candidates). Without this, the operator who doesn't know the job_id is dead-ended.
+
+The `test_job_id_token_detector_anchored` pins the short_id support — a refactor that drops the `(?:-...)?` optional group would silently regress to UUID-only detection and break §17.215 E1's pre-§17.316 short_id contract.
+
+**Pre-existing /skip tests preserved.** 3 tests in `tests/test_scaffold_router_commands.py` (`test_skip_bare_lists_candidates`, `test_skip_bare_no_candidates`, `test_skip_with_node_key_unchanged`) cover §17.215 E1 + the 2-arg explicit path. All continue to pass — the §17.316 short_id detector ensures `/skip 01ab243e` (8-hex) routes to list-candidates as before.
+
+**Cluster regression:** 488/488 passed across 22 test files, exit-0.
+
+**Cost.** +~60 LOC: new `_handle_skip` method (~55 LOC including the inline block refactor) + new `_JOB_ID_TOKEN_RE` regex (~3 LOC) + 1 LOC dispatch update. Net router LOC change: +40 (the inline block was ~20 LOC, replaced by a method that's ~55 LOC). Operator-facing cost: zero on existing paths (1-arg UUID / 2-arg explicit unchanged); ~1-line 📌 hint on the two new recall paths.
+
+**§17.307 cohort complete.** Six commands now reach active-job memory:
+
+| Command | Tier | Section |
+|---|---|---|
+| `/results <id>` | Read-only auto-substitute | §17.307 |
+| `/cost <id>` | Read-only auto-substitute | §17.307 |
+| `/logs <id>` | Read-only auto-substitute | §17.311 |
+| `/execute <id>` | State-altering binary friction | §17.314 |
+| `/exec retry <id> <node>` | State-altering tiered friction | §17.315 |
+| `/skip <id> [<node>]` | Tiered: informational + state-altering | §17.316 |
+
+The §17.307 pilot's 36-char UUID copy-paste tax is now eliminated across every operator-facing id-taker. Remaining UX axes are tangents: model selection ergonomics, `/health` discoverability, `/optimize` UX. None of these have the cohort-wide leverage that §17.300-§17.316 had.
+
+**§17.300-§17.316 polish four layers + close the recall cohort.** Canonical flow + three management panels + dual-surface disambiguation + active-job memory across all 6 id-taking commands. The friction-proportional-to-ambiguity-×-state-altering-ness principle is the design vocabulary; any future state-altering recall additions (new commands, orchestrator endpoints) inherit it.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

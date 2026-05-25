@@ -1506,6 +1506,17 @@ class Pipeline:
         re.IGNORECASE,
     )
 
+    # §17.316 — job_id token detector for state-altering recall paths
+    # (§17.315 /exec retry + §17.316 /skip). Matches either a full
+    # UUID OR an 8-char hex short_id (the canonical orchestrator-
+    # accepted shortened form used throughout the §-doc examples,
+    # e.g., "Example: /skip 01ab243e T2"). Anything else is treated
+    # as a node_key for auto-substitute via §17.307 active-job recall.
+    _JOB_ID_TOKEN_RE = re.compile(
+        r"^[0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$",
+        re.IGNORECASE,
+    )
+
     @staticmethod
     def _chat_id_from_body(body: dict | None) -> str | None:
         if not isinstance(body, dict):
@@ -2478,26 +2489,10 @@ class Pipeline:
                 )
                 return self._fmt(r)
             if cmd == "/skip":
-                if len(parts) < 2:
-                    return "Usage: /skip <job_id> <node_key>"
-                if _is_placeholder(parts[1]):
-                    return "It looks like job_id or node_key is missing or a placeholder. Try `/skip 01ab243e T2`."
-                # §17.215 E1 — bare `/skip <job_id>` now lists candidate nodes
-                # (failed / blocked / pending) with copy-pasteable /skip lines,
-                # instead of erroring out. Mirrors the _render_next_actions
-                # affordance (§17.195). If a node_key is supplied, behave as
-                # before.
-                if len(parts) < 3:
-                    return self._render_skip_candidates(parts[1])
-                if _is_placeholder(parts[2]):
-                    return "It looks like job_id or node_key is missing or a placeholder. Try `/skip 01ab243e T2`."
-                r = _HTTP_SESSION.post(
-                    f"{self.valves.orchestrator_url}/skip",
-                    json={"job_id": parts[1], "node_key": parts[2]},
-                    headers=self._auth_headers(),
-                    timeout=self.valves.request_timeout,
-                )
-                return self._fmt(r)
+                # §17.316 — extracted into _handle_skip for the tiered
+                # confirmation-friction recall model (closes the §17.307
+                # cohort: /skip is the 6th and final id-taker).
+                return self._handle_skip(parts, chat_id=chat_id)
             if cmd == "/optimize":
                 if len(parts) < 2:
                     return "Usage: /optimize <prompt text>"
@@ -3239,6 +3234,97 @@ class Pipeline:
                 lines.append("_(" + " · ".join(extras) + ")_\n")
         return "".join(lines)
 
+    def _handle_skip(
+        self, parts: list, *, chat_id: str | None = None,
+    ) -> str:
+        """§17.316 — `/skip` tiered confirmation-friction recall.
+
+        Sixth and final cohort member to adopt §17.307's active-job
+        memory. /skip has DUAL semantics that map cleanly onto the
+        §17.315 tiered model:
+
+          - 0 args, recall hit → 📌 + list candidates (informational,
+            §17.307 auto-substitute pattern — safe to recall because
+            listing isn't state-altering)
+          - 0 args, no recall → pre-§17.316 Usage error
+          - 1 arg, UUID-shaped → list candidates (existing §17.215 E1
+            behavior — informational, already job_id-specific)
+          - 1 arg, non-UUID, recall hit → 📌 + auto-skip on recalled
+            job_id (state-altering but operator deliberate per §17.315
+            pattern; failure mode is visible 404, not destructive)
+          - 1 arg, non-UUID, no recall → friendly error pointing at
+            2-arg form, pre-filling typed node_key
+          - 2 args → existing explicit skip POST (unchanged)
+
+        The 0-args informational path is the §17.316 contribution
+        that distinguishes /skip from §17.314's /execute (where 0
+        args is state-altering) and §17.315's /exec retry (where 0
+        args needs a node_key to disambiguate). /skip's 0-args is
+        safe to auto-recall because the action it produces (list
+        candidates) is read-only.
+        """
+        # 0 args after /skip — list candidates from recall, or Usage.
+        if len(parts) < 2:
+            recalled = self._active_job_recall(chat_id)
+            if recalled and recalled.get("job_id"):
+                rid = recalled["job_id"]
+                hint = self._active_job_hint(rid, recalled.get("title"))
+                return hint + self._render_skip_candidates(rid)
+            return (
+                "Usage: `/skip <job_id> <node_key>`\n"
+                "Example: `/skip 01ab243e T2`\n\n"
+                "💡 Use `/jobs` to list your active jobs and copy a job_id, "
+                "or bare `/skip <job_id>` to list candidate nodes."
+            )
+
+        if _is_placeholder(parts[1]):
+            return ("It looks like job_id or node_key is missing or a "
+                    "placeholder. Try `/skip 01ab243e T2`.")
+
+        # 1 arg branch — job_id-shaped lists candidates; non-job_id-
+        # shaped is a node_key.
+        if len(parts) < 3:
+            only = parts[1]
+            if self._JOB_ID_TOKEN_RE.match(only):
+                # Existing §17.215 E1 behavior — bare `/skip <id>`
+                # lists candidates. Matches full UUID OR 8-hex-char
+                # short_id (the canonical operator-typed form).
+                return self._render_skip_candidates(only)
+            # Non-UUID single arg: operator specified node_key but not
+            # job_id. Auto-substitute from recall (§17.315 pattern).
+            recalled = self._active_job_recall(chat_id)
+            if not recalled or not recalled.get("job_id"):
+                return (
+                    f"❌ No active job in chat memory to skip "
+                    f"`{only}` on.\n\n"
+                    f"Pass an explicit job_id: "
+                    f"`/skip <job_id> {only}`. "
+                    f"Use `/jobs` to list active jobs, or "
+                    f"`/skip <job_id>` (with id alone) to list "
+                    f"candidate nodes."
+                )
+            rid = recalled["job_id"]
+            hint = self._active_job_hint(rid, recalled.get("title"))
+            r = _HTTP_SESSION.post(
+                f"{self.valves.orchestrator_url}/skip",
+                json={"job_id": rid, "node_key": only},
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+            return hint + self._fmt(r)
+
+        # 2 args — existing explicit path, unchanged.
+        if _is_placeholder(parts[2]):
+            return ("It looks like job_id or node_key is missing or a "
+                    "placeholder. Try `/skip 01ab243e T2`.")
+        r = _HTTP_SESSION.post(
+            f"{self.valves.orchestrator_url}/skip",
+            json={"job_id": parts[1], "node_key": parts[2]},
+            headers=self._auth_headers(),
+            timeout=self.valves.request_timeout,
+        )
+        return self._fmt(r)
+
     def _render_skip_candidates(self, job_id: str) -> str:
         """§17.215 E1 — render a markdown hint listing skippable nodes
         for `job_id` when the user types bare `/skip <job_id>` with no
@@ -3911,10 +3997,11 @@ class Pipeline:
                 return "Usage: `/exec retry <job_id> <node_key>`"
             if len(tail) == 1:
                 only = tail[0]
-                if self._UUID_RE.match(only):
-                    # UUID-shaped single arg is ambiguous (operator
-                    # typed job_id but forgot node_key). Refuse to
-                    # guess — point at the 2-arg form.
+                if self._JOB_ID_TOKEN_RE.match(only):
+                    # job_id-shaped single arg is ambiguous (operator
+                    # typed job_id but forgot node_key). Matches full
+                    # UUID OR 8-hex short_id. Refuse to guess — point
+                    # at the 2-arg form.
                     return (
                         "Usage: `/exec retry <job_id> <node_key>`\n\n"
                         f"Looks like you typed a job_id (`{only[:8]}`) "
