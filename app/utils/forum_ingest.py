@@ -56,11 +56,31 @@ _AT_USER_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_\-]+")
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
+# §17.283 — sentinel-bracketed redaction markers. Pre-§17.283 the strip used
+# `@user` and `email@redacted` as placeholders. Those literals can occur in
+# legitimate forum prose (e.g. a thread that DISCUSSES placeholder syntax),
+# which made redacted text indistinguishable from authentic, and let RAG
+# dedup merge unrelated posts that happened to redact to the same string.
+# The `<<REDACTED:…>>` shape contains characters (`<<`, `>>`) that don't
+# appear in normal forum text, and is keyed by kind (user/email) so the
+# audit trail records WHAT was stripped, not just THAT something was. The
+# markers contain no `@`, so neither `_EMAIL_RE` nor `_AT_USER_RE` matches
+# them — the strip is idempotent and the email pass can't cascade into the
+# user pass.
+_REDACTED_USER = "<<REDACTED:user>>"
+_REDACTED_EMAIL = "<<REDACTED:email>>"
+
 
 def _strip_pii(text: str) -> str:
-    """Replace @username mentions and emails with redacted placeholders."""
-    text = _EMAIL_RE.sub("email@redacted", text)
-    text = _AT_USER_RE.sub("@user", text)
+    """Replace @username mentions and emails with sentinel-bracketed markers.
+
+    Emails first (their `@` would otherwise be eaten by the username pass),
+    then `@username` mentions. The markers (``<<REDACTED:email>>`` /
+    ``<<REDACTED:user>>``) are idempotent — running this twice on the same
+    text yields identical output because neither regex matches `<<…>>`.
+    """
+    text = _EMAIL_RE.sub(_REDACTED_EMAIL, text)
+    text = _AT_USER_RE.sub(_REDACTED_USER, text)
     return text
 
 

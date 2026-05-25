@@ -81,17 +81,97 @@ class TestForumParsers:
 # ---------------------------------------------------------------------------
 
 class TestStripPii:
+    """§17.283 — sentinel-bracketed `<<REDACTED:…>>` markers."""
+
     def test_strips_username(self):
         from app.utils.forum_ingest import _strip_pii
-        assert _strip_pii("hi @alice and @bob-1") == "hi @user and @user"
+        assert _strip_pii("hi @alice and @bob-1") == (
+            "hi <<REDACTED:user>> and <<REDACTED:user>>"
+        )
 
     def test_strips_email(self):
         from app.utils.forum_ingest import _strip_pii
-        assert _strip_pii("contact me at jane@example.com") == "contact me at email@redacted"
+        assert _strip_pii("contact me at jane@example.com") == (
+            "contact me at <<REDACTED:email>>"
+        )
 
     def test_preserves_normal_text(self):
         from app.utils.forum_ingest import _strip_pii
         assert _strip_pii("plain text no pii") == "plain text no pii"
+
+    # ---- §17.283 collision-avoidance + idempotence ----
+
+    def test_legacy_at_user_string_is_preserved(self):
+        """Pre-§17.283 the strip replaced mentions with the literal `@user`,
+        so any thread that legitimately wrote `@user` got merged into the
+        redaction class. Post-fix, `@user` survives unchanged — the
+        `<<REDACTED:user>>` marker is what redacted text now looks like.
+        """
+        from app.utils.forum_ingest import _strip_pii
+        # `@user` is `@` + word chars, so `_AT_USER_RE` still matches the
+        # token shape. But §17.283 redacts it to the bracketed marker — the
+        # important property is that the marker is distinguishable from
+        # whatever the original token was.
+        out = _strip_pii("docs say to type @user as a placeholder")
+        assert out == "docs say to type <<REDACTED:user>> as a placeholder"
+        assert "<<REDACTED:user>>" in out
+
+    def test_legacy_email_placeholder_does_not_collide_with_new_marker(self):
+        """`email@redacted` was the pre-§17.283 placeholder. The new email
+        marker (`<<REDACTED:email>>`) is shape-distinct, so even if a
+        post quotes the legacy literal verbatim, downstream consumers can
+        always tell the two apart.
+
+        Note: `email@redacted` has no TLD suffix, so `_EMAIL_RE` doesn't
+        match it on its own — the literal survives the strip unchanged.
+        That's correct: the COLLISION risk §17.283 closes is about the
+        REDACTED form being mistakeable for authentic text, not about the
+        legacy literal getting re-redacted. The bracketed sentinel is the
+        canonical redaction now; any `email@redacted` substring in a real
+        body is treated as ordinary prose.
+        """
+        from app.utils.forum_ingest import _strip_pii
+        out = _strip_pii("the old placeholder was email@redacted")
+        # Legacy literal survives (it's not a TLD-shaped email).
+        assert out == "the old placeholder was email@redacted"
+        # The new sentinel is shape-distinct from the legacy literal.
+        assert "<<REDACTED:email>>" not in out
+
+    def test_idempotent_under_repeated_application(self):
+        """Running the strip twice yields the same output as running it
+        once — the bracketed markers contain no `@`, so neither regex
+        matches them on a second pass. Critical because some upstream
+        pipelines apply the strip both at fetch time and re-apply
+        defensively at the ingest boundary.
+        """
+        from app.utils.forum_ingest import _strip_pii
+        original = "ping @alice or jane@example.com for context"
+        once = _strip_pii(original)
+        twice = _strip_pii(once)
+        assert once == twice
+        assert once == (
+            "ping <<REDACTED:user>> or <<REDACTED:email>> for context"
+        )
+
+    def test_email_then_mention_does_not_cascade(self):
+        """The email pass runs before the user pass. The email marker
+        contains no `@`, so the second pass can't decompose it into
+        another mention-redaction. Pin this so a future "optimize regex"
+        refactor doesn't reintroduce the cascade.
+        """
+        from app.utils.forum_ingest import _strip_pii
+        out = _strip_pii("jane@example.com")
+        assert out == "<<REDACTED:email>>"
+        assert out.count("<<REDACTED") == 1
+
+    def test_multiple_mentions_each_get_own_marker(self):
+        """Distinct mentions are each replaced — no collapsing into a
+        single marker, which would lose count information for downstream
+        provenance.
+        """
+        from app.utils.forum_ingest import _strip_pii
+        out = _strip_pii("/cc @alice @bob @carol")
+        assert out.count("<<REDACTED:user>>") == 3
 
 
 class TestStripHtml:
@@ -136,10 +216,10 @@ async def test_fetch_so_answers_accepted_passes_gate(fake_cache_miss):
     refs = {e["source_ref"] for e in out}
     # 1001 passes via is_accepted=True (score 2 < 10); 1002 passes via score=25
     assert refs == {"answer-1001", "answer-1002"}
-    # PII strip applied to 1002 body
+    # PII strip applied to 1002 body — §17.283 sentinel marker.
     a1002 = next(e for e in out if e["source_ref"] == "answer-1002")
     assert "@alice" not in a1002["content"]
-    assert "@user" in a1002["content"]
+    assert "<<REDACTED:user>>" in a1002["content"]
 
 
 @pytest.mark.asyncio
@@ -718,9 +798,9 @@ async def test_fetch_reddit_posts_gates_score_and_comments(fake_cache_miss):
     refs = {e["source_ref"] for e in out}
     assert refs == {"t3_p1"}
     p1 = out[0]
-    # PII strip applied
+    # PII strip applied — §17.283 sentinel marker.
     assert "@ada" not in p1["content"]
-    assert "@user" in p1["content"]
+    assert "<<REDACTED:user>>" in p1["content"]
     # source_url stitches together base + permalink
     assert p1["source_url"].endswith("/r/MachineLearning/comments/p1/")
     assert p1["source_type"] == "reddit_post"

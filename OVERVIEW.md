@@ -15168,6 +15168,35 @@ The two source-shape tests guard against a future "drive-by docstring cleanup" s
 
 **§17.280 closeout progress (cumulative).** §17.281 closed 🔴 #1. §17.282 closes 🟡 #1 (audit-only, no production change). Remaining: four 🟡, four 🟢 (informational), nine UX.
 
+### §17.283 forum PII redaction switches to sentinel markers — close §17.280 🟡 #2 (2026-05-24)
+
+§17.280's second yellow item: `app/utils/forum_ingest.py:60-64` redacted `@username` mentions to the literal `@user` and emails to `email@redacted`. Those literal placeholders can occur in legitimate forum prose — a Stack Overflow thread that DISCUSSES placeholder syntax, a Reddit post that quotes a help-desk template — making redacted text indistinguishable from authentic, and letting RAG dedup merge unrelated posts that happened to redact to the same string.
+
+**Fix:** swap to bracketed sentinels — `<<REDACTED:user>>` for mentions, `<<REDACTED:email>>` for emails. The shape (`<<` / `>>` framing chars + the literal token `REDACTED`) doesn't appear in normal forum text. Keying by kind (user vs email) preserves the audit trail of WHAT was stripped, not just THAT something was. Neither marker contains an `@`, so neither `_EMAIL_RE` nor `_AT_USER_RE` matches them — the strip is idempotent and the email pass can't cascade into the user pass.
+
+**Two-line production change** at `app/utils/forum_ingest.py:62-63`: replace the string-literal arguments to `re.sub`. Three callsites (`fetch_so_answers:194`, `fetch_hn_comments:311`, `fetch_reddit_posts:547`) inherit the new behaviour automatically; no signature change.
+
+**Test-suite delta:** existing 3-test `TestStripPii` cluster updated for the new markers, plus +5 new pin tests:
+
+| Test | Pins |
+|---|---|
+| `test_strips_username` (modified) | mentions → `<<REDACTED:user>>` |
+| `test_strips_email` (modified) | emails → `<<REDACTED:email>>` |
+| `test_preserves_normal_text` (unchanged) | non-PII passthrough |
+| `test_legacy_at_user_string_is_preserved` (**new**) | a `@user` token gets the new bracketed marker — distinguishable from any legacy artefact |
+| `test_legacy_email_placeholder_does_not_collide_with_new_marker` (**new**) | the pre-§17.283 `email@redacted` literal has no TLD, isn't re-matched by `_EMAIL_RE`, and is shape-distinct from `<<REDACTED:email>>`; if it ever appears in legacy corpus content, it stays inert and is trivially distinguishable from the new redaction marker |
+| `test_idempotent_under_repeated_application` (**new**) | running `_strip_pii` twice yields the same output — markers contain no `@` so neither regex re-matches them (load-bearing: some upstream pipelines defensively re-apply at the ingest boundary) |
+| `test_email_then_mention_does_not_cascade` (**new**) | `jane@example.com` → `<<REDACTED:email>>` (single marker, count==1) — pins that a future "optimise regex" refactor doesn't reintroduce cascading |
+| `test_multiple_mentions_each_get_own_marker` (**new**) | three distinct mentions → three sentinel markers — no collapsing to a single token, which would lose count information |
+
+Two SO-fetcher / Reddit-fetcher integration assertions further down the file (`a1002["content"]`, `p1["content"]`) updated from `"@user"` to `"<<REDACTED:user>>"` so the downstream wiring is verified end-to-end.
+
+**Backward compatibility (none required).** Redaction happens at fetch time and is one-way; existing ingested entries in the corpus that carry the legacy `@user` / `email@redacted` placeholders stay as-is. New forum-fetches from §17.283 onward emit the bracketed markers. Operators reading old vs new entries get the WORST case of "two different placeholder shapes coexist in the corpus" — there's no broken-dedup risk because the strings don't match, and the new shape is the one §17.283 closes the collision for.
+
+**Test-suite delta:** +5 cases. Forum-ingest + research-adjacent cluster: 97 passed, no regressions.
+
+**§17.280 closeout progress (cumulative).** §17.281 closed 🔴 #1. §17.282 closed 🟡 #1. §17.283 closes 🟡 #2. Remaining: three 🟡, four 🟢 (informational), nine UX.
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
