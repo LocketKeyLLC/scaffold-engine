@@ -16679,6 +16679,92 @@ The `test_marker_absent_when_active_job_not_in_list` assertion is load-bearing �
 
 ---
 
+### §17.310 `/research` mode discovery (2026-05-25)
+
+Eleventh post-§17.280 UX item. The second tangent past the canonical flow. `/research` is surfaced as a starter from §17.300's welcome (`/research kubernetes best practices`) and named in /help (§17.306) — but the command supports four other modes that operators rarely discover:
+
+| Mode | Trigger | Use case |
+|---|---|---|
+| Topic | `/research <text>` | Open-ended; agent discovers sources |
+| URL | `/research <https://...>` | Specific page ingested verbatim |
+| GitHub | `/research github:owner/repo` | Repo README + docs + docstrings |
+| OpenAPI | `/research openapi:<url>` | OpenAPI/Swagger spec, one entry per endpoint |
+| PDF | `/research/pdf` | Local PDF (drag-drop UI or `curl -F`) |
+
+**Pre-§17.310 discovery surface.** Both `/research` (no args) and `/research --help` dumped the parser's plain `help_text()` — 4 example lines with no "when to use" column:
+
+```
+**`/research`** - Autonomous web research
+
+**Flags:**
+  `--depth` (shallow|medium|deep) [default: medium] - Research iteration count
+
+**Examples:**
+  `/research kubernetes pods --depth=deep`
+  `/research https://example.com/article`
+  `/research github:owner/repo`
+  `/research openapi:https://api.example.com/openapi.json`
+```
+
+Examples ≠ discovery. An operator who saw `/research` named in welcome and tried `/research kubernetes` (matching the welcome's exemplar) never returned to /research --help; they just used it as a topic-only command. The github:/openapi: shapes lived in the docs but weren't operationally surfaced anywhere along their natural flow.
+
+**Fix shape.** Introduce `_research_modes_panel()` — a 5-row table with **purpose + example** per mode. Use it on BOTH the no-args path AND the `--help` / `-h` / `help` paths. Operators who arrive at either surface see the same scannable mode chooser:
+
+```
+**`/research` — Autonomous web research**
+
+Pick a mode based on what you have:
+
+| Mode      | When to use                                | Example                                       |
+| **Topic** | Open-ended question; let the agent discover | /research kubernetes best practices            |
+| **URL**   | Specific page ingested verbatim             | /research https://example.com/article          |
+| **GitHub**| Repo's README, docs, docstrings             | /research github:owner/repo                    |
+| **OpenAPI**| OpenAPI/Swagger spec — one entry/endpoint  | /research openapi:https://…/openapi.json       |
+| **PDF**   | Local PDF (drag-drop or curl -F)            | /research/pdf                                  |
+
+**Flags:**
+- --depth shallow | medium | deep (default: medium)
+- --confirm (bypass short-query disambig prompt; scripted callers)
+
+**Manage saved sessions:** /research/help (list / find / rename / delete / reply / schedule)
+```
+
+The "When to use" column is the load-bearing change — it teaches operators to pick a mode based on what they have in hand, not on what the prefix syntax looks like.
+
+**Disambiguation prompt — second touch-point.** When an operator types a short topic (`/research how does k8s work`), §17.215's existing disambig prompt fires (`looks like a short query — did you mean /rag?`). Pre-§17.310 that prompt only offered /rag-vs-/research-confirm. Post-§17.310 it gains a third line:
+
+```
+💡 If you have a URL / repo / spec instead, `/research` accepts modes:
+   `<url>`, `github:owner/repo`, `openapi:<url>`. See `/research --help`.
+```
+
+The hint deliberately doesn't re-dump the panel — it points at `/research --help` instead. Operators who triggered the disambig because they typed a topic-shaped query don't need the full mode chooser inline; the pointer is enough.
+
+**Why not surface modes inline in the welcome.** Considered adding `github:owner/repo` and `openapi:<url>` to §17.300's welcome bullets. Rejected — modes are niche (most operators use topic-only research); cluttering the first-touch surface to teach an advanced affordance trades off the welcome's brevity for low-value detail. Operators who eventually hit `/research --help` or the disambig prompt discover modes there. /help (§17.306) also already lists them in the Knowledge Base table.
+
+**Why not append a "💡 Other modes" footer to every successful research.** Considered. Rejected because:
+
+1. Successful research already streams progress + a results block — a footer would be noise on every run.
+2. The mode chooser is most useful BEFORE the command runs, not after.
+3. Welcome → /help → /research --help → /research (no args) → disambig prompt is already 5 surfaces that teach modes. A successful-run footer would be the 6th, and the lowest-value one.
+
+**Test-suite delta:** +19 tests in `tests/test_scaffold_router_research_mode_discovery.py` across 4 classes:
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestModePanelContents` | 6 | all 5 mode labels (Topic/URL/GitHub/OpenAPI/PDF); each example verbatim; "When to use" column; per-mode purpose phrase (catches a "collapse descriptions to 'see help'" refactor); `--depth` + `--confirm` flags; pointer to /research/help |
+| `TestEntryPathsUsePanel` | 5 | `/research` no-args → panel; `--help` → panel; `-h` → panel; `help` → panel; no-args does NOT fall through to the pre-§17.310 "topic is missing or a placeholder" message |
+| `TestDisambigPromptModeHint` | 4 | short-query disambig includes the mode hint; hint points at `/research --help`; long queries skip disambig AND mode hint; URL queries skip disambig AND mode hint |
+| `TestSourceShapeRegressionGuard` | 4 | `_research_modes_panel` helper anchored; no-args tuple-branch anchored; disambig mode-hint phrasing anchored; all 5 mode-label literals anchored in source |
+
+The `test_no_args_does_not_fall_through_to_placeholder` assertion is load-bearing — it pins the architectural decision to short-circuit no-args BEFORE the parser parse + placeholder check. A future refactor that reverts to letting empty-args fall through would regress the panel surface back to the pre-§17.310 plain dump.
+
+**Cost.** +36 LOC for `_research_modes_panel` + 3 LOC for the no-args branch update + 3 LOC for the disambig hint. Total ~42 LOC in `pipelines/scaffold_router.py`. Operator-facing cost: zero on successful runs (panel only appears on explicit no-args / --help / disambig); replaces an ~10-line plain dump with a ~14-line table on the discovery paths.
+
+**§17.300-§17.310 polish two layers.** The canonical-flow surfaces (§17.300-§17.308) AND the two highest-traffic operator panels (`/jobs` in §17.309, `/research` in §17.310). Remaining tangents: model selection ergonomics, the §17.307 expansion to state-altering commands, and `/schedule` listing UX. The discovery loop for first-touch operators is now: welcome → starter → /help → /research --help OR /jobs OR specific command → in-flow Next-blocks → recovery hints. Six surfaces; all instrumented.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

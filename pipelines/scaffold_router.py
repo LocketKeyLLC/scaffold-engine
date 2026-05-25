@@ -1179,9 +1179,13 @@ class Pipeline:
         parts = msg.split(None, 1)
         raw_args = parts[1] if len(parts) > 1 else ""
 
-        # Per-command help (#5).
-        if raw_args.strip() in ("--help", "-h", "help"):
-            yield parser.help_text() + "\n\nManage sessions: `/research/help`"
+        # §17.310 — `/research` (no args) and `/research --help` both
+        # surface the rich modes panel. Pre-§17.310 they dumped the
+        # parser's plain help_text (4 example lines, no purpose
+        # column). The panel teaches WHEN to use each mode, not just
+        # WHAT they look like.
+        if raw_args.strip() in ("", "--help", "-h", "help"):
+            yield self._research_modes_panel()
             return
 
         # §17.215 E2 — /research is autonomous (20-60 min wall time) and
@@ -1219,6 +1223,9 @@ class Pipeline:
                 f"- **Quick lookup (seconds):** `/rag {topic}`\n"
                 f"- **Autonomous research (20-60 min):** "
                 f"`/research {topic} --confirm`\n"
+                "\n💡 If you have a URL / repo / spec instead, "
+                "`/research` accepts modes: `<url>`, `github:owner/repo`, "
+                "`openapi:<url>`. See `/research --help`.\n"
             )
             return
 
@@ -1243,6 +1250,39 @@ class Pipeline:
         if self._RESEARCH_PREFIX_RE.match(t):
             return False
         return len(t.split()) <= 4
+
+    @staticmethod
+    def _research_modes_panel() -> str:
+        """§17.310 — rich mode-discovery panel surfaced by `/research`
+        (no args) and `/research --help`. Pre-§17.310 both paths dumped
+        the parser's plain help_text — 4 example lines with no purpose
+        column. The panel teaches WHEN to use each mode, not just WHAT
+        they look like.
+
+        Each row uses a short id-shape match (`abc1234e`-style fragment
+        for any /research/<sub> references is unnecessary here — modes
+        don't carry job_ids).
+        """
+        return (
+            "**`/research` — Autonomous web research**\n\n"
+            "Pick a mode based on what you have:\n\n"
+            "| Mode | When to use | Example |\n"
+            "|---|---|---|\n"
+            "| **Topic** | Open-ended question; let the agent discover sources | `/research kubernetes best practices` |\n"
+            "| **URL** | Specific page you want ingested verbatim | `/research https://example.com/article` |\n"
+            "| **GitHub** | Repo's README, docs, and module docstrings | `/research github:owner/repo` |\n"
+            "| **OpenAPI** | OpenAPI/Swagger spec — one entry per endpoint | `/research openapi:https://api.example.com/openapi.json` |\n"
+            "| **PDF** | Local PDF (drag-drop UI or `curl -F`) | `/research/pdf` |\n"
+            "\n"
+            "**Flags:**\n"
+            "- `--depth shallow | medium | deep` — iteration count "
+            "(default: medium)\n"
+            "- `--confirm` — bypass the short-query disambiguation "
+            "prompt (scripted callers)\n"
+            "\n"
+            "**Manage saved sessions:** `/research/help` "
+            "(list / find / rename / delete / reply / schedule)\n"
+        )
 
     def _handle_execute(self, msg: str) -> Generator[str, None, None]:
         parts = msg.split()

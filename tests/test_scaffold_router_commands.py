@@ -521,14 +521,14 @@ class TestResearchCommand:
     """Tests for /research command parsing and dispatch."""
 
     def test_research_usage_error(self, pipe):
-        """'/research' with no topic yields the placeholder hint + parser
-        examples.
+        """'/research' with no topic yields the §17.310 mode-discovery
+        panel.
 
-        X.18 — pre-X.18 the test expected a literal "Usage" string, but
-        the live parser shows a placeholder-rejection message + a bullet
-        list of example invocations. The assertion now matches the
-        real shape: the operator-facing hint identifies the missing
-        topic and surfaces example invocations.
+        Pre-§17.310 the no-args case routed through the placeholder-
+        rejection branch ("topic is missing or a placeholder") + a
+        plain parser examples dump. §17.310 short-circuits no-args to
+        the rich mode panel which teaches WHEN to use each mode (not
+        just WHAT they look like).
         """
         output = list(pipe.pipe(
             user_message="/research",
@@ -537,10 +537,15 @@ class TestResearchCommand:
             body={"messages": [{"role": "user", "content": "/research"}]},
         ))
         combined = "".join(output)
-        # Operator-facing message identifies the missing/placeholder topic.
-        assert "topic is missing or a placeholder" in combined
-        # Examples section surfaces at least the basic shape.
-        assert "/research" in combined
+        # §17.310 — panel signature line.
+        assert "Pick a mode based on what you have:" in combined
+        # All 5 modes surfaced.
+        for mode_label in ("**Topic**", "**URL**", "**GitHub**",
+                            "**OpenAPI**", "**PDF**"):
+            assert mode_label in combined
+        # Pre-§17.310 placeholder phrasing must NOT appear (panel
+        # short-circuits before the placeholder branch).
+        assert "topic is missing or a placeholder" not in combined
 
     def test_research_depth_flag_parsed(self, pipe):
         """'--depth deep' is extracted and topic is cleaned.
