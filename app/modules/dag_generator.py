@@ -29,7 +29,7 @@ from app.modules.dag_validator import (
     validate_tool_picks,
 )
 from app.utils.job_utils import fail_job as _fail_job
-from app.utils.llm_parsing import parse_json_object
+from app.utils.llm_parsing import diagnose_json_object_parse, parse_json_object
 
 logger = logging.getLogger("scaffold.dag")
 
@@ -440,12 +440,21 @@ async def generate_dag(
     if gen_result["dag_data"] is None:
         # Hard failure on the first attempt — propagate the original error.
         if gen_result["error"] == "LLM output was not valid JSON":
+            # §17.293 — surface JSONDecodeError diagnostics (lineno /
+            # colno / msg / pos) alongside the truncated raw output.
+            # Pre-§17.293 the operator only saw `raw_output[:500]` and
+            # had to eyeball the snippet for the syntax error. The
+            # diagnose helper re-parses with `json.loads` to recover
+            # the same exception parse_json_object swallows, so the
+            # field is available without changing the parser API.
+            parse_diag = diagnose_json_object_parse(gen_result["raw_text"])
             await _fail_job(db, uid, "Failed to parse DAG JSON from LLM output")
             return {
                 "job_id": job_id,
                 "status": "failed",
                 "error": "LLM output was not valid JSON",
                 "raw_output": gen_result["raw_text"][:500],
+                "parse_error": parse_diag,  # None if the first parse would have succeeded
             }
         await _fail_job(db, uid, f"LLM DAG generation failed: {gen_result['error']}")
         return {"job_id": job_id, "status": "failed", "error": gen_result["error"]}

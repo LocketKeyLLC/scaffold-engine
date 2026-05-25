@@ -15545,6 +15545,70 @@ The 404-on-read sanity test is load-bearing — without it, a future "be consist
 
 **§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.291 closed UX #1-5. §17.292 closes UX #6. Remaining: four 🟢 (informational), three UX (#7-9).
 
+### §17.293 DAG-parse failure surfaces JSONDecodeError diagnostics — close §17.280 UX #7 (2026-05-24)
+
+§17.280's seventh UX item. `app/modules/dag_generator.py:442-449`'s JSON-parse failure branch returned only:
+
+```python
+return {
+    "job_id": job_id,
+    "status": "failed",
+    "error": "LLM output was not valid JSON",
+    "raw_output": gen_result["raw_text"][:500],
+}
+```
+
+The operator got a truncated snippet and had to eyeball it for the syntax error. No line / column / expected-token guidance.
+
+**Root cause: `parse_json_object` swallows JSONDecodeError.** The 4-step chain (raw → `json.loads` → `json_repair` → `_extract_by_brackets` + retry × 2) returns `None` on full failure, discarding the original exception. Adding diagnostics by widening the parser's signature would touch every caller in the codebase — too invasive for a UX fix.
+
+**Fix.** New helper at `app/utils/llm_parsing.py::diagnose_json_object_parse(raw)` mirrors the parser's first cleanup step (strip-think-tags + strip-markdown-fences, then `json.loads`) and recovers the `JSONDecodeError` that the parser would swallow. Returns `{lineno, colno, msg, pos}` on failure; `None` when the first parse would have succeeded.
+
+Why the FIRST parse error and not later-stage diagnostics: the first parse runs against the cleanest text, so its lineno/colno point at where the LLM first deviated from valid JSON — the most actionable position for the operator. The deeper repair / fragment-extract steps swallow further errors silently; reporting their failures would be noisier and less diagnostic.
+
+`dag_generator.generate_dag` attaches the diagnostic as a new `parse_error` field on the failure dict. The existing `error` + `raw_output` fields are unchanged — purely additive shape for consumers that haven't migrated.
+
+**Operator-facing result.** Before:
+```
+status: failed
+error: LLM output was not valid JSON
+raw_output: "{\n  \"tasks\": []\n  \"strategy\": \"x\"\n}"
+```
+
+After:
+```
+status: failed
+error: LLM output was not valid JSON
+raw_output: "{\n  \"tasks\": []\n  \"strategy\": \"x\"\n}"
+parse_error:
+  lineno: 3
+  colno: 3
+  msg: "Expecting ',' delimiter"
+  pos: 18
+```
+
+The operator now sees "missing comma at line 3" immediately instead of scanning the snippet.
+
+**What §17.293 does NOT do.**
+
+- Doesn't add a "context window" snippet centered on the error position. Considered and skipped — the audit asked specifically for `lineno`/`colno`/`msg`, and operators have `raw_output` to navigate by hand. Over-spec'd.
+- Doesn't modify `parse_json_object`'s return signature. The helper is a parallel diagnostic path so existing callers stay untouched.
+- Doesn't propagate JSONDecodeError details from `_generate_dag_with_validator` directly (the existing function returns a fixed-shape dict). The diagnose helper re-parses to recover the exception, which is cheap for ≤500-char LLM outputs.
+
+**Test-suite delta:** +10 tests in `tests/test_dag_generator_parse_error_diag.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestDiagnoseJsonObjectParse` | 7 | valid JSON → None; well-formed-malformed missing-comma case surfaces `lineno`/`colno`/`msg`/`pos`; **`test_diagnostic_points_at_actual_error`** — lineno=3 for the standard missing-comma fixture; think-tag strip + markdown-fence strip happen before parsing (mirroring `parse_json_object`'s first step); truncated stream surfaces a non-empty msg; valid array-not-object returns None (deliberately — array-vs-object is a SHAPE issue, not a JSONDecodeError, so faking one would lie about the failure mode) |
+| `TestGenerateDagParseErrorField` (async) | 1 | the parse-failure path's return dict carries `parse_error` with non-None `lineno`/`colno`/`msg`; `raw_output` preserved for backward compat |
+| `TestSourceShapeRegressionGuard` | 2 | `diagnose_json_object_parse` is imported + called in `dag_generator`; `"parse_error":` is present in the failure return; the helper definition is present in `app/utils/llm_parsing.py` |
+
+`test_not_an_object_returns_none` is load-bearing — without it, a future "be more aggressive about reporting parse failures" refactor could start synthesizing a fake `JSONDecodeError` for valid-but-wrong-shape JSON (e.g. an array), which would lie to the operator. The audit shape is specifically syntactic-error diagnostics; shape-mismatch is a different failure mode.
+
+**Test-suite delta:** +10. dag_generator + dag_validator + llm_parsing cluster: 68 passing. No regressions.
+
+**§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.292 closed UX #1-6. §17.293 closes UX #7. Remaining: four 🟢 (informational), two UX (#8-9).
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).

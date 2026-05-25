@@ -99,6 +99,44 @@ def parse_json_object(raw: str):
     return None
 
 
+def diagnose_json_object_parse(raw: str) -> dict | None:
+    """§17.293 — return diagnostic context for the first ``JSONDecodeError``
+    encountered while parsing ``raw`` as a JSON object.
+
+    Mirrors the first step of ``parse_json_object``'s pipeline (strip
+    think-tags + markdown fences, then ``json.loads``). Returns a dict
+    with ``lineno`` / ``colno`` / ``msg`` / ``pos`` from the exception
+    when that first parse fails; returns ``None`` when the first parse
+    succeeds (meaning ``parse_json_object`` would also have succeeded).
+
+    Operator-facing usage: when ``parse_json_object`` returns ``None``,
+    callers can attach this diagnostic to the failure dict so the
+    operator sees ``line 3, col 12, "Expecting ',' delimiter"`` next to
+    the truncated raw output, instead of having to scan the snippet by
+    eye. The deeper repair / fragment-extract steps in the pipeline
+    swallow further errors silently; this helper deliberately reports
+    only the first one, which is the most diagnostic for the operator
+    (it pinpoints where the LLM first deviated from valid JSON).
+    """
+    cleaned = strip_think_tags(raw)
+    cleaned = _strip_markdown_fences(cleaned)
+    try:
+        result = json.loads(cleaned)
+        if isinstance(result, dict):
+            return None
+        # Parsed cleanly but wrong shape (e.g., an array) — that's a
+        # caller-side concern, not a JSONDecodeError. Report None so the
+        # parse_error block doesn't lie about the failure mode.
+        return None
+    except json.JSONDecodeError as e:
+        return {
+            "lineno": e.lineno,
+            "colno": e.colno,
+            "msg": e.msg,
+            "pos": e.pos,
+        }
+
+
 def parse_json_array(raw: str):
     """Parse a JSON array from raw LLM output (4-step chain)."""
     cleaned = strip_think_tags(raw)
