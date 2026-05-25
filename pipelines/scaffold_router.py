@@ -2358,7 +2358,11 @@ class Pipeline:
         except requests.exceptions.Timeout:
             return "⚠️ Request timed out. The orchestrator is still processing — check back shortly."
         except requests.exceptions.ConnectionError:
-            return f"⚠️ Cannot reach orchestrator at {self.valves.orchestrator_url}. Is it running?"
+            return (
+                f"⚠️ Cannot reach orchestrator at {self.valves.orchestrator_url}. "
+                f"Is it running?\n\n"
+                f"💡 Try `/health` to probe each subsystem (Postgres + Ollama + Milvus + Redis)."
+            )
         except Exception as e:
             self.logger.exception("Command `%s` failed", cmd)
             return ("⚠️ Internal error processing command. "
@@ -2609,7 +2613,10 @@ class Pipeline:
         except requests.exceptions.RequestException as e:
             return f"⚠️ {e}"
         if r.status_code == 404:
-            return f"Job not found: `{job_id}`"
+            return (
+                f"Job not found: `{job_id}`.\n\n"
+                f"💡 Use `/jobs` to list active jobs and copy a real job_id."
+            )
         if r.status_code >= 400:
             return self._fmt(r)
         # §17.275 — non-JSON 200 body would have crashed pre-fix.
@@ -2638,7 +2645,10 @@ class Pipeline:
             except requests.exceptions.RequestException as e:
                 return f"⚠️ {e}"
             if r.status_code == 404:
-                return f"Job not found: `{job_id}`"
+                return (
+                    f"Job not found: `{job_id}`.\n\n"
+                    f"💡 Use `/jobs` to list active jobs and copy a real job_id."
+                )
             if r.status_code >= 400:
                 return self._fmt(r)
             self._pending_deletes.pop(("job", job_id), None)
@@ -2653,7 +2663,10 @@ class Pipeline:
         except requests.exceptions.RequestException as e:
             return f"⚠️ {e}"
         if r.status_code == 404:
-            return f"Job not found: `{job_id}`"
+            return (
+                f"Job not found: `{job_id}`.\n\n"
+                f"💡 Use `/jobs` to list active jobs and copy a real job_id."
+            )
         if r.status_code >= 400:
             return self._fmt(r)
         d = r.json()
@@ -2749,7 +2762,10 @@ class Pipeline:
         except requests.exceptions.RequestException as e:
             return f"⚠️ {e}"
         if r.status_code == 404:
-            return f"Research session not found: `{session_id}`"
+            return (
+                f"Research session not found: `{session_id}`.\n\n"
+                f"💡 Use `/research/list` to see active sessions and copy a real session_id."
+            )
         if r.status_code >= 400:
             return self._fmt(r)
         d = r.json()
@@ -2772,7 +2788,10 @@ class Pipeline:
             except requests.exceptions.RequestException as e:
                 return f"⚠️ {e}"
             if r.status_code == 404:
-                return f"Research session not found: `{session_id}`"
+                return (
+                    f"Research session not found: `{session_id}`.\n\n"
+                    f"💡 Use `/research/list` to see active sessions and copy a real session_id."
+                )
             if r.status_code >= 400:
                 return self._fmt(r)
             self._pending_deletes.pop(("research", session_id), None)
@@ -2792,7 +2811,10 @@ class Pipeline:
         sessions = r.json().get("sessions", [])
         match = next((s for s in sessions if s.get("id") == session_id), None)
         if not match:
-            return f"Research session not found: `{session_id}`"
+            return (
+                f"Research session not found: `{session_id}`.\n\n"
+                f"💡 Use `/research/list` to see active sessions and copy a real session_id."
+            )
         self._pending_deletes[("research", session_id)] = time.time()
         return (
             f"⚠️ **About to delete research session** `{session_id[:8]}`\n\n"
@@ -2927,7 +2949,10 @@ class Pipeline:
             )
 
         if r.status_code == 404:
-            return f"Job not found: `{job_id}`"
+            return (
+                f"Job not found: `{job_id}`.\n\n"
+                f"💡 Use `/jobs` to list active jobs and copy a real job_id."
+            )
         if r.status_code >= 400:
             return (
                 "Usage: /skip <job_id> <node_key>\n\n"
@@ -3006,10 +3031,16 @@ class Pipeline:
         except requests.exceptions.Timeout:
             return "⚠️ Request timed out."
         except requests.exceptions.ConnectionError:
-            return f"⚠️ Cannot reach orchestrator at {self.valves.orchestrator_url}."
+            return (
+                f"⚠️ Cannot reach orchestrator at {self.valves.orchestrator_url}.\n\n"
+                f"💡 Try `/health` to probe each subsystem (Postgres + Ollama + Milvus + Redis)."
+            )
 
         if r.status_code == 404:
-            return f"Job not found: `{job_id}`"
+            return (
+                f"Job not found: `{job_id}`.\n\n"
+                f"💡 Use `/jobs` to list active jobs and copy a real job_id."
+            )
         if r.status_code >= 400:
             return f"⚠️ Error {r.status_code}: {r.text[:200]}"
         try:
@@ -3338,7 +3369,10 @@ class Pipeline:
             r = _HTTP_SESSION.delete(f"{base}/schedule/{sid}", headers=hdr,
                                 timeout=self.valves.request_timeout)
             if r.status_code == 404:
-                return f"❌ Schedule #{sid} not found"
+                return (
+                    f"❌ Schedule #{sid} not found.\n\n"
+                    f"💡 Use `/schedule list` to see active schedules and copy a real id."
+                )
             r.raise_for_status()
             return f"🗑️ Deleted schedule #{sid}"
         except Exception as exc:
