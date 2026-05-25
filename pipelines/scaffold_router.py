@@ -3762,60 +3762,77 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def _help(self) -> str:
-        return """**Scaffold Router Commands**
+        return """**Scaffold Engine — full command reference**
 
-**Workflow:** describe your idea → triage chat → `/go` → review → `/confirm` → execution.
+**Canonical flow:** chat naturally to scope an idea → `/go` to launch → review the plan → `/confirm <job_id>` to execute.
+
+**Try one of these to start:**
+- `/idea Build a CLI that converts screenshots to PDF` — jump straight to Phase 1
+- `/research kubernetes best practices` — autonomous web research + ingest
+- `/jobs` — see what's already running
+
+---
 
 **🗣 Scope & kickoff**
-| Command | Description |
+| Command | What it does |
 |---|---|
-| *(plain message)* | Chat with the triage assistant to scope your idea. |
-| `/go` or `/run` | Lock the scoped idea, run Phase 1, halt at confirmation gate. |
-| `/idea <text>` | Submit an idea directly to Phase 1 (skips triage). |
-| `/confirm <job_id> [feedback]` | Approve a refined idea; auto-chains research → DAG → execute. |
+| *(plain message)* | Chat to scope an idea. Triage asks clarifying questions until you `/go`. |
+| `/go` or `/run` | Synthesize chat → Phase 1, pause at the confirmation gate. |
+| `/idea <text>` | Skip triage; send an idea directly to Phase 1. |
+| `/confirm <job_id> [feedback]` | Approve a refined idea — auto-chains research → DAG → execute. |
 
 **⚙ Workflow control**
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `/execute <job_id>` | Run all pending DAG nodes (use after cancel or if auto-chain stalls). |
-| `/skip <job_id> [<node_key>]` | Skip a specific node; bare `/skip <job_id>` lists candidates. |
-| `/results <job_id>` | View output, in-flight progress, or failure details + recovery hints. |
+| `/execute <job_id>` | Run all pending DAG nodes (resume after cancel or stall). |
+| `/skip <job_id> [<node_key>]` | Skip a node; bare `/skip <job_id>` lists candidates. |
+| `/results <job_id>` | View output, in-flight progress, or failure detail + recovery hints. |
 | `/status` | List active jobs grouped by state. |
 
 **📚 Knowledge base**
-| Command | Description |
+| Command | What it does |
 |---|---|
 | `/rag <query>` | Search the Milvus knowledge base. |
 | `/research <topic>` | Autonomous web research → distill → ingest. |
 | `/research <url>` | Ingest a single web page. |
-| `/research github:<owner>/<repo>` | Ingest a repo's README, docs, and module docstrings. |
+| `/research github:<owner>/<repo>` | Ingest a repo's README + docs + docstrings. |
 | `/research openapi:<url>` | Ingest an OpenAPI spec, one entry per endpoint. |
 | `/research/reply <session_id> <msg>` | Resume a paused research session. |
 | `/research/pdf` | Upload a PDF — drag-drop at `GET /research/pdf` or `curl -F file=@x.pdf`. |
 
 **🗂 Manage saved work**
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `/jobs <sub>` | List/filter/find/rename/delete jobs. `/jobs help` for details. |
-| `/research/<sub>` | List/find/rename/delete research sessions. `/research/help` for details. |
-| `/schedule <sub>` | Recurring research crons (list/add/delete). |
+| `/jobs <sub>` | list / find / rename / delete jobs. `/jobs help` for details. |
+| `/research/<sub>` | list / find / rename / delete research sessions. `/research/help`. |
+| `/schedule <sub>` | Recurring research crons. `/schedule help`. |
 
 **🔧 Configuration & utilities**
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `/model <sub>` | Models per role — list/available/set/reset/probe. |
+| `/model <sub>` | Models per role — list / available / set / reset / probe. |
 | `/optimize <prompt>` | Tighten and improve a prompt. |
-| `/config [substring] [--non-defaults]` | List Settings with values + redaction. |
-| `/help` | Show this message.
+| `/config [substring] [--non-defaults]` | List settings with values + redaction. |
+| `/help` | Show this message. |
 
 **🩺 Diagnostics & admin**
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `/health` | Per-subsystem probe (Postgres + Ollama + Milvus + Redis). |
+| `/health` | Probe Postgres + Ollama + Milvus + Redis + sidecars. |
 | `/logs <job_id>` | Per-node DAG state with output preview. |
 | `/exec retry <job_id> <node_key>` | Retry a failed/blocked node. |
-| `/cleanup` | Sweep stale jobs (resets orphans, cancels long-idle). |
-| `/cost <job_id>` | Cost + latency rollup (J.3) — totals + per-(provider, model) breakdown.
+| `/cleanup` | Sweep stale jobs (reset orphans, cancel long-idle). |
+| `/cost <job_id>` | Cost + latency rollup — totals + per-(provider, model). |
 
 ---
-*§17.202 — type `/help` again any time to recall this list. Native web UI: `http://<host>:8000/web/jobs`. Full reference: README.md + USER_GUIDE.md in the repo.*"""
+
+**Common scenarios**
+
+- **Launch from a conversation** — describe what you want for a few turns, then `/go`. The triage LLM asks clarifying questions; when you `/go`, it synthesizes your turns into a brief and Phase 1 runs.
+- **One-shot launch** — `/idea <your idea>` — skips triage entirely. Phase 1 pauses at the confirmation gate; you `/confirm <id>` to proceed.
+- **Recover from a failed node** — `/results <job_id>` shows what broke; `/exec retry <job_id> <node_key>` re-runs just that node and re-flows downstream.
+- **Inspect cost mid-flight** — `/cost <job_id>` shows LLM spend so far. `/jobs` lists every active job; `/jobs find <text>` filters by title.
+
+---
+
+*Native web UI: `http://<host>:8000/web/jobs`. Full reference: README.md + USER_GUIDE.md in the repo.*"""

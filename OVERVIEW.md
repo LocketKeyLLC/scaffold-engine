@@ -16393,6 +16393,62 @@ The "start over" preservation test is the load-bearing /go-specific assertion �
 
 ---
 
+### §17.306 `/help` refreshed for first-touch scan-ability (2026-05-25)
+
+Seventh post-§17.280 UX item. The §17.300 welcome explicitly points new operators at `/help` as the discovery exit. Pre-§17.306 they landed on a 6-section command table — workflow guidance was one sentence above 22+ table rows. No copy-pasteable starter commands at the top, no canonical scenario walkthroughs at the bottom. Operators scrolled and bounced.
+
+**Fix.** Preserve every command currently listed (the full 22-command surface is contract; `TestHelp.test_contains_key_commands` already loads the floor) but add three new affordances and tighten the existing ones:
+
+| Addition | Why | Where |
+|---|---|---|
+| "Try one of these to start:" block — 3 copy-pasteable starter commands | Mirror the §17.300 welcome's exemplars so an operator who came from welcome → /help sees CONSISTENT exits | Above the first command table |
+| "Common scenarios" footer — 4 walkthroughs | Operators arriving at /help have an intent (launch / recover / inspect) but don't know which command-chain delivers it. Walkthroughs name the chains. | Below the last command table |
+| Column header "Description" → "What it does" | Active voice; signals these are operator actions, not noun definitions | All 6 section tables |
+
+The 3 starter commands match §17.300's welcome verbatim:
+
+```
+- /idea Build a CLI that converts screenshots to PDF
+- /research kubernetes best practices
+- /jobs
+```
+
+The 4 common scenarios target the canonical operator decision tree:
+
+1. **Launch from a conversation** — chat-then-/go. The §17.300 default path.
+2. **One-shot launch** — `/idea <text>`. For operators who know exactly what they want.
+3. **Recover from a failed node** — `/results <id>` first (diagnose), `/exec retry <id> <node>` second (act). Diagnose-before-act ordering is taught explicitly because reversing it strands operators.
+4. **Inspect cost mid-flight** — `/cost <id>` + `/jobs` + `/jobs find <text>`. Mid-journey cost-tracking.
+
+**Why these 4 scenarios specifically.** They cover the three operator states from §17.300-§17.305: (1) at-welcome (launch options), (2) at-result (cost inspection), (3) at-failure (recovery). The scenarios are the same operator journey §17.300-§17.305 instrument through Next-blocks — `/help` is the static reference that complements the inline-flow surfacing.
+
+**Canonical flow line rewrite.** Pre-§17.306: `Workflow: describe your idea → triage chat → \`/go\` → review → \`/confirm\` → execution.` Post-§17.306: `Canonical flow: chat naturally to scope an idea → \`/go\` to launch → review the plan → \`/confirm <job_id>\` to execute.` The post-version names the **action** at each stage (chat, launch, review, execute) rather than the **process noun** (triage, run, review, execution). Adverbs ("naturally") signal the chat-first default. The actual command `/confirm <job_id>` is shown — not just `/confirm` — so the operator sees the copy-paste shape.
+
+**What did NOT change.** Every command from pre-§17.306 still appears in the same section grouping. The 6-section layout (Scope & kickoff / Workflow control / Knowledge base / Manage saved work / Configuration & utilities / Diagnostics & admin) preserved — those groupings are the audit-aligned organization (per the §17.280 audit's command-classification thinking). Drift to a different organization would break operator muscle memory.
+
+**Test-suite delta:** +18 tests in `tests/test_scaffold_router_help_refresh.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestStarterBlock` | 3 | section header present; all 3 welcome exemplars present; positioned above first table |
+| `TestCommonScenariosSection` | 4 | section header present; all 4 scenario labels present; each scenario references ≥ 1 real command; failed-node recovery teaches /results-before-/exec-retry ordering |
+| `TestCanonicalFlowLine` | 2 | "Canonical flow:" phrasing anchored; all 5 stages (chat, /go, review, /confirm, execute) named in one sentence |
+| `TestColumnHeaderRefresh` | 2 | "What it does" header present; all 6 sections updated (no partial refresh) |
+| `TestPreservedSurface` | 3 | all 22+ commands still listed; native web UI footer present; USER_GUIDE + README pointers present |
+| `TestSourceShapeRegressionGuard` | 4 | starter block phrase / Common scenarios phrase / canonical flow phrase / all 4 scenario labels anchored in `pipelines/scaffold_router.py` |
+
+The `test_recovery_scenario_chains_results_then_retry` assertion is load-bearing — it pins the diagnose-before-act lesson directly into the source. A future refresh that swaps the order (or merges the scenarios) would strand operators in retry-without-context.
+
+**Why this is the right next UX item.** §17.300-§17.305 instrument the **active** operator journey (Next-blocks emitted as the operator moves through states). `/help` is the **static** reference. Operators arrive at /help from different points: from welcome (first-touch), from a forgotten-command moment, from a typo's command-suggestion. All three trajectories benefit from the same three additions — starter examples at the top (for arrival), scenarios at the bottom (for context). The change is contained to one method (`_help`) and adds no new control flow.
+
+**Cost.** +1 LOC net in `pipelines/scaffold_router.py` (the docstring grows ~40 lines, but the existing layout's whitespace and trailing line account for most of it). Operator-facing cost: the help-text block grows by ~50% in line count. Trade-off accepted because /help is invoked deliberately (operator typed it) — unlike inline Next-blocks where every yield is a tax on the active flow.
+
+**§17.306 closes the discovery surface.** §17.300-§17.305 surfaced commands at every transition; §17.306 surfaces them in the catalog. An operator who knows nothing about the system can — in order — read the welcome (§17.300), pick a starter from /help (§17.306), follow the auto-chain Next-blocks (§17.301-§17.305), and recover from any failure (§17.302) without ever leaving the chat. That's the full first-touch loop.
+
+**Next plausible items.** Active-job chat memory (carry job_id implicitly across turns within a chat) is the highest-leverage remaining lever — it eliminates the longest copy-paste action operators do (the 36-char UUID). Risk areas: cross-chat confusion, surprise factor. Other tangents: multi-line `/assist submit` evidence ergonomics; `/jobs` default listing UX.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
