@@ -73,6 +73,16 @@ Public surface from v1.0.0:
                                                                             ▲
                                                               SearXNG ──────┘
                                                               :8888  (research path)
+
+                /design (engineering-design pipeline, §17.140-§17.156, §17.319)
+                                     │
+                       ┌─────────────┼──────────────┐
+                       ▼             ▼              ▼
+                ┌──────────┐  ┌────────────┐  ┌──────────────┐
+                │ ngspice  │  │ verilator  │  │ symbiyosys   │
+                │ :8001    │  │ :8002      │  │ :8003        │
+                │ analog   │  │ digital    │  │ formal verif │
+                └──────────┘  └────────────┘  └──────────────┘
 ```
 
 All containers on Docker `ai-network` bridge (172.18.0.0/16). Pipelines and orchestrator reach **host Ollama** via the bridge gateway `172.18.0.1:11434`. `host.docker.internal` is unavailable on Pop!_OS native Docker.
@@ -86,7 +96,12 @@ All containers on Docker `ai-network` bridge (172.18.0.0/16). Pipelines and orch
 | Milvus 2.5.27 | 19530 | `milvus-standalone` | pinned by SHA256 (standalone, embedded ETCD) |
 | Redis 7.4 | 6379 | `scaffold-redis` | `redis:8-alpine` |
 | SearXNG | 8888 | `searxng` | pinned by SHA256 |
+| ngspice sidecar (§17.140) | 8001 | `scaffold-ngspice` | locally-built (`python:3.12.13-slim` + apt `ngspice` 44.2), `read_only`, `cap_drop ALL`, `no-new-privileges`, `/tmp` 64m tmpfs |
+| Verilator sidecar (§17.141) | 8002 | `scaffold-verilator` | locally-built (Verilator 5.024 from source), `read_only`, `cap_drop ALL`, `/tmp` 256m `rw,nosuid,nodev,exec` tmpfs (binaries must execute) |
+| SymbiYosys sidecar (§17.142) | 8003 | `scaffold-symbiyosys` | locally-built (OSS CAD Suite 2026-05-12 tarball: yosys + sby + z3), `read_only`, `cap_drop ALL`, `/tmp` 512m `exec` tmpfs |
 | Ollama | 11434 | (host, not containerized) | local install, CPU-only |
+
+**EDA sidecars are loopback-only and reached over the bridge by name** (`http://scaffold-ngspice:8001`, etc.) — they have no auth surface of their own, are not in the request-path for any chat workflow, and only fire when an operator drives the `/design` flow (`design_circuit` job_type). The orchestrator wraps each one with an audit-the-attempt contract (`sim_runs` row written even on transport/timeout/non-zero exit) so failures never raise — see §17.140-§17.142.
 
 Compose: `docker-compose.yml` is the prod runtime — image is hermetic, **zero host-source bind mounts**, only the `hf-cache` and `scaffold-logs` named volumes are mounted (post-X.27, 2026-05-09; §17.62). `docker-compose.dev.yml` is the dev override that bind-mounts `app/`, `tests/`, `cli/`, `sdk/`, `scripts/`, `db/`, `pipelines/`, `Dockerfile`, `.github/`, `docs/` (all `:ro`) plus `tests/benchmarks/` (rw) for live edit + bench writes. `make dev-up` brings up the dev overlay; `make test` requires the dev image.
 
@@ -262,6 +277,7 @@ A sibling to autonomous execute. After `/dag` produces a plan, the operator opts
 | `title` | TEXT NOT NULL | |
 | `description` | TEXT | |
 | `status` | TEXT NOT NULL | CHECK in 14 statuses (lifecycle + 3 `assisted_*`); default `'pending'` |
+| `job_type` | TEXT NOT NULL DEFAULT `'legacy'` | CHECK in `('legacy','design_circuit')`; added migration 043 (§17.151). Partial index `WHERE job_type <> 'legacy'`. `design_circuit` rows are owned by the §17.140-§17.156 engineering-design pipeline (specs / topology_select / device_sizings / digital_sizings / sim_runs join via `jobs.id`) |
 | `input_text` | TEXT | original idea text |
 | `refined_brief` | JSONB | from idea_refinement |
 | `compiled_output` | TEXT | from execution_agent._compile_output |
@@ -270,6 +286,8 @@ A sibling to autonomous execute. After `/dag` produces a plan, the operator opts
 | `created_at`, `updated_at`, `completed_at` | TIMESTAMPTZ | `updated_at` auto-trigger |
 
 `status` lifecycle: `pending → refining → awaiting_confirmation → researching → planning → executing → running → completed | failed | cancelled | blocked` plus `assisted_executing | assisted_running | assisted_paused`.
+
+`job_type` branch: `legacy` (default) drives the original `/ideate → /confirm → /execute/all` chain. `design_circuit` (§17.151) drives the `/design → /specs/{id}/confirm → /design/{id}/advance?stage={topology,size,report}` chain — same `status` set, different routers and per-stage audit tables (see §11.11).
 
 #### `dag_nodes`
 | Column | Type | Notes |
@@ -1424,6 +1442,90 @@ Shell scripts (not Python):
 - `doctor.sh` (196 lines) — health audit (`make doctor`); probes every dep + verifies key sync
 - `init.sh` (201 lines) — provider/model wizard (`make init`); per-role provider, OPENAI_API_KEY collection, atomic `.env` update
 - `sync_valves.sh` (57 lines) — wipe baked-in `api_key` from `pipelines/*/valves.json`
+
+### 11.11 `app/sim/` — engineering-design pipeline
+
+Hosts the `design_circuit` job_type chain (§17.140-§17.156). Five reasoning stages — **extract → confirm → topology-select → size → report** — backed by three EDA sidecars (`scaffold-ngspice`, `scaffold-verilator`, `scaffold-symbiyosys`; see §2). Every numeric claim ties back through `sim_runs.id`; every module here follows the audit-the-attempt contract — failures are persisted data, not exceptions.
+
+Routed by `app/routers/design.py` + `app/routers/sizing.py`; opt-in only — chat flows never touch this code path.
+
+#### `app/sim/__init__.py` — 0 lines
+Package marker.
+
+#### `app/sim/spec_schema.json` — 155 lines (not Python)
+**Single source of truth** for the spec envelope — same file the LLM extractor pastes into its system prompt AND the wire-accept validator pre-compiles at import. Draft 2020-12. `constraints[]` of `{id, kind, description, target?, min?, max?, tolerance_pct?, unit, criticality}`; `kind` is a closed dotted enum (`electrical.*` / `timing.*` / `thermal.*` / `signal.*` / `physical.*` / `cost.*`); `additionalProperties: false` everywhere blocks the extractor from sneaking unvalidated fields.
+
+#### `app/sim/spec.py` — 236 lines
+Schema loaded once at import time, pre-compiled into a `Draft202012Validator`. Re-exports constraint-kind / criticality / interface enums as Python `frozenset` constants (`test_python_enums_mirror_schema_file` is the parity guard — JSON enum drift breaks the test loudly).
+
+Functions / classes:
+- `def validate_spec(spec_json) -> SpecValidationResult` — never raises; returns `{ok, errors[]}` with JSON-pointer paths
+- `def spec_sha256(spec_json) -> str` — canonical-JSON SHA256 (sorted keys); order-only diffs hash identically
+- `SpecValidationResult`, `SpecValidationError` dataclasses
+
+#### `app/sim/spec_store.py` — 259 lines
+DB-only helpers; kept separate from `spec.py` so the validator stays schema-only.
+
+Functions: `get_spec`, `confirm_spec`, `unconfirm_spec`, `is_spec_confirmed` (quiet probe), `require_confirmed_spec` (strict gate — raises `SpecNotConfirmedError` distinct from `SpecNotFoundError`), `list_pending_confirmations`. Dataclass: `SpecRow`.
+
+#### `app/sim/spec_extractor.py` — 280 lines
+**First LLM in the engineering-design pipeline.** Embeds `spec_schema.json` in the system prompt + two few-shot examples; one-shot strict envelope (`{"spec": {...}}` or `{"ambiguities": [...]}`). `temperature=0` for spec_sha256 reproducibility.
+
+Function: `async def extract_spec(nl_text, *, db, job_id=None, model_role=None) -> ExtractionResult`. Failure paths kept distinct in `ExtractionResult` (ambiguities vs errors); **never writes to `specs` on any failure path**.
+
+#### `app/sim/topology_select.py` — 420 lines
+First reasoning stage that consumes a confirmed spec. Numeric-free RAG query (design.kind + constraint kinds, no values) → `query_rag(domain="eng")` → LLM proposes 2-4 candidates with `entry_id` citations → **hard-reject if any cite ∉ retrieval set** → persist `topology_selections` row.
+
+Function: `async def select_topologies(spec_id, *, db, model_role=None, top_k=8, domain="eng") -> TopologySelectionResult`. Helpers `_build_rag_query`, `_validate_citations`, `_parse_candidates` are individually unit-tested.
+
+#### `app/sim/ngspice.py` — 196 lines
+Wrapper around the `scaffold-ngspice` sidecar (§2). HTTP contract: `POST /run {netlist, timeout_s, seed?}`. Two ngspice 44 quirks baked in: `.meas` cards must be inside a `.control/.endc` wrapper in batch mode, and the measurement parser stops at the resource-stats footer (otherwise it captures `Stack = 0 bytes` as a KPI).
+
+Function: `async def run_ngspice(netlist, *, db, timeout_s=None, seed=None, job_id=None, dag_node_id=None) -> NgspiceResult`. **Never raises** — `NgspiceResult(ok=False)` on transport/timeout/non-zero exit; the `sim_runs` row is written even when the sidecar is unreachable.
+
+#### `app/sim/verilator.py` — 228 lines
+Wrapper around the `scaffold-verilator` sidecar (§2). Two-phase pipeline (compile → build → run) with separate `build_timeout_s` + `run_timeout_s`. KPI protocol: `$display("KPI name=value")` → regex-parsed into `sim_runs.measurements`.
+
+Function: `async def run_verilator(sv_source, *, top_module, db, run_timeout_s=None, build_timeout_s=None, seed=None, job_id=None, dag_node_id=None) -> VerilatorResult`. Same audit-the-attempt contract as ngspice.
+
+#### `app/sim/symbiyosys.py` — 244 lines
+Wrapper around the `scaffold-symbiyosys` sidecar (§2) for formal verification. SV assertions → SMT → verdict ∈ {`PASS`, `FAIL`, `UNKNOWN`, `TIMEOUT`, `ERROR`}. sby's exit codes are authoritative (0/2/4/8/16); regex over the `DONE` summary is the fallback. Counterexample VCDs returned base64-encoded on `FAIL` (not persisted to `sim_runs` v1).
+
+Function: `async def run_symbiyosys(sv_source, *, top_module, db, mode='bmc', depth=20, engine='smtbmc z3', timeout_s=None, seed=None, job_id=None, dag_node_id=None) -> SymbiYosysResult`. Module-level constants: `VERDICT_PASS`, `VERDICT_FAIL`, `VERDICT_UNKNOWN`, `VERDICT_TIMEOUT`, `VERDICT_ERROR`.
+
+#### `app/sim/device_sizing.py` — 767 lines
+First closed-loop stage. LLM proposes params + ngspice netlist → §17.140 wrapper runs it → `_check_constraints` compares measurements to spec → on gap, feeds (params, measurements, gap descriptions, ngspice stderr tail) back to LLM. Bounded by `settings.device_sizing_max_iterations` (default 3).
+
+Function: `async def size_device(topology_selection_id, *, db, candidate_idx=0, max_iterations=None, model_role=None) -> DeviceSizingResult`. The row IS the attempt; `converged BOOL` is the outcome. `_check_constraints` treats a `criticality=required` + measurable-kind constraint with no measurement AS a gap (caught a §17.147 bug where forgetting `.meas` claimed convergence with empty measurements). Analog-only refusal at gate (`design.kind != "analog_circuit"` rejected before any LLM/ngspice call).
+
+Helpers `_is_measurable_kind`, `_check_constraints`, `_call_llm_propose` individually unit-tested. Dataclass: `IterationRecord` (full trajectory on result).
+
+#### `app/sim/digital_sizing.py` — 581 lines
+Digital-logic counterpart to `device_sizing.py`. Verilator-in-the-loop instead of ngspice-in-the-loop. Reuses `_check_constraints` and the lookup primitives from `device_sizing` so analog/digital code paths share gap-checking semantics.
+
+Function: `async def size_digital_device(topology_selection_id, *, db, candidate_idx=0, max_iterations=None, model_role=None, top_module="tb") -> DigitalSizingResult`. Dataclass: `DigitalIterationRecord`. **`POST /topology-selections/{id}/size` is polymorphic** on `spec.design.kind`: `analog_circuit` → `size_device`, `digital_logic` → `size_digital_device`, other → 400.
+
+#### `app/sim/report.py` — 719 lines
+Terminal stage — **pure projection of the audit tables, no LLM.** Joins `device_sizings ⨝ topology_selections ⨝ specs ⨝ sim_runs[]` (or `digital_sizings ⨝ …`). `render_markdown(doc) -> str` is byte-deterministic (`test_render_markdown_is_deterministic` is the guard). Non-converged sizings ARE renderable, with a `⚠ NOT CONVERGED` banner and per-constraint status table.
+
+Functions:
+- `async def build_report(sizing_id, *, db, generated_at=None) -> ReportDocument` — main entry
+- `def render_markdown(doc) -> str` — pure deterministic projection
+- `_classify_constraint` — status enum source of truth (mirrors `device_sizing._check_constraints`)
+- `_fetch_chunk_content` — best-effort Milvus citation fetch (§17.319 closed the `content` → `canonical_text` field-rename bug)
+
+Dataclasses: `ReportDocument`, `ReportConstraint`, `ReportCitation`, `ReportSimRun`. Exception: `ReportNotAvailableError` (router maps to 404).
+
+#### `app/sim/design_pipeline.py` — 592 lines
+**The five stages wired into one operator-facing flow.** Hosts the `design_circuit` job_type lifecycle. Three callable surfaces:
+
+- `async def create_design_job(nl_text, *, db, model_role=None) -> DesignCreateResult` — runs §17.144 extract; on success creates `jobs` row (`job_type='design_circuit'`) + links `specs.job_id`; on ambiguity OR extractor error returns inline with no rows persisted (keeps failed extractions out of the jobs lifecycle).
+- `async def advance_design_stage(job_id, stage, *, db) -> AsyncIterator[str]` — SSE-streaming per-stage advance (`event: stage_start | stage_done | stage_error | done`). `stage` ∈ `{topology, size, report}`. Size branch dispatches analog/digital based on `spec.design.kind`; `stage_done` carries a `kind` field.
+- `async def get_design_state(job_id, *, db) -> DesignState` — aggregated state; joins jobs ⨝ specs ⨝ topology_selections ⨝ device_sizings (UNION digital_sizings).
+
+Dataclasses: `DesignCreateResult`, `DesignState`. Exception: `DesignJobNotFoundError` (distinguishes missing job from wrong-`job_type`).
+
+**Full chain.** `POST /design` → `POST /specs/{id}/confirm` → 3× `POST /design/{id}/advance?stage={topology,size,report}` → `GET /design/{id}` for aggregated state, OR `GET /device-sizings/{id}/report` / `GET /digital-sizings/{id}/report` for the rendered Markdown.
 
 ---
 
@@ -17489,6 +17591,64 @@ Pre-§17.319 every entry returned `{}` (function-level swallow → empty map). P
 **Whose responsibility was this.** §17.148 wrote `_fetch_chunk_content` with the then-correct `content` field name. The Milvus collection rename landed in a separate commit during §17.83's 3-tier ingest work. There's no audit trail linking the two — that's exactly the kind of cross-module coupling §17.318's "schema-introspection regression test" suggestion would catch. A stronger version of the §17.319 guard would query the live `Collection.schema.fields` set and fail if any `output_fields` string isn't a member. **Deferred** — it requires either a live Milvus in CI or a stubbed schema-fixture file kept in sync with migrations; both are larger changes than a §17.318-finding bugfix warrants. Logged as a §17.x candidate for the next infrastructure-cleanup cohort.
 
 **Operator-facing change.** Operators running `GET /device-sizings/{id}/report` (or `/digital-sizings/{id}/report`) now see populated `snippet` text on every resolvable citation instead of `[content unavailable]`. The §17.148 graceful-degradation banner still fires when the chunk genuinely can't be fetched (Milvus down, entry_id stale) — only the field-name-mismatch failure mode is closed.
+
+---
+
+### §17.320 architecture-section refresh — name the EDA sidecars + `design_circuit` job_type in §2/§5.1/§11 (2026-05-25)
+
+Closes §17.318 finding #5 (architecture-section drift) — the doc-only counterpart to §17.319's code fix. **Documentation-only change**; no app/, pipelines/, or test edits. The §17.140-§17.156 engineering-design pipeline shipped 16 commits without a single update to the load-bearing reference sections (§2 topology, §5.1 schema, §11 module reference), so an operator reading OVERVIEW top-to-bottom would never learn the EDA stack exists. Three targeted patches close that gap without renumbering existing subsections (which would break every `§11.x` cross-reference in the §17.x archive).
+
+**Patch 1 — §2 (Container topology + port map).** ASCII diagram extended with a sidecar tier below the storage row, joined to the orchestrator via the `/design` arrow. Port-map table grows three rows for `scaffold-ngspice:8001`, `scaffold-verilator:8002`, `scaffold-symbiyosys:8003` — each row names the §17.140-§17.142 commit it landed in and the sandboxing posture (`read_only`, `cap_drop ALL`, tmpfs with explicit `exec` on the verilator/symbiyosys rows because those execute freshly-compiled binaries, per §17.141 rough edge #5). A new paragraph below the table calls out that the EDA sidecars are loopback-only, are not in any chat workflow's request path, and only fire under the `/design` (`design_circuit` job_type) flow. The audit-the-attempt contract (`sim_runs` row written on every attempt, never raises) is stated once at this level so the §11.11 module entries don't each have to repeat it.
+
+**Patch 2 — §5.1 `jobs` table.** Adds the missing `job_type` column row (`TEXT NOT NULL DEFAULT 'legacy'`, `CHECK ('legacy', 'design_circuit')`, partial index `WHERE job_type <> 'legacy'`, added migration 043 (§17.151)). A second paragraph below the status-lifecycle line distinguishes the two branches by router prefix and the join chain that `design_circuit` rows participate in (`specs / topology_select / device_sizings / digital_sizings / sim_runs`). The status set is unchanged across branches — only the routing differs — so the existing 14-status lifecycle paragraph stays correct.
+
+**Patch 3 — new §11.11 `app/sim/` subsection.** 13-file package reference (4522 lines total) appended after §11.10 so the existing subsection numbering survives. Format mirrors the rest of §11: file path, line count, one-line purpose, key functions / classes / dataclasses. Per-file highlights are kept terse and cross-referenced to the §17.x commit that introduced each one rather than re-explained:
+
+| File | LOC | Purpose | §17.x origin |
+|---|---:|---|---|
+| `spec_schema.json` | 155 | Single source of truth for the spec envelope | §17.143 |
+| `spec.py` | 236 | Validator + enum re-exports | §17.143 |
+| `spec_store.py` | 259 | DB-only helpers (split from validator) | §17.145 |
+| `spec_extractor.py` | 280 | NL→spec LLM (one-shot strict envelope) | §17.144 |
+| `topology_select.py` | 420 | Numeric-free RAG + citation-invariant LLM | §17.146 |
+| `ngspice.py` | 196 | scaffold-ngspice sidecar wrapper | §17.140 |
+| `verilator.py` | 228 | scaffold-verilator sidecar wrapper | §17.141 |
+| `symbiyosys.py` | 244 | scaffold-symbiyosys sidecar wrapper | §17.142 |
+| `device_sizing.py` | 767 | Analog closed-loop (LLM ↔ ngspice) | §17.147, §17.150, §17.156 |
+| `digital_sizing.py` | 581 | Digital closed-loop (LLM ↔ verilator) | §17.152, §17.155 |
+| `report.py` | 719 | Terminal Markdown report (no LLM) | §17.148, §17.153, §17.319 |
+| `design_pipeline.py` | 592 | `design_circuit` lifecycle (5 stages, SSE) | §17.151 |
+
+The §11.11 closing block lists the full operator-facing chain (`POST /design → /specs/{id}/confirm → 3× /design/{id}/advance → /design/{id}` OR `/device-sizings/{id}/report`).
+
+**Why not also update §3 (Request flow).** Considered adding a §3.2 for the `design_circuit` request flow paralleling the existing chat flow. Rejected — §3 is titled "happy path" and currently describes one path; adding a second would either dilute the structure or force a renumber-into-§3.1/§3.2. The new §11.11 closing paragraph already names the full POST-chain; an operator who needs the request-flow detail can read §11.11 + the §17.140-§17.156 archive without §3 having to grow.
+
+**Why not refresh `app/rerankers.py` (§11.1 line 943).** §17.318 finding #5 flagged the reranker model name as drifted in memory, but the actual OVERVIEW sections were consistent: §6.1 (line 595) names `Qwen3-Reranker-0.6B-seq-cls`; §12 (line 1476) defaults `MODEL_RERANKER` to `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`. The §11.1 one-liner ("CrossEncoder reranker + RRF fallback") describes the *interface*, not the model, and is accurate. The drift was in MEMORY.md only, and that was reconciled at the §17.318 commit.
+
+**Why not also doc the other `jobs`-table column drift.** §5.1's `jobs` row is missing `dag_input_hash`, `research_data`, `workflow_summary`, `compiled_output_synthesized`, `compile_synthesis_override` — separate drift, unrelated to §17.318's findings. Logged for a future §17.x doc-sweep; out of scope for the architecture-section refresh.
+
+**Verification.** Documentation-only edit, no test runs needed. Existing cross-references audited:
+
+```
+$ grep -c 'section §11\.[0-9]+' OVERVIEW.md
+0                                              # no internal numeric refs to §11.x; safe to append §11.11
+$ grep -c '§11\.1[0-9]' OVERVIEW.md
+2                                              # only §11.10 + new §11.11 refs from this entry; clean
+```
+
+**Cost.** OVERVIEW.md +~170 lines across §2 (+18), §5.1 (+3), §11 (+105 for the new §11.11), §17.320 (~50). No code, no tests, no migrations. Operator-facing leverage: high — anyone arriving at OVERVIEW after §17.319 can now find the `design_circuit` track without having to grep the §17.140 archive.
+
+**§17.318 follow-up list status.**
+
+| §17.318 recommendation | Status |
+|---|---|
+| §17.319 — sim/report.py field rename | ✅ Shipped 2026-05-25 |
+| §17.320 — Architecture refresh | ✅ This entry |
+| MEMORY pointer refresh | ✅ Done at §17.318 commit |
+| Drain 4 stuck `Sort Algorithm Overview` jobs | ⏸ Operator action — not engineering work |
+| Decide `calibration` health-check disposition | ⏸ Operator action |
+
+The §17.318 → §17.320 cohort closes both engineering items from the audit; the operator-action items remain pending.
 
 ---
 
