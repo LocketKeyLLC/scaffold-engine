@@ -15041,6 +15041,92 @@ Test boundary: at `get_ngspice_client()`. The sidecar's actual HTTP behavior is 
 
 ---
 
+### §17.280 Full-codebase line-for-line audit — 7-agent sweep post-§17.279 (2026-05-24)
+
+Operator-requested whole-codebase review. Seven parallel `Explore` agents, one per subsystem chunk (core runtime / execution+DAG / research+ideation+prompt / RAG+provenance / assist+obs+utils / sim+middleware+providers+web / OWUI pipelines), each briefed with the project-invariant suppression list (stdlib-vs-structlog, CancelledError-is-BaseException, FOR UPDATE SKIP LOCKED, sim_runs audit invariant, valves.template vs valves.json gitignore, `host.docker.internal` unavailable, bare `r.json()` is a known sweep target, embedder/reranker config-only, middleware reverse-add order, async-first with executor wrappers acceptable). Coverage: ~35k LOC across 117 production `.py` files in `app/` + `pipelines/`. Tests, db migrations, scripts, cli, sdk not in scope of this pass.
+
+**Method mirrors §17.258 / §17.273.** Raw agent output: ~30 🔴 + ~25 🟡 + ~15 🟢 + ~20 UX candidates. Each raw 🔴 verified by reading the cited file:line against the agent's claim. Verified TP rate: **6 / 20 = 30%** for 🔴 claims — within the predicted 26-31% band. Same false-positive vectors as §17.273: agents claim "no try/except" when one exists slightly above/below the citation; claim "fallthrough" when `; return` terminates the branch; claim "missing `.join()`" when reading prose docstring text as code; cite line numbers past EOF.
+
+**🔴 BUGS** (verified — work items)
+
+- **§17.280-🔴-1** — `app/modules/execution_agent.py:1070-1084` — Auto-complete flips a job to `completed` when `COUNT(*) WHERE status='pending'` is zero, but `failed` / `blocked` nodes don't count toward "remaining". A DAG with every node in `done | failed | skipped | blocked` flips to `completed` even when uncrossed failures sit on the row. Fix: `WHERE status NOT IN ('done','skipped','cancelled')` OR explicitly inspect the failed/blocked tally and branch to `failed`/`partially_completed` instead. Load-bearing — operators read `/exec/status` looking for the truthful terminal state.
+
+**🟡 RISKS** (verified — fix when touched)
+
+- **§17.280-🟡-1** — `app/modules/execution_agent.py:1397-1408` — `asyncio.wait_for(_slot_sem.acquire(), timeout=...)` followed by `_slot_acquired = True` has a known race window in pre-3.11 asyncio: if `acquire()` completes between timeout-fire and cancel-propagation, the semaphore slot is held but `_slot_acquired` never set, so the finally-block release is skipped → permanent slot leak. Python 3.12.13 (this project's pin) tightens this, but the wider try/except/finally below should be re-audited under that fix's guarantees.
+- **§17.280-🟡-2** — `app/utils/forum_ingest.py:55-64` — PII strip writes fixed placeholders `@user` and `email@redacted` into the canonical text. If a forum post legitimately contains those exact substrings, downstream consumers cannot distinguish them from genuinely-redacted PII. Either add a marker (`<<REDACTED:user>>`) or short-circuit when the original token already matches the placeholder.
+- **§17.280-🟡-3** — `app/modules/cost_rollup.py:91-99` (and the matching pattern in `app/modules/observability_rollups.py`) — broad `except Exception` returns zero-totals on transient DB failure with only a `logger.debug` line. `/exec/status` callers see `{total_cost_usd: 0, call_count: 0}` indistinguishably from a job with no calls yet. Surface a `_source: "error"` flag in the returned dict OR raise and let the route handler decide.
+- **§17.280-🟡-4** — `app/modules/gt_browser.py:104-114` — Milvus expression is built with f-string interpolation: `f'domain == "{domain}"'`. Injection-proofness depends entirely on `validate_domain()` being airtight; if any code path forgets that gate, an attacker-controlled `domain` value breaks out of the string literal. Wrap in a guard helper `safe_domain_expr(domain)` that re-validates at the formatter boundary, or switch to a parameterized expression API.
+- **§17.280-🟡-5** — `app/modules/assist_agent.py:410-420` — Mirror invariant (assist evidence → `dag_nodes.output_text`) is verified post-commit with `rowcount` checks but no recovery path if divergence is detected. Operator sees the success reply while the row mismatch persists silently in `logger.warning`. Either fail the request when divergence is observed, or surface the warning in the response dict so the operator can manually reconcile.
+
+**🟢 COMPLEXITY** (structural — not necessarily wrong, but flagged for future operator load)
+
+- **§17.280-🟢-1** — `pipelines/scaffold_router.py` is 3941 LOC. Handles 22 top-level commands, triage, synthesis, research, assist, execute, jobs, schedules, models, RAG, results. Size is operationally fixed (OWUI auto-discovery prevents shared imports between pipeline files). Worth recording as a stable hot-spot rather than treating as tech debt.
+- **§17.280-🟢-2** — `STATUS_ICONS` dict is replicated across all five pipeline files (`scaffold_router.py:360`, `execution_handler.py:26`, `dag_viewer.py:25`, `gt_browser.py:20`, `prompt_inspector.py:21`). Adding/changing a status icon requires patching 5 files in one commit or icons drift per-pipeline. Already noted as `# §17.212` in inline comments — calling it out again here so future contributors don't try to DRY it.
+- **§17.280-🟢-3** — `app/modules/research_agent.py` is 2501 LOC bundling decompose / search / extract / gap-analysis / summary + four direct modes (OpenAPI / GitHub / HF / Forum) with shared session lifecycle. Producer modes could be lifted into `app/modules/research_modes/<mode>.py` files with a dispatch table in the main module, mirroring how `app/utils/{github,hf,forum}_ingest.py` already split out the fetchers.
+- **§17.280-🟢-4** — `app/modules/execution_agent.py` (1736) and `app/modules/rag_pipeline.py` (1277) are the next two largest modules. No specific complaint — flagged because both touch hot paths and any further additions should land in dedicated sub-modules rather than continuing to grow the host file.
+
+**UX** (operator-facing simplifications)
+
+- **§17.280-UX-1** — `pipelines/scaffold_router.py:1011-1017` — Unknown `/`-prefixed input falls through to triage with no feedback. The `_suggest_command()` helper at line 153 is only wired into `_handle_command()` (line 710), not the front-door dispatch. A typo like `/resarch` silently becomes a triage turn instead of a "did you mean `/research`?" hint. Move the suggestion call earlier in dispatch.
+- **§17.280-UX-2** — `pipelines/scaffold_router.py:3318-3320` — `/results <job_id>` against a running job emits the progress line and an empty next-actions block when `next_actions` is omitted. Operator gets `⏳ Status: running — 3/10 nodes complete` with no path forward. Render a default "no actions suggested yet — re-run `/results` after the next node completes" string when the list is empty.
+- **§17.280-UX-3** — `app/modules/cost_rollup.py:99` + `app/modules/observability_rollups.py` fail-open pattern — see §17.280-🟡-3. Operator UX layer of the same issue: a zero-cost rollup on a busy job looks identical to a green run.
+- **§17.280-UX-4** — `app/modules/ideation_workflow.py:368` — Phase 2 compile failure returns `http_status: 502` (Bad Gateway). Defensible (the LLM is upstream), but inconsistent with the other Phase 2 failure paths that return 500. Either standardize on 500 across phase failures, or document the 502-means-LLM-upstream convention in `app/modules/recovery.py::NEXT_ACTIONS`.
+- **§17.280-UX-5** — `app/modules/research_agent.py:563-568` — `topic_classifier_bypass` reports `bypassed_urls` / `bypassed_entries` counts without denominators. `5 bypassed` could mean 5/5 (broken classifier) or 5/500 (working as intended). Add `total_urls` / `total_entries` to the same SSE event.
+- **§17.280-UX-6** — `app/modules/gt_extractor.py:215-220` push_to_github reason field is unstructured text. UI cannot categorize retries (rate-limit retry-after vs auth-fail re-auth vs repo-not-found ask-for-path). Promote to `{category: "rate_limit"|"auth"|"not_found"|..., detail: "..."}`.
+- **§17.280-UX-7** — `app/modules/dag_generator.py:450-451` — JSON parse failure returns `raw_output[:500]` with no parse-error context (line/offset/expected token). Operator gets a truncated snippet and no diagnostic. Include `e.lineno`, `e.colno`, `e.msg` from the JSONDecodeError.
+- **§17.280-UX-8** — `app/modules/execution_agent.py:1002-1003` — Node-timeout error message omits the actual timeout value and the node_key from the operator-facing payload. Reads as "Review timeout settings or retry"; should read "Node `<key>` exceeded `<N>s` timeout. Retry with `/exec/retry/<job>/<key>` or raise `execution_node_timeout_seconds`."
+- **§17.280-UX-9** — `app/modules/execution_agent.py:728` — `blocked_nodes` reply doesn't distinguish "blocked by failed upstream" (needs `/exec/retry`) from "blocked by pending upstream" (just wait). Different remediation; merge the two cases under one ambiguous label today. Split the response shape.
+
+**False-positive vectors observed during verification** (recorded so the next audit pass can pre-filter)
+
+- "Missing try/except around `r.json()`" — frequently flagged at a line that DOES have a surrounding try/except a few lines above or below. Five separate raw 🔴 claims in this audit collapsed under this pattern.
+- "Fallthrough after `if ...: yield ...; return`" — the `; return` is on the same line as the `yield` and agents tokenize it as if the branch falls through. Two raw 🔴 claims rejected.
+- "Missing `.join()` in error list" — claimed against prose docstring text (`device_sizing.py:287`) because the agent read PITFALL-7 prose as code. One raw 🔴 rejected.
+- "Bug at line N" where N > EOF — verilator.py claim cited line 352 in a 229-line file. One raw 🔴 rejected.
+- "AsyncSession without explicit commit" — `assist_replan.py:325` explicitly calls `await bg_db.commit()`. One raw 🟡 rejected.
+- "Vector-search merge is unfair under uneven partition distribution" — `rag_pipeline.py:325-335` does a global sort by `vector_score` before truncation, which IS fair. One raw 🟡 rejected.
+
+**What §17.280 does NOT change.** No code edits. Pure audit. The 1 🔴 + 5 🟡 + 4 🟢 + 9 UX items are the work surface for the follow-up cycle. Same structural arc as §17.273 → §17.274-§17.279: each verified item becomes its own §17.281, §17.282, … commit, dated with the day it lands, OVERVIEW entry + code change + (where relevant) test in the same commit per the project's standing rule. The 🟢 cleanups are deliberately framed as flagged-for-awareness rather than blocking — scaffold_router.py's 3941 LOC is fine as-is until OWUI gains shared-import support.
+
+**Subagent-TP rate replication.** §17.258 → 15% TP. §17.273 → 26% TP. §17.280 → 30% TP. Trending upward as the invariant-briefing matures (this run added `r.json()`-pattern preemption + verilator/ngspice sidecar audit invariant + middleware reverse-add explanation to the standing brief). Below 50% is still the working assumption — every raw 🔴 must be verified file:line before it becomes a fix commit.
+
+### §17.281 autocomplete gate shares `_all_nodes_done` with the L644 path — close §17.280 🔴 #1 (2026-05-24)
+
+§17.280's single verified 🔴. Pre-fix at `app/modules/execution_agent.py:1070-1074`:
+
+```python
+remaining = await db.execute(
+    text("SELECT COUNT(*) FROM dag_nodes WHERE job_id = :jid AND status = 'pending'"),
+    {"jid": job_id},
+)
+if remaining.scalar() == 0:
+    # flip job to 'completed' + compile output
+```
+
+The inline count only matched `status = 'pending'`. A DAG that finished a verify pass with surviving `failed` / `blocked` / `running` siblings would still satisfy the gate and flip the job to `completed` — even though work was unresolved. The L644 autocomplete path in the same file already uses `_all_nodes_done(db, job_id)` (`NOT IN ('done', 'skipped')`), which is the correct gate; the two paths had drifted.
+
+**One-line fix:** replace the inline `SELECT COUNT(*) ... status = 'pending'` count with `if await _all_nodes_done(db, job_id):`. Both autocomplete paths now share semantics, so any non-success status (failed, blocked, running, plus anything added later) defeats the flip. Failed-with-survivors jobs fall through into `execute_all_nodes`' partial-compile + `status = 'blocked'` branch (L671-705), which is the existing convention for "job didn't finish cleanly" — and matches what `/jobs/{id}/resume` (§17.130) is shaped to recover from.
+
+**Test-suite delta:** +6 tests in new `tests/test_execution_agent_autocomplete.py`:
+
+| Class | Test | Asserts |
+|---|---|---|
+| `TestAllNodesDoneAutocompleteSemantics` | `test_zero_unfinished_returns_true` | COUNT==0 → helper True (autocomplete fires) |
+| | `test_failed_node_present_returns_false` | **The §17.281 bug pinned** — one `failed` row → helper False (autocomplete blocked) |
+| | `test_blocked_node_present_returns_false` | `blocked` is non-success terminal — defeats flip |
+| | `test_running_node_present_returns_false` | concurrent-execution mid-run defers autocomplete to that call |
+| `TestAllNodesDoneRegressionGuard` | `test_pre_fix_buggy_sql_is_absent` | regex-anchored source guard: the exact pre-fix SQL string cannot reappear. Other legitimate `status = 'pending'` uses in the file (`_get_next_node` claim, retry cascade) don't match the full `SELECT COUNT(*) FROM dag_nodes WHERE job_id = :jid AND status = 'pending'` shape. |
+| | `test_all_nodes_done_helper_uses_not_in_done_skipped` | the helper's predicate anchor (`NOT IN ('done', 'skipped')`) is preserved — a drift to a narrower predicate would silently re-introduce the bug |
+
+The behavioural tests use a tiny `_make_count_db(count)` helper that mocks `db.execute(...).scalar()` to a fixed value — sidesteps the full-pipeline mocking required to drive `execute_next_node` end-to-end. The source-shape regression guards close the gap that pure behavioural tests of the helper leave open: if a future refactor re-inlines the SQL alongside the helper, the behavioural tests still pass but the regex guard fails.
+
+**Why not also auto-flip to `failed` on the broken branch?** Considered and rejected. The existing L671-705 branch already does the right thing — it persists a partial compile and flips the job to `blocked`, which the `/jobs/{id}/resume` endpoint (§17.130) is shaped to recover from. Adding a separate `failed` terminal branch here would split the operator recovery path. The current single-recipe ("flip to blocked, operator retries the failed node, autocomplete fires from the next clean verify") stays.
+
+**§17.280 closeout progress.** §17.281 closes 🔴 #1 — the only verified bug in the audit. Five 🟡, four 🟢 (informational), and nine UX items remain. Cycle expected to mirror §17.273 → §17.274-§17.279 in shape: one entry per fix, OVERVIEW + code + test in the same commit.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

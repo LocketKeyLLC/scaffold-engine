@@ -1067,11 +1067,13 @@ async def execute_next_node(
             ),
         )
 
-        remaining = await db.execute(
-            text("SELECT COUNT(*) FROM dag_nodes WHERE job_id = :jid AND status = 'pending'"),
-            {"jid": job_id},
-        )
-        if remaining.scalar() == 0:
+        # §17.281 — Use _all_nodes_done (NOT IN ('done','skipped')) instead of
+        # the inline `status='pending'` count. The old query missed `running`,
+        # `failed`, and `blocked` nodes, so a DAG that finished with any
+        # surviving failure would still flip the job to 'completed'. Path #2
+        # at L644 already uses this helper; sharing semantics across the two
+        # autocomplete paths.
+        if await _all_nodes_done(db, job_id):
             auto = await db.execute(
                 text(
                     "UPDATE jobs SET status = 'completed' "
