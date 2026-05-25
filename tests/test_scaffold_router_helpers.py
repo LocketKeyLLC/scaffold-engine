@@ -202,16 +202,40 @@ class TestHandleSSEEvent:
         assert "Output did not match requirements" in chunks[0]
 
     def test_blocked(self, pipe):
-        """A 'blocked' event means a step is waiting for another step to finish."""
+        """A 'blocked' event means the pipeline can't make progress.
+
+        §17.295 — the terminal `blocked` SSE event carries a
+        `blocked_nodes` list with per-node `cause` ("failed" or "waiting")
+        and per-dep `{node_key, status}` objects. Pre-§17.295 this test
+        mocked a different (single-node, top-level `blocked_by`) shape
+        that didn't reflect what execute_all_nodes actually emits — the
+        handler tolerated it accidentally. §17.295's rewrite matched the
+        real payload, surfacing the test's wrong mock.
+        """
         data = json.dumps({
-            "node_key": "T3",
-            "blocked_by": ["T1", "T2"],
+            "message": "No executable nodes — 1 blocked by failed upstream.",
+            "blocked_nodes": [
+                {
+                    "node_key": "T3",
+                    "title": "Summarize",
+                    "blocked_by": [
+                        {"node_key": "T1", "status": "failed"},
+                        {"node_key": "T2", "status": "pending"},
+                    ],
+                    "cause": "failed",
+                },
+            ],
+            "actionable_count": 1,
+            "waiting_count": 0,
         })
         failed = []
         chunks = list(pipe._handle_sse_event("blocked", data, failed))
-        assert len(chunks) == 1
-        assert "T3" in chunks[0]
-        assert "T1" in chunks[0]
+        # Generator yields multiple chunks (header + per-node bullets).
+        joined = "".join(chunks)
+        assert "T3" in joined
+        # Failed-upstream dep surfaced with the /exec retry hint.
+        assert "T1" in joined
+        assert "/exec retry" in joined
 
     def test_node_retry(self, pipe):
         """A 'node_retry' event should show retry info to the user."""

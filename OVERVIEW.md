@@ -15807,6 +15807,61 @@ The vendor file is larger than the LOC removed because each function gained a br
 
 **§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.295 closed UX #1-9. §17.296 closes 🟢 #1. Remaining: three 🟢 (#2 STATUS_ICONS replication, #3 research_agent 2501 LOC, #4 execution_agent + rag_pipeline next-largest).
 
+### §17.297 STATUS_ICONS hoisted into pipelines/_vendor/_status_icons.py — close §17.280 🟢 #2 (2026-05-24)
+
+§17.280's second 🟢 (informational) item. Pre-§17.297 the `STATUS_ICONS` dict was inlined in all five pipeline files (`scaffold_router.py`, `execution_handler.py`, `dag_viewer.py`, `gt_browser.py`, `prompt_inspector.py`) under a "─── SHARED: keep in sync ───" comment block. Adding or renaming a status required patching all 5 files in one commit or icons drifted per-pipeline. The replication was operationally enforced by §17.212 (OWUI auto-discovery: every `pipelines/*.py` is a candidate pipeline; no shared imports between pipeline files).
+
+§17.296 demonstrated the vendor escape hatch for the /assist handlers. §17.297 applies the same pattern to `STATUS_ICONS`.
+
+**Fix.** Single source of truth at `pipelines/_vendor/_status_icons.py` exports a UNION dict — 5 node-level keys (`done` / `failed` / `running` / `pending` / `skipped`) plus 5 job-level keys (`executing` / `planning` / `blocked` / `completed` / `cancelled`). All 5 pipelines load it and expose `STATUS_ICONS` as a module-level alias, preserving every existing `STATUS_ICONS.get(...)` call site without rewriting.
+
+**Pre-§17.297 inconsistency caught during fix.** Inspecting the five inline dicts surfaced that `execution_handler.py` had 5 extra job-state keys the others lacked — `executing`, `planning`, `blocked`, `completed`, `cancelled`. The "keep in sync" comment was misleading: the dicts WERE in sync for the 5 shared keys, but execution_handler legitimately extended them. §17.297 collapses both into one UNION dict; non-execution-handler pipelines simply never look up the extras, which is harmless.
+
+**Per-pipeline bootstrap shape.** scaffold_router.py already had `_load_vendor` (from §17.190); it gets one extra line. The other 4 pipelines each inline an 8-line `importlib.util.spec_from_file_location` bootstrap. Per-pipeline boilerplate is structural — OWUI's auto-discovery prevents factoring this into a shared loader without re-introducing the very constraint we're escaping.
+
+| File | Before | After (this change only) |
+|---|---|---|
+| `scaffold_router.py` | 10-line inline dict | 3-line vendor load (delta: -7) |
+| `execution_handler.py` | 15-line inline dict (extended) | 13-line vendor bootstrap (delta: -2) |
+| `dag_viewer.py` | 10-line inline dict | 13-line vendor bootstrap (delta: +3) |
+| `gt_browser.py` | 10-line inline dict | 13-line vendor bootstrap (delta: +3) |
+| `prompt_inspector.py` | 10-line inline dict | 13-line vendor bootstrap (delta: +3) |
+| **New: `_vendor/_status_icons.py`** | — | 56 lines (dict + comprehensive header doc) |
+
+LOC delta is roughly neutral. The win is in the maintenance burden — adding a status now requires editing ONE file. The "─── SHARED: keep in sync ───" comment blocks (~3 lines each) are gone from every pipeline.
+
+**Test-suite delta:** +19 new tests in `tests/test_status_icons_vendor.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestVendorModuleContract` | 4 | vendor file exists; `STATUS_ICONS` is a non-empty dict; node-level keys (5) present; job-level keys (5) present |
+| `TestPipelinesUseVendorDict` | 5 (parametrize) | each pipeline's `STATUS_ICONS` equals the vendor's dict — same values, single source |
+| `TestSourceShapeRegressionGuard` | 10 (2× parametrize) | no pipeline carries the pre-§17.297 "─── SHARED: status icons" inline literal block; every pipeline references `_status_icons.py` in its bootstrap |
+
+**Equality, not identity, in the matches-vendor check.** First test cut asserted `mod.STATUS_ICONS is vendor.STATUS_ICONS` — identity. Failed for all 5 because each `importlib.util.spec_from_file_location` call gives a FRESH module instance with its own dict object, so the test-side reloaded vendor and the test-side reloaded pipeline get distinct dicts even though they come from the same source file. Identity is over-specified for the audit invariant; equality + the source-shape regression guards together prove "values match" AND "values came from the vendor bootstrap". Recorded as a vendor-test-pattern lesson for future similar work.
+
+**What §17.297 does NOT do.**
+
+- Doesn't reduce other replication patterns (the valve-bootstrap inline-per-pipeline code §17.280-🟢-2 also flagged in passing). Each pipeline has its own valves persistence — that's tied to OWUI's per-pipeline valve UI, not a candidate for vendor extraction without a separate API contract.
+- Doesn't refactor scaffold_router.py's `_load_vendor` helper to be reusable across pipelines. Each pipeline's standalone bootstrap is the operationally fixed shape; sharing a loader function would re-introduce the chicken-and-egg constraint.
+
+**Test-suite delta:** +19 (new vendor pin) + 2 stale-test-shape catchups.
+
+The pipeline-cluster regression check (300 total tests) caught two pre-existing stale-test-shape drifts that earlier targeted clusters had missed:
+
+| Test | Drift origin | Fix |
+|---|---|---|
+| `tests/test_scaffold_router_helpers.py::test_blocked` | §17.295 — the `blocked` SSE handler was rewritten to read `blocked_nodes` (list) but this test mocked the old single-node `{node_key, blocked_by}` shape | Updated the mock payload to match the post-§17.295 `blocked_nodes: [{cause, blocked_by: [{node_key, status}]}]` shape; assertions now `"".join(chunks)` because the handler yields multiple chunks (header + per-node bullets) |
+| `tests/test_assist_agent_mirror_divergence.py::test_submit_pipeline_renders_warning_when_divergence_flag_set` | §17.296 — the source-anchor strings moved from `scaffold_router.py` into `_vendor/_assist_handlers.py` when /assist handlers were extracted | Test now reads BOTH files and checks the combined source — `scaffold_router.py` retains the thin delegates; literal anchor strings live in the vendor |
+
+Both stale tests passed in their own targeted clusters when their originating commits landed (§17.295 / §17.296), but neither's cluster ran the FULL set; the broader §17.297 cluster check surfaced the drift. Recorded as a vendor-extraction lesson: **after any post-§17.296-style refactor that moves source strings into _vendor/, sweep test files for `scaffold_router.__file__` anchors that need to add the vendor path to their grep target.**
+
+Both fixes bundled into the §17.297 commit since they're narrow test-mock updates with no production effect; isolating them as a separate commit would have been mostly bookkeeping.
+
+Pipeline cluster post-fix: 300 passing in the cluster regression check. No regressions.
+
+**§17.280 closeout progress (cumulative).** §17.281 🔴 #1. §17.282-§17.286 closed 🟡 #1-5. §17.287-§17.295 closed UX #1-9. §17.296 closed 🟢 #1. §17.297 closes 🟢 #2. Remaining: two 🟢 (#3 research_agent 2501 LOC, #4 execution_agent + rag_pipeline next-largest).
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).

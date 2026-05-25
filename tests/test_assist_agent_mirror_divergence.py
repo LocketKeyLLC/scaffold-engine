@@ -171,21 +171,34 @@ class TestPipelineRendersDivergence:
     """
 
     def test_submit_pipeline_renders_warning_when_divergence_flag_set(self):
+        """§17.286 chat-render anchor.
+
+        §17.296 lifted the /assist handlers from scaffold_router.py into
+        pipelines/_vendor/_assist_handlers.py. The string anchors moved
+        with them. Check both files — scaffold_router still has the
+        thin-delegate methods but the literal source strings now live
+        in the vendor module.
+        """
+        from pathlib import Path
         from pipelines import scaffold_router
 
-        with open(scaffold_router.__file__, encoding="utf-8") as f:
-            src = f.read()
+        scaffold_src = Path(scaffold_router.__file__).read_text(encoding="utf-8")
+        vendor_path = Path(scaffold_router.__file__).parent / "_vendor" / "_assist_handlers.py"
+        vendor_src = vendor_path.read_text(encoding="utf-8")
+        combined = scaffold_src + vendor_src
 
-        assert 'd.get("mirror_divergence")' in src, (
-            "§17.286: scaffold_router._assist_submit (and _assist_skip) must "
-            "read the ``mirror_divergence`` field from the orchestrator's "
-            "submit response and surface a warning to the chat. Otherwise "
-            "the field is set on the server side but invisible to the user."
+        assert 'd.get("mirror_divergence")' in combined, (
+            "§17.286: the /assist submit + skip handlers must read the "
+            "``mirror_divergence`` field from the orchestrator's response "
+            "and surface a warning to the chat. Otherwise the field is "
+            "set on the server side but invisible to the user. (Post-"
+            "§17.296 the handlers live in pipelines/_vendor/_assist_"
+            "handlers.py; check both files.)"
         )
-        assert "Mirror divergence" in src, (
+        assert "Mirror divergence" in combined, (
             "§17.286: the operator-facing warning string for mirror "
-            "divergence must remain in scaffold_router.py — it's the visible "
-            "surface of the audit fix."
+            "divergence must remain in the assist handlers — it's the "
+            "visible surface of the audit fix."
         )
 
 

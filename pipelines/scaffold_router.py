@@ -60,6 +60,15 @@ _next_actions = _load_vendor("scaffold_router_next_actions", "_next_actions.py")
 # fine because vendor functions resolve the session lazily via
 # `sys.modules["scaffold_router"]._HTTP_SESSION`.
 _assist = _load_vendor("scaffold_router_assist", "_assist_handlers.py")
+# §17.297 — STATUS_ICONS hoisted into pipelines/_vendor/_status_icons.py
+# so the dict has a single source of truth across all 5 pipeline files
+# (pre-§17.297 each pipeline carried its own copy with a "keep in sync"
+# comment). Module-level `STATUS_ICONS` alias preserved so existing
+# call sites (`STATUS_ICONS.get(status, ...)`) keep working without a
+# rewrite.
+STATUS_ICONS = _load_vendor(
+    "scaffold_router_status_icons", "_status_icons.py",
+).STATUS_ICONS
 del _importlib_util, _pathlib, _load_vendor
 
 # Module-level Session for connection reuse across the many orchestrator
@@ -361,17 +370,11 @@ SYNTHESIS_SYSTEM_PROMPT = (
 )
 
 
-# ─── SHARED: status icons — keep in sync across pipelines (#8.17) ───
-# Pipelines load as isolated single-file modules; no shared imports possible.
-# If you add/rename a status, update every pipeline file that has this block.
-STATUS_ICONS = {
-    "done":     "✅",
-    "failed":   "❌",
-    "running":  "🔄",
-    "pending":  "⬜",
-    "skipped":  "⏭️",
-}
-# ─── END SHARED ───
+# §17.297 — STATUS_ICONS is now loaded from pipelines/_vendor/_status_icons.py
+# at module-init (see the `_load_vendor` block above). The "─── SHARED:
+# keep in sync ───" inline block this comment replaces was the pre-§17.297
+# convention; it's gone because the vendor module is the single source.
+
 
 class Pipeline:
     class Valves(BaseModel):

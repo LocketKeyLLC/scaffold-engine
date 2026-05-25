@@ -18,25 +18,22 @@ from pydantic import BaseModel
 _HTTP_SESSION = requests.Session()
 
 
-# ─── SHARED: status icons — keep in sync across pipelines (#8.17) ───
-# Pipelines load as isolated single-file modules; no shared imports possible.
-# execution_handler has additional job-lifecycle states (executing, planning,
-# blocked, completed, cancelled) that the other pipelines don't need.
-# If you add/rename a status, update every pipeline file that has this block.
-STATUS_ICONS = {
-    "done":      "✅",
-    "failed":    "❌",
-    "running":   "🔄",
-    "pending":   "⬜",
-    "skipped":   "⏭️",
-    # Extended job states — execution_handler only
-    "executing": "🔄",
-    "planning":  "📋",
-    "blocked":   "🚫",
-    "completed": "✅",
-    "cancelled": "🚫",
-}
-# ─── END SHARED ───
+# §17.297 — STATUS_ICONS loaded from pipelines/_vendor/_status_icons.py
+# (vendor pattern from §17.190 / §17.296). Single source of truth across
+# all 5 pipelines; adding a status only requires editing the vendor file.
+# Each pipeline has its own loader bootstrap because OWUI's auto-discovery
+# loads each `pipelines/*.py` as an isolated module — `from _vendor import`
+# isn't reachable without the importlib.util shim.
+import importlib.util as _iu
+import pathlib as _pl
+_si_spec = _iu.spec_from_file_location(
+    "pipeline_status_icons",
+    _pl.Path(__file__).parent / "_vendor" / "_status_icons.py",
+)
+_si_mod = _iu.module_from_spec(_si_spec)
+_si_spec.loader.exec_module(_si_mod)
+STATUS_ICONS = _si_mod.STATUS_ICONS
+del _iu, _pl, _si_spec, _si_mod
 
 
 def _safe_json(resp):
