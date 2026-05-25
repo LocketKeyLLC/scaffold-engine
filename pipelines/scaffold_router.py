@@ -3387,7 +3387,20 @@ class Pipeline:
             )
             fail_str = f", {failed} failed" if failed else ""
             head = f"⏳ Status: **{status}** — {done}/{total} nodes complete{fail_str}{cur_str}"
-            return head + self._render_next_actions(data)
+            # §17.288 — provide a path forward when the orchestrator
+            # omits next_actions on an in-progress status (older
+            # orchestrator, or transient-empty during a status flip).
+            # Pre-§17.288 the operator got just the progress line with
+            # nowhere to go; now they always see at least a copy-pasteable
+            # next step.
+            actions_block = self._render_next_actions(data)
+            if actions_block:
+                return head + actions_block
+            return (
+                head
+                + f"\n\n_No next steps suggested yet — re-run "
+                + f"`/results {job_id}` after the next node completes._"
+            )
 
         if status in ("failed", "blocked", "cancelled"):
             err = (data.get("error_summary") or data.get("error")
