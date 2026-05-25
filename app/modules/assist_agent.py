@@ -337,6 +337,10 @@ async def submit_step(
                 "node_key": node_key,
                 "status": step["status"],
                 "no_op": True,
+                # §17.286 — no UPDATE happened on the idempotent path, so
+                # divergence can't be detected. Always-False keeps the
+                # response shape stable across both branches.
+                "mirror_divergence": False,
             }
         if step["status"] == "pending":
             raise ValueError(
@@ -412,8 +416,11 @@ async def submit_step(
     # is row-locked above so step_res.rowcount is always 1; if dag_nodes
     # rowcount is 0, the corresponding node was already 'done' or 'skipped'
     # from another code path (rare — most likely a stale execute_next_node
-    # racing with assist). Log loudly so the divergence is visible.
-    if step_res.rowcount == 1 and node_res.rowcount == 0:
+    # racing with assist). Log loudly AND surface the divergence in the
+    # response dict (§17.286) so the operator can see it without digging
+    # through orchestrator logs.
+    mirror_divergence = (step_res.rowcount == 1 and node_res.rowcount == 0)
+    if mirror_divergence:
         logger.warning(
             "assist_mirror_divergence: session_id=%s node_key=%s "
             "assist_step_status=%s dag_node_already_terminal=true",
@@ -452,6 +459,12 @@ async def submit_step(
         "no_op": False,
         "next_node_key": next_pending,
         "replan": replan_result,
+        # §17.286 — True when the mirror invariant detected dag_nodes was
+        # already terminal (race with execute_next_node). assist_steps was
+        # still updated, so the request succeeds; the flag tells operator
+        # that the dag_nodes row was NOT touched by this call. Always
+        # present (default False) so callers can rely on the key.
+        "mirror_divergence": mirror_divergence,
     }
 
 

@@ -1702,6 +1702,17 @@ class Pipeline:
             msg += f"Next: `{next_nk}`. Run `/assist next` to fetch."
         else:
             msg += f"All steps terminal — run `/assist done` to view compiled output."
+        # §17.286 — mirror invariant divergence: assist_steps was updated
+        # but dag_nodes was already in a terminal status. Append a
+        # warning so the operator sees the race without grepping logs.
+        if d.get("mirror_divergence"):
+            msg += (
+                "\n\n⚠️ **Mirror divergence**: the corresponding DAG node was "
+                "already `done` or `skipped` when this submit landed (likely a "
+                "concurrent `execute_next_node`). Your evidence is recorded on "
+                "the assist step, but the DAG node was NOT overwritten by this "
+                "call. Inspect with `/assist status` and re-run if needed."
+            )
         yield msg
 
     def _assist_skip(
@@ -1734,6 +1745,14 @@ class Pipeline:
             msg += f"Next: `{next_nk}`."
         else:
             msg += f"All steps terminal — run `/assist done`."
+        # §17.286 — mirror invariant divergence (skip path). assist_steps
+        # was flipped to 'skipped' but dag_nodes was already terminal.
+        if d.get("mirror_divergence"):
+            msg += (
+                "\n\n⚠️ **Mirror divergence**: the DAG node was already `done` or "
+                "`skipped` when this skip landed. The assist step is marked "
+                "skipped, but the DAG node was NOT touched."
+            )
         yield msg
 
     def _assist_handoff(self, session_id: str, node_key: str, mode: str) -> Generator[str, None, None]:

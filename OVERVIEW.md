@@ -15271,6 +15271,39 @@ The injection-payload parametrize is the load-bearing block — every payload th
 
 **§17.280 closeout progress (cumulative).** §17.281 closed 🔴 #1. §17.282 closed 🟡 #1. §17.283 closed 🟡 #2. §17.284 closed 🟡 #3. §17.285 closes 🟡 #4. Remaining: one 🟡 (#5 assist mirror divergence), four 🟢 (informational), nine UX.
 
+### §17.286 assist submit surfaces `mirror_divergence` in response — close §17.280 🟡 #5 (2026-05-24)
+
+§17.280's final yellow item, and the last 🟡 in the §17.280 audit. `app/modules/assist_agent.py:submit_step` already detected the mirror invariant violation (`step_res.rowcount == 1 and node_res.rowcount == 0` — assist_steps was updated but the matching `dag_nodes` row was already terminal from a concurrent path) and logged a WARNING. The response dict carried no signal — operators saw a success reply while the divergence sat quietly in orchestrator logs.
+
+**Fix:** surface the divergence at the API + UX boundary.
+
+- **Response shape.** `submit_step` now sets `mirror_divergence: bool` on every return path. True iff the rowcount comparison flagged divergence (step updated, mirror not); False on the happy path; False on the idempotent no-op (no UPDATE happened so no race can be detected).
+- **OWUI render.** `pipelines/scaffold_router.py:_assist_submit` and `:_assist_skip` append a ⚠️ block to the chat reply when `d.get("mirror_divergence")` is True. Operator sees the warning inline next to "✅ Step committed" with concrete guidance ("DAG node was NOT overwritten by this call — inspect with `/assist status` and re-run if needed"). Same for the skip path.
+
+**Why surface, not fail.** Considered failing the request when divergence is detected — rejected. The assist_steps row IS legitimately updated (the audit row exists, evidence is recorded). The race condition is between two valid paths, and the assist side completed correctly. Failing would hide a legitimate commit from the operator. Surfacing the flag preserves the success semantic AND makes the race visible.
+
+**Why a bool, not a structured detail dict.** Considered `mirror_divergence: {reason: "...", concurrent_status: "..."}` — rejected as over-engineered for the current consumer set. The only race condition that triggers this is `execute_next_node` running concurrently with assist submission; future causes (e.g., reaper resetting the node, manual SQL) are out of scope. If a second divergence cause emerges, the field can grow into a structured shape with `{kind: "race_with_executor", ...}` without breaking existing consumers (the boolean reading is `bool(d["mirror_divergence"])` which works for both shapes).
+
+**Test-suite delta:** +7 tests in new `tests/test_assist_agent_mirror_divergence.py`.
+
+| Class | Test | Pins |
+|---|---|---|
+| `TestMirrorDivergenceResponseShape` | `test_happy_submit_returns_false` | both rowcounts==1 → field is False |
+| | `test_submit_divergence_surfaced_when_dag_node_already_terminal` | **load-bearing case** — step rowcount==1, dag rowcount==0 → field is True; response is still success |
+| | `test_skip_divergence_surfaced_same_way` | skip path uses same mirror check + same response field |
+| | `test_skip_no_divergence_when_both_rows_updated` | skip happy-path → False |
+| | `test_idempotent_noop_returns_false_divergence` | already-committed early-return path also carries the field (always-present contract) |
+| `TestPipelineRendersDivergence` | `test_submit_pipeline_renders_warning_when_divergence_flag_set` | scaffold_router reads `d.get("mirror_divergence")` and emits the "Mirror divergence" warning string — pinned via source-shape since the OWUI pipeline has module-level side-effects |
+| `TestSourceShapeRegressionGuard` | `test_response_dict_contains_mirror_divergence_key` | the `mirror_divergence` field AND the load-bearing `mirror_divergence = (step_res.rowcount...)` assignment stay in production source |
+
+The happy-path tests use a local `_result()` helper that mirrors `tests/test_assist_agent.py::_result` — kept independent so this file doesn't depend on the other's helper layout. Mock side-effect lists thread through the post-commit queries (`_next_pending_node_key` returns `{"node_key": "T2"}` so `_maybe_finalize_session` doesn't fire; would need more mocks if we wanted to exercise the finalize branch — out of scope for the divergence-flag test).
+
+**Backward compatibility.** Existing callers that ignore the new field continue to work — dict-access pattern. The early no-op return (already-committed path) also includes `mirror_divergence: False` so callers can rely on the field being present, never `KeyError`. Pydantic-typed consumers via the SDK pick it up automatically — the assist submit response has no Pydantic schema today, but if one is added later, `mirror_divergence: bool = False` is the obvious default.
+
+**Test-suite delta:** +7. Assist + scaffold_router cluster: exit-0 (test_assist_agent + test_assist_agent_mirror_divergence + test_assist_session_map + test_scaffold_router_commands). No regressions.
+
+**§17.280 closeout — yellow done.** All 5 🟡 items closed across §17.282 → §17.286. The 🔴 was closed in §17.281. Cycle shape mirrors §17.273 → §17.279 exactly: one entry per fix, OVERVIEW + code + test in the same commit. Remaining §17.280 work: four 🟢 (informational complexity flags — flagged-for-awareness, not blocking) and nine UX items. Operator can decide cycle order from here; no audit item is load-bearing.
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
