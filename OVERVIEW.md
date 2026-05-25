@@ -17652,6 +17652,71 @@ The §17.318 → §17.320 cohort closes both engineering items from the audit; t
 
 ---
 
+### §17.321 audit correction — `/skip` scope + drain the 4 stuck `awaiting_confirmation` jobs (2026-05-25)
+
+Two related corrections to the §17.318 → §17.320 cohort. The audit at §17.318 finding #3 and the §17.320 follow-up table both asserted that the 4 stuck `Sort Algorithm Overview` jobs were "exactly the cohort §17.316 `/skip` was built to clear." **That claim was wrong.** When the operator went to act on it, the underlying mechanism wouldn't have worked:
+
+| Claim in §17.318 | Reality |
+|---|---|
+| §17.316 `/skip` drains stuck `awaiting_confirmation` jobs | `/skip` is **node-level**: `POST /skip {"job_id", "node_key"}` → `skip_node` at `app/modules/execution_agent.py:1183` queries `dag_nodes WHERE job_id=X AND node_key=Y` and marks one row `'skipped'`. Job-status is untouched. |
+| §17.316 was built for this cohort | §17.316 hardened `/skip`'s **recall ergonomics** (active-job memory, tiered confirmation-friction). The command's *scope* — DAG-node-level — was unchanged. |
+| The 4 stuck jobs would drain via `/skip` | The 4 stuck rows have **zero `dag_nodes` each** (parked at the `/confirm` gate, before DAG generation). Any `/skip <id> <key>` against them returns `{"status": "error", "message": "Node 'key' not found"}` — a no-op with an error body. |
+
+**Root cause of the miscall.** I conflated "the §17.316 commit landed for the `/skip` command" with "/skip is the operation that drains stuck jobs at the job level." That's exactly the failure mode `feedback_verify_before_claim` warns against — claiming an operation works without actually invoking it. The §17.318 audit's strength was the *data inventory*; its weakness was the *operator-action recommendation*. **Lesson** for future audit entries: every "use command X to resolve" claim should be verified by reading the command's actual handler, not by inferring scope from the commit title.
+
+**Drain mechanism actually used.** `/cancel` is not a router command on this deployment, and `DELETE /jobs/{id}` cascades to `dag_nodes / artifacts / specs / etc.` (overreach for jobs that have no children yet — and destroys the audit trail). The right operation is a **status-conditional `UPDATE`** that matches the existing 78 cancellation rows' shape:
+
+```sql
+BEGIN;
+UPDATE jobs
+   SET status = 'cancelled',
+       error_summary = COALESCE(error_summary, '') ||
+           E'\nManual cancel via §17.321 — drained from awaiting_confirmation after §17.318 audit; /skip does not apply at job-level.'
+ WHERE id IN ( '209cd850-...', 'fba49045-...', '910c5dc0-...', '7aaa2866-...' )
+   AND status = 'awaiting_confirmation'
+ RETURNING id, status, updated_at;
+COMMIT;
+```
+
+The `AND status = 'awaiting_confirmation'` predicate is the safety guard — if any of the 4 jobs had moved out of that status between the audit and the operation (e.g., operator ran `/confirm` in between), the row wouldn't be touched. `RETURNING` confirms which rows actually changed.
+
+**Operation result.**
+
+```
+ fba49045-09eb-4757-9260-63bbe23813de | cancelled | 2026-05-25 23:49:00.252224+00
+ 910c5dc0-e015-4245-b100-e756119f5317 | cancelled | 2026-05-25 23:49:00.252224+00
+ 7aaa2866-883a-42a9-abe0-43cedb4a1432 | cancelled | 2026-05-25 23:49:00.252224+00
+ 209cd850-9d3f-485d-9dd5-558186eb9fac | cancelled | 2026-05-25 23:49:00.252224+00
+UPDATE 4
+COMMIT
+```
+
+Post-cancel verification:
+
+```
+$ SELECT COUNT(*) FROM jobs WHERE status='awaiting_confirmation';
+ 0
+```
+
+System-wide `awaiting_confirmation` count is now 0 — the cohort is fully drained. The 4 cancellations join the existing 54 cancelled `Sort Algorithm Overview` rows (the title was an operator's frequent stress-test target during the §17.300-§17.317 UX cycle).
+
+**Why not also add a job-level `/cancel` router command.** Considered shipping a real `/cancel <job_id>` in `scaffold_router.py` so future operator-action items don't require `docker exec psql`. Deferred — would need: (a) a new orchestrator endpoint with proper status-conditional UPDATE, (b) idempotency semantics (cancel-when-already-cancelled = 200 OK or 409?), (c) the §17.307 active-job-recall integration so it matches the post-§17.316 cohort, (d) tests. Logged as a §17.x candidate. The bigger insight is that the **operator's drain workflow for stuck Phase-1 jobs is currently SQL-only** — every other lifecycle transition has a router command, this one doesn't. Worth a real fix the next time the engine is in a feature-work window.
+
+**§17.318 → §17.320 → §17.321 cohort status (final).**
+
+| §17.318 recommendation | Status |
+|---|---|
+| §17.319 — sim/report.py field rename | ✅ Shipped |
+| §17.320 — Architecture refresh | ✅ Shipped |
+| MEMORY pointer refresh | ✅ Done |
+| Drain 4 stuck `Sort Algorithm Overview` jobs | ✅ Cancelled via §17.321 (mechanism corrected from `/skip` to status-conditional UPDATE) |
+| Decide `calibration` health-check disposition | ⏸ Operator action — still pending |
+| Add real `/cancel <job_id>` router command | 🆕 New §17.x candidate surfaced by this entry |
+
+**No code, no tests, no migrations** — same posture as §17.320, plus a 4-row UPDATE on a non-schema table. The OVERVIEW correction is itself the deliverable; future audits anchored against §17.318's claims should be reading the §17.321 correction as the canonical version of the `/skip` semantics.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
