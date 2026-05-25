@@ -16334,6 +16334,63 @@ The "retry rows appear ABOVE results/cost" pin is the load-bearing operator-prio
 
 **§17.303 + §17.304 are bookends.** §17.303 surfaces next steps at the START of the operator journey (after `/idea`); §17.304 surfaces them at the END (after compiled output). The middle moments — mid-execution SSE events — already carry context via the surrounding stream. The discovery layer is materially complete at the journey-entry-point and journey-exit-point boundaries.
 
+### §17.305 `/go` awaiting_confirmation pause harmonized with §17.303 (2026-05-25)
+
+Sixth post-§17.280 UX item. Two entry points lead operators to the same orchestrator state (Phase 1 job awaiting confirmation), but pre-§17.305 they surfaced different discovery surfaces:
+
+| Entry point | Discovery shape |
+|---|---|
+| `/idea <text>` (direct) | §17.303's 4-command Next-block: `/confirm`, `/confirm + feedback`, `/results`, `/cost` |
+| `chat naturally + /go` | 3 options: proceed, adjust, restart |
+
+Operators landing from chat-history-driven `/go` saw fewer commands than operators using direct `/idea` — inconsistent for the same orchestrator state. The §17.300 welcome explicitly steers new operators toward the chat → /go path, so this is the path with the highest first-touch traffic.
+
+**Fix.** Update `/go`'s `_auto_chain` awaiting_confirmation branch (the only point in the auto-chain that pauses for operator input) to emit the same 4-command set as §17.303's `/idea` Next-block, plus a 5th "start over" line unique to the chat-driven entry path:
+
+```
+---
+
+**What would you like to do?**
+
+- `/confirm abc1234` — auto-chain Phase 2 (research → compile → DAG → execute)
+- `/confirm abc1234 <your adjustments>` — adjust the brief before proceeding
+- `/results abc1234` — peek at current state
+- `/cost abc1234` — see refinement costs so far
+
+_Or start over: describe a new idea and type `/go` again._
+```
+
+**Why a 5th "start over" line.** `/go` is the chat-history-driven entry — it synthesizes from prior turns. Restarting means describing a NEW idea and typing `/go` again, NOT typing `/idea <new-text>`. The 5th line names that path explicitly because operators coming from chat naturally expect to refine via more chat. §17.303's `/idea` block doesn't carry this because direct `/idea` has no chat history to restart from.
+
+**Wording difference: "refinement costs so far" vs "costs so far".** §17.303 says `/cost` "see costs so far" because /idea has only just produced a job — costs are minimal but the operator might want to peek. §17.305 says "refinement costs so far" because /go's path includes the chat-history-LLM cost (triage + synthesis) on top of Phase 1's LLM cost. The phrasing reflects what the operator paid for to reach this point.
+
+**Preserved pre-§17.305 context.** The feasibility verdict + risks + clarifications block above the action menu (lines 1629-1648) stays unchanged — it's the decision context, not the Next-block. The Next-block harmonization is purely about the post-context action menu.
+
+**Why not extract a shared helper.** Considered factoring a `_render_phase1_next_block(job_id)` used by both `/idea` and `/go`. Rejected because:
+
+1. The two contexts have slightly different surrounding shapes — `/idea` adds a full `<details>` JSON footer; `/go` is mid-stream in an auto-chain generator (no JSON footer makes sense).
+2. The wording diverges deliberately (§17.305 "refinement costs", §17.303 "costs so far"; §17.305 has the start-over line, §17.303 doesn't).
+3. Two short inline blocks are cheaper to maintain than a helper with branching args.
+
+The §17.297 + §17.298 + §17.299 audit-cycle vendor extractions taught the same lesson: helpers worth extracting are ones where the surface is genuinely identical across callers. Here it's not.
+
+**Test-suite delta:** +7 tests in `tests/test_scaffold_router_go_next_block.py`.
+
+| Class | Tests | Pins |
+|---|---|---|
+| `TestGoAwaitingConfirmationNextBlock` | 5 | all 4 canonical commands present (mirror of §17.303's 4-command set); /confirm with vs without feedback distinguished; placeholder-leak guard above the start-over line; "start over" affordance preserved (/go-unique); feasibility summary block above the menu preserved |
+| `TestSourceShapeRegressionGuard` | 2 | /results + /cost template lines anchored in `_auto_chain`; "start over" line anchored — catches a future "consolidate /go and /idea" refactor that drops the /go-unique restart affordance |
+
+The "start over" preservation test is the load-bearing /go-specific assertion — a future helper-extraction that aligns /go and /idea would naturally drop /go's restart line (since /idea doesn't have one), regressing the chat-history-driven UX.
+
+**Why the placeholder-leak guard splits at "start over"**. The start-over line says "type `/go` again" — and the OWUI rendered backticks around `/go` make THAT bare backtick-G slash-G look like it could match the placeholder anchor. The split ensures the guard runs against the 4-command BLOCK (where placeholders must not leak) but allows the start-over hint below (where there's no job_id to leak — restart abandons the current one).
+
+**Cost.** +8 LOC at the call site (the 5-line yield block expanded by 3 lines). Operator-facing cost: ~3 lines of additional text per /go run. Symmetric with §17.303's `/idea` block.
+
+**Test-suite delta:** +7. scaffold_router cluster (13 test files including §17.300–§17.305): in flight at commit time; no regression surface anticipated (purely additive to the awaiting_confirmation yield).
+
+**§17.300–§17.305 cover the operator journey end-to-end.** The two entry points (`/idea` direct, chat → `/go`) now surface identical Next-blocks; the execution finish surfaces the post-execution Next-block; every error path between has its recovery hint. The next plausible polish items are tangents to the canonical flow: assist evidence input UX, active-job chat memory, multi-line input ergonomics.
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).

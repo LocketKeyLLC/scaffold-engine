@@ -1646,10 +1646,25 @@ class Pipeline:
                 for c in clar:
                     yield f"- **{c}**\n"
                 yield "\n"
+            # §17.305 — harmonize /go's awaiting_confirmation pause with
+            # §17.303's /idea Next-block. Same 4 canonical commands so
+            # operators landing here from EITHER entry point see the
+            # same discovery surface. "Start over" stays as a 5th line
+            # — unique to /go's chat-history-driven entry path.
             yield "---\n\n**What would you like to do?**\n\n"
-            yield f"- **Proceed as-is:** Type `/confirm {job_id}`\n"
-            yield f"- **Proceed with changes:** `/confirm {job_id} <your adjustments>`\n"
-            yield f"- **Start over:** Describe a new idea and type `/go` again\n"
+            yield (
+                f"- `/confirm {job_id}` — auto-chain Phase 2 "
+                f"(research → compile → DAG → execute)\n"
+            )
+            yield (
+                f"- `/confirm {job_id} <your adjustments>` — adjust the "
+                f"brief before proceeding\n"
+            )
+            yield f"- `/results {job_id}` — peek at current state\n"
+            yield (
+                f"- `/cost {job_id}` — see refinement costs so far\n"
+            )
+            yield "\n_Or start over: describe a new idea and type `/go` again._\n"
             return
 
         yield "Planning my approach"
