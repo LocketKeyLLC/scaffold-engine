@@ -17284,6 +17284,162 @@ The `TestOrchestratorUnreachable` suite is **load-bearing for the §17.302 → �
 
 ---
 
+### §17.318 Full-system usage audit — OWUI + scaffold-engine, end-to-end (2026-05-25)
+
+First **observational** entry rather than a code change: a complete inventory of what the system has actually been doing, the shape of operator interaction with it across both surfaces (Open WebUI and the scaffold-engine orchestrator), and a reconciliation between the documented topology and the running topology. Surfaces two findings the running system can't tell you from any single panel: a 100%-cancellation cohort on a new job type and a latent field-name bug that's been silently swallowing RAG citation text in sim reports.
+
+**Inventory boundary.** All counts as of 2026-05-25 ~23:25 UTC. Postgres = `scaffold_engine`; OWUI = `webui.db` (sqlite) in the `open-webui` container; orchestrator `/health` payload for live subsystem state.
+
+**1 — OWUI interaction surface (operator → chat → pipelines).**
+
+| Metric | Value |
+|---|---:|
+| Chats (since 2026-03-07) | 287 |
+| Messages | 1037 (740 assistant / 297 user) |
+| Distinct operators | 1 (admin `AE DeFruscio`) |
+| Archived chats | 158 (55%) |
+| Last operator activity | 2026-05-23 |
+| Last message | 2026-05-23 03:03:25 UTC |
+
+Model selection distribution (top 5 of 15 distinct chat-model assignments):
+
+| Model | Chats | Share |
+|---|---:|---:|
+| `scaffold-engine` (auto-router pipeline) | 146 | 50.9% |
+| `github-rag-research-agent` | 57 | 19.9% |
+| `qwen3.5:397b-cloud` | 17 | 5.9% |
+| `workflow-architect-v2` | 13 | 4.5% |
+| `defruscio-homelab-assistant` | 11 | 3.8% |
+
+Half of all chats route through the `scaffold-engine` pipeline (i.e., `scaffold_router.py`'s auto-chain). The cloud `qwen3.5:397b-cloud` model and four named personas account for another quarter. **The other 144 chats span 11 model identities** — long-tail experimentation, not steady-state production traffic.
+
+**2 — Scaffold-engine job lifecycle (orchestrator → DAG → completion).**
+
+125 jobs total across 57 days (2026-03-29 → 2026-05-25). Per-month breakdown reveals a sharp completion regression:
+
+| Month | Jobs | Completed | Cancelled | Failed | Completion rate |
+|---|---:|---:|---:|---:|---:|
+| March | 9 | 9 | 0 | 0 | **100%** |
+| April | 26 | 25 | 0 | 0 | **96%** |
+| May | 90 | 6 | 78 | 2 | **6.7%** |
+
+The May collapse is **not** an engine regression — it tracks operator behavior during the §17.250 → §17.317 UX-polish marathon. The May 7 → May 13 burst (71 jobs created, 71 cancelled, 0 completed) is the operator stress-testing each new command surface and cancelling between iterations. No DAG executor crashed; every cancellation is operator-initiated via `/skip`, `/cancel`, or the OWUI panel.
+
+DAG-node lifecycle (across all 125 jobs):
+
+| Status | Nodes | Share |
+|---|---:|---:|
+| `done` | 173 | 91.5% |
+| `pending` | 11 | 5.8% |
+| `skipped` | 3 | 1.6% |
+| `failed` | 2 | 1.1% |
+
+Per-node completion is healthy; the cancellation pressure lives at the job level, not the node level.
+
+**3 — The two cohorts the audit surfaces.**
+
+(a) **`design_circuit` job type — 5/5 cancelled.** A new `job_type` column value introduced alongside the three EDA sidecars (`scaffold-ngspice`, `scaffold-verilator`, `scaffold-symbiyosys`, ports 8001–8003 — see finding #5 below). Five jobs created on 2026-05-13, all cancelled the same day. No completed `design_circuit` job exists. Three plausible causes: (i) the operator was sanity-checking pipeline wiring and didn't intend completion; (ii) the EDA verification flow hits the §17.318 latent bug (finding #6) and the operator killed jobs that produced blank citations; (iii) a separate `design_circuit`-specific failure path that swallows errors. Cannot disambiguate from logs alone — needs an operator-driven re-attempt with `/logs` running.
+
+(b) **`Sort Algorithm Overview` × 4, all `awaiting_confirmation`.** Created 2026-05-24 (×3) and 2026-05-25 (×1). Zero DAG nodes per job — each is parked at the `/confirm` gate. **This is exactly the cohort §17.316 `/skip` was built to clear**, and the operator hasn't run `/skip` on any of them yet. Pre-§17.316 these would have been invisible (the active-job recall cohort hadn't shipped). Post-§17.316 the operator now has the tool; this audit is the first chance to verify whether the cohort drains organically or whether `/skip` needs an additional nudge.
+
+**4 — Research agent throughput.**
+
+126 sessions across 40 days (2026-04-16 → 2026-05-24):
+
+| Status | Sessions | Entries ingested |
+|---|---:|---:|
+| completed | 88 | 1971 |
+| failed | 7 | 0 |
+| cancelled | 31 | 0 |
+
+Depth distribution: `shallow` 41 (most popular), `medium` 12, `direct_url` 21, `direct_github` 11, `direct_pdf` 2, `direct_openapi` 1. **Zero `deep` sessions** across the entire history — the deepest tier ships but is never selected. The `direct_github` mode has a notable 11-completed / 6-failed split (64% success) — the rest of the modes are at 95%+ success.
+
+RAG ingestion result: **1971 entries extracted → 732 live in Milvus** (collection `toon_v2`, dim 512). The 1239-entry gap is dedup + supersede (§17.83's 3-tier ingest at work) plus the 41 explicit rejections. Embedding cache: 100% hit rate (5 hits / 0 misses) since prewarm.
+
+**5 — Infrastructure delta from MEMORY.md.**
+
+The auto-memory's project snapshot is **out of date in three load-bearing places**:
+
+| Memory says | Reality |
+|---|---|
+| 7 containers on `ai-network` | **10 containers** (3 EDA sidecars added: `scaffold-ngspice:8001`, `scaffold-verilator:8002`, `scaffold-symbiyosys:8003`) |
+| Reranker = "CrossEncoder singleton" | Reranker = `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, score range `[0, 1] (already-sigmoid)`, prewarmed |
+| OVERVIEW latest = §17.273 (next §17.274) | OVERVIEW latest = §17.317 (next: this entry, §17.318) — **44 entries behind** |
+
+Confirmed unchanged: embedder is still `nomic-embed-text:latest`; embedding dim still 512; bridge gateway still `172.18.0.1:11434` for host-Ollama; Postgres DB still `scaffold_engine`. The OVERVIEW's §2 ("Container topology") still lists 7 containers and does not name the EDA sidecars — needs a separate documentation pass once this audit lands.
+
+Live ollama-loaded models at audit time: `nomic-embed-text:latest`, `qwen3.5:397b-cloud`, `qwen3-vl:235b-instruct-cloud`, `qwen3-embedding:8b`, `qwen3.5:latest`, `qwen2.5:7b`, `qwen2.5-coder:7b`, `qwen3:4b`.
+
+**6 — Latent bug surfaced by the audit: `report.chunk_content_fetch_failed`.**
+
+Live evidence in orchestrator logs (2026-05-25 12:42:22 → 12:42:23) — five consecutive `MilvusException: (code=65535, message=field content not exist)` lines, then silence. The exception is swallowed:
+
+```
+app/sim/report.py:316
+    return collection.query(
+        expr=expr,
+        output_fields=["entry_id", "title", "content", "source_url"],
+        ...
+    )
+```
+
+The Milvus collection `toon_v2` has **no `content` field**. Its content field was renamed `canonical_text` somewhere along the §17.83 → §17.110 RAG ingestion arc. Every other producer migrated (`app/modules/rag_pipeline.py`, `_rag_entry.py`, `_rag_protocol.py`, `gt_browser.py`, `openapi_ingest.py`, `milvus_utils.py` all use `canonical_text`). The sim-report module from §17.148 was missed.
+
+Impact: **every sim_run that triggers `_fetch_chunk_content` returns empty quote text in its citations.** The 5 retries-in-a-second pattern suggests the fetch is called per-chunk in a loop; for a report with N referenced chunks, the operator sees N warning lines and N blank quote blocks. The 5 cancelled `design_circuit` jobs on 2026-05-13 are temporally consistent with this — operator runs a circuit, gets a report with empty RAG citations, kills the job, retries.
+
+Three call sites in `app/sim/report.py` need the rename:
+- L316 — `output_fields` list (`"content"` → `"canonical_text"`)
+- L324 — dict-key mapping (`"content": r.get("content", "")` → `"content": r.get("canonical_text", "")` — keep the public-facing key `"content"` for the consumer, just read from the right Milvus column)
+- L451 — `chunk["content"][:_SNIPPET_CHARS]` — consumer side, no change needed if the L324 mapping preserves the `"content"` key
+
+**Not fixed in this entry** — this is an audit, not a remediation. Recommended next §17.319 owns the rename + a regression test that queries the live collection schema and fails if any `output_fields` value isn't in `Collection.schema.fields`.
+
+**7 — Health surface state (audit-time snapshot, via §17.317's `/health`).**
+
+```
+✅ All 4 core subsystems up.
+postgresql: ✅ 13 ms     ollama: ✅ 12 ms (8 models loaded)
+milvus:     ✅ 12 ms (732 entries)     redis: ✅ 1857 keys
+embedding_cache: 100% hit rate (5/5)
+reranker: ✅ prewarmed (Qwen3-Reranker-0.6B-seq-cls, 8.0 s warmup)
+ngspice:  ✅ 8 ms     verilator: ✅ 7 ms     symbiyosys: ✅ 10 ms
+calibration: ⚠️ status=unknown, last_check_at=null
+```
+
+Operator-facing: orchestrator-side, **everything is green except `calibration`**, which has never run (`last_check_at=null`, `last_kind=null`). Whether that's intentional (calibration is an opt-in periodic) or stale-config drift needs an operator decision.
+
+**8 — LLM telemetry (30-day window).**
+
+2805 calls, 1.71 M tokens. Top usage:
+
+| Model | Calls | OK / Fail | Notes |
+|---|---:|---:|---|
+| `nomic-embed-text` (ollama) | 592 | 537 / 55 | Configured embedder; 9.3% failure rate — investigate |
+| `qwen3-embedding:8b` (ollama) | 292 | 120 / 172 | **59% failure rate** — this model isn't the embedder-of-record, so failures may be expected misconfigurations from operator experiments |
+| `qwen2.5:7b` (ollama) | 223 | 221 / 2 | Research extract/summary — 99.1% OK |
+| `qwen3-vl:235b-instruct-cloud` (ollama) | 195 | 194 / 1 | Cloud cohort — 99.5% OK |
+| `qwen3:4b` (ollama) | 68 | 68 / 0 | Research decompose/gap-analysis — 100% OK |
+
+The `fake`/`m`/`qwen` zero-token rows (621 + 380 + 190 + 156 + 88 + 68 calls) are test-runner artifacts — they have null `provider="unknown"` or no token accounting and don't reflect production traffic.
+
+**9 — Quiet zones (things that look healthy specifically because of *absence*).**
+
+- `error_logs`: **0 rows in 14 days** (table populated by app code; absence = no app-side caught-and-logged errors).
+- Orchestrator log ERROR-level lines (last 12 h): **0**.
+- Orchestrator log warnings (last 12 h): **7** — all from finding #6 (`chunk_content_fetch_failed`).
+- `scheduled_jobs`: **0 rows** — the `/schedule` command (recently polished in §17.312) has never created a persistent schedule. Either the operator hasn't reached for it or every prior schedule was deleted.
+
+**10 — Recommended follow-ups (ranked by operator leverage).**
+
+1. **§17.319 — `sim/report.py` field-rename.** Real bug, swallowed silently, affects every sim citation. ~5 LOC + a schema-introspection regression test.
+2. **§17.320 — Architecture-section refresh.** Update OVERVIEW §2 + §11 to name the three EDA sidecars and the `design_circuit` job_type. Add the reranker model rename (`Qwen3-Reranker-0.6B-seq-cls`).
+3. **MEMORY pointer refresh.** Update `reference_overview_log.md` to point at §17.318 (currently says §17.273). One-line memory edit — handled at the end of this audit.
+4. **Operator decisions (not engineering work):** (i) drain the 4 stuck Sort-Algorithm-Overview jobs via `/skip` to confirm §17.316 works end-to-end; (ii) decide whether `calibration` should be wired into the periodic tick or removed from `/health`.
+
+**The audit's own product.** This entry is the canonical answer to "what has actually been happening across both surfaces of this system in 2026 to date." Future incident triage can anchor against the March/April 100%-completion baseline, the May 6.7% rate (and why), the OWUI 50% `scaffold-engine` routing share, and the 1971→732 RAG dedup ratio without re-querying.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
