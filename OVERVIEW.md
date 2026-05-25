@@ -15125,6 +15125,49 @@ The behavioural tests use a tiny `_make_count_db(count)` helper that mocks `db.e
 
 **§17.280 closeout progress.** §17.281 closes 🔴 #1 — the only verified bug in the audit. Five 🟡, four 🟢 (informational), and nine UX items remain. Cycle expected to mirror §17.273 → §17.274-§17.279 in shape: one entry per fix, OVERVIEW + code + test in the same commit.
 
+### §17.282 pin the `wait_for + Semaphore.acquire` cancellation contract — close §17.280 🟡 #1 (2026-05-24)
+
+§17.280's first yellow item: re-audit the `asyncio.wait_for(_slot_sem.acquire(), timeout=...)` block at `app/modules/execution_agent.py:1399-1410` under Python 3.12.13's guarantees, since the historically-known slot-leak race was a pre-3.10 concern.
+
+**Audit result — no production bug.** Read CPython 3.12.13's `asyncio.Semaphore.acquire` source directly:
+
+```python
+except exceptions.CancelledError:
+    if not fut.cancelled():
+        self._value += 1
+        self._wake_up_next()
+    raise
+```
+
+When acquire's internal future has resolved (slot was taken) and a `CancelledError` lands, the handler explicitly bumps `_value` back and wakes the next waiter before re-raising. Same shape preserved across 3.10 → 3.12. Composing this with `wait_for` (whose timeout cancels the inner acquire on expiry) and our own outer-task cancellation paths, the slot-leak race the §17.280 audit flagged does not exist in any direction under our pin.
+
+**What §17.282 changes.** Not production logic — the existing wait_for+acquire block is already correct. The fix is documentation + a regression-test suite that pins the language contract from the project side. Mirrors §17.279's pattern (test pin for an unwritten invariant). Two artifacts:
+
+1. **Production reference comment** at `app/modules/execution_agent.py:1399`-ish (above the existing `try:`). Quotes the CPython source, names the §17.282 audit + the test file. Anchors the source-shape regression guard below.
+
+2. **`tests/test_execution_agent_slot_leak.py` (+8 tests):**
+
+| Class | Test | Pins |
+|---|---|---|
+| `TestSemaphoreCancelContract` | `test_acquire_completes_normally_decrements_value` | baseline: happy-path `_value` semantics |
+| | `test_cancel_pending_acquire_does_not_steal_a_slot` | Direction 1: cancellation BEFORE future resolution — `_value` untouched |
+| | `test_cancel_after_resolution_releases_slot_back` | **Direction 2 — the §17.282 contract pinned** — cancellation AFTER future resolution returns the slot |
+| `TestWaitForAcquireUnderTimeout` | `test_wait_for_timeout_does_not_leak_slot` | composition: wait_for's own timeout doesn't leak |
+| | `test_wait_for_success_followed_by_release_returns_to_baseline` | happy-path mirror of the production code shape |
+| | `test_outer_task_cancel_does_not_leak_slot_through_wait_for` | Starlette-disconnect mirror — outer-task cancel during mid-acquire returns slot |
+| `TestSlotLeakAuditCommentPinned` | `test_execution_agent_cites_section_17_282` | source-shape: the `§17.282` citation stays in production |
+| | `test_audit_test_file_referenced_by_production_comment` | source-shape: the production comment names this test file |
+
+The two source-shape tests guard against a future "drive-by docstring cleanup" stripping the audit reference and silently re-opening the question. They mirror §17.281's `_BUGGY_AUTOCOMPLETE_SQL` regression-guard idea.
+
+**Why pin Direction 2 specifically.** `test_cancel_after_resolution_releases_slot_back` is the load-bearing test — Direction 1 (cancel before resolution) is trivially safe across every asyncio version, but Direction 2 (cancel after future resolved but before `await` returns) is the one CPython 3.10 fixed and that a regression in a future Python release or a third-party Semaphore swap could re-break. The test arranges the exact race window (`sem.release()` → wake the waiter's future → `waiter.cancel()` before the waiter runs past `await fut`) and asserts the slot is back to the holder count.
+
+**Reading the source directly was the load-bearing audit step.** The §17.280 yellow item read as actionable: "Python 3.12.13 tightens this, but the wider try/except/finally below should be re-audited." Re-auditing without reading the CPython source would have produced either (a) defensive over-fix wrapping the acquire in shield+recovery boilerplate (more lines, the agent advice from the original §17.280 review) or (b) a "looks fine, moving on" closeout with no anchor. Reading `inspect.getsource(asyncio.Semaphore.acquire)` in the dev container surfaced the exact `except CancelledError: self._value += 1; raise` shape, which becomes the test invariant — pinning the dependency at the level we depend on it.
+
+**Test-suite delta:** +8 tests in new `tests/test_execution_agent_slot_leak.py`. Concurrency + slot-leak + autocomplete cluster: 44 passing, no regressions. Full-suite re-run deferred (§17.281's `make test` is the baseline: 2565 passed; 2 failed + 5 errors confirmed pre-existing flake/pollution).
+
+**§17.280 closeout progress (cumulative).** §17.281 closed 🔴 #1. §17.282 closes 🟡 #1 (audit-only, no production change). Remaining: four 🟡, four 🟢 (informational), nine UX.
+
 ---
 
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).

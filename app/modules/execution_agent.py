@@ -1396,6 +1396,15 @@ async def execute_all_nodes(
             "cap": settings.execution_global_concurrency,
             "timeout_seconds": settings.execution_queue_timeout_seconds,
         })
+    # §17.282 — Cancellation safety of this acquire relies on CPython 3.10+'s
+    # `asyncio.Semaphore.acquire` releasing its slot back on cancellation
+    # (the `except CancelledError` branch at the bottom of `acquire`'s body
+    # does `self._value += 1; self._wake_up_next(); raise`). Under that
+    # guarantee, the wait_for+acquire combo here cannot leak a slot under
+    # any cancellation timing — neither wait_for's internal timeout cancel
+    # nor an outer-task cancel reaching us mid-acquire. The contract is
+    # pinned by tests/test_execution_agent_slot_leak.py; if a future Python
+    # release or third-party Semaphore swap regresses it, those tests fail.
     try:
         _q_timeout = settings.execution_queue_timeout_seconds or None
         await asyncio.wait_for(_slot_sem.acquire(), timeout=_q_timeout)
