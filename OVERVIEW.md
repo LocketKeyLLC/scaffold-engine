@@ -18336,6 +18336,60 @@ $ pytest tests/test_domain_filtering.py -q
 
 ---
 
+### §17.332 `_domain_expr_clause` shape regex — accommodate `eng_design` (2026-05-26)
+
+Caught by the post-§17.331 full test suite run. §17.285 added `tests/test_gt_browser_domain_safety.py::TestDomainExprClauseFormatterBoundary::test_clause_output_contains_no_user_chars_outside_allowlist` as a tight security anchor on the Milvus expression-clause shape:
+
+```python
+# pre-§17.332
+assert re.fullmatch(r'domain == "[a-z]{2,6}"', clause)
+```
+
+The `{2,6}` length cap and `[a-z]` character class were tight to the **pre-§17.329** VALID_DOMAINS shape (every value 2-6 lowercase chars). §17.329's `eng_design` introduced both an underscore AND a 10-character length — the regex correctly rejected it.
+
+**Fix.** Relax the regex to allow the new partition name without weakening the security guarantee. The clause must still reject quotes, backslashes, whitespace, and Milvus expression operators — any of those would break out of the literal context. The character class `[a-z_]` covers the legitimate range (lowercase ASCII + underscore separator); the length cap `{2,16}` is a 6x margin over the longest current value, well below the point where an attacker-controlled string could meaningfully embed an expression:
+
+```python
+# post-§17.332
+assert re.fullmatch(r'domain == "[a-z_]{2,16}"', clause)
+```
+
+The security invariant the §17.285 test was guarding — "no user chars outside the allowlist leak into the Milvus expression" — is unchanged. The shape just accepts one more legitimate kind of allowlist value.
+
+**Verification.**
+
+```
+$ pytest tests/test_gt_browser_domain_safety.py -q
+39 passed in 9.99s
+```
+
+(was 38 passed + 1 failed pre-§17.332.)
+
+**Why §17.329 didn't catch this.** §17.329's verification matrix was the topology integration test + the eng goldens + a direct cross-partition retrieval probe. None of those exercise the gt_browser path. The full test suite run is the right place to surface this kind of class-of-error; §17.329 had been verified against the cohort it shipped with but not against the suite-wide invariants the §17.285 era encoded.
+
+**Cost.** 1 LOC of regex change + comment refresh. No production code change.
+
+**Open background full-suite run.** §17.332 lands while the post-§17.331 `make test` is still mid-flight (started before the fix). When that run finishes, it will report **1 failed** for this exact test — stale; the failure is already resolved. A subsequent suite run will be clean.
+
+**§17.318 → §17.332 cohort.** 15 entries. Final scope:
+- §17.318 — audit
+- §17.319 — sim/report.py field rename
+- §17.320 — architecture-section refresh
+- §17.321 — SQL drain + /skip semantics correction
+- §17.322 — /cancel endpoint + router command
+- §17.323 — calibration disposition
+- §17.324 — reranker test ARG fix
+- §17.325 — topology test timeout override
+- §17.326 — corpus wipe + reseed (premise wrong, corrected in §17.327)
+- §17.327 — audit correction + content restore
+- §17.328 — repopulate_kb.sh Tier 0 seeds
+- §17.329 — eng_design partition split
+- §17.330 — doc + idea_refinement cleanup
+- §17.331 — ALLOWED_DOMAINS parity guard
+- §17.332 — gt_browser regex shape fix (this entry)
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

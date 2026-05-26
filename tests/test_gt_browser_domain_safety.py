@@ -148,12 +148,16 @@ class TestDomainExprClauseFormatterBoundary:
         import re
         for d in sorted(VALID_DOMAINS):
             clause = gt_browser._domain_expr_clause(d)
-            # Allowlist-domain values are all `[a-z]{2,6}` so this regex
-            # is a tight superset; any future drift would need to either
-            # change VALID_DOMAINS (caught by test_every_allowlist_value_accepted)
-            # or change the clause format itself.
-            assert re.fullmatch(r'domain == "[a-z]{2,6}"', clause), (
-                f"§17.285 regression: clause shape drifted for domain={d!r}: {clause!r}"
+            # Allowlist-domain values are all `[a-z_]{2,16}` (post-§17.329:
+            # eng_design adds underscore + 10-char length). The regex stays
+            # tight on character class — no quotes, no backslashes, no
+            # whitespace, no expression operators — any of those would
+            # break out of the Milvus literal context. Future drift either
+            # changes VALID_DOMAINS (caught by test_every_allowlist_value_accepted)
+            # or changes the clause format itself.
+            assert re.fullmatch(r'domain == "[a-z_]{2,16}"', clause), (
+                f"clause shape drifted for domain={d!r}: {clause!r} "
+                f"(see §17.285 / §17.329)"
             )
 
 
