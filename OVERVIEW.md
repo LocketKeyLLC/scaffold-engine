@@ -18532,6 +18532,80 @@ The sweep is the right scope: a one-shot trip across the four files matches the 
 
 ---
 
+### §17.336 schema-introspection regression guard — close the §17.319 deferred item (2026-05-26)
+
+Closes the future-work item §17.319 logged. The §17.319 bug class — production code queries Milvus with `output_fields=[...]` containing a field name that doesn't exist on the live collection — was silent for ~5 days because the broad `try/except` in `_fetch_chunk_content` swallowed the `MilvusException`. §17.319 added two unit tests pinning the specific case (`canonical_text` rename) but didn't address the class. §17.336 closes the class.
+
+**Approach: static scan + live introspection.** A new integration test walks every `app/**/*.py`, finds each `output_fields=[...]` literal via regex, parses out the quoted field names, and asserts each is a member of the live `toon_v2.schema.fields` set.
+
+```python
+# tests/integration/test_milvus_schema_parity.py
+@pytest.mark.smoke
+@pytest.mark.timeout(60)
+async def test_output_fields_match_toon_v2_schema():
+    schema_fields = await _milvus_collection_fields()   # {entry_id, canonical_text, title, ...}
+    drift = [(file, line, fname) for file, line, fname in _scan_output_fields_literals()
+             if fname not in schema_fields]
+    assert not drift, (
+        f"output_fields drift detected — these literals query field names "
+        f"that don't exist in toon_v2's schema (...):\n" +
+        "\n".join(f"  app/{path}:{line}  → {fname!r}" for path, line, fname in drift)
+    )
+```
+
+**The scanner regex.** Two regex passes:
+
+```python
+# Across line breaks (rag_pipeline.py's multi-line output_fields=[...] split across 4 lines):
+_OUTPUT_FIELDS_LITERAL_RE = re.compile(r"output_fields\s*=\s*\[([^\]]+)\]")
+# Quoted lowercase identifier — filters out pseudo-fields like "count(*)" (gt_browser aggregation):
+_FIELD_NAME_RE = re.compile(r"""["']([a-z_][a-z0-9_]*)["']""")
+```
+
+The `[^\]]` body match correctly spans newlines without needing `re.DOTALL` (negated character classes don't apply line-anchor logic). The identifier-only filter excludes aggregation pseudo-fields like `"count(*)"` (which `gt_browser.py:112` uses for collection-size queries and which Milvus interprets specially, not as a column lookup).
+
+**Scope and limitations** (documented at the top of the test file):
+- Catches literal lists only. `output_fields=some_var` where `some_var` is dynamically built can't be checked statically. These are rare and tend to be unit-tested separately.
+- Skips cleanly on unreachable Milvus — uses a dedicated `schema_parity_probe` connection alias so it doesn't share state with the test session's primary Milvus connection.
+
+**Two tests in one file**:
+
+| Test | Pins |
+|---|---|
+| `test_output_fields_match_toon_v2_schema` | every quoted field name in every `app/` `output_fields=[...]` literal is a member of the live `toon_v2.schema.fields` set |
+| `test_scan_finds_known_call_sites` | scanner regex doesn't silently break — must find `sim/report.py` + `modules/rag_pipeline.py` matches; must extract `canonical_text` from `sim/report.py` (the post-§17.319 anchor); must NOT extract `content` from `sim/report.py` (§17.319 regression flag) |
+
+The second test is the **belt and braces**: if the regex breaks in a future Python version or someone moves files around, `test_output_fields_match_toon_v2_schema` would still pass vacuously (0 matches, drift is empty). `test_scan_finds_known_call_sites` ensures the scan is genuinely finding production code, so the parity assertion has real material to compare against.
+
+**Verification.**
+
+```
+$ pytest tests/integration/test_milvus_schema_parity.py -v
+test_output_fields_match_toon_v2_schema    PASSED
+test_scan_finds_known_call_sites           PASSED
+============================== 2 passed in 1.46s ===============================
+```
+
+1.46 s total — the Milvus introspection cost dominates; the static scan over `app/**/*.py` is sub-100 ms. Cheap enough to run as part of `make test`.
+
+**What it catches forward.**
+
+The test now fires in CI on these regression shapes:
+
+1. Production code adds an `output_fields=[..., "wrong_name", ...]` literal — caught at next test run, named with file + line for grep-friendly fix.
+2. A Milvus migration drops a field from `toon_v2.schema` — every literal still referencing the dropped field is reported.
+3. The §17.319 specific shape (rename one place but miss another) — reported per-call-site.
+
+**What it doesn't catch.**
+
+Dynamic `output_fields=[*EXTRACT_FIELDS]` where `EXTRACT_FIELDS` is built at runtime. There are zero such cases in `app/` today; if one is introduced, a unit-level test against that specific function should pin its output_fields contract directly.
+
+**Cost.** +130 LOC of test code in a new file. Zero production-code change. The integration-test convention is already in place (skip-on-unreachable, `@pytest.mark.timeout(60)`).
+
+**§17.318 → §17.336 cohort.** 19 entries. The cohort is now closed across **every** layer it touched AND the regression guards for the two highest-leverage classes (the parallel-constant drift class via §17.331, the Milvus-schema-drift class via §17.336).
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
