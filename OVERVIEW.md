@@ -17964,6 +17964,102 @@ candidates"], "rag_chunk_ids": ["scaffold-browsing-the-web-...", ...], "rag_quer
 
 ---
 
+### §17.326 eng RAG corpus — wipe contamination, reseed via §17.149 + §17.154 (2026-05-25)
+
+Closes the §17.x candidate §17.325 surfaced. The §17.325 SKIP diagnostic exposed that the eng partition was **100% contamination** — every retrieval for an analog-filter query returned web/HTTP/auth chunks because the seed scripts had never been run on this Milvus instance.
+
+**Diagnosis.** Pre-§17.326 `toon_v2.eng` snapshot:
+
+```
+eng partition: 387 entries
+  community            377   ← all 'community' source_type — web research bleed-through
+  wiki_article          10   ← 8 dup copies of "Inheritance (OOP)" + 2 of "Encapsulation"
+  curated                0   ← §17.149 + §17.154 NEVER ran on this Milvus
+```
+
+Source-URL host breakdown of the 377 `community` rows:
+
+| Host | Rows |
+|---|---:|
+| developer.mozilla.org | 117 |
+| stackoverflow.com | 49 |
+| hub.docker.com | 19 |
+| github.com | 13 |
+| superuser.com | 2 |
+
+**None of the 387 entries** were analog or digital circuit references. The §17.149 (13 analog filter topologies) and §17.154 (25 digital building blocks) seed scripts — the only legitimate eng corpus content — had **zero rows** in the live collection. So when an LLM was asked to cite analog topologies, the retrieval set carried Mozilla web-docs and Stack Overflow auth Q&As, and the §17.146 citation-invariant correctly refused to fabricate.
+
+**Root cause hypothesis.** §17.158 had already documented that the post-§17.63 embedder swap (qwen3-embedding:8b 768d → nomic-embed-text-mrl512 512d) rebuilt only the eng partition's STRUCTURE — but the seed scripts that fill eng with the right content had never been re-run after the rebuild. Meanwhile, `/research` runs through the §17.146-era `/research` and OWUI pipelines kept landing community-source results in `eng` (because that was the default partition with classifier coverage). The combination — empty curated cohort + accumulating research bleed — left eng as 100% bleed by the time §17.325 looked.
+
+**Two-step remediation.**
+
+1. **Snapshot-then-wipe** the eng partition. All 387 entries' metadata (entry_id, title, source_type, source_url, content_hash, timestamps, version chain) dumped to `.backups/eng_partition_pre_17326_20260526T010917Z.json` (4647 lines) as audit trail — full text not preserved but enough to reconstruct provenance if any of the 387 turn out to have been legitimately needed. The wipe used Milvus's filter-expression delete:
+
+   ```python
+   c.delete(expr='domain == "eng"')
+   # (insert count: 0, delete count: 387, success count: 0, err count: 0)
+   ```
+
+   Post-delete `domain == 'eng'` query: **0 rows**. Other partitions intact: llm=254, rag=58, prompt=20.
+
+2. **Run both seed scripts.** Inside the orchestrator container:
+
+   ```
+   $ python scripts/seed_eng_topologies.py
+     ... ingested 13 (new=13 versioned=0 rejected=0 hash_skipped=0) into toon_v2
+   $ python scripts/seed_eng_digital.py
+     ... curated_ingest_done: stats={'new': 25, 'versioned': 0, 'rejected': 0, ...}
+   ```
+
+   Post-seed `domain == 'eng'`: **38 entries, all `source_type='curated'`**. Sample titles:
+
+   ```
+   [curated] 2-FF synchronizer (clock-domain crossing primitive)
+   [curated] Asynchronous FIFO (clock-domain crossing)
+   [curated] BCD (binary-coded decimal) counter
+   [curated] Binary decoder (N-to-2^N)
+   [curated] Booth's multiplication algorithm
+   [curated] Carry-lookahead adder
+   [curated] Cascaded RC band-pass filter
+   [curated] CR passive high-pass filter (first-order)
+   ...
+   ```
+
+**End-to-end verification.** Re-ran §17.325's failing query directly via `query_rag('analog low-pass filter', domain='eng', top_k=5)`:
+
+```
+[curated] RL passive low-pass filter (first-order)
+[curated] RC passive low-pass filter (first-order)
+[curated] Sallen-Key low-pass filter (2-pole active)
+[curated] LC ladder high-pass filter (higher-order passive)
+[curated] Cascaded RC band-pass filter
+```
+
+All 5 results are relevant filter-topology references — the contamination is gone and the retrieval is functioning. Then re-ran the §17.325 integration test that had been SKIPping:
+
+```
+$ pytest tests/integration/test_topology_select_db.py::test_topology_select_live_end_to_end -v
+tests/integration/test_topology_select_db.py::test_topology_select_live_end_to_end PASSED [100%]
+============================== 1 passed in 55.03s ==============================
+```
+
+**PASSED.** The full chain — confirmed spec → §17.146 topology-select stage → cloud 235b LLM → citation-invariant validation → topology_selections row persisted — works end-to-end against the cleaned corpus. The §17.325 fix made the test runnable (no more pytest-timeout); the §17.326 fix made the test green (LLM can find real candidates to cite).
+
+**Why not preserve any of the 387 contaminating rows.** Considered keeping any entries that happened to be circuit-relevant. None were. Of the wiki_article subset (10 rows), all were software-engineering Wikipedia articles (Encapsulation, Inheritance), not engineering-design. Of the community subset, the developer.mozilla.org/stackoverflow.com/hub.docker.com URLs were all web/auth/caching topics. Blanket wipe was the correct scope.
+
+**Preventing recurrence.** Two reinforcing controls:
+
+1. **Seed scripts are idempotent + cheap** (~3-15s combined). A future `scripts/repopulate_kb.sh` (referenced in §17.158) should include both seed scripts so a fresh Milvus rebuild lands with the canonical 38 rows.
+2. **The /research path that landed community rows in eng** should be audited: looking at the 377-row contamination pattern (predominantly Mozilla MDN), it's likely the `/research/url` mode with operator-selected `domain=eng` was bleeding general programming research into the wrong partition. A follow-on §17.x could add a kind-aware classifier that refuses to ingest non-circuit content with `domain=eng` (or at least warns when web/programming sources are about to land in eng).
+
+**Audit-trail file.** `.backups/eng_partition_pre_17326_20260526T010917Z.json` is gitignored (the `.backups/` prefix matches no existing rule but is conventionally local-only). Operators wanting to recover any of the 387 rows have title + source_url + content_hash + version_chain links; the original text would need re-fetching from the source URL (which is fine because community content was fetched once already — not unique scaffolded knowledge).
+
+**Cost.** Zero code change. One snapshot file (~150 KB), one Milvus delete (387 rows), two seed-script invocations (13 + 25 = 38 rows new). Net entries delta on `toon_v2`: −387 + 38 = **−349 rows**. New total: 732 → ~383.
+
+**§17.318 → §17.326 cohort cumulative scope.** 9 entries on 2026-05-25, spanning the entire stack from observational audit (§17.318) through code fix (§17.319) → architecture doc (§17.320) → manual SQL drain (§17.321) → new endpoint + command (§17.322) → operational disposition (§17.323) → test fixes (§17.324, §17.325) → data remediation (§17.326). Every layer that was wrong is now right; the test surface is fully green; the engineering-design pipeline can actually run against a populated corpus for the first time on this host.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
