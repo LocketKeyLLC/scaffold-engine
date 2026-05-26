@@ -18060,6 +18060,57 @@ tests/integration/test_topology_select_db.py::test_topology_select_live_end_to_e
 
 ---
 
+### §17.327 audit correction — `eng` partition has dual semantic meaning; restore wiped goldens content (2026-05-26)
+
+**§17.326's premise was wrong.** While investigating the follow-on candidate flagged at the end of §17.326 (kind-aware ingest gate to prevent eng contamination), the §17.325 SKIP diagnostic was re-examined and `tests/fixtures/golden_set.json` checked. The fact uncovered:
+
+**The `eng` partition has dual semantic meaning across the codebase.**
+
+| Meaning | Source of truth | Content type |
+|---|---|---|
+| Historical: software engineering | `tests/fixtures/golden_set.json` (10 of 20 golden pairs); `scripts/repopulate_kb.sh` Tier 1 URLs (TDD, design-patterns) | TDD, design patterns, caching, gRPC, REST, FastAPI, HTTP compression |
+| New (§17.140–§17.156): engineering design | `app/sim/topology_select.py`, `scripts/seed_eng_topologies.py`, `scripts/seed_eng_digital.py` | Analog filters, digital logic, EDA tooling |
+
+§17.326's narrative — "all 387 rows in eng were contamination" — was incorrect. A material fraction of those 387 were the legitimate software-eng content the goldens depend on. The `community` source_type rows from developer.mozilla.org / stackoverflow.com / hub.docker.com / github.com were largely on-topic for the historical `eng` meaning (HTTP compression, caching patterns, REST/gRPC), not random web bleed.
+
+**Concrete cost of the misdiagnosis.** Post-§17.326 the eng partition contained only the 38 circuit seeds. Re-running the golden retrieval suite:
+
+```
+test_golden_retrieval[Explain the principles of test-driven development-eng-test]      FAILED
+test_golden_retrieval[What are common software design patterns ... factory?-eng-pattern] FAILED
+```
+
+Both failures returned circuit titles (Synchronous FIFO / Moore FSM / SP-SRAM) for software-eng queries — exactly because the partition no longer carried the software-eng content goldens were checking for.
+
+**Tried-then-reverted: a kind-aware ingest gate.** A first attempt at §17.327 added `_DOMAIN_SIGNAL_KEYWORDS["eng"]` with a circuit-only signal set (filter, amplifier, transistor, fpga, verilog, …) and gated `ingest_entries` so an eng-bound entry without any matching keyword was rejected. **That code reverted in the same entry** because the dual-meaning realization makes a single-meaning gate semantically wrong: the gate would block all software-eng content from ever re-entering eng, perpetuating the §17.326 mistake. A correct gate would need to either span both meanings (signal set so broad it stops being useful) or operate on a partition split that doesn't exist yet.
+
+**Restoration.** Re-fetched the two missing software-eng URLs via `/research` direct-url mode:
+
+```
+POST /research {"topic":"https://en.wikipedia.org/wiki/Test-driven_development", "depth":"shallow", "domain":"eng"}
+  → session_completed: total_ingested=8 (Wikipedia chunked into 8 entries)
+POST /research {"topic":"https://en.wikipedia.org/wiki/Software_design_pattern", "depth":"shallow", "domain":"eng"}
+  → session_completed: total_ingested=10
+```
+
+Post-restore eng partition state:
+
+| source_type | count |
+|---|---:|
+| curated (38 §17.149+§17.154 seeds) | 38 |
+| wiki_article (TDD + design-pattern) | 18 |
+| **total** | **56** |
+
+Golden retrieval re-run: **3/3 eng-related goldens PASS** in 74.98 s (TDD, design-pattern, and the chain-of-thought prompt one that was already green).
+
+**Recommended future work — partition split.** The clean fix for dual-meaning is to introduce a new `eng_design` partition for circuit/EDA content, keep `eng` for the historical software-engineering content, and update §17.146/§17.149/§17.154/§11.11/§17.320 accordingly. Out of scope for this entry — would touch ~10 files, an `app.schemas.VALID_DOMAINS` change, a migration to move 38 existing seed rows, and the dependent goldens. Logged as a candidate for the next data-architecture sprint. Until then `eng` is acknowledged as dual-meaning and ingest of either content type is correct.
+
+**§17.326 disposition.** Left as-is in OVERVIEW. §17.326's data operation (wipe + reseed) is preserved as the historical record; §17.327 is the canonical correction. Future audits anchoring on §17.326 should read forward to §17.327 for the actual disposition.
+
+**`feedback_verify_before_claim` reinforced.** Same lesson as §17.321: an audit recommendation needs handler-level / golden-test-level verification, not just data-shape inspection. §17.318's data audit correctly identified 387 entries in eng with one source_type distribution; the leap to "all contamination" required cross-checking against the goldens and didn't. The fix-up cost (this entry + the 2 restored URLs) was small because we caught it inside the same conversation, but a fresh-eyes audit a week later would have hit "wait, why do the goldens fail" and spent much more time disambiguating.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
