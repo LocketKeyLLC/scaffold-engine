@@ -86,7 +86,9 @@ def _make_task(
 
 class TestValidDomains:
     def test_expected_domains(self):
-        assert VALID_DOMAINS == {"prompt", "rag", "eng", "llm", "spec", "code", "qa"}
+        # §17.329 — eng_design added as a separate partition for circuit/EDA content
+        # (eng keeps its historical software-engineering meaning).
+        assert VALID_DOMAINS == {"prompt", "rag", "eng", "eng_design", "llm", "spec", "code", "qa"}
 
     def test_is_set(self):
         # #101: VALID_DOMAINS promoted to frozenset (immutable)

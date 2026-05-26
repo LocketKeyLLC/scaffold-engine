@@ -76,7 +76,7 @@ pytestmark = pytest.mark.skipif(
 # ===========================================================================
 
 VALID_TOOLS = {"LLM", "CodeGen", "SearXNG", "Milvus"}
-VALID_DOMAINS = {"prompt", "rag", "eng", "llm", "spec", "code", "qa"}
+VALID_DOMAINS = {"prompt", "rag", "eng", "eng_design", "llm", "spec", "code", "qa"}  # §17.329 — eng_design added for circuit/EDA
 
 
 # ===========================================================================

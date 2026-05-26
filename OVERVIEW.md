@@ -181,7 +181,7 @@ Phase 2 is long-running (10–25 min on a cold corpus); pipelines must use a lon
 
 1. Idempotency guard: if `dag_nodes` for `job_id` already exist with count > 0, return 409 (audit-flagged hot path).
 2. LLM produces a JSON list of tasks: `[{node_key, title, description, tool, domain, depends_on}, ...]`.
-3. `_normalize_tasks`: clamps `tool` to `VALID_TOOLS` (LLM/CodeGen/SearXNG/Milvus), `domain` to `VALID_DOMAINS` (prompt/rag/eng/llm/spec), defaults invalids with a warning event.
+3. `_normalize_tasks`: clamps `tool` to `VALID_TOOLS` (LLM/CodeGen/SearXNG/Milvus), `domain` to `VALID_DOMAINS` (prompt/rag/eng/eng_design/llm/spec/code/qa — see §17.329 for the eng/eng_design split), defaults invalids with a warning event.
 4. Kahn's cycle check (`validate_dag`); cycles → `dag_cycle_detected` event + 500.
 5. Numeric T-key sort + `_MAX_NODES` truncation (drops keys with logged warning).
 6. Determine leaf set; INSERT nodes with `is_output_node=TRUE` for leaves.
@@ -304,7 +304,7 @@ A sibling to autonomous execute. After `/dag` produces a plan, the operator opts
 | `output_text` | TEXT | the result; mirrored from assist_steps.evidence in Assist Mode |
 | `output_artifact_id` | UUID | optional FK to artifacts |
 | `confidence` | FLOAT | verifier confidence; nullable |
-| `domain` | VARCHAR(10) | one of `VALID_DOMAINS` (prompt/rag/eng/llm/spec) |
+| `domain` | VARCHAR(10) | one of `VALID_DOMAINS` (prompt/rag/eng/eng_design/llm/spec/code/qa); see §17.329 for the eng vs eng_design semantic split |
 | `tool` | VARCHAR(50) DEFAULT `'LLM'` | one of `VALID_TOOLS` (LLM/CodeGen/SearXNG/Milvus) |
 | `retry_count`, `max_retries` | INT | retry budget |
 | `parallel_group`, `execution_order` | INT | scheduling hints |
@@ -900,7 +900,7 @@ Constants:
 - `VALID_TASK_TYPES = frozenset({"research", "decision", "action", "validation", "output"})`
 - `VALID_STRATEGIES = frozenset({"sequential", "parallel", "hybrid", "conditional"})`
 - `VALID_TOOLS = frozenset({"LLM", "CodeGen", "SearXNG", "Milvus"})`
-- `VALID_DOMAINS = frozenset({"prompt", "rag", "eng", "llm", "spec"})`
+- `VALID_DOMAINS = frozenset({"prompt", "rag", "eng", "eng_design", "llm", "spec", "code", "qa"})` (§17.329 — `eng_design` for circuit/EDA content; `eng` keeps its historical software-engineering meaning)
 - `ROLE_FIELDS = frozenset(...)` — `get_model()` allowlist
 - `TTL_POLICY: dict[str, int]` — source_type → seconds
 - `DEFAULT_TTL_SECONDS = 180 * 86400`
@@ -1109,7 +1109,7 @@ Functions: `gt_list`, `gt_search`, `gt_detail`, `gt_stats`. Domain fan-out when 
 #### `app/modules/idea_refinement.py` — 171 lines
 Raw idea → structured brief.
 
-Constants: `ALLOWED_DOMAINS = {"prompt", "rag", "llm", "spec", "eng"}`, `REFINE_SYSTEM`, `REFINE_PROMPT`.
+Constants: `ALLOWED_DOMAINS = {"prompt", "rag", "llm", "spec", "eng", "eng_design"}` (§17.330), `REFINE_SYSTEM`, `REFINE_PROMPT`.
 
 Functions:
 - `async def refine_idea(idea_text, db, model, domain, model_overrides, target_status) -> dict`
@@ -1474,9 +1474,9 @@ Functions: `get_spec`, `confirm_spec`, `unconfirm_spec`, `is_spec_confirmed` (qu
 Function: `async def extract_spec(nl_text, *, db, job_id=None, model_role=None) -> ExtractionResult`. Failure paths kept distinct in `ExtractionResult` (ambiguities vs errors); **never writes to `specs` on any failure path**.
 
 #### `app/sim/topology_select.py` — 420 lines
-First reasoning stage that consumes a confirmed spec. Numeric-free RAG query (design.kind + constraint kinds, no values) → `query_rag(domain="eng")` → LLM proposes 2-4 candidates with `entry_id` citations → **hard-reject if any cite ∉ retrieval set** → persist `topology_selections` row.
+First reasoning stage that consumes a confirmed spec. Numeric-free RAG query (design.kind + constraint kinds, no values) → `query_rag(domain="eng_design")` (§17.329 — was `"eng"` pre-split) → LLM proposes 2-4 candidates with `entry_id` citations → **hard-reject if any cite ∉ retrieval set** → persist `topology_selections` row.
 
-Function: `async def select_topologies(spec_id, *, db, model_role=None, top_k=8, domain="eng") -> TopologySelectionResult`. Helpers `_build_rag_query`, `_validate_citations`, `_parse_candidates` are individually unit-tested.
+Function: `async def select_topologies(spec_id, *, db, model_role=None, top_k=8, domain="eng_design") -> TopologySelectionResult` (§17.329 — DEFAULT_DOMAIN flipped from `"eng"` to `"eng_design"` so the stage retrieves only circuit/EDA content). Helpers `_build_rag_query`, `_validate_citations`, `_parse_candidates` are individually unit-tested.
 
 #### `app/sim/ngspice.py` — 196 lines
 Wrapper around the `scaffold-ngspice` sidecar (§2). HTTP contract: `POST /run {netlist, timeout_s, seed?}`. Two ngspice 44 quirks baked in: `.meas` cards must be inside a `.control/.endc` wrapper in batch mode, and the measurement parser stops at the resource-stats footer (otherwise it captures `Stack = 0 bytes` as a KPI).
@@ -18247,6 +18247,59 @@ query_rag('test-driven development', domain='eng'):
 **Cost.** 5 code edits (~10 LOC), 1 Milvus delete + 2 seed re-runs, 2 UI edits (~3 LOC), 1 orchestrator restart. Zero migrations to Postgres; the partition is Milvus-only. No test added — the existing `test_topology_select_live_end_to_end` + golden retrieval suite cover the contract end-to-end.
 
 **§17.318 → §17.329 cohort cumulative scope (revised).** 12 entries spanning observational audit → code fix → architecture doc → manual SQL drain → new endpoint + command → operational disposition → 2 test fixes → data remediation → audit correction → runbook fix → architectural partition split. Every layer of the system that the original audit touched is now both right AND clean.
+
+---
+
+### §17.330 `eng_design` doc + code cleanup — close the §17.329 follow-up loop (2026-05-26)
+
+Closes the doc-only follow-up §17.329 logged. While auditing the static-prose references for the partition split, an extra **code gap** surfaced: `app/modules/idea_refinement.py:25 ALLOWED_DOMAINS` was not updated, so the `/ideate` path would have rejected `eng_design` as an invalid domain override. §17.329's verification ran against the topology-select stage (which sets domain itself) and missed this — operator-facing `/ideate domain=eng_design` would have failed with the old set. §17.330 closes both surfaces in one commit.
+
+**Code (1 edit, 1 LOC).**
+
+`app/modules/idea_refinement.py:25`:
+```python
+- ALLOWED_DOMAINS = {"prompt", "rag", "llm", "spec", "eng"}
++ ALLOWED_DOMAINS = {"prompt", "rag", "llm", "spec", "eng", "eng_design"}
+```
+
+**Docs (5 OVERVIEW edits in the reference sections — §4, §5.1, §11.1, §11.x, §11.11).**
+
+| § Section | Before | After |
+|---|---|---|
+| §4.4 (`_normalize_tasks`) | `VALID_DOMAINS (prompt/rag/eng/llm/spec)` | `VALID_DOMAINS (prompt/rag/eng/eng_design/llm/spec/code/qa — see §17.329)` |
+| §5.1 (`dag_nodes.domain`) | `VALID_DOMAINS (prompt/rag/eng/llm/spec)` | same expansion + reference to the eng/eng_design split |
+| §11.1 (`app/config.py` constants) | `VALID_DOMAINS = frozenset({"prompt", "rag", "eng", "llm", "spec"})` | full set including `eng_design`, `code`, `qa`; §17.329 reference |
+| §11.x (`idea_refinement.ALLOWED_DOMAINS`) | `{"prompt", "rag", "llm", "spec", "eng"}` | `{"prompt", "rag", "llm", "spec", "eng", "eng_design"}` (§17.330) |
+| §11.11 (`app/sim/topology_select.py`) | `query_rag(domain="eng")` + signature `domain="eng"` | `domain="eng_design"` with cross-reference to §17.329 |
+
+§4 and §5.1 were stale **even before §17.329** — they omitted `code` and `qa` which had landed in some earlier §17.x. The §17.330 sweep refreshes all five static references to match the canonical `VALID_DOMAINS` literal.
+
+**Tests (3 LOC across 3 files).**
+
+`make test`-level checks that hardcoded a literal `VALID_DOMAINS` or domain-tuple expectation needed an update too — caught by running the affected tests immediately after the doc edits:
+
+| Test | Update |
+|---|---|
+| `tests/test_domain_filtering.py:89` | Hardcoded `VALID_DOMAINS == {... no eng_design}` set comparison; added `"eng_design"` to the expected set |
+| `tests/test_dag_generator.py:79` | Local `VALID_DOMAINS = {...}` constant mirror; added `"eng_design"` |
+| `tests/test_web_ui.py:286` | `for d in ("prompt", "rag", "llm", "spec", "eng"):` dropdown sweep; added `"eng_design"` |
+
+`tests/eval_retrieval.py` and `tests/ground_truth.json` carry their own informational copies — left alone (eval helpers, not test asserts; updating them is scope creep for a doc-cleanup entry).
+
+**Verification.**
+
+```
+$ pytest tests/test_domain_filtering.py tests/test_dag_generator.py tests/test_web_ui.py tests/test_idea_refinement.py -q
+101 passed, 129 warnings in 29.27s
+```
+
+Pre-§17.330 `test_domain_filtering.py::TestValidDomains::test_expected_domains` failed; post-§17.330 it passes alongside the other 100. No other regressions surfaced.
+
+**Why the code gap got past §17.329.** §17.329's verification matrix targeted the topology-select stage (`test_topology_select_live_end_to_end` against eng_design) + the eng goldens (3/3 pass against the SW-eng content). Neither exercise touches `/ideate`'s domain validator. The `app/web/routes.py::_ALLOWED_DOMAINS` was updated in §17.329 but the (parallel) `app/modules/idea_refinement.py::ALLOWED_DOMAINS` wasn't — the comment at routes.py:198 says "must match ALLOWED_DOMAINS in app.modules.idea_refinement" but no test enforces that pairing. **Follow-up logged but not chased:** a single `test_allowed_domains_pair_in_sync` would catch any future drift between the two literals.
+
+**§17.318 → §17.330 cohort cumulative scope.** 13 entries on 2026-05-25 / 2026-05-26: audit (§17.318), code fix (§17.319), architecture doc (§17.320), manual SQL drain (§17.321), new endpoint + command (§17.322), operational disposition (§17.323), test fixes (§17.324, §17.325), data remediation (§17.326), audit correction (§17.327), runbook fix (§17.328), partition split (§17.329), and the closing doc + code cleanup (§17.330).
+
+**Cohort fully closed.** Every layer of the system the original §17.318 audit touched — observational data, application code, architecture docs, operational scripts, test surface, runtime data, partition layout, and the static-prose references — is now consistent and verified end-to-end.
 
 ---
 

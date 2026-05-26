@@ -22,7 +22,7 @@ from app.utils.tool_call_args import read_tool_args
 
 logger = logging.getLogger("scaffold.refine")
 
-ALLOWED_DOMAINS = {"prompt", "rag", "llm", "spec", "eng"}
+ALLOWED_DOMAINS = {"prompt", "rag", "llm", "spec", "eng", "eng_design"}  # §17.330 — eng_design closes the §17.329 gap; /ideate must accept it as a domain override
 
 # ---------------------------------------------------------------------------
 # Refinement prompt + tool schema (Sprint X.11)

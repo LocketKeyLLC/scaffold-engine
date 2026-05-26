@@ -282,8 +282,8 @@ class TestNewIdeaForm:
         # Textarea + domain select rendered.
         assert 'name="idea"' in body
         assert 'name="domain"' in body
-        # Domain options match _ALLOWED_DOMAINS.
-        for d in ("prompt", "rag", "llm", "spec", "eng"):
+        # Domain options match _ALLOWED_DOMAINS (§17.329 added eng_design).
+        for d in ("prompt", "rag", "llm", "spec", "eng", "eng_design"):
             assert f'value="{d}"' in body
 
 
