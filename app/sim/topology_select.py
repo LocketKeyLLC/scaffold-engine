@@ -53,7 +53,7 @@ from app.utils.llm_parsing import parse_json_object
 logger = logging.getLogger("scaffold")
 
 DEFAULT_TOP_K = 8
-DEFAULT_DOMAIN = "eng"
+DEFAULT_DOMAIN = "eng_design"  # §17.329 — split from "eng" (software-eng) to give circuit/EDA content its own partition
 MIN_CANDIDATES = 2
 MAX_CANDIDATES = 4
 

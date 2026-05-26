@@ -199,7 +199,7 @@ async def job_detail(
 # app.modules.idea_refinement. Duplicated here as a literal so the form
 # template can render the options without importing the orchestrator
 # module (loopback discipline).
-_ALLOWED_DOMAINS = ("prompt", "rag", "llm", "spec", "eng")
+_ALLOWED_DOMAINS = ("prompt", "rag", "llm", "spec", "eng", "eng_design")  # §17.329 — eng_design split for circuit/EDA content
 
 
 @router.get("/new", response_class=HTMLResponse, dependencies=[])

@@ -18159,6 +18159,97 @@ $ bash scripts/repopulate_kb.sh --dry-run | head -10
 
 ---
 
+### §17.329 partition split — `eng_design` separates circuit/EDA from the historical software-engineering `eng` (2026-05-26)
+
+Closes the future-work item §17.327 logged. The dual-meaning `eng` partition — historical software engineering (referenced by 10 of 20 golden test pairs) and new engineering-design (§17.140-§17.156 circuit pipeline) — was a real architectural smell: every `query_rag(domain="eng", ...)` retrieved a mixed set, and the §17.146 topology-select stage could be biased by software-eng chunks bleeding into circuit candidate searches. The fix: a clean partition split with `eng_design` as the new home for circuit/EDA content.
+
+**Choices recorded (one round-trip with the operator).**
+
+| Decision | Choice | Why not the alternatives |
+|---|---|---|
+| Partition name | `eng_design` | Matches the OVERVIEW's "engineering-design" wording (used 30+ times since §17.140); `circuits` risked excluding future mechanical/RF/thermal scope; `eda` was narrow to tooling only; `design` collided with `design_circuit` job_type |
+| Migration mechanism | Delete + reseed (38 curated rows) | In-place upsert was higher-complexity for no load-bearing benefit; migration-script was unnecessary on this single-host deployment |
+| `code` and `qa` partitions in VALID_DOMAINS | Out of scope | Both currently unused on this host; addressing them speculatively is scope creep — handle individually if a similar dual-meaning issue surfaces |
+
+**Phase A — code constants (5 single-line edits).**
+
+| File | Change |
+|---|---|
+| `app/config.py` | `VALID_DOMAINS` += `"eng_design"` |
+| `app/sim/topology_select.py` | `DEFAULT_DOMAIN = "eng" → "eng_design"` |
+| `scripts/seed_eng_topologies.py` | `DOMAIN = "eng" → "eng_design"` |
+| `scripts/seed_eng_digital.py` | `DOMAIN = "eng" → "eng_design"` |
+| `scripts/repopulate_kb.sh` | Tier 0 dry-run label `partition=eng → partition=eng_design` |
+
+`topic_to_domain[3-6] = "eng"` left unchanged. The classifier still routes its catch-all into `eng`; `eng_design` is the deliberate-only partition (operator UI selection, topology-select call, hardcoded seeds). This is the architectural property the split was supposed to deliver — `eng_design` never receives random research bleed because no automatic path routes into it.
+
+**Phase B — Milvus data migration.**
+
+```python
+# Delete the 38 curated rows from eng (leave the 18 wiki_article SW-eng rows intact)
+c.delete(expr='domain == "eng" and source_type == "curated"')
+# (delete count: 38, err count: 0)
+
+# Re-run both seed scripts; they now point at eng_design
+$ python scripts/seed_eng_topologies.py  → new=13 versioned=0 rejected=0
+$ python scripts/seed_eng_digital.py     → new=25 versioned=0 rejected=0
+```
+
+Final state:
+
+| Partition | Count | Source-type breakdown | Owner of writes |
+|---|---:|---|---|
+| eng | 18 | 18 wiki_article (TDD + design-pattern Wikipedia chunks) | `/research` URL-mode + topic-mode classifier route |
+| eng_design | 38 | 38 curated | §17.149 + §17.154 seed scripts; §17.146 topology-select reads here |
+| llm | 254 | (unchanged) | classifier topic-1 + various |
+| rag | 58 | (unchanged) | classifier topic-2 + various |
+| prompt | 20 | (unchanged) | direct `/research` |
+| **total** | **388** | | |
+
+**Phase C — UI + script enumerations.**
+
+`app/web/routes.py::_ALLOWED_DOMAINS` += `"eng_design"`. `app/templates/research_pdf_upload.html` dropdown gains an `<option value="eng_design">eng_design (circuit / EDA)</option>` line, with the existing `eng` option re-labelled `eng (software engineering)` so the dual selector is operator-readable. `app/routers/gt.py`, `scripts/flatten_branched_chains.py`, `scripts/reindex.py` all already use `VALID_DOMAINS` dynamically — they picked up `eng_design` via the Phase A change without edits.
+
+**Phase D — orchestrator restart + verification.**
+
+`DEFAULT_DOMAIN` in `topology_select.py` is a module constant evaluated at import; the dev-compose bind-mount made the file visible but the running process held the old value. **Restart required** (`docker compose restart scaffold-orchestrator`) before the topology-select call routes to `eng_design`. Verified:
+
+```
+$ pytest tests/integration/test_topology_select_db.py::test_topology_select_live_end_to_end -v
+PASSED in 67.85s
+
+$ pytest tests/test_retrieval_golden.py -k 'eng' -v
+PASSED [3 tests]: TDD-eng-test, design-pattern-eng-pattern, prompt-engineering
+
+# Direct cross-partition probe — each query routes to its own kind:
+query_rag('analog low-pass filter', domain='eng_design'):
+  [curated] RL passive low-pass filter (first-order)
+  [curated] RC passive low-pass filter (first-order)
+  [curated] Sallen-Key low-pass filter (2-pole active)
+
+query_rag('test-driven development', domain='eng'):
+  [wiki_article] Test-driven development - Wikipedia
+  [wiki_article] Test-driven development - Wikipedia
+  [wiki_article] Test-driven development - Wikipedia
+```
+
+**openapi snapshot.** `python scripts/openapi_snapshot.py --check` → `OK: docs/openapi.json matches the live OpenAPI spec`. The schema doesn't expose VALID_DOMAINS as a literal enum (it's a runtime-validated `domain: str`), so the partition addition didn't drift the spec.
+
+**Why the topology test was SKIPPING before §17.329 but PASSES after.** Pre-§17.327 the eng partition had only the 38 curated seeds; an analog-LPF query retrieved them and the LLM produced candidates → PASS. Post-§17.327 the 18 wiki_article SW-eng rows were restored to eng AND the topology stage still pointed at `domain="eng"`, so its retrieval got a mixed bag (3 software-design-pattern chunks in the top-3 of the post-§17.327 run) → SKIP (the LLM correctly refused to fabricate analog topologies from software-design chunks). Post-§17.329 the topology stage points at `domain="eng_design"`, retrieves the curated circuit content uncontaminated → PASS in 67.85s.
+
+**Documentation.** This entry is the canonical resolution of the dual-meaning problem first flagged at §17.327. The architectural map in §2 and the module reference in §11.11 still describe `app/sim/topology_select.py` as querying `eng` — both should be updated in a follow-on doc commit (§17.x), but the runtime is correct. The follow-on doc commit is logged but not bundled because doc-only changes are independently shippable.
+
+**§17.329 + §17.327 + §17.326 together describe the full eng dilemma and its resolution.** Read in order:
+- §17.326 — wipe + reseed (premise wrong)
+- §17.327 — correction (admit dual-meaning, restore wiped SW-eng content)
+- §17.329 — architectural split (`eng_design` for circuits, `eng` keeps SW-eng)
+
+**Cost.** 5 code edits (~10 LOC), 1 Milvus delete + 2 seed re-runs, 2 UI edits (~3 LOC), 1 orchestrator restart. Zero migrations to Postgres; the partition is Milvus-only. No test added — the existing `test_topology_select_live_end_to_end` + golden retrieval suite cover the contract end-to-end.
+
+**§17.318 → §17.329 cohort cumulative scope (revised).** 12 entries spanning observational audit → code fix → architecture doc → manual SQL drain → new endpoint + command → operational disposition → 2 test fixes → data remediation → audit correction → runbook fix → architectural partition split. Every layer of the system that the original audit touched is now both right AND clean.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

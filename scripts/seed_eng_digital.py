@@ -44,7 +44,7 @@ from typing import Any
 
 logger = logging.getLogger("scaffold.seed_eng_digital")
 
-DOMAIN = "eng"
+DOMAIN = "eng_design"  # §17.329 — circuit content lives in its own partition
 SOURCE_TYPE = "curated"
 CONFIDENCE = 0.90
 

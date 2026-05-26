@@ -13,7 +13,7 @@ _logger = logging.getLogger("scaffold.config")
 VALID_TASK_TYPES = frozenset({"research", "decision", "action", "validation", "output"})
 VALID_STRATEGIES = frozenset({"sequential", "parallel", "hybrid", "conditional"})
 VALID_TOOLS = frozenset({"LLM", "CodeGen", "SearXNG", "Milvus"})
-VALID_DOMAINS = frozenset({"prompt", "rag", "eng", "llm", "spec", "code", "qa"})
+VALID_DOMAINS = frozenset({"prompt", "rag", "eng", "eng_design", "llm", "spec", "code", "qa"})
 
 # get_model() allowlist — prevents arbitrary attribute access via role string
 ROLE_FIELDS = frozenset({

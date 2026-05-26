@@ -260,10 +260,10 @@ info "tier: $TIER  apply: $([[ $APPLY == 1 ]] && echo yes || echo no)"
 
 if [[ "${NO_SEED:-0}" != "1" ]]; then
     hdr "Tier 0 — hand-curated seeds (§17.149 + §17.154; ~5s total)"
-    printf '  %sseed%s   %s5s%s  partition=eng   %s\n' \
+    printf '  %sseed%s   %s5s%s  partition=eng_design   %s\n' \
         "$C_INFO" "$C_RST" "$C_DIM" "$C_RST" \
         "scripts/seed_eng_topologies.py (13 analog filter rows)"
-    printf '  %sseed%s   %s5s%s  partition=eng   %s\n' \
+    printf '  %sseed%s   %s5s%s  partition=eng_design   %s\n' \
         "$C_INFO" "$C_RST" "$C_DIM" "$C_RST" \
         "scripts/seed_eng_digital.py (25 digital building-block rows)"
 fi
