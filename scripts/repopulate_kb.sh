@@ -65,6 +65,7 @@ TIER="all"  # all | fast | topic
 for arg in "$@"; do
     case "$arg" in
         --apply) APPLY=1 ;;
+        --no-seed) NO_SEED=1 ;;
         --dry-run) APPLY=0 ;;
         --force|-f) FORCE=1 ;;
         --tier=fast|--tier=topic|--tier=all) TIER="${arg#--tier=}" ;;
@@ -74,7 +75,7 @@ for arg in "$@"; do
             if [[ "${PREV_ARG:-}" == "--tier" ]]; then TIER="$arg"; fi ;;
         --help|-h)
             cat <<'USAGE'
-Usage: bash scripts/repopulate_kb.sh [--dry-run|--apply] [--tier fast|topic|all] [--force]
+Usage: bash scripts/repopulate_kb.sh [--dry-run|--apply] [--tier fast|topic|all] [--force] [--no-seed]
 
   --dry-run  (default) Print the curated source list without running anything.
   --apply              Actually invoke /research on each source, in series.
@@ -84,6 +85,9 @@ Usage: bash scripts/repopulate_kb.sh [--dry-run|--apply] [--tier fast|topic|all]
   --force              Skip the pre-flight stuck-session check on --apply.
                        Use only if you've already inspected the existing
                        running sessions and they're not blockers.
+  --no-seed (§17.328)  Skip the Tier 0 seed scripts (§17.149 analog + §17.154
+                       digital, 38 curated circuit rows). Tier 0 runs first
+                       by default and is idempotent at the dedup layer.
 
 Run from the repo root. Requires the orchestrator stack up + SCAFFOLD_API_KEY
 in .env (or exported). Streams each source's SSE events to stdout so progress
@@ -254,6 +258,15 @@ info "orchestrator: $ORCHESTRATOR_URL"
 info "current Milvus entry_count: $PRE_COUNT"
 info "tier: $TIER  apply: $([[ $APPLY == 1 ]] && echo yes || echo no)"
 
+if [[ "${NO_SEED:-0}" != "1" ]]; then
+    hdr "Tier 0 — hand-curated seeds (§17.149 + §17.154; ~5s total)"
+    printf '  %sseed%s   %s5s%s  partition=eng   %s\n' \
+        "$C_INFO" "$C_RST" "$C_DIM" "$C_RST" \
+        "scripts/seed_eng_topologies.py (13 analog filter rows)"
+    printf '  %sseed%s   %s5s%s  partition=eng   %s\n' \
+        "$C_INFO" "$C_RST" "$C_DIM" "$C_RST" \
+        "scripts/seed_eng_digital.py (25 digital building-block rows)"
+fi
 if [[ "$TIER" == "all" || "$TIER" == "fast" ]]; then
     hdr "Tier 1 — fast (github: + URL, 3-5 min each)"
     for row in "${FAST_SOURCES[@]}"; do
@@ -338,6 +351,31 @@ fi
 # ── Apply ─────────────────────────────────────────────────────────────
 hdr "Applying ingestions (--apply)"
 warn "Running serially — DO NOT cancel mid-flight unless you're prepared to clean up via /research/sessions."
+
+# ── §17.328 — Tier 0: hand-curated seed scripts ─────────────────────────
+# Always runs before research-based ingests (unless --no-seed). Seeds
+# are idempotent at the dedup layer (~5 s combined for 13 analog + 25
+# digital = 38 curated rows into eng). §17.149 + §17.154 wrote these
+# scripts but pre-§17.328 they had to be invoked separately, which
+# meant a fresh Milvus rebuild via this runbook left eng empty of
+# canonical circuit content (latent bug surfaced by §17.326).
+if [[ "${NO_SEED:-0}" != "1" ]]; then
+    hdr "Tier 0: seed scripts (§17.149 + §17.154 — 38 curated circuit rows)"
+    if docker exec "${SCAFFOLD_ALERT_CONTAINER:-scaffold-orchestrator}" \
+            python scripts/seed_eng_topologies.py; then
+        ok "seed_eng_topologies.py completed (13 analog filter rows)"
+    else
+        err "seed_eng_topologies.py FAILED — continuing with research tiers"
+    fi
+    if docker exec "${SCAFFOLD_ALERT_CONTAINER:-scaffold-orchestrator}" \
+            python scripts/seed_eng_digital.py; then
+        ok "seed_eng_digital.py completed (25 digital building-block rows)"
+    else
+        err "seed_eng_digital.py FAILED — continuing with research tiers"
+    fi
+else
+    info "skipping Tier 0 seed scripts (NO_SEED=1)"
+fi
 
 ROWS_TO_RUN=()
 [[ "$TIER" == "all" || "$TIER" == "fast" ]] && ROWS_TO_RUN+=("${FAST_SOURCES[@]}")

@@ -18111,6 +18111,54 @@ Golden retrieval re-run: **3/3 eng-related goldens PASS** in 74.98 s (TDD, desig
 
 ---
 
+### §17.328 `scripts/repopulate_kb.sh` — bundle Tier 0 hand-curated seeds (2026-05-26)
+
+Closes the second follow-on from §17.326. Pre-§17.328 the seed scripts (`seed_eng_topologies.py` 13 analog + `seed_eng_digital.py` 25 digital = 38 curated circuit rows) had to be run separately from `repopulate_kb.sh`. A fresh Milvus rebuild via the canonical runbook left the eng partition with the Tier-1 software-eng URLs ingested but zero curated circuit content — the latent state §17.326 surfaced.
+
+**Three minimal-token changes.**
+
+1. **Tier 0 in the apply path.** Inserted before the existing Tier 1 (fast) / Tier 2 (topic) loops:
+
+   ```bash
+   if [[ "${NO_SEED:-0}" != "1" ]]; then
+       hdr "Tier 0: seed scripts (§17.149 + §17.154 — 38 curated circuit rows)"
+       docker exec scaffold-orchestrator python scripts/seed_eng_topologies.py
+       docker exec scaffold-orchestrator python scripts/seed_eng_digital.py
+   fi
+   ```
+
+   Idempotent at the dedup layer (`stats[skipped_hash]` skip on repeat), ~5 s combined.
+
+2. **Tier 0 in the dry-run output.** Mirrors the existing `print_row`-shape so an operator running `--dry-run` sees both seed rows alongside the URL/github/topic rows.
+
+3. **`--no-seed` flag.** Surface for the rare case operator wants the research-only path (e.g. testing the Tier 1 / Tier 2 paths in isolation).
+
+**Verified.**
+
+```
+$ bash -n scripts/repopulate_kb.sh && echo "syntax OK"
+syntax OK
+$ bash scripts/repopulate_kb.sh --dry-run | head -10
+== KB repopulation plan (audit N4 — post-§17.63 SSD migration) ==
+> orchestrator: http://localhost:8000
+> tier: all  apply: no
+
+== Tier 0 — hand-curated seeds (§17.149 + §17.154; ~5s total) ==
+  seed   5s  partition=eng   scripts/seed_eng_topologies.py (13 analog filter rows)
+  seed   5s  partition=eng   scripts/seed_eng_digital.py (25 digital building-block rows)
+
+== Tier 1 — fast (github: + URL, 3-5 min each) ==
+  ...
+```
+
+**Cost.** +40 LOC of bash (Tier 0 apply block, Tier 0 dry-run block, --no-seed parser, --help text). No Python change. No test added — repopulate_kb.sh is a runbook script with no existing test coverage and the change is operationally obvious from the dry-run output.
+
+**§17.327 + §17.328 together close the two follow-ons from §17.326.** A fresh `bash scripts/repopulate_kb.sh --apply --tier all` on a wiped Milvus now produces (in order): 38 curated circuit rows (Tier 0), the 8 Tier 1 software-eng + RAG-domain + prompt URLs, the 3 Tier 2 autonomous topics. Both meanings of `eng` (software-eng historical + circuit-design new) end up populated.
+
+**§17.318 → §17.328 cohort cumulative scope (revised).** 11 entries on 2026-05-25 / 2026-05-26: audit (§17.318), code fix (§17.319), architecture doc (§17.320), manual SQL drain (§17.321), new endpoint + command (§17.322), operational disposition (§17.323), test fixes (§17.324, §17.325), data remediation (§17.326), audit correction (§17.327), runbook fix (§17.328).
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
