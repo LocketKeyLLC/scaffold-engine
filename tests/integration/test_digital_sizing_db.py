@@ -154,7 +154,15 @@ async def _services_ready() -> tuple[bool, str]:
     return True, ""
 
 
+# §17.335 — Per-test timeout override. Same pattern as §17.325 / §17.334
+# applied across the live-LLM integration suite: this test drives the
+# closed digital-sizing loop (LLM → verilator → constraint-check) up to
+# `device_sizing_max_iterations` rounds. Its own httpx ceiling is 1500s
+# matching the orchestrator's per-stage budget; the suite-wide
+# `pytest --timeout=30` from `make test` pre-empts that without this
+# marker.
 @pytest.mark.smoke
+@pytest.mark.timeout(900)
 async def test_digital_sizing_live_end_to_end(confirmed_digital_setup):
     if os.environ.get("SCAFFOLD_SKIP_LIVE_LLM") == "1":
         pytest.skip("SCAFFOLD_SKIP_LIVE_LLM=1")

@@ -18488,6 +18488,50 @@ The shared pattern is now visible enough to be worth a future testing-convention
 
 ---
 
+### §17.335 pre-emptive timeout-marker sweep for the remaining `_live_*` integration tests (2026-05-26)
+
+The post-§17.334 full suite run surfaced **`test_digital_sizing_live_end_to_end`** with the exact same timeout shape — the digital sibling of §17.334's fix. The §17.334 entry's "pattern observation" predicted this:
+
+> Adding `@pytest.mark.timeout(900)` to the four `tests/integration/test_*_live_end_to_end` candidates pre-emptively would close future surfacings of this same class.
+
+§17.335 executes that pre-emptive sweep. Doing it now stops the one-at-a-time cascade from continuing into a §17.336 / §17.337 / … for every remaining live-LLM integration test.
+
+**Sweep inventory.** Identified all `tests/integration/test_*.py` files with `live`-named tests:
+
+| File | Test | Pre-§17.335 timeout | Action |
+|---|---|---|---|
+| `test_topology_select_db.py` | `test_topology_select_live_end_to_end` | `@pytest.mark.timeout(900)` (§17.325) | none — already marked |
+| `test_device_sizing_db.py` | `test_device_sizing_live_end_to_end` | `@pytest.mark.timeout(900)` (§17.334) | none — already marked |
+| `test_digital_sizing_db.py` | `test_digital_sizing_live_end_to_end` | none | **+ `@pytest.mark.timeout(900)`** |
+| `test_spec_extractor_live.py` | `test_extract_spec_live_unambiguous_brief` | none | **+ `@pytest.mark.timeout(900)`** |
+
+Both newly-marked tests share the same shape as their §17.325/§17.334 cousins: a live cloud-LLM round-trip whose inner httpx already declares a multi-minute ceiling, but where the suite-wide `pytest --timeout=30` from `make test` pre-empts it.
+
+**Cost.** ~14 LOC across 2 files (2 decorators + 2 brief comment blocks each referencing §17.325 / §17.334). Zero production-code change.
+
+**Verification.**
+
+```
+$ pytest tests/integration/test_digital_sizing_db.py::test_digital_sizing_live_end_to_end \
+         tests/integration/test_spec_extractor_live.py::test_extract_spec_live_unambiguous_brief -v
+test_digital_sizing_live_end_to_end                  PASSED
+test_extract_spec_live_unambiguous_brief             PASSED
+============================== 2 passed in 18.94s ==============================
+```
+
+**Why this pattern recurs.** Every live LLM-driven integration test follows the same template:
+
+1. **Inner timeout matches orchestrator-side budget** (~900-1500 s). The test author correctly recognized that cloud-LLM round-trips need a multi-minute ceiling.
+2. **No per-test marker.** The author assumed pytest's default would inherit a sensible-for-integration value; they didn't anticipate `make test` setting `--timeout=30` as a suite-wide ceiling appropriate for unit tests.
+3. **Skip-cascade hides it.** Each test has its own skip conditions (Ollama unreachable / empty corpus / etc.). For most of the audit history these conditions were active, so the timeout-marker gap was invisible.
+4. **A cohort fix heals the skip.** §17.149 seeded the eng corpus. §17.329 split eng_design. §17.326's wipe was correctly diagnosed. Each healing step exposed the next layer's hidden timeout.
+
+The sweep is the right scope: a one-shot trip across the four files matches the four-file inventory. Future LLM integration tests should land with the marker pre-applied; a linter rule (`pytest --collect-only | grep _live_ | check marker`) would close that loop, but that's a future testing-convention §17.x candidate.
+
+**§17.318 → §17.335 cohort.** 18 entries. Projected next-run shape unchanged from §17.334's projection: **3141 passed / 0 failed / 3 skipped** in ~10 min.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

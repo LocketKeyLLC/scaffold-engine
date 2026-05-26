@@ -56,7 +56,12 @@ async def _model_reachable() -> bool:
         return False
 
 
+# §17.335 — Per-test timeout override. Same pattern as §17.325 / §17.334.
+# Live LLM extraction round-trip (cloud 235b) on a ~4 KB schema-heavy
+# prompt routinely runs 10-30 s; the suite-wide `pytest --timeout=30`
+# is too tight for the natural variance, especially under contention.
 @pytest.mark.smoke
+@pytest.mark.timeout(900)
 async def test_extract_spec_live_unambiguous_brief(live_clients):
     if os.environ.get("SCAFFOLD_SKIP_LIVE_LLM") == "1":
         pytest.skip("SCAFFOLD_SKIP_LIVE_LLM=1")
