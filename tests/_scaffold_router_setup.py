@@ -43,15 +43,31 @@ _mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(_mod)
 Pipeline = _mod.Pipeline
 
-# Cloud-CI smoke runners can't route to 172.18.0.1 (the Docker bridge gateway
-# that Pipeline.__init__ probes for embedder-dim verification). Local hosts
-# happen to route to it. Without this stub, Pipeline() hangs the full
-# request_timeout (300s) — capped at 30s per-test by pytest-timeout, but
-# even that adds up to a workflow-budget kill across the 15+ tests that
-# instantiate Pipeline. The stub is scoped to SCAFFOLD_CI_SMOKE_MODE so
-# `make test` / `make ci` (dev image, has working Ollama) is unaffected.
-if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
-    Pipeline._probe_embedder_dim = lambda self, model=None: (True, "ci-smoke stub")
+# §17.333 — Unconditional stub. `Pipeline.__init__` calls
+# `_probe_embedder_dim` which does a real HTTP POST to Ollama with a
+# 300s timeout. Three failure modes the stub eliminates:
+#
+#   (1) Cloud-CI smoke runners can't route to 172.18.0.1 — the original
+#       reason this stub existed, gated on SCAFFOLD_CI_SMOKE_MODE.
+#   (2) Local-host suite-wide Ollama queue contention. The probe is fast
+#       in isolation (~0.2 s) but stalls past pytest-timeout's 30 s when
+#       15+ tests instantiate Pipeline back-to-back AND other tests hold
+#       Ollama. Observed once as a flake at
+#       `TestRememberRecallHelpers::test_remember_then_recall_returns_job_id`
+#       (the first test in a class that builds a fresh Pipeline; the
+#       subsequent 12 tests cached the instance and all passed).
+#   (3) Operators running `make test` on a host where Ollama is
+#       temporarily down — every Pipeline-instantiating test fails on
+#       __init__ even if the assertion would pass under nominal
+#       conditions.
+#
+# All three are integration concerns, not unit-test concerns. The live
+# embedder-dim invariant is verified by `/health`'s probe + the
+# `tests/integration/` suite. The stub returns ok=True with a marker
+# string so any `Embedder probe OK: <msg>` log line continues to render.
+Pipeline._probe_embedder_dim = lambda self, model=None: (
+    True, "test stub (§17.333)"
+)
 
 sys.modules["scaffold_router"] = _mod
 _pkg = types.ModuleType("pipelines")

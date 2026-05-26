@@ -18390,6 +18390,58 @@ $ pytest tests/test_gt_browser_domain_safety.py -q
 
 ---
 
+### §17.333 unconditional embedder-probe stub in scaffold_router tests — eliminate the Ollama-contention flake class (2026-05-26)
+
+Closes the underlying race that surfaced as `TestRememberRecallHelpers::test_remember_then_recall_returns_job_id` ERROR in the post-§17.332 full suite run. The same test PASSED in 3.42 s when run in isolation — classic suite-wide flake. Root cause traced to `Pipeline.__init__`:
+
+```python
+# pipelines/scaffold_router.py:497
+ok, msg = self._probe_embedder_dim()       # ← real HTTP POST to Ollama
+if not ok:
+    raise RuntimeError(f"Embedder probe failed: {msg}")
+```
+
+`_probe_embedder_dim` (L669) issues a `POST /api/embeddings` with a **300 s timeout** to verify the embedder returns the expected vector dimension. In isolation the call returns in ~0.2 s. Under suite-wide load — 15+ scaffold_router tests each instantiating `Pipeline` AND other tests holding Ollama for embed/rerank — the probe can queue past pytest's 30 s ceiling. Pytest fires `Failed: Timeout (>30.0s)` at the unlucky test, even though the underlying invariant is satisfied. Flake is non-deterministic and depends on test ordering plus background model state.
+
+**Pre-§17.333 stub was scoped too narrowly.** `tests/_scaffold_router_setup.py:53` already stubbed `_probe_embedder_dim` to a constant-truthy lambda, but only when `SCAFFOLD_CI_SMOKE_MODE=1`. Reasoning at the time: cloud-CI runners can't route to `172.18.0.1`; local hosts can. The fix worked for cloud-CI but didn't address local-host queue contention.
+
+**Fix — unconditional stub.** Removed the env-var gate. The stub now applies to every `_scaffold_router_setup`-loaded module (which is exactly the test files that need the Pipeline instance). The live embedder-dim invariant is genuinely useful at runtime — that's what `/health`'s embedder check + the `tests/integration/` suite are for — but unit tests instantiating `Pipeline()` to exercise its routing logic shouldn't be testing Ollama's live state.
+
+Three failure modes the stub now eliminates instead of just one:
+
+1. Cloud-CI smoke runners (the original §17.x case) — unreachable bridge gateway.
+2. Local-host suite-wide queue contention (the §17.332 surfacing) — Ollama responds eventually but past pytest-timeout.
+3. Local-host Ollama temporarily down (a class not previously addressed) — every Pipeline-instantiating test fails at `__init__` even when the test's actual assertions would pass.
+
+**Stub return shape preserved.** The new lambda returns `(True, "test stub (§17.333)")` matching the existing `(ok, msg)` tuple contract — any code path that logs the success message (`self.logger.info("Embedder probe OK: %s", msg)` at L500) continues to render correctly with a clear marker that identifies the stub origin.
+
+**Verification.**
+
+```
+# Previously-flaky class, isolated under load equivalent:
+$ pytest tests/test_scaffold_router_active_job_memory.py -q
+34 passed in 3.07s                # was 33 passed + 1 ERROR in 30+ s
+
+# Wider scaffold_router sweep — every Pipeline-instantiating file:
+$ pytest tests/test_scaffold_router_active_job_memory.py \
+         tests/test_scaffold_router_commands.py \
+         tests/test_scaffold_router_helpers.py \
+         tests/test_scaffold_router_skip_recall.py \
+         tests/test_scaffold_router_execute_confirm.py \
+         tests/test_scaffold_router_cancel.py -q
+231 passed in 22.94s
+```
+
+Net cohort-wide: zero regressions, eliminates an entire flake class. Suite total expected to drop from ~37 minutes to slightly less (the eliminated 30-s pytest-timeout per flake is the visible bound; the silent per-test probe latency savings on the 15+ Pipeline-instantiating tests is the rest).
+
+**Why this wasn't done in §17.x (the cloud-CI ship).** The §17.x author scoped the stub to the explicit failure mode they were closing (cloud-CI unreachability) rather than the broader semantic question ("should unit tests probe Ollama at all?"). §17.333's broader scope is informed by the §17.332 flake making the cost of the narrow scope visible.
+
+**Cost.** 0 production-code change. ~7 LOC of test setup — replaced one env-gated lambda with one unconditional lambda + a 12-line comment block documenting the three failure modes the stub now closes.
+
+**§17.318 → §17.333 cohort.** 16 entries. The cohort's full ripple — from the original audit through every layer it touched AND the regression-guard cohort that prevents the audit from being needed again AND the test-infrastructure stub that prevents the regression guards from flaking — is shipped.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
