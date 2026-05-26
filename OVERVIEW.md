@@ -17862,6 +17862,61 @@ Closes the final §17.318 open item. The audit flagged `/health` showing `calibr
 
 ---
 
+### §17.324 `test_downloads_correct_reranker_model` — match the build-ARG parameterization (2026-05-25)
+
+Full-suite run after §17.323 surfaced two pre-existing failures unrelated to the §17.318→§17.323 cohort (the cohort itself added 30 green tests). §17.324 fixes one of them; §17.325 closes the other.
+
+**Failure shape.** `tests/test_infra_scaffolding.py::TestDockerfileReranker::test_downloads_correct_reranker_model` asserted that the literal string `Qwen3-Reranker-0.6B-seq-cls` appears in a Dockerfile **`RUN`** step:
+
+```python
+# pre-§17.324
+def test_downloads_correct_reranker_model(self, instructions):
+    run_steps = [args for op, args in instructions if op == "RUN"]
+    assert any("Qwen3-Reranker-0.6B-seq-cls" in r for r in run_steps), ...
+```
+
+The Dockerfile uses a build ARG (which had landed at some earlier §17.x but the test predates the parameterization):
+
+```dockerfile
+ARG MODEL_RERANKER=tomaarsen/Qwen3-Reranker-0.6B-seq-cls   # line 50 — ARG
+RUN ... snapshot_download('${MODEL_RERANKER}')             # line 54 — RUN refs ${MODEL_RERANKER}
+```
+
+The literal model name is on the **ARG** line; the RUN line carries `${MODEL_RERANKER}`. The test only scans RUN args, so the assertion failed even though the Dockerfile is producing the right behavior at build time (ARG default flows through to the snapshot_download call).
+
+**Fix.** Pin **both halves** of the contract:
+
+1. An `ARG` line has `MODEL_RERANKER=tomaarsen/Qwen3-Reranker-0.6B-seq-cls`
+2. The `snapshot_download` RUN step references `${MODEL_RERANKER}` (or the literal name, for backward-compat if a future Dockerfile rewrites un-parameterized — either form is correct as long as #1 holds)
+
+Together these catch three regressions:
+
+| Regression scenario | Caught by |
+|---|---|
+| Dockerfile swaps the ARG default to a different model | Check #1 |
+| Dockerfile parameterizes but RUN hardcodes a stale literal | Both — literal in RUN would no longer equal the (new) ARG, so the apparent pass under check #2 contradicts the failure under check #1 |
+| Dockerfile correctly parameterizes and the ARG carries the canonical model | Both pass |
+| Dockerfile reverts to literal everywhere on the canonical model | Check #2 alone (literal-form branch) |
+
+The disjunction in #2 (`${MODEL_RERANKER}` OR literal name) keeps the test from over-fitting to the parameterized form; a future de-parameterization that still uses the right model name passes.
+
+**Why I considered just deleting the test.** Tempting because the §17.135 embedder-drift detector already fires `cache.embedder_drift` (critical alert) if the live model id changes — that's runtime-detection, stronger than build-time assertion. Rejected: the build-time check catches a stale Dockerfile before image push, whereas the runtime detector only fires after `lifespan` startup against a real cache_metadata row. Cheaper to fail in CI.
+
+**Verification.**
+
+```
+$ pytest tests/test_infra_scaffolding.py::TestDockerfileReranker -v
+test_has_snapshot_download_run_step                              PASSED
+test_downloads_correct_reranker_model                            PASSED  ← §17.324
+test_cache_dir_matches_compose                                   PASSED
+test_download_step_ordered_between_pip_install_and_app_copy      PASSED
+============================== 4 passed in 0.41s ===============================
+```
+
+**Cost.** +24 LOC of test (rewrite + 4-row regression-table comment). No app code change — Dockerfile was already correct; the test was wrong.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

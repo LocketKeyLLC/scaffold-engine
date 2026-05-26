@@ -206,9 +206,37 @@ class TestDockerfileReranker:
         )
 
     def test_downloads_correct_reranker_model(self, instructions):
+        """§17.324 — the canonical model name lives in `ARG MODEL_RERANKER`
+        and the RUN step references it via ``${MODEL_RERANKER}``. The
+        prior version of this test only scanned RUN args and failed
+        post-parameterization. Pin both halves of the contract:
+
+          1. An ARG line has ``MODEL_RERANKER=tomaarsen/Qwen3-Reranker-0.6B-seq-cls``
+          2. The snapshot_download RUN step references ``${MODEL_RERANKER}``
+             (or the literal name, for backward-compat with future un-
+             parameterized rewrites — either form is correct as long as
+             #1 holds).
+
+        Together these catch: a Dockerfile that swaps the default to a
+        different model (fails #1); a Dockerfile that parameterizes but
+        then RUN-hardcodes a stale literal (fails #2 because the literal
+        wouldn't equal the ARG); a parameterized Dockerfile pointing at
+        the canonical model (passes both).
+        """
+        arg_steps = [args for op, args in instructions if op == "ARG"]
+        canonical_arg = "MODEL_RERANKER=tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
+        assert any(canonical_arg in a for a in arg_steps), (
+            f"No ARG line sets {canonical_arg!r}; "
+            f"saw ARGs: {arg_steps!r}"
+        )
         run_steps = [args for op, args in instructions if op == "RUN"]
-        assert any("Qwen3-Reranker-0.6B-seq-cls" in r for r in run_steps), (
-            "snapshot_download target is not Qwen3-Reranker-0.6B-seq-cls"
+        download_refs_model = any(
+            "${MODEL_RERANKER}" in r or "Qwen3-Reranker-0.6B-seq-cls" in r
+            for r in run_steps
+        )
+        assert download_refs_model, (
+            "snapshot_download RUN step does not reference ${MODEL_RERANKER} "
+            "or the literal canonical model name"
         )
 
     def test_cache_dir_matches_compose(self, instructions):
