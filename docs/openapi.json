@@ -169,6 +169,40 @@
         "title": "Body_research_pdf_endpoint_research_pdf_post",
         "type": "object"
       },
+      "CancelJobResult": {
+        "description": "§17.322 — POST /jobs/{job_id}/cancel response.\n\nStatus-conditional cancel that distinguishes three operator-relevant\noutcomes via HTTP code + body shape:\n\n- 200 + ``cancelled=True, was_already_cancelled=False`` — flipped from\n  an active status (pending/refining/awaiting_confirmation/researching/\n  planning/executing/running/blocked/assisted_*) to ``cancelled``.\n- 200 + ``cancelled=True, was_already_cancelled=True`` — already\n  ``cancelled`` before the call; idempotent OK. The router exposes\n  this so chat clients can render a different message (\"already\n  cancelled\" vs \"now cancelled\") without re-querying state.\n- 409 (no body field) — job is in a terminal non-cancellable status\n  (``completed`` or ``failed``); current_status returned in the\n  HTTPException detail so the client can guide the operator.\n\n``status_before`` captures the row's status at the moment of the\nUPDATE attempt. For ``was_already_cancelled=True`` it equals\n``'cancelled'``; for the active→cancelled flip it carries the prior\nstatus (operator-debugging signal — useful when the cancel races\nagainst an ``/execute/all`` SSE).",
+        "properties": {
+          "cancelled": {
+            "title": "Cancelled",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status_after": {
+            "title": "Status After",
+            "type": "string"
+          },
+          "status_before": {
+            "title": "Status Before",
+            "type": "string"
+          },
+          "was_already_cancelled": {
+            "title": "Was Already Cancelled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "cancelled",
+          "was_already_cancelled",
+          "status_before",
+          "status_after"
+        ],
+        "title": "CancelJobResult",
+        "type": "object"
+      },
       "ConfigFieldEntry": {
         "description": "One row of ``GET /config``'s ``fields`` list.",
         "properties": {
@@ -1354,7 +1388,7 @@
         "type": "object"
       },
       "JobCostsResponse": {
-        "description": "Sprint J.3.b — aggregate cost + latency for one job, with breakdown.\n\n``by_provider`` is sorted descending by cost_usd then calls so the\nbiggest spend lines surface first. ``call_count``/``total_*`` are\njob-wide totals across all (provider, model) combinations.\n\n§17.90 added ``by_kind`` — same shape, grouped by ``call_kind``.\nUseful for splitting compile-time synthesis spend from execution\nspend (W.7 follow-up).",
+        "description": "Sprint J.3.b — aggregate cost + latency for one job, with breakdown.\n\n``by_provider`` is sorted descending by cost_usd then calls so the\nbiggest spend lines surface first. ``call_count``/``total_*`` are\njob-wide totals across all (provider, model) combinations.\n\n§17.90 added ``by_kind`` — same shape, grouped by ``call_kind``.\nUseful for splitting compile-time synthesis spend from execution\nspend (W.7 follow-up).\n\n§17.284 added ``data_source`` (``\"ok\"`` | ``\"error\"``). The rollup\nfails open on transient DB errors and returns the zero-shape rather\nthan 500ing — pre-§17.284 that was indistinguishable from a real\nempty rollup. ``\"error\"`` here means at least one of the three\ncomponent queries (totals / by_provider / by_kind) raised; operators\nshould re-poll or check logs before trusting the numbers.",
         "properties": {
           "by_kind": {
             "default": [],
@@ -1374,6 +1408,15 @@
           "call_count": {
             "title": "Call Count",
             "type": "integer"
+          },
+          "data_source": {
+            "default": "ok",
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Data Source",
+            "type": "string"
           },
           "job_id": {
             "title": "Job Id",
@@ -1775,6 +1818,19 @@
             "title": "Confidence Threshold",
             "type": "number"
           },
+          "doc_truncate": {
+            "anyOf": [
+              {
+                "maximum": 20000.0,
+                "minimum": 100.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doc Truncate"
+          },
           "domain": {
             "anyOf": [
               {
@@ -1790,6 +1846,19 @@
             "default": false,
             "title": "Include History",
             "type": "boolean"
+          },
+          "max_candidates": {
+            "anyOf": [
+              {
+                "maximum": 512.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Candidates"
           },
           "query": {
             "title": "Query",
@@ -4528,6 +4597,54 @@
           }
         ],
         "summary": "Rename Job",
+        "tags": [
+          "Management"
+        ]
+      }
+    },
+    "/jobs/{job_id}/cancel": {
+      "post": {
+        "description": "§17.322 — operator-driven cancel for a non-terminal job.\n\nSymmetric to ``POST /jobs/{job_id}/resume`` (§17.130): resume is\ncancelled→executing; cancel is active→cancelled. Replaces the\nSQL-only drain mechanism §17.321 had to use for the 4 stuck\n``awaiting_confirmation`` jobs.\n\nStatus codes:\n  - 200 + ``CancelJobResult{cancelled=True, was_already_cancelled=False}``\n    on a successful active→cancelled flip (any of pending /\n    refining / awaiting_confirmation / researching / planning /\n    executing / running / blocked / assisted_*)\n  - 200 + ``CancelJobResult{cancelled=True, was_already_cancelled=True}``\n    when the job was already cancelled; idempotent OK\n  - 404 if no job with that ID exists\n  - 409 if the job is in a terminal non-cancellable state\n    (``completed`` or ``failed``); ``current_status`` in detail\n  - 422 on malformed UUID\n\nNo request body. Cancellation reason is operator-context; if a\nstructured reason field becomes useful (audit trail, scheduled\ncancels) a v2 schema can accept it. Pre-v1 the\n``ideation_workflow._cancel_job`` helper writes\n``error_summary='client_disconnect'`` for SSE-disconnect paths and\nis unaffected by this endpoint.",
+        "operationId": "cancel_job_endpoint_jobs__job_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelJobResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Cancel Job Endpoint",
         "tags": [
           "Management"
         ]

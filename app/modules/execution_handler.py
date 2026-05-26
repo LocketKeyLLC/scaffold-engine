@@ -198,3 +198,109 @@ async def resume_cancelled_job(
         "job_id": str(job_id),
         "current_status": current.status,
     }
+
+
+# ---------------------------------------------------------------------------
+# §17.322 — operator-driven job cancellation (symmetric to resume above)
+# ---------------------------------------------------------------------------
+
+# Statuses where ``cancel`` is a no-op (already in a terminal state where
+# transitioning to ``cancelled`` is either wrong or already done).
+# ``cancelled`` itself is intentionally NOT here — repeating /cancel on an
+# already-cancelled job is idempotent OK, not 409.
+_NON_CANCELLABLE_STATUSES: tuple[str, ...] = ("completed", "failed")
+
+
+async def cancel_active_job(
+    job_id: UUID, db: AsyncSession,
+) -> dict:
+    """Atomically transition a non-terminal job to ``cancelled``.
+
+    The UPDATE is gated on ``status NOT IN ('completed','failed','cancelled')``
+    so two concurrent /cancel calls cannot both win and so an
+    already-terminal job is not mutated. Returns:
+
+    - ``{"outcome": "cancelled", "job_id": str, "status_before": <prior>}``
+      on a successful active→cancelled flip
+    - ``{"outcome": "already_cancelled", "job_id": str}`` when the job
+      was already ``cancelled``; idempotent OK at the data layer (the
+      router maps this to 200 with a different message)
+    - ``{"outcome": "wrong_status", "job_id": str, "current_status": str}``
+      when the job is in a terminal non-cancellable state
+      (``completed`` or ``failed``)
+    - ``{"outcome": "not_found", "job_id": str}`` when no row matches
+
+    **Why the existing ``_cancel_job`` in ideation_workflow.py isn't reused.**
+    That helper is a fire-and-forget UPDATE used only on the Phase-2
+    client_disconnect path; it has no status guard, no outcome
+    discrimination, and writes ``error_summary``. The operator-driven
+    /cancel path needs the three-outcome shape (so the router can map
+    400/404/409 + idempotent 200) AND must NOT clobber error_summary on
+    jobs that have a real failure reason already stored.
+
+    **Concurrency.** Two concurrent /cancel calls on the same job: only
+    one matches the WHERE clause; the other falls through to the
+    ``already_cancelled`` branch via the post-rollback status SELECT.
+    A /cancel racing an ``/execute/all`` SSE worker: the worker's next
+    DB write (status='running' on a node-complete) sees the cancellation
+    via the status check at the top of the execution loop — see
+    execute_all_nodes' precondition probe.
+    """
+    # CTE captures the prior status atomically with the UPDATE — needed
+    # because UPDATE ... RETURNING reflects the NEW row, not the old.
+    # The FOR UPDATE inside the CTE serializes concurrent /cancel calls
+    # so the second caller falls through to the already_cancelled branch.
+    result = await db.execute(
+        text(
+            "WITH prior AS ("
+            "  SELECT id, status AS prior_status FROM jobs "
+            "  WHERE id = :job_id FOR UPDATE"
+            ") "
+            "UPDATE jobs "
+            "SET status = 'cancelled', updated_at = NOW() "
+            "FROM prior "
+            "WHERE jobs.id = prior.id "
+            "  AND jobs.status NOT IN ('completed','failed','cancelled') "
+            "RETURNING jobs.id, prior.prior_status"
+        ),
+        {"job_id": str(job_id)},
+    )
+    row = result.fetchone()
+    if row is not None:
+        await db.commit()
+        logger.info(
+            "job_cancelled job_id=%s prior_status=%s",
+            job_id, row.prior_status,
+        )
+        return {
+            "outcome": "cancelled",
+            "job_id": str(job_id),
+            "status_before": row.prior_status,
+            "status_after": "cancelled",
+        }
+
+    # No row updated. Three reasons: (a) job doesn't exist, (b) job
+    # exists and is already cancelled (idempotent OK), (c) job exists
+    # and is in a terminal non-cancellable state. Distinguish via a
+    # post-rollback status SELECT.
+    await db.rollback()
+    status_result = await db.execute(
+        text("SELECT status FROM jobs WHERE id = :job_id"),
+        {"job_id": str(job_id)},
+    )
+    current = status_result.fetchone()
+    if current is None:
+        return {"outcome": "not_found", "job_id": str(job_id)}
+    if current.status == "cancelled":
+        return {
+            "outcome": "already_cancelled",
+            "job_id": str(job_id),
+            "status_before": "cancelled",
+            "status_after": "cancelled",
+        }
+    # status is 'completed' or 'failed' — terminal, non-cancellable.
+    return {
+        "outcome": "wrong_status",
+        "job_id": str(job_id),
+        "current_status": current.status,
+    }

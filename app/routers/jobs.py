@@ -1,4 +1,4 @@
-"""§17.174 — jobs lifecycle endpoints (list/get/delete/rename/costs/synthesis/resume/cleanup).
+"""§17.174 — jobs lifecycle endpoints (list/get/delete/rename/costs/synthesis/resume/cancel/cleanup).
 
 Extracted from ``app/main.py`` as part of the §17.174 router refactor.
 Endpoint paths, function names, tags, and response_models are
@@ -8,6 +8,7 @@ stays byte-identical post-refactor.
 Routes:
   POST   /jobs/cleanup                  — cleanup_stale_jobs (ops)
   POST   /jobs/{job_id}/resume          — resume_job_endpoint (Management, SSE)
+  POST   /jobs/{job_id}/cancel          — cancel_job_endpoint (Management) [§17.322]
   GET    /jobs                          — list_jobs (Management)
   DELETE /jobs/{job_id}                 — delete_job (Management)
   PATCH  /jobs/{job_id}                 — rename_job (Management)
@@ -25,8 +26,9 @@ from starlette.responses import StreamingResponse
 from app.database import get_db
 from app.modules.cleanup import reap_stale_jobs
 from app.modules.execution_agent import execute_all_nodes
-from app.modules.execution_handler import resume_cancelled_job
+from app.modules.execution_handler import cancel_active_job, resume_cancelled_job
 from app.schemas import (
+    CancelJobResult,
     DeleteResponse,
     JOB_STATUSES,
     JobCostsBreakdownItem,
@@ -98,6 +100,80 @@ async def resume_job_endpoint(
         execute_all_nodes(job_id, model_overrides=body.model_overrides),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},
+    )
+
+
+@router.post(
+    "/jobs/{job_id}/cancel",
+    response_model=CancelJobResult,
+    tags=["Management"],
+)
+async def cancel_job_endpoint(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """§17.322 — operator-driven cancel for a non-terminal job.
+
+    Symmetric to ``POST /jobs/{job_id}/resume`` (§17.130): resume is
+    cancelled→executing; cancel is active→cancelled. Replaces the
+    SQL-only drain mechanism §17.321 had to use for the 4 stuck
+    ``awaiting_confirmation`` jobs.
+
+    Status codes:
+      - 200 + ``CancelJobResult{cancelled=True, was_already_cancelled=False}``
+        on a successful active→cancelled flip (any of pending /
+        refining / awaiting_confirmation / researching / planning /
+        executing / running / blocked / assisted_*)
+      - 200 + ``CancelJobResult{cancelled=True, was_already_cancelled=True}``
+        when the job was already cancelled; idempotent OK
+      - 404 if no job with that ID exists
+      - 409 if the job is in a terminal non-cancellable state
+        (``completed`` or ``failed``); ``current_status`` in detail
+      - 422 on malformed UUID
+
+    No request body. Cancellation reason is operator-context; if a
+    structured reason field becomes useful (audit trail, scheduled
+    cancels) a v2 schema can accept it. Pre-v1 the
+    ``ideation_workflow._cancel_job`` helper writes
+    ``error_summary='client_disconnect'`` for SSE-disconnect paths and
+    is unaffected by this endpoint.
+    """
+    try:
+        parsed_id = UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+
+    outcome = await cancel_active_job(parsed_id, db)
+
+    if outcome["outcome"] == "not_found":
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+    if outcome["outcome"] == "wrong_status":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "job not cancellable",
+                "current_status": outcome["current_status"],
+                "reason": (
+                    "Terminal jobs (completed / failed) cannot be cancelled. "
+                    "Use DELETE /jobs/{id} to hard-delete instead."
+                ),
+            },
+        )
+    if outcome["outcome"] == "already_cancelled":
+        return CancelJobResult(
+            id=str(parsed_id),
+            cancelled=True,
+            was_already_cancelled=True,
+            status_before=outcome["status_before"],
+            status_after=outcome["status_after"],
+        )
+    # outcome == "cancelled" — active→cancelled flip succeeded.
+    return CancelJobResult(
+        id=str(parsed_id),
+        cancelled=True,
+        was_already_cancelled=False,
+        status_before=outcome["status_before"],
+        status_after=outcome["status_after"],
     )
 
 

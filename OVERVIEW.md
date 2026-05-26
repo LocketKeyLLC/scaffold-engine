@@ -17717,6 +17717,98 @@ System-wide `awaiting_confirmation` count is now 0 — the cohort is fully drain
 
 ---
 
+### §17.322 `POST /jobs/{id}/cancel` + `/cancel` router command — close §17.321's surfaced gap (2026-05-25)
+
+Closes the §17.321 surfaced gap: operator-driven job cancel was SQL-only, and `/skip` (the closest pre-existing operator command) is DAG-node-level — wrong scope for draining a stuck job. Every other job lifecycle transition has a router command (`/idea`, `/confirm`, `/execute`, `/skip`, `/exec retry`, `/jobs … delete`, `/jobs … rename`, and §17.130's `/jobs/{id}/resume`); cancel was the lone gap. This entry ships both the orchestrator endpoint and the OWUI router command in one cohort so the surface is consistent end-to-end.
+
+**Orchestrator endpoint: `POST /jobs/{job_id}/cancel`.** Symmetric to §17.130's `POST /jobs/{job_id}/resume` — resume is `cancelled → executing`, cancel is `active → cancelled`. Status codes:
+
+| Code | Outcome | When |
+|---|---|---|
+| 200 | `cancelled=True, was_already_cancelled=False` | Active→cancelled flip succeeded. Body carries `status_before` (the prior status, captured via CTE atomically with the UPDATE) and `status_after='cancelled'` |
+| 200 | `cancelled=True, was_already_cancelled=True` | Job was already `cancelled`. **Idempotent OK** — duplicate-click safe; chat clients can render a different message without re-querying state |
+| 404 | — | No job with that UUID |
+| 409 | `current_status` in detail | Job is in terminal `completed` or `failed` — non-cancellable. Detail message points at `DELETE /jobs/{id}` for the truly-destructive alternative |
+| 422 | — | Malformed UUID |
+
+**Schema (`CancelJobResult`):** four fields — `id`, `cancelled`, `was_already_cancelled`, `status_before`, `status_after`. The split between the boolean `cancelled` (always true on 200) and `was_already_cancelled` (the idempotency signal) is deliberate — chat clients want one bit to decide "render success vs render no-op," and one bit to drive different copy. Vendored byte-equal to `sdk/scaffold_client/schemas.py` (verified by the §17.157 `test_schemas_byte_equal` guard).
+
+**Handler (`cancel_active_job` in `app/modules/execution_handler.py`).** Lives next to `resume_cancelled_job` — same module, same return-shape conventions. Four-outcome dict: `cancelled` (status_before / status_after) / `already_cancelled` / `wrong_status` (current_status) / `not_found`. The status-conditional UPDATE uses a CTE so the prior status comes back in a single round-trip:
+
+```sql
+WITH prior AS (
+  SELECT id, status AS prior_status FROM jobs
+   WHERE id = :job_id FOR UPDATE
+)
+UPDATE jobs SET status='cancelled', updated_at=NOW()
+  FROM prior
+ WHERE jobs.id = prior.id
+   AND jobs.status NOT IN ('completed','failed','cancelled')
+RETURNING jobs.id, prior.prior_status;
+```
+
+**Why the CTE.** `UPDATE jobs ... RETURNING` reflects the NEW row, not the old, so capturing `status_before` would otherwise need a separate `SELECT FOR UPDATE` round-trip. The CTE inlines the lock + read into one statement; concurrent /cancel callers serialize on the FOR UPDATE inside the CTE and the second caller falls through to the `already_cancelled` SELECT path.
+
+**Why not reuse `ideation_workflow._cancel_job`.** That helper is a fire-and-forget UPDATE used only on Phase-2 client_disconnect; no status guard, no outcome discrimination, and it writes `error_summary='client_disconnect'` — which would clobber legitimate error_summary content on operator-driven cancels. The new handler is a distinct module-level function with the four-outcome shape the router needs.
+
+**Concurrency posture.** Two concurrent /cancel calls on the same job: one matches the WHERE clause, the other falls through to the post-rollback status SELECT and returns `already_cancelled`. A /cancel racing an `/execute/all` SSE worker: the worker's next DB write (status='running' on node-complete) sees the cancellation via the precondition probe at the top of the execution loop — there's a short race window where a node completes against a soon-to-be-cancelled job, but no data corruption results (the node row records 'done', the job row records 'cancelled', and `/jobs/{id}/resume` from §17.130 picks up from the done node correctly).
+
+**OWUI router command: `/cancel`.** Mirrors the §17.314 confirmation-friction pattern (state-altering, so 0-args with recall yields options, not action). Five tiers:
+
+| Input | Behavior |
+|---|---|
+| `/cancel` + recall hit | 📌 + 3 options surface (`/cancel confirm`, `/cancel <other_id>`, `/status <short>`) — no POST |
+| `/cancel` + cold cache | Usage error pointing at `/jobs` |
+| `/cancel confirm` + recall hit | 📌 hint + POST on recalled id |
+| `/cancel confirm` + cold cache | Friendly error pointing at explicit form |
+| `/cancel <job_id>` | POST (no friction; operator deliberately typed) |
+| `/cancel <not-a-uuid>` | Friendly error explaining the format |
+
+The 3-options surface includes `/status <short>` as the escape-hatch — operators in the recall path may have forgotten which job is "active" and need to look before acting. This mirrors §17.314's `/execute` 3-options surface (which uses `/results` as the escape-hatch); both teach the diagnose-first pattern.
+
+**Reversal-hint anchoring.** Every cancel-success response (both 200 paths) carries `💡 Reversible: POST /jobs/{job_id}/resume to restart from the last pending node.` Operators must always know /resume exists — that's the difference between `/cancel` being a safe operator tool (default-on adoption) and a destructive tool operators avoid out of caution. Pinned by `test_renders_idempotent_already_cancelled` and `test_renders_success_with_prior_status` as a regression guard.
+
+**Test-suite delta.**
+
+| File | Tests | Coverage |
+|---|---:|---|
+| `tests/test_cancel_endpoint.py` (new) | 12 | 7 unit (4 outcomes + SQL-shape + 2 happy paths) + 5 integration (200 / 200-idempotent / 404 / 409 / 422) |
+| `tests/test_scaffold_router_cancel.py` (new) | 16 | bare/cold/confirm/explicit/validation/rendering across 6 test classes; mirrors §17.314's `test_scaffold_router_execute_confirm.py` |
+
+Combined run in dev image: **28 passed, 0 failed.** SDK parity test (`tests/test_sdk_schema_parity.py`) green — the new `CancelJobResult` survived the byte-equal vendoring.
+
+**Live verification (against the running orchestrator, post-restart to pick up the new route).** All four status codes confirmed against real DB state — using one of the §17.321-cancelled rows as the idempotent-200 fixture:
+
+```
+$ POST /jobs/00000000-...-000000000000/cancel  → 404  "job not found: ..."
+$ POST /jobs/209cd850-...-558186eb9fac/cancel  → 200  was_already_cancelled=true, status_before=cancelled
+$ POST /jobs/f72b52b9-...-c14720e1660f/cancel  → 409  current_status=completed, reason="...DELETE /jobs/{id}..."
+$ POST /jobs/not-a-uuid/cancel                 → 422  "job_id must be a valid UUID"
+```
+
+The 200-idempotent fixture is load-bearing: the 4 jobs §17.321 drained via SQL are now reachable via the same orchestrator endpoint they should have been cancellable through originally, and the endpoint reports the cancellation honestly (`was_already_cancelled=true`) instead of either failing or silently re-cancelling.
+
+**OpenAPI snapshot.** `docs/openapi.json` regenerated (`make openapi-snapshot`) — +119 lines covering the new route + `CancelJobResult` schema. The §17.157 mechanical-sync convention applies: any future eng-design commit touching `app/schemas.py` should also bump openapi.json in the same commit.
+
+**Cost.** ~310 LOC of source (handler ~80, endpoint ~50, router-command + post helper ~110, schema ~40, OpenAPI delta ~30) + ~440 LOC of tests across two new files. Zero migrations, zero existing-file rewrites beyond the route-table additions in `app/routers/jobs.py` and the command-table addition in `pipelines/scaffold_router.py`.
+
+**§17.318 → §17.322 cohort final status.**
+
+| §17.318 recommendation | Status |
+|---|---|
+| §17.319 — sim/report.py field rename | ✅ |
+| §17.320 — Architecture refresh | ✅ |
+| MEMORY pointer refresh | ✅ |
+| Drain 4 stuck `Sort Algorithm Overview` jobs | ✅ via §17.321 |
+| §17.321 — Surfaced gap: real `/cancel` router command | ✅ This entry (§17.322) |
+| Decide `calibration` health-check disposition | ⏸ Operator action |
+
+Five engineering items shipped in the §17.318 → §17.322 cohort, all on 2026-05-25. The remaining open item is operator policy, not engineering work.
+
+**Pattern note.** The §17.318 audit's single biggest weakness was claiming `/skip` would drain the cohort without checking the handler's actual scope. §17.321 corrected the record; §17.322 closes the gap that the wrong-claim was hiding. The lesson — **every "use command X" recommendation gets handler-level verification, not commit-title inference** — is logged into `feedback_verify_before_claim`. Audits that mention this lesson by reference can now skip restating it.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

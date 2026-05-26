@@ -99,6 +99,9 @@ KNOWN_COMMANDS: tuple = (
     "/exec", "/cleanup", "/config", "/logs", "/health",
     # J.3.c — cost rollup for a job.
     "/cost",
+    # §17.322 — operator-driven job cancel (the corollary to /go and
+    # /confirm; replaces the SQL-only drain §17.321 had to use).
+    "/cancel",
 )
 
 KNOWN_SUBCOMMANDS: dict = {
@@ -2493,6 +2496,12 @@ class Pipeline:
                 # confirmation-friction recall model (closes the §17.307
                 # cohort: /skip is the 6th and final id-taker).
                 return self._handle_skip(parts, chat_id=chat_id)
+            if cmd == "/cancel":
+                # §17.322 — operator-driven job cancel. Mirrors §17.314
+                # /execute's confirmation-friction pattern: state-
+                # altering, so 0-args with recall yields options
+                # instead of auto-firing.
+                return self._handle_cancel(parts, chat_id=chat_id)
             if cmd == "/optimize":
                 if len(parts) < 2:
                     return "Usage: /optimize <prompt text>"
@@ -3233,6 +3242,113 @@ class Pipeline:
             if extras:
                 lines.append("_(" + " · ".join(extras) + ")_\n")
         return "".join(lines)
+
+    def _handle_cancel(
+        self, parts: list, *, chat_id: str | None = None,
+    ) -> str:
+        """§17.322 — `/cancel <job_id>` operator-driven cancel.
+
+        Mirrors the §17.314 /execute confirmation-friction pattern
+        because /cancel is state-altering (flips status →
+        ``cancelled``) and operating on the wrong job is the worst-
+        case failure. Idempotent at the orchestrator (`POST /jobs/
+        {id}/cancel` returns 200 + ``was_already_cancelled=True``
+        on a no-op), so duplicate clicks don't break anything.
+
+        Argument shapes:
+          - 0 args, recall hit → 📌 + 3 options (require explicit
+            ``/cancel confirm`` to fire on the recalled id)
+          - 0 args, no recall → Usage error
+          - 1 arg = ``confirm`` (recall hit) → POST on recalled id
+          - 1 arg = ``confirm`` (no recall) → error pointing at
+            explicit form
+          - 1 arg, job_id-shaped → POST (no friction; operator
+            deliberately typed the id)
+          - 1 arg, neither → invalid-id error
+          - 2+ args → warn extras ignored; treat as 1-arg case
+        """
+        # 0 args after /cancel — confirmation-friction with recall.
+        if len(parts) < 2:
+            recalled = self._active_job_recall(chat_id)
+            if recalled and recalled.get("job_id"):
+                rid = recalled["job_id"]
+                short = rid[:8] if len(rid) >= 8 else rid
+                title = recalled.get("title")
+                title_part = f" — _{title}_" if title else ""
+                return (
+                    f"📌 Active job in this chat: `{short}`{title_part}.\n\n"
+                    f"⚠️ `/cancel` flips the job to `cancelled` — "
+                    f"state-altering (but reversible via `/jobs/{short}"
+                    f"/resume`).\n\n"
+                    f"- Type `/cancel confirm` to cancel `{short}`\n"
+                    f"- Type `/cancel <other_job_id>` to target a "
+                    f"different job\n"
+                    f"- Or inspect first: `/status {short}`"
+                )
+            return (
+                "Usage: `/cancel <job_id>`\n"
+                "Example: `/cancel 01ab243e`\n\n"
+                "💡 Use `/jobs` to list your active jobs and copy a job_id."
+            )
+
+        # 1-arg = "confirm" — fire on recalled id (§17.314 pattern).
+        if parts[1].lower() == "confirm" and len(parts) == 2:
+            recalled = self._active_job_recall(chat_id)
+            if not recalled or not recalled.get("job_id"):
+                return (
+                    "❌ `/cancel confirm` requires an active job in chat "
+                    "memory, but none is set.\n\n"
+                    "Pass an explicit job_id: `/cancel <job_id>`. "
+                    "Use `/jobs` to list active jobs."
+                )
+            rid = recalled["job_id"]
+            hint = self._active_job_hint(rid, recalled.get("title"))
+            return hint + self._post_cancel(rid)
+
+        # 1-or-more args — first arg should be a job_id.
+        if _is_placeholder(parts[1]):
+            return (
+                "It looks like job_id is missing or a placeholder. "
+                "Try `/cancel 01ab243e` (use `/jobs` to find a real id)."
+            )
+        if not self._JOB_ID_TOKEN_RE.match(parts[1]):
+            return (
+                f"❌ `{parts[1]}` doesn't look like a job_id (expected "
+                f"a UUID or 8-hex-char short id).\n\n"
+                f"Pass an explicit job_id: `/cancel <job_id>`. "
+                f"Use `/jobs` to list active jobs."
+            )
+        return self._post_cancel(parts[1])
+
+    def _post_cancel(self, job_id: str) -> str:
+        """POST /jobs/{id}/cancel and render the result.
+
+        Three render shapes corresponding to the three CancelJobResult
+        outcomes (plus error shapes for 404/409/422 surfaced via _fmt).
+        """
+        r = _HTTP_SESSION.post(
+            f"{self.valves.orchestrator_url}/jobs/{job_id}/cancel",
+            headers=self._auth_headers(),
+            timeout=self.valves.request_timeout,
+        )
+        if r.status_code != 200:
+            return self._fmt(r)
+        try:
+            body = r.json()
+        except Exception:
+            return self._fmt(r)
+        short = job_id[:8] if len(job_id) >= 8 else job_id
+        if body.get("was_already_cancelled"):
+            return (
+                f"ℹ️ Job `{short}` was already cancelled — no change.\n\n"
+                f"💡 To restart it: `POST /jobs/{job_id}/resume`."
+            )
+        prior = body.get("status_before", "active")
+        return (
+            f"🛑 Cancelled job `{short}` (was `{prior}` → now `cancelled`).\n\n"
+            f"💡 Reversible: `POST /jobs/{job_id}/resume` to restart from "
+            f"the last pending node."
+        )
 
     def _handle_skip(
         self, parts: list, *, chat_id: str | None = None,

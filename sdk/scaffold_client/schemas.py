@@ -747,6 +747,36 @@ class DeleteResponse(BaseModel):
     id: str
 
 
+class CancelJobResult(BaseModel):
+    """§17.322 — POST /jobs/{job_id}/cancel response.
+
+    Status-conditional cancel that distinguishes three operator-relevant
+    outcomes via HTTP code + body shape:
+
+    - 200 + ``cancelled=True, was_already_cancelled=False`` — flipped from
+      an active status (pending/refining/awaiting_confirmation/researching/
+      planning/executing/running/blocked/assisted_*) to ``cancelled``.
+    - 200 + ``cancelled=True, was_already_cancelled=True`` — already
+      ``cancelled`` before the call; idempotent OK. The router exposes
+      this so chat clients can render a different message ("already
+      cancelled" vs "now cancelled") without re-querying state.
+    - 409 (no body field) — job is in a terminal non-cancellable status
+      (``completed`` or ``failed``); current_status returned in the
+      HTTPException detail so the client can guide the operator.
+
+    ``status_before`` captures the row's status at the moment of the
+    UPDATE attempt. For ``was_already_cancelled=True`` it equals
+    ``'cancelled'``; for the active→cancelled flip it carries the prior
+    status (operator-debugging signal — useful when the cancel races
+    against an ``/execute/all`` SSE).
+    """
+    id: str
+    cancelled: bool
+    was_already_cancelled: bool
+    status_before: str
+    status_after: str
+
+
 # §17.145 — Spec confirmation gate (engineering-design pipeline).
 
 class SpecRead(BaseModel):
