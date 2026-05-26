@@ -154,7 +154,17 @@ async def _services_ready() -> tuple[bool, str]:
     return True, ""
 
 
+# §17.334 — Per-test timeout override. Same shape as §17.325's fix for
+# test_topology_select_live_end_to_end: this is a live closed-loop test
+# that drives LLM (cloud 235b) → ngspice → constraint-check across up
+# to `device_sizing_max_iterations` rounds. The suite-wide
+# `pytest --timeout=30` ceiling pre-empts the inner LLM round-trip
+# (which the orchestrator gives 900s). Pre-§17.329 the test SKIPPED on
+# its prereq (topology-select 409 against the empty eng corpus); post-
+# §17.329 the eng_design partition is properly populated, so this test
+# actually runs end-to-end and surfaces the timeout-override gap.
 @pytest.mark.smoke
+@pytest.mark.timeout(900)
 async def test_device_sizing_live_end_to_end(confirmed_spec_and_selection):
     if os.environ.get("SCAFFOLD_SKIP_LIVE_LLM") == "1":
         pytest.skip("SCAFFOLD_SKIP_LIVE_LLM=1")

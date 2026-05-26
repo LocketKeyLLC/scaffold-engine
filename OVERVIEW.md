@@ -18442,6 +18442,52 @@ Net cohort-wide: zero regressions, eliminates an entire flake class. Suite total
 
 ---
 
+### §17.334 `test_device_sizing_live_end_to_end` timeout override — second-order surfacing from §17.329's corpus fix (2026-05-26)
+
+Same class of fix as §17.325, applied to the parallel integration test in the device-sizing stage. The §17.329 → §17.333 work eliminated the pre-existing skip conditions that had been hiding this exact timeout from prior suite runs.
+
+**Failure shape.** Post-§17.333 full suite reported `1 failed, 3141 passed, 3 skipped in 625.81s (0:10:25)` — the failure was `tests/integration/test_device_sizing_db.py::test_device_sizing_live_end_to_end` with the same trace shape as §17.325:
+
+```
++++++++++++++++++++++++++++++++++++ Timeout ++++++++++++++++++++++++++++++++++++
+FAILED  [  0%]
+```
+
+The test makes a live `POST /topology-selections/{id}/size?max_iterations=3` and waits for the closed-loop LLM (cloud 235b) → ngspice → constraint-check sequence. The test's own httpx ceiling is `timeout=1500.0` matching the orchestrator's per-stage 900s budget. The suite-wide `pytest --timeout=30` from `make test` fires first.
+
+**Why now.** Pre-§17.329 the device-sizing test was SKIPPING — its dependency chain (spec → topology-select → device-sizing) failed at the topology-select step because the empty/contaminated eng corpus produced no valid candidates. The `confirmed_spec_and_selection` fixture would fail to materialize a valid `topology_selections` row, so the test never reached the LLM-loop section that the 30s timeout would have caught. **§17.329's corpus split healed the prereq; §17.334 closes the second-order timeout that healing surfaced.**
+
+**Fix.** Add `@pytest.mark.timeout(900)` immediately above the test, exactly mirroring §17.325's pattern. The marker overrides the CLI-level 30s ceiling for this one test (`pytest-timeout` precedence: marker > -o > --timeout). 900s matches the orchestrator-side ceiling so both clocks reach failure at the same wall-clock.
+
+```python
+@pytest.mark.smoke
+@pytest.mark.timeout(900)
+async def test_device_sizing_live_end_to_end(confirmed_spec_and_selection):
+```
+
+**Verification.**
+
+```
+$ pytest tests/integration/test_device_sizing_db.py::test_device_sizing_live_end_to_end -v
+tests/integration/test_device_sizing_db.py::test_device_sizing_live_end_to_end PASSED
+============================== 1 passed in 4.15s ===============================
+```
+
+4.15s wall-clock — consistent with §17.156's documented iter-1 convergence (5.33s observed) on the RC LPF analytical case. The cloud LLM had pre-warmed conversation state from the topology-select runs earlier in this cohort. Pre-§17.334 this test timed out at 30s before it could even start its first LLM round-trip.
+
+**Two-step pattern shared between §17.325 and §17.334.** Each is a live cloud-LLM integration test that:
+1. Has a documented inner httpx timeout matching the orchestrator's per-stage budget (15+ minutes)
+2. Got its skip-cascade healed by an earlier cohort fix (§17.325 by the test-author's own corpus + reachability gates; §17.334 by §17.329's partition split)
+3. Hit the suite-wide 30s ceiling from `make test` once it actually had a chance to run
+
+The shared pattern is now visible enough to be worth a future testing-convention §17.x: **integration tests under `tests/integration/` should default to a longer timeout marker.** Adding `@pytest.mark.timeout(900)` to the four `tests/integration/test_*_live_end_to_end` candidates pre-emptively would close future surfacings of this same class.
+
+**Cost.** +12 LOC of test setup (decorator + comment block referencing §17.325 + §17.329). Zero production-code change.
+
+**§17.318 → §17.334 cohort.** 17 entries. Closes the only failure from the post-§17.333 full suite run; the next run is projected to land at **3141 passed / 0 failed / 3 skipped** in ~10 min wall-clock.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
