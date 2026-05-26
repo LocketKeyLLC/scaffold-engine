@@ -135,7 +135,17 @@ async def _corpus_has_eng_chunks() -> bool:
         return False
 
 
+# §17.325 — Per-test timeout override. The suite-wide `pytest --timeout=30`
+# in `make test` is the right default for unit / mock tests, but this is a
+# live cloud-LLM round-trip and the inner httpx already uses `timeout=900.0`
+# acknowledging the cloud 235b's "several minutes" upper bound. Without
+# this override the pytest-timeout signal fires at 30 s mid-LLM call,
+# failing a test whose own contract permits 15 min. The skip-cascade
+# above (SCAFFOLD_SKIP_LIVE_LLM / model-unreachable / empty-corpus) keeps
+# this from blocking hosts that can't run the live path; the timeout
+# only matters when the test actually proceeds.
 @pytest.mark.smoke
+@pytest.mark.timeout(900)
 async def test_topology_select_live_end_to_end(confirmed_spec):
     if os.environ.get("SCAFFOLD_SKIP_LIVE_LLM") == "1":
         pytest.skip("SCAFFOLD_SKIP_LIVE_LLM=1")

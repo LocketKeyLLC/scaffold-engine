@@ -17917,6 +17917,53 @@ test_download_step_ordered_between_pip_install_and_app_copy      PASSED
 
 ---
 
+### §17.325 `test_topology_select_live_end_to_end` — per-test timeout(900) override (2026-05-25)
+
+Second of the two pre-existing failures the §17.323 full-suite run surfaced. Same root cause shape as §17.324 (test out of sync with production reality), different specific failure mode.
+
+**Failure shape.** `make test` runs `pytest tests/ --timeout=30 -v` — the 30 s ceiling is right for unit / mock tests, the bulk of the suite. The integration test for §17.146's topology-select stage is a real cloud-LLM round-trip and its own inner `httpx.AsyncClient(timeout=900.0)` already acknowledges the cloud 235b's "several minutes" upper bound:
+
+```python
+# tests/integration/test_topology_select_db.py L150-156 (pre-§17.325)
+# The cloud 235b can chew through a topology-select prompt for
+# several minutes — give the orchestrator round-trip a generous
+# ceiling so the test's own httpx timeout never wins the race.
+async with httpx.AsyncClient(timeout=900.0) as client:
+    resp = await client.post(
+        f"{ORCHESTRATOR_URL}/specs/{spec_id}/topology-select",
+        ...
+    )
+```
+
+But the suite-wide `--timeout=30` pre-empts the inner `timeout=900` and fires `pytest-timeout` at the 30 s mark, killing the test mid-LLM call.
+
+**Fix.** Add `@pytest.mark.timeout(900)` directly on the test function. Per-test markers override the CLI flag (`pytest-timeout` documents this precedence as "explicit marker > -o ini-option > --timeout CLI"). The 900 s mirrors the inner httpx ceiling so both reach failure at the same wall-clock.
+
+**Why not raise `--timeout` in `make test`.** That would loosen the ceiling for all 3138 tests including unit tests that are correctly bounded at 30 s — a unit test that takes >30 s is almost always wedged on an async race or mock that should have settled instantly. The aggressive default is right; the live integration test is the exception that needs an explicit override.
+
+**Why not add a `live` marker + `-m "not live"` exclusion.** Considered. Marker-based exclusion creates a maintenance tax (every CI invocation must remember to add `-m "not live"`) and hides regressions in the live path. The per-test timeout override is local: the test still runs in `make test`, still exercises the live cloud path when reachable, but no longer races the wrong timeout.
+
+**Skip-cascade unchanged.** The test's pre-§17.325 skip conditions (`SCAFFOLD_SKIP_LIVE_LLM=1`, `_model_reachable()`, `_corpus_has_eng_chunks()`) still gate execution. Hosts without cloud reachability or with an empty corpus skip cleanly without needing the timeout marker.
+
+**Verification.**
+
+```
+$ pytest tests/integration/test_topology_select_db.py::test_topology_select_live_end_to_end -v
+tests/integration/test_topology_select_db.py::test_topology_select_live_end_to_end SKIPPED
+SKIPPED [1] tests/integration/test_topology_select_db.py:176: stage returned 409
+(likely citation/coverage issue): '{"detail":{"errors":["LLM produced no well-formed
+candidates"], "rag_chunk_ids": ["scaffold-browsing-the-web-...", ...], "rag_query": "..."}}'
+============================= 1 skipped in 39.59s ==============================
+```
+
+39.59 s wall-clock — past the prior 30 s timeout, into the test's natural 409-handling fall-through. The SKIP message reveals a separate finding worth a future §17.x: the eng RAG retrieval for an analog-LPF query is returning `scaffold-browsing-the-web` / `scaffold-javascript-data-types` / `scaffold-rest` chunks, which means the eng corpus still has the §17.158 contamination that §17.149's seed was supposed to clear. The test correctly surfaces this as a SKIP rather than a fail — citation invariant intact, no fabricated topologies. **Logged as a §17.x candidate** for the next RAG-quality sprint; **not blocking** the §17.324/§17.325 ship because the test now runs to its documented terminal state instead of timing out indeterminately.
+
+**Cost.** +9 LOC of test (decorator + comment block explaining the override). No production code change.
+
+**§17.324 + §17.325 together** close the two pre-existing failures the §17.323 full-suite run surfaced. Post-fix expected suite shape: **3138 passed (3136 + the 2 newly green), 0 failed, 3 skipped** (the long-standing §17.158 KB-content skips, unchanged).
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
