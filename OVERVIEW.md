@@ -18303,6 +18303,39 @@ Pre-§17.330 `test_domain_filtering.py::TestValidDomains::test_expected_domains`
 
 ---
 
+### §17.331 `ALLOWED_DOMAINS` parity guard — close the §17.330 follow-up (2026-05-26)
+
+Closes the follow-up §17.330 logged. The §17.329 → §17.330 sequence proved the failure mode: `app/web/routes.py::_ALLOWED_DOMAINS` and `app/modules/idea_refinement.py::ALLOWED_DOMAINS` are two literal copies of the same allow-list; the routes.py comment at L198 says they MUST match, but no test enforced it. §17.329 updated routes.py and missed idea_refinement.py — caught only because the §17.330 doc audit walked every domain-related reference.
+
+**Guard added.** `tests/test_domain_filtering.py::TestAllowedDomainsParity` (2 tests, +35 LOC, smoke-tier):
+
+| Test | Asserts |
+|---|---|
+| `test_idea_refinement_and_routes_allowed_domains_equal` | `set(idea_refinement.ALLOWED_DOMAINS) == set(routes._ALLOWED_DOMAINS)`. Error message names both sets so an operator updating one literal sees exactly which one to update. |
+| `test_allowed_domains_subset_of_valid_domains` | Both literals are subsets of `VALID_DOMAINS` (one-way invariant: `/ideate` may be more restrictive than the schema, never less). |
+
+**Why both halves.** The equality test catches the §17.329 → §17.330 drift shape; the subset test catches a different shape — adding a value to `_ALLOWED_DOMAINS` that isn't in `VALID_DOMAINS` (would silently accept inputs the schema later rejects, producing 422s at request handlers downstream).
+
+**Why two literals at all** (kept as written today): The routes.py comment explains the duplication — "Duplicated here as a literal so the form template can render the options without importing the orchestrator module (loopback discipline)." That's a load-bearing architectural property — the web layer is allowed to read its own config without coupling to `app.modules`. The parity test reconciles the two without breaking the loopback boundary.
+
+**Verification.**
+
+```
+$ pytest tests/test_domain_filtering.py::TestAllowedDomainsParity -v
+test_idea_refinement_and_routes_allowed_domains_equal       PASSED
+test_allowed_domains_subset_of_valid_domains                PASSED
+============================== 2 passed in 0.64s ===============================
+
+$ pytest tests/test_domain_filtering.py -q
+19 passed in 2.04s
+```
+
+**Cost.** +35 LOC of test (1 new class, 2 tests, header comment). No production code change.
+
+**§17.318 → §17.331 cohort.** 14 entries. The follow-up that §17.330 logged is itself now closed — the §17.318 audit's full ripple, including the regression guards that prevent the same audit from being needed again, is shipped.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
