@@ -17809,6 +17809,59 @@ Five engineering items shipped in the §17.318 → §17.322 cohort, all on 2026-
 
 ---
 
+### §17.323 `calibration` /health disposition — keep wiring as-is, document the empty-state contract (2026-05-25)
+
+Closes the final §17.318 open item. The audit flagged `/health` showing `calibration: ⚠️ status=unknown, last_check_at=null, last_kind=null` and asked whether this represented drift (cron stopped firing) or genuine empty-state (system between fire windows). **Disposition: genuine empty-state; no code change; document the contract so future audits don't re-litigate.**
+
+**Investigation.** All five evidence sources align:
+
+| Probe | Finding |
+|---|---|
+| Host crontab | `0 8 1 1,4,7,10 *  /home/aedefruscio/scaffold-engine/scripts/quarterly_calibration_pr.sh ...` — present, correctly absolute-pathed (post-§17.214) |
+| Script permissions | `executable` |
+| `git log -- scripts/quarterly_calibration_pr.sh` | First commit `a826ffc 2026-05-08` |
+| `/tmp/quarterly_calibration.log` | Does not exist |
+| `SELECT * FROM system_alerts WHERE kind LIKE 'calibration.%'` | 0 rows |
+| `settings.calibration_watchdog_enabled` | `True` (default) |
+| `settings.calibration_watchdog_interval_seconds` | 900 (15 min) |
+| `settings.calibration_grace_minutes` | 120 |
+
+**Calibration fires Jan/Apr/Jul/Oct 1st at 08:00 UTC.** The script was installed 2026-05-08 — **after** the Apr 1 fire window. The next fire is 2026-07-01 08:00 UTC, ~37 days out from this entry. The cron has literally never had a fire window since the script existed on this host, so:
+
+- No log file is expected. (Cron only writes the log when it runs.)
+- Zero `calibration.*` alerts is expected. (Alerts come from the script's `emit_alert` helper, fired only at start/success/failure.)
+- `/health`'s `status=unknown` is the honest signal. (§17.194's classifier maps "no calibration.* row in system_alerts" → `unknown`.)
+- The watchdog has correctly stayed silent every day from May 8 → today. (X.26's watchdog only acts on quarter-start days past the 120m grace; today is neither Apr 1 nor Jul 1.)
+
+**§17.318 was asking the wrong question.** The audit treated `unknown` as a possible failure signal; in fact the system has the right contract — surface `unknown` until the first fire, then carry the real outcome forward. The contract was just under-documented, which made `unknown` look like drift to a fresh-eyes reader.
+
+**Why not manually fire the calibration to turn the surface green.** Considered running `bash scripts/quarterly_calibration_pr.sh` once to populate a `calibration.ok` row. Rejected for three reasons:
+
+1. **Honesty.** A manual fire records an alert that the QUARTERLY cron didn't actually trigger. The system_alerts table would carry a misleading "this fired on schedule" signal that future audits would have to disambiguate.
+2. **Side-effects.** The script opens a draft PR on the GitHub repo with prior-baseline context and a placeholder rebaseline entry. Operator would have to triage / close the spurious PR.
+3. **No information gained.** The real value of the calibration is the /score_retrieval sweep against the golden set — that runs as part of the PR's manual checklist, not as part of the cron itself. A manual cron-trigger doesn't actually exercise the calibration loop end-to-end.
+
+**Why not disable the watchdog or the cron.** Both are working correctly. Disabling the watchdog would suppress the page-on-laptop-asleep mode the X.26 sprint specifically built for. Removing the cron would mean Jul 1's calibration silently doesn't fire and `/health` stays `unknown` indefinitely without anyone noticing.
+
+**The right operator-facing contract.** `/health` surfaces calibration the way it surfaces any other slow-cadence subsystem: `unknown` until the first sample, then `ok` / `failed` / `missed` reflecting the most recent quarter. Operators should expect `unknown` on a freshly-deployed instance and on instances installed between quarter boundaries. **First fire on this host: 2026-07-01 08:00 UTC.** If `/health` still shows `unknown` after Jul 1 + 120m grace + the watchdog's next 15m sweep (≈ 2026-07-01 10:15 UTC at latest), THAT is drift worth a §17.x entry.
+
+**§17.318 → §17.323 cohort final-final status.**
+
+| §17.318 recommendation | Status |
+|---|---|
+| §17.319 — sim/report.py field rename | ✅ |
+| §17.320 — Architecture refresh | ✅ |
+| MEMORY pointer refresh | ✅ |
+| Drain 4 stuck `Sort Algorithm Overview` jobs | ✅ via §17.321 |
+| §17.321 — Surfaced gap: real `/cancel` router command | ✅ via §17.322 |
+| Decide `calibration` health-check disposition | ✅ This entry (§17.323) — keep as-is, contract documented |
+
+**The §17.318 → §17.323 cohort is fully closed.** Six engineering / decision items across six commits on 2026-05-25, all touching different layers of the operator-facing surface: data audit, code fix, architecture doc, manual SQL drain, new router endpoint + command, and an "intentionally do nothing" disposition that depends on contract clarity rather than code change.
+
+**Next sample point for calibration.** A short-form §17.x reminder fires on 2026-07-01 (cron auto-runs; this entry's note carries the expected behavior). No engineering action needed before then.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
