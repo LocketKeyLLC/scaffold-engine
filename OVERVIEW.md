@@ -18606,6 +18606,72 @@ Dynamic `output_fields=[*EXTRACT_FIELDS]` where `EXTRACT_FIELDS` is built at run
 
 ---
 
+### §17.337 schema-parity test hardening — close §17.336's own review findings (2026-05-29)
+
+`/code-review xhigh` on §17.336 surfaced nine findings on the new `tests/integration/test_milvus_schema_parity.py`. Top three were severe enough that the test could have passed green while silently *not* exercising the §17.319 guard it advertises — exactly the failure mode the test was written to prevent. §17.337 lands the targeted fixes (no production-code change).
+
+**1. Broad `except Exception` was the §17.319 anti-pattern in microcosm.** The original helper wrapped connect + `Collection(...)` + `c.load()` + schema-read in one try and silently returned `None` on *any* failure — `pytest.skip("milvus unreachable")` then fired regardless of cause. A dropped `toon_v2`, a failed `load()`, an auth/TLS change all came out as "unreachable" and the parity assertion never ran. Narrowed the except to wrap *only* `connections.connect()`; everything downstream propagates as a real test failure.
+
+```python
+# was — one broad except over the whole probe
+try:
+    connections.connect(alias=..., host="milvus-standalone", port="19530")
+    try:
+        c = Collection("toon_v2", using="schema_parity_probe")
+        c.load()
+        return {f.name for f in c.schema.fields}
+    finally:
+        connections.disconnect("schema_parity_probe")
+except Exception:
+    return None    # masks toon_v2-missing, load-failed, auth, ...
+
+# is — except scoped to the one path that means "Milvus is down"
+try:
+    connections.connect(alias="schema_parity_probe", uri=settings.milvus_uri)
+except Exception:
+    return None
+try:
+    return {f.name for f in Collection("toon_v2", using="schema_parity_probe").schema.fields}
+finally:
+    connections.disconnect("schema_parity_probe")
+```
+
+**2. `Collection.load()` was unnecessary** for reading `schema.fields` — the schema is materialised at `Collection(name)` construction time. Dropping the call removes a real failure mode (data-node unhealth, memory pressure, replica unavailable) that the old broad-except would have silently skipped, and shaved test runtime: **1.46s → 1.15s** in the dev container.
+
+**3. Hardcoded `host="milvus-standalone", port="19530"`** diverged from `settings.milvus_uri`. Today both resolve to the same endpoint, but any future env override (`MILVUS_URI=...`) would have the test probe one Milvus while the app talks to another — the schema-parity claim is then asserted against the wrong collection. Switched to `connections.connect(alias=..., uri=settings.milvus_uri)`. As a bonus the `from app.config import settings` import — previously dead — is now actually used.
+
+**Smaller cleanups in the same diff:**
+
+- Removed dead `import httpx` and `ORCHESTRATOR_URL = ...` constant (copy-paste from another integration-test boilerplate; the test makes zero HTTP calls).
+- `_milvus_collection_fields` lost its `async` keyword (it had no `await`); the calling test lost its `async`/`@pytest.mark.asyncio` along with the `await` at the call site. Pure-sync now matches the second test in the file (`test_scan_finds_known_call_sites`).
+- `pytest.skip("milvus unreachable")` → `pytest.skip(f"milvus unreachable at {settings.milvus_uri}")` so CI logs name *which* endpoint failed.
+- `_scan_output_fields_literals` now strips Python line-comments from the bracket body before extracting field names: `["foo", # rename "bar" later\n "baz"]` would otherwise extract `bar` and false-flag it as drift. No live call site has this shape today; the strip is forward-defensive.
+
+**What's deliberately not fixed.** Two findings from the review were left in place:
+
+| Finding | Why not |
+|---|---|
+| Single-collection assumption (every `output_fields=[...]` in `app/` is checked against `toon_v2`) | Would require tagging each call site with its target collection or ast-walking `Collection(...)` arguments. Non-trivial; no second collection exists today. Documented in the file's own `Limitations:` block. |
+| Test reimplements `get_collection()` from `app/utils/milvus_utils.py` | The dedicated `schema_parity_probe` alias is intentional isolation from the cached default alias used by the rest of the test session. Refactoring the central helper to support per-alias connect is wider scope than this guard warrants. |
+
+**Verification.**
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T scaffold-orchestrator \
+    pytest tests/integration/test_milvus_schema_parity.py -v
+test_output_fields_match_toon_v2_schema    PASSED
+test_scan_finds_known_call_sites           PASSED
+============================== 2 passed in 1.15s ===============================
+```
+
+Both tests pass with the new, *tighter* exception envelope — a real regression now fails the test loudly instead of skipping.
+
+**Meta-note.** §17.337 is a fix for §17.336, which was itself a fix for §17.319's deferred item. The chain is healthy: §17.319 pinned one specific drift, §17.336 generalised the guard, §17.337 hardened the guard against masking its own failures. The §17.318→§17.336 cohort closure stands (the production-code regression *class* is now closed); §17.337 is test-only quality on top.
+
+**Cost.** ~30 LOC delta in one test file. Zero production-code change. Zero new dependencies.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

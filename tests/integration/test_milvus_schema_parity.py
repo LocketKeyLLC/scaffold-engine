@@ -28,13 +28,11 @@ import os
 import re
 from pathlib import Path
 
-import httpx
 import pytest
 
 from app.config import settings
 
 
-ORCHESTRATOR_URL = "http://scaffold-orchestrator:8000"
 APP_ROOT = Path(__file__).resolve().parent.parent.parent / "app"
 
 
@@ -51,27 +49,23 @@ _OUTPUT_FIELDS_LITERAL_RE = re.compile(
 _FIELD_NAME_RE = re.compile(r"""["']([a-z_][a-z0-9_]*)["']""")
 
 
-async def _milvus_collection_fields() -> set[str] | None:
-    """Connect to Milvus and return the set of field names on toon_v2.
-    Returns None if Milvus is unreachable — the caller skips."""
+def _milvus_collection_fields() -> set[str] | None:
+    """Return the set of field names on toon_v2.
+
+    Returns None ONLY when Milvus is unreachable — the caller skips
+    that one case. A missing toon_v2 collection or any schema-read
+    failure propagates as a test failure: masking those would re-create
+    the §17.319 silent-failure mode this whole file exists to prevent.
+    """
+    from pymilvus import Collection, connections
     try:
-        # pymilvus is sync; the test is async only because
-        # tests/integration/conftest.py runs in asyncio mode. The
-        # actual probe is a sync call but cheap.
-        from pymilvus import Collection, connections
-        connections.connect(
-            alias="schema_parity_probe",
-            host="milvus-standalone",
-            port="19530",
-        )
-        try:
-            c = Collection("toon_v2", using="schema_parity_probe")
-            c.load()
-            return {f.name for f in c.schema.fields}
-        finally:
-            connections.disconnect("schema_parity_probe")
+        connections.connect(alias="schema_parity_probe", uri=settings.milvus_uri)
     except Exception:
         return None
+    try:
+        return {f.name for f in Collection("toon_v2", using="schema_parity_probe").schema.fields}
+    finally:
+        connections.disconnect("schema_parity_probe")
 
 
 def _scan_output_fields_literals() -> list[tuple[Path, int, str]]:
@@ -83,8 +77,10 @@ def _scan_output_fields_literals() -> list[tuple[Path, int, str]]:
     for py_file in APP_ROOT.rglob("*.py"):
         text = py_file.read_text()
         for m in _OUTPUT_FIELDS_LITERAL_RE.finditer(text):
-            body = m.group(1)
-            # Line number of the match start, 1-indexed.
+            # Strip Python line comments so commented-out identifiers
+            # like `["foo",  # was "bar"\n "baz"]` don't get extracted
+            # as field names and false-flag as drift.
+            body = re.sub(r"#[^\n]*", "", m.group(1))
             line_no = text.count("\n", 0, m.start()) + 1
             for fm in _FIELD_NAME_RE.finditer(body):
                 out.append((py_file, line_no, fm.group(1)))
@@ -93,14 +89,13 @@ def _scan_output_fields_literals() -> list[tuple[Path, int, str]]:
 
 @pytest.mark.smoke
 @pytest.mark.timeout(60)
-@pytest.mark.asyncio
-async def test_output_fields_match_toon_v2_schema():
+def test_output_fields_match_toon_v2_schema():
     if os.environ.get("SCAFFOLD_SKIP_LIVE_LLM") == "1":
         pytest.skip("SCAFFOLD_SKIP_LIVE_LLM=1")
 
-    schema_fields = await _milvus_collection_fields()
+    schema_fields = _milvus_collection_fields()
     if schema_fields is None:
-        pytest.skip("milvus unreachable")
+        pytest.skip(f"milvus unreachable at {settings.milvus_uri}")
 
     matches = _scan_output_fields_literals()
     assert matches, (
