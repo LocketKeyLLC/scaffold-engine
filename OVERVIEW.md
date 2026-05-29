@@ -18672,6 +18672,67 @@ Both tests pass with the new, *tighter* exception envelope — a real regression
 
 ---
 
+### §17.338 `test_post_design_ambiguity_returns_inline` timeout override — chase the §17.337-run flake (2026-05-29)
+
+The `make test` run immediately after §17.337 landed showed `1 failed, 3143 passed`: `tests/integration/test_design_db.py::test_post_design_ambiguity_returns_inline` failed in the full suite while passing 10/10 in isolation (~2.7s each). Same flake *class* as §17.334, different test.
+
+**Diagnosis.** The test POSTs `"Make a fast filter."` to `/design`, which routes into `extract_spec()` → the LLM at `settings.spec_extractor_model_role` → `settings.model_general`, defaulted to **`qwen3-vl:235b-instruct-cloud`**. The 235b cloud model is the same one whose `test_topology_select_db.py` peer already carries the comment *"can chew through a topology-select prompt for several minutes"* and is marked `@pytest.mark.timeout(900)` (per §17.335). This test was missing the marker, so the suite-wide `--timeout=30` (from `Makefile:33` → `pytest tests/ --timeout=30`) wins the race against the LLM call whenever:
+
+- the orchestrator's background workers (scheduler, reaper, OWUI-pipelines warmup) are also queued at Ollama, or
+- the model needs a cold load (first call after eviction), or
+- the cloud endpoint queues briefly.
+
+Two failure paths the suite-timeout opens that the test was supposed to tolerate:
+
+| Path | What the test sees |
+|---|---|
+| Pytest 30s timeout fires | SIGALRM kills the test mid-`await` — FAIL with no body |
+| Pytest survives, but `httpx.AsyncClient(timeout=120.0)` fires before LLM responds | `httpx.ReadTimeout` raised, never reaches the `assert resp.status_code == 200` |
+
+The test's own docstring already documented the tolerance contract — *"Tolerate model unavailability — if the LLM call fails for any transport reason, we get errors[] populated rather than ambiguities[]; the contract holds either way"* — but the tolerance can only kick in if the orchestrator returns at all. A client-side timeout never gets `errors[]`.
+
+**Fix.** Mirror the §17.335 / `test_topology_select_db.py` convention:
+
+```python
+@pytest.mark.smoke
+@pytest.mark.timeout(900)                 # ← was: inherits --timeout=30
+async def test_post_design_ambiguity_returns_inline(cleanup_design_jobs):
+    """...
+    Uses the cloud 235b model_general for spec extraction — same
+    rationale as test_topology_select_db.py: the suite-wide
+    --timeout=30 is hostile to a model that can queue for minutes
+    under Ollama contention from the orchestrator's background
+    workers (scheduler, reaper, pipelines). Mark + client ceiling
+    both at 900s; orchestrator's own Ollama timeout governs upstream.
+    """
+    payload = {"brief": "Make a fast filter."}
+    async with httpx.AsyncClient(timeout=900.0) as client:    # ← was: 120.0
+        ...
+```
+
+Both ceilings bumped to 900s: the pytest marker (kills the SIGALRM path) **and** the httpx client (kills the `ReadTimeout` path). 900s is far more than the test will ever take in a healthy run; it's a *ceiling*, not a wait. The orchestrator's own Ollama timeout (governed by app config, not the test) decides when to give up on the upstream call, and that gives the orchestrator a chance to return an `errors[]` body the test can assert against.
+
+**Why 900 and not 60 or 120.** The 235b cloud model has a documented multi-minute worst-case (see the comment in `test_topology_select_db.py:159-162` that §17.335 inherited). 60s would still race the worst case. 900s aligns with the existing project convention and is the same number the topology-select test uses.
+
+**Verification.**
+
+```
+$ docker compose ... exec -T scaffold-orchestrator \
+    pytest tests/integration/test_design_db.py::test_post_design_ambiguity_returns_inline -v
+test_post_design_ambiguity_returns_inline PASSED
+============================== 1 passed in 2.74s ===============================
+```
+
+Still ~2.7s on the warm path — the marker doesn't slow normal runs, it just removes the suite-default ceiling.
+
+**Why not extend the §17.335 sweep blanket-fashion.** §17.335 was scoped to `tests/integration/test_*_live_*` because that naming convention is the established opt-in for "this test depends on a live external model." `test_design_db.py` doesn't follow that convention — it's a router/DB integration test that happens to make one LLM-backed call. The right move here is a targeted marker on the one LLM-backed test, not a renamed-or-resweep. If a second flake of this shape lands from another non-`_live_` file, that's the signal to widen the rule (likely: "any integration test that POSTs to an LLM-backed endpoint needs an explicit timeout marker").
+
+**Cost.** +2 lines (the marker + the docstring paragraph), one literal change (`120.0` → `900.0`). Zero production-code change.
+
+**Cohort.** §17.337 → §17.338. Each is a fix for the prior commit's surfaced issue (§17.336 review → §17.337; §17.337 full-suite run → §17.338). Clean serial closure of the post-§17.336 quality cascade.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

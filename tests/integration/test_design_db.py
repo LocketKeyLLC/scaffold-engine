@@ -280,11 +280,20 @@ async def test_get_design_aggregates_chain(cleanup_design_jobs):
 
 
 @pytest.mark.smoke
+@pytest.mark.timeout(900)
 async def test_post_design_ambiguity_returns_inline(cleanup_design_jobs):
     """An ambiguous brief must surface ambiguities[] in the 200 body
-    with NO job row created."""
+    with NO job row created.
+
+    Uses the cloud 235b ``model_general`` for spec extraction — same
+    rationale as ``test_topology_select_db.py``: the suite-wide
+    ``--timeout=30`` is hostile to a model that can queue for minutes
+    under Ollama contention from the orchestrator's background
+    workers (scheduler, reaper, pipelines). Mark + client ceiling
+    both at 900s; orchestrator's own Ollama timeout governs upstream.
+    """
     payload = {"brief": "Make a fast filter."}
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=900.0) as client:
         resp = await client.post(
             f"{ORCHESTRATOR_URL}/design",
             json=payload,
