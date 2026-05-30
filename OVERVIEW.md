@@ -18938,6 +18938,113 @@ The curve plateau is the operational answer: cap=2 is the throughput sweet spot 
 
 ---
 
+### §17.342 OWUI triage Gaps — direct questions + My pick "open-Gap guard" (2026-05-30)
+
+Operator report: "user interactions in OWUI have improved, but triage still doesn't give clear missing information needed to complete its tasks." The supplied transcript made the failure mode concrete — `TRIAGE_SYSTEM_PROMPT` (pipelines/scaffold_router.py:272-362) was producing Gap lines that *named the bucket category* instead of *asking the user a question*, and a My pick that *invented values* (timelines, services, security tools) the user never stated.
+
+**Transcript exemplar (pre-fix).** Operator typed a 1-line home-lab goal with attached hardware specs, then said "I want to utilize proxmox." After two turns:
+
+```
+**Gaps:**
+- WHAT specifically is being built: needs AI research use case (e.g., video analytics) and game titles (e.g., Minecraft, Steam).
+- HARDWARE / infrastructure: ✓ covered
+- SUCCESS criteria: needs definition of "done" (e.g., all services operational, security patches applied within 24h).
+- CONSTRAINTS: needs timeline (e.g., "within 1 week") and budget (e.g., "zero added cost").
+
+**My pick:**
+Deploy media servers ... within a 2-week timeline.
+```
+
+Two distinct failures: (1) every open Gap is a category description ("needs definition of done") rather than a question the operator can answer in a sentence; (2) My pick fabricated a 2-week timeline that the operator never proposed, then carried it forward as if locked.
+
+**Three iterative rounds — verified in container each round via `Pipeline._call_triage` replay of the original transcript against host Ollama (qwen3:4b, /v1/chat/completions, OpenAI-compatible).** Each cycle: edit → `docker restart open-webui-pipelines` → run `/tmp/verify_triage.py` inside `open-webui-pipelines` container → grep response for Gap shape and My pick fabrication.
+
+| Round | Prompt change | Gap = direct question | Format discipline (no tables/emoji/extra headers) | "Never invent a value" honored | Verify elapsed |
+|---|---|:---:|:---:|:---:|---:|
+| **R1** | Added inline `Bad: / Good:` example block inside Gaps spec + abstract "never invent a value" rule | ✓ | ✗ catastrophic — markdown tables, emoji (✅⭐⚡⚖️💡⚠️📌🔒), horizontal rules, extra section headers ("Key Gaps to Address", "Action Plan"), "I'll then draft exact VM configs within 24 hours" deliverable offer | ✓ (mostly) | 1490 s |
+| **R2** | Dropped Bad/Good block; one-line directive only | ✗ — reverted to "Needs X (e.g., Y)" categories | ✓ | ✗ — My pick fabricated TensorFlow Lite, fail2ban, OpenVAS, "2-week timeline" | 1382 s |
+| **R3 (landed)** | Rewrote worked example's own Gap line as pure question (no "needs X —" prefix); added a *second* worked example with 3 buckets open all phrased as questions; added My pick "open-Gap guard" clause | ✓ — 3/3 open Gaps actionable | ✓ | ✓ — My pick named the blocking WHAT Gap and refused to recommend until answered | 1006 s |
+
+R1 vs R2 triangulation pinpointed the actual lever: **qwen3:4b copies the worked example far more strongly than abstract directives.** R1's Bad/Good block competed with the worked example below it (which still said `needs one detail — should the PDF...`) and the model improvised its own format. R2 removed the competition and got format back, but with the worked example *itself* showing the broken "needs X —" pattern, the model reverted to category descriptions. R3 fixed the example.
+
+**R3 prompt diff — three surgical edits to `pipelines/scaffold_router.py:272-362`.**
+
+1. Gaps spec — directive only, no inline counter-example:
+
+```
+**Gaps:**
+Always shown. For each bucket not yet "✓ covered", write the bucket name,
+a colon, then ONE specific question the user can answer in a single
+sentence. Never a category description like "needs definition of done" —
+always a real question. The four buckets:
+- WHAT specifically is being built
+- HARDWARE / infrastructure (OS, CPU, RAM, storage, network)
+- SUCCESS criteria (what "done" looks like)
+- CONSTRAINTS (budget, timeline, equipment, skill)
+Mark a bucket "✓ covered" only when the user has explicitly stated a value.
+Parenthetical examples are answer shape only — never carry an example
+value into "My pick" or "Scope so far".
+```
+
+2. Existing worked example — Gap line rewritten as pure question (no "needs one detail —" prefix):
+
+```
+- SUCCESS criteria: should the PDF preserve the original screenshots, or be text-only?
+```
+
+3. New second worked example covering the early-conversation case (most buckets open, all phrased as direct questions, My pick honors open-Gap guard) — inserted before `HISTORY TRACKING`.
+
+4. My pick spec — added open-Gap guard clause:
+
+```
+If the most important open decision depends on an unanswered Gap, do
+NOT invent a value to recommend. Instead, name the blocking Gap and
+push for that answer. Only recommend defaults you can derive from
+values the user explicitly stated.
+```
+
+5. Rules block — added:
+
+```
+- Never invent a value the user did not state. If a bucket is open, the
+  question goes in Gaps; it does not appear as a fact in Scope so far or
+  as a chosen value in My pick.
+```
+
+**Live verification on R3 (host Ollama qwen3:4b, full replay of the operator's original 5-message transcript).**
+
+```
+**Gaps:**
+- WHAT: List exact media servers (e.g., Sonarr, Radarr, Jellyfin) and AI workloads you want to run.
+- HARDWARE: ✓ covered (2x Xeon E5-2695 V2, Tesla P40 GPUs from attached notes)
+- SUCCESS: How do you define "completed" (e.g., all services running without downtime for 7 days)?
+- CONSTRAINTS: What is your timeline for completing the lab?
+
+**My pick:**
+We need to know which specific services (e.g., Sonarr, Radarr, Jellyfin) and AI workloads you want
+to implement to design the lab safely and efficiently. Say so or override.
+```
+
+SUCCESS and CONSTRAINTS are direct questions; WHAT is an imperative ("List...") that's still actionable in one sentence. My pick names the blocking Gap (WHAT) and refuses to recommend until answered — the guard fired. Zero fabricated services, zero invented timeline.
+
+**Verify-replay latency note.** R1 took 1490 s because the off-format response was ~55 lines; R3 took 1006 s for the proper ~16-line response — the latency reduction is mostly output token count. Replay uses a 5-message transcript (history window cap = 8); live first-turn OWUI is much shorter and not representative of this latency.
+
+**Outside scope of §17.342 (not blockers, deferred).**
+
+- WHAT's Gap returned as imperative ("List ...") rather than interrogative ("Which ..."). Same actionability, slightly less natural shape. The worked-example demos use both, so the model is sampling the imperative form on WHAT specifically.
+- Bucket names came back italicised (`*WHAT*`) — prompt rule says "Plain bullets only" but doesn't explicitly forbid italics on the inline bucket name. Cosmetic.
+- Options used numbered list `1. 2. 3.` instead of plain bullets. The prompt says "Plain bullets only" but the worked examples use `-` and the second example I added also uses `-`; the model improvised numbering here. Cosmetic.
+- Could not test the OTHER half of the operator's transcript — the early turn where the operator typed bare `"a"` and the bot responded as if it were a real input. That's a separate input-validation gap (triage should flag uninterpretable single-char inputs), not a prompt-format issue. Logged for a future entry.
+- `triage_model` held at default `qwen3:4b`. R3 confirms a 4b can hold the format + question discipline when the worked examples lead correctly; no need to absorb the 7b CPU latency tax yet. If a future round shows drift returning under longer conversations (history-window cap = 8 turns), reconsider then.
+
+**Reinforces `feedback_verify_before_claim`.** Three rounds of "this prompt edit will fix it" were each verified in-container against the actual transcript before claiming a win — and R1's "fix" turned out to introduce a worse regression that only the verify caught. The 25/23/17-minute CPU loops were the cost of not shipping a regression behind a confident-sounding rationale.
+
+**Cohort.** First entry in the §17.342+ "OWUI triage UX polish" axis. Earlier triage hardening was the Apr 30 2026 gap-tracking preamble (the `✓ covered` discipline) — §17.342 is the *Gap-question shape* axis, perpendicular to the *don't-re-ask-answered-questions* axis the preamble closed. The two together now cover both "stop looping on answered buckets" and "ask actionably when buckets are open." Follow-ups on this axis: the bare-`"a"`-input case, plus the cosmetic nits above if they reappear in real conversations.
+
+**Cost.** ~30 LOC net change to `pipelines/scaffold_router.py` (TRIAGE_SYSTEM_PROMPT — directive rewrites + one new worked example + 2 new rule clauses). Zero code logic touched. Zero new dependencies. Three container restarts during iteration; final state cleanly loaded (logs grepped for `ERROR|failed` — clean).
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
