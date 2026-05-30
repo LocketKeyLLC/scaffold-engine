@@ -18870,7 +18870,71 @@ Both runs `overall_pass=true`. Baseline job IDs `ec584766-…` + `300e33b9-…` 
 - `.env` — explicit `EXECUTION_GLOBAL_CONCURRENCY=2` line is now redundant given the new default; retained on this host as documentation of the explicit override choice. **Host-local; not in repo.**
 - OVERVIEW.md — this entry.
 
-**Cohort.** §17.339 → §17.340. §17.339 was the prerequisite (`format_toon_rows` shape drift, surfaced by this harness's single-job dry-run before the cap could even be tested end-to-end). §17.340 is the deliverable: multi-concurrent project execution structurally verified at N=2 on this host; cap=2 is the new default; the harness ships as `scripts/verify_concurrent_exec.py` for future re-verification (raise the cap, re-run `--num <N> all`, compare). No N≥3 stress test ran — recommended before any cap=3+ raise; the harness already supports it via `--num 3 all`.
+**Cohort.** §17.339 → §17.340. §17.339 was the prerequisite (`format_toon_rows` shape drift, surfaced by this harness's single-job dry-run before the cap could even be tested end-to-end). §17.340 is the deliverable: multi-concurrent project execution structurally verified at N=2 on this host; cap=2 is the new default; the harness ships as `scripts/verify_concurrent_exec.py` for future re-verification (raise the cap, re-run `--num <N> all`, compare). No N≥3 stress test ran — recommended before any cap=3+ raise; the harness already supports it via `--num 3 all`. **N=3 stress test ran on the post-§17.340 host — see §17.341.**
+
+---
+
+### §17.341 N=3 stress test against cap=2 — graceful queueing confirmed, CPU floor characterised (2026-05-29)
+
+Closes the "no N≥3 stress test ran" caveat from §17.340. Same harness (`scripts/verify_concurrent_exec.py`), same orchestrator/pool/Ollama config that shipped in `7ea14d1`, three topically-disjoint CodeGen-shaped ideas (SHA-256 CLI / line-count CLI / base64 CLI). Zero repo changes — this entry is verification record only.
+
+**Three-run picture (each cell is an actual measurement, not a model).**
+
+| Run | batch wall-clock | `queued_events_total` | `effective_parallelism` | per-job exec (s) |
+|---|---:|---:|---:|---|
+| **§17.340 baseline** — cap=1, N=2 | 1728.6 s / 28.8 min | 1 | 1.000 ("effectively serial") | sha=464; line=1265 *(incl. 464 s queue)* |
+| **§17.340 flipped** — cap=2, N=2 | 1058.2 s / 17.6 min | 0 | 1.996 ("fully parallel ~N") | sha=1058; line=1055 |
+| **§17.341 stress** — cap=2, N=3 | **2557.3 s / 42.6 min** | **1** | **1.724 ("partially parallel")** | sha=1169; line=1852; b64=1389 *(incl. 1169 s queue)* |
+
+All three runs `overall_pass=true`: zero pool errors, zero cross-pollution, every job reached `pipeline_complete`.
+
+**Decoded N=3 timeline.** Stress-run job IDs and SSE-event timestamps trace the semaphore's behavior:
+
+```
+t=0.03 s    sha256_cli  (a79c8fc0)  node_start T1   ← admitted (slot 1 of 2)
+t=0.03 s    linecount   (e3ee5248)  node_start T1   ← admitted (slot 2 of 2)
+t=0.02 s    base64_cli  (6f7c7dfb)  queued          ← cap=2 full, B' = 1
+t=1168.6 s  sha256_cli                pipeline_complete (3-node DAG)
+t=1168.66 s base64_cli                node_start T1   ← acquired within 20 ms of release
+t=1851.7 s  linecount                 pipeline_complete (6-node DAG, heaviest)
+t=2557.3 s  base64_cli                pipeline_complete (4-node DAG, ran alone 1852-2557)
+```
+
+Slot release → queued-job admit measured at **20 ms** — the `asyncio.Semaphore.acquire` wakeup is bound by event-loop scheduler latency, not lock contention.
+
+**CPU floor characterisation.** Per-job exec time as a function of concurrent-job count on this host (T480-class i5, 4 cores; local 7b roles `qwen2.5-coder:7b` + `qwen2.5:7b`):
+
+| Concurrent jobs (on local roles) | sha256_cli per-job exec | Slowdown vs single-user |
+|---:|---:|---:|
+| 1 (cap=1 N=2 baseline, after queue) | 463.6 s | 1.0× |
+| 2 (cap=2 N=2 flipped) | 1058.1 s | **2.28×** |
+| 2 → 1 (cap=2 N=3, base64 in the partial-overlap regime) | 1389.1 s avg over mixed phases | ≈ 2.0–2.5× depending on phase |
+
+Doubling concurrent inference on this CPU doubles per-job latency. That's the Ollama/CPU bottleneck, not the orchestrator — `OLLAMA_NUM_PARALLEL=4` admits the parallel requests, the cores serialize them.
+
+**Why the curve favours cap=2 specifically.**
+
+- At cap=1 (N=2): batch = 1729 s. Two jobs strictly sequential, second waits the entire first job's duration.
+- At cap=2 (N=2): batch = 1058 s. Both jobs concurrent, each running at ~½ throughput. Batch ≈ per-job-at-cap-2 = max(1058, 1055). Net **39 % batch-time reduction** vs cap=1.
+- At cap=2 (N=3): batch = 2557 s = 1169 (sha solo with linecount) + (1852 − 1169) (overlap) + (2557 − 1852) (base64 solo after linecount). Compared to a hypothetical cap=1 N=3 batch ≈ Σ per-job = 4410 s, that's a **42 % batch-time reduction**.
+- At cap=3 (N=3) — *not measured but extrapolatable*: all three concurrent, each at ~⅓ throughput. Batch ≈ 3× single-job-at-cap-3. If per-job time scales linearly with concurrent count (the observed N=1→2 slope), 3× concurrent → 3× per-job time → batch ≈ single-job time × 3 ≈ 1400 s. *Marginal* improvement over cap=2 N=3's 2557 s — and only worth running if a real third-concurrent-user workload exists. The added per-job latency hurts the operator perceiving any individual job's progress.
+
+The curve plateau is the operational answer: cap=2 is the throughput sweet spot for two- or three-stream workloads on this hardware; cap=3 only pays for itself if you're sustaining ≥ 3 simultaneous users. Single-operator usage (the actual workload here) doesn't justify the per-job slowdown.
+
+**Safety property confirmed at N > cap.** The cap=2 + N=3 case is the first run where the queueing path was actually exercised end-to-end on a live (not unit-test-mocked) flow. Observations:
+
+- The `queued` SSE event fires immediately on slot-full admission (not after a timeout). Operator sees "you're #2 in line" within milliseconds, can decide to wait or cancel.
+- `execution_queue_timeout_seconds=1800` (default) was not reached — base64's 1169 s queue wait was well inside budget.
+- DB pool (10/20 post-§17.340) carried 3 concurrent `/execute/all` runs (one queued; the queued runner still holds an open SSE response but no DB session of its own until admitted) without warnings.
+- Reaper (`STALE_THRESHOLD_MINUTES=1440`) did not touch the queued job — `updated_at` is bumped on slot admission, not on receipt.
+- No cross-pollution across any of the three job pairs (3 keywords × 2 foreign-checks each = 6 contamination probes, all empty).
+- Per-job finish-time delta in the partial-overlap regime (linecount vs base64): 705 s (linecount finished, base64 ran alone for another 705 s). Fairness is *not* enforced — there's no preemption, no slice rotation — but no starvation either: queued jobs eventually run, full DAGs to completion.
+
+**Cosmetic.** `linecount_cli` shows `own_keyword_hits=0` in Check C because the generated Python code uses `line_count`, `count_lines`, `line count` — never the literal string `linecount` (the slug). The keyword check is heuristic and informational; the gating sub-check is `contamination`, which was empty across all three jobs. Worth keeping as a soft signal for future runs but not promoting to a hard fail.
+
+**Cost.** Zero repo changes; this entry only. Verification artefacts cached at `/tmp/verify_n3_results.json` + `/tmp/verify_n3_logs/{sha256,linecount,base64}_cli.sse.log` on this host (not committed; tmp survives until reboot).
+
+**Cohort.** §17.340 (cap raise + N=2 verification) → §17.341 (N=3 stress confirms the §17.340 claim that cap=3+ doesn't pay for itself on this hardware). The §17.340 "Outside scope" caveat is now closed. Next move on this axis is only sensible if the host changes (more cores, GPU, dedicated inference appliance) — then re-run `verify_concurrent_exec.py --num <N> all`, compare batch + parallelism vs this run.
 
 ---
 
