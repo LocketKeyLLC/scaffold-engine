@@ -19045,6 +19045,66 @@ SUCCESS and CONSTRAINTS are direct questions; WHAT is an imperative ("List...") 
 
 ---
 
+### §17.343 OWUI triage single-turn stress — echo-fidelity rule lands, format/guard limits documented (2026-05-30)
+
+Same-day follow-up to §17.342, triggered by a browser-driven verify against `localhost:3000`. Post-§17.342 the multi-turn case was clean; a two-prompt stress probe of the *single-turn* case (rich opener, zero prior assistant turns) surfaced a separate failure class the §17.342 verify cycles never hit — because the original failing transcript that drove §17.342 was multi-turn. **This entry documents what one round of prompt iteration could and could not fix, and pins the residual single-turn failures to a qwen3:4b model-capacity ceiling.**
+
+**Stress probes (both single-turn, full pipe() through pipelines :9099).**
+
+| # | Domain | Structure | Pre-iteration result |
+|---|---|---|---|
+| 1 | Homelab (Ryzen 9 7950X, 128GB DDR5 ECC, 8TB NVMe ZFS mirror, dual 25GbE, ~$50/mo power, weekends) | HARDWARE-rich, CONSTRAINTS stated, WHAT open, SUCCESS open | Open-Gap guard held ("Without this information, I cannot recommend a solution") but format collapsed (h3 headers, emoji, no 4 required headers), AND paraphrased HARDWARE values (7950X→7900X, 25GbE→10Gb, ZFS mirror dropped). |
+| 2 | Greenhouse (12×16 hydroponics, automatic vents, drip irrigation, 1500W lights, $30/mo cap, weekends) | Identical shape to #1, non-tech domain | Open-Gap guard **FAILED** — recommended lettuce/basil/spinach with confidence, included cost-per-crop tables, *hallucinated authority* ("from USDA, NASA, and small-scale growers"), offered "step-by-step plan" deliverable. Format collapsed worse (two markdown tables, multiple emoji, blockquotes). |
+
+The two-domain triangulation pinned the failure class as **single-turn-input drift**, not domain-specific. The model has no in-conversation assistant-turn pattern to imitate on first message, so the worked examples in the system prompt lose to qwen3:4b's native "structured helpful analysis" mode. The greenhouse-domain hallucinated authority ("USDA, NASA") was new — appeared only on single-turn, not in any multi-turn verify.
+
+**Three prompt changes applied (`pipelines/scaffold_router.py` TRIAGE_SYSTEM_PROMPT).**
+
+1. **First-turn callout in "EVERY RESPONSE" header** — explicit clause "including the very first response in a new chat (no prior assistant message exists yet — the 4 headers still apply)".
+
+2. **Third worked example** — single-turn first-message case (a 2018 MacBook Pro opener). Mirrors the §17.342-B precedent (model copies worked examples > abstract directives). Shows: 4 required headers, Options bucket can say "Define WHAT first — see Gaps", all four Gap lines as direct questions, My pick names the blocking Gap and refuses to recommend.
+
+3. **Two new Rules clauses:**
+   - **No-fabricated-authority:** "Never cite sources you weren't given. No invented studies, organizations, averages, or 'real-world data' ... Numerical specifics (costs, durations, percentages, benchmarks) must come from values the user stated; otherwise they are fabrication and must be omitted."
+   - **Echo-fidelity:** "Echo user-stated values verbatim in 'Scope so far' — do not paraphrase specs (e.g., if the user said 'Ryzen 9 7950X' do not write 'Ryzen 9 7900X'; if the user said '25GbE' do not write '10Gb'). Same rule for hardware model numbers, throughput figures, capacities, and named technologies."
+
+**Verification — homelab probe re-run after iteration (full pipe through pipelines :9099, qwen3:4b, 2008 s elapsed).**
+
+| Iteration goal | Result |
+|---|---|
+| Echo-fidelity (user-stated values verbatim) | ✓ **landed clean** — "Ryzen 9 7950X, 128GB DDR5, 8TB NVMe storage in ZFS mirror, dual 25GbE network, ~$50/mo power ceiling" echoed verbatim. The 7900X/10Gb paraphrase drift seen pre-iteration is gone. |
+| First-turn callout in "EVERY RESPONSE" | ✗ **no effect** — model still emitted `### Analysis of Your Homelab Setup` and a markdown table of buckets instead of the 4 required headers. |
+| Third worked example (MacBook Pro single-turn) | ✗ **no effect** — model did not imitate the demonstrated shape. §17.342's "model copies the worked example" lever did not carry through to a third example. |
+| No-fabricated-authority | **partial** — no USDA/NASA-style citations this run, BUT model still invented specific numerical claims ("< $0.10/mo power", "$50–$70 for Pi", "< 3 days to implement"). The clause restrained imaginary *sources* but not imaginary *numerics*. |
+| Open-Gap guard (§17.342) on single-turn | ✗ **STILL FAILS** — model correctly marked WHAT as Gap in the bucket table, then immediately under `### ✅ Recommended Options to Run on Your Homelab` proposed three specific services (Jellyfin / Home Assistant / Raspberry Pi distributed backup) with cost and success metrics. Same failure shape as greenhouse pre-iteration, just lower temperature of authority hallucination. |
+
+**Greenhouse not re-run** — initial parallel-execution attempt timed out client-side (urllib 3000 s) because two concurrent qwen3:4b inferences on this CPU push per-job latency ≈ 2.3× per §17.341's measurements. Serial re-run would have been an additional 30-50 min; the homelab result is already conclusive on which iteration changes worked (echo-fidelity) and which did not (everything else), so a second confirmation was not load-bearing.
+
+**Diagnostic — model-capacity ceiling.** Two iterations against the same failure class (this one + the §17.342 R1→R2→R3 dance) hit diminishing returns. The pattern:
+
+- Echo-fidelity is a *substitution-time* check: the model is already about to emit a value, the rule says "use the user's value." Cheap behavioral override, sticks.
+- Open-Gap guard is a *generation-suppression* check: the model has already constructed a recommendation mentally, the rule says "do not emit it." Expensive behavioral override, fails on high-confidence domains.
+- Format discipline on single-turn is a *template-choice* check: no in-conversation pattern to anchor against; competes directly with qwen3:4b's strong prior toward "structured helpful expert" output mode.
+
+**The §17.342 multi-turn fix still stands.** Pre-§17.342: vague Gaps + fabricated My pick across all turns. Post-§17.342: multi-turn (≥1 prior assistant turn in history) produces direct-question Gaps + open-Gap-guarded My pick — verified live via the browser-drive cycle that landed §17.342. Single-turn behavior is a *separate failure class* this entry only partially addresses.
+
+**Outside scope (deferred).**
+
+- **Format discipline + open-Gap guard on single-turn.** Cannot be reliably fixed via prompt-only changes on qwen3:4b. Real solutions:
+  - **Model bump:** valve `triage_model` qwen3:4b → qwen3:7b (or larger). 7b should hold format + rule discipline more reliably; latency cost ≈ 2-3× per turn on CPU. Worth measuring as a single A/B against the same stress probes.
+  - **Special-case first-turn:** detect `len(prior_assistant_messages) == 0` in `_call_triage` and inject a tighter, more structurally-constrained system prompt for that single call only. Avoids changing the multi-turn behavior that already works.
+  - **Two-pass:** 4b emits, then a small structured 7b call re-formats and strips fabricated recommendations. Cost: doubles first-turn latency; benefit: keeps multi-turn fast.
+- **Numerical fabrication.** The no-fabricated-authority rule restrained imaginary sources but not imaginary numbers. A future iteration could tighten this with an explicit "no numerical specifics — costs, durations, percentages, benchmarks, capacities — that aren't echoed from user-stated values." Held back here because layering more abstract rules has shown diminishing returns on this model.
+- **Greenhouse-probe re-verification.** Not re-run after iteration; logged here as an open data point. Run if/when the model question above is decided.
+
+**Cohort.** §17.342 → §17.343 = first two entries in the "OWUI triage UX polish" axis. §17.342 closed the *multi-turn* gap-shape/open-guard failure mode (the original operator-reported failure). §17.343 closed the *paraphrase-drift* sub-axis (echo fidelity) and documented the residual *single-turn discipline* axis as a model-capacity-bounded problem requiring a model-level intervention. The Apr 30 2026 gap-tracking preamble (✓ covered discipline) remains the third axis — those three together cover the "stop looping" / "ask actionably" / "echo verbatim" surface; "hold format and refuse to fabricate on single-turn rich inputs" is the fourth axis, open.
+
+**Reinforces `feedback_verify_before_claim`.** §17.342's verify cycles confirmed *only multi-turn* behavior because the original failing transcript was multi-turn. The single-turn regression class was invisible until a fresh stress probe surfaced it — exactly the failure mode the memory warns about. The verify-driven loop again caught what claim-driven shipping would have missed.
+
+**Cost.** ~25 LOC net change to `pipelines/scaffold_router.py` (TRIAGE_SYSTEM_PROMPT — +1 worked example block, +2 Rules clauses, +1 in-header clause). Zero code logic touched. Zero new deps. One container restart. ~33-min verification cycle (homelab probe serial, qwen3:4b cold-start). Greenhouse re-verification deferred (see "Outside scope").
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
