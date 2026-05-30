@@ -18811,6 +18811,69 @@ Post-run DB check confirmed 4 `dag_nodes` rows all `status='done'`, `output_text
 
 ---
 
+### §17.340 raise `execution_global_concurrency` 1 → 2 — multi-project execution verified end-to-end (2026-05-29)
+
+Closes the "confirm large-scale projects will work" thread that opened the session. Audit-by-grep across `app/config.py:425`, `app/database.py:11-12`, `app/modules/execution_agent.py:56-90`, `references/debugging.md`, and the live host env (`docker exec scaffold-orchestrator printenv`) identified the orchestrator semaphore as the single-user serializer. The fix is structural (raise the cap, size the pool to match, allow Ollama parallelism) but the value comes from the verification — the harness shipped here is the artifact that justifies the number.
+
+**Three coordinated knobs lifted.**
+
+| Layer | Setting | Was | Now |
+|---|---|---|---|
+| Orchestrator semaphore | `EXECUTION_GLOBAL_CONCURRENCY` / `app/config.py:425` | 1 | **2** |
+| SQLAlchemy async engine | `pool_size` / `max_overflow` at `app/database.py:11-12` | 5 / 10 | **10 / 20** |
+| Host Ollama daemon | `OLLAMA_NUM_PARALLEL` in `/etc/systemd/system/ollama.service.d/override.conf` | (typo `PARRALLEL=1` ignored; daemon ran with built-in default) | **4** (typo also corrected) |
+
+The Ollama typo discovery is its own quiet finding — the host's existing "cap of 1" intent had been silently nullified for as long as the drop-in existed. Pre-flip, Ollama was already serving with its own default; only the orchestrator's semaphore was actually serializing requests.
+
+**Verification harness** — `scripts/verify_concurrent_exec.py`. Three subcommands (`setup`, `exec`, `verdict`) plus `all`. `setup` drives N projects sequentially through `/ideate` → `/ideate/confirm` → `/dag`. `exec` fires N concurrent `/execute/all` SSE streams, captures per-event timestamps and counts (`queued`, `node_start`, `node_done`, `pipeline_complete`, ...) to per-job log files. `verdict` runs five checks:
+
+- **A** — `docker logs scaffold-orchestrator` since the exec window contains zero `queuepool` / `TimeoutError` / `pool limit` substrings.
+- **B** — every job's SSE stream terminated in `pipeline_complete`.
+- **B'** — `queued` event count. With cap < N, expect N − cap queued; with cap ≥ N, expect 0.
+- **C** — `dag_nodes.output_text` substring matching: each job's own keyword appears in its own outputs, and no job's outputs contain another job's keyword. Cross-pollution sentinel.
+- **D** — `effective_parallelism = Σ(per-job exec) / batch_wall_clock`, where per-job exec subtracts queue time so a queued run doesn't double-count its wait as work. ≈ 1.0 = pure serial; ≈ N = fully parallel.
+
+Two runs against the same pair of CodeGen-shaped ideas (`"Write a Python CLI that reads stdin and prints the SHA-256 hex digest"` + `"Write a Python CLI that prints the line count of each file path argument"`):
+
+| Metric | Baseline `cap=1` | Flipped `cap=2` | Δ |
+|---|---|---|---|
+| Batch wall clock | 1728.6 s / 28.8 min | **1058.2 s / 17.6 min** | **−39 %** (1.63× faster) |
+| `queued_events_total` | 1 | 0 | semaphore admits both at t ≈ 0.03 s |
+| `effective_parallelism` | 1.00 ("effectively serial") | **1.9965** ("fully parallel ~N") | step change |
+| `sha256_cli` per-job exec | 463.6 s | 1058.1 s | +128 % per-job |
+| `linecount_cli` per-job exec | 1264.7 s (incl. 463.6 s queue) | 1054.6 s | −17 % wall; ≈ +30 % once queue is excluded |
+| Pool errors during window | 0 | 0 | clean both sides |
+| Cross-pollution (Check C) | 0 contamination | 0 contamination | isolation holds |
+| Per-job finish-time delta | n/a | **3.5 s apart** | near-perfect fairness |
+
+Both runs `overall_pass=true`. Baseline job IDs `ec584766-…` + `300e33b9-…` (saved at `/tmp/verify_n2_baseline_results.json`); flipped run job IDs `07ec68c0-…` + `8c6e4853-…` (`/tmp/verify_n2_flipped_results.json`).
+
+**Why cap=2 and not higher.** Per-job exec time roughly doubles vs the single-user baseline at cap=2 — Ollama is CPU-bound on this host (T480-class i5, 4 cores; the local 7b roles `qwen2.5-coder:7b` + `qwen2.5:7b` saturate the physical cores regardless of `OLLAMA_NUM_PARALLEL=4`). Two parallel inferences interleave at ~50 % throughput each; the 39 % batch wall-clock win is real but it's the throughput floor, not a free 2×. At cap=3+ the curve flattens further — every additional concurrent job carves the CPU yet thinner. Cloud-served roles (`model_general = qwen3-vl:235b-instruct-cloud`) parallelize cleanly server-side, but local-role nodes (verifier, coder, embedder) dominate most DAGs, so the local floor sets the practical ceiling.
+
+**Why pool 10/20 and not larger.** Per-`/execute/all` DB-session profile: each run opens up to ~5 short-lived `async_session()` contexts concurrently (executor row guard + RAG query + verifier verdict + status writes + per-node UPDATE). N=2 × 5 = 10 baseline + ~5 headroom for `/health` / `/status` / scheduler / reaper / OWUI poll ≈ 15 under steady contention, 30 under burst. Tighter than 10/20 risks waking the §17.179 `connect_args={"timeout": 2}` cap when the pool itself is the bottleneck — the asyncpg connect retries cascade into 500s.
+
+**Why fix the Ollama typo to 4 instead of 2.** Match the upstream default in 0.17+ so a later cap raise (3, 4) on stronger hardware doesn't need a second host edit. The host's CPU still sets the floor; the fix just removes an inadvertent inference-side gate.
+
+**Harness cleanups landed alongside.**
+
+- `_psql` switched from `-F "\t"` to `psql --csv` + `csv.reader`. The hand-rolled tab parser split on newlines inside multi-line `output_text` and over-counted rows (the §17.339 dry-run saw `node_count=32` for a 4-node DAG; the same call now correctly returns 4). Check C's contamination verdict was always correct — the substring-search-over-any-row pattern survives the over-split — but the headline `node_count` and `own_keyword_hits` were misleading.
+- Check D's `effective_parallelism` now uses `complete_s - first_node_start_s` (actual exec time after the semaphore admits the job) instead of raw `complete_s` (which includes queue wait). The baseline at cap=1 previously reported `1.27` ("partially parallel") for a run that was demonstrably pure serial — the queued job's wait was being counted as both queue and work. Same baseline cached results re-rendered at `1.00` ("effectively serial") after the fix.
+
+**Tests untouched.** `tests/test_execution_agent_concurrency.py` already monkeypatches `settings.execution_global_concurrency` to its needed value per case (1, 2, 3) — the suite never depended on the default. `tests/test_observability_metrics.py` patches the same attribute. The default bump is invisible to the suite; `make test` not re-run as part of this entry.
+
+**Cost.**
+- `app/config.py:425` — default `1 → 2` + comment refresh (drops the stale "pool_size=5, max_overflow=10" reference, adds the §17.340 verification summary).
+- `app/database.py:11-12` — `pool_size 5 → 10`, `max_overflow 10 → 20`.
+- `.env.example:267-271` — commented-example default bumped 1 → 2 with the new rationale; override semantics documentation preserved.
+- `scripts/verify_concurrent_exec.py` — `_psql --csv` and D-check exec-time math (see Harness cleanups above).
+- `/etc/systemd/system/ollama.service.d/override.conf` — typo `PARRALLEL → PARALLEL`, value `1 → 4`. **Host-local; not in repo.** Operators bringing up a fresh host should mirror.
+- `.env` — explicit `EXECUTION_GLOBAL_CONCURRENCY=2` line is now redundant given the new default; retained on this host as documentation of the explicit override choice. **Host-local; not in repo.**
+- OVERVIEW.md — this entry.
+
+**Cohort.** §17.339 → §17.340. §17.339 was the prerequisite (`format_toon_rows` shape drift, surfaced by this harness's single-job dry-run before the cap could even be tested end-to-end). §17.340 is the deliverable: multi-concurrent project execution structurally verified at N=2 on this host; cap=2 is the new default; the harness ships as `scripts/verify_concurrent_exec.py` for future re-verification (raise the cap, re-run `--num <N> all`, compare). No N≥3 stress test ran — recommended before any cap=3+ raise; the harness already supports it via `--num 3 all`.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

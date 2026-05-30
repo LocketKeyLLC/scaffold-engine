@@ -8,8 +8,8 @@ from app.config import settings
 engine = create_async_engine(
     settings.database_url,
     echo=(settings.log_level.lower() == "debug"),
-    pool_size=5,
-    max_overflow=10,
+    pool_size=10,
+    max_overflow=20,
     pool_pre_ping=True,
     # §17.179 — cap the asyncpg connect handshake. Default is 60 s,
     # which under an unreachable Postgres host (e.g. cloud-CI smoke

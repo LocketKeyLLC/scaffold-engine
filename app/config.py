@@ -419,10 +419,17 @@ class Settings(BaseSettings):
     # Sprint X.24 — process-wide cap on concurrent execute_all_nodes runs.
     # Each run drives its own inference loop and holds short-lived DB
     # sessions. N concurrent callers (HTTP /execute/all, assist-handoff,
-    # scheduled jobs) can exhaust the SQLAlchemy pool (pool_size=5,
-    # max_overflow=10) and cascade 500s. Default 1 keeps the single-user
-    # invariant strict; raise once the pool is sized to match.
-    execution_global_concurrency: int = Field(default=1, ge=1, le=32)
+    # scheduled jobs) can exhaust the SQLAlchemy pool and cascade 500s.
+    # §17.340 — default raised 1 → 2 after the pool was sized to match
+    # (database.py: pool_size=10, max_overflow=20) and host Ollama gained
+    # NUM_PARALLEL=4 capacity. End-to-end verified at N=2 by
+    # scripts/verify_concurrent_exec.py: queued_events=0, parallelism=1.997,
+    # batch wall-clock -39 % vs cap=1 baseline (1729 s -> 1058 s), zero pool
+    # errors, zero cross-pollution. Per-job exec time roughly doubles on this
+    # CPU-bound host — cap=2 is the empirical sweet spot, cap=3+ scales
+    # poorly (each additional concurrent job further carves the cores).
+    # Operators on stronger inference hardware can raise via env override.
+    execution_global_concurrency: int = Field(default=2, ge=1, le=32)
     # Max queue wait when the cap is full. 0 = wait forever; otherwise
     # the run emits a 503-shaped SSE error and bails. Default 1800s
     # matches scheduler_job_timeout so a queued run can't outlive the

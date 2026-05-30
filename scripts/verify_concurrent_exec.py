@@ -15,6 +15,8 @@ Deps:
 
 import argparse
 import asyncio
+import csv
+import io
 import json
 import os
 import subprocess
@@ -64,19 +66,20 @@ def _headers() -> dict[str, str]:
 
 
 def _psql(sql: str) -> list[list[str]]:
+    # --csv handles embedded newlines/quotes/commas in output_text correctly;
+    # a hand-rolled tab-split would over-count rows whenever an LLM emitted a
+    # multi-line node output.
     res = subprocess.run(
         ["docker", "exec", "-i", POSTGRES,
          "psql", "-U", PG_USER, "-d", PG_DB,
-         "-t", "-A", "-F", "\t", "-c", sql],
+         "-t", "-A", "--csv", "-c", sql],
         check=False, capture_output=True, text=True, timeout=30,
     )
     if res.returncode != 0:
         raise RuntimeError(f"psql failed: {res.stderr.strip()}")
-    return [
-        line.split("\t")
-        for line in res.stdout.strip().splitlines()
-        if line.strip()
-    ]
+    if not res.stdout.strip():
+        return []
+    return [row for row in csv.reader(io.StringIO(res.stdout)) if row]
 
 
 def _logs_count(container: str, since_unix: float, *patterns: str) -> int:
@@ -421,31 +424,37 @@ def cmd_verdict(args: argparse.Namespace) -> None:
         "per_job": cross_findings,
     }
 
-    # D — per-job timing summary. Headline number is wall-clock per job vs
-    # the parallel batch wall-clock. With true parallelism, per-job time
-    # roughly equals batch time. With pure serialization, batch_time approx
-    # equals sum(per_job_time).
+    # D — per-job timing summary. Headline is "effective parallelism" =
+    # sum(per-job exec time) / batch wall-clock. With true parallelism,
+    # batch ≈ max(per-job exec) so parallelism ≈ N. Pure serial gives ≈ 1.
+    # Per-job exec time is complete_s - first_node_start_s so that a job
+    # queued on the semaphore doesn't double-count its queue wait as work
+    # (which would falsely inflate "parallelism" toward 1.27 in a pure-
+    # serial run).
     per_job_times = []
     for j in per_job:
         if not isinstance(j, dict):
             continue
         t = j.get("timings_relative_s", {})
         complete_t = t.get("pipeline_complete") or t.get("execution_failed")
+        start_t = t.get("first_node_start") or 0.0
+        exec_t = (complete_t - start_t) if complete_t is not None else None
         per_job_times.append({
             "slug": j.get("slug"),
             "first_event_s": t.get("first_event"),
             "queued_s": t.get("queued"),
             "first_node_start_s": t.get("first_node_start"),
             "complete_s": complete_t,
+            "exec_s": exec_t,
         })
     batch_s = results.get("wall_clock_s")
     sum_per_job = sum(
-        (p["complete_s"] or 0.0) for p in per_job_times
+        (p["exec_s"] or 0.0) for p in per_job_times
     )
     parallelism = (sum_per_job / batch_s) if batch_s else None
     checks["D_timing_summary"] = {
         "batch_wall_clock_s": batch_s,
-        "sum_per_job_complete_s": sum_per_job,
+        "sum_per_job_exec_s": sum_per_job,
         "effective_parallelism": parallelism,
         "interpretation": (
             "n/a (no completions)" if parallelism is None or parallelism == 0
