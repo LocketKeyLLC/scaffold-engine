@@ -18733,6 +18733,84 @@ Still ~2.7s on the warm path — the marker doesn't slow normal runs, it just re
 
 ---
 
+### §17.339 `format_toon_rows` shape drift — drop non-dict distill entries (2026-05-29)
+
+Surfaced while validating `scripts/verify_concurrent_exec.py` (the new concurrency-verification harness drafted alongside the upcoming `execution_global_concurrency` work). Single-job dry-run, idea `"Write a Python CLI that reads stdin and prints the SHA-256 hex digest."`, job_id `68dd4b1b-281e-4b91-9f4b-ab6bb005cfa7`. `POST /ideate/confirm` returned HTTP 500 nine seconds in. Orchestrator log:
+
+```
+phase2_distill: job_id=68dd4b1b-... entry_count=7
+phase2_unhandled_exception: job_id=68dd4b1b-...
+Traceback (most recent call last):
+  File "/code/app/modules/ideation_workflow.py", line 315, in research_and_compile
+    toon_rows = format_toon_rows(entries) if entries else []
+  File "/code/app/modules/gt_extractor.py", line 178, in format_toon_rows
+    title = entry.get("title", "unknown").strip().lower().replace(" ", "-")
+AttributeError: 'str' object has no attribute 'get'
+http_request_completed: method=POST path=/ideate/confirm status=500 duration_s=9.005
+```
+
+**Diagnosis.** `parse_json_array(resp.text)` at `app/modules/ideation_workflow.py:309` returned a 7-element list, but at least one element was a string. Downstream `format_toon_rows(entries: list[dict])` (`app/modules/gt_extractor.py:173-186`) and `ingest_entries()` both assume dict shape; the existing `_normalize_legacy_keys` helper (`app/modules/gt_extractor.py:194-199`) only handled the prior shape-drift class (`topic` → `title` key rename) and didn't cover "string instead of object" at the element level. The local annotation `entries: list[dict] = []` at line 289 was aspirational — the parse result wasn't validated against it. Every `/ideate/confirm` whose distill LLM (`model_general` = `qwen3-vl:235b-instruct-cloud` on this host) emits a string in the array fails Phase 2 with a 500 and leaves the job stuck in `failed` with `error_summary='phase2 exception: ''str'' object has no attribute ''get'''`.
+
+**Fix.** Filter at the parse boundary in `research_and_compile`, before any downstream consumer sees `entries`:
+
+```python
+if resp.success:
+    raw_entries = parse_json_array(resp.text) or []
+    entries = [e for e in raw_entries if isinstance(e, dict)]
+    dropped = len(raw_entries) - len(entries)
+    if dropped:
+        # §17.339 — distill LLM occasionally emits a JSON array
+        # of strings (or mixed types) instead of objects. Filter
+        # to dicts so downstream format_toon_rows / ingest_entries
+        # can rely on the documented shape. Drop rather than
+        # coerce: a string entry has no title/source/tags, and
+        # synthesizing those would pollute Milvus with provenance-
+        # free rows.
+        logger.warning(
+            "phase2_distill_shape_drift: job_id=%s raw=%d kept=%d dropped=%d",
+            job_id, len(raw_entries), len(entries), dropped,
+        )
+```
+
+**Why filter rather than coerce.** A string entry has no `title` / `source` / `tags`. Coercing to `{"content": <str>, "title": "unknown", "source": "pending-verification"}` would silently ingest provenance-free, dedup-collision-prone rows into Milvus — exactly the data-quality class the 3-tier dedup (cosine > 0.95 reject / 0.90-0.95 version-chain / < 0.90 new) was built to guard. Dropping is the safe choice; the structured `phase2_distill_shape_drift` warning gives operators a clear signal to tighten the DISTILL_SYSTEM prompt or accept the partial result.
+
+**Why not extend `_normalize_legacy_keys`.** That helper was named and scoped for key-rename drift inside dicts (`topic` → `title`). Type-level drift (whole element is a string, not a dict) is a different failure class; putting it in a function named "legacy keys" would muddy the helper's contract. The parse boundary in `ideation_workflow.py:308-312` is the right gate because it's the single chokepoint between the LLM's untrusted JSON output and every downstream consumer (`format_toon_rows`, `ingest_entries`, the compile prompt's `researched_facts` slice at line 338).
+
+**Verification.** Orchestrator restarted to pick up the change; same harness re-run against the same idea, new job `bca61c5c-d7d3-4ae4-8868-c4c0c1ba92f4`. Phase 2 cleared, DAG generated (`T1` → `T4`), `/execute/all` reached `pipeline_complete` cleanly:
+
+```
+[setup:sha256_cli] /ideate
+[setup:sha256_cli] job_id=bca61c5c-d7d3-4ae4-8868-c4c0c1ba92f4
+  [bca61c5c] status=awaiting_confirmation
+[setup:sha256_cli] /ideate/confirm
+  [bca61c5c] status=planning
+[setup:sha256_cli] /dag
+[setup:sha256_cli] DAG nodes: ['T1', 'T2', 'T3', 'T4']
+```
+
+Verdict (`scripts/verify_concurrent_exec.py … verdict`, N=1 baseline):
+
+```json
+{
+  "overall_pass": true,
+  "checks": {
+    "A_no_pool_exhaustion": {"pass": true, "pool_errors_during_window": 0},
+    "B_all_completed":      {"pass": true, "completed": 1, "total": 1},
+    "B_semaphore_observed": {"queued_events_total": 0, "interpretation": "cap >= N (no queueing observed)"},
+    "C_no_cross_pollution": {"pass": true, "per_job": [{"slug": "sha256_cli", "node_count": 4, "contamination": []}]},
+    "D_timing_summary":     {"batch_wall_clock_s": 701.95, "effective_parallelism": 0.9996, "interpretation": "fully parallel (~N)"}
+  }
+}
+```
+
+Post-run DB check confirmed 4 `dag_nodes` rows all `status='done'`, `output_text` populated, distinct topical content (`sha` substring in 4/4, `hashlib` in 2/4). No `phase2_distill_shape_drift` warning fired on this particular re-run — the distill prompt happened to land a clean list-of-dicts response, so the new filter passed through without dropping. The fix is dormant on the happy path and only activates when the LLM drifts.
+
+**Cost.** +9 LOC in `app/modules/ideation_workflow.py`, zero changes elsewhere in `app/`, no new dependencies. The warning emits at most once per `/ideate/confirm` call. The filter adds an `isinstance(e, dict)` per parsed entry — negligible alongside the LLM round-trip.
+
+**Cohort.** §17.339 is a one-off bug surfaced incidentally by the new concurrency-harness; it isn't part of the §17.337→§17.338 timeout-marker cascade. The harness itself remains as `scripts/verify_concurrent_exec.py` for the concurrency-cap work to follow. One minor cosmetic issue in the script (`_psql` splits on newline, so multi-line `output_text` over-counts the per-job `node_count` field in Check C — the contamination verdict is unaffected) is tracked as a follow-up; the orchestrator fix verification itself stands.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

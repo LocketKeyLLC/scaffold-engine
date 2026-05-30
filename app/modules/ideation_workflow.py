@@ -306,7 +306,21 @@ async def research_and_compile(
                 **distill_route,
             )
             if resp.success:
-                entries = parse_json_array(resp.text) or []
+                raw_entries = parse_json_array(resp.text) or []
+                entries = [e for e in raw_entries if isinstance(e, dict)]
+                dropped = len(raw_entries) - len(entries)
+                if dropped:
+                    # §17.339 — distill LLM occasionally emits a JSON array
+                    # of strings (or mixed types) instead of objects. Filter
+                    # to dicts so downstream format_toon_rows / ingest_entries
+                    # can rely on the documented shape. Drop rather than
+                    # coerce: a string entry has no title/source/tags, and
+                    # synthesizing those would pollute Milvus with provenance-
+                    # free rows.
+                    logger.warning(
+                        "phase2_distill_shape_drift: job_id=%s raw=%d kept=%d dropped=%d",
+                        job_id, len(raw_entries), len(entries), dropped,
+                    )
             logger.info(
                 "phase2_distill: job_id=%s entry_count=%d", job_id, len(entries),
             )
