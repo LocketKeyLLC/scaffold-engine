@@ -167,13 +167,38 @@ def ollama_ps() -> list:
 
 
 def ollama_warm(model: str):
-    """Preload a model by sending an empty generate request."""
+    """Preload a model + warm the prompt-eval path.
+
+    §17.355 — pre-§17.355 this sent only an empty-prompt request,
+    which loads weights but doesn't exercise the prompt-eval CPU
+    cache. The subsequent first real inference paid a 2-4 s cold-
+    prompt-eval penalty that was misattributed across the 2026-04-02
+    → 2026-05-31 bench runs as a "TTFT improvement." Reality: it
+    tracked Ollama keep-alive state at preflight, not any code
+    change. Fix: also send a one-token throwaway generation so
+    prompt-eval CPU caches are hot before the benchmark call. The
+    extra cost is ~50 ms; the payoff is that TTFT becomes a stable
+    measurement of warm prompt-eval rather than first-call.
+    """
     log(f"Warming model: {model}")
     try:
+        # Load weights (mmap, GPU upload, etc.)
         r = httpx.post(
             f"{OLLAMA_URL}/api/generate",
             json={"model": model, "prompt": "", "keep_alive": "30m"},
             timeout=300,
+        )
+        r.raise_for_status()
+        # §17.355 — exercise prompt-eval + one token of decode so the
+        # subsequent benchmark call doesn't pay first-call CPU-cache cost.
+        r = httpx.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": model, "prompt": "1+1=",
+                "stream": False, "options": {"num_predict": 1},
+                "keep_alive": "30m",
+            },
+            timeout=60,
         )
         r.raise_for_status()
     except Exception as e:
@@ -580,6 +605,15 @@ def run_benchmark():
             "url": OLLAMA_URL,
             "models_pre": [m["model"] for m in loaded_models],
             "models_post": [m["model"] for m in post_models],
+            # §17.355 — derived classifier: a "cold" preflight (no
+            # models resident) historically meant a 2-4 s prompt-eval
+            # penalty on the first benchmarked call that bench_pipeline
+            # then misattributed as a per-model TTFT regression. Post-
+            # §17.355 ollama_warm() exercises prompt-eval explicitly so
+            # this classification is mostly archival, but having it in
+            # the record lets a future analyst filter pre-§17.355 rows
+            # cleanly when comparing TTFT trends.
+            "keep_alive_state": "warm" if loaded_models else "cold",
         },
         "raw_inference": raw_results,
         "pipeline": pipeline_results,

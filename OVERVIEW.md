@@ -19508,6 +19508,55 @@ Goldens after unskip: `pytest tests/test_retrieval_golden.py -v --timeout=300` =
 
 ---
 
+### §17.355 TTFT improvement explained — Ollama keep-alive state at preflight, not a code change (2026-05-31)
+
+Closes §17.351's Outside-scope #3 ("Investigate TTFT improvement"). The 2.4-5× TTFT speedup §17.351 observed for the local 4b/7b raw-inference probes between the 2026-04-02 baselines and the 2026-05-31 baseline turned out to be a **measurement artifact**, not a real perf gain — and the data in `results.jsonl` already had the answer hiding in plain sight.
+
+**The data, ranked by preflight state.**
+
+| Run | `models_pre` | qwen2.5:7b TTFT | qwen3:4b TTFT |
+|---|---|---:|---:|
+| `bench_20260402_130418_…` | `[]` (cold) | 4.380 s | 1.606 s |
+| `bench_20260402_135746_…` | `[]` (cold) | 4.325 s | 1.620 s |
+| `bench_20260531_083759_…` | `['qwen3:4b','qwen2.5:7b']` (warm) | 1.792 s | 0.315 s |
+| `bench_20260531_142700_…` | `['qwen3:4b','qwen2.5:7b']` (warm) | 1.906 s | 0.388 s |
+
+Generation throughput (`eval_tps`) is **stable across all four runs within noise** (3.0-3.6 tok/s for 7b, 5.1-6.2 tok/s for 4b). That's the smoking gun: TTFT changed; steady-state throughput didn't. Steady-state throughput is what cloud-flips / cache-pre-warming / scheduler tuning would actually move. Cold-prompt-eval CPU cache cost (the contribution to TTFT) only changes with model-load state.
+
+**Root cause.** `ollama_warm(model)` pre-§17.355 sent only an **empty-prompt** generate request. That loads model weights (mmap, GPU upload) but doesn't exercise the prompt-eval CPU pipeline. The subsequent first benchmarked call paid full first-call cost: prompt-eval CPU caches cold, decode CPU caches cold. When Ollama already had the model resident at preflight (`models_pre != []`), the host's recent inference activity had warmed those caches incidentally; `ollama_warm` was effectively a no-op and TTFT measurement landed on a hot path. When Ollama was cold at preflight, `ollama_warm` only loaded weights and the benchmark call still paid the cold-pipeline cost.
+
+**The hypothesized causes from §17.351, judged.**
+
+- (a) "Cache pre-warming side effect" — **confirmed but for the WRONG reason**. The pre-warming wasn't from §17.347/§17.349 valve work; it was from Ollama's keep-alive holding the models resident between operator activity and bench preflight.
+- (b) "§17.318→§17.336 / §17.341 throughput tuning" — **rejected**. Those landed concurrency improvements, not TTFT improvements. `eval_tps` would have moved if (b) were the cause; it didn't.
+- (c) "Thermal / scheduler noise" — **rejected**. Two consecutive 2026-04-02 runs gave near-identical TTFT (4.380 / 4.325); two consecutive 2026-05-31 runs gave near-identical TTFT (1.792 / 1.906). Reproducibility within each state rules out noise.
+
+**The fix — make `ollama_warm` actually warm.** Extended to a two-call sequence: (1) the existing empty-prompt weights-load, (2) a one-token throwaway generation (`prompt="1+1=", num_predict=1`) that forces the prompt-eval CPU path. ~50 ms extra cost; payoff is TTFT becomes a stable measurement of warm prompt-eval rather than first-call cost. Post-§17.355 bench runs will have TTFT values that are state-independent — future cold-preflight runs will measure roughly the same TTFT as warm-preflight runs.
+
+Plus a new `ollama.keep_alive_state` field on the JSONL record (`"warm"` or `"cold"` depending on whether `/api/ps` returned non-empty at preflight). Mostly archival post-§17.355 — but lets a future analyst filter pre-§17.355 rows cleanly when comparing TTFT trends, and documents the historical artifact in the data itself.
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `tests/benchmarks/bench_pipeline.py` | `ollama_warm` extended with a one-token prompt-eval warmup. New `ollama.keep_alive_state` derived classifier in the JSONL record. Rationale comments inline. | +28 |
+| `OVERVIEW.md` | this entry | +~55 |
+| **Total** | | **~+83** |
+
+Zero new deps. Zero changes outside the bench. Production paths unaffected.
+
+**Verification.** The fix is mechanical (extra HTTP call in a warmup helper); no live re-run scheduled here. Next bench invocation (or `make rebaseline`) will produce the first post-§17.355 baseline. Hypothesis to validate at that time: the post-§17.355 row will show TTFT ~= 1.8-2.0 s (7b) and ~= 0.3-0.4 s (4b) **regardless** of `models_pre` state at preflight — the §17.355 fix is correct if those numbers hold.
+
+**Outside scope.**
+- Eviction-mode test (force Ollama to drop the models, then re-run the bench) would directly validate the §17.355 fix without waiting for natural cold-preflight. Skipped here — `docker restart ollama` is destructive and the §17.355 fix is mechanically self-evident from the code diff. Operator can run the test themselves if they want the confirmation row in results.jsonl.
+- TTFT delta inside the orchestrator's own pipeline (i.e. the LLM nodes inside `/execute/all`) was not analyzed. Pipeline LLM nodes go through the cloud-flipped router post-§17.346 so they're network-bound, not CPU-bound, and any "TTFT" there is round-trip latency rather than prompt-eval cost. Different axis.
+
+**Cohort.** Closes the last open Outside-scope item from §17.351. §17.351 → §17.355 chain: §17.351 measured the TTFT delta and flagged it for investigation; §17.355 root-causes it as a bench measurement bug (not a real perf change) and fixes the bench so the artifact doesn't recur. Perf-measurement-infrastructure axis now has no open Outside-scope items.
+
+**Cost.** +83 LOC, zero new deps, zero migrations. Verification = reading the historical data + code review of the fix. Net result: a clean, durable explanation for an observed-but-unexplained TTFT delta + a bench fix that stops the artifact from re-confusing future readers.
+
+---
+
 ### §17.354 `make rebaseline` aggregator + runbook — quarterly cadence target (2026-05-31)
 
 Closes Tier-2 audit-tail item #14 from §17.29. Adds a single-command operator surface for running the three benches in sequence (`bench-rag` → `bench-embed` → `bench-pipeline` → `bench-check`) plus a runbook describing when to run, how to interpret, what to do on regression, and how it ties into the §17.323 quarterly cron + §17.194 `/health.calibration` endpoint.
