@@ -362,6 +362,31 @@ class TestToolSelectionGuide:
         assert 'A node named "Configure Y"' in DAG_SYSTEM
         assert 'A node named "Deploy Z service"' in DAG_SYSTEM
 
+    # ----- §17.367 — CodeGen-verb scope discipline -----
+
+    def test_scope_rules_cover_codegen_verbs(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The §17.363 anti-example list was Shell-verb-only; §17.367
+        # extends to CodeGen verbs (Write/Implement). Each of the three
+        # CodeGen hard rules must be present.
+        assert 'A node named "Write CLI interface"' in DAG_SYSTEM
+        assert 'A node named "Implement <module>"' in DAG_SYSTEM
+        assert 'A node named "Write unit tests for <X>"' in DAG_SYSTEM
+
+    def test_codegen_scope_anti_example_present(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The actual T2≈T3 incompatible-API regression from the CodeGen
+        # retry must appear so the model has concrete contrast.
+        assert "Anti-example 2 (CodeGen" in DAG_SYSTEM
+        assert "Two `def main()`s, two `ArgumentParser`s" in DAG_SYSTEM
+        assert "DIFFERENT SIGNATURE" in DAG_SYSTEM
+
+    def test_codegen_compatible_apis_rule_present(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The §17.367 sibling-API-compat rule — sibling CodeGen nodes
+        # must use sibling function signatures, not re-invent them.
+        assert "Sibling CodeGen nodes must have COMPATIBLE APIs" in DAG_SYSTEM
+
 
 # ===========================================================================
 # Sprint W.3 — validator-driven retry loop

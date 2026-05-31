@@ -19988,6 +19988,129 @@ Substitute any of the five homelab job IDs to get that retry's grid row.
 
 ---
 
+### §17.365 brief-spec fidelity — silent enumeration truncation closed in LLM + CodeGen (2026-05-31)
+
+First fix from a CodeGen-class task trial (job `4f6cb206-…`, "Build a Python CLI tool `mdsplit` that extracts fenced code blocks from Markdown into per-language files"). The §17.359 → §17.364 homelab-class arc was scoped to Shell-class failures and had no CodeGen-class exposure; the trial surfaced three new failure classes the existing prompt-layer fixes don't address, of which §17.365 closes the first.
+
+**The regression.** The brief explicitly enumerated nine language-to-extension mappings (`python → .py`, `rust → .rs`, `bash → .sh`, `go → .go`, `javascript → .js`, `sql → .sql`, `yaml → .yaml`, `json → .json`, `dockerfile → Dockerfile`), the default output directory (`./out`), and the default filename pattern (`block_<index>_<language>.<ext>`). Every CodeGen node in the resulting DAG (T2, T3, T4, T5) implemented only **2 of the 9** mappings (`python` + `bash`) with a `.txt` default fallback; the default output directory was wrong in every node (`'output'` or `required=True`); the filename pattern's `block_` prefix survived only in T3; T2 silently re-interpreted `--pattern STR` as a regex content filter rather than a filename template. The operator who copies the result gets a tool that doesn't handle their rust or yaml inputs, writes to the wrong directory by default, and runs a different feature when they invoke `--pattern`.
+
+This class is **distinct from §17.360's value-fabrication guard**. §17.360 forbids inventing concrete values that are NOT in upstream (`tskey-abc…`, `192.168.10.100`, `pve01.internal`). §17.365 is the inverse: concrete values that ARE in the brief get silently truncated or transformed. The two clauses operate on opposite directions of the same axis — fabrication vs. omission — and need separate prompt-layer surfaces because the model's failure modes are different (fabrication = "I'll make this concrete-looking" vs. truncation = "I'll cover the common cases and let the operator extend").
+
+**The fix.** A "Brief-spec fidelity (§17.365)" clause added to both `EXECUTION_SYSTEM_LLM` and `EXECUTION_SYSTEM_CODEGEN` (mirrored in `prompt_assembly.py` per the W.10 assist/executor mirror invariant). The CodeGen version carries a CodeGen-specific lift-to-constant rule: if a brief specifies an enumeration too large to fit inline, the deliverable must lift it to a module-level constant (`LANG_EXT = {…}` with all 9 entries) and reference it from the code — NEVER hardcode a 2-entry subset and call it "the mapping." The constant IS the deliverable for that part of the brief. Three concrete Bad/Good anti-example markers come directly from the trial regression: the 9-language-map truncation, the `./out` default mismatch, the `--pattern` semantic re-interpretation. The clause also names the meta-principle: silent truncation is the worst failure mode — when in doubt, produce the complete set and let the operator trim.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_LLM` gains "Brief-spec fidelity (§17.365)" block with three Bad/Good anti-example pairs + the "silent truncation is the worst failure mode" closer. `EXECUTION_SYSTEM_CODEGEN` gains a CodeGen-specific variant with the lift-to-constant rule. |
+| `app/modules/prompt_assembly.py` | Mirror of both prompt updates (assist/executor mirror invariant). |
+| `tests/test_execution_agent_tools.py` | Two new tests: `test_llm_prompt_has_brief_spec_fidelity_clause` and `test_codegen_prompt_has_brief_spec_fidelity_clause`. Anti-example markers (`"9 supported languages"`, `"./out"`, `"9 language-to-extension mappings"`) asserted present. |
+| `tests/test_prompt_assembly.py` | `test_llm_mirror_has_brief_spec_and_validation_clauses` + `test_codegen_mirror_has_brief_spec_clause`. |
+
+Ships with §17.366 + §17.367 in the same commit; verification block deferred to §17.367's final entry.
+
+**Cohort.** First of three commits (§17.365 + §17.366 + §17.367) addressing the CodeGen-class trial's findings. The fabrication arc closed in §17.362; §17.364 closed the decomposition surface; §17.365 opens the brief-fidelity surface. Three more retries' worth of failure-class taxonomy on a class the prior arc didn't touch.
+
+**Cost.** Combined with §17.366 + §17.367, the batch is +~150 LOC of prompt + ~50 LOC of tests + three OVERVIEW entries. §17.365's share is ~50 LOC of prompt + ~15 LOC of tests. Zero new deps, zero migrations, zero schema changes, zero behavior change for tasks where the brief is already underspecified (the clause triggers only when there's an explicit enumeration to be faithful to).
+
+---
+
+### §17.366 LLM-validation grounding — `type=validation` nodes must compare upstream to spec, not restate it (2026-05-31)
+
+Second fix from the CodeGen-class trial. The DAG's T6 node ("Integrate and validate", `type=validation`, `tool=LLM`) was supposed to verify that T2-T5's CodeGen outputs satisfied the brief. Its output was eighteen `must` statements rephrasing the brief itself:
+
+> - Parser logic must isolate Markdown scanning from CLI argument handling.
+> - Use `argparse` for CLI: flags for dry-run, output dir, filename pattern, regex filter.
+> - Extract code blocks using regex: match triple backticks with optional language tag.
+> - Generate filenames via configurable pattern (e.g., `{lang}_{index}.{ext}`).
+> …
+> - Output filenames must be sanitized: replace invalid chars, avoid collisions via index.
+> - Regex filter applies to code content, not language tag.
+> - Tests must assert exact file contents and paths under varying configs.
+> - No placeholders — full implementation required, including error handling for malformed Markdown or I/O.
+
+Zero references to T2, T3, T4, or T5's actual output_text. Zero observations of whether the parser actually was isolated from the CLI (it wasn't — see §17.367). Zero comparison of the implemented `LANG_EXT` mappings vs. the brief's 9-language list (the gap §17.365 closes at the executor side). The verifier passed the node. The operator gets a "validation report" that is indistinguishable from the brief.
+
+**The model's failure shape.** "Validate" was interpreted as "produce another spec" rather than "compare implementation to spec." This is plausibly the most common LLM-validation-class failure across task types — without explicit instruction to walk per-requirement evidence, the model defaults to the safer behavior of restating the requirements. The model wasn't lying; it just answered the question "what should be true?" when the actual question was "what IS true, given the upstream?"
+
+**The fix.** A "Validation grounding (§17.366)" clause added to `EXECUTION_SYSTEM_LLM` (mirrored in `prompt_assembly.py`). Triggers on `type=validation` (the title containing "Validate", "Verify", "Check", "Audit"; the prompt teaches the model to self-detect the trigger). Requires a comparison report, NOT a spec checklist. The output format is a per-requirement walk marking each item as `MET` / `NOT MET` / `UNKNOWN`, each backed by concrete evidence from upstream output_text (a quoted line, a function name, an observed default value). Without per-requirement evidence the report is just the spec re-typed — that's the failure mode the clause closes.
+
+The clause includes a Good/Bad anti-example pair drawn from the actual T6 regression. The Bad example is the T6 output verbatim ("Parser logic must isolate Markdown scanning from CLI argument handling. Use argparse for CLI: flags for dry-run, output dir, filename pattern, regex filter…"). The Good example walks the same requirements with concrete evidence: "Parser/CLI separation: NOT MET. T2's output and T3's output both define `def main()` and `argparse.ArgumentParser` — the parser is not isolated from the CLI. Evidence: T3 line 32 contains `argparse.ArgumentParser(description=…)`." This shape is what the verifier should reward and the operator can act on.
+
+The clause also closes a subtle downgrade path: if the model can't find evidence for a requirement, it must mark `UNKNOWN` and state why ("upstream T4 output does not contain a default-dir value"). Silent UNKNOWN → MET downgrade was a likely failure mode if the rule didn't explicitly forbid it; calling it out by name pins the behavior.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_LLM` gains "Validation grounding (§17.366)" block with trigger keywords + MET/NOT MET/UNKNOWN format + Bad/Good anti-example pair + the "no silent UNKNOWN → MET downgrade" anti-regression. |
+| `app/modules/prompt_assembly.py` | Mirror. |
+| `tests/test_execution_agent_tools.py` | Two new tests: `test_llm_prompt_has_validation_grounding_clause` (trigger words + format pin) and `test_llm_prompt_validation_clause_forbids_silent_unknown_downgrade` (the specific anti-regression pin). |
+| `tests/test_prompt_assembly.py` | Mirror coverage in `test_llm_mirror_has_brief_spec_and_validation_clauses`. |
+
+**Cohort.** Second of the §17.365 + §17.366 + §17.367 batch. The trial's T6 spec-restatement is the regression; the clause's MET/NOT MET/UNKNOWN format is the prescriptive output shape. The verifier itself (`_verify_output` in `execution_verify.py`) is unchanged — it remains a pass/fail tool-call judge, not a structured-evidence checker. Adding a "did this validation report cite upstream evidence?" check to the verifier is a defensible follow-up but adds maintenance + threshold-tuning surface; deferred until a retry shows the prompt-layer fix is insufficient.
+
+**Cost.** ~40 LOC of prompt + ~15 LOC of tests as part of the §17.365 + §17.366 + §17.367 batch. Zero behavior change for non-validation nodes. Validation nodes' output shape changes from "must-checklist" to "MET/NOT MET/UNKNOWN comparison report" — operators reading prior validation outputs will see the shift on the next live run.
+
+---
+
+### §17.367 DAG scope discipline — extend §17.363 anti-example list to CodeGen verbs (2026-05-31)
+
+Third fix from the CodeGen-class trial. The trial's DAG had **T2 ("Write CLI interface") and T3 ("Implement code block parser") each independently produce the FULL PROGRAM** — both contained `def main()`, `argparse.ArgumentParser`, an extension mapping, a `generate_filename` function — with incompatible signatures (`T2: generate_filename(lang, index, pattern)` vs. `T3: generate_filename(language, index)`). This is the same structural shape as the §17.363-pre homelab regression's T1≈T2≈T5 overlap, but with CodeGen verbs (Write/Implement) instead of Shell verbs (Install/Configure/Deploy). §17.363's anti-example list and Bad/Good walkthrough only covered Shell verbs; the model didn't generalize.
+
+**Why the gap.** §17.363's anti-example was concrete and Shell-class. Concrete anti-examples are the load-bearing pedagogical surface — the §17.359 → §17.361 retries showed clearly that abstract rules without anti-examples regress on the next run. The implication is that anti-example coverage must match the failure-shape catalog: Shell-class needs Shell anti-examples, CodeGen-class needs CodeGen anti-examples. A general "do not duplicate work across nodes" rule isn't enough because the model pattern-matches against the example, not the abstraction.
+
+**The fix.** Three layers, mirroring §17.363's structure.
+
+1. **`DAG_SYSTEM` gains "Hard rules (CodeGen verbs — §17.367)"** alongside the existing "Hard rules (Shell verbs)" block. Three concrete rules:
+   - A node named "Write CLI interface" produces ONLY the CLI entry-point (argparse skeleton, `def main()`, dispatch into the parser module). It does NOT also implement the parser, extension mapping, filename pattern logic, or tests.
+   - A node named "Implement <module>" or "Implement <feature>" produces ONLY that module as something the CLI imports. It does NOT also include `def main()`, an `argparse.ArgumentParser`, or `if __name__ == "__main__"` — those belong to the CLI node.
+   - A node named "Write unit tests for <X>" produces ONLY the test file. Tests IMPORT from X; they do not re-stub X inline.
+
+   Plus a fourth load-bearing rule: **Sibling CodeGen nodes must have COMPATIBLE APIs**. If T2 ("Write CLI") defines `generate_filename(lang, index, pattern)` and T3 ("Implement parser") defines `generate_filename(language, index)`, the two artifacts can't compose. Each node's `notes` must reference the function signatures the sibling nodes export, and each node must use those exact signatures rather than re-inventing them. This is the rule that closes the T2-vs-T3-incompatible-signature regression specifically.
+
+2. **A new "Anti-example 2 (CodeGen — §17.367)"** added to `DAG_SYSTEM` next to the existing "Anti-example 1 (Shell)" block. The CodeGen anti-example is the literal T2/T3 regression: enumerates both nodes' function lists, names the duplicated entities (two `def main()`s, two `ArgumentParser`s, two extension maps), and explicitly calls out the `DIFFERENT SIGNATURE` failure on `generate_filename`. The Bad shape is documented; the Good shape is implied by the existing 8-node homelab walkthrough and would warrant a CodeGen Good-shape walkthrough on a future retry if the rule needs more weight.
+
+3. **`VALIDATOR_SYSTEM` gains §17.367 generalization** in its SCOPE DISCIPLINE block: "CodeGen verbs follow the same rule. A node named 'Write CLI interface' produces ONLY the entry-point; outputs like 'complete CLI tool' or 'working extractor' inflate scope into what should be sibling parser / test nodes. A node named 'Implement <module>' produces a library/module; outputs that include `def main()` or `argparse.ArgumentParser` are scope-inflated. A node named 'Write unit tests for X' produces a test file that imports X; outputs that include the implementation of X are scope-inflated (tests import; they do not re-stub)." The validator's no-op filter relaxation from §17.363 (same-tool same-scope-marker rescues) already handles CodeGen-class scope flagging — no validator-side dataflow change needed.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/dag_generator.py` | `DAG_SYSTEM` gains "Hard rules (CodeGen verbs — §17.367)" block (3 rules + the COMPATIBLE APIs sibling rule). "Anti-example" section split into Anti-example 1 (Shell, the existing homelab content) + Anti-example 2 (CodeGen, the new T2/T3 regression). |
+| `app/modules/dag_validator.py` | `VALIDATOR_SYSTEM`'s SCOPE DISCIPLINE block extended with the CodeGen-verb generalization paragraph. |
+| `tests/test_dag_generator.py` | Three new tests: `test_scope_rules_cover_codegen_verbs` (the three Write CLI / Implement / Write unit tests rules), `test_codegen_scope_anti_example_present` (Anti-example 2 block + the `DIFFERENT SIGNATURE` marker), `test_codegen_compatible_apis_rule_present` (sibling-API rule). |
+| `tests/test_dag_validator.py` | `test_validator_system_documents_codegen_scope_audit` covers the validator's §17.367 update; uses whitespace-collapse before substring match so future prompt reflows don't break the test on line wraps (the test surfaced this fragility on first run; rewrite is the test-driven pattern that §17.363's marker-list filter introduced). |
+
+**Verification (full batch — §17.365 + §17.366 + §17.367).**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_execution_agent_tools.py tests/test_prompt_assembly.py \
+    tests/test_dag_generator.py tests/test_dag_validator.py \
+    tests/test_validate_dag.py --timeout=30 -q
+141 passed in 14.84s
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+<smoke result captured in commit message>
+```
+
+Two of the tests failed on first run with line-wrap-fragile substring asserts (`"Silent truncation"` getting wrapped across `Silent\n  truncation`, `"Write unit tests for X"` similarly split). Rewriting to `" ".join(prompt.split())` before the substring check is the robust pattern; the test-driven rewrite pins this against future prompt reflows.
+
+**What this does NOT do** (deliberately out of scope across the §17.365 + §17.366 + §17.367 batch).
+
+- **Empirically verify the three fixes on a retry of the `mdsplit` brief.** Each retry burns cloud LLM tokens for ~5-10 minutes and the prompt-layer fixes target generation only. The validator's W.3 retry loop and the executor's prompt-layer rules are unit-tested. Operator-driven verification recommended on the next CodeGen-class use.
+- **Add per-class metric grids analogous to §17.364's homelab grid.** The CodeGen-class trial produced one job (`4f6cb206-…`); a metric grid needs a regression baseline + a fixed baseline minimum. After a fix-retry the baseline pair exists; until then there's only one row in the grid. Deferred.
+- **Validator-side comparison-evidence checker for §17.366.** The verifier (`_verify_output`) remains a pass/fail tool-call judge. Adding "did this validation report cite per-requirement evidence?" is a structured-evidence audit; defensible but adds threshold-tuning surface.
+- **Generalize the brief-spec-fidelity clause to non-coding briefs.** The clause is written generically ("language lists, default values, flag semantics, supported formats, required fields, configuration keys") so research-class enumerations (citation lists, source counts) are covered by the abstraction. The CodeGen-specific anti-example is the load-bearing surface; if a research-class retry shows the model truncating source lists, a research anti-example would warrant a §17.36X follow-up.
+- **Address the §17.367 retry's other CodeGen-class observations.** The trial's T2 had a placeholder bug (`for lang, code in zip(['python', 'bash'] * (len(code_blocks) // 2 + 1), code_blocks)`) that ignored the actual fence header; the regex `r'\`\`\`(.*?)\`\`\`'` is too greedy for nested fences. These are model-capability-ceiling issues (code-correctness within a CodeGen node, not the decomposition or fidelity surfaces); RAG-injecting Python idiom into the `code` partition would help. Out of scope for prompt-layer fixes.
+
+**Cohort.** Third of the §17.365 + §17.366 + §17.367 batch and the close of the first CodeGen-class iteration. The §17.359 → §17.364 Shell-class arc plus this batch establish the pattern: each task class needs its own anti-example surface in `DAG_SYSTEM`, its own scope-discipline hard rules in `VALIDATOR_SYSTEM`, and (where the failure shape differs from Shell) its own clause in `EXECUTION_SYSTEM_LLM` / `EXECUTION_SYSTEM_CODEGEN`. Future task classes (research synthesis, mixed code+research, digital-design via the `/design` pipeline) will likely surface their own classes with their own anti-example needs.
+
+**Cost.** Combined with §17.365 + §17.366, the batch is +~150 LOC of prompt across `execution_agent.py` + `prompt_assembly.py` + `dag_generator.py` + `dag_validator.py`, +~50 LOC of tests, three OVERVIEW entries. §17.367's share is ~30 LOC of prompt + ~20 LOC of tests. Zero new deps, zero migrations, zero schema changes, zero behavior change for non-CodeGen-decomposition DAGs.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

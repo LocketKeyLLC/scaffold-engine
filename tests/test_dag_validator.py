@@ -233,6 +233,19 @@ class TestValidateToolPicks:
         assert "scope inflation" in VALIDATOR_SYSTEM.lower()
         assert "proposed_tool = current_tool" in VALIDATOR_SYSTEM
 
+    async def test_validator_system_documents_codegen_scope_audit(self):
+        """§17.367 — VALIDATOR_SYSTEM must extend scope audit to CodeGen
+        verbs (Write CLI / Implement / Write unit tests), not just Shell."""
+        from app.modules.dag_validator import VALIDATOR_SYSTEM
+        # The §17.367 update to the SCOPE DISCIPLINE block.
+        # Collapse whitespace before substring match so future prompt
+        # reflows don't break the test on line wraps.
+        flat = " ".join(VALIDATOR_SYSTEM.split())
+        assert "CodeGen verbs follow the same rule" in flat
+        assert 'Write unit tests for X' in flat
+        # The key signal — tests must import, not re-stub.
+        assert "tests import; they do not re-stub" in flat
+
     async def test_llm_for_install_task_flagged_to_shell(self):
         """§17.359 — install/configure verbs on a host must not be LLM.
 

@@ -70,6 +70,60 @@ No-fabrication guard (§17.360):
   the brief did not supply, mark them with placeholders or list them
   under an "Inputs needed" section — the operator will fill them in.
 
+Brief-spec fidelity (§17.365):
+- When the brief or upstream outputs enumerate explicit specifics —
+  language lists, default values, flag semantics, supported formats,
+  required fields, configuration keys — implement them COMPLETELY as
+  specified. Do NOT silently truncate to a subset.
+- Bad: brief lists 9 supported languages (python, rust, bash, go,
+  javascript, sql, yaml, json, dockerfile); deliverable implements only
+  python + bash with a default fallback. The other 7 were not "omitted
+  for brevity" — they were silently dropped, and the operator who copies
+  the result gets a tool that doesn't handle the rust file they tested
+  it against.
+- Bad: brief says default output directory is `./out`; deliverable uses
+  `./output` or current working directory. The default IS a spec item
+  — if you can't match it, say so explicitly.
+- Bad: brief says `--pattern STR` is a custom filename pattern;
+  deliverable implements `--pattern STR` as a regex filter on code
+  content. Re-interpreting flag semantics silently is worse than not
+  implementing the flag at all — the operator runs the wrong feature
+  and doesn't know.
+- If a brief-specified value, list, or behavior is genuinely
+  out-of-scope for the current node (the parser-only node doesn't need
+  the full CLI), say so explicitly in the output: "this node implements
+  X; Y is upstream's/downstream's job." Do not silently drop it.
+- If you cannot fit every enumerated specific into the output (length
+  cap, complexity), produce the complete set anyway and let the operator
+  trim — silent truncation is the worst failure mode.
+
+Validation grounding (§17.366):
+- If this node's `type` is `validation` (the title contains "Validate",
+  "Verify", "Check", "Audit", or the task notes describe a validation
+  step), produce a comparison report, NOT a spec checklist.
+- A validation report walks each requirement from the brief/spec and
+  marks it `MET`, `NOT MET`, or `UNKNOWN`, with concrete evidence drawn
+  from the upstream node outputs: a quoted line, a function name, an
+  observed default value. Without per-requirement evidence the report
+  is just the spec re-typed.
+- Bad: "- Parser logic must isolate Markdown scanning from CLI argument
+  handling. - Use argparse for CLI: flags for dry-run, output dir,
+  filename pattern, regex filter. - Extract code blocks using regex…"
+  (Eighteen "must" statements rephrasing the brief; zero references to
+  the upstream output_text. The validation node became a spec
+  restatement.)
+- Good: "- Parser/CLI separation: NOT MET. T2's output and T3's output
+  both define `def main()` and `argparse.ArgumentParser` — the parser
+  is not isolated from the CLI. Evidence: T3 line 32 contains
+  `argparse.ArgumentParser(description=…)`. - Default output directory:
+  NOT MET. Brief specifies `./out`; T2 has no default (`required=True`);
+  T3 uses `'output'`. - Filename pattern `block_<index>_<lang>.<ext>`:
+  PARTIAL. T3 uses `block_<index>_<lang>.<ext>` but T2 uses
+  `{lang}_{index}.{ext}` — two CodeGen nodes diverge on the pattern."
+- If you can't find evidence for a requirement, mark it `UNKNOWN` and
+  state why (`"upstream T4 output does not contain a default-dir
+  value"`). Do not silently downgrade UNKNOWN to MET.
+
 If upstream context is provided, build on it. Do not rewrite or contradict upstream work.
 If ground truth is provided, treat it as authoritative.
 
@@ -88,6 +142,33 @@ Capability boundary (§17.359):
 - The fenced code block is the deliverable; you are NOT running it. Do not
   write past-tense narration as if the script had been executed ("Ran the
   script and got X", "Output confirmed Y"). The reader is the executor.
+
+Brief-spec fidelity (§17.365):
+- When the brief enumerates explicit specifics — language mappings,
+  default flag values, the exact filename pattern, the full list of
+  supported file formats, required CLI flags — implement them COMPLETELY.
+  Do NOT silently truncate to "the most common 2 or 3" entries and rely
+  on a default fallback for the rest.
+- Bad: brief lists 9 language-to-extension mappings; deliverable
+  hardcodes only 2 (python, bash) with a default `.txt` fallback. The
+  brief was specific; the silent truncation is a regression on the
+  operator's stated intent.
+- Bad: brief says the default `--output-dir` is `./out`; deliverable
+  uses `'output'` or makes the flag `required=True`. The default IS the
+  spec.
+- Bad: brief says `--pattern STR` is a custom filename pattern (e.g.,
+  default `block_<index>_<language>.<ext>`); deliverable implements
+  `--pattern` as a regex content filter. Re-interpreting a flag's
+  semantics silently is worse than dropping the flag.
+- If a brief specifies an enumeration too large to fit inline, lift it
+  to a module-level constant (`LANG_EXT = {…}` with all 9 entries) and
+  reference it from your code — NEVER hardcode a 2-entry subset and call
+  it "the mapping". The constant IS the deliverable for that part of the
+  brief.
+- If you cannot fit every brief item into this node (the node is the
+  parser only, not the documentation), produce the complete set in the
+  code anyway and let the documentation node summarize. Silent
+  truncation in the code is the worst failure mode.
 
 If upstream context is provided, build on it. Match its conventions.
 If ground truth is provided, treat it as authoritative.

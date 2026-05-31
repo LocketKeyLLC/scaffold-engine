@@ -282,3 +282,50 @@ class TestSystemPromptRouting:
         # The decision rule the model applies.
         assert "does this value vary per" in EXECUTION_SYSTEM_RUNBOOK.lower()
 
+    # ----- §17.365 — brief-spec fidelity -----
+
+    def test_llm_prompt_has_brief_spec_fidelity_clause(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        # The clause closes the CodeGen-retry's 2-of-9 language-map regression.
+        assert "Brief-spec fidelity" in EXECUTION_SYSTEM_LLM
+        # The "silent truncation" framing is the load-bearing phrase.
+        assert "silently truncate" in EXECUTION_SYSTEM_LLM
+        # Concrete anti-example markers — the model must see the actual
+        # numbers from the regression so it can pattern-match.
+        assert "9 supported languages" in EXECUTION_SYSTEM_LLM
+        assert "./out" in EXECUTION_SYSTEM_LLM
+        assert "Re-interpreting flag semantics" in EXECUTION_SYSTEM_LLM
+
+    def test_codegen_prompt_has_brief_spec_fidelity_clause(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_CODEGEN
+        assert "Brief-spec fidelity" in EXECUTION_SYSTEM_CODEGEN
+        # CodeGen-specific lift-to-constant rule
+        assert "module-level constant" in EXECUTION_SYSTEM_CODEGEN
+        # The concrete anti-example
+        assert "9 language-to-extension mappings" in EXECUTION_SYSTEM_CODEGEN
+        # "silent truncation" line-wraps in the prompt; collapse whitespace
+        # before substring match so a future reflow doesn't break the test.
+        assert "silent truncation" in (
+            " ".join(EXECUTION_SYSTEM_CODEGEN.split()).lower()
+        )
+
+    # ----- §17.366 — validation grounding -----
+
+    def test_llm_prompt_has_validation_grounding_clause(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        # The clause closes the CodeGen-retry's T6 spec-restatement regression.
+        assert "Validation grounding" in EXECUTION_SYSTEM_LLM
+        # The MET / NOT MET / UNKNOWN format is the load-bearing pattern.
+        assert "MET" in EXECUTION_SYSTEM_LLM
+        assert "NOT MET" in EXECUTION_SYSTEM_LLM
+        assert "UNKNOWN" in EXECUTION_SYSTEM_LLM
+        # The validation-trigger keyword list
+        assert "Validate" in EXECUTION_SYSTEM_LLM
+        assert "Verify" in EXECUTION_SYSTEM_LLM
+
+    def test_llm_prompt_validation_clause_forbids_silent_unknown_downgrade(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        # The specific failure mode — UNKNOWN getting silently flipped
+        # to MET when evidence is missing — must be called out.
+        assert "Do not silently downgrade UNKNOWN to MET" in EXECUTION_SYSTEM_LLM
+

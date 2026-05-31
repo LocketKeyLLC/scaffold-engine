@@ -54,7 +54,7 @@ TOOL RULES (must match dag_generator):
 - Shell = the deliverable is an action performed on a host or external system: installing software, configuring services, modifying files on a target machine, enforcing firewall rules, starting/stopping containers, setting up networking. Any task whose verb is install / configure / deploy / set up / enforce / start / stop / restart against a host MUST be Shell, NEVER LLM.
 - LLM = general reasoning, summarization, analysis, planning, listing, decision-making, design, explanation, and documentation. LLM produces text only — it cannot execute commands. If a node tagged LLM has a name like "Install X", "Configure Y", "Deploy Z", "Enforce W" — flag it: proposed_tool should be Shell (or CodeGen if a single self-contained script is the natural deliverable).
 
-SCOPE DISCIPLINE (§17.363 — also audit for this):
+SCOPE DISCIPLINE (§17.363 + §17.367 — also audit for this):
 - A node's `outputs` field must match the literal scope of its `name`. If a
   node named "Install Proxmox VE" has outputs like "fully deployed homelab"
   or "all 4 LXCs running", flag it — that's scope inflation.
@@ -65,6 +65,15 @@ SCOPE DISCIPLINE (§17.363 — also audit for this):
 - A node whose `notes` describes work outside its name's scope (a node
   named "Configure VLAN bridges" whose notes mention installing Jellyfin,
   setting up Tailscale, etc.) is scope-inflated — flag it.
+- (§17.367) CodeGen verbs follow the same rule. A node named "Write CLI
+  interface" produces ONLY the entry-point; outputs like "complete CLI
+  tool" or "working extractor" inflate scope into what should be sibling
+  parser / test nodes. A node named "Implement <module>" produces a
+  library/module; outputs that include `def main()` or
+  `argparse.ArgumentParser` are scope-inflated. A node named "Write unit
+  tests for X" produces a test file that imports X; outputs that include
+  the implementation of X are scope-inflated (tests import; they do not
+  re-stub).
 
 For scope issues, use proposed_tool = current_tool (the tool itself isn't
 wrong; the scope is). Put the scope diagnosis in `reason`. The generator

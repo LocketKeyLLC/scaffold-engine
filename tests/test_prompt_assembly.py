@@ -75,6 +75,18 @@ class TestSystemForTool:
         assert "SCREAMING_SNAKE_CASE" in pa.EXECUTION_SYSTEM_RUNBOOK
         assert "<HOST_IP>" in pa.EXECUTION_SYSTEM_RUNBOOK
 
+    def test_llm_mirror_has_brief_spec_and_validation_clauses(self):
+        # §17.365 + §17.366 — mirror invariant. Without these the
+        # assist-mode operator sees a different prompt than autonomous.
+        assert "Brief-spec fidelity" in pa.EXECUTION_SYSTEM_LLM
+        assert "Validation grounding" in pa.EXECUTION_SYSTEM_LLM
+        assert "MET" in pa.EXECUTION_SYSTEM_LLM and "NOT MET" in pa.EXECUTION_SYSTEM_LLM
+
+    def test_codegen_mirror_has_brief_spec_clause(self):
+        # §17.365 — CodeGen mirror.
+        assert "Brief-spec fidelity" in pa.EXECUTION_SYSTEM_CODEGEN
+        assert "module-level constant" in pa.EXECUTION_SYSTEM_CODEGEN
+
 
 # ---------------------------------------------------------------------------
 # truncate_output — head/tail preserve + marker.

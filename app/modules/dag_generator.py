@@ -116,7 +116,7 @@ infra rollout, deployment). The model is tempted to make each node
 networking, set up every container — instead of starting from upstream
 state and adding only the named delta. Resist this.
 
-Hard rules:
+Hard rules (Shell verbs):
 - A node named "Install X" produces ONLY a working X install. It does NOT
   also configure the network around X, deploy services that run on X, set
   up SSH/VPN access to X, or document the result. Each of those is a
@@ -129,14 +129,38 @@ Hard rules:
   create the other 3 services in the same pipeline, recreate the network,
   or reinstall the host. Sibling deploy nodes are sibling nodes — not
   contents of each other.
-- Each node's `outputs` field must be a tight description of the
-  incremental artifact (e.g., "Jellyfin LXC + container running") — NOT a
-  catch-all like "fully deployed homelab" that overlaps every other node's
-  outputs.
 
-Anti-example (drawn from a real DAG that violated this rule — homelab
-brief, 6-node Shell decomposition). T1, T2, T3, T5 EACH produced runbooks
-that:
+Hard rules (CodeGen verbs — §17.367):
+- A node named "Write CLI interface" produces ONLY the CLI entry-point
+  (argparse skeleton, `def main()`, dispatch into the parser module).
+  It does NOT also implement the parser, the extension mapping, the
+  filename pattern logic, or the tests. Those are separate nodes
+  downstream.
+- A node named "Implement <module>" or "Implement <feature>" produces
+  ONLY that module/feature, as a Python module that the CLI imports.
+  It does NOT also include `def main()`, an `argparse.ArgumentParser`,
+  or `if __name__ == "__main__"` — those belong to the CLI node.
+- A node named "Write unit tests for <X>" produces ONLY the test file
+  for X (`test_<x>.py` with `def test_*` functions importing from X).
+  It does NOT also re-implement X inline, define a second `main()`, or
+  pull in CLI argument parsing. Tests import; they do not re-stub.
+- Sibling CodeGen nodes must have COMPATIBLE APIs: if T2 ("Write CLI")
+  defines `generate_filename(lang, index, pattern)` and T3 ("Implement
+  parser") defines `generate_filename(language, index)`, the two
+  artifacts can't compose. Each node's `notes` must reference the
+  function signatures the sibling nodes export, and each node must use
+  those exact signatures rather than re-inventing them.
+
+Hard rules (universal):
+- Each node's `outputs` field must be a tight description of the
+  incremental artifact (e.g., "Jellyfin LXC + container running",
+  "parser module exporting extract_blocks(text) → list[Block]") — NOT a
+  catch-all like "fully deployed homelab" or "complete CLI tool" that
+  overlaps every other node's outputs.
+
+Anti-example 1 (Shell — drawn from a real DAG that violated this rule —
+homelab brief, 6-node Shell decomposition). T1, T2, T3, T5 EACH produced
+runbooks that:
   - download + burn the Proxmox ISO
   - install Proxmox VE on the host
   - configure all 4 VLAN bridges
@@ -147,6 +171,23 @@ that:
 Each node was ~95% identical to the others. An operator running them
 in execution order would `pct create` the same LXC IDs three times and
 get "VMID already in use" errors on the 2nd and 3rd attempts.
+
+Anti-example 2 (CodeGen — §17.367, drawn from a real DAG: Markdown
+code-block extractor, 4-CodeGen-node decomposition). T2 ("Write CLI
+interface") and T3 ("Implement code block parser") each produced FULL
+PROGRAMS:
+  - T2 defined: `LANG_EXT` mapping, `parse_args()`, `extract_code_blocks()`,
+    `generate_filename(lang, index, pattern)`, `def main()`,
+    `argparse.ArgumentParser`, `if __name__ == "__main__"`
+  - T3 defined: `language_extension_map` mapping, `code_block_pattern`,
+    `generate_filename(language, index)` (DIFFERENT SIGNATURE),
+    `process_file()`, `def main()`, `argparse.ArgumentParser`,
+    `if __name__ == "__main__"`
+Two `def main()`s, two `ArgumentParser`s, two extension maps under
+different names, two incompatible `generate_filename` signatures. An
+operator can't compose them — they're independent re-implementations
+of the same program, not separable modules. The same shape as
+Anti-example 1, different tool tag.
 
 The Good shape for the same brief:
   - T1 "Install Proxmox VE host"      → outputs: working Proxmox host with management IP
