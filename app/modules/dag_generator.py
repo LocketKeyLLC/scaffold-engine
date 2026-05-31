@@ -106,6 +106,64 @@ Rules:
     task whose deliverable is an action on a host or system: that is Shell
     (or CodeGen if the deliverable is a single self-contained script).
     This is the DEFAULT for purely informational deliverables.
+Scope discipline (§17.363 — load-bearing, read every time):
+
+A node's scope is EXACTLY what its `name` and `outputs` literally state, and
+NOTHING ELSE. Inflating a node's scope to cover adjacent work is the most
+common decomposition failure on multi-step host-action briefs (homelab,
+infra rollout, deployment). The model is tempted to make each node
+"self-contained" — install everything from scratch, configure all the
+networking, set up every container — instead of starting from upstream
+state and adding only the named delta. Resist this.
+
+Hard rules:
+- A node named "Install X" produces ONLY a working X install. It does NOT
+  also configure the network around X, deploy services that run on X, set
+  up SSH/VPN access to X, or document the result. Each of those is a
+  separate node downstream.
+- A node named "Configure Y" assumes the upstream that creates Y has run.
+  It does NOT reinstall the base system, recreate the host, or repeat any
+  step the upstream already did. The runbook starts from "Y exists" and
+  adds only the configuration delta.
+- A node named "Deploy Z service" creates ONLY service Z. It does NOT
+  create the other 3 services in the same pipeline, recreate the network,
+  or reinstall the host. Sibling deploy nodes are sibling nodes — not
+  contents of each other.
+- Each node's `outputs` field must be a tight description of the
+  incremental artifact (e.g., "Jellyfin LXC + container running") — NOT a
+  catch-all like "fully deployed homelab" that overlaps every other node's
+  outputs.
+
+Anti-example (drawn from a real DAG that violated this rule — homelab
+brief, 6-node Shell decomposition). T1, T2, T3, T5 EACH produced runbooks
+that:
+  - download + burn the Proxmox ISO
+  - install Proxmox VE on the host
+  - configure all 4 VLAN bridges
+  - create all 4 LXC containers (Jellyfin, Ollama, AdGuard, Monitoring)
+  - install + authenticate Tailscale on all 4 LXCs
+  - set DNS on all 4 LXCs
+  - disable telemetry on all 4 LXCs
+Each node was ~95% identical to the others. An operator running them
+in execution order would `pct create` the same LXC IDs three times and
+get "VMID already in use" errors on the 2nd and 3rd attempts.
+
+The Good shape for the same brief:
+  - T1 "Install Proxmox VE host"      → outputs: working Proxmox host with management IP
+  - T2 "Configure VLAN bridges"       → starts from T1; adds vmbr0.<VLAN_*> stanzas; nothing else
+  - T3 "Create LXC containers"        → starts from T2; runs `pct create` for the 4 LXCs; nothing else
+  - T4 "Deploy Jellyfin in its LXC"   → starts from T3; installs + configures Jellyfin in its already-existing LXC; touches no other container
+  - T5 "Deploy Ollama with GPU"       → starts from T3; GPU passthrough + Ollama install on its already-existing LXC; touches no other container
+  - T6 "Enable Tailscale + DNS policy"→ starts from T5; one Tailscale exit node + AdGuard as resolver; consolidated, not per-LXC repeat
+  - T7 "Validate the build"           → checks; no installs, no config edits
+  - T8 "Document"                     → LLM; reads upstream; produces README
+
+Each node's runbook starts from the prior node's terminal state — assume
+the upstream ran, do not repeat its work. The `notes` field on each task
+should make this explicit ("starts from T2's bridge config; adds LXC
+creation only").
+
+Other DAG-shape rules:
 - Each node must produce DISTINCT output that no other node produces. Do NOT create multiple nodes that generate the same artifact (e.g., do not have separate "design script" and "write script" nodes that both produce the full script).
 - Later nodes must EXTEND or VALIDATE earlier work, never recreate it. For example: T1 writes the code → T2 writes tests for it → T3 validates both — NOT T1 designs code → T2 rewrites the same code → T3 rewrites it again.
 - If a task can be accomplished in one node, use one node. Prefer fewer, focused nodes over many overlapping ones.
@@ -121,14 +179,18 @@ EXAMPLE (4-node DAG for "Research the history of solar panels and summarize find
   ]
 }
 
-EXAMPLE (4-node DAG for "Install Proxmox VE on a server and set up Jellyfin in a VM"):
+EXAMPLE (8-node DAG for "Install Proxmox VE, set up Jellyfin + Ollama in containers, isolate via VLANs, enable Tailscale remote access"):
 {
   "strategy": "sequential",
   "tasks": [
-    {"id": "T1", "name": "Install Proxmox VE host", "type": "action", "inputs": ["target host details"], "outputs": ["installed Proxmox runbook"], "depends_on": [], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "Action on host — Shell. Runbook covers ISO burn, install steps, post-install network config."},
-    {"id": "T2", "name": "Configure GPU passthrough", "type": "action", "inputs": ["installed Proxmox runbook"], "outputs": ["vfio passthrough runbook"], "depends_on": ["T1"], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "Modify host BIOS/IOMMU + vfio.conf — Shell, not LLM."},
-    {"id": "T3", "name": "Deploy Jellyfin VM", "type": "action", "inputs": ["vfio passthrough runbook"], "outputs": ["jellyfin VM runbook"], "depends_on": ["T2"], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "VM creation, hostpci config, OS install — Shell."},
-    {"id": "T4", "name": "Document setup", "type": "output", "inputs": ["all runbooks"], "outputs": ["README.md"], "depends_on": ["T1", "T2", "T3"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Documentation about the setup is text — LLM, not Shell."}
+    {"id": "T1", "name": "Install Proxmox VE host", "type": "action", "inputs": ["target host details"], "outputs": ["working Proxmox host"], "depends_on": [], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "ISO burn + install + management IP. STOPS at booted Proxmox. Does NOT configure VLANs, create LXCs, or install services."},
+    {"id": "T2", "name": "Configure VLAN bridges", "type": "action", "inputs": ["working Proxmox host"], "outputs": ["VLAN-aware bridges"], "depends_on": ["T1"], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "Starts from T1. Edits /etc/network/interfaces to add vmbr0.<VLAN_*> stanzas. Nothing else."},
+    {"id": "T3", "name": "Create LXC containers", "type": "action", "inputs": ["VLAN-aware bridges"], "outputs": ["four empty running LXCs"], "depends_on": ["T2"], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "Starts from T2. Runs pct create for the 4 LXCs (Jellyfin, Ollama, AdGuard, Monitoring) on appropriate VLANs. No service install."},
+    {"id": "T4", "name": "Deploy Jellyfin service", "type": "action", "inputs": ["four empty running LXCs"], "outputs": ["Jellyfin LXC serving media"], "depends_on": ["T3"], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "Starts from T3 — the Jellyfin LXC already exists and runs. Installs + configures only Jellyfin inside it. Does NOT touch the other 3 LXCs."},
+    {"id": "T5", "name": "Deploy Ollama with GPU", "type": "action", "inputs": ["four empty running LXCs"], "outputs": ["Ollama LXC serving llama3"], "depends_on": ["T3"], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "Starts from T3 — the Ollama LXC already exists. Adds GPU passthrough lines + installs Ollama. Does NOT touch the other 3 LXCs."},
+    {"id": "T6", "name": "Enable Tailscale + DNS policy", "type": "action", "inputs": ["all service LXCs"], "outputs": ["one exit node + AdGuard as DNS"], "depends_on": ["T4", "T5"], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "ONE exit node, not four. AdGuard configured as resolver for the other LXCs (not Cloudflare directly)."},
+    {"id": "T7", "name": "Validate the build", "type": "validation", "inputs": ["all upstream runbooks"], "outputs": ["validation report"], "depends_on": ["T6"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Read upstream outputs and check coherence. No installs, no config edits."},
+    {"id": "T8", "name": "Document the setup", "type": "output", "inputs": ["all upstream runbooks"], "outputs": ["README.md"], "depends_on": ["T7"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Documentation about the setup is text — LLM, not Shell."}
   ]
 }
 

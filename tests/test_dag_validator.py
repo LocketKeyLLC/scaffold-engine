@@ -167,6 +167,72 @@ class TestValidateToolPicks:
         assert outcome.issues == []
         assert outcome.error is None
 
+    async def test_scope_issue_same_tool_kept_when_reason_says_scope(self):
+        """§17.363 — same-tool suggestions (current==proposed) used to be
+        silently dropped by the no-op filter, which discarded every scope
+        finding because the validator can't propose a different tool for
+        scope inflation. The relaxed filter keeps same-tool issues whose
+        reason explicitly diagnoses scope."""
+        tasks = [{"id": "T2", "name": "Configure VLAN bridges", "tool": "Shell",
+                  "notes": "outputs include all 4 LXCs running and tailscale install"}]
+        payload = {
+            "issues": [
+                {
+                    "node_id": "T2", "current_tool": "Shell",
+                    "proposed_tool": "Shell",
+                    "reason": (
+                        "Scope inflation: name is 'Configure VLAN bridges' but "
+                        "outputs include 'all 4 LXCs running'. Trim outputs to "
+                        "bridges only; LXC creation belongs to a downstream node."
+                    ),
+                }
+            ]
+        }
+        with patch(
+            "app.modules.dag_validator.model_router.generate",
+            new=AsyncMock(return_value=_llm_response(json.dumps(payload))),
+        ):
+            outcome = await validate_tool_picks(tasks)
+        assert outcome.error is None
+        assert len(outcome.issues) == 1
+        assert outcome.issues[0].node_id == "T2"
+        # Same tool both sides — the no-op filter must let this through
+        # because the reason explicitly says "Scope inflation".
+        assert outcome.issues[0].current_tool == "Shell"
+        assert outcome.issues[0].proposed_tool == "Shell"
+        assert "scope" in outcome.issues[0].reason.lower()
+
+    async def test_same_tool_non_scope_reason_still_dropped(self):
+        """Non-scope same-tool suggestions remain no-ops. The relaxation is
+        narrow — only `reason ~ "scope"` rescues them; a same-tool issue
+        with an unrelated reason (model error, hallucination) still drops."""
+        tasks = [{"id": "T1", "name": "Plan", "tool": "LLM"}]
+        payload = {
+            "issues": [
+                {
+                    "node_id": "T1", "current_tool": "LLM",
+                    "proposed_tool": "LLM",
+                    "reason": "no-op suggestion with no scope diagnosis",
+                }
+            ]
+        }
+        with patch(
+            "app.modules.dag_validator.model_router.generate",
+            new=AsyncMock(return_value=_llm_response(json.dumps(payload))),
+        ):
+            outcome = await validate_tool_picks(tasks)
+        assert outcome.error is None
+        assert outcome.issues == []
+
+    async def test_validator_system_documents_scope_audit(self):
+        """The VALIDATOR_SYSTEM prompt must instruct the auditor to flag
+        scope issues, not just tool issues. Static surface check — without
+        it, the validator silently regresses to tool-only auditing."""
+        from app.modules.dag_validator import VALIDATOR_SYSTEM
+        assert "SCOPE DISCIPLINE" in VALIDATOR_SYSTEM
+        assert "scope inflation" in VALIDATOR_SYSTEM.lower()
+        assert "proposed_tool = current_tool" in VALIDATOR_SYSTEM
+
     async def test_llm_for_install_task_flagged_to_shell(self):
         """§17.359 — install/configure verbs on a host must not be LLM.
 

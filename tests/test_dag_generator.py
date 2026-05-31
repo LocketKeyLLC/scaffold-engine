@@ -322,6 +322,46 @@ class TestToolSelectionGuide:
         # The key principle: discussing/listing/explaining code is LLM territory
         assert "even one ABOUT code" in DAG_SYSTEM
 
+    # ----- §17.363 — scope discipline -----
+
+    def test_scope_discipline_block_present(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The dedicated labeled block — clause must be load-bearing visible
+        assert "Scope discipline" in DAG_SYSTEM
+        assert "load-bearing" in DAG_SYSTEM
+        # The hard rule must name the failure shape directly.
+        assert "EXACTLY what its `name` and `outputs` literally state" in DAG_SYSTEM
+
+    def test_scope_anti_example_present(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The homelab T1/T2/T3/T5 ~95% overlap pattern is the anti-example;
+        # asserting its narrative phrasing prevents a future prompt edit
+        # from silently dropping the contrast surface.
+        assert "Anti-example" in DAG_SYSTEM
+        assert "95% identical" in DAG_SYSTEM
+        # The operator failure mode must be named so the model sees the
+        # actual consequence of getting it wrong.
+        assert "VMID already in use" in DAG_SYSTEM
+
+    def test_scope_good_shape_walked_through(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The Good shape walks all 8 nodes — pinning a few transitions so
+        # an edit can't degrade it back to 4-node hand-waving.
+        assert "Configure VLAN bridges" in DAG_SYSTEM
+        assert "Create LXC containers" in DAG_SYSTEM
+        assert "Deploy Jellyfin service" in DAG_SYSTEM
+        assert "Deploy Ollama with GPU" in DAG_SYSTEM
+        assert "starts from" in DAG_SYSTEM.lower()
+
+    def test_scope_rules_cover_install_configure_deploy_verbs(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The three hard rules per verb (Install/Configure/Deploy) must
+        # each be present — drop any one and the model regresses on the
+        # corresponding shape.
+        assert 'A node named "Install X"' in DAG_SYSTEM
+        assert 'A node named "Configure Y"' in DAG_SYSTEM
+        assert 'A node named "Deploy Z service"' in DAG_SYSTEM
+
 
 # ===========================================================================
 # Sprint W.3 — validator-driven retry loop

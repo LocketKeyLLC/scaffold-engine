@@ -54,17 +54,34 @@ TOOL RULES (must match dag_generator):
 - Shell = the deliverable is an action performed on a host or external system: installing software, configuring services, modifying files on a target machine, enforcing firewall rules, starting/stopping containers, setting up networking. Any task whose verb is install / configure / deploy / set up / enforce / start / stop / restart against a host MUST be Shell, NEVER LLM.
 - LLM = general reasoning, summarization, analysis, planning, listing, decision-making, design, explanation, and documentation. LLM produces text only — it cannot execute commands. If a node tagged LLM has a name like "Install X", "Configure Y", "Deploy Z", "Enforce W" — flag it: proposed_tool should be Shell (or CodeGen if a single self-contained script is the natural deliverable).
 
+SCOPE DISCIPLINE (§17.363 — also audit for this):
+- A node's `outputs` field must match the literal scope of its `name`. If a
+  node named "Install Proxmox VE" has outputs like "fully deployed homelab"
+  or "all 4 LXCs running", flag it — that's scope inflation.
+- If two or more nodes have `outputs` fields that overlap substantially
+  (e.g., both claim to produce "the LXC containers" or both produce "the
+  Tailscale setup"), flag the one whose `name` does NOT align with that
+  output. The other one keeps the work.
+- A node whose `notes` describes work outside its name's scope (a node
+  named "Configure VLAN bridges" whose notes mention installing Jellyfin,
+  setting up Tailscale, etc.) is scope-inflated — flag it.
+
+For scope issues, use proposed_tool = current_tool (the tool itself isn't
+wrong; the scope is). Put the scope diagnosis in `reason`. The generator
+reads the issue list and re-decomposes with tighter scopes.
+
 OUTPUT FORMAT (strict JSON, no markdown fences):
 {
   "issues": [
-    {"node_id": "T3", "current_tool": "CodeGen", "proposed_tool": "LLM", "reason": "Task is documentation, not executable code."}
+    {"node_id": "T3", "current_tool": "CodeGen", "proposed_tool": "LLM", "reason": "Task is documentation, not executable code."},
+    {"node_id": "T2", "current_tool": "Shell", "proposed_tool": "Shell", "reason": "Scope inflation: name is 'Configure VLAN bridges' but outputs include 'all 4 LXCs running'. Trim outputs to bridges only; LXC creation belongs to the downstream 'Create LXC containers' node."}
   ]
 }
 
 Rules for your audit:
 - Only flag clear violations grounded in the rules above. If a tool pick is defensible, do NOT flag it.
 - "proposed_tool" must be one of: LLM, SearXNG, Milvus, CodeGen, Shell.
-- Return an empty issues list if every tool pick is correct.
+- Return an empty issues list if every tool pick is correct AND every node's scope matches its name.
 - Return ONLY the JSON object. No preamble, no markdown."""
 
 
@@ -163,8 +180,31 @@ async def validate_tool_picks(
             # Skip ill-formed entries rather than failing the whole batch.
             continue
         if current == proposed:
-            # No-op suggestion; ignore.
-            continue
+            # §17.363 — same-tool suggestions are scope issues (tool is
+            # correct; node's scope/outputs/notes are wrong). Keep them
+            # only when the reason explicitly diagnoses scope, so the
+            # retry loop sees the diagnosis and re-decomposes with tighter
+            # outputs. Pre-§17.363 the no-op filter dropped every
+            # scope finding silently because the validator can't propose
+            # a different tool for scope inflation.
+            #
+            # Filter for positive diagnosis markers — a bare substring
+            # check on "scope" matches negations like "no scope diagnosis"
+            # or unrelated mentions ("out of scope"), so the rescue list
+            # is the concrete phrases the VALIDATOR_SYSTEM teaches the
+            # model to emit.
+            reason_lower = reason.lower()
+            scope_markers = (
+                "scope inflation",
+                "scope mismatch",
+                "scope issue",
+                "scope drift",
+                "outside its scope",
+                "outside the scope",
+                "name mismatch",
+            )
+            if not any(m in reason_lower for m in scope_markers):
+                continue
         issues.append(ToolIssue(
             node_id=node_id,
             current_tool=current,
