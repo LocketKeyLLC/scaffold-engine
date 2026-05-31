@@ -19508,6 +19508,74 @@ Goldens after unskip: `pytest tests/test_retrieval_golden.py -v --timeout=300` =
 
 ---
 
+### §17.358 retire `ground_truth.json` + `eval_retrieval.py` — Tier-2 #15 closed by deprecation, not regen (2026-05-31)
+
+Closes Tier-2 audit-tail item #15 from §17.29. The item was originally framed as "ground_truth.json regen at KB=1093 — re-curate expected_doc_ids against the current scaffold-<title>-<hash> naming, multi-hour calibration." After reading the file's own metadata it's clear the right move is retirement, not regen: `tests/ground_truth.json` has been officially marked `"stale": true` in its own metadata since 2026-05-07 with an explicit pointer at the replacement (`scripts/score_retrieval.py` + `tests/fixtures/golden_set.json`). Nothing in the live system consumes it; nothing in CI runs against it. A multi-hour re-curation produces a file no operator surface reads.
+
+**State at retirement.**
+
+| Artifact | Status |
+|---|---|
+| `tests/ground_truth.json` | Marked `"stale": true` 2026-05-07 ("v1.2 (2026-05-07): marked stale — entry_id naming drifted (eng-* → scaffold-*); embedding dim changed (4096 → 512 MRL); metric changed (L2 → COSINE). Live eval moved to score_retrieval.py + golden_set.json"). |
+| `tests/eval_retrieval.py` | The script that loads ground_truth.json. Excluded from CI (`--ignore=tests/eval_retrieval.py` in `make ci` + `.github/workflows/test.yml`). Only consumer: `make eval`. |
+| `tests/test_eval_metrics.py` | 12 metric-math tests that import eval_retrieval.py via `importlib.util`. Not smoke-marked, not run in CI tier-1 (gets collected though; the deletion of eval_retrieval.py broke its collection). |
+| `make eval` | Single-line target that runs eval_retrieval.py against ground_truth.json. Last meaningfully exercised pre-§17.350 (KB-shape drift made every query a MISS). |
+| `scripts/score_retrieval.py` + `tests/fixtures/golden_set.json` | **Canonical replacement** since 2026-05-07. Wired into `make ci-tier-2` step 4/5 (§17.247) and the §17.354 quarterly cron's runbook. Uses substring-based title matching, immune to the entry-id-naming drift that broke ground_truth.json. |
+
+**What's removed.**
+
+| Path | Why | LOC |
+|---|---|---:|
+| `tests/ground_truth.json` | Stale per its own metadata; no live consumer | -287 |
+| `tests/eval_retrieval.py` | The only loader; deprecated since 2026-05-07 | -343 |
+| `tests/test_eval_metrics.py` | Tests the retired module's metric functions; equivalent functions live in `scripts/score_retrieval.py` with different (substring-based) semantics that are tested via the golden-set fixtures themselves | -150 |
+| `Makefile` `eval:` target | Wired only to the retired script; replaced by §17.354 `make rebaseline` + the explicit `python3 scripts/score_retrieval.py ...` in the quarterly cron PR body | -2 |
+| `Makefile` `--ignore=tests/eval_retrieval.py` in `make ci` | No file to ignore; pytest collection won't trip | -1 |
+| `.github/workflows/test.yml` `--ignore=tests/eval_retrieval.py` | Same | -1 |
+| `scripts/quarterly_calibration_pr.sh` PR-body Tier-2 #15 references + "Run make eval" checklist line + ground_truth.json drift signal | Tier-2 #15 is closed; the runbook now points at `make rebaseline` (§17.354) + `python3 scripts/score_retrieval.py` directly | -3 / +5 |
+| **Net** | | **-782 lines** |
+
+**Files added / modified.**
+
+| File | Change |
+|---|---|
+| `Makefile` | Removed `eval:` target. Removed `--ignore=tests/eval_retrieval.py` from `make ci`. Added §17.358 marker comment in place of the removed target so future operators see why `make eval` is gone. |
+| `.github/workflows/test.yml` | Removed the `--ignore` line. Updated the commented-out integration-test stub to reference `scripts/score_retrieval.py` instead of `make eval`. |
+| `scripts/quarterly_calibration_pr.sh` | PR body text and operator runbook updated: Tier-2 #14 + #15 references → Tier-2 #14 only (with §17.358 note that #15 is closed by deprecation), `make eval` checklist line → `make rebaseline` + explicit score_retrieval invocation, drift-signals' ground_truth.json mention → note that golden_set.json is immune to the same drift class. |
+| `OVERVIEW.md` | this entry |
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/ --collect-only -q
+3161 tests collected in 22.85s   # pre-§17.358: same 3161 + 1 collection ERROR (test_eval_metrics)
+
+$ bash -n scripts/quarterly_calibration_pr.sh && echo OK
+OK
+
+$ grep -rnE "tests/eval_retrieval|tests/ground_truth\.json|make eval" Makefile scripts .github tests --include="*.py" --include="*.sh" --include="*.yml" --include="Makefile"
+# only intentional §17.358 marker comments remain
+```
+
+Smoke suite: 3000+ pass (live verification run alongside this commit).
+
+**What this preserves.**
+
+- The substring-based title-matching metric semantics in `scripts/score_retrieval.py` (`_title_mrr`, `_title_hit_at_k`) are conceptually different from the entry-id-based functions in the retired `eval_retrieval.py` — substring matching is what survives KB-shape changes that shifted entry IDs (the failure mode that made ground_truth.json stale in the first place). The new eval path is correct *by design* for the corpus-rebuild scenarios that broke the old one; that's why it became canonical in 2026-05-07.
+- 20-query `tests/fixtures/golden_set.json` is the live truth. Quarterly cron drafts placeholder rebaseline entries against it; operator runs `make rebaseline` + `score_retrieval.py` to fill in real numbers.
+- The §17.354 runbook (`docs/rebaseline-runbook.md`) is the operator-facing companion that ties §17.358's deprecation into the quarterly cadence.
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Add new metric-math tests for `scripts/score_retrieval.py`.** The 12 retired `test_eval_metrics.py` tests were unit tests for the retired script's metric calculations. `score_retrieval.py`'s equivalent functions (`_title_mrr`, `_title_hit_at_k`) are simpler (substring not set-intersection) and currently tested only end-to-end via the golden-set fixtures + the ci-tier-2 sidecar. Adding unit tests would be a defensible follow-up — not done here because the e2e coverage is sufficient and adding three new test files just to fill the slot the retired ones left would be churn.
+- **Touch the `tests/fixtures/golden_set.json` content.** That's the quarterly cron's job. §17.358 is structural cleanup only.
+
+**Cohort.** Closes Tier-2 #15 from §17.29's audit table — the last remaining open Tier-2 audit-tail row. With this commit, **all Tier-2 items from the post-§16.4 audit (rows #1 → #18) are closed**: #1-#18 mostly done in §17.30 → §17.50; #14 closed in §17.354; #15 closed here by deprecation. The §17.29 resume pointer can be archived; the next audit-tail bucket (Tier 3-5) doesn't have a structured tracker today.
+
+**Cost.** -782 LOC net (3 file deletions + 4 file edits + 1 OVERVIEW entry). Zero new deps, zero migrations. Verification = pytest collection + smoke suite + grep. Net result: ~782 lines of dead test infrastructure removed, three references to the deprecated path corrected to point at the canonical one, Tier-2 #15 closed not by multi-hour re-curation but by retiring an artifact that was already officially deprecated for 24 days.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

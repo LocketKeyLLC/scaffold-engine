@@ -41,8 +41,10 @@ test-sdk: _ensure_dev ## Run scaffold SDK tests (sdk/tests/) inside the dev cont
 agent: _ensure_dev ## Run execution agent tests only (dev image)
 	docker exec $(CONTAINER) pytest tests/test_execution_agent.py -m smoke --timeout=30 -v
 
-eval: ## Run retrieval eval against ground truth
-	docker exec -e SCAFFOLD_API_KEY=$(API_KEY) $(CONTAINER) python3 tests/eval_retrieval.py
+# §17.358 — `make eval` removed. tests/eval_retrieval.py + tests/ground_truth.json
+# were retired (Tier-2 #15 from §17.29). The canonical retrieval eval is now
+# `scripts/score_retrieval.py` against `tests/fixtures/golden_set.json`,
+# wired into `make ci-tier-2` step 4/5 and the §17.354 quarterly cron.
 
 bench: ## Run full e2e performance benchmark (~43 min)
 	docker exec $(CONTAINER) python3 tests/benchmarks/bench_pipeline.py
@@ -127,7 +129,6 @@ ci-smoke: ## Cloud-CI smoke tests — host pytest on `-m smoke`, no docker, no l
 
 ci: _ensure_dev ## Run CI-safe tests (no live services; dev image) + bench regression gates (skip on missing/sparse history)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v \
-		--ignore=tests/eval_retrieval.py \
 		-m "not validate"
 	@printf '\n--- Audit I4: bench regression gates ---\n'
 	$(MAKE) bench-check

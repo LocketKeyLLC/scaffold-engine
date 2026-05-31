@@ -195,7 +195,7 @@ trap 'rm -f "$PR_BODY_FILE"' EXIT
 cat > "$PR_BODY_FILE" <<MD
 **Quarterly RAG calibration — ${LABEL}**
 
-Tier-2 audit-tail items **#14** (quarterly re-baseline cadence) and **#15** (\`tests/ground_truth.json\` regen review). This is a draft PR; the operator runs \`/score_retrieval\` locally and fills in the placeholder \`rebaseline\` entry that's been added to \`tests/fixtures/golden_set.json\`.
+Tier-2 audit-tail item **#14** (quarterly re-baseline cadence). This is a draft PR; the operator runs \`make rebaseline\` (§17.354) locally and fills in the placeholder \`rebaseline\` entry that's been added to \`tests/fixtures/golden_set.json\`. §17.358 formally retired Tier-2 #15 (the deprecated \`tests/ground_truth.json\` regen task) — \`scripts/score_retrieval.py\` against \`tests/fixtures/golden_set.json\` is the only retrieval eval path now.
 
 ## Prior baseline
 
@@ -206,12 +206,12 @@ Tier-2 audit-tail items **#14** (quarterly re-baseline cadence) and **#15** (\`t
 ## Runbook (operator)
 
 - [ ] Restart orchestrator container so any post-prior-baseline migrations apply (\`make restart\`)
-- [ ] Run \`make eval\` (40-query comprehensive suite via \`tests/eval_retrieval.py\`)
-- [ ] Run the W.8-style HTTP harness against \`/rag\` for the live 20-query golden_set
+- [ ] Run \`make rebaseline\` (§17.354 — runs bench-rag + bench-embed + bench-pipeline + bench-check)
+- [ ] Run \`python3 scripts/score_retrieval.py --golden tests/fixtures/golden_set.json\` for the 20-query golden_set against \`/rag\`
 - [ ] Compare metrics against the prior baseline; flag any drift > 5pt
-- [ ] If recall has dropped, investigate per-query MISSes; check ground_truth.json staleness (#15)
+- [ ] If recall has dropped, investigate per-query MISSes against \`tests/fixtures/golden_set.json\` (see docs/rebaseline-runbook.md "On regression")
 - [ ] Update the placeholder \`rebaseline\` block in \`tests/fixtures/golden_set.json\` with real numbers
-- [ ] If a query has drifted to MISS, decide: regenerate ground_truth.json entry (#15) or accept as legitimate drift
+- [ ] If a query has drifted to MISS, decide: regenerate the golden_set entry or accept as legitimate drift
 - [ ] Update \`OVERVIEW.md §18\`'s retrieval-quality baseline table with the new row
 - [ ] Mark this PR ready-for-review
 
@@ -220,7 +220,7 @@ Tier-2 audit-tail items **#14** (quarterly re-baseline cadence) and **#15** (\`t
 - **Embedder model swap** — rare; \`MODEL_EMBEDDER_PIPELINE\` is locked + a Milvus collection rebuild is required.
 - **Reranker model swap** — also locked; \`MODEL_RERANKER\` singleton.
 - **Partition-key changes** — domain-filter logic lives in \`rag_pipeline._iter_search_domains\`.
-- **KB-shape changes** — new ingestion runs can shift entry IDs (W.8 surfaced this; ground_truth.json drifted).
+- **KB-shape changes** — new ingestion runs can shift entry IDs (W.8 surfaced this in the now-retired ground_truth.json; golden_set.json uses query-text matching rather than entry-id matching, immune to the same drift).
 - **Threshold-cluster tuning** — X.1 lowered \`node_orphan_threshold_minutes\` and \`awaiting_confirmation_stale_minutes\`; further tuning could shift recall numbers.
 - **Synthesis changes** — W.7 + X.6 added per-job synthesis override; rebaselines should record whether synthesis was on.
 

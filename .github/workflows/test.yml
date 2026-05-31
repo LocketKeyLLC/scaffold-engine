@@ -65,7 +65,6 @@ jobs:
             -e PYTHONPATH=/code:/code/sdk \
             scaffold-orchestrator:ci \
             pytest tests/ --timeout=30 -v \
-              --ignore=tests/eval_retrieval.py \
               -k "not integration"
 
   # Full integration tests require Ollama + Milvus + SearXNG.
@@ -84,8 +83,8 @@ jobs:
   #         done
   #     - name: Run all tests
   #       run: make test
-  #     - name: Run eval
-  #       run: make eval
+  #     - name: Run retrieval eval (§17.358 — replaced make eval with score_retrieval.py)
+  #       run: python3 scripts/score_retrieval.py --golden tests/fixtures/golden_set.json
   #     - name: Teardown
   #       if: always()
   #       run: docker compose down -v
