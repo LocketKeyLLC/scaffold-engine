@@ -19,18 +19,15 @@ exact entry-id assertion shape. (``scripts/score_retrieval.py`` +
 ``tests/fixtures/golden_set.json`` use the entry-id shape and pay for
 that brittleness with the 0/20 coverage observation in §17.211.)
 
-Why three queries skip. The corpus regression documented in §17.158
-(Milvus collection rebuilt empty post-§17.63 SSD migration; only
-``eng`` re-landed; ``llm`` / ``rag`` / ``prompt`` partitions partial)
-plus the §17.165 + §17.210 repopulation passes left the knowledge base
-without the specific Wikipedia / vendor documents the three skipped
-parametrizations need (function-calling, hybrid-search, TOON spec).
-Each skip's ``reason=`` names the exact missing source so a future
-ingest pass can flip it back on. §17.92 already flipped 2 of the
-original 5 §17.86 skips to active; the remaining 3 are corpus-content
-dependencies the goldens cannot satisfy until the source-of-truth
-documents are ingested. See ``OVERVIEW.md`` §§17.86, 17.92, 17.158,
-17.165, 17.210, 17.211 for the full corpus history.
+Corpus history. The §17.63 SSD migration left the Milvus collection
+empty; §17.165 + §17.210 + §17.350 progressively restored content.
+All 7 parametrizations are now active as of §17.350 (the three
+previously-skipped queries — function-calling, hybrid-search, TOON
+spec — were unblocked by ``scripts/seed_corpus_remainder.py`` which
+ingests 3 hand-curated entries because no external Wikipedia/vendor
+source for those exact titles exists). See ``OVERVIEW.md``
+§§17.86, 17.92, 17.158, 17.165, 17.210, 17.211, 17.350 for the full
+corpus rebuild arc.
 """
 
 
@@ -53,65 +50,29 @@ from tests._milvus_helpers import skip_if_milvus_empty
 # resilient to minor topic rewording in TOON files.
 # ---------------------------------------------------------------------------
 
-# §17.92 skip-mark refresh — three named blockers replace the prior generic
-# "partition is empty" rationale. Each names the specific content that
-# would unblock its parametrization, and the §17.92 ingest pass landed
-# Chain-of-thought_prompting (prompt) + Quantization_(signal_processing)
-# (llm) which flipped two previously-skipped queries to active.
-_NEEDS_FUNCTION_CALLING_DOC = pytest.mark.skip(
-    reason="KB-content dependency (corpus regression §17.158, partial recovery "
-    "§17.165 + §17.210): prompt partition lacks a doc whose title contains "
-    "'function-calling'. Wikipedia has no Function_calling article (the page "
-    "404s; the topic is covered as a sub-section of Prompt_engineering, "
-    "whose <title> is 'Prompt engineering - Wikipedia'). Skip until a "
-    "vendor-doc or hand-curated source named for function-calling "
-    "specifically is ingested. See OVERVIEW.md §17.158 for the post-§17.63 "
-    "Milvus rebuild that emptied this partition."
-)
-_NEEDS_HYBRID_SEARCH_DOC = pytest.mark.skip(
-    reason="KB-content dependency (corpus regression §17.158, partial recovery "
-    "§17.165 + §17.210): rag partition lacks a doc whose title contains "
-    "'hybrid'. Wikipedia has no Hybrid_search / Hybrid_retrieval article "
-    "(both 404). The available related Wikipedia articles (Okapi_BM25, "
-    "Learning_to_rank, Semantic_search) don't carry 'hybrid' in their "
-    "titles. Skip until a vendor blog post or paper-derived doc with "
-    "'hybrid' in title is ingested. See OVERVIEW.md §17.158 for the "
-    "post-§17.63 Milvus rebuild that left this partition under-seeded."
-)
-_NEEDS_SPEC_TOON = pytest.mark.skip(
-    reason="KB-content dependency (corpus regression §17.158): spec partition "
-    "lacks a TOON spec doc — TOON (Token-Oriented Object Notation) is "
-    "project-internal with no external Wikipedia or vendor source. "
-    "docs/toon/toon_validator_reference/ exists but is a Python reference "
-    "implementation, not a spec document. Skip until a markdown spec is "
-    "written and ingested as a custom URL or file upload. See OVERVIEW.md "
-    "§17.158 for the broader corpus-regression context — this skip pre-dates "
-    "that incident but shares the resolution shape (ingest source-of-truth, "
-    "then drop the skip mark)."
-)
+# §17.92 skip-mark refresh + §17.350 unskip — the three remaining
+# KB-content-dependent skips were closed by scripts/seed_corpus_remainder.py
+# (3 hand-curated entries: function-calling/prompt, hybrid retrieval/rag,
+# TOON v2 spec/spec). All 7 parametrizations now active.
 
 GOLDEN_QUERIES = [
     # --- prompt domain ---
-    # §17.92 ingested Chain-of-thought_prompting which serves a Wikipedia
-    # page whose <title> is 'Prompt engineering - Wikipedia' (the CoT URL
-    # has no redirect but Wikipedia renders the parent prompt-engineering
-    # article body with that title). 10 entries landed; the second query
-    # below is now active against the substring 'prompt engineering'.
+    # §17.92 ingested Chain-of-thought_prompting → prompt-engineering title
+    # (second query). §17.350 added hand-curated function-calling entry
+    # (first query, was _NEEDS_FUNCTION_CALLING_DOC).
     pytest.param(
         "How does function calling work in LLM tool use?",
         "prompt", "function-calling",
-        marks=_NEEDS_FUNCTION_CALLING_DOC,
     ),
     pytest.param(
         "What is chain of thought prompting?",
         "prompt", "prompt engineering",
     ),
     # --- rag domain (Vector_database + Retrieval-augmented_generation seeded;
-    # no hybrid-titled doc yet — see _NEEDS_HYBRID_SEARCH_DOC for the block) ---
+    # §17.350 added hand-curated hybrid-retrieval doc — was _NEEDS_HYBRID_SEARCH_DOC) ---
     pytest.param(
         "How does hybrid search combine dense and sparse retrieval?",
         "rag", "hybrid",
-        marks=_NEEDS_HYBRID_SEARCH_DOC,
     ),
     # --- llm domain ---
     # §17.92 ingested Quantization_(signal_processing) (title 'Quantization
@@ -121,11 +82,10 @@ GOLDEN_QUERIES = [
         "What is quantization and how does it reduce model size?",
         "llm", "quantiz",
     ),
-    # --- spec domain (no TOON spec doc yet — see _NEEDS_SPEC_TOON) ---
+    # --- spec domain (§17.350 added TOON v2 spec — was _NEEDS_SPEC_TOON) ---
     pytest.param(
         "Describe the TOON file format specification and its pipeline stages",
         "spec", "toon",
-        marks=_NEEDS_SPEC_TOON,
     ),
     # --- eng domain ---
     pytest.param(
