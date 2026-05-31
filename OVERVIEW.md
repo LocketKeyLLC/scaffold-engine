@@ -19576,6 +19576,72 @@ Smoke suite: 3000+ pass (live verification run alongside this commit).
 
 ---
 
+### §17.359 Shell tool seam + no-fake-execution clauses — close LLM-narrated-success regression from homelab trial (2026-05-31)
+
+Closes a regression surfaced in an OWUI trial of the engine: a user asked for "Implement and construct my homelab setup … Proxmox VE … Jellyfin … Ollama, complete within one week." The DAG generator decomposed it into 9 nodes (`T1 Install Proxmox VE`, `T2 Configure GPU passthrough`, `T3 Deploy Jellyfin VM` …) and tagged **all of them `tool=LLM`**. The executor ran each, the verifier passed each, and the compiled output read like a successful sysadmin transcript — "Firewall backup: `/etc/pve/firewall/cluster.fw.bak` created", "Telemetry block confirmed: `tcpdump` shows no traffic to 13.107.4.50", "GPU validation: `glxinfo | grep "OpenGL renderer"` returns NVIDIA GPU" — none of which happened, because the LLM tool produces text, not host actions. The tool guide had no category for "action on a host" and the LLM system prompt had no clause forbidding past-tense execution narration, so the model fabricated a clean run-log of work it could not have performed.
+
+This is structurally the same class of bug as `references/debugging.md`:213 ("DAG generator picked the wrong tool"), but a stronger form: there, the wrong-tool pick fails verification and the operator notices; here, the LLM successfully verifies prose that looks like execution, and the operator gets a hallucinated success transcript with no signal that nothing ran.
+
+**The fix — four layers.**
+
+1. **`Shell` tool added to `VALID_TOOLS`** in `app/config.py` as a seam, plus a `shell_tool_enabled: bool = False` setting. Until a real shell backend is wired (subprocess dispatch, sandboxed exec, etc.), `Shell`-tagged nodes route through the LLM executor with a new runbook-style system prompt. When the flag flips to True, `execute_next_node` raises `NotImplementedError` with a `§17.359` marker — a wired backend has to land before the flag is honored, so flipping it without an implementation fails loudly rather than silently downgrading to LLM-as-shell.
+
+2. **`EXECUTION_SYSTEM_RUNBOOK`** added to `app/modules/execution_agent.py` (mirrored in `app/modules/prompt_assembly.py` to keep the W.10 assist/executor mirror invariant). Mandatory four-section output structure (`## Prerequisites` / `## Run this` / `## Verify` / `## Rollback`), explicit "no past-tense narration", "no checkmarks or success emoji — the human marks completion", "destructive actions go under `## Risk` before the Run block", "if you don't know a value, say so under `## Inputs needed` rather than invent". This is the prompt that closes the fabrication surface — the runbook is framed as instructions the human will execute, not a transcript of work the LLM performed.
+
+3. **`EXECUTION_SYSTEM_LLM` + `EXECUTION_SYSTEM_CODEGEN` tightened** with a "Capability boundary (§17.359)" clause: "You cannot run commands, SSH into hosts, install software, edit files, or modify systems. You produce text only. If the task describes an action on a host or external system, frame your output as instructions for the human reader to perform, not a transcript claiming the action was performed. Do NOT write past-tense narration such as 'Created the file', 'Installed the package', 'Verified with tcpdump that…'". This is the belt-and-suspenders against the same fabrication leaking out of LLM nodes that should have been routed to Shell but weren't — the regression's tail risk is that the DAG generator still mis-tags an install task as LLM; the prompt clause means even if that happens, the executor refuses to hallucinate execution.
+
+4. **DAG generator `DAG_SYSTEM` tool guide updated** to introduce `Shell` and route install / configure / deploy / set up / enforce / start / stop / restart verbs to it: "Any task whose verb is install / configure / deploy / set up / enforce / start / stop / restart against a host MUST be Shell, NEVER LLM." A homelab worked-example DAG was added alongside the existing CLI-tool example so the LLM sees one concrete mapping (`Install Proxmox VE` → Shell, `Configure GPU passthrough` → Shell, `Document setup` → LLM). `dag_validator.VALIDATOR_SYSTEM` mirrors the same rule so the second-pass auditor flags an install-task-tagged-LLM and the W.3 retry loop nudges the generator to re-decompose with Shell.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/config.py` | `VALID_TOOLS` += `Shell`; new `shell_tool_enabled: bool = False` (env-overridable). |
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_RUNBOOK` added; capability-boundary clauses in `EXECUTION_SYSTEM_LLM`/`_CODEGEN`; `_system_for_tool` extended to route Shell → runbook (case-insensitive); `execute_next_node` short-circuit raises `NotImplementedError` when `shell_tool_enabled=True` (flag-off path falls through to the LLM dispatch with the runbook system prompt). |
+| `app/modules/prompt_assembly.py` | Mirror of the three prompts + `system_for_tool` dispatch (the executor-vs-assist mirror invariant from `references/assist.md`). |
+| `app/modules/dag_generator.py` | `DAG_SYSTEM` tool guide: Shell category added with anti-narration rule; homelab DAG worked-example added before the CLI-tool example; LLM block updated to redirect host-action verbs to Shell (uppercase `DEFAULT` sentinel preserved for `test_llm_marked_as_default`). |
+| `app/modules/dag_validator.py` | `VALIDATOR_SYSTEM` aware of Shell; `valid_tools` set extended so the validator can propose Shell as a fix. |
+| `tests/test_dag_generator.py` | `VALID_TOOLS` constant += `Shell`. |
+| `tests/test_execution_agent_tools.py` | New tests: `test_shell_tool_gets_runbook_prompt`, `test_runbook_prompt_forbids_past_tense_narration`, `test_runbook_prompt_calls_out_destructive_action_section`, `test_llm_prompt_forbids_fake_execution_narration`, `test_codegen_prompt_forbids_fake_execution_narration`, `test_shell_in_valid_tools`. |
+| `tests/test_prompt_assembly.py` | `test_shell_returns_runbook_prompt` added; parametrize comment updated to note Shell is the second specialized branch alongside CodeGen. |
+| `tests/test_dag_validator.py` | `test_llm_for_install_task_flagged_to_shell` — the regression's exact shape (Install Proxmox VE + Configure GPU passthrough as LLM → validator proposes Shell). |
+| `OVERVIEW.md` | this entry |
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_dag_generator.py \
+    tests/test_dag_validator.py tests/test_validate_dag.py \
+    tests/test_prompt_assembly.py tests/test_execution_agent_tools.py \
+    --timeout=30 -q
+117 passed, 1 failed (pre-existing ordering flake — test_query_filters_to_done_status
+fails in the dag_generator+validate_dag+prompt_assembly combo; reproduces on
+main with §17.359 stashed; line-number shifted 176 → 184 only because §17.359
+added 8 lines of new tests above it; sqlalchemy.text gets MagicMocked by
+test_dag_generator.py's importlib stub when test_validate_dag.py is in the
+same collection — out of scope, not introduced here).
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+1972 passed, 1197 deselected, 6 warnings in 389.19s (0:06:29)
+```
+
+**What this changes for users.**
+
+The user's existing job `bc54760c-…` won't retroactively re-execute — those 9 nodes are already at `done` with the fabricated output. The fix lands for new runs: a future `/idea Build a homelab on Proxmox …` decomposes with the install verbs routed to Shell, each Shell node emits a `## Run this` / `## Verify` / `## Rollback` runbook that the user copy-pastes into the host (no past-tense fakery), and when a shell executor backend lands behind `shell_tool_enabled=True` the same DAG nodes execute for real with no DAG re-generation needed. The seam is complete.
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Implement the shell backend.** `shell_tool_enabled=True` raises `NotImplementedError` with a clear pointer at the missing site. The runbook prompt is the bridge until the backend is wired.
+- **Retroactively re-execute the existing failed homelab job.** The operator can `POST /prompts/{job_id}/{node_key}` to revise the node template and `/exec retry` per node if they want clean runbook output now; bulk retroactive fix is out of scope.
+- **Pin Shell-tagged nodes to a specific model.** `assigned_model` defaults to the route's `model_general`. When a real shell backend lands, the dispatch may want a tighter coder/operator model — defer.
+- **Fix the pre-existing `test_query_filters_to_done_status` ordering flake.** That's a `test_dag_generator.py` importlib-hack pollution of `sqlalchemy.text` triggered by `test_validate_dag.py` co-collection. Pre-§17.359; orthogonal; flagged in this entry's Verification block.
+
+**Cohort.** Standalone fix — closes a trial-surfaced LLM-narration-as-fake-execution regression. Sits structurally adjacent to the W.3 validator-driven retry loop (§17.x) and the prompt_assembly mirror invariant (§17.184); reuses both surfaces.
+
+**Cost.** +~190 LOC across 5 app files + 4 test files + this entry. Zero new deps, zero migrations, zero schema changes. Shell tool is purely additive in `VALID_TOOLS`; no behavior changes for existing LLM/CodeGen/Milvus/SearXNG nodes beyond the prompt-clause additions (the clauses constrain output style; they don't alter routing or dispatch).
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

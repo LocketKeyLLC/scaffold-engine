@@ -450,6 +450,18 @@ Output rules:
 - Do not speculate beyond the task. Do not propose alternatives the task did not ask for.
 - Do not editorialize ("Here\'s what we\'ll do," "Let me know if...", "Final verdict").
 
+Capability boundary (§17.359):
+- You cannot run commands, SSH into hosts, install software, edit files,
+  or modify systems. You produce text only.
+- If the task describes an action on a host or external system, frame your
+  output as instructions for the human reader to perform, not a transcript
+  claiming the action was performed. Do NOT write past-tense narration
+  such as "Created the file", "Installed the package", "Verified with
+  tcpdump that...", "Backup confirmed at /etc/...". If host action is the
+  core deliverable, the DAG generator should have routed this to the Shell
+  or CodeGen tool — flag the mismatch in your output rather than fabricate
+  success.
+
 If upstream context is provided, build on it. Do not rewrite or contradict upstream work.
 If ground truth is provided, treat it as authoritative.
 
@@ -464,19 +476,59 @@ Output rules:
 - No emoji. No checklists of features. No "let me know if you need..." closers.
 - If the code depends on tools/libs, name them in one line before or after the code.
 
+Capability boundary (§17.359):
+- The fenced code block is the deliverable; you are NOT running it. Do not
+  write past-tense narration as if the script had been executed ("Ran the
+  script and got X", "Output confirmed Y"). The reader is the executor.
+
 If upstream context is provided, build on it. Match its conventions.
 If ground truth is provided, treat it as authoritative.
 
 Produce working code that solves the task. Nothing more."""
 
+EXECUTION_SYSTEM_RUNBOOK = """You are executing one node in a planned multi-step workflow whose deliverable is a runbook the human will perform on a host.
+
+You do not have shell access. You produce instructions only. The human is the executor.
+
+Output structure (in this order, omit sections that don\'t apply):
+- ## Prerequisites — one bullet per requirement (already-installed package, env var, file present).
+- ## Run this — numbered list of copy-paste-ready commands or file edits, one step per item. Use fenced code blocks for commands. Include only commands the human types; no commentary inside the block.
+- ## Verify — one bullet per check, each pairing an expected outcome with the exact command the human runs to confirm it.
+- ## Rollback — what to do if a step fails. Concrete commands, not advice.
+
+Hard rules:
+- Never write past-tense narration ("Created…", "Installed…", "Verified…", "tcpdump shows…", "Backup confirmed at…"). You have not done any of this.
+- Never claim outputs you did not see ("Returned NVIDIA GPU", "Confirmed empty config").
+- Never use checkmarks, success emoji, or "✅ Step N complete" — the human marks completion, not you.
+- If the task requires information you don\'t have (host IP, current state, model name), say so explicitly under a "## Inputs needed" section rather than inventing it.
+- If a step requires destructive action (rm, dd, format, drop database), call it out under "## Risk" before the Run this block.
+
+If upstream context is provided, build on it. Do not rewrite or contradict upstream work.
+If ground truth is provided, treat it as authoritative.
+
+Produce the runbook the task asks for. Nothing more."""
+
 
 def _system_for_tool(tool: str) -> str:
     """Return the appropriate system prompt for a node tool type.
 
-    Case-insensitive: VALID_TOOLS uses ``"CodeGen"`` but a hand-edited
-    row carrying ``"codegen"`` should still get the codegen system prompt.
+    Case-insensitive: VALID_TOOLS uses canonical casing ("CodeGen", "Shell")
+    but a hand-edited row carrying ``"codegen"`` / ``"shell"`` should still
+    get the right system prompt.
+
+    §17.359 — ``Shell`` tool routes here too. When ``shell_tool_enabled`` is
+    False (default), Shell nodes get the runbook prompt and dispatch via the
+    LLM executor — text-only output framed as "Run this:" for the human to
+    perform. When the flag is True, ``execute_next_node`` short-circuits to
+    a real shell backend (NotImplementedError until wired) before this
+    prompt is selected.
     """
-    return EXECUTION_SYSTEM_CODEGEN if tool.lower() == "codegen" else EXECUTION_SYSTEM_LLM
+    t = tool.lower()
+    if t == "codegen":
+        return EXECUTION_SYSTEM_CODEGEN
+    if t == "shell":
+        return EXECUTION_SYSTEM_RUNBOOK
+    return EXECUTION_SYSTEM_LLM
 
 
 def _build_prompt(node: dict, brief: dict) -> str:
@@ -804,6 +856,22 @@ async def execute_next_node(
                 exec_overrides["model_general"] = _assigned
         exec_model = get_model(exec_role, exec_overrides)
         verifier_model = get_model("model_verifier", model_overrides)
+
+        # ── Shell: §17.359 seam ──
+        # When ``shell_tool_enabled`` is True we expect a real shell backend
+        # bolted on here (subprocess dispatch, sandboxed exec, etc.). Until
+        # that lands, the flag-on path must fail loudly rather than silently
+        # downgrade to the runbook prompt — otherwise an operator flips the
+        # flag, sees text output, and assumes the host was modified. The
+        # flag-off path falls through to the normal LLM dispatch below, where
+        # ``_system_for_tool("Shell")`` returns ``EXECUTION_SYSTEM_RUNBOOK``.
+        if tool_lower == "shell" and settings.shell_tool_enabled:
+            raise NotImplementedError(
+                "Shell tool execution requested but no backend wired. "
+                "Either disable settings.shell_tool_enabled, or implement "
+                "a shell executor here (subprocess/sandboxed) and route "
+                "Shell-tagged nodes to it. See §17.359."
+            )
 
         # ── Human: single atomic UPDATE short-circuit (H3) ──
         if tool.lower() in ("human", "human_review"):

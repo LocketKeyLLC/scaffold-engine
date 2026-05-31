@@ -191,3 +191,44 @@ class TestSystemPromptRouting:
         for prompt in (EXECUTION_SYSTEM_LLM, EXECUTION_SYSTEM_CODEGEN):
             assert "upstream" in prompt.lower()
 
+    # ----- §17.359 — Shell tool routing + no-fake-execution clause -----
+
+    def test_shell_tool_gets_runbook_prompt(self):
+        from app.modules.execution_agent import (
+            _system_for_tool,
+            EXECUTION_SYSTEM_RUNBOOK,
+        )
+        assert _system_for_tool("Shell") is EXECUTION_SYSTEM_RUNBOOK
+        # Case-insensitive: hand-edited lowercase row must land the same way.
+        assert _system_for_tool("shell") is EXECUTION_SYSTEM_RUNBOOK
+
+    def test_runbook_prompt_forbids_past_tense_narration(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_RUNBOOK
+        # Spot-check the anti-fake-execution surface — these substrings are
+        # the closing the OVERVIEW §17.359 trial regression hit.
+        assert "past-tense" in EXECUTION_SYSTEM_RUNBOOK.lower()
+        assert "Run this" in EXECUTION_SYSTEM_RUNBOOK
+        assert "Verify" in EXECUTION_SYSTEM_RUNBOOK
+        assert "Rollback" in EXECUTION_SYSTEM_RUNBOOK
+
+    def test_runbook_prompt_calls_out_destructive_action_section(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_RUNBOOK
+        # The "Risk" header is what prevents an unmarked rm/dd/format step.
+        assert "Risk" in EXECUTION_SYSTEM_RUNBOOK
+
+    def test_llm_prompt_forbids_fake_execution_narration(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        # The capability-boundary clause is the surface that closes the
+        # homelab regression: LLM nodes claimed "Created the file" /
+        # "tcpdump shows..." without having done anything.
+        assert "cannot run commands" in EXECUTION_SYSTEM_LLM
+        assert "past-tense" in EXECUTION_SYSTEM_LLM.lower()
+
+    def test_codegen_prompt_forbids_fake_execution_narration(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_CODEGEN
+        assert "NOT running it" in EXECUTION_SYSTEM_CODEGEN
+
+    def test_shell_in_valid_tools(self):
+        from app.config import VALID_TOOLS
+        assert "Shell" in VALID_TOOLS
+

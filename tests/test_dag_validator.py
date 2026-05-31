@@ -167,6 +167,39 @@ class TestValidateToolPicks:
         assert outcome.issues == []
         assert outcome.error is None
 
+    async def test_llm_for_install_task_flagged_to_shell(self):
+        """§17.359 — install/configure verbs on a host must not be LLM.
+
+        Closes the OVERVIEW §17.359 trial regression: 9 nodes all tagged
+        `tool=LLM` for `Install Proxmox VE`, `Configure GPU passthrough`,
+        etc.; the LLM then narrated past-tense fake execution. The
+        validator now flags those as Shell candidates.
+        """
+        tasks = [
+            {"id": "T1", "name": "Install Proxmox VE", "tool": "LLM",
+             "notes": "Action on host — installs hypervisor"},
+            {"id": "T2", "name": "Configure GPU passthrough", "tool": "LLM",
+             "notes": "Edits /etc/modprobe.d, updates initramfs"},
+        ]
+        payload = {
+            "issues": [
+                {"node_id": "T1", "current_tool": "LLM",
+                 "proposed_tool": "Shell",
+                 "reason": "Installing software on a host is a Shell action."},
+                {"node_id": "T2", "current_tool": "LLM",
+                 "proposed_tool": "Shell",
+                 "reason": "Modifying host config files is a Shell action."},
+            ]
+        }
+        with patch(
+            "app.modules.dag_validator.model_router.generate",
+            new=AsyncMock(return_value=_llm_response(json.dumps(payload))),
+        ):
+            outcome = await validate_tool_picks(tasks)
+        assert outcome.error is None
+        assert len(outcome.issues) == 2
+        assert {i.proposed_tool for i in outcome.issues} == {"Shell"}
+
     async def test_empty_tasks_short_circuits_no_llm_call(self):
         """No LLM call when there's nothing to audit."""
         mock = AsyncMock()

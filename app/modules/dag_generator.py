@@ -62,7 +62,7 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
       "inputs": ["what this task consumes"],
       "outputs": ["what this task produces"],
       "depends_on": [],
-      "tool": "LLM | SearXNG | Milvus | CodeGen",
+      "tool": "LLM | SearXNG | Milvus | CodeGen | Shell",
       "domain": "prompt | rag | eng | llm | spec | null",
       "assigned_model": "model name or null",
       "notes": "optional execution hint"
@@ -91,10 +91,21 @@ Rules:
     documentation, listing requirements, or describing what code should do.
     If the deliverable is a list, plan, decision, design doc, or explanation —
     even one ABOUT code — use LLM, not CodeGen.
+  * Shell = the deliverable is an action performed on a host or external
+    system: installing software, configuring services, modifying files on a
+    target machine, enforcing firewall rules, starting/stopping containers,
+    setting up networking. The output of a Shell node is a runbook the human
+    executes (and, when a shell backend is wired, the engine executes
+    directly). Examples: "Install Proxmox VE", "Configure GPU passthrough",
+    "Deploy Jellyfin VM", "Enforce network isolation", "Set up Tailscale
+    routes". A task whose verb is install / configure / deploy / set up /
+    enforce / start / stop / restart against a host MUST be Shell, NEVER LLM.
   * LLM = general reasoning, summarization, analysis, planning, listing,
-    decision-making, design, explanation, and documentation. This is the
-    DEFAULT — use it whenever the deliverable is text rather than executable
-    code.
+    decision-making, design, explanation, and documentation. LLM nodes
+    produce text only — they cannot execute commands. Do NOT use LLM for any
+    task whose deliverable is an action on a host or system: that is Shell
+    (or CodeGen if the deliverable is a single self-contained script).
+    This is the DEFAULT for purely informational deliverables.
 - Each node must produce DISTINCT output that no other node produces. Do NOT create multiple nodes that generate the same artifact (e.g., do not have separate "design script" and "write script" nodes that both produce the full script).
 - Later nodes must EXTEND or VALIDATE earlier work, never recreate it. For example: T1 writes the code → T2 writes tests for it → T3 validates both — NOT T1 designs code → T2 rewrites the same code → T3 rewrites it again.
 - If a task can be accomplished in one node, use one node. Prefer fewer, focused nodes over many overlapping ones.
@@ -107,6 +118,17 @@ EXAMPLE (4-node DAG for "Research the history of solar panels and summarize find
     {"id": "T2", "name": "Retrieve internal KB context", "type": "research", "inputs": ["solar panel keywords"], "outputs": ["KB matches"], "depends_on": ["T1"], "tool": "Milvus", "domain": "eng", "assigned_model": null, "notes": "Check knowledge base for any stored solar energy references"},
     {"id": "T3", "name": "Synthesize and summarize", "type": "action", "inputs": ["raw search results", "KB matches"], "outputs": ["summary draft"], "depends_on": ["T1", "T2"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Combine sources into a coherent summary"},
     {"id": "T4", "name": "Format final output", "type": "output", "inputs": ["summary draft"], "outputs": ["final summary document"], "depends_on": ["T3"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Write final summary to file"}
+  ]
+}
+
+EXAMPLE (4-node DAG for "Install Proxmox VE on a server and set up Jellyfin in a VM"):
+{
+  "strategy": "sequential",
+  "tasks": [
+    {"id": "T1", "name": "Install Proxmox VE host", "type": "action", "inputs": ["target host details"], "outputs": ["installed Proxmox runbook"], "depends_on": [], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "Action on host — Shell. Runbook covers ISO burn, install steps, post-install network config."},
+    {"id": "T2", "name": "Configure GPU passthrough", "type": "action", "inputs": ["installed Proxmox runbook"], "outputs": ["vfio passthrough runbook"], "depends_on": ["T1"], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "Modify host BIOS/IOMMU + vfio.conf — Shell, not LLM."},
+    {"id": "T3", "name": "Deploy Jellyfin VM", "type": "action", "inputs": ["vfio passthrough runbook"], "outputs": ["jellyfin VM runbook"], "depends_on": ["T2"], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "VM creation, hostpci config, OS install — Shell."},
+    {"id": "T4", "name": "Document setup", "type": "output", "inputs": ["all runbooks"], "outputs": ["README.md"], "depends_on": ["T1", "T2", "T3"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Documentation about the setup is text — LLM, not Shell."}
   ]
 }
 

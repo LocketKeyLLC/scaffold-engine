@@ -51,7 +51,8 @@ TOOL RULES (must match dag_generator):
 - Milvus = ALWAYS use when the task involves the knowledge base, KB, internal docs, TOON files, or domain-specific lookup. Any mention of "knowledge base", "KB", "look up from", "retrieve from", or stored/internal knowledge MUST use Milvus, NEVER SearXNG.
 - SearXNG = web search for EXTERNAL, current, or live information NOT in the knowledge base.
 - CodeGen = the deliverable IS executable code. The node produces a working script, function, module, or class as its primary output. Do NOT use CodeGen for: listing file extensions, naming variables, designing schemas, choosing libraries, writing documentation, listing requirements, or describing what code should do. If the deliverable is a list, plan, decision, design doc, or explanation — even one ABOUT code — use LLM, not CodeGen.
-- LLM = general reasoning, summarization, analysis, planning, listing, decision-making, design, explanation, and documentation. This is the DEFAULT.
+- Shell = the deliverable is an action performed on a host or external system: installing software, configuring services, modifying files on a target machine, enforcing firewall rules, starting/stopping containers, setting up networking. Any task whose verb is install / configure / deploy / set up / enforce / start / stop / restart against a host MUST be Shell, NEVER LLM.
+- LLM = general reasoning, summarization, analysis, planning, listing, decision-making, design, explanation, and documentation. LLM produces text only — it cannot execute commands. If a node tagged LLM has a name like "Install X", "Configure Y", "Deploy Z", "Enforce W" — flag it: proposed_tool should be Shell (or CodeGen if a single self-contained script is the natural deliverable).
 
 OUTPUT FORMAT (strict JSON, no markdown fences):
 {
@@ -62,7 +63,7 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
 
 Rules for your audit:
 - Only flag clear violations grounded in the rules above. If a tool pick is defensible, do NOT flag it.
-- "proposed_tool" must be one of: LLM, SearXNG, Milvus, CodeGen.
+- "proposed_tool" must be one of: LLM, SearXNG, Milvus, CodeGen, Shell.
 - Return an empty issues list if every tool pick is correct.
 - Return ONLY the JSON object. No preamble, no markdown."""
 
@@ -149,7 +150,7 @@ async def validate_tool_picks(
         )
         return ValidatorOutcome(error="schema_mismatch")
 
-    valid_tools = {"LLM", "SearXNG", "Milvus", "CodeGen"}
+    valid_tools = {"LLM", "SearXNG", "Milvus", "CodeGen", "Shell"}
     issues: list[ToolIssue] = []
     for raw in raw_issues:
         if not isinstance(raw, dict):

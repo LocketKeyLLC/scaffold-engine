@@ -48,9 +48,17 @@ class TestSystemForTool:
 
     @pytest.mark.parametrize("tool", ["SearXNG", "Milvus", "", "unknown"])
     def test_non_codegen_tools_get_llm_prompt(self, tool):
-        # Any non-CodeGen tool gets the generic LLM system prompt —
-        # CodeGen is the only specialized branch in §17.184.
+        # Any non-CodeGen, non-Shell tool gets the generic LLM system
+        # prompt. §17.359 adds Shell as a second specialized branch alongside
+        # CodeGen — this list intentionally excludes "Shell".
         assert pa.system_for_tool(tool) == pa.EXECUTION_SYSTEM_LLM
+
+    def test_shell_returns_runbook_prompt(self):
+        # §17.359 — Shell mirror must match execution_agent._system_for_tool.
+        assert pa.system_for_tool("Shell") == pa.EXECUTION_SYSTEM_RUNBOOK
+        assert pa.system_for_tool("shell") == pa.EXECUTION_SYSTEM_RUNBOOK
+        assert "Run this" in pa.EXECUTION_SYSTEM_RUNBOOK
+        assert "past-tense" in pa.EXECUTION_SYSTEM_RUNBOOK.lower()
 
 
 # ---------------------------------------------------------------------------

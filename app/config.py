@@ -21,7 +21,7 @@ _logger = logging.getLogger("scaffold.config")
 # ---------------------------------------------------------------------------
 VALID_TASK_TYPES = frozenset({"research", "decision", "action", "validation", "output"})
 VALID_STRATEGIES = frozenset({"sequential", "parallel", "hybrid", "conditional"})
-VALID_TOOLS = frozenset({"LLM", "CodeGen", "SearXNG", "Milvus"})
+VALID_TOOLS = frozenset({"LLM", "CodeGen", "SearXNG", "Milvus", "Shell"})
 VALID_DOMAINS = frozenset({"prompt", "rag", "eng", "eng_design", "llm", "spec", "code", "qa"})
 
 # get_model() allowlist — prevents arbitrary attribute access via role string
@@ -477,6 +477,16 @@ class Settings(BaseSettings):
     # scheduler that booked it.
     execution_queue_timeout_seconds: int = Field(default=1800, ge=0, le=86400)
     sse_keepalive_seconds: float = Field(default=15.0, ge=1.0, le=300.0)
+
+    # §17.359 — Shell tool is a seam, not an implementation. When False
+    # (default), DAG nodes tagged tool='Shell' route through the LLM
+    # executor with a runbook-style system prompt (instructions for the
+    # human to run; no past-tense fake-execution narration). When True,
+    # the executor expects a real shell backend wired in execute_next_node
+    # — until that lands, the Shell branch raises NotImplementedError so
+    # flipping the flag without an implementation fails loudly rather than
+    # silently downgrading.
+    shell_tool_enabled: bool = Field(default=False)
 
     # Manual prompt-edit cap (POST /prompts/{job_id}/{node_key}). Both
     # the orchestrator-side update_prompt() and the OWUI prompt_inspector
