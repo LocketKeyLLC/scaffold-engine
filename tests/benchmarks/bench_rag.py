@@ -15,6 +15,13 @@ Phases:
   - cold: first call (embedder load, Milvus connect, reranker first batch)
   - warm: N subsequent calls (avg + p50/p95/p99 over N iterations)
 
+§17.352 — per-stage decomposition. Each warm iteration now also calls
+the retrieval stages directly (embed → vector_search ∥ keyword_search →
+rrf_fuse → rerank) so per-stage latency is captured separately from the
+aggregate. Drift in one stage (e.g. embedder slow, reranker batch ramp)
+is visible BEFORE the aggregate creeps up. Schema bumped to 1.1; new
+``summary.stage.*`` keys plus a ``rerank_per_pair_ms`` derived metric.
+
 Output: append a JSONL record to tests/benchmarks/bench_rag_results.jsonl
 with run_id, hardware, phases, and per-query timings. Same shape as
 bench_pipeline so bench_compare can read both.
@@ -53,14 +60,18 @@ except ImportError:
 ITERATIONS = int(os.getenv("BENCH_ITERATIONS", "10"))
 TOP_K = int(os.getenv("BENCH_TOP_K", "5"))
 
-# Fixed query set for reproducibility. Mix of short / long, single-domain
-# / multi-domain so reranker batching gets exercised.
+# Fixed query set for reproducibility. Mix of short / long across the
+# actual partitions present in toon_v2 — eng / llm / rag / prompt / spec.
+# §17.352 — earlier list used "ml" / "infra" which aren't valid partition
+# names (see VALID_DOMAINS in app/config.py); those queries returned 0
+# hits and silently skewed rerank_per_pair_mean down toward zero by
+# averaging in queries that never reranked.
 QUERIES = [
     ("DAG orchestration", "eng"),
-    ("retrieval augmented generation patterns", "eng"),
-    ("transformer attention", "ml"),
-    ("Postgres connection pooling", "infra"),
+    ("retrieval augmented generation patterns", "rag"),
+    ("transformer attention", "llm"),
     ("how does HNSW vector search work", "eng"),
+    ("chain of thought prompting", "prompt"),
 ]
 
 def _writable_results_file() -> Path:
@@ -147,6 +158,89 @@ async def _run_one_query(query: str, domain: str) -> tuple[float, int, str | Non
     return (elapsed_ms, hits, backend)
 
 
+async def _run_one_query_decomposed(query: str, domain: str) -> dict | None:
+    """Per-stage timing: embed | (vector ∥ keyword) | fuse | rerank.
+
+    Calls the private stage helpers directly so each stage is timed in
+    isolation. Returns ``None`` on collection-unavailable / embed-failed
+    so the caller can skip without polluting the warm-mean stats.
+
+    ``search_parallel_ms`` is the wall-clock for ``asyncio.gather`` of
+    vector + keyword; production runs these in parallel so the parallel
+    number is what matters. ``vector_search_ms`` / ``keyword_search_ms``
+    are the sequential-time-equivalents (sum-of-parts) for debugging
+    which leg dominated.
+    """
+    from app.modules.rag_pipeline import (
+        _embed_query, _vector_search, _keyword_search,
+        _rrf_fuse, _rerank, _get_collection,
+    )
+
+    loop = asyncio.get_running_loop()
+    collection = await loop.run_in_executor(None, _get_collection)
+    if collection is None:
+        return None
+
+    t_embed = time.monotonic()
+    query_embedding = await _embed_query(query, query_intent="general")
+    embed_ms = (time.monotonic() - t_embed) * 1000
+    if query_embedding is None:
+        return None
+
+    # Time the parallel gather (production behavior) AND each leg's
+    # sequential equivalent. The sequential numbers are reconstructed
+    # by running each helper a second time — small extra cost but lets
+    # us see which leg is the long pole when search_parallel_ms drifts.
+    t_search = time.monotonic()
+    vector_results, keyword_results = await asyncio.gather(
+        _vector_search(collection, query_embedding, TOP_K * 2, domain=domain),
+        _keyword_search(collection, query, TOP_K * 2, domain=domain),
+    )
+    search_parallel_ms = (time.monotonic() - t_search) * 1000
+
+    # Sequential-equivalent timings — useful only when the parallel
+    # number looks wrong. Skipped when BENCH_RAG_SKIP_SEQ_TIMING is set.
+    vector_seq_ms = 0.0
+    keyword_seq_ms = 0.0
+    if not os.getenv("BENCH_RAG_SKIP_SEQ_TIMING"):
+        t_v = time.monotonic()
+        await _vector_search(collection, query_embedding, TOP_K * 2, domain=domain)
+        vector_seq_ms = (time.monotonic() - t_v) * 1000
+        t_k = time.monotonic()
+        await _keyword_search(collection, query, TOP_K * 2, domain=domain)
+        keyword_seq_ms = (time.monotonic() - t_k) * 1000
+
+    t_fuse = time.monotonic()
+    fused = _rrf_fuse(vector_results, keyword_results)
+    fuse_ms = (time.monotonic() - t_fuse) * 1000
+
+    rerank_ms = 0.0
+    rerank_pairs = 0
+    rerank_backend = "skipped"
+    if fused:
+        rerank_pairs = len(fused)
+        t_r = time.monotonic()
+        _ranked, rerank_meta = await _rerank(query, fused, TOP_K)
+        rerank_ms = (time.monotonic() - t_r) * 1000
+        rerank_backend = rerank_meta.get("backend") or "unknown"
+
+    rerank_per_pair_ms = (rerank_ms / rerank_pairs) if rerank_pairs else 0.0
+
+    return {
+        "embed_ms": round(embed_ms, 2),
+        "search_parallel_ms": round(search_parallel_ms, 2),
+        "vector_search_seq_ms": round(vector_seq_ms, 2),
+        "keyword_search_seq_ms": round(keyword_seq_ms, 2),
+        "fuse_ms": round(fuse_ms, 2),
+        "rerank_ms": round(rerank_ms, 2),
+        "rerank_pairs": rerank_pairs,
+        "rerank_per_pair_ms": round(rerank_per_pair_ms, 2),
+        "rerank_backend": rerank_backend,
+        "vector_hits": len(vector_results),
+        "keyword_hits": len(keyword_results),
+    }
+
+
 async def _bench_cold(query: str, domain: str) -> dict:
     """Single first-run query. Captures cold-start cost (model load,
     Milvus connect, reranker first batch). Don't average across cold
@@ -163,16 +257,37 @@ async def _bench_cold(query: str, domain: str) -> dict:
 
 async def _bench_warm(query: str, domain: str, iterations: int) -> dict:
     """Run the same query N times. Returns per-iter samples + p50/p95/p99
-    + mean. The first iteration of this run is still warm because we
-    invoked `_bench_cold` first."""
+    + mean for the aggregate, plus per-stage means (§17.352).
+
+    The first iteration of this run is still warm because we invoked
+    ``_bench_cold`` first. Per-stage timings come from
+    ``_run_one_query_decomposed``; if any iteration returns None
+    (collection unavailable mid-run), the stage stats degrade to 0 for
+    that iteration only.
+    """
     samples_ms: list[float] = []
+    embed_samples: list[float] = []
+    search_samples: list[float] = []
+    rerank_samples: list[float] = []
+    rerank_per_pair_samples: list[float] = []
     last_hits = 0
     last_backend = "unknown"
+    last_rerank_pairs = 0
     for _ in range(iterations):
         elapsed_ms, hits, backend = await _run_one_query(query, domain)
         samples_ms.append(elapsed_ms)
         last_hits = hits
         last_backend = backend
+
+        decomp = await _run_one_query_decomposed(query, domain)
+        if decomp is not None:
+            embed_samples.append(decomp["embed_ms"])
+            search_samples.append(decomp["search_parallel_ms"])
+            rerank_samples.append(decomp["rerank_ms"])
+            if decomp["rerank_pairs"] > 0:
+                rerank_per_pair_samples.append(decomp["rerank_per_pair_ms"])
+                last_rerank_pairs = decomp["rerank_pairs"]
+
     mean_ms = statistics.mean(samples_ms) if samples_ms else 0
     return {
         "query": query,
@@ -184,6 +299,15 @@ async def _bench_warm(query: str, domain: str, iterations: int) -> dict:
         "min_ms": round(min(samples_ms), 1) if samples_ms else 0,
         "max_ms": round(max(samples_ms), 1) if samples_ms else 0,
         **_percentiles(samples_ms),
+        "stage": {
+            "embed_mean_ms": round(statistics.mean(embed_samples), 2) if embed_samples else 0,
+            "search_parallel_mean_ms": round(statistics.mean(search_samples), 2) if search_samples else 0,
+            "rerank_mean_ms": round(statistics.mean(rerank_samples), 2) if rerank_samples else 0,
+            "rerank_per_pair_mean_ms": round(
+                statistics.mean(rerank_per_pair_samples), 2
+            ) if rerank_per_pair_samples else 0,
+            "rerank_pairs_last": last_rerank_pairs,
+        },
     }
 
 
@@ -233,8 +357,13 @@ async def main() -> None:
         # weighted summary instead.
         all_warm_ms.extend([w["mean_ms"]] * w["iterations"])
 
+    # §17.352 — roll per-stage means across queries for top-level gating.
+    def _avg_stage(key: str) -> float:
+        vals = [w["stage"].get(key, 0) for w in warm_results if w.get("stage")]
+        return round(statistics.mean(vals), 2) if vals else 0
+
     record = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",  # §17.352 — added summary.stage.*
         "run_id": run_id,
         "timestamp": started,
         "hardware": _hardware(),
@@ -254,6 +383,12 @@ async def main() -> None:
             "warm_max_ms": round(
                 max((w["max_ms"] for w in warm_results), default=0), 1
             ),
+            "stage": {
+                "embed_warm_mean_ms": _avg_stage("embed_mean_ms"),
+                "search_parallel_warm_mean_ms": _avg_stage("search_parallel_mean_ms"),
+                "rerank_warm_mean_ms": _avg_stage("rerank_mean_ms"),
+                "rerank_per_pair_warm_mean_ms": _avg_stage("rerank_per_pair_mean_ms"),
+            },
         },
         "total_bench_time_s": round(total_s, 2),
     }

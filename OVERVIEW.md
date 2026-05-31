@@ -19508,6 +19508,83 @@ Goldens after unskip: `pytest tests/test_retrieval_golden.py -v --timeout=300` =
 
 ---
 
+### §17.352 per-stage RAG bench decomposition + ci-tier-2 wiring + bench QUERIES correctness fix (2026-05-31)
+
+Closes the remaining §16.5/§17.57 perf-benchmarking deferred items called out as still-open in §17.351's "Outside scope": per-component coverage inside `bench_rag.py` (embedder TTFT in isolation, Milvus search latency separately from reranker, reranker per-pair) plus CI wiring of the bench-check gates into `ci-tier-2` so PR-time regressions land rather than gates that run by hand. Plus an unrelated correctness fix the smoke run surfaced: the `QUERIES` list referenced partition names (`ml`, `infra`) that aren't in `VALID_DOMAINS`, so two of five fixtures returned 0 hits and silently averaged into `rerank_per_pair_mean_ms` as zero — dragging the system metric ~40% below truth.
+
+**The decomposition.** Pre-§17.352 `bench_rag.py` treated `query_rag` as a black box and only timed the aggregate. Per-stage drift was invisible until the aggregate moved. §17.352 adds a sibling `_run_one_query_decomposed` that calls the private stage helpers (`_embed_query`, `_vector_search`, `_keyword_search`, `_rrf_fuse`, `_rerank`) directly in sequence so each stage is timed in isolation. The aggregate `query_rag` timer is preserved unchanged for historical comparability.
+
+Per warm iteration the bench now records:
+- `embed_ms` — typically <0.1 ms on a cache hit, ~5–15 s on a cold L1+L2 miss
+- `search_parallel_ms` — wall-clock for `asyncio.gather` of vector + keyword (production behavior)
+- `vector_search_seq_ms`, `keyword_search_seq_ms` — sequential-equivalents for diagnosing which leg dominates when the parallel number drifts; opt-out via `BENCH_RAG_SKIP_SEQ_TIMING=1` halves the bench wall-clock
+- `rerank_ms` + `rerank_pairs` + derived `rerank_per_pair_ms` — keeps a candidate-count fluctuation from getting blamed on per-pair regression (and vice versa)
+
+Top-level `summary.stage.*` rolls per-query stage means into a system-level set: `embed_warm_mean_ms`, `search_parallel_warm_mean_ms`, `rerank_warm_mean_ms`, `rerank_per_pair_warm_mean_ms`. Schema bumped `1.0 → 1.1`; pre-1.1 rows lack the keys and `bench_check.py`'s "metric not found" path correctly skips them.
+
+**Makefile additions — three new per-stage gates.**
+
+| Target | Metric | Why a separate gate |
+|---|---|---|
+| `bench-check-rag-embed` | `summary.stage.embed_warm_mean_ms` | Embedder swap / cache-disable accident — was hidden in aggregate. |
+| `bench-check-rag-search` | `summary.stage.search_parallel_warm_mean_ms` | Milvus index drift / partition-key regression — was hidden in aggregate. |
+| `bench-check-rag-rerank` | `summary.stage.rerank_per_pair_warm_mean_ms` | Per-pair cost is the load-bearing reranker metric; total `rerank_ms` is sensitive to candidate-count fluctuations. |
+
+All three included in the `bench-check` aggregate so `make ci-tier-2` runs them. Each gate skips gracefully on missing/sparse history (the existing `bench_check.py` contract); the first real fire happens once two 1.1-schema bench_rag runs accumulate.
+
+**CI wiring.** `ci-tier-2` grew a `step 5/5` that runs `make bench-check`. The pipeline gate (`summary.pipeline.total_pipeline_s`) already had history from §17.351 + the 2026-04-02 baselines and IS firing today against the post-§17.346 cloud-flip number (latest=181.78 vs baseline_median=2020.85, well under threshold). The three RAG-stage gates skip on insufficient history right now; the embed gate skips on missing file (`bench_embed` not run on this host).
+
+**The QUERIES correctness fix.** Smoke run with the pre-§17.352 `QUERIES` list returned 0 hits for `'transformer attention' (domain=ml)` and `'Postgres connection pooling' (domain=infra)`. `VALID_DOMAINS = frozenset({'prompt','rag','eng','eng_design','llm','spec','code','qa'})` — `ml` and `infra` were never partition names. Pre-fix those queries' `rerank_per_pair_mean_ms` averaged in as 0, dragging the system metric down by 40% silently. Fixed: replaced with `'transformer attention' (domain=llm)` and `'chain of thought prompting' (domain=prompt)` so all five fixtures hit a real partition with content.
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `tests/benchmarks/bench_rag.py` | New `_run_one_query_decomposed` helper. Warm phase calls it alongside `query_rag` and records per-stage means + p50/p95/p99. Schema bumped to 1.1. `summary.stage.*` rollup. `QUERIES` list fixed (`ml`/`infra` → `llm`/`prompt`). | +96 |
+| `Makefile` | 3 new per-stage gates (`bench-check-rag-{embed,search,rerank}`); added to `bench-check` aggregate. `ci-tier-2` step renumbered 1/4 → 1/5 plus a new step 5/5 running `make bench-check`. | +22 |
+| `tests/benchmarks/bench_rag_results.jsonl` | First clean 1.1-schema baseline appended: `rag_20260531_140051_861cb0`. | +1 line |
+| `OVERVIEW.md` | this entry | +~80 |
+| **Total** | | **+~200** |
+
+No new deps. Zero behavior change in production code paths. Existing `bench_pipeline` / `bench_embed` / `bench_check` untouched — `bench_check`'s dotted-path resolver already supports the new `summary.stage.*` keys.
+
+**Verification — the live numbers (T480 i5-8350U, 4 cores, 3 iter, BENCH_RAG_SKIP_SEQ_TIMING=1).**
+
+| Query | Domain | embed_ms | search_||_ms | rerank_ms | per_pair_ms | pairs |
+|---|---|---:|---:|---:|---:|---:|
+| DAG orchestration | eng | 0.04 | 4.86 | 10 255.82 | 932.35 | 11 |
+| retrieval augmented generation patterns | rag | 0.04 | 5.26 | 17 928.80 | 1 629.89 | 11 |
+| transformer attention | llm | 0.04 | 6.73 | 20 030.37 | 1 178.26 | 17 |
+| how does HNSW vector search work | eng | 0.04 | 7.57 | 21 695.12 | 1 355.94 | 16 |
+| chain of thought prompting | prompt | 0.03 | 6.28 | 21 713.31 | 1 550.95 | 14 |
+| **System (`summary.stage.*`)** | | **0.04** | **6.14** | **18 324.68** | **1 329.48** | — |
+
+What the decomposition reveals: the embedder is essentially free (cache hits dominate); Milvus parallel search is also negligible at ~6 ms; **the CrossEncoder reranker on CPU is the entire RAG cost — 1.3 s per (query, doc) pair** on this hardware, scaling linearly with `pairs`. Any future RAG-quality work that doesn't reduce the per-pair cost OR the candidate count will not move the aggregate. This was the explicit point of the per-stage decomposition.
+
+`make bench-check` aggregate run on the new baseline:
+```
+[bench_check] not enough runs for summary.warm_mean_ms (1 found; need at least 2). Skipping.
+[bench_check] not enough runs for summary.stage.embed_warm_mean_ms (1 found; need at least 2). Skipping.
+[bench_check] not enough runs for summary.stage.search_parallel_warm_mean_ms (1 found; need at least 2). Skipping.
+[bench_check] not enough runs for summary.stage.rerank_per_pair_warm_mean_ms (1 found; need at least 2). Skipping.
+[bench_check] not enough runs for summary.cold_mean_ms (0 found; need at least 2). Skipping.
+[bench_check] OK on pipeline.total_pipeline_s: latest=181.781 baseline_median=2020.8505 (over 2 prior runs)
+```
+
+Exit code 0 across all six sub-gates. Pipeline gate's PASS validates §17.351's 8–14× cloud-flip speedup will be enforced at every PR going forward.
+
+**Outside scope.**
+
+- `bench_embed_results.jsonl` is absent on this host so `bench-check-embed` skips on missing file. Will populate next time an operator runs `make bench-embed`; the gate auto-activates on second 1.1 run.
+- `bench_pipeline.py` per-phase decomposition (`/ideate` vs `/ideate/confirm` vs `/execute/all`) is its own follow-up (queued separately); today's bench still uses the legacy `/ideas` bundled path §17.351 patched.
+- TTFT investigation from §17.351's Outside-scope #3 remains unchased — different axis from per-stage decomposition.
+
+**Cohort.** Sits in the perf-measurement-infrastructure axis: §17.57 (X.21 — framework + gates) → §17.351 (post-cloud-flip baseline refresh + bench API drift fix) → §17.352 (per-stage decomp + CI wiring + QUERIES correctness). With this commit the §16.5 "no formal performance benchmarking" cluster is **fully closed**: framework, gating, CI wiring, per-component coverage, and macro baseline all exist and run on every Tier-2 push to main.
+
+**Cost.** +200 LOC across 4 files (1 baseline row). Zero new deps, zero migrations, zero production-code behavior change. Verification cycle: ~10.5 min bench wall-clock (628.8 s for 5 queries × 3 warm iters × 2 retrieval calls each). Net result: drift in any single retrieval stage now surfaces independently of aggregate movement; PR-time bench regression enforced via `ci-tier-2`.
+
+---
+
 ### §17.351 perf baseline refresh post-§17.346 cloud-flip — bench API-contract fix + 8-14× total-pipeline speedup recorded (2026-05-31)
 
 Closes the §16.5-deferred "refresh the macro performance baseline" item from the post-§17.350 roadmap. The bench has been a 541-line e2e measurement script (`tests/benchmarks/bench_pipeline.py`) since pre-W track; the only two historical baselines in `tests/benchmarks/results.jsonl` were from 2026-04-02, both pre-§17.346 cloud-flip and pre-§17.300 auto-chain. Re-running it against the current orchestrator surfaced one API-contract drift (bench's POST `/dag` now 409s — DAG auto-generates during `/ideas`) and produced a clean post-cloud-flip baseline showing the kind of speedup the §17.346 work was supposed to deliver.

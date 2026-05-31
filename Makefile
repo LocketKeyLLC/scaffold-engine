@@ -58,6 +58,25 @@ bench-check-rag: _ensure_dev ## Gate: fail if bench_rag warm_mean_ms regressed >
 		--file tests/benchmarks/bench_rag_results.jsonl \
 		--metric summary.warm_mean_ms --threshold 1.5 --direction up
 
+# §17.352 — per-stage gates. summary.stage.* keys land on schema_version
+# 1.1 (bench_rag.py post-§17.352); pre-1.1 runs lack the keys so
+# bench_check.py's "insufficient history" skip kicks in until two
+# post-§17.352 runs accumulate.
+bench-check-rag-embed: _ensure_dev ## Gate: bench_rag embed-stage warm mean regressed >1.5x median
+	docker exec $(CONTAINER) python3 tests/benchmarks/bench_check.py \
+		--file tests/benchmarks/bench_rag_results.jsonl \
+		--metric summary.stage.embed_warm_mean_ms --threshold 1.5 --direction up
+
+bench-check-rag-search: _ensure_dev ## Gate: bench_rag Milvus parallel-search warm mean regressed >1.5x median
+	docker exec $(CONTAINER) python3 tests/benchmarks/bench_check.py \
+		--file tests/benchmarks/bench_rag_results.jsonl \
+		--metric summary.stage.search_parallel_warm_mean_ms --threshold 1.5 --direction up
+
+bench-check-rag-rerank: _ensure_dev ## Gate: bench_rag reranker per-pair warm mean regressed >1.5x median
+	docker exec $(CONTAINER) python3 tests/benchmarks/bench_check.py \
+		--file tests/benchmarks/bench_rag_results.jsonl \
+		--metric summary.stage.rerank_per_pair_warm_mean_ms --threshold 1.5 --direction up
+
 bench-check-embed: _ensure_dev ## Gate: fail if bench_embed cold_mean_ms regressed >1.5x median of last 3
 	docker exec $(CONTAINER) python3 tests/benchmarks/bench_check.py \
 		--file tests/benchmarks/bench_embed_results.jsonl \
@@ -68,12 +87,16 @@ bench-check-pipeline: _ensure_dev ## Gate: fail if bench_pipeline total_pipeline
 		--file tests/benchmarks/results.jsonl \
 		--metric pipeline.total_pipeline_s --threshold 1.5 --direction up
 
-# Audit I4 — aggregate gate. Runs all three regression checks; fails on
-# the first regression. Each sub-gate skips gracefully (exit 0) when its
-# JSONL file is missing or has fewer than 2 prior runs, so this target
-# is safe to wire into `make ci` even on a fresh repo with no bench
-# history yet.
-bench-check: bench-check-rag bench-check-embed bench-check-pipeline ## Gate: run every bench-check; skips gates whose JSONL file is missing or sparse
+# Audit I4 — aggregate gate. Runs all three core regression checks; fails
+# on the first regression. Each sub-gate skips gracefully (exit 0) when
+# its JSONL file is missing or has fewer than 2 prior runs, so this
+# target is safe to wire into `make ci` / `make ci-tier-2` even on a
+# fresh repo with no bench history yet.
+#
+# §17.352 — per-stage rag gates (embed / search / rerank-per-pair) are
+# included so stage-level drift catches before the aggregate moves. They
+# skip on schema_version 1.0 rows; activate once two 1.1+ runs land.
+bench-check: bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline ## Gate: run every bench-check; skips gates whose JSONL file is missing or sparse
 
 ci-smoke: ## Cloud-CI smoke tests — host pytest on `-m smoke`, no docker, no live services. Used by .github/workflows/ci.yml.
 	# §17.177 — SCAFFOLD_PREWARM_RERANKER=false skips the lifespan
@@ -245,20 +268,20 @@ check-next-actions: ## §17.195 — Verify pipelines/_vendor/_next_actions.py is
 	fi
 	@echo "✓ pipelines/_vendor/_next_actions.py is in sync with sdk/scaffold_client/next_actions.py."
 
-ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + golden retrieval sidecar. Runs locally OR via self-hosted CI; requires the orchestrator + Milvus + Postgres + Redis + Ollama stack to be live.
+ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + golden retrieval sidecar + bench regression gates (§17.352). Runs locally OR via self-hosted CI; requires the orchestrator + Milvus + Postgres + Redis + Ollama stack to be live.
 	@set -euo pipefail; \
 	printf '\033[1;36m== §17.247 tier 2 — full-stack integration ==\033[0m\n'; \
-	printf '\033[1;36m-- step 1/4: orchestrator /health --\033[0m\n'; \
+	printf '\033[1;36m-- step 1/5: orchestrator /health --\033[0m\n'; \
 	if ! curl -sf --max-time 5 http://localhost:8000/health >/dev/null; then \
 		printf '\033[1;31m✗ orchestrator /health unreachable\033[0m  Fix: docker compose up -d scaffold-orchestrator\n'; \
 		exit 1; \
 	fi; \
 	echo "  ✓ orchestrator healthy"; \
-	printf '\033[1;36m-- step 2/4: make doctor (whole-cloth) --\033[0m\n'; \
+	printf '\033[1;36m-- step 2/5: make doctor (whole-cloth) --\033[0m\n'; \
 	$(MAKE) doctor; \
-	printf '\033[1;36m-- step 3/4: make check-rerank-drift --\033[0m\n'; \
+	printf '\033[1;36m-- step 3/5: make check-rerank-drift --\033[0m\n'; \
 	$(MAKE) check-rerank-drift; \
-	printf '\033[1;36m-- step 4/4: golden retrieval sidecar --\033[0m\n'; \
+	printf '\033[1;36m-- step 4/5: golden retrieval sidecar --\033[0m\n'; \
 	mkdir -p /tmp/ci-tier-2; \
 	docker run --rm \
 		--network ai-network \
@@ -277,6 +300,8 @@ ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + g
 		2>&1 | grep -vE "reranker_decision|provenance_fetch_failed|Loading weights" | tail -15; \
 	python3 -c "import json,sys; d=json.load(open('/tmp/ci-tier-2/retrieval_report_ci_tier_2.json')); \
 	print(f\"  ✓ coverage_at_5={d['coverage_at_5']:.1%}  coverage_at_10={d['coverage_at_10']:.1%}  mean_mrr={d['mean_title_mrr']:.3f}\")"; \
+	printf '\033[1;36m-- step 5/5: bench regression gates (§17.352) --\033[0m\n'; \
+	$(MAKE) bench-check; \
 	printf '\033[1;32mAll tier 2 checks passed.\033[0m\n'
 
 check-rerank-drift: ## §17.245 — Verify MODEL_RERANKER default matches across Dockerfile ARG ↔ app/config.py ↔ .env.example (CI gate; mirrors doctor section 12)
