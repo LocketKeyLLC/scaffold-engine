@@ -240,20 +240,34 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_JSON_FORMAT: "true"
       LOG_FILE: /var/log/scaffold/app.jsonl
-      MODEL_ROUTER: qwen3:4b
+      # §17.348 — Tunable MODEL_* roles use ${VAR:-default} so operator
+      # overrides in .env (and the scaffold model set CLI from §17.347)
+      # actually take effect. Pre-§17.348 these were hardcoded literals
+      # that silently shadowed both the §17.346 code defaults AND any
+      # .env override — `scaffold model set router X` would write to .env
+      # and the container would still read the compose-baked value at boot.
+      # Defaults below match the §17.346 Settings defaults so a deploy with
+      # no overrides gets the cloud-flipped routing layer out of the box.
+      MODEL_ROUTER: ${MODEL_ROUTER:-qwen3-vl:235b-instruct-cloud}
+      MODEL_CODER: ${MODEL_CODER:-qwen3-vl:235b-instruct-cloud}
+      MODEL_VERIFIER: ${MODEL_VERIFIER:-qwen3-vl:235b-instruct-cloud}
+      MODEL_GENERAL: ${MODEL_GENERAL:-qwen3-vl:235b-instruct-cloud}
+      MODEL_CLOUD_ALT: ${MODEL_CLOUD_ALT:-qwen3.5:397b-cloud}
+      # MODEL_FALLBACK stays local by default (§17.346) — fallback must be
+      # different from primary to actually help on cloud-side failure.
+      MODEL_FALLBACK: ${MODEL_FALLBACK:-qwen3.5:latest}
       # PYTHONPATH=/code:/code/sdk is now image-intrinsic (Dockerfile),
       # so it does not need to be re-declared here.
+      # Embedder + reranker stay hardcoded (config-locked per OVERVIEW.md
+      # §15 invariants — embedder dim is locked at 512 to match the Milvus
+      # collection; reranker is a CrossEncoder singleton outside the
+      # provider system). The §17.347 CLI rejects set/unset on these roles.
       # qwen3-embedding:8b on Ollama 0.17.5 wedged deterministically on this
       # host's --ollama-engine path (audit Findings B+C, §17.81/82). Switched
       # to nomic-embed-text: 137M params (50× smaller), 768-dim native →
       # MRL-truncated to 512 by truncate_and_normalize, ~1s warm on CPU.
       MODEL_EMBEDDER_PIPELINE: nomic-embed-text
       MODEL_RERANKER: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
-      MODEL_CODER: qwen2.5-coder:7b
-      MODEL_GENERAL: qwen3-vl:235b-instruct-cloud
-      MODEL_VERIFIER: qwen2.5:7b
-      MODEL_CLOUD_ALT: qwen3.5:397b-cloud
-      MODEL_FALLBACK: qwen3.5:latest
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_MAX_FILES: "50"
       HF_HOME: /code/.cache/huggingface

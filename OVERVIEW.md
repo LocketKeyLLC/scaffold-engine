@@ -19349,6 +19349,54 @@ The `.env`-mutation helper (`_update_env_var`) replaces the first active `KEY=..
 
 ---
 
+### §17.348 `docker-compose.yml` MODEL_* parameterization — close the §17.346 + §17.347 silent-shadow gap surfaced live (2026-05-31)
+
+A real surface-the-bug moment. While demoing §17.347's `scaffold model list` against the running orchestrator post-§17.346 commit + restart, the output showed the **pre-§17.346** values (`model_router: qwen3:4b`, `model_coder: qwen2.5-coder:7b`, `model_verifier: qwen2.5:7b`) with `default? = no` — meaning an env var was overriding the §17.346 code default. Tracing the env source uncovered the gap: `docker-compose.yml` lines 250-256 had all 8 `MODEL_*` values **hardcoded as literals** in the orchestrator service's `environment:` block, with no `${VAR:-default}` substitution. Docker Compose's `environment:` block wins over `env_file:`, so:
+
+- **§17.346's code-default flip didn't take effect** — the orchestrator container always loaded compose's literal `MODEL_ROUTER=qwen3:4b` regardless of what `app/config.py` said.
+- **§17.347's `scaffold model set ROLE VALUE` silently failed** for these roles — the CLI wrote to `.env`, the orchestrator's compose env shadowed `.env`, and the operator saw no change in `model list` after restart. The CLI's restart hint pointed at the right command but the underlying override-chain was wrong.
+
+The pattern for fixing this already existed two services up in the same file: line 212 in a different service used `${MODEL_RERANKER:-tomaarsen/...}` — the parameterized form that lets `.env` (and runtime env vars) win, falling back to a default only when unset.
+
+**The fix.** Convert the 6 tunable `MODEL_*` lines in the orchestrator service's `environment:` block to `${VAR:-default}` form:
+
+```yaml
+MODEL_ROUTER:     ${MODEL_ROUTER:-qwen3-vl:235b-instruct-cloud}
+MODEL_CODER:      ${MODEL_CODER:-qwen3-vl:235b-instruct-cloud}
+MODEL_VERIFIER:   ${MODEL_VERIFIER:-qwen3-vl:235b-instruct-cloud}
+MODEL_GENERAL:    ${MODEL_GENERAL:-qwen3-vl:235b-instruct-cloud}
+MODEL_CLOUD_ALT:  ${MODEL_CLOUD_ALT:-qwen3.5:397b-cloud}
+MODEL_FALLBACK:   ${MODEL_FALLBACK:-qwen3.5:latest}
+```
+
+Defaults match the §17.346 Settings defaults so a deploy with no overrides gets the cloud-flipped routing layer out of the box. Anything an operator sets in `.env` (or via `scaffold model set`) now wins over the compose default — restoring the precedence chain the §17.347 CLI assumed.
+
+`MODEL_EMBEDDER_PIPELINE` and `MODEL_RERANKER` **stay hardcoded** — both are config-locked per [[invariants]] (embedder dim locked at 512 to match Milvus; reranker is a CrossEncoder singleton outside the provider system). The §17.347 CLI already rejects `set`/`unset` on these roles; parameterizing them in compose would invite the exact mistake the CLI guards against.
+
+**Verification.**
+
+| Step | Output |
+|---|---|
+| Edit compose, `docker compose up -d scaffold-orchestrator` | container recreated cleanly; `/health` 200 in ~6 s |
+| `scaffold model list` (post-restart) | `model_router`, `model_coder`, `model_verifier` all show `qwen3-vl:235b-instruct-cloud` — the §17.346 defaults finally live in production |
+| `default? = no` on the 3 flipped roles | env-var-supplied (compose's `${VAR:-default}` expansion fills with the cloud value), value matches §17.346 intent |
+
+**Why `default? = no` is correct.** Pydantic distinguishes "value came from env" vs "value came from class default." Since compose now SETS the env var (via the parameterized form), Pydantic sees an explicit env value and marks `is_default=False`. The value is the right one — it's just sourced from compose-env rather than from the `app/config.py` literal. Functionally identical; reporting is honest. An operator who later does `unset MODEL_ROUTER` from both `.env` and compose env would see `default? = yes` and the same cloud value.
+
+**Surfacing rule confirmed.** §17.346's "Operator action required for existing deploys" section foresaw that operators would need to update their `.env` and `valves.json` to pick up the new defaults — but missed that **this host's compose env was a third shadow layer** that no operator action on `.env` or `valves.json` could touch without editing compose directly. The §17.347 CLI's restart-hint can't help when the variable's compose-env source isn't in `.env` to begin with. §17.348 fixes that for all hosts that pull this commit.
+
+**Outside scope (deferred).**
+
+- **CLI-side warning when a variable is compose-shadowed.** Future enhancement to `scaffold model set`: after writing to `.env`, grep `docker-compose.yml` for an unparameterized `KEY: literal` line for the same KEY and warn the operator that the CLI's write will have no effect until compose is edited. This catches the §17.348 failure mode on any future host or service that introduces a similar shadow. Not blocking — §17.348 fixes the only known instance — but worth filing as a §17.347 polish item.
+- **Audit other services for the same pattern.** §17.348 surfaced the issue in the orchestrator service. Other services (`open-webui-pipelines`, `searxng`, the sidecars) might have similar unparameterized env literals. A 30-second grep across compose (`grep -n ":[[:space:]]*[a-z0-9].*$"` filtered to env blocks) would surface them. Out of scope for this commit; logged for a future infra audit.
+- **`docker-compose.dev.yml` parity.** The dev compose override might also have hardcoded env. Quick check passed (no MODEL_* literals in dev compose), but worth re-grepping the next time someone touches dev compose. Out of scope here.
+
+**Cohort.** §17.342 → §17.343 → §17.344 → §17.345 → §17.346 → §17.347 → **§17.348** = seven entries on the "operator UX + provider flexibility" arc. §17.347 *claimed* to close the arc operationally; §17.348 actually closes it by removing the silent-shadow layer that would have made §17.347's CLI lie to operators. The pattern that surfaced this — running `scaffold model list` and noticing the values didn't match the latest §-entry's expectations — is itself the validation that §17.347 was worth building (without the CLI, the operator would have edited `.env`, restarted, and assumed it worked, never knowing compose was shadowing them). **The arc is now actually closed.**
+
+**Cost.** ~22 LOC change in `docker-compose.yml` (6 value lines converted to parameterized form, ~16 LOC of rationale comments). One container restart (`docker compose up -d scaffold-orchestrator` recreate-on-config-change, ~6 s for `/health` ready). Zero code changes. Zero test changes. Zero new dependencies. Verification: live `scaffold model list` against the restarted orchestrator confirmed the 3 §17.346 roles now resolve to their intended cloud values.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
