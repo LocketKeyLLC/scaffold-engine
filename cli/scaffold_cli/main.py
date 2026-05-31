@@ -1941,12 +1941,157 @@ def optimize(
 MODEL_EPILOG = """
 \b
 Examples:
-  scaffold model list                    current per-role model assignments
-  scaffold model available               models loaded on Ollama
+  scaffold model list                            current per-role model assignments
+  scaffold model available                       models loaded on Ollama
+  scaffold model providers                       which providers are registered + key status
+  scaffold model set general claude-haiku-4-5 --provider anthropic
+                                                 write MODEL_GENERAL + MODEL_GENERAL_PROVIDER to .env
+                                                 AND model_general to pipelines/scaffold_router/valves.json
+  scaffold model set router qwen3-vl:235b-instruct-cloud
+                                                 swap a role's model; provider unchanged
+  scaffold model unset coder                     remove MODEL_CODER override; orchestrator + pipeline
+                                                 fall back to their Settings/template defaults
+  scaffold model set general --dry-run ...       print the edits without writing
 
-Per-role overrides are session-only when set in OWUI valves. To persist,
-edit MODEL_<ROLE> in .env and restart. (`make init` for the wizard.)
+§17.347. Writes to BOTH .env and pipelines/scaffold_router/valves.json
+so orchestrator and OWUI agree on restart. Restart is NOT automatic —
+the command prints the exact `docker restart ...` line and you decide
+when to apply (in case a job is mid-flight).
+
+Locked roles (`embedder`, `reranker`) are config-locked per the invariants
+in OVERVIEW.md §15 — set/unset on those will error.
 """
+
+# §17.347 — tunable model roles. Keep in sync with app/config.py Settings
+# and pipelines/scaffold_router.py Valves. Roles in PIPELINE_HAS_VALVE
+# also get written to pipelines/scaffold_router/valves.json; roles only
+# in TUNABLE_ROLES write to .env only (the pipeline has no per-role
+# valve for them — currently just `cloud_heavy`).
+TUNABLE_ROLES: tuple[str, ...] = (
+    "general", "verifier", "coder", "router",
+    "fallback", "cloud_alt", "cloud_heavy",
+)
+PIPELINE_HAS_VALVE: frozenset[str] = frozenset({
+    "general", "verifier", "coder", "router", "fallback", "cloud_alt",
+})
+LOCKED_ROLES: frozenset[str] = frozenset({"embedder", "reranker", "embedder_pipeline"})
+KNOWN_PROVIDERS: tuple[str, ...] = ("ollama", "openai", "anthropic")
+
+
+def _resolve_repo_root(cwd: "Path | None" = None) -> "Path | None":
+    """Find the directory holding the orchestrator's .env (walk up from cwd).
+
+    Returns None if no .env found within 6 levels — caller decides whether
+    that's fatal. The lookup mirrors ``cli/scaffold_cli/config.py``'s
+    ``_walk_for_dotenv`` so behavior is consistent across the CLI.
+    """
+    from pathlib import Path
+    cur = (cwd or Path.cwd()).resolve()
+    for _ in range(6):
+        if (cur / ".env").is_file():
+            return cur
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
+    return None
+
+
+def _update_env_var(env_path: "Path", key: str, value: str) -> str:
+    """Write or update a ``KEY=value`` line in .env. Preserves all other
+    lines verbatim (including comments and blank lines). Returns a
+    short human-readable change description.
+
+    If KEY is present (commented out OR active) the first active match is
+    replaced. If KEY is only present commented-out, we append a new active
+    line at the end (don't uncomment — the comment may carry intent).
+    If KEY is absent entirely, append at the end.
+    """
+    lines = env_path.read_text().splitlines()
+    new_line = f"{key}={value}"
+    for i, ln in enumerate(lines):
+        stripped = ln.lstrip()
+        if stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            continue
+        existing_key, _, _ = stripped.partition("=")
+        if existing_key.strip() == key:
+            if ln == new_line:
+                return f"{key} already set to {value!r}"
+            lines[i] = new_line
+            env_path.write_text("\n".join(lines) + ("\n" if env_path.read_text().endswith("\n") else ""))
+            return f"updated {key}={value!r}"
+    # Not present as active line — append.
+    text = env_path.read_text()
+    sep = "" if text.endswith("\n") else "\n"
+    env_path.write_text(text + sep + new_line + "\n")
+    return f"added {key}={value!r}"
+
+
+def _remove_env_var(env_path: "Path", key: str) -> str:
+    """Remove the first active ``KEY=...`` line from .env. Comments
+    referencing the key are left intact (they document intent).
+    Returns a short human-readable change description.
+    """
+    lines = env_path.read_text().splitlines()
+    keep: list[str] = []
+    removed = False
+    for ln in lines:
+        stripped = ln.lstrip()
+        if not removed and not stripped.startswith("#") and "=" in stripped:
+            existing_key, _, _ = stripped.partition("=")
+            if existing_key.strip() == key:
+                removed = True
+                continue  # drop this line
+        keep.append(ln)
+    if not removed:
+        return f"{key} was not set (no change)"
+    env_path.write_text("\n".join(keep) + ("\n" if env_path.read_text().endswith("\n") else ""))
+    return f"removed {key}="
+
+
+def _update_pipeline_valve(valves_path: "Path", key: str, value: str) -> str:
+    """Set ``key`` to ``value`` in the OWUI pipeline's live valves.json.
+
+    Preserves all other keys verbatim. Returns a short change description.
+    Creates the file with the single key if it doesn't exist (operator
+    deployed before bootstrap ran).
+    """
+    if valves_path.is_file():
+        try:
+            data = _json.loads(valves_path.read_text())
+        except Exception:
+            data = {}
+    else:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if data.get(key) == value:
+        return f"pipeline valve {key!r} already {value!r}"
+    prev = data.get(key)
+    data[key] = value
+    valves_path.parent.mkdir(parents=True, exist_ok=True)
+    valves_path.write_text(_json.dumps(data, indent=2) + "\n")
+    if prev is None:
+        return f"added pipeline valve {key}={value!r}"
+    return f"updated pipeline valve {key}={value!r} (was {prev!r})"
+
+
+def _remove_pipeline_valve(valves_path: "Path", key: str) -> str:
+    """Remove ``key`` from the OWUI pipeline's live valves.json. The
+    valve falls back to the template default on next pipeline restart.
+    """
+    if not valves_path.is_file():
+        return f"pipeline valves file missing — no change"
+    try:
+        data = _json.loads(valves_path.read_text())
+    except Exception:
+        return f"pipeline valves file unreadable — no change"
+    if not isinstance(data, dict) or key not in data:
+        return f"pipeline valve {key!r} not set — no change"
+    prev = data.pop(key)
+    valves_path.write_text(_json.dumps(data, indent=2) + "\n")
+    return f"removed pipeline valve {key}= (was {prev!r})"
 
 
 @cli.group(help="Inspect model role assignments and Ollama availability.",
@@ -2008,6 +2153,214 @@ def model_available(ctx: click.Context, as_json: bool) -> None:
     click.echo(f"{len(models)} models loaded on Ollama:")
     for m in sorted(models):
         click.echo(f"  {m}")
+
+
+@model.command("providers", help="Show registered providers + API-key status (§17.347).")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def model_providers(ctx: click.Context, as_json: bool) -> None:
+    """Hardcoded list of providers shipped with scaffold-engine plus a
+    best-effort key/health check pulled from the orchestrator's /config.
+
+    Keeps logic out of a new HTTP endpoint — the provider list changes
+    rarely (Anthropic landed in §17.345; before that, a year between
+    additions). When that cadence changes, replace this with a
+    ``/config/providers`` query.
+    """
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/config")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    fields = data.get("fields", []) if isinstance(data, dict) else []
+    by_name = {f["name"]: f for f in fields}
+
+    rows: list[dict[str, str]] = []
+    for prov in KNOWN_PROVIDERS:
+        key_field = {
+            "ollama": None,  # no auth
+            "openai": "openai_api_key",
+            "anthropic": "anthropic_api_key",
+        }.get(prov)
+        if key_field is None:
+            status, detail = "ready", "no auth required"
+        else:
+            f = by_name.get(key_field, {})
+            val = str(f.get("value") or "").strip()
+            # Pydantic SecretStr usually serializes as "**********" when set,
+            # empty string when not. Treat any non-empty, non-asterisk as set.
+            is_set = bool(val) and not all(c == "*" for c in val)
+            # Asterisks-only is the SecretStr-set sentinel.
+            if all(c == "*" for c in val) and val:
+                is_set = True
+            status = "ready" if is_set else "no API key"
+            detail = f"{key_field} present" if is_set else f"set {key_field.upper()}"
+        rows.append({"provider": prov, "status": status, "detail": detail})
+
+    if as_json:
+        click.echo(_json.dumps(rows, indent=2))
+        return
+    click.echo(f"{'provider':<12} {'status':<14} {'detail':<32}")
+    click.echo("-" * 60)
+    for r in rows:
+        color = "green" if r["status"] == "ready" else "yellow"
+        click.echo(f"{r['provider']:<12} ", nl=False)
+        click.secho(f"{r['status']:<14}", fg=color, nl=False)
+        click.echo(f" {r['detail']:<32}")
+
+
+def _print_restart_hint(touched_pipeline: bool) -> None:
+    """Print the canonical restart line. Operator decides timing —
+    a `set` during a running job would interrupt work, so we never
+    auto-restart (per the §17.347 design decision)."""
+    containers = "scaffold-orchestrator"
+    if touched_pipeline:
+        containers += " open-webui-pipelines"
+    click.echo("")
+    click.secho("Next: ", fg="cyan", nl=False)
+    click.echo(f"restart to apply — `docker restart {containers}`")
+    click.secho("      ", nl=False)
+    click.echo("(skip if no job is mid-flight; otherwise wait for it to finish)")
+
+
+@model.command("set", help="Set a role's model + optional provider (§17.347).")
+@click.argument("role")
+@click.argument("model_name")
+@click.option("--provider", "provider", default=None,
+              help="Optional provider to set MODEL_<ROLE>_PROVIDER (ollama|openai|anthropic).")
+@click.option("--repo-root", "repo_root", default=None,
+              type=click.Path(file_okay=False, dir_okay=True, exists=True, resolve_path=True),
+              help="Override .env discovery (defaults to walking up from cwd).")
+@click.option("--dry-run", is_flag=True,
+              help="Print the edits without writing them.")
+def model_set(role: str, model_name: str, provider: str | None,
+              repo_root: str | None, dry_run: bool) -> None:
+    """Write to both .env (orchestrator) and pipelines/scaffold_router/valves.json
+    (OWUI pipeline) so both surfaces agree on restart."""
+    from pathlib import Path
+
+    role = role.lower().lstrip("-").replace("-", "_")
+    if role in LOCKED_ROLES:
+        click.secho(
+            f"role {role!r} is config-locked (see OVERVIEW.md §15 — embedder dim "
+            f"is locked at 512; reranker is a CrossEncoder singleton outside the "
+            f"provider system). Refusing to write.", fg="red", err=True,
+        )
+        sys.exit(2)
+    if role not in TUNABLE_ROLES:
+        click.secho(
+            f"unknown role {role!r}. Tunable roles: {', '.join(TUNABLE_ROLES)}",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+    if provider is not None and provider not in KNOWN_PROVIDERS:
+        click.secho(
+            f"unknown provider {provider!r}. Known: {', '.join(KNOWN_PROVIDERS)}",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+
+    root = Path(repo_root) if repo_root else _resolve_repo_root()
+    if root is None:
+        click.secho(
+            "no .env found in cwd or parents (up to 6 levels). Run from the "
+            "scaffold-engine repo root, or pass --repo-root.", fg="red", err=True,
+        )
+        sys.exit(2)
+    env_path = root / ".env"
+    valves_path = root / "pipelines" / "scaffold_router" / "valves.json"
+    env_key = f"MODEL_{role.upper()}"
+    pipeline_key = f"model_{role}"
+
+    edits: list[str] = []
+    if dry_run:
+        edits.append(f"would set {env_key}={model_name!r} in {env_path}")
+        if provider:
+            edits.append(f"would set {env_key}_PROVIDER={provider!r} in {env_path}")
+        if role in PIPELINE_HAS_VALVE:
+            edits.append(f"would set {pipeline_key}={model_name!r} in {valves_path}")
+        for e in edits:
+            click.echo(f"  - {e}")
+        click.echo("(dry-run — no files changed)")
+        return
+
+    edits.append(_update_env_var(env_path, env_key, model_name))
+    if provider:
+        edits.append(_update_env_var(env_path, f"{env_key}_PROVIDER", provider))
+    touched_pipeline = False
+    if role in PIPELINE_HAS_VALVE:
+        edits.append(_update_pipeline_valve(valves_path, pipeline_key, model_name))
+        touched_pipeline = True
+    for e in edits:
+        click.echo(f"  ✓ {e}")
+    _print_restart_hint(touched_pipeline)
+
+
+@model.command("unset", help="Remove a role override; reset to Settings/template default (§17.347).")
+@click.argument("role")
+@click.option("--repo-root", "repo_root", default=None,
+              type=click.Path(file_okay=False, dir_okay=True, exists=True, resolve_path=True))
+@click.option("--keep-provider", is_flag=True,
+              help="Don't remove MODEL_<ROLE>_PROVIDER (only remove the model override).")
+@click.option("--dry-run", is_flag=True)
+def model_unset(role: str, repo_root: str | None,
+                keep_provider: bool, dry_run: bool) -> None:
+    """Inverse of `set`. Removes the override from .env and clears the
+    pipeline valve so both surfaces fall back to their built-in defaults
+    on restart (Settings defaults for the orchestrator, template defaults
+    for the pipeline)."""
+    from pathlib import Path
+
+    role = role.lower().lstrip("-").replace("-", "_")
+    if role in LOCKED_ROLES:
+        click.secho(
+            f"role {role!r} is config-locked; nothing to unset.", fg="yellow",
+        )
+        sys.exit(2)
+    if role not in TUNABLE_ROLES:
+        click.secho(
+            f"unknown role {role!r}. Tunable roles: {', '.join(TUNABLE_ROLES)}",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+
+    root = Path(repo_root) if repo_root else _resolve_repo_root()
+    if root is None:
+        click.secho(
+            "no .env found. Run from the scaffold-engine repo root or pass --repo-root.",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+    env_path = root / ".env"
+    valves_path = root / "pipelines" / "scaffold_router" / "valves.json"
+    env_key = f"MODEL_{role.upper()}"
+    pipeline_key = f"model_{role}"
+
+    edits: list[str] = []
+    if dry_run:
+        edits.append(f"would remove {env_key}= from {env_path}")
+        if not keep_provider:
+            edits.append(f"would remove {env_key}_PROVIDER= from {env_path}")
+        if role in PIPELINE_HAS_VALVE:
+            edits.append(f"would remove {pipeline_key}= from {valves_path}")
+        for e in edits:
+            click.echo(f"  - {e}")
+        click.echo("(dry-run — no files changed)")
+        return
+
+    edits.append(_remove_env_var(env_path, env_key))
+    if not keep_provider:
+        edits.append(_remove_env_var(env_path, f"{env_key}_PROVIDER"))
+    touched_pipeline = False
+    if role in PIPELINE_HAS_VALVE:
+        edits.append(_remove_pipeline_valve(valves_path, pipeline_key))
+        touched_pipeline = True
+    for e in edits:
+        click.echo(f"  ✓ {e}")
+    _print_restart_hint(touched_pipeline)
 
 
 # ---------------------------------------------------------------------------

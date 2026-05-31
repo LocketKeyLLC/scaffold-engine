@@ -778,6 +778,189 @@ def test_model_available_reads_health_models_loaded(runner):
 
 
 # ---------------------------------------------------------------------------
+# §17.347 — model providers / set / unset
+# ---------------------------------------------------------------------------
+def _seed_repo(tmp_path, env_content: str = ""):
+    """Create a minimal repo layout with .env and pipelines/scaffold_router/.
+    Returns the repo root path."""
+    (tmp_path / ".env").write_text(env_content)
+    (tmp_path / "pipelines" / "scaffold_router").mkdir(parents=True)
+    return tmp_path
+
+
+def test_model_providers_shows_ready_when_keys_set(runner):
+    response = {"fields": [
+        {"name": "openai_api_key", "value": "**********"},     # SecretStr-set sentinel
+        {"name": "anthropic_api_key", "value": ""},            # not set
+        {"name": "ollama_base_url", "value": "http://x:11434"},
+    ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["model", "providers"])
+    assert res.exit_code == 0
+    # ollama always ready
+    assert "ollama" in res.output and "ready" in res.output
+    # openai ready (key present)
+    assert "openai" in res.output
+    # anthropic not ready
+    assert "anthropic" in res.output and "no API key" in res.output
+
+
+def test_model_providers_json_mode(runner):
+    response = {"fields": [
+        {"name": "openai_api_key", "value": ""},
+        {"name": "anthropic_api_key", "value": "**********"},
+    ]}
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["model", "providers", "--json"])
+    assert res.exit_code == 0
+    data = json.loads(res.output)
+    by_name = {r["provider"]: r for r in data}
+    assert by_name["ollama"]["status"] == "ready"
+    assert by_name["openai"]["status"] == "no API key"
+    assert by_name["anthropic"]["status"] == "ready"
+
+
+def test_model_set_writes_env_and_pipeline_valves(runner, tmp_path):
+    root = _seed_repo(tmp_path, env_content="EXISTING=keep_me\n")
+    res = runner.invoke(cli, [
+        "model", "set", "general", "claude-haiku-4-5",
+        "--provider", "anthropic",
+        "--repo-root", str(root),
+    ])
+    assert res.exit_code == 0, res.output
+    # .env got both keys appended, old line preserved
+    env_text = (root / ".env").read_text()
+    assert "EXISTING=keep_me" in env_text
+    assert "MODEL_GENERAL=claude-haiku-4-5" in env_text
+    assert "MODEL_GENERAL_PROVIDER=anthropic" in env_text
+    # pipeline valves got the model key
+    valves = json.loads((root / "pipelines" / "scaffold_router" / "valves.json").read_text())
+    assert valves["model_general"] == "claude-haiku-4-5"
+    # restart hint emitted
+    assert "docker restart" in res.output
+    assert "open-webui-pipelines" in res.output  # pipeline was touched
+
+
+def test_model_set_replaces_existing_env_line(runner, tmp_path):
+    """If MODEL_GENERAL is already set, replace it in place — don't append a duplicate."""
+    root = _seed_repo(tmp_path, env_content="MODEL_GENERAL=qwen3:4b\nOTHER=x\n")
+    res = runner.invoke(cli, [
+        "model", "set", "general", "qwen3-vl:235b-instruct-cloud",
+        "--repo-root", str(root),
+    ])
+    assert res.exit_code == 0, res.output
+    env_text = (root / ".env").read_text()
+    # exactly one MODEL_GENERAL line
+    assert env_text.count("MODEL_GENERAL=") == 1
+    assert "MODEL_GENERAL=qwen3-vl:235b-instruct-cloud" in env_text
+    assert "OTHER=x" in env_text
+
+
+def test_model_set_dry_run_writes_nothing(runner, tmp_path):
+    root = _seed_repo(tmp_path, env_content="")
+    res = runner.invoke(cli, [
+        "model", "set", "router", "qwen3-vl:235b-instruct-cloud",
+        "--repo-root", str(root), "--dry-run",
+    ])
+    assert res.exit_code == 0, res.output
+    assert "dry-run" in res.output
+    assert (root / ".env").read_text() == ""  # untouched
+    assert not (root / "pipelines" / "scaffold_router" / "valves.json").exists()
+
+
+def test_model_set_rejects_locked_role(runner, tmp_path):
+    root = _seed_repo(tmp_path)
+    res = runner.invoke(cli, [
+        "model", "set", "embedder", "anything", "--repo-root", str(root),
+    ])
+    assert res.exit_code == 2
+    assert "config-locked" in res.output
+    assert (root / ".env").read_text() == ""  # untouched
+
+
+def test_model_set_rejects_unknown_role(runner, tmp_path):
+    root = _seed_repo(tmp_path)
+    res = runner.invoke(cli, [
+        "model", "set", "wizard", "claude-opus-4-7", "--repo-root", str(root),
+    ])
+    assert res.exit_code == 2
+    assert "unknown role" in res.output
+
+
+def test_model_set_rejects_unknown_provider(runner, tmp_path):
+    root = _seed_repo(tmp_path)
+    res = runner.invoke(cli, [
+        "model", "set", "general", "x", "--provider", "cohere", "--repo-root", str(root),
+    ])
+    assert res.exit_code == 2
+    assert "unknown provider" in res.output
+
+
+def test_model_set_cloud_heavy_skips_pipeline_valve(runner, tmp_path):
+    """cloud_heavy is orchestrator-only — no pipeline valve, no restart hint for pipelines."""
+    root = _seed_repo(tmp_path, env_content="")
+    res = runner.invoke(cli, [
+        "model", "set", "cloud_heavy", "claude-opus-4-7", "--repo-root", str(root),
+    ])
+    assert res.exit_code == 0, res.output
+    assert "MODEL_CLOUD_HEAVY=claude-opus-4-7" in (root / ".env").read_text()
+    assert not (root / "pipelines" / "scaffold_router" / "valves.json").exists()
+    # Restart hint should NOT include open-webui-pipelines (pipeline not touched)
+    assert "open-webui-pipelines" not in res.output
+
+
+def test_model_unset_removes_env_and_pipeline_valves(runner, tmp_path):
+    root = _seed_repo(tmp_path,
+        env_content="MODEL_GENERAL=x\nMODEL_GENERAL_PROVIDER=anthropic\nKEEP=y\n")
+    valves_path = root / "pipelines" / "scaffold_router" / "valves.json"
+    valves_path.write_text(json.dumps({"model_general": "x", "triage_model": "z"}))
+    res = runner.invoke(cli, [
+        "model", "unset", "general", "--repo-root", str(root),
+    ])
+    assert res.exit_code == 0, res.output
+    env_text = (root / ".env").read_text()
+    assert "MODEL_GENERAL=" not in env_text
+    assert "MODEL_GENERAL_PROVIDER=" not in env_text
+    assert "KEEP=y" in env_text  # other lines preserved
+    valves = json.loads(valves_path.read_text())
+    assert "model_general" not in valves
+    assert valves["triage_model"] == "z"  # other valves preserved
+
+
+def test_model_unset_keep_provider_flag(runner, tmp_path):
+    root = _seed_repo(tmp_path,
+        env_content="MODEL_GENERAL=x\nMODEL_GENERAL_PROVIDER=anthropic\n")
+    res = runner.invoke(cli, [
+        "model", "unset", "general", "--repo-root", str(root), "--keep-provider",
+    ])
+    assert res.exit_code == 0, res.output
+    env_text = (root / ".env").read_text()
+    assert "MODEL_GENERAL=" not in env_text
+    assert "MODEL_GENERAL_PROVIDER=anthropic" in env_text
+
+
+def test_model_set_walks_up_for_repo_root(runner, tmp_path, monkeypatch):
+    """Without --repo-root, walks up from cwd to find .env."""
+    root = _seed_repo(tmp_path)
+    subdir = root / "deep" / "nested" / "dir"
+    subdir.mkdir(parents=True)
+    monkeypatch.chdir(subdir)
+    res = runner.invoke(cli, ["model", "set", "router", "qwen3:4b"])
+    assert res.exit_code == 0, res.output
+    assert "MODEL_ROUTER=qwen3:4b" in (root / ".env").read_text()
+
+
+def test_model_set_errors_when_no_env_found(runner, tmp_path, monkeypatch):
+    """If no .env anywhere up the tree, fail with actionable message — not crash."""
+    monkeypatch.chdir(tmp_path)
+    res = runner.invoke(cli, ["model", "set", "router", "qwen3:4b"])
+    assert res.exit_code == 2
+    assert "no .env" in res.output.lower() or "no .env" in res.stderr.lower() or ".env" in res.output
+
+
+# ---------------------------------------------------------------------------
 # assist group (Sprint U.8.A)
 # ---------------------------------------------------------------------------
 

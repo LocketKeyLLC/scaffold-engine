@@ -19288,6 +19288,67 @@ The OWUI admin panel "Pipelines → scaffold_router" valve editor is the canonic
 
 ---
 
+### §17.347 `scaffold model set / unset / providers` CLI — close the §17.345/§17.346 "easily switch" deferred item (2026-05-31)
+
+Closes the operational follow-up that §17.345 and §17.346 both flagged: **the model-bumps were correct but the *switching mechanic* was still 3 manual edits (`.env`, `pipelines/scaffold_router/valves.json`, then `docker restart`).** This entry replaces the manual sync with three CLI subcommands so the operator can flip a role in one line.
+
+**Where this slots in.** `cli/scaffold_cli/main.py:1952` already had `@cli.group(help="Inspect model role assignments...")` with two read-mostly commands: `scaffold model list` (reads orchestrator `/config`) and `scaffold model available` (Ollama-loaded models via `/health`). §17.347 extends the group with three write/inspect commands. The CLI shipped in §17.346's cohort as "scaffold-engine-cli==0.6.0"; bumped to **0.7.0**.
+
+**New surface.**
+
+```
+scaffold model providers
+scaffold model set <role> <model> [--provider <name>] [--repo-root <path>] [--dry-run]
+scaffold model unset <role> [--keep-provider] [--repo-root <path>] [--dry-run]
+```
+
+**`scaffold model providers`** — list the three registered providers + key-presence status. Hardcoded provider list (`ollama`, `openai`, `anthropic`) because the cadence of provider additions is slow enough (Anthropic landed in §17.345; before that, a year between additions) that a `/config/providers` HTTP endpoint isn't worth the surface area today. Logic: pulls the `openai_api_key` / `anthropic_api_key` fields from the orchestrator's existing `/config` endpoint, treats Pydantic's `**********` SecretStr sentinel as "set," and renders a colored table. Live verification on this host: `ollama ready / openai ready / anthropic no API key` — accurately reflects the §17.345 deferred-state of "Anthropic provider code is wired, key not funded."
+
+**`scaffold model set <role> <model> [--provider <name>]`** — writes BOTH:
+1. `.env`: `MODEL_<ROLE>=<model>` (and `MODEL_<ROLE>_PROVIDER=<name>` if `--provider` is given)
+2. `pipelines/scaffold_router/valves.json`: `"model_<role>": "<model>"`
+
+…so the orchestrator's Pydantic Settings AND OWUI's pipeline valves both pick up the new value on next restart, eliminating the "I changed .env but pipelines still uses the old model" failure mode operators hit in §17.344/§17.346. Per §17.347 design decision, restart is **never automatic** — the command prints the exact `docker restart scaffold-orchestrator open-webui-pipelines` line and lets the operator decide when to apply (mid-job `set` would interrupt running work).
+
+The `.env`-mutation helper (`_update_env_var`) replaces the first active `KEY=...` line in place if present, appends otherwise; comments referencing the key are preserved (they document intent). The pipeline-valves helper (`_update_pipeline_valve`) round-trips the JSON, preserves all other keys, and creates the file if missing.
+
+**`scaffold model unset <role>`** — inverse of `set`. Removes both the `.env` line and the pipeline valve entry, so the orchestrator falls back to its `app/config.py` Settings default and the pipeline falls back to its `valves.template.json` default on next bootstrap. `--keep-provider` preserves `MODEL_<ROLE>_PROVIDER` (so an operator can unset just the model name while keeping `MODEL_GENERAL_PROVIDER=anthropic` so the fallback default still routes through Claude).
+
+**Locked-role protection.** `embedder` / `reranker` / `embedder_pipeline` reject with exit code 2 and a pointer to the OVERVIEW invariants section. Prevents an operator from accidentally setting `MODEL_EMBEDDER=<not-512-dim>` and silently corrupting the Milvus collection (the canonical "don't auto-upgrade" example from [[invariants]]).
+
+**Repo-root discovery.** Walks up from `cwd` looking for `.env`, capped at 6 levels (mirrors `cli/scaffold_cli/config.py`'s `_walk_for_dotenv` behavior). `--repo-root` overrides explicitly. Tested: running from a 4-deep nested subdirectory finds the parent `.env` correctly; running from a tree with no `.env` exits clean with an actionable message ("no .env found in cwd or parents...").
+
+**`--dry-run`** prints the planned edits without writing. Used in CI / when an operator wants to confirm the targeting before changing live state.
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `cli/scaffold_cli/main.py` | New `model_providers`, `model_set`, `model_unset` Click commands + 6 helper functions (`_resolve_repo_root`, `_update_env_var`, `_remove_env_var`, `_update_pipeline_valve`, `_remove_pipeline_valve`, `_print_restart_hint`) + 3 module-level constants (`TUNABLE_ROLES`, `PIPELINE_HAS_VALVE`, `KNOWN_PROVIDERS`, `LOCKED_ROLES`) + updated `MODEL_EPILOG` with 4 examples and the §17.347 doc block. | +293 |
+| `cli/tests/test_commands.py` | 13 new tests covering: providers happy-path + JSON mode, set writes both .env + pipeline valves, set replaces existing .env line (no duplicate), set dry-run, locked-role rejection, unknown-role/provider rejection, cloud_heavy skips pipeline valve (orchestrator-only role), unset removes from both, unset --keep-provider, repo-root walk-up, repo-root not-found. | +163 |
+| `cli/pyproject.toml`, `cli/scaffold_cli/__init__.py` | Version bump 0.6.0 → **0.7.0**. | +2 |
+| **Total** | | **+458** |
+
+**Verification.**
+
+- `pytest tests/test_commands.py -k model` in dev container = **15 passed** (13 new + 2 existing). 0.32 s.
+- `pytest tests/` (full CLI suite) = **153 passed**. 0.98 s. No regression.
+- Live smoke against the running orchestrator: `scaffold model providers` rendered the colored table correctly, accurately marking `anthropic no API key` (which is the actual state per §17.345). `scaffold model set general claude-haiku-4-5 --provider anthropic --dry-run` listed exactly the three planned edits without writing.
+
+**Outside scope (deferred).**
+
+- **`scaffold model recommend`** — auto-pick "best" model per role from the Ollama registry or a curated upstream list. §17.345's deferred-items section flagged this as risky (the 512-dim embedder lock is the canonical "don't auto-upgrade" example). Out of scope for §17.347; would require a curated registry + per-role criteria + safety gates around config-locked roles. The `model_recommend` command name is reserved for the future.
+- **Auto-restart with a `--restart` flag** — §17.347's design decision was no-auto-restart-ever in v1 because a mid-job restart interrupts work. A future `--restart` opt-in with a pre-check ("are any jobs in `running` state? confirm before proceeding?") is the natural next iteration if operators ask for it. Not strictly needed — the printed `docker restart ...` line is one copy-paste away.
+- **Remote-host operation.** §17.347 assumes the CLI runs on the same host as the docker compose deployment (so it can `Path.write_text` to `.env` and `valves.json`). For a remote operator, the path is: SSH in, run the CLI, restart. A future `scaffold model set --host <op-host>` (or equivalent over an authenticated HTTP endpoint) is logged but out of scope.
+- **OWUI admin-API integration.** Currently `scaffold model set` writes the JSON file directly. If OWUI exposes a "set valve" admin API in a future release, the CLI could optionally POST through that instead — would let the change take effect without a pipeline restart. Logged for if/when OWUI's admin API surfaces. Not blocking; the restart path works today.
+- **Schema validation on `--provider`.** Today the CLI validates against the hardcoded `KNOWN_PROVIDERS = ("ollama", "openai", "anthropic")` tuple. §17.345's deferred item ("`MODEL_<ROLE>_PROVIDER` Pydantic Literal validation") would do the same gate at orchestrator boot. The CLI gate is the more user-visible of the two; the Pydantic-Literal gate is for env-var typos that bypass the CLI. Both worth eventually; CLI is the higher-leverage one and is done.
+
+**Cohort.** §17.342 → §17.343 → §17.344 → §17.345 → §17.346 → **§17.347** = six entries closing the "operator UX + provider flexibility" arc. §17.342–§17.343 fixed triage prompt discipline. §17.344 broke the qwen3:4b discipline ceiling for triage by going to cloud. §17.345 made the cloud-provider choice open (Ollama-cloud / OpenAI / Anthropic). §17.346 extended §17.344's cloud bump to router + verifier + coder with `model_fallback` held local on purpose. **§17.347 closes the loop: any operator can now flip any role to any provider/model in one command**, with the dual-file write that §17.344's manual operator-action note made everyone (including me) do by hand. The arc that opened with "OWUI triage doesn't surface missing info clearly" (§17.342) ends with "any role swappable to any provider in one line." **The cohort is materially closed.** Genuinely-deferred follow-ups (auto-restart, remote-host CLI, `model recommend`) are now operator-driven, not blocking.
+
+**Cost.** +458 LOC (293 production / 163 tests / 2 version). Zero new dependencies. Zero migrations. CLI is pip-installable as `scaffold-engine-cli==0.7.0` — operators on `0.6.0` upgrade via `pip install --upgrade scaffold-engine-cli` (or the in-repo `pip install -e cli/` for development installs). Verification cycle: 0.32 s + 0.98 s = under 2 s for the test suite.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
