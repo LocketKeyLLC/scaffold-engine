@@ -19220,6 +19220,74 @@ Closes §17.344's "deferred Claude provider" item. The operator's stated directi
 
 ---
 
+### §17.346 extend §17.344 model-bump pattern to model_router / model_verifier / model_coder; hold model_fallback local; close §17.345 http_clients-registry oversight (2026-05-31)
+
+Closes the "apply §17.344 to other roles" thread surfaced in the §17.345 postmortem review. §17.344 flipped only `triage_model` to cloud; the other 7 role valves stayed on whatever they were. This entry extends the same flip-to-cloud move to **3 of 4** remaining candidate roles, holds the fourth (`model_fallback`) local on purpose, and incidentally surfaces + fixes a §17.345 regression in `tests/test_http_clients.py`.
+
+**Survey.** The 8 role valves split into three buckets:
+
+| Bucket | Roles | Action |
+|---|---|---|
+| **Already cloud (§17.140 / §17.344 era)** | `model_general`, `model_cloud_heavy`, `model_cloud_alt` | No-op — already on `qwen3-vl:235b-instruct-cloud` or `qwen3.5:397b-cloud`. |
+| **Config-locked (per [[invariants]])** | `model_embedder_pipeline`, `model_reranker` | No-op — embedder dim-locked at 512; reranker is a CrossEncoder singleton outside the provider system. |
+| **Candidates (still local)** | `model_router`, `model_verifier`, `model_coder`, `model_fallback` | This entry decides each one. |
+
+**Per-role decisions.**
+
+1. **`model_router`: qwen3:4b → qwen3-vl:235b-instruct-cloud.** Same model `triage_model` was using pre-§17.344. The §17.344 argument applies verbatim — cloud is 287× faster AND holds format discipline qwen3:4b couldn't. No additional A/B needed; the §17.344 evidence is the evidence. **Confidence: high.**
+
+2. **`model_verifier`: qwen2.5:7b → qwen3-vl:235b-instruct-cloud.** Verification is judgment-heavy ("is X correct?" against the verifier-verdict cache, research-agent analyze/distill/gap-analysis, assist_replan, prompt_optimizer, execution_verify). Larger model = better judgment; latency benefits are identical to §17.344. The verifier-verdict cache (§17.128) deduplicates repeated queries so even if cloud were marginally slower per-call, cache amortizes. **Confidence: high.** Operator note: this is the highest-call-volume role on the orchestrator side (5+ call sites in `app/modules/`), so the speedup compounds across the workload.
+
+3. **`model_coder`: qwen2.5-coder:7b → qwen3-vl:235b-instruct-cloud.** This was the only role where a specialized local 7b (`qwen2.5-coder:7b` is coder-tuned) might plausibly beat the general 235b. Verified via A/B on a CodeGen-shape task — a line-count CLI implementation mirroring the kind of node-output `execution_agent` generates in real workloads (and §17.341's stress-test shape):
+
+    | Model | Elapsed | Eval tokens | Followed "no markdown fences" instruction | Code shape |
+    |---|---:|---:|:---:|---|
+    | **qwen2.5-coder:7b (local)** | 50.8 s | 107 | ✗ wrapped in ```` ```python ``` ```` fences | `readlines()` (loads file into memory) |
+    | **qwen3-vl:235b-instruct-cloud** | **2.4 s** | 65 | ✓ raw code, no fences | `sum(1 for _ in f)` (streaming) |
+
+    Cloud is **21× faster**, more token-efficient, more memory-efficient idiom, AND followed the prompt instruction the specialized model ignored. The specialized-coder advantage did not materialize on this workload shape. **Confidence: high after verify.** Reversible via valve if a future workload surfaces a code-gen task where the specialized model wins.
+
+4. **`model_fallback`: qwen3.5:latest stays local.** Held on purpose. `_smart_fallback()` (`app/model_router.py:266`) is invoked when the primary call fails. For fallback to actually help on failure, it must be *different* from primary — different model, ideally different runtime path. With router/verifier/coder all flipped to cloud, falling back to another cloud model gives zero failure-mode diversity (a cloud-side outage takes both primary and fallback down). Keeping `qwen3.5:latest` (local 7b) means: when cloud-Ollama is degraded, the orchestrator still has a working second path. **Confidence: high — deliberate diversity, not laziness.**
+
+**Files changed (production + test).**
+
+- `app/config.py` — Settings defaults for `model_router`, `model_verifier`, `model_coder` flipped to `qwen3-vl:235b-instruct-cloud`; preceded by an inline comment block carrying the per-role rationale + the explicit "fallback stays local on purpose" note (so a future reader doesn't undo it). `model_fallback` unchanged. (~12 LOC of rationale + 3 value changes.)
+- `pipelines/scaffold_router.py` — pipeline-side Valves class (lines 528-536) mirrors the same 3 flips for parity with orchestrator Settings, plus a comment pointing back to `app/config.py` as the rationale source-of-truth. (3 value changes.)
+- `tests/test_scaffold_router_commands.py:495` — `pipe.valves.model_verifier` default assertion updated to the new cloud value, with inline `§17.346` reference comment. (1 LOC.)
+- `.env.example` — 4 commented-out `MODEL_*=...` hint lines updated to the new defaults, each tagged with `# §17.346 default (was ...)` so an operator reading the file sees the history at a glance. `MODEL_FALLBACK` line gains an inline `# local — kept on purpose for failure-mode diversity` note. (5 LOC.)
+
+**§17.345 regression caught + fixed in the same commit.** During the §17.346 smoke-test sweep (`pytest -m smoke`) a `tests/test_http_clients.py::test_close_clients_resets_registry` failure surfaced — the registry-key assertion enumerates the exact expected set, and §17.345 added `"anthropic"` to the live registry via `_build_anthropic` + `get_anthropic_client` but never updated the test. Strict regression-class fixed by:
+- Adding `http_clients.get_anthropic_client()  # §17.345` to the test's setup calls (so the test actually exercises the registered client).
+- Adding `"anthropic"` to the expected-set assertion.
+
+This is a §17.345 oversight surfaced by §17.346's smoke run, fixed here rather than as a follow-up entry — the diff is 2 lines, the fix is mechanical, and bundling it keeps the regression history near the cause.
+
+**Verification.**
+
+- **Per-role A/B for coder** — line-count CLI probe, both models hit via Ollama's `/api/chat`. Output captured + compared (see table above). Cloud wins on every axis.
+- **Affected pipeline tests** — `pytest tests/test_scaffold_router_commands.py tests/test_scaffold_router_structure.py` = **98 passed in 4.02 s**. The default-after-reset assertion passes with the new value.
+- **Smoke suite** — `pytest -m smoke` = **1961 passed, 1 failed initially** (the §17.345 http_clients oversight above). After fixing: re-run on the affected file = **10 passed in 1.81 s**. Full smoke re-run not required — the failure mode was the registry-set enumeration, which is unaffected by anything in §17.346's production diff.
+- **Live verification not run** — no automated test exercises the orchestrator's actual `model_router.chat(role=...)` path against a real DAG-execution workload here, because that requires running an entire job. The next real operator job will be the implicit verification; if any role regresses, the flip-back is one valve change. The §17.344 precedent (where greenhouse + homelab stress probes confirmed cloud held discipline) is the strongest evidence the flip is safe.
+
+**Operator action required for existing deploys.** Same shape as §17.344 — the gitignored `valves.json` files (`pipelines/scaffold_router/valves.json` AND the orchestrator's runtime view of `.env`) persist whatever was there. Existing deploys keep reading the old local values until the operator either:
+1. Edits the live `valves.json` and `.env` to set the 3 roles to `qwen3-vl:235b-instruct-cloud` (or any preferred cloud-tagged model — `claude-*` models work too post-§17.345 with API credits).
+2. Deletes `pipelines/scaffold_router/valves.json` AND removes any `MODEL_ROUTER=`, `MODEL_VERIFIER=`, `MODEL_CODER=` lines from `.env`, then restarts `open-webui-pipelines` + `scaffold-orchestrator` — bootstrap re-seeds from the new template/Settings defaults.
+
+The OWUI admin panel "Pipelines → scaffold_router" valve editor is the canonical UI for path (1) and is the recommended operator path. `make sync-valves` (per `references/pipelines.md`) wipes baked-in valve overrides so they fall through to env / template defaults — useful when migrating between cohorts of changes.
+
+**Outside scope (deferred).**
+
+- **`scaffold model` CLI** — operator-stated direction from the §17.345 thread for one-command valve switching. §17.346 makes the *defaults* good; the CLI makes the *switching* friction-free. Mechanical follow-up; would close the "easily switch to stay up to date" axis fully. Logged as a candidate §17.347 item.
+- **`model_fallback` re-evaluation** — only worth revisiting if cloud-Ollama develops a reputation for outages on this host. If that happens, options are: keep current local fallback, OR add a *second-cloud-provider* fallback (`claude-haiku-4-5` via §17.345's AnthropicProvider) for cross-provider diversity. Held until there's a real failure pattern to design against.
+- **Code-gen A/B coverage** — verified only one workload shape (line-count CLI). Future code-gen tasks (longer functions, multi-file synthesis, refactoring) might surface the specialized-coder advantage that the single-shot CLI test didn't. If `execution_agent` output quality regresses on a real DAG, run a targeted A/B against the regressing task and decide per-task whether to override `model_coder` for that workload. The valve override path is already there — this is operator-driven, not code-driven.
+- **Live verification against a real orchestrator job** — see "Verification" section above. The next real DAG execution after this commit is the implicit verification; explicit synthetic verification is not load-bearing given the §17.344 precedent + the per-role A/B for coder.
+
+**Cohort.** §17.342 → §17.343 → §17.344 → §17.345 → §17.346 = five entries closing the "operator UX + provider flexibility" arc opened in §17.342. The arc's shape: §17.342–§17.343 fixed the *triage role specifically* via prompt iteration up to the qwen3:4b ceiling. §17.344 broke that ceiling for triage by going to cloud. §17.345 made the choice of cloud provider open (Ollama-cloud, OpenAI, Anthropic — anyone). §17.346 extends §17.344's cloud-bump to the rest of the role catalog (with verified per-role rationale and one role deliberately held local for failure diversity). At this point the system defaults are: every chat role on cloud-Ollama, fallback on local, embedder/reranker config-locked, any role swap-able to any provider via one settings change. **The "operator UX + provider flexibility" thread is materially closed.** Future work on this axis is operational (the `scaffold model` CLI to make swapping low-friction) or driven by observed regressions, not architectural.
+
+**Cost.** ~20 LOC of production change (3 value flips + comment rationale across 3 files), 1 LOC of pipeline-mirror flip × 3, 1 LOC test-assertion update, 5 LOC `.env.example` hint updates, 2 LOC §17.345 regression fix. Zero new dependencies. Zero migrations. One container restart not required (config-only changes; existing deploys read the new defaults at next process start). Verification cycle: 53.2 s for the coder A/B + 4.02 s for affected pipeline tests + 1.81 s for the http_clients regression-fix re-run = under 60 s of test cycle on top of the model-A/B itself.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

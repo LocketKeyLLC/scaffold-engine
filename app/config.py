@@ -168,10 +168,23 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(default=32, ge=1, le=512)
 
     # Model assignments
-    model_router: str = "qwen3:4b"
+    # §17.346 — model_router / model_coder / model_verifier defaults flipped
+    # to the same cloud model that §17.344 chose for triage. Justified per-role:
+    #   model_router: same model + same arg as §17.344 — cloud 287× faster + better discipline
+    #   model_coder:  verified A/B on a CodeGen-shape task (line-count CLI) —
+    #                 cloud 21× faster (2.4s vs 50.8s on this CPU) AND followed
+    #                 the "no markdown fences" instruction that the specialized
+    #                 qwen2.5-coder:7b ignored. The specialized-coder advantage
+    #                 didn't materialize on this workload shape.
+    #   model_verifier: §17.344 reasoning extends — judgment-heavy ("is X correct?"),
+    #                   larger model wins, latency benefits identical.
+    # model_fallback stays local on purpose — fallback should be DIFFERENT from
+    # primary to actually help when primary fails (cloud → cloud fallback gives
+    # no failure-mode diversity).
+    model_router: str = "qwen3-vl:235b-instruct-cloud"
     model_embedder_pipeline: str = "nomic-embed-text"
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-    model_coder: str = "qwen2.5-coder:7b"
+    model_coder: str = "qwen3-vl:235b-instruct-cloud"
     model_general: str = "qwen3-vl:235b-instruct-cloud"
     # Ideation phase model role (Apr 26 2026): which ROLE_FIELDS entry to
     # use for analyze/distill/compile. "model_router" = local 4b (audit
@@ -192,7 +205,7 @@ class Settings(BaseSettings):
     # one refinement → safety net, without making a non-convergent
     # design wait for an expensive 10-iter futile loop.
     device_sizing_max_iterations: int = Field(default=3, ge=1, le=10)
-    model_verifier: str = "qwen2.5:7b"
+    model_verifier: str = "qwen3-vl:235b-instruct-cloud"
     model_cloud_heavy: str = "qwen3-vl:235b-instruct-cloud"
     model_cloud_alt: str = "qwen3.5:397b-cloud"
     model_fallback: str = "qwen3.5:latest"
