@@ -19508,6 +19508,60 @@ Goldens after unskip: `pytest tests/test_retrieval_golden.py -v --timeout=300` =
 
 ---
 
+### §17.357 quarterly calibration cron — script-header path corrected post-§17.214, live-state verified (2026-05-31)
+
+Closes the §17.323-flagged "scheduled calibration health fire" deferred item by verifying the cron is installed correctly + fixing one stale path reference in the script header that contradicted what's actually in `crontab -l`.
+
+**State of the world (verified live).**
+
+| What | Value |
+|---|---|
+| Crontab entry installed | `0 8 1 1,4,7,10 *  /home/aedefruscio/scaffold-engine/scripts/quarterly_calibration_pr.sh >> /tmp/quarterly_calibration.log 2>&1` ✓ |
+| Script `bash -n` syntax | OK |
+| Next fire | **2026-07-01 08:00 UTC** (matches §17.323's predicted next fire) |
+| `/health.calibration.status` (today) | `unknown` — honest empty state, no calibration has fired yet |
+| Alert wiring | Script's lifecycle alerts route through orchestrator CLI → `system_alerts` (DB) + file sink; `/health.calibration` SELECTs the most recent `calibration.*` alert kind (§17.194) |
+
+**The stale path.** The script's header comment block had an example cron entry pointing at `/mnt/adamssd/scaffold-engine/scripts/...`, the pre-§17.214 SSD path. The actual `crontab -l` correctly points at `/home/aedefruscio/scaffold-engine/...` (post-§17.214 NVMe canonical path; the AM8180 enclosure was demoted to cold-backup-only). Future operators reading the script header to set up cron on a new host would have copy-pasted a broken path.
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `scripts/quarterly_calibration_pr.sh` | Comment-block fix: `/mnt/adamssd/...` → `/home/aedefruscio/...`. Added §17.357 marker + post-§17.214 rationale + next-fire confirmation. | +3 / -3 |
+| `OVERVIEW.md` | this entry | +~30 |
+| **Total** | | **~+33** |
+
+Zero code-logic changes — comments only. Zero new deps, zero migrations, zero behavior change.
+
+**Verification.**
+```
+$ crontab -l | grep -v '^#'
+0 2 * * * /home/aedefruscio/scaffold-engine/cron_sync_milvus.sh
+0 8 1 1,4,7,10 *  /home/aedefruscio/scaffold-engine/scripts/quarterly_calibration_pr.sh >> /tmp/quarterly_calibration.log 2>&1
+
+$ bash -n scripts/quarterly_calibration_pr.sh && echo OK
+OK
+
+$ curl -sf http://localhost:8000/health | jq .checks.calibration
+{
+  "status": "unknown",
+  "last_check_at": null,
+  "last_kind": null,
+  ...
+}
+```
+
+**Outside scope.**
+- Actually FIRING the script today to test alert wiring would draft a real PR against this repo's `tests/fixtures/golden_set.json` — destructive in the sense that it creates a draft PR on origin. Operator-only call; the script is `set -euo pipefail` + idempotent in its main loop, but `gh pr create` isn't reversible. Deferred to the actual 2026-07-01 fire.
+- Adding a "fire-soon" preview / dry-run mode to the script would let operators sanity-check without creating a PR. Possible follow-up; not done here.
+
+**Cohort.** Closes the §17.318 → §17.323 audit-tail of the design-pipeline + scheduled-cron cluster. The §17.350 entry called out §17.323 as one of two genuinely open operator-driven items — this commit closes it; §17.356 (the design_circuit cancellation root-cause) is the other and lands separately.
+
+**Cost.** +3 lines of comment-only diff, +30 lines of OVERVIEW. Verification was 3 read-only shell commands. Net result: a future operator reading the script header to set up cron on a fresh host gets the correct path on the first read.
+
+---
+
 ### §17.353 bench_pipeline modernization — `/ideas` → `/ideate` + `/ideate/confirm` + explicit `/dag` (2026-05-31)
 
 Closes §17.351's "Outside scope" #1: bench_pipeline.py switched from the legacy `/ideas` endpoint (which bundled refinement + auto-DAG into one timer and forced bench_pipeline to special-case a 409 from the auto-DAG path) to the modern four-phase flow `/ideate` (analyze) → `/ideate/confirm` (research + compile) → `/dag` (DAG generation) → `/execute/all` (stream node execution). Each phase now has a dedicated timer field. The pre-§17.353 record-shape field names (`idea_submission`, `dag_generation`, `execution`, `total_pipeline_s`) are preserved so bench_check.py's `pipeline.total_pipeline_s` regression gate keeps firing; a new `confirmation` field captures the additional Phase-2 step.
