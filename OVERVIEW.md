@@ -19508,6 +19508,36 @@ Goldens after unskip: `pytest tests/test_retrieval_golden.py -v --timeout=300` =
 
 ---
 
+### §17.354 `make rebaseline` aggregator + runbook — quarterly cadence target (2026-05-31)
+
+Closes Tier-2 audit-tail item #14 from §17.29. Adds a single-command operator surface for running the three benches in sequence (`bench-rag` → `bench-embed` → `bench-pipeline` → `bench-check`) plus a runbook describing when to run, how to interpret, what to do on regression, and how it ties into the §17.323 quarterly cron + §17.194 `/health.calibration` endpoint.
+
+**Why a target, not just a runbook.** Pre-§17.354 the operator had to remember three separate `make` invocations and the order didn't matter for correctness but DID matter for the cache-warm story (run bench-rag before bench-embed so the embedder cache is populated when bench-embed measures the cached path). Wrapping in one target also makes the elapsed-time summary cleanly visible at the bottom (`✓ rebaseline complete in N min M s`) so an operator can budget the quarterly run.
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `Makefile` | New `rebaseline` target — runs bench-rag → bench-embed → bench → bench-check with timing. | +18 |
+| `docs/rebaseline-runbook.md` | New runbook: when to run / what it measures / how to interpret / on regression procedure / cron integration / install-on-fresh-host snippet. Cross-references §17.57/§17.351/§17.352/§17.353/§17.357/§17.194/§17.323. | +130 |
+| `OVERVIEW.md` | this entry | +~40 |
+| **Total** | | **~+190** |
+
+Zero code changes — Makefile orchestration + Markdown only. No new deps.
+
+**Verification.** `make -n rebaseline` parses cleanly and the body shows the four-step shape expected. A live full run is ~20-45 min depending on hardware; not run in this commit (already validated each component in §17.352 / §17.353; the aggregate is mechanical composition).
+
+**Outside scope.**
+- The cron's actual quarterly fire still creates the draft PR via `quarterly_calibration_pr.sh` (§17.357 verified live). `make rebaseline` is the operator-facing companion the cron's PR-body instructions point at. The two are deliberately decoupled — the cron drafts the PR + emits alerts; the operator runs the benches.
+- `make rebaseline` doesn't currently produce a comparison summary against the previous run beyond what `bench-check` already prints. A dedicated `bench_compare.py`-driven before/after table would be cleaner; deferred.
+- ground_truth.json regen (Tier-2 #15, §17.358) is its own thread — the rebaseline is perf-only; the golden-set re-curation is quality-only.
+
+**Cohort.** Closes the perf-measurement-infrastructure cluster's operator-UX side: §17.57 framework → §17.351 macro baseline → §17.352 per-stage decomp + CI → §17.353 modernized pipeline shape → §17.354 single-command rebaseline + runbook. Tier-2 #14 done. The remaining open Tier-2 item from §17.29 is #15 (ground_truth.json regen).
+
+**Cost.** +190 LOC. Zero deps. Verification = `make -n rebaseline` (instant). Net result: an operator hand-handed a "rebaseline this quarter" task has one command + one runbook to read.
+
+---
+
 ### §17.357 quarterly calibration cron — script-header path corrected post-§17.214, live-state verified (2026-05-31)
 
 Closes the §17.323-flagged "scheduled calibration health fire" deferred item by verifying the cron is installed correctly + fixing one stale path reference in the script header that contradicted what's actually in `crontab -l`.
