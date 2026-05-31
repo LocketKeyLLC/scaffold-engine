@@ -671,6 +671,133 @@ class TestCompileOutputSynthesizedFlag:
 
 
 @pytest.mark.smoke
+class TestSynthesisPromptGuards:
+    """§17.360 — SYNTHESIS_SYSTEM + SYNTHESIS_TOOL must enforce no-fabrication
+    + placeholder-preservation + capability-boundary. Closes the homelab
+    retry's compiled_output regression (synthesizer filled in placeholders
+    like `<PROXMOX_HOST_IP>` with fabricated `192.168.1.10` / `tskey-abc...`
+    values; see OVERVIEW §17.360)."""
+
+    def test_synthesis_system_forbids_value_fabrication(self):
+        from app.modules.execution_compile import SYNTHESIS_SYSTEM
+        assert "DO NOT invent" in SYNTHESIS_SYSTEM
+        # Spot-check several value classes the clause names explicitly.
+        for marker in ("IPs", "auth keys", "API tokens", "file paths", "version"):
+            assert marker in SYNTHESIS_SYSTEM, f"missing {marker!r}"
+
+    def test_synthesis_system_requires_placeholder_preservation(self):
+        from app.modules.execution_compile import SYNTHESIS_SYSTEM
+        assert "Preserve placeholders" in SYNTHESIS_SYSTEM
+        assert "verbatim" in SYNTHESIS_SYSTEM.lower()
+        # An anti-example the clause flags must appear so the model sees
+        # what fabrication looks like.
+        assert "192.168" in SYNTHESIS_SYSTEM
+        assert "tskey-" in SYNTHESIS_SYSTEM
+
+    def test_synthesis_system_has_capability_boundary(self):
+        from app.modules.execution_compile import SYNTHESIS_SYSTEM
+        assert "Capability boundary" in SYNTHESIS_SYSTEM
+        assert "past-tense" in SYNTHESIS_SYSTEM.lower()
+
+    def test_synthesis_tool_description_mirrors_placeholder_rule(self):
+        from app.modules.execution_compile import SYNTHESIS_TOOL
+        desc = SYNTHESIS_TOOL.description
+        summary_desc = SYNTHESIS_TOOL.input_schema["properties"]["summary"]["description"]
+        # Tool-call-level reminder so the model sees the constraint at the
+        # tool boundary even if the system prompt is truncated.
+        assert "Do not invent" in desc
+        assert "preserve placeholders" in desc.lower()
+        assert "verbatim" in summary_desc.lower()
+
+
+@pytest.mark.smoke
+class TestShellGuardForSynthesis:
+    """§17.360 — Shell-tagged source nodes short-circuit synthesis the same
+    way CodeGen does. Runbooks are deliverables-as-instructions; rewriting
+    them as narrative prose silently corrupts the output (LLM helpfully
+    fills in `<PLACEHOLDER>` tokens, drops "## Run this" structure)."""
+
+    async def test_shell_leaf_skips_synthesis_strategy_0_single(self):
+        """Single-leaf with tool=Shell → guard fires, runbook returned verbatim."""
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        runbook = (
+            "## Run this\n```bash\nssh root@<PROXMOX_HOST_IP>\n```\n\n"
+            "## Verify\n- `pveversion`\n"
+        )
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Install Proxmox VE host",
+             "tool": "Shell", "status": "done", "output_text": runbook,
+             "is_output_node": True},
+        ])
+        synth_call = AsyncMock()
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch("app.model_router.tool_call", new=synth_call):
+            result, was_syn = await _compile_output("job-1", db)
+        # Runbook preserved verbatim — placeholders intact, no rewriting.
+        assert result == runbook
+        assert "<PROXMOX_HOST_IP>" in result
+        assert was_syn is False
+        synth_call.assert_not_called()
+
+    async def test_shell_only_multi_leaf_skips_synthesis(self):
+        """All-Shell multi-leaf set → homogeneous-tool detection passes
+        source_tool='Shell' so the guard short-circuits. Closes the
+        homelab retry's compile-step regression."""
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Install host",
+             "tool": "Shell", "status": "done",
+             "output_text": "## Run this\nssh root@<HOST>\n",
+             "is_output_node": True},
+            {"node_key": "T2", "title": "Configure VLANs",
+             "tool": "Shell", "status": "done",
+             "output_text": "## Run this\npvesh create /nodes/<NODE>/network\n",
+             "is_output_node": True},
+        ])
+        synth_call = AsyncMock()
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch("app.model_router.tool_call", new=synth_call):
+            result, was_syn = await _compile_output("job-1", db)
+        # Both runbooks present, placeholders intact, no LLM rewrite.
+        assert "<HOST>" in result
+        assert "<NODE>" in result
+        assert was_syn is False
+        synth_call.assert_not_called()
+
+    async def test_mixed_shell_llm_multi_leaf_still_synthesizes(self):
+        """Heterogeneous leaf set (Shell + LLM) → no homogeneous-tool
+        short-circuit; synthesis runs but is constrained by the new
+        SYNTHESIS_SYSTEM clauses (covered by TestSynthesisPromptGuards)."""
+        from app.config import settings
+        from app.modules.execution_agent import _compile_output
+
+        db = _make_db_with_brief([
+            {"node_key": "T1", "title": "Install host",
+             "tool": "Shell", "status": "done",
+             "output_text": "## Run this\nssh root@<HOST>\n",
+             "is_output_node": True},
+            {"node_key": "T2", "title": "Document setup",
+             "tool": "LLM", "status": "done",
+             "output_text": "Documentation prose about the install.",
+             "is_output_node": True},
+        ])
+        with patch.object(settings, "compile_synthesis_enabled", True), \
+             patch(
+                 "app.model_router.tool_call",
+                 new=AsyncMock(return_value=_synthesis_response(
+                     "Synthesized narrative covering install and documentation.",
+                 )),
+             ):
+            result, was_syn = await _compile_output("job-1", db)
+        assert result == "Synthesized narrative covering install and documentation."
+        assert was_syn is True
+
+
+@pytest.mark.smoke
 class TestSkippedVerifyBanner:
     """X.2 — when N nodes were skipped during execution, prepend an
     operational banner so consumers can tell the deliverable doesn't

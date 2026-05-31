@@ -42,7 +42,9 @@ SYNTHESIS_TOOL = Tool(
     description=(
         "Rewrite the heuristic compiled output into a coherent narrative "
         "that preserves every concrete fact, name, number, and code block "
-        "while removing redundancy across sections."
+        "while removing redundancy across sections. Do not invent values "
+        "(IPs, keys, hostnames, hashes, paths) that are not in the source; "
+        "preserve placeholders verbatim."
     ),
     input_schema={
         "type": "object",
@@ -53,7 +55,9 @@ SYNTHESIS_TOOL = Tool(
                     "The synthesized narrative. Plain prose that flows "
                     "section-to-section. No section headers, no horizontal "
                     "rules, no preamble. Preserve code blocks verbatim "
-                    "inside their original triple-backtick fences."
+                    "inside their original triple-backtick fences. "
+                    "Preserve any placeholders (<PROXMOX_HOST_IP>, "
+                    "${VAR}, {{x}}) verbatim — do not fill them in."
                 ),
             },
         },
@@ -79,7 +83,27 @@ prose with topic transitions.
 - Drop any 'Partial deliverable' preamble, but keep the substantive content.
 - Length: roughly the same total length as the input (don't compress aggressively).
 - Report your output by calling the render_summary tool. Do NOT respond with \
-prose; the deliverable must come from the tool call."""
+prose; the deliverable must come from the tool call.
+
+VALUE-FABRICATION GUARDS (§17.360 — closes the synthesizer hole left by §17.359):
+- DO NOT invent IPs, hostnames, MAC addresses, ports, auth keys, API tokens, \
+SSH keys, password hashes, file paths, container IDs, version numbers, dates, \
+or any other concrete value that is NOT explicitly present in the source \
+sections. The synthesizer's job is rewriting, not filling in.
+- Preserve placeholders VERBATIM — strings like `<PROXMOX_HOST_IP>`, \
+`<TAILSCALE_AUTH_KEY>`, `${VAR_NAME}`, `{{value}}`, `<...>`, `your-host-here` \
+must appear in the output exactly as they appear in the source. Do not replace \
+them with example-looking values (`192.168.1.10`, `tskey-abc123…`, \
+`pve01.internal`); those are fabrication, not synthesis.
+- If a section says "Inputs needed: X" or marks a value as unknown, propagate \
+that "needed/unknown" status into the narrative. Never invent the value to \
+make the prose flow more naturally.
+- Capability boundary: you do not have shell access; you have not executed \
+any command in the source. Do not introduce past-tense narration that wasn't \
+already in the source ("Created the file", "Installed the package", \
+"tcpdump shows…", "Verified at /var/log/…"). If the source frames a step as \
+"Run this: <cmd>", the synthesis must keep that forward-tense framing — do \
+not rewrite it as "We ran <cmd> and got X"."""
 
 
 SYNTHESIS_PROMPT = """PROJECT GOAL:
@@ -107,14 +131,18 @@ async def _synthesize_compiled_output(
     Sprint W.7. Fail-open: any LLM/parse failure returns ``None`` and the
     caller falls back to the heuristic body unchanged.
 
-    CodeGen guard: ``source_tool='CodeGen'`` short-circuits without an LLM
-    call. The deliverable IS executable code; rewriting it as prose would
-    silently corrupt the output. Logged at INFO so operators can spot when
-    the guard fired.
+    Verbatim-tool guard: ``source_tool in {'CodeGen', 'Shell'}`` short-circuits
+    without an LLM call. The deliverable IS executable code (CodeGen) or a
+    host runbook the human will execute (Shell, §17.359); rewriting either as
+    prose would silently corrupt the output. §17.360 generalizes the original
+    W.7 CodeGen-only guard to Shell after the homelab retry surfaced the
+    synthesizer fabricating concrete values (`tskey-abc123…`, hardcoded IPs)
+    in place of the runbook's `<PLACEHOLDER>` tokens. Logged at INFO so
+    operators can spot when the guard fired.
     """
-    if source_tool == "CodeGen":
+    if source_tool in ("CodeGen", "Shell"):
         logger.info(
-            "compile_synthesis_skip_codegen: job=%s strategy=%s tool=%s",
+            "compile_synthesis_skip_verbatim: job=%s strategy=%s tool=%s",
             job_id, source_strategy, source_tool,
         )
         return None
@@ -371,14 +399,24 @@ async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
             )
             return await _finish(text_value, was_syn)
         heuristic = _join_sections([_format_section(n) for n in explicit])
-        # Multi-leaf: source_tool is None so the CodeGen guard doesn't
-        # short-circuit on a heterogeneous leaf set. If any leaf is
-        # CodeGen the synthesized prose still respects the verbatim-code
-        # rule via SYNTHESIS_SYSTEM ("preserve code blocks verbatim
-        # inside their original triple-backtick fences").
+        # Multi-leaf: if every leaf is the same verbatim-tool (CodeGen or
+        # Shell), pass that tool through so `_synthesize_compiled_output`
+        # short-circuits and the heuristic — which is the joined runbooks
+        # or code — is preserved verbatim. §17.360: closes the case where
+        # all 7 Shell leaves rendered through synthesis and the LLM
+        # rewriter helpfully filled in `<PROXMOX_HOST_IP>` placeholders
+        # with fabricated `192.168.x.x` values. Heterogeneous leaf set
+        # (mixed LLM + Shell + CodeGen) keeps source_tool=None so
+        # synthesis runs, constrained by the §17.360 fabrication clauses
+        # in SYNTHESIS_SYSTEM.
+        leaf_tools = {n["tool"] for n in explicit}
+        if len(leaf_tools) == 1 and next(iter(leaf_tools)) in ("CodeGen", "Shell"):
+            homogeneous_tool: str | None = next(iter(leaf_tools))
+        else:
+            homogeneous_tool = None
         text_value, was_syn = await _maybe_synthesize(
             job_id=job_id, heuristic=heuristic,
-            strategy="0_multi_leaf", source_tool=None, db=db,
+            strategy="0_multi_leaf", source_tool=homogeneous_tool, db=db,
         )
         return await _finish(text_value, was_syn)
 

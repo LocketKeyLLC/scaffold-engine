@@ -60,6 +60,14 @@ class TestSystemForTool:
         assert "Run this" in pa.EXECUTION_SYSTEM_RUNBOOK
         assert "past-tense" in pa.EXECUTION_SYSTEM_RUNBOOK.lower()
 
+    def test_llm_prompt_mirror_has_no_fabrication_guard(self):
+        # §17.360 — the assist-mode mirror must carry the same anti-
+        # fabrication clauses as the autonomous executor's LLM prompt.
+        # Without this mirror, an assist-mode operator sees a different
+        # prompt than the autonomous run, breaking the W.10 invariant.
+        assert "No-fabrication guard" in pa.EXECUTION_SYSTEM_LLM
+        assert "preserve the placeholder verbatim" in pa.EXECUTION_SYSTEM_LLM
+
 
 # ---------------------------------------------------------------------------
 # truncate_output — head/tail preserve + marker.

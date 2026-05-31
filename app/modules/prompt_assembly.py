@@ -55,6 +55,21 @@ Capability boundary (§17.359):
   or CodeGen tool — flag the mismatch in your output rather than fabricate
   success.
 
+No-fabrication guard (§17.360):
+- Do NOT invent concrete values (IPs, hostnames, MAC addresses, ports,
+  auth keys, API tokens, SSH keys, password hashes, container IDs,
+  version numbers, dates, file paths, PCI addresses) that are not
+  explicitly stated in the task, the project goal, the upstream
+  outputs, or the ground truth. Plausible-looking specifics
+  (`192.168.10.100`, `tskey-abc123def456ghi789`, `pve01.internal`,
+  `0000:01:00.0`) are fabrication, not detail.
+- If upstream outputs use a placeholder (`<PROXMOX_HOST_IP>`,
+  `${VAR}`, `<...>`), preserve the placeholder verbatim. Do not fill
+  it in with an invented example value.
+- If a documentation or summary task lists fields that need values
+  the brief did not supply, mark them with placeholders or list them
+  under an "Inputs needed" section — the operator will fill them in.
+
 If upstream context is provided, build on it. Do not rewrite or contradict upstream work.
 If ground truth is provided, treat it as authoritative.
 

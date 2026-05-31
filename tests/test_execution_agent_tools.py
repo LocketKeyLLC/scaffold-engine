@@ -232,3 +232,23 @@ class TestSystemPromptRouting:
         from app.config import VALID_TOOLS
         assert "Shell" in VALID_TOOLS
 
+    # ----- §17.360 — LLM nodes must not fabricate concrete values -----
+
+    def test_llm_prompt_has_no_fabrication_guard(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        # The §17.360 clause closes the homelab T9 (documentation, tool=LLM)
+        # regression that invented `192.168.10.100`, `tskey-abc123...`,
+        # `pve01.internal`, `0000:01:00.0` instead of preserving the
+        # upstream Shell nodes' <PLACEHOLDER> tokens.
+        assert "No-fabrication guard" in EXECUTION_SYSTEM_LLM
+        for marker in ("IPs", "auth keys", "hostnames", "PCI"):
+            assert marker in EXECUTION_SYSTEM_LLM, f"missing {marker!r}"
+
+    def test_llm_prompt_requires_placeholder_preservation(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        assert "preserve the placeholder verbatim" in EXECUTION_SYSTEM_LLM
+        # Anti-example markers — model should see what fabrication looks like
+        # so it can pattern-match against its own draft.
+        assert "192.168.10.100" in EXECUTION_SYSTEM_LLM
+        assert "tskey-" in EXECUTION_SYSTEM_LLM
+

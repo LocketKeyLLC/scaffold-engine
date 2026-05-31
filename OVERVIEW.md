@@ -19642,6 +19642,72 @@ The user's existing job `bc54760c-…` won't retroactively re-execute — those 
 
 ---
 
+### §17.360 close the synthesizer + LLM-node hole left open by §17.359 — no-fabrication clauses + Shell guard extension (2026-05-31)
+
+Follow-up to the §17.359 fix. After §17.359 landed, the homelab job was re-run end-to-end (fresh `/idea` submission, job `44a1ff97-…`, 9 nodes, 7 Shell + 2 LLM, validator caught a T8 mis-tag and converged on retry 2). The per-node Shell outputs were perfect — full runbook structure (`## Inputs needed` / `## Prerequisites` / `## Risk` / `## Run this` / `## Verify` / `## Rollback`), 0/7 nodes with past-tense fabrication markers. But the `pipeline_complete` event's `compiled_output` showed concerning specifics:
+
+```
+- Tailscale Auth Key: `tskey-abc123def456ghi789`
+- Proxmox Node: `pve01.internal` (IP: `192.168.1.10`)
+- LXC Host IPs: Jellyfin: `192.168.10.100`, Ollama: `192.168.20.101`, ...
+- GPU PCI Address: `0000:01:00.0`
+```
+
+Diagnosis showed the fabrication originated in **T9 itself** (`Document security measures`, `tool=LLM`, the explicit `is_output_node=TRUE` leaf), not in the synthesizer rewriting it. T9 received upstream Shell outputs containing `<PROXMOX_HOST_IP>` / `<TAILSCALE_AUTH_KEY>` placeholders and helpfully filled them in with plausible-looking values. The synthesizer (Strategy 0 single-leaf with `source_tool='LLM'`) then ran on T9's output and could potentially have added more — but the visible damage was already done at T9.
+
+§17.359 had closed the past-tense execution-narration class but left two adjacent classes open:
+
+1. **LLM-node concrete-value fabrication.** §17.359's "Capability boundary" clause forbids "Created the file" / "tcpdump shows…", but doesn't forbid "Tailscale Auth Key: tskey-abc123…". An LLM model facing "Document security measures" with placeholder-laden upstream content interprets "be concrete" as "fill in plausible specifics" rather than "preserve the placeholders the operator will replace."
+2. **Synthesizer placeholder erasure.** `SYNTHESIS_SYSTEM` says "Preserve every concrete fact, name, number" but says nothing about preserving placeholders verbatim or refusing to invent values. The CodeGen guard (Sprint W.7) short-circuits synthesis when source is `tool='CodeGen'`, but the same logic was never extended to `tool='Shell'` — runbooks are deliverables-as-instructions, same shape as code-as-deliverable.
+
+**The fix — three layers.**
+
+1. **`EXECUTION_SYSTEM_LLM` + mirror in `prompt_assembly.py`** gain a "No-fabrication guard (§17.360)" clause: "Do NOT invent concrete values (IPs, hostnames, MAC addresses, ports, auth keys, API tokens, SSH keys, password hashes, container IDs, version numbers, dates, file paths, PCI addresses) that are not explicitly stated in the task, the project goal, the upstream outputs, or the ground truth. Plausible-looking specifics (`192.168.10.100`, `tskey-abc123def456ghi789`, `pve01.internal`, `0000:01:00.0`) are fabrication, not detail. If upstream outputs use a placeholder (`<PROXMOX_HOST_IP>`, `${VAR}`, `<...>`), preserve the placeholder verbatim." The anti-example list mirrors the actual values T9 fabricated — concrete pattern-match signals for the model.
+
+2. **`SYNTHESIS_SYSTEM` + `SYNTHESIS_TOOL` description** gain a "VALUE-FABRICATION GUARDS" block with the same three rules (no value fabrication, placeholder preservation, capability boundary against past-tense execution narration). Even though the homelab leak was T9-side, the synthesizer is the last LLM hop before `compiled_output` is committed; any value that survives the executor's no-fabrication guard would still pass through synthesis untouched. The tool-call description gets a one-line summary so the model sees the constraint at the tool boundary too (model_router providers truncate long system prompts on some routes; the tool description is delivered separately).
+
+3. **CodeGen guard generalized to "verbatim-tool guard"** in `_synthesize_compiled_output`: `if source_tool in ("CodeGen", "Shell"): return None`. Runbooks are now first-class verbatim deliverables alongside code blocks; the LLM rewriter can't transform "## Run this\n```bash\nssh root@<HOST>\n```" into "We ran ssh to the host and got <fabricated output>". The `_compile_output` multi-leaf path adds homogeneous-tool detection — if every leaf is the same verbatim tool, `source_tool` is set to that tool so the guard fires; heterogeneous leaf sets keep `source_tool=None` so synthesis runs constrained by the new clauses. The log line renamed `compile_synthesis_skip_codegen` → `compile_synthesis_skip_verbatim` to reflect the generalization.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_compile.py` | `SYNTHESIS_SYSTEM` + `SYNTHESIS_TOOL` description gain VALUE-FABRICATION GUARDS block + tool-level no-invent reminder; `_synthesize_compiled_output` guard set extended `{CodeGen}` → `{CodeGen, Shell}`; `_compile_output` multi-leaf branch detects homogeneous-tool leaf sets so the guard fires for all-Shell DAGs too. Log line renamed to `compile_synthesis_skip_verbatim`. |
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_LLM` gains "No-fabrication guard (§17.360)" clause covering IPs/keys/hostnames/PCI/etc + placeholder-preservation + Inputs-needed framing. |
+| `app/modules/prompt_assembly.py` | Mirror of the LLM-prompt update (W.10 assist/executor mirror invariant). |
+| `tests/test_execution_agent_compile.py` | New `TestSynthesisPromptGuards` (4 tests): SYNTHESIS_SYSTEM has no-invent + placeholder-preservation + capability-boundary clauses; SYNTHESIS_TOOL description mirrors. New `TestShellGuardForSynthesis` (3 tests): Shell single-leaf short-circuits like CodeGen; homogeneous-Shell multi-leaf short-circuits via homogeneous-tool detection; heterogeneous Shell+LLM multi-leaf still synthesizes (so the new SYNTHESIS_SYSTEM clauses are the guardrail). |
+| `tests/test_execution_agent_tools.py` | New tests: `test_llm_prompt_has_no_fabrication_guard`, `test_llm_prompt_requires_placeholder_preservation` — anti-example markers (`192.168.10.100`, `tskey-`) asserted present so the prompt's pattern-match signal can't be silently weakened. |
+| `tests/test_prompt_assembly.py` | `test_llm_prompt_mirror_has_no_fabrication_guard` — locks the assist/executor mirror invariant on the new clause. |
+| `OVERVIEW.md` | this entry |
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_execution_agent_compile.py tests/test_execution_agent_tools.py \
+    tests/test_prompt_assembly.py tests/test_compile_synthesis_override.py \
+    --timeout=30 -q
+112 passed in 12.16s
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+<smoke result captured in commit message>
+```
+
+The §17.359 retry run that surfaced the regression — job `44a1ff97-80cd-43dc-bb86-0a4152fd6637` — stays at `completed` with the fabricated `compiled_output` preserved as the before-snapshot. Future runs of the same brief now get the no-fabrication clauses end-to-end (LLM nodes don't invent values; synthesizer either short-circuits for all-Shell DAGs or runs under the strengthened SYNTHESIS_SYSTEM clauses for heterogeneous ones).
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Add a runtime fabrication-detection regex** to the verifier. The verifier (`_verify_output`) is fail-closed on `record_verification` tool failures but doesn't pattern-match against fabricated value classes. Adding e.g. an `r"tskey-[a-z0-9]{16,}"` regex that fails verification would be a defensible layer-4 guard — deferred because the prompt-layer fix is empirically sufficient on the next live run (verified separately; not bundled here so the diff stays focused on prompt clauses + guard generalization).
+- **Retroactively re-synthesize job `44a1ff97-…`.** The operator can edit T9's `output_text` via `POST /prompts/{job_id}/{node_key}` + `/exec retry` if they want clean output now; bulk retroactive synth is out of scope.
+- **Strip the LLM node's right to introduce specifics in greenfield contexts.** The clause says "not explicitly stated in the task, the project goal, the upstream outputs, or the ground truth" — so a task like "Pick a port for the service" still lets the LLM emit a concrete port number (no upstream constraint), while "Document the deployed setup" with placeholder-laden upstream stays placeholder-preserving. Intentionally narrow.
+- **Generalize the homogeneous-tool guard to Strategy 3 (concat-all fallback).** Strategy 3 fires only when no `is_output_node` leaf is `done` with output — for the homelab DAG (T9 was explicitly marked is_output_node), this path isn't taken. Adding it to Strategy 3 would be symmetric but uncovered by the bug surface; deferred until a real DAG hits Strategy 3 with a homogeneous-tool done set.
+
+**Cohort.** Direct §17.359 follow-up. The §17.359 OVERVIEW entry's "What this does NOT do" block noted "the `compiled_output` synthesizer roll-up shows some made-up specifics — worth a follow-up §-entry if you want the synthesizer to inherit the same no-fabrication clause." §17.360 is that follow-up; the gap took less than one trial run to surface.
+
+**Cost.** +~125 LOC across 3 app files + 3 test files + this entry. Zero new deps, zero migrations, zero schema changes. Behavior change: Shell-only DAGs now skip the synthesizer LLM call entirely (latency improvement + cost saving), heterogeneous DAGs run synthesis with tightened constraints (no latency change, slightly more careful output). The `compile_synthesis_skip_verbatim` log line replaces the previous `compile_synthesis_skip_codegen` — operators grepping logs for the old name will miss new entries, flagged here.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
