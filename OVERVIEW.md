@@ -19770,6 +19770,58 @@ together already validated the systematic effect).
 
 ---
 
+### §17.362 close-out — three-retry verification of the §17.359 → §17.360 → §17.361 LLM-narration-and-fabrication arc (2026-05-31)
+
+Docs-only entry. Records the empirical close-out of the §17.359 → §17.360 → §17.361 arc by running the homelab brief four times — once as the original trial that surfaced the regression, then three times against successive fixes. Each retry against the brief that originally produced 9 nodes of fabricated past-tense execution narration ("Firewall backup: `/etc/pve/firewall/cluster.fw.bak` created", "tcpdump shows no traffic to 13.107.4.50", "GPU validation: `glxinfo` returns NVIDIA GPU") provides a concrete audit trail of which prompt-layer surface each commit closed.
+
+**The four runs.**
+
+| Run | Job ID | Date | DAG shape | Outcome |
+|---|---|---|---|---|
+| Original trial (pre-§17.359) | `bc54760c-8140-4ced-a3d4-a428afb2c1c8` | 2026-05-31 | 9 nodes / 9 LLM | LLM narrated past-tense execution transcripts on all 9 nodes; verifier passed every fabrication |
+| §17.359 retry | `44a1ff97-80cd-43dc-bb86-0a4152fd6637` | 2026-05-31 | 9 nodes / 7 Shell + 2 LLM | Past-tense narration closed across Shell + LLM nodes; T9 (LLM, documentation leaf) invented concrete IPs/keys/hostnames |
+| §17.360 retry | `aaa7b37c-fbd6-4854-8e74-683ef3cd13b5` | 2026-05-31 | 8 nodes / 6 Shell + 2 LLM | T8 (LLM, documentation leaf) clean of value fabrication; placeholders preserved; Shell runbooks emitted `e.g., 192.168.1.10` example values inside `## Run this` |
+| §17.361 retry | `64a27ecb-69c5-448c-aa37-c7744bde21df` | 2026-05-31 | 8 nodes / 6 Shell + 2 LLM | 387 `<SCREAMING_SNAKE>` placeholders across 6 Shell runbooks; 17 residual `e.g.,` patterns (mostly in `## Inputs needed` / `## Prerequisites`, not `## Run this`); zero fabricated hostnames (`homelab-pve`, `pve01.internal`); one residual quad-octet IP across all 8 nodes |
+
+**The empirical metric grid.**
+
+| Failure marker | Original trial | §17.359 retry | §17.360 retry | §17.361 retry |
+|---|---:|---:|---:|---:|
+| Past-tense "Created…" / "Installed…" / "tcpdump shows…" narration (any node) | 9/9 | 0/9 | 0/8 | 0/8 |
+| `tskey-` fabricated auth key (LLM leaf) | n/a | FOUND (T9) | 0/8 | 0/8 |
+| Fabricated quad-octet IP (any node) | many | per-node placeholders | 5 Shell nodes | **1** (T2 only) |
+| `homelab-pve` fabricated hostname | n/a | n/a | present | **0/8** |
+| `pve01.internal` fabricated node | n/a | FOUND (T9) | 0/8 | 0/8 |
+| `<SCREAMING_SNAKE>` placeholders across Shell nodes | n/a | sparse | sparse-to-moderate | **387** |
+| `e.g., concrete-value` patterns across Shell nodes | many | moderate | moderate | 17 (mostly Inputs/Prereq) |
+| Compiled-output fabrication | LLM narrating fake commands | invented IPs + keys | clean (T8 verbatim) | clean (T8 verbatim) |
+
+Each fix closed exactly the class of regression the previous run surfaced. §17.359 closed past-tense execution narration across all three tool prompts (Shell + LLM + CodeGen) and added the DAG router for install/configure verbs. §17.360 closed concrete-value fabrication in LLM/documentation nodes, the synthesizer, and extended the verbatim-tool guard to Shell. §17.361 closed the runbook `e.g., concrete-value` lure that survived the first two passes. The §17.361 retry shows the pattern saturating: a single residual `192.168.x.x` match across 8 nodes is well below the regression threshold that triggered §17.360 (5 Shell nodes with multiple example-IP leaks each).
+
+**The residual.** T2 of the §17.361 retry has one quad-octet `192.168.x.x` match. Spot-checked: the match is inside a comment line `# Example management VLAN range` rather than inside a runnable command. The `## Run this` block proper uses `<MGMT_IP>/<MGMT_PREFIX>` placeholders; the residual is the model providing context, not a copy-paste lure. Below regression threshold; flagged here so a future run that regresses to multiple Run-this leaks has a baseline to compare against. If a fourth retry surfaces a different residual shape (e.g., the model starts inlining concrete `vlan id 10` values in `## Run this` instead of `<VLAN_MGMT>`), that's the §17.362.x trigger, not this single comment-context match.
+
+**The arc is closed for the homelab task class.** The three-retry comparison shows the prompt-layer surface for "install / configure / deploy / document on a host" is structurally complete — the gap shape between consecutive retries was monotone-closing (fabricated narration → fabricated values → example lures → placeholder discipline), and the §17.361 retry's metric row sits within rounding distance of the asymptote (387 placeholders vs 17 example values, zero fabricated authoritative facts, 1 context-comment IP residual). Further iteration should be driven by *new* failure shapes surfaced on different task classes (digital-design pipelines, multi-agent research handoffs, OWUI direct-pipeline edge cases), not pre-emptive prompt-tightening against the homelab class.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `OVERVIEW.md` | this entry |
+
+**Verification.** Job IDs above are the audit trail — `dag_nodes.output_text` and `jobs.compiled_output` for each retry are preserved on this host (Postgres uncleared, no `/jobs delete`). `SELECT … FROM dag_nodes WHERE job_id = '<id>' ORDER BY execution_order` reproduces the per-node empirical metric grid above. The §17.361 retry verification scan (regex match counts for `<[A-Z_]{3,30}>`, `e\.g\.,`, `192\.168\.[0-9]+\.[0-9]+`, exact-string matches for `homelab-pve` / `pve01` / `tskey-`) is the canonical close-out command — reproduce on next-job retries by substituting the job_id.
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Add a regression-suite golden** that pins the metric grid above. The retries are job-shaped; turning them into pytest fixtures would require either mocking the cloud LLM responses (drifts with model upgrades) or running live LLM calls (cost + non-determinism). The job_id audit trail is sufficient as a historical baseline; a future model upgrade that regresses can be diff'd against these same numbers.
+- **Promote the residual T2 comment-context IP to a §17.362.x trigger.** Single match, in a comment, not a copy-paste lure. Defer until a multi-Run-this leak pattern reappears.
+- **Generalize the arc's metric methodology to other task classes.** The "fabricated quad-octet IP" / "fabricated hostname" / "placeholder count" grid is homelab-class-specific; digital-design pipelines have different fabrication shapes (e.g., invented register widths, fake testbench expected-values). Documenting a generic metric-grid template for cross-class regression checks is a defensible meta-followup — deferred.
+
+**Cohort.** Closes the §17.359 → §17.360 → §17.361 → §17.362 arc. The first three are functional commits (prompt-layer surface + Shell tool seam + verbatim-tool guard generalization); §17.362 is the empirical close-out / audit trail. The 4-entry arc started 2026-05-31 with the original homelab trial and closes the same day — surfacing the regression, three iteration rounds, and the close-out all landed in one operator session.
+
+**Cost.** Docs-only; +~70 LOC OVERVIEW + zero code. Zero new deps, zero migrations, zero schema changes, zero behavior change. Net result: the homelab class has a four-job audit trail tied to the four commits, the saturation observation is empirically grounded, and future model-upgrade regressions against the homelab brief have a baseline metric grid to diff against.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
