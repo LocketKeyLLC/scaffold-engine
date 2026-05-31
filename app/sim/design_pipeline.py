@@ -127,18 +127,56 @@ async def _set_job_status(
     db: AsyncSession,
     job_id: uuid.UUID,
     new_status: str,
-) -> None:
-    await db.execute(
+) -> bool:
+    """Atomically set status, refusing to overwrite ``'cancelled'``.
+
+    §17.356 — pre-§17.356 this unconditionally overwrote whatever
+    status was in place, so a ``POST /jobs/{id}/cancel`` (§17.322)
+    landing mid-stage would be silently clobbered by the stage's
+    success/failure write. Operator's cancel intent lost; design
+    pipeline ran to completion regardless. The §17.350 entry called
+    this out as one of two genuinely open operator-driven items.
+
+    Now uses the same ``status != 'cancelled'`` guard pattern that
+    ``cancel_active_job`` uses on the other side of the race, so
+    cancel is the strictly-sticky terminal state during a stage.
+    Returns True on transition, False if the row was already
+    cancelled — caller emits an SSE ``cancelled`` event and stops
+    instead of yielding ``stage_done`` against a now-cancelled job.
+    """
+    result = await db.execute(
         text(
             """
             UPDATE jobs
             SET status = :status, updated_at = NOW()
             WHERE id = :id
+              AND status != 'cancelled'
             """
         ),
         {"id": str(job_id), "status": new_status},
     )
     await db.commit()
+    return bool(result.rowcount)
+
+
+async def _job_was_cancelled(
+    db: AsyncSession, job_id: uuid.UUID,
+) -> bool:
+    """§17.356 — quiet probe: did the operator cancel mid-stage?
+
+    Used by stage handlers after a long await (LLM call, ngspice
+    iteration loop) to detect whether to emit ``cancelled`` instead
+    of the stage's normal outcome. The status SELECT is cheap and
+    runs outside any FOR UPDATE lock; race with a concurrent
+    /cancel is acceptable — worst case the next status write
+    becomes the loser via `_set_job_status`'s WHERE guard.
+    """
+    row = await db.execute(
+        text("SELECT status FROM jobs WHERE id = :id"),
+        {"id": str(job_id)},
+    )
+    r = row.mappings().first()
+    return r is not None and r["status"] == "cancelled"
 
 
 async def _fetch_design_job(
@@ -372,6 +410,27 @@ async def advance_design_stage(
         yield _sse("done", {"ok": False})
         return
 
+    # §17.356 — precondition probe: if the operator already cancelled
+    # this job (via POST /jobs/{id}/cancel, §17.322), refuse to advance.
+    # Mirrors execute_all_nodes' precondition check; pre-§17.356 the
+    # design pipeline had no such guard and would happily transition a
+    # cancelled job through topology → planning → executing → completed,
+    # silently overwriting the cancel.
+    if job.get("status") == "cancelled":
+        yield _sse(
+            "cancelled",
+            {
+                "stage": stage,
+                "job_id": str(job_id),
+                "reason": (
+                    "job was cancelled before this stage started — "
+                    "refusing to advance. POST /jobs/{id}/resume to lift."
+                ),
+            },
+        )
+        yield _sse("done", {"ok": False})
+        return
+
     spec_row = await _fetch_spec_for_job(db, job_id)
     if spec_row is None:
         yield _sse(
@@ -397,6 +456,19 @@ async def advance_design_stage(
             yield _sse(
                 "stage_error",
                 {"stage": stage, "errors": [str(exc)]},
+            )
+            yield _sse("done", {"ok": False})
+            return
+        # §17.356 — post-await cancellation check. select_topologies
+        # is LLM-driven and can take 30-90 s; an operator may cancel
+        # during that window. Honor it by emitting 'cancelled' and
+        # NOT writing stage_done / not flipping status to anything
+        # that would clobber the sticky 'cancelled'.
+        if await _job_was_cancelled(db, job_id):
+            yield _sse(
+                "cancelled",
+                {"stage": stage, "job_id": str(job_id),
+                 "reason": "cancelled during topology selection"},
             )
             yield _sse("done", {"ok": False})
             return
@@ -487,6 +559,18 @@ async def advance_design_stage(
             )
             yield _sse("done", {"ok": False})
             return
+        # §17.356 — post-await cancellation check. size_device /
+        # size_digital_device runs an LLM+sim iteration loop bounded
+        # by device_sizing_max_iterations (default 3) and can take
+        # several minutes. Cancel during the loop is honored here.
+        if await _job_was_cancelled(db, job_id):
+            yield _sse(
+                "cancelled",
+                {"stage": stage, "job_id": str(job_id),
+                 "reason": "cancelled during device sizing"},
+            )
+            yield _sse("done", {"ok": False})
+            return
         yield _sse("stage_done", sizing_dict)
         if not converged_flag:
             # Job stays in ``executing`` — operator can re-run size
@@ -537,8 +621,35 @@ async def advance_design_stage(
             )
             yield _sse("done", {"ok": False})
             return
+        # §17.356 — post-await cancellation check. build_report is
+        # pure-Postgres-and-Milvus and quick (sub-second on this
+        # corpus), but a /cancel landing between our last check and
+        # the success status write would have been clobbered pre-
+        # §17.356. Now `_set_job_status` itself refuses to overwrite
+        # 'cancelled', so even if this check misses the race the
+        # cancel survives — the explicit check just lets us yield
+        # the right SSE event for cleaner client UX.
+        if await _job_was_cancelled(db, job_id):
+            yield _sse(
+                "cancelled",
+                {"stage": stage, "job_id": str(job_id),
+                 "reason": "cancelled during report build"},
+            )
+            yield _sse("done", {"ok": False})
+            return
         if doc.converged:
-            await _set_job_status(db, job_id, "completed")
+            transitioned = await _set_job_status(db, job_id, "completed")
+            if not transitioned:
+                # §17.356 — _set_job_status refused (cancelled won the
+                # race). Emit cancelled instead of stage_done so the
+                # client doesn't think we shipped a final report.
+                yield _sse(
+                    "cancelled",
+                    {"stage": stage, "job_id": str(job_id),
+                     "reason": "cancelled during final status write"},
+                )
+                yield _sse("done", {"ok": False})
+                return
         yield _sse(
             "stage_done",
             {

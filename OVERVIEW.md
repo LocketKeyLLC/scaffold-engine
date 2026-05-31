@@ -19508,6 +19508,63 @@ Goldens after unskip: `pytest tests/test_retrieval_golden.py -v --timeout=300` =
 
 ---
 
+### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
+
+Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
+
+**The fix — three layers.**
+
+1. **Sticky-cancel at the data layer.** `_set_job_status` now `UPDATE ... WHERE status != 'cancelled'`, mirroring the cancel-side CTE in `cancel_active_job` (`app/modules/execution_handler.py:253-267`). Returns `bool(rowcount)` — True on a successful transition, False when the row was already cancelled. So even if every other layer of §17.356 was missing, a `/cancel` racing the stage's terminal write would still survive.
+
+2. **Precondition probe at the top of `advance_design_stage`.** If `_fetch_design_job` returns `status == 'cancelled'`, emit a `cancelled` SSE event + `done(ok=False)` and refuse to advance. **Stage worker is never invoked.** Mirrors `execute_all_nodes`' precondition probe.
+
+3. **Post-await probes after every long-running call.** New private helper `_job_was_cancelled(db, job_id)` runs a cheap `SELECT status`. Called immediately after each of:
+   - `select_topologies` (LLM-driven, 30-90 s)
+   - `size_device` / `size_digital_device` (LLM+sim iteration loop, several minutes)
+   - `build_report` (sub-second, but covered for completeness)
+   
+   On True, emit `cancelled` + `done(ok=False)` and return. **No `stage_done` against a now-cancelled job; no terminal status write that would clobber cancel.**
+
+4. **Race-safe report finalization.** In the report stage, the `_set_job_status('completed')` write checks the bool return; on False (cancel won the race), emit `cancelled` instead of `stage_done` so SSE clients don't think a final converged report shipped.
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `app/sim/design_pipeline.py` | `_set_job_status` → bool return with `WHERE status != 'cancelled'` guard. New `_job_was_cancelled` helper. Precondition probe + 3 post-await probes + race-safe report finalization in `advance_design_stage`. Rationale comments inline tying back to §17.318 / §17.322 / `cancel_active_job`. | +90 |
+| `tests/test_design_pipeline.py` | `fake_set_status` returns True (new bool contract). Three new §17.356 regression-guard tests: `test_advance_refuses_to_advance_already_cancelled_job` (precondition), `test_advance_topology_honors_mid_stage_cancellation` (post-await), `test_set_job_status_refuses_to_overwrite_cancelled` (sticky-cancel invariant at the data layer). | +75 |
+| `OVERVIEW.md` | this entry | +~70 |
+| **Total** | | **~+235** |
+
+Zero new deps. Zero migrations. No production-call-site changes outside `app/sim/design_pipeline.py` — `_set_job_status` and `_job_was_cancelled` are module-private; the router imports only the public `advance_design_stage` / `get_design_state` / `create_design_job`.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_design_pipeline.py --timeout=30
+.................                                                        [100%]
+17 passed in 3.06s
+```
+
+Three new tests + 14 pre-existing. Broader slice (`-k "design or cancel"`):
+```
+72 passed, 3104 deselected in 46.03s
+```
+
+No regressions. The new cancellation invariants are now regression-guarded at three layers: precondition (refuse), mid-stage (probe + emit cancelled), and data (UPDATE refuses cancelled overwrite).
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Mid-LLM-call interrupt.** A `/cancel` during an in-flight `select_topologies` call doesn't interrupt the call; it's honored at the next checkpoint (right after the call returns). Aggressive mid-call cancellation would require `asyncio.CancelledError` propagation through the LLM client, the ngspice sidecar, and the Verilator sidecar — invasive and brittle. The minimum-viable contract is "if you cancel, the job's final state IS cancelled" — that's what §17.356 guarantees.
+- **Cleanup of partial sim_runs / dag_nodes / topology_selections rows.** The audit tables stay (they're the §17.147 "audit-the-attempt" invariant — operator debugging "why is this spec stuck?" wants to see what was tried). Cancelling doesn't truncate audit history.
+- **Resume-from-cancel.** `POST /jobs/{id}/resume` (§17.130) flips `cancelled` → `executing` for the regular DAG path. The design pipeline's resume story is operator-driven re-issue of `POST /design/{id}/advance?stage=...` (the stage's own status-flip will succeed once the row is no longer cancelled). Out of scope here; documented in the `cancelled` event's `reason` field ("POST /jobs/{id}/resume to lift").
+
+**Cohort.** Closes the §17.318 → §17.322 → §17.350 → §17.356 cancellation thread. §17.322 added the `/cancel` endpoint + the `cancel_active_job` data-layer atom; §17.350 surfaced that §17.318's deferred design-pipeline gap was still real; §17.356 closes the gap on the design-pipeline side. **The §17.350 "two genuinely open operator-driven items" list (§17.318 + §17.323) is now closed** — §17.357 closed §17.323; §17.356 closes §17.318.
+
+**Cost.** +235 LOC, 3 new regression-guard tests, ~3 s test verification. Zero new deps, zero migrations, zero behavior change for non-cancelled jobs (verified by all 17 existing tests passing). Net result: a `/cancel` issued during a `design_circuit` stage actually cancels — at every layer — instead of being silently overwritten by the stage's terminal write.
+
+---
+
 ### §17.355 TTFT improvement explained — Ollama keep-alive state at preflight, not a code change (2026-05-31)
 
 Closes §17.351's Outside-scope #3 ("Investigate TTFT improvement"). The 2.4-5× TTFT speedup §17.351 observed for the local 4b/7b raw-inference probes between the 2026-04-02 baselines and the 2026-05-31 baseline turned out to be a **measurement artifact**, not a real perf gain — and the data in `results.jsonl` already had the answer hiding in plain sight.

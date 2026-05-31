@@ -171,7 +171,10 @@ def _patch_chain(
         return sizing
 
     async def fake_set_status(db, jid, status):
-        return None
+        # §17.356 — `_set_job_status` now returns bool (True on transition,
+        # False if the row was already cancelled). Tests that don't care
+        # about cancellation get the default "transition succeeded" reply.
+        return True
 
     monkeypatch.setattr("app.sim.design_pipeline._fetch_design_job", fake_fetch_job)
     monkeypatch.setattr("app.sim.design_pipeline._fetch_spec_for_job", fake_fetch_spec)
@@ -433,3 +436,91 @@ async def test_get_design_state_404_on_missing(monkeypatch):
     db = make_mock_db()
     with pytest.raises(DesignJobNotFoundError):
         await get_design_state(JOB_ID, db=db)
+
+
+# ---------------------------------------------------------------------------
+# §17.356 — cancellation invariants
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+async def test_advance_refuses_to_advance_already_cancelled_job(monkeypatch):
+    """§17.356 precondition: a job already in 'cancelled' status when
+    advance_design_stage starts emits 'cancelled' + done(ok=False) and
+    never calls into the stage worker."""
+    select_calls = []
+
+    async def fake_select(spec_id, *, db, **kwargs):
+        select_calls.append(spec_id)
+        return TopologySelectionResult(ok=True, selection_id=SEL_ID, candidates=[])
+
+    _patch_chain(monkeypatch, job=_job_row(status="cancelled"), spec=_spec_row())
+    monkeypatch.setattr("app.sim.design_pipeline.select_topologies", fake_select)
+    db = make_mock_db()
+
+    events = _parse_sse(
+        await _collect(advance_design_stage(JOB_ID, "topology", db=db))
+    )
+    kinds = [e[0] for e in events]
+    assert kinds == ["cancelled", "done"]
+    assert events[-1][1]["ok"] is False
+    # Critical: stage worker MUST NOT have been invoked.
+    assert select_calls == []
+
+
+@pytest.mark.smoke
+async def test_advance_topology_honors_mid_stage_cancellation(monkeypatch):
+    """§17.356 post-await check: cancel landing during select_topologies
+    causes 'cancelled' to be emitted instead of stage_done — and
+    stage_done MUST NOT appear in the SSE stream."""
+    async def fake_select(spec_id, *, db, **kwargs):
+        return TopologySelectionResult(
+            ok=True, selection_id=SEL_ID,
+            candidates=[TopologyCandidate(
+                name="x", description="y", rationale="z", citations=["c"],
+            )],
+        )
+
+    # Job starts non-cancelled, then a mid-stage probe sees 'cancelled'.
+    _patch_chain(monkeypatch, job=_job_row(status="awaiting_confirmation"), spec=_spec_row())
+    monkeypatch.setattr("app.sim.design_pipeline.select_topologies", fake_select)
+
+    # Precondition check uses job["status"] from _fetch_design_job (which
+    # _patch_chain mocked to "awaiting_confirmation"), so it passes.
+    # The post-await check calls _job_was_cancelled — patch it to True
+    # so the stage handler honors a cancel that landed during the LLM call.
+    async def fake_was_cancelled(db, jid):
+        return True
+
+    monkeypatch.setattr(
+        "app.sim.design_pipeline._job_was_cancelled", fake_was_cancelled
+    )
+    db = make_mock_db()
+
+    events = _parse_sse(
+        await _collect(advance_design_stage(JOB_ID, "topology", db=db))
+    )
+    kinds = [e[0] for e in events]
+    assert "stage_done" not in kinds
+    assert "cancelled" in kinds
+    assert events[-1][0] == "done"
+    assert events[-1][1]["ok"] is False
+
+
+@pytest.mark.smoke
+async def test_set_job_status_refuses_to_overwrite_cancelled(monkeypatch):
+    """§17.356 sticky-cancel invariant: `_set_job_status` returns False
+    when the row was already cancelled, so the WHERE-guarded UPDATE
+    affects 0 rows and the caller can detect the race."""
+    from app.sim.design_pipeline import _set_job_status
+
+    # Mock rowcount=0 to simulate the WHERE status != 'cancelled' guard
+    # rejecting the UPDATE (i.e. the row IS cancelled).
+    db_rejected = make_mock_db(rowcount=0)
+    transitioned = await _set_job_status(db_rejected, JOB_ID, "completed")
+    assert transitioned is False
+
+    # Mock rowcount=1 simulates a successful transition.
+    db_ok = make_mock_db(rowcount=1)
+    transitioned = await _set_job_status(db_ok, JOB_ID, "completed")
+    assert transitioned is True
