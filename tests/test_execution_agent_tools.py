@@ -329,3 +329,44 @@ class TestSystemPromptRouting:
         # to MET when evidence is missing — must be called out.
         assert "Do not silently downgrade UNKNOWN to MET" in EXECUTION_SYSTEM_LLM
 
+    # ----- §17.368 — validation per-upstream evidence walk -----
+
+    def test_llm_prompt_has_per_upstream_evidence_walk_clause(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        # The §17.368 clause closes the retry's 13-MET-all-citing-T6 regression.
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        assert "Per-upstream evidence walk" in flat
+        assert "Single-upstream-bias" in flat
+        # The decision-rule phrasing the model needs to apply.
+        assert "every upstream whose `name` or `outputs` field is relevant" in flat
+
+    def test_llm_prompt_names_silently_passed_regression_as_worst_mode(self):
+        """The §17.368 clause's load-bearing meta-claim — a wrong-upstream
+        MET silently passes the regression the validation was supposed
+        to catch. Pin so a future prompt edit can't soften this."""
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        assert "silently passes a regression" in flat
+
+    # ----- §17.369 — decision-output authority -----
+
+    def test_llm_prompt_has_decision_authority_clause(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        assert "Decision-output authority" in flat
+        # The trigger condition phrasing.
+        assert "`type` = `decision`" in flat
+        # The Good/Bad framing — "advisory inspiration" vs verbatim.
+        assert "advisory inspiration" in flat
+
+    def test_codegen_prompt_has_decision_authority_clause(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_CODEGEN
+        flat = " ".join(EXECUTION_SYSTEM_CODEGEN.split())
+        assert "Decision-output authority" in flat
+        # The CodeGen-side framing — "decision is the authority; this
+        # node is the encoder" — must be present so the model treats
+        # the upstream as canonical, not advisory.
+        assert "decision node is the authority" in flat
+        # The transformation-vs-substitution distinction.
+        assert "Transformation is fine; substitution is not" in flat
+

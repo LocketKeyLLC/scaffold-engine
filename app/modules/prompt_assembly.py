@@ -124,6 +124,64 @@ Validation grounding (§17.366):
   state why (`"upstream T4 output does not contain a default-dir
   value"`). Do not silently downgrade UNKNOWN to MET.
 
+Per-upstream evidence walk (§17.368):
+- For each requirement, inspect EVERY upstream node whose deliverable is
+  relevant to that requirement; do not pick one upstream and describe it
+  while ignoring the others. Single-upstream-bias is the §17.368-tracked
+  regression — a validation report that cites all 13 MET claims against
+  the same upstream T_N missed the other 4 upstreams entirely.
+- Decision rule per requirement: list every upstream whose `name` or
+  `outputs` field is relevant; require at least one piece of evidence
+  per relevant upstream before marking MET. If only one upstream is
+  relevant, citing one is fine; if three are relevant, all three must
+  be cited.
+- Bad: requirement is "parser/CLI separation". Validator cites only T6
+  (CLI tests) and marks MET — but the separation is established by
+  T_parser (no argparse/main) AND T_cli (imports parser instead of
+  re-implementing). Without citing both, the MET verdict is unverified.
+- Good: "Parser/CLI separation: MET. T2 (parser module) defines
+  `extract_blocks()` with no argparse or `def main()` — evidence: T2
+  lines 5-15 contain only `import re`, `LANG_EXT`, and `def
+  extract_blocks`. T4 (CLI) calls `extract_blocks(text)` from the
+  imported parser — evidence: T4 line 22 contains `from parser import
+  extract_blocks`. Both nodes contribute; both are inspected."
+- If a requirement should be NOT MET but the validator picked the wrong
+  upstream to inspect and marked it MET, that is the worst failure mode
+  — it silently passes a regression the validation was supposed to
+  catch. When in doubt about which upstream is relevant, list all
+  upstreams that could be relevant and mark UNKNOWN against the ones
+  whose output_text wasn't conclusive.
+
+Decision-output authority (§17.369):
+- When an upstream node has `type` = `decision` and produces a concrete
+  output (a list of items, a default value, a chosen library, a mapping,
+  a picked alternative), downstream nodes MUST use that exact output
+  verbatim — they do NOT re-derive their own version with the model's
+  preferred "common" alternatives.
+- Bad: T_decision = "Design language map" outputs the 9-language list
+  (python, rust, bash, go, javascript, sql, yaml, json, dockerfile);
+  T_codegen = "Write CLI" hardcodes its own LANG_EXT with different
+  entries (python, bash, javascript, html, css, json, yaml, xml, sql,
+  ruby). The decision is being treated as "advisory inspiration" rather
+  than "the choice that has been made." The operator who reads the
+  brief, sees the 9-language commitment in the decision node, and then
+  finds the CLI mapping a different 10 languages gets a tool that does
+  not match the decision they signed off on.
+- Good: T_codegen reads T_decision's output as a module-level constant
+  with the exact entries the decision specified — same items, same
+  values, same order if order matters. No additions ("html seems
+  common, I'll add it"); no substitutions ("ruby seems more useful
+  than rust for this kind of tool, I'll swap"); no silent reordering.
+- The rule generalizes beyond language maps: defaults chosen by a
+  decision node ("default port = 8080"), libraries chosen ("ORM =
+  SQLAlchemy"), file formats picked, alternatives selected — all
+  upstream concrete decisions get verbatim-use treatment downstream.
+- If you genuinely cannot use the decision output verbatim (its format
+  is prose, it's incomplete, it's internally inconsistent), say so
+  explicitly: "T_decision's output lists 9 languages as prose bullets;
+  this node lifts them to a Python dict literal with the same 9 keys
+  and values." Transformation is fine; substitution is not.
+
 If upstream context is provided, build on it. Do not rewrite or contradict upstream work.
 If ground truth is provided, treat it as authoritative.
 
@@ -169,6 +227,30 @@ Brief-spec fidelity (§17.365):
   parser only, not the documentation), produce the complete set in the
   code anyway and let the documentation node summarize. Silent
   truncation in the code is the worst failure mode.
+
+Decision-output authority (§17.369):
+- When an upstream node has `type` = `decision` and produced a concrete
+  output (a list of items, a default value, a chosen library, a mapping),
+  this node MUST encode that exact output verbatim — same entries, same
+  values, same order. Do NOT re-derive a "similar" mapping with your
+  own preferred entries. The decision node is the authority; this node
+  is the encoder.
+- Bad: T_decision lists 9 languages (python, rust, bash, go, javascript,
+  sql, yaml, json, dockerfile); this node hardcodes a LANG_EXT dict
+  with python + bash + javascript + html + css + json + yaml + xml +
+  sql + ruby — same shape (a dict of 9-10 entries), different content.
+  No silent truncation (it's 10 entries, not 2) AND no silent
+  fabrication (every entry is plausible) — but four upstream entries
+  (rust, go, dockerfile, and the implicit "no html/css") have been
+  silently dropped or substituted. This is upstream-decision drift.
+- Good: this node's LANG_EXT contains exactly the upstream's 9 keys —
+  python, rust, bash, go, javascript, sql, yaml, json, dockerfile — with
+  the values the decision specified or the file extensions canonical
+  for those languages.
+- If the upstream decision output is prose (LLM decision nodes commonly
+  produce bullet lists), this node transforms it to code verbatim:
+  prose `- python: ".py"` becomes `'python': '.py'`. Transformation is
+  fine; substitution is not.
 
 If upstream context is provided, build on it. Match its conventions.
 If ground truth is provided, treat it as authoritative.

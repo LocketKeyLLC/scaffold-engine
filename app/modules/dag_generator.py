@@ -130,12 +130,15 @@ Hard rules (Shell verbs):
   or reinstall the host. Sibling deploy nodes are sibling nodes — not
   contents of each other.
 
-Hard rules (CodeGen verbs — §17.367):
-- A node named "Write CLI interface" produces ONLY the CLI entry-point
-  (argparse skeleton, `def main()`, dispatch into the parser module).
-  It does NOT also implement the parser, the extension mapping, the
-  filename pattern logic, or the tests. Those are separate nodes
-  downstream.
+Hard rules (CodeGen verbs — §17.367 + §17.370):
+- A node named "Write CLI interface", "Write entry-point", or "Write
+  command-line interface" produces ONLY the THIN ENTRY-POINT: argparse
+  setup, flag parsing, and dispatch into functions imported from the
+  upstream parser / generator / etc. modules. §17.370 — the CLI node
+  is the thin glue between argparse and the imported business logic.
+  It does NOT re-define `extract_blocks`, `generate_filename`,
+  `LANG_EXT`, or any other function that an upstream sibling already
+  exported. The CLI imports; it does not re-implement.
 - A node named "Implement <module>" or "Implement <feature>" produces
   ONLY that module/feature, as a Python module that the CLI imports.
   It does NOT also include `def main()`, an `argparse.ArgumentParser`,
@@ -188,6 +191,24 @@ different names, two incompatible `generate_filename` signatures. An
 operator can't compose them — they're independent re-implementations
 of the same program, not separable modules. The same shape as
 Anti-example 1, different tool tag.
+
+Anti-example 3 (CodeGen — §17.370, drawn from the §17.367-retry of
+the same brief — finer-grained residual). T2 ("Write code block
+parser") was clean — `import re`, `LANG_EXT`, `def extract_blocks` —
+no main, no argparse. But T4 ("Write CLI interface") contained:
+  - `def main()` + `argparse.ArgumentParser` (its actual job: the
+    thin entry-point) ✓
+  - `def parse_markdown` — T2's job (the parser) — reimplemented inline
+  - `def generate_filename` — T3's job (the filename generator) —
+    reimplemented inline with a different signature than T3 exported
+  - `LANG_EXT = {...}` — T1's decision output — re-derived with 10
+    different entries (html, css, xml, ruby) instead of T1's 9 (rust,
+    go, dockerfile)
+The CLI node became the whole program: argparse + parser + generator
++ map decision. Even though T2's scope was clean and T3's was mostly
+clean, T4 reinvented T2's and T3's contributions inline. The §17.370
+rule — CLI is the thin entry-point that imports, never reimplements —
+closes this finer-grained regression.
 
 The Good shape for the same brief:
   - T1 "Install Proxmox VE host"      → outputs: working Proxmox host with management IP

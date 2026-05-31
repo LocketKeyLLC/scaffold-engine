@@ -20111,6 +20111,140 @@ Two of the tests failed on first run with line-wrap-fragile substring asserts (`
 
 ---
 
+### §17.368 validation per-upstream evidence walk — close the §17.365-§17.367 retry's single-upstream-bias regression (2026-05-31)
+
+First fix from the §17.365-§17.367 retry (job `83fe8695-f2a0-4ef7-ae70-f7489bdf7ec5`, second run of the `mdsplit` brief). The §17.366 validation grounding clause landed cleanly at the format layer — T7's output produced 13 `MET` determinations with 12 references to upstream T-nodes, vs the original retry's 18 `must` statements with 0 upstream references. But every single MET cited the same upstream (T6, the CLI tests node). T2 (parser), T3 (filename gen), T4 (CLI), T5 (parser tests) were not cited at all. The "Parser/CLI separation: MET" claim is actually false — T4 contains both `parse_markdown` and `def main()` — but T7 marked it MET citing T6's tests, which don't even contain the implementation that establishes (or doesn't) the separation.
+
+**The failure shape.** §17.366's clause taught the model to produce a MET/NOT MET/UNKNOWN format with per-requirement evidence. It did not teach the model that "evidence" means "evidence from every upstream relevant to the requirement." The model picked the last code-bearing upstream (T6), walked its content, and called every line a MET — without inspecting the upstreams that would have surfaced the regression. Single-upstream-bias is the §17.368-tracked class: the format landed; the substance did not.
+
+This is a real regression: a wrong-upstream MET silently passes the regression the validation was supposed to catch. Specifically, the T4 reimplementation of T2 + T3 (the §17.370-tracked regression) should have been NOT MET on "Parser/CLI separation" — but T7 cited T6's tests as evidence of separation, then marked it MET, and the verifier passed the node. The validator that §17.366 produced is structurally indistinguishable from a "yes-man" validator at this granularity.
+
+**The fix.** A "Per-upstream evidence walk (§17.368)" sub-clause added to `EXECUTION_SYSTEM_LLM`'s "Validation grounding" block (mirrored in `prompt_assembly.py`). Four parts:
+
+1. **The per-requirement decision rule**: "list every upstream whose `name` or `outputs` field is relevant; require at least one piece of evidence per relevant upstream before marking MET." If only one upstream is relevant, citing one is fine; if three are relevant, all three must be cited. The decision rule converts "find evidence" into "find evidence from every relevant upstream", which is the surface §17.366 didn't cover.
+
+2. **A Bad/Good anti-example pair** drawn from this retry's T7-vs-the-actual-regression: Bad = "Parser/CLI separation: MET. T6 defines `parse_markdown()` in `parser.py`" (one upstream cited, conclusion wrong); Good = "Parser/CLI separation: MET. T2 (parser module) defines `extract_blocks()` with no argparse or `def main()` — evidence: T2 lines 5-15 contain only `import re`, `LANG_EXT`, and `def extract_blocks`. T4 (CLI) calls `extract_blocks(text)` from the imported parser — evidence: T4 line 22 contains `from parser import extract_blocks`. Both nodes contribute; both are inspected." The Good shape names both upstreams the requirement depends on; the conclusion is verifiable from the evidence.
+
+3. **The worst-failure-mode pin**: "If a requirement should be NOT MET but the validator picked the wrong upstream to inspect and marked it MET, that is the worst failure mode — it silently passes a regression the validation was supposed to catch." This is the §17.366 anti-regression that should have been there in the first place; §17.368 names it explicitly so the next prompt edit can't soften it.
+
+4. **The UNKNOWN-when-in-doubt rule**: when uncertain which upstream is relevant, list all candidates and mark UNKNOWN against the ones whose output_text wasn't conclusive — never fabricate MET from the wrong source. This extends §17.366's UNKNOWN→MET-downgrade prohibition to the wrong-upstream-MET case.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_LLM` Validation grounding block extended with "Per-upstream evidence walk (§17.368)" sub-clause — four parts, with the Bad/Good pair drawn from the §17.365-§17.367 retry's T7. |
+| `app/modules/prompt_assembly.py` | Mirror (assist/executor invariant). |
+| `tests/test_execution_agent_tools.py` | Two new tests: `test_llm_prompt_has_per_upstream_evidence_walk_clause` (clause marker phrases + decision-rule phrasing) and `test_llm_prompt_names_silently_passed_regression_as_worst_mode` (the load-bearing meta-claim pin). |
+| `tests/test_prompt_assembly.py` | `test_llm_mirror_has_per_upstream_walk_and_decision_authority` covers §17.368 mirror parity. |
+
+Ships with §17.369 + §17.370 in the same commit; verification block deferred to §17.370's entry.
+
+**Cohort.** First of the §17.368 + §17.369 + §17.370 batch. The §17.365-§17.367 retry's three regressions were all "format landed, substance partial" patterns; this batch closes the substance gap on each. §17.368 specifically addresses the validation surface.
+
+**Cost.** Combined with §17.369 + §17.370, the batch is +~110 LOC of prompt + ~50 LOC of tests + three OVERVIEW entries. §17.368's share is ~30 LOC of prompt + ~15 LOC of tests. Zero new deps, zero migrations, zero schema changes, zero behavior change for non-validation nodes.
+
+---
+
+### §17.369 decision-output authority — close upstream-decision drift on CodeGen consumers (2026-05-31)
+
+Second fix from the §17.365-§17.367 retry. The §17.365 brief-spec fidelity clause closed the silent-truncation failure (2-of-9 language map became 9-of-9 at the decision layer). But T1 ("Design language mapping", `type=decision`, `tool=LLM`) emitted the brief-faithful 9-language list as prose bullets, and then **each downstream CodeGen node independently invented its own LANG_EXT map of "common 10 languages"** that did NOT match T1:
+
+| Source | Languages in LANG_EXT |
+|---|---|
+| T1 (LLM decision, authoritative) | python, rust, bash, go, javascript, sql, yaml, json, dockerfile |
+| T2 (parser) | python, bash, javascript, **html, css**, json, yaml, **xml, txt** |
+| T3 (filename gen) | python, bash, javascript, **java, c, cpp, ruby, php**, go, rust |
+| T4 (CLI) | python, bash, javascript, **html, css**, json, yaml, **xml**, sql, **ruby** |
+
+None of T2/T3/T4 matches T1. None matches each other on the non-brief entries. The operator who reads T1's decision, signs off on the 9-language commitment, then runs the result gets a tool with a different language map per module — `LANG_EXT['rust']` exists in T3 only, `LANG_EXT['html']` exists in T2 and T4 but neither was in the brief or T1.
+
+**The failure shape.** §17.365 closed silent truncation (the bad case where the brief's 9 entries became hardcoded 2). But it didn't close upstream-decision drift (the bad case where the brief's 9 entries become invented 10 entries that miss 4 of the original 9). Each CodeGen node read the original brief, made its own "this seems like a robust language map" judgment, and emitted that — treating T1's decision as advisory inspiration rather than the authoritative output. The model interpreted "Brief-spec fidelity" as "don't be lazy" rather than "honor the upstream decision verbatim."
+
+**The fix.** A "Decision-output authority (§17.369)" clause added to both `EXECUTION_SYSTEM_LLM` and `EXECUTION_SYSTEM_CODEGEN` (mirrored in `prompt_assembly.py`). The CodeGen-side variant is sharper because the failure is most visible there:
+
+- LLM-side: "When an upstream node has `type` = `decision` and produces a concrete output, downstream nodes MUST use that exact output verbatim — they do NOT re-derive their own version with the model's preferred 'common' alternatives." Anti-example pair drawn from the retry (T1's 9 vs T2/T3/T4's drift). Generalization beyond language maps: defaults chosen, libraries chosen, file formats picked.
+
+- CodeGen-side: "The decision node is the authority; this node is the encoder." The encoder framing is the load-bearing rephrasing — the model's job isn't to "implement a good mapping" but to translate the decision into a Python constant verbatim. Bad/Good pair quantifies the regression: "Bad: this node hardcodes a LANG_EXT dict with python + bash + javascript + html + css + json + yaml + xml + sql + ruby — same shape (a dict of 9-10 entries), different content."
+
+- Both: the transformation-vs-substitution distinction. "If the upstream decision output is prose (LLM decision nodes commonly produce bullet lists), this node transforms it to code verbatim: prose `- python: ".py"` becomes `'python': '.py'`. Transformation is fine; substitution is not." The rule names the legitimate edge case (format conversion) and pins it against the illegitimate one (entry substitution).
+
+The rule generalizes to any concrete decision a `type=decision` node makes: chosen defaults, chosen libraries, picked alternatives, selected formats. The language map is the worked example because that's where the retry exhibited the regression; the abstraction covers the class.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_LLM` gains "Decision-output authority (§17.369)" clause after Validation grounding. `EXECUTION_SYSTEM_CODEGEN` gets the encoder-framed variant after Brief-spec fidelity. |
+| `app/modules/prompt_assembly.py` | Mirror of both. |
+| `tests/test_execution_agent_tools.py` | Two new tests: `test_llm_prompt_has_decision_authority_clause` (trigger condition + "advisory inspiration" Bad framing) and `test_codegen_prompt_has_decision_authority_clause` (encoder framing + transformation/substitution distinction). |
+| `tests/test_prompt_assembly.py` | `test_llm_mirror_has_per_upstream_walk_and_decision_authority` + `test_codegen_mirror_has_decision_authority`. |
+
+**Cohort.** Second of the §17.368 + §17.369 + §17.370 batch. Pairs with §17.365 — §17.365 closes "don't drop entries the brief specified", §17.369 closes "use the upstream's chosen entries verbatim, don't substitute your own." Two different failure surfaces on the same axis (faithfulness to specified vs faithfulness to decided).
+
+**Cost.** ~40 LOC of prompt + ~20 LOC of tests as part of the §17.368 + §17.369 + §17.370 batch.
+
+---
+
+### §17.370 CodeGen scope CLI-as-thin-entry-point — close T4's reimplementation of T2 + T3 inline (2026-05-31)
+
+Third fix from the §17.365-§17.367 retry. The §17.367 scope discipline clause closed the T2 ≈ T3 incompatible-API regression (both nodes producing the full program with different `generate_filename` signatures). T2 in the retry landed cleanly — `import re`, `LANG_EXT`, `def extract_blocks`, no main, no argparse. But T4 ("Write CLI interface") contained:
+
+- `def main()` + `argparse.ArgumentParser` — its actual job (the thin entry-point) ✓
+- `def parse_markdown` — T2's job, reimplemented inline
+- `def generate_filename` — T3's job, reimplemented inline with a different signature than T3 exported
+- `LANG_EXT = {...}` — T1's decision output (§17.369-tracked), re-derived with 10 different entries
+
+The CLI node became the whole program: argparse + parser + generator + map decision. Even though T2's scope was clean and T3's was mostly clean (it added a stray argparse wrapper but otherwise was scope-tight), T4 reinvented T2's and T3's contributions inline. The §17.367 anti-example covered "T2 ≈ T3 both full programs" but did not cover "T_parser clean, T_cli reimplements T_parser inline" — the second pattern is finer-grained and surfaced only after §17.367 closed the first.
+
+**The failure shape.** A "Write CLI interface" node correctly producing argparse + dispatch was the §17.367 rule's intent, but the model treated "the CLI" as "everything the CLI calls into" rather than "the thin glue between argparse and the imported business logic." Without an explicit "the CLI imports; it does not reimplement" rule, the model's default is to make the CLI standalone — runnable as a single file, no imports from siblings — which contradicts the parser-as-separate-module decomposition.
+
+**The fix.** Three layers, mirroring the §17.363 + §17.367 structure.
+
+1. **`DAG_SYSTEM`'s "Hard rules (CodeGen verbs)"** block extended with the §17.370 specifics. The first rule (Write CLI) gets a clarifying sentence: "the CLI node is the THIN ENTRY-POINT — argparse, flag parsing, and dispatch into functions imported from the upstream parser / generator / etc. modules. It does NOT re-define `extract_blocks`, `generate_filename`, `LANG_EXT`, or any other function that an upstream sibling already exported. The CLI imports; it does not re-implement." The "imports; does not re-implement" framing is the closing pin.
+
+2. **A new "Anti-example 3 (CodeGen — §17.370)"** added next to the existing Anti-examples 1 (Shell) and 2 (CodeGen §17.367). Anti-example 3 is the literal T4 regression: enumerates every function T4 contained, names which upstream the function belongs to (`def parse_markdown` — T2's job; `def generate_filename` — T3's job; `LANG_EXT` — T1's decision), and articulates the §17.370 closing claim ("CLI is the thin entry-point that imports, never reimplements"). The anti-example structure now scales: Anti-example 1 was "Install verb whole-pipeline" (homelab); Anti-example 2 was "Write CLI + Implement parser both full programs" (original mdsplit retry); Anti-example 3 is "T_parser clean, T_cli reimplements T_parser inline" (this retry's finer-grained regression).
+
+3. **`VALIDATOR_SYSTEM`'s SCOPE DISCIPLINE block** extended with the §17.370 CLI specifics. The auditor flags a CLI as scope-inflated when its output contains function definitions whose names match upstream sibling exports. The validator's existing same-tool-with-scope-marker rescue (§17.363) already routes the issue through the retry loop — no validator-side dataflow change needed beyond the prompt extension.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/dag_generator.py` | `DAG_SYSTEM`'s "Hard rules (CodeGen verbs)" Write-CLI rule extended with the §17.370 thin-entry-point + imports framing. "Anti-example 3 (CodeGen — §17.370)" block added — the literal T4 regression enumerated function-by-function with attribution to the upstream sibling each function belonged to. |
+| `app/modules/dag_validator.py` | `VALIDATOR_SYSTEM`'s SCOPE DISCIPLINE CodeGen paragraph extended with the §17.370 CLI-scope audit shape (T_cli output containing function definitions matching upstream sibling exports is scope-inflated). |
+| `tests/test_dag_generator.py` | Two new tests: `test_cli_thin_entry_point_rule_present` (the §17.370 framing markers) and `test_anti_example_3_present` (the literal Anti-example 3 block + the §17.370 closing claim). |
+| `tests/test_dag_validator.py` | `test_validator_system_documents_codegen_scope_audit` extended with §17.370 markers — the CLI imports check and the function-definition overlap audit. |
+| `OVERVIEW.md` | this entry and §17.368 + §17.369. |
+
+**Verification (full batch — §17.368 + §17.369 + §17.370).**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_execution_agent_tools.py tests/test_prompt_assembly.py \
+    tests/test_dag_generator.py tests/test_dag_validator.py \
+    tests/test_validate_dag.py --timeout=30 -q
+149 passed in 15.88s
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+<smoke result captured in commit message>
+```
+
+Unlike the §17.365 + §17.366 + §17.367 batch (which had two line-wrap-fragile test failures on first run), this batch's tests all passed first try. The whitespace-collapse pattern from the §17.367 retry's `" ".join(prompt.split())` rewrite was applied proactively to the new test assertions, so the substring matches survive line wraps from the start.
+
+**What this does NOT do** (deliberately out of scope across the §17.368 + §17.369 + §17.370 batch).
+
+- **Empirically verify the three fixes on a third `mdsplit` retry.** Each retry burns cloud LLM tokens for ~5-10 minutes and the prompt-layer fixes target generation only. The validator's W.3 retry loop and the executor's prompt-layer rules are unit-tested. Operator-driven verification recommended on the next CodeGen-class use.
+- **Add a runtime cross-node similarity / API-overlap detector.** A post-execution similarity check on `dag_nodes.output_text` for sibling nodes (e.g., shingle-hash on function-name lists, or AST-level signature diff) could catch §17.370 CLI-reimplementation cases even if the DAG generator produced scope-distinct `outputs` fields. Defensible layer-4 guard — deferred because the prompt-layer fix is empirically the closer-to-source intervention.
+- **Add similar enforcement for non-CodeGen decision propagation.** §17.369's worked example is the language-map case (CodeGen consumer); the abstraction covers any concrete decision a `type=decision` node makes. If a research-class or Shell-class retry shows a parallel regression (LLM decision picks a library, Shell node uses a different one), a class-specific anti-example would warrant a §17.36X follow-up.
+- **Refresh §17.364's metric grid with §17.368-§17.370 markers.** The §17.364 close-out documented the homelab-class fabrication + scope metric grid as a permanent diff baseline. The CodeGen-class equivalents (LANG_EXT entries per CodeGen node, sibling-API signature match, validation upstream-citation counts) deserve a parallel grid after the next retry produces a fixed baseline to compare against. Deferred to that retry's audit entry.
+
+**Cohort.** Third of the §17.368 + §17.369 + §17.370 batch and the close of the second CodeGen-class iteration. The §17.359 → §17.364 Shell-class arc + §17.365 → §17.367 first CodeGen-class iteration + this §17.368 → §17.370 second CodeGen-class iteration establish the pattern: each retry surfaces finer-grained sub-classes; each batch closes the format gap then the substance gap. The mdsplit brief has now been used as the test case for two batches; if a third retry surfaces another sub-class, the pattern continues.
+
+**Cost.** Combined with §17.368 + §17.369, the batch is +~110 LOC of prompt + ~50 LOC of tests + three OVERVIEW entries. §17.370's share is ~40 LOC of prompt + ~15 LOC of tests. Zero new deps, zero migrations, zero schema changes, zero behavior change for non-CodeGen-decomposition DAGs.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

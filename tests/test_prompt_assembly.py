@@ -87,6 +87,20 @@ class TestSystemForTool:
         assert "Brief-spec fidelity" in pa.EXECUTION_SYSTEM_CODEGEN
         assert "module-level constant" in pa.EXECUTION_SYSTEM_CODEGEN
 
+    def test_llm_mirror_has_per_upstream_walk_and_decision_authority(self):
+        # §17.368 + §17.369 — assist-mode mirror invariant.
+        flat = " ".join(pa.EXECUTION_SYSTEM_LLM.split())
+        assert "Per-upstream evidence walk" in flat
+        assert "Single-upstream-bias" in flat
+        assert "Decision-output authority" in flat
+        assert "advisory inspiration" in flat
+
+    def test_codegen_mirror_has_decision_authority(self):
+        # §17.369 — CodeGen mirror.
+        flat = " ".join(pa.EXECUTION_SYSTEM_CODEGEN.split())
+        assert "Decision-output authority" in flat
+        assert "decision node is the authority" in flat
+
 
 # ---------------------------------------------------------------------------
 # truncate_output — head/tail preserve + marker.

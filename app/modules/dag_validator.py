@@ -65,15 +65,24 @@ SCOPE DISCIPLINE (§17.363 + §17.367 — also audit for this):
 - A node whose `notes` describes work outside its name's scope (a node
   named "Configure VLAN bridges" whose notes mention installing Jellyfin,
   setting up Tailscale, etc.) is scope-inflated — flag it.
-- (§17.367) CodeGen verbs follow the same rule. A node named "Write CLI
-  interface" produces ONLY the entry-point; outputs like "complete CLI
-  tool" or "working extractor" inflate scope into what should be sibling
-  parser / test nodes. A node named "Implement <module>" produces a
-  library/module; outputs that include `def main()` or
-  `argparse.ArgumentParser` are scope-inflated. A node named "Write unit
-  tests for X" produces a test file that imports X; outputs that include
-  the implementation of X are scope-inflated (tests import; they do not
-  re-stub).
+- (§17.367 + §17.370) CodeGen verbs follow the same rule. A node named
+  "Write CLI interface" produces ONLY the entry-point; outputs like
+  "complete CLI tool" or "working extractor" inflate scope into what
+  should be sibling parser / test nodes. §17.370: more specifically, a
+  "Write CLI" node's output must NOT re-define functions that an
+  upstream sibling already exported. If T_parser ("Implement parser")
+  exports `extract_blocks`, T_cli's output must IMPORT `extract_blocks`,
+  not contain a second `def extract_blocks` or a renamed
+  reimplementation. The same applies to LANG_EXT (if a T_decision
+  upstream picked the languages, T_cli imports it) and to
+  generate_filename (if a T_gen sibling exports it). Flag the CLI as
+  scope-inflated when its output contains function definitions whose
+  names match upstream sibling exports.
+- A node named "Implement <module>" produces a library/module; outputs
+  that include `def main()` or `argparse.ArgumentParser` are
+  scope-inflated. A node named "Write unit tests for X" produces a
+  test file that imports X; outputs that include the implementation of
+  X are scope-inflated (tests import; they do not re-stub).
 
 For scope issues, use proposed_tool = current_tool (the tool itself isn't
 wrong; the scope is). Put the scope diagnosis in `reason`. The generator

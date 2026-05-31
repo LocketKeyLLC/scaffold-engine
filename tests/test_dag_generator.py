@@ -387,6 +387,26 @@ class TestToolSelectionGuide:
         # must use sibling function signatures, not re-invent them.
         assert "Sibling CodeGen nodes must have COMPATIBLE APIs" in DAG_SYSTEM
 
+    # ----- §17.370 — CLI thin-entry-point rule -----
+
+    def test_cli_thin_entry_point_rule_present(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        flat = " ".join(DAG_SYSTEM.split())
+        # The §17.370 rule — CLI imports; does not re-implement.
+        assert "thin entry-point" in flat.lower()
+        assert "The CLI imports; it does not re-implement" in flat
+
+    def test_anti_example_3_present(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        flat = " ".join(DAG_SYSTEM.split())
+        # Anti-example 3 is the §17.370 finer-grained regression — T2
+        # clean but T4 reimplements T2's parser + T3's filename gen.
+        assert "Anti-example 3 (CodeGen" in flat
+        assert "T2's job (the parser) — reimplemented inline" in flat
+        # The §17.370 closing claim — CLI is the thin entry-point that
+        # imports, never reimplements.
+        assert "thin entry-point that imports, never reimplements" in flat
+
 
 # ===========================================================================
 # Sprint W.3 — validator-driven retry loop
