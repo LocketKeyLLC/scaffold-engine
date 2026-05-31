@@ -237,10 +237,19 @@ def scaffold_headers() -> dict:
 
 
 def submit_idea(idea: str) -> tuple[str, float]:
-    """POST /ideas → returns (job_id, elapsed_seconds)."""
+    """POST /ideate → returns (job_id, elapsed_seconds).
+
+    §17.353 — switched from the legacy `/ideas` (one-shot refine + DAG)
+    to the modern `/ideate` (Phase 1: analyze and halt for confirmation).
+    `idea_submission` in the bench record now exclusively measures the
+    analyze-and-confirm gate, not the bundled refine+DAG of `/ideas`.
+    Field name preserved so bench_check.py's
+    ``pipeline.idea_submission.duration_s`` keeps gating without
+    schema-aware changes downstream.
+    """
     t0 = time.monotonic()
     r = httpx.post(
-        f"{SCAFFOLD_URL}/ideas",
+        f"{SCAFFOLD_URL}/ideate",
         headers=scaffold_headers(),
         json={"idea": idea},
         timeout=300,
@@ -254,29 +263,53 @@ def submit_idea(idea: str) -> tuple[str, float]:
     return job_id, elapsed
 
 
+def confirm_idea(job_id: str) -> tuple[dict, float]:
+    """POST /ideate/confirm → returns (confirm_response, elapsed_seconds).
+
+    §17.353 — the explicit Phase-2 confirmation step that runs research
+    and compiles the workflow, transitioning the job from
+    ``awaiting_confirmation`` to ``planning``. Recorded under a NEW
+    ``pipeline.confirmation`` field so the existing
+    ``pipeline.dag_generation.duration_s`` keeps timing just DAG-gen
+    (now via the explicit ``POST /dag`` call which §17.353 brings back
+    after this confirm step).
+    """
+    t0 = time.monotonic()
+    r = httpx.post(
+        f"{SCAFFOLD_URL}/ideate/confirm",
+        headers=scaffold_headers(),
+        json={"job_id": job_id},
+        timeout=600,
+    )
+    elapsed = round(time.monotonic() - t0, 3)
+    r.raise_for_status()
+    return r.json(), elapsed
+
+
 def generate_dag(job_id: str) -> tuple[dict, float]:
     """POST /dag → returns (dag_response, elapsed_seconds).
 
-    §17.351 — POST /ideas now auto-generates the DAG as part of refinement
-    (the orchestrator's behavior shifted between the 2026-04-02 baselines
-    and now). An explicit POST /dag then returns 409 Conflict via the
-    §17.131 "DAG already exists" guard. Treat 409 as success — DAG was
-    already generated during /ideas, no incremental work needed — and
-    record elapsed=0 with a marker so the result distinguishes auto-generated
-    from explicit-generation runs.
+    §17.353 — restored after the bench moved to the explicit
+    ``/ideate`` + ``/ideate/confirm`` flow. ``/ideate/confirm``
+    (research_and_compile) does not auto-generate the DAG (unlike the
+    legacy ``/ideas``), so this call is the actual DAG-generation
+    timer. ``pipeline.dag_generation.duration_s`` therefore measures
+    DAG-gen alone — no research, no execution.
+
+    409 retained from §17.351 as defense-in-depth: if a future code
+    change re-introduces auto-DAG in confirm, the bench still works
+    (records 0 with the auto marker rather than failing).
     """
     t0 = time.monotonic()
     r = httpx.post(
         f"{SCAFFOLD_URL}/dag",
         headers=scaffold_headers(),
         json={"job_id": job_id},
-        timeout=300,
+        timeout=600,
     )
     elapsed = round(time.monotonic() - t0, 3)
     if r.status_code == 409:
-        # DAG was auto-generated during /ideas — that work landed in
-        # idea_submission_s, not here. Return 0 + the auto marker.
-        return {"auto_generated_during_ideas": True}, 0.0
+        return {"auto_generated_during_earlier_phase": True}, 0.0
     r.raise_for_status()
     return r.json(), elapsed
 
@@ -388,23 +421,47 @@ def phase_ollama_raw(collector: MetricsCollector) -> list:
 
 
 def phase_pipeline(collector: MetricsCollector) -> dict:
-    """Phase 2: Full Scaffold Engine pipeline benchmark."""
+    """Phase 2: Full Scaffold Engine pipeline benchmark.
+
+    §17.353 — four explicit phases via the modern endpoint flow:
+    ``/ideate`` (analyze + halt) → ``/ideate/confirm`` (research +
+    compile) → ``/dag`` (DAG generation) → ``/execute/all`` (stream
+    node execution). Replaces the pre-§17.353 ``/ideas`` + ``/dag``
+    shape which bundled refinement and DAG into one timer and forced
+    bench_pipeline to special-case a 409 from the auto-DAG path.
+
+    Field-name preservation: ``idea_submission``, ``dag_generation``,
+    ``execution``, ``total_pipeline_s`` all keep their pre-§17.353
+    shape — only their underlying endpoint changes — so the
+    bench_check.py ``pipeline.total_pipeline_s`` regression gate keeps
+    firing without schema-aware downstream changes. New
+    ``confirmation`` field captures the additional Phase-2 step.
+    """
     print("\n── Phase 2: Full Pipeline ──")
     pipeline = {}
 
-    # Step 1: Submit idea
-    log("Submitting benchmark idea...")
+    # Step 1: /ideate — analyze + halt for confirmation
+    log("POST /ideate — analyze and assess feasibility...")
     job_id, idea_time = submit_idea(BENCHMARK_IDEA)
     log(f"  → job_id={job_id}, took {idea_time}s")
     pipeline["idea_submission"] = {
         "job_id": job_id,
         "duration_s": idea_time,
+        "endpoint": "/ideate",  # §17.353 marker
     }
 
-    # Step 2: Generate DAG
-    log("Generating DAG (this takes 30-90s on CPU)...")
-    dag_resp, dag_time = generate_dag(job_id)
-    # POST /dag returns generator output; GET /dag/{job_id} has the node list
+    # Step 2: /ideate/confirm — research + compile workflow
+    log("POST /ideate/confirm — research + compile...")
+    _confirm_resp, confirm_time = confirm_idea(job_id)
+    log(f"  → confirm completed in {confirm_time}s")
+    pipeline["confirmation"] = {
+        "duration_s": confirm_time,
+        "endpoint": "/ideate/confirm",  # §17.353 — new field
+    }
+
+    # Step 3: /dag — generate DAG from refined brief
+    log("POST /dag — generate DAG nodes...")
+    _dag_resp, dag_time = generate_dag(job_id)
     try:
         dag_get = httpx.get(
             f"{SCAFFOLD_URL}/dag/{job_id}",
@@ -420,10 +477,11 @@ def phase_pipeline(collector: MetricsCollector) -> dict:
     pipeline["dag_generation"] = {
         "duration_s": dag_time,
         "node_count": node_count,
+        "endpoint": "/dag",  # §17.353 marker
     }
 
-    # Step 3: Execute all nodes via SSE
-    log("Executing pipeline (streaming SSE)...")
+    # Step 4: /execute/all — stream node execution
+    log("POST /execute/all — streaming SSE...")
     events, exec_time = execute_and_stream(job_id)
     node_timings = parse_node_timings(events)
     event_types = list(set(ev["event"] for ev in events))
@@ -437,11 +495,15 @@ def phase_pipeline(collector: MetricsCollector) -> dict:
         "total_events": len(events),
         "event_types": sorted(event_types),
         "node_timings": node_timings,
+        "endpoint": "/execute/all",  # §17.353 marker
     }
 
-    # Total pipeline time
+    # Total pipeline time — sums all four §17.353 phases. Pre-§17.353
+    # runs summed only three (idea + dag + exec); the new confirmation
+    # phase makes total_pipeline_s slightly higher, but the gate's
+    # 1.5× threshold has plenty of headroom.
     pipeline["total_pipeline_s"] = round(
-        idea_time + dag_time + exec_time, 3
+        idea_time + confirm_time + dag_time + exec_time, 3
     )
 
     return pipeline
@@ -503,7 +565,14 @@ def run_benchmark():
 
     # ── Assemble result record ──
     record = {
-        "schema_version": "1.0",
+        # §17.353 — schema 1.1: pipeline.* shape unchanged so existing
+        # bench_check gates (pipeline.total_pipeline_s,
+        # pipeline.idea_submission.duration_s, etc.) keep firing, but
+        # each phase now records `endpoint:` so a future reader can tell
+        # which orchestrator API actually ran. Pre-1.1 runs have no
+        # endpoint marker — that's the discriminator for "this was the
+        # legacy /ideas+/dag flow."
+        "schema_version": "1.1",
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "hardware": hardware,
@@ -529,12 +598,17 @@ def run_benchmark():
     print(f"    Results:    {RESULTS_FILE}")
 
     if isinstance(pipeline_results, dict) and "total_pipeline_s" in pipeline_results:
+        # §17.353 — confirmation row is new; pre-1.1 records lack it
+        # so guard with .get(...).
+        conf = (pipeline_results.get("confirmation") or {}).get("duration_s")
         print(f"\n    Pipeline breakdown:")
-        print(f"      Idea submission:  {pipeline_results['idea_submission']['duration_s']}s")
-        print(f"      DAG generation:   {pipeline_results['dag_generation']['duration_s']}s")
-        print(f"      Execution:        {pipeline_results['execution']['duration_s']}s")
-        print(f"      ─────────────────────────")
-        print(f"      Total pipeline:   {pipeline_results['total_pipeline_s']}s")
+        print(f"      Idea submission (/ideate):          {pipeline_results['idea_submission']['duration_s']}s")
+        if conf is not None:
+            print(f"      Confirmation (/ideate/confirm):     {conf}s")
+        print(f"      DAG generation (/dag):              {pipeline_results['dag_generation']['duration_s']}s")
+        print(f"      Execution (/execute/all):           {pipeline_results['execution']['duration_s']}s")
+        print(f"      ───────────────────────────────────────────")
+        print(f"      Total pipeline:                     {pipeline_results['total_pipeline_s']}s")
 
     if raw_results and isinstance(raw_results[0], dict) and "eval_tps" in raw_results[0]:
         print(f"\n    Raw inference:")

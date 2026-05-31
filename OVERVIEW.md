@@ -19508,6 +19508,53 @@ Goldens after unskip: `pytest tests/test_retrieval_golden.py -v --timeout=300` =
 
 ---
 
+### §17.353 bench_pipeline modernization — `/ideas` → `/ideate` + `/ideate/confirm` + explicit `/dag` (2026-05-31)
+
+Closes §17.351's "Outside scope" #1: bench_pipeline.py switched from the legacy `/ideas` endpoint (which bundled refinement + auto-DAG into one timer and forced bench_pipeline to special-case a 409 from the auto-DAG path) to the modern four-phase flow `/ideate` (analyze) → `/ideate/confirm` (research + compile) → `/dag` (DAG generation) → `/execute/all` (stream node execution). Each phase now has a dedicated timer field. The pre-§17.353 record-shape field names (`idea_submission`, `dag_generation`, `execution`, `total_pipeline_s`) are preserved so bench_check.py's `pipeline.total_pipeline_s` regression gate keeps firing; a new `confirmation` field captures the additional Phase-2 step.
+
+**What the shape change buys.** Pre-§17.353 the bench attributed the entire pre-execution cost to one of two phases: either `idea_submission` (the legacy /ideas, ~78s in the 2026-04-02 baselines) OR — post-§17.351 — `idea_submission` again (the auto-DAG path, 7.4s but the DAG work folded into the `execution` timer). Neither shape let an operator see drift in research, compile, or DAG generation separately. Post-§17.353 a regression in any single phase surfaces against that phase's own historical median rather than averaging in alongside three other costs.
+
+**Endpoint markers.** Each per-phase dict now carries `endpoint: "/ideate"` / `"/ideate/confirm"` / `"/dag"` / `"/execute/all"`. Pre-1.1-schema records lack the marker; that's the discriminator for "this was the legacy /ideas+/dag flow." A `confirmation` field's presence is the second discriminator (legacy runs had only three phases).
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `tests/benchmarks/bench_pipeline.py` | `submit_idea` switched to `/ideate`. New `confirm_idea` helper (`/ideate/confirm`). `generate_dag` restored as a separate-phase helper (kept the §17.351 409-as-success handling as defense-in-depth). `phase_pipeline` rewritten as four explicit steps. `total_pipeline_s` sums all four. Schema bumped to 1.1 with rationale comment. Print summary grew a `Confirmation (/ideate/confirm)` line (guarded so pre-1.1 runs still print). | +59 |
+| `tests/benchmarks/results.jsonl` | First clean 1.1-schema row appended: `bench_20260531_142700_671163`. Two earlier broken rows (the §17.353 mid-implementation `name 'dag_time' is not defined` errors) dropped during cleanup. | net 0 lines |
+| `OVERVIEW.md` | this entry | +~50 |
+| **Total** | | **+~110** |
+
+No new deps, no production-code changes — bench remains script-only. The `pipeline.total_pipeline_s` gate threshold (1.5× vs median) has plenty of headroom for the slight total uptick (~250 s vs §17.351's 182 s, the difference being the now-explicit /ideate/confirm + /dag steps that pre-§17.353 ran but weren't timed independently).
+
+**Verification — live numbers (T480 i5-8350U, 4C, cloud-flipped per §17.346, Ollama warm).**
+
+```
+Pipeline breakdown:
+  Idea submission (/ideate):          16.811s
+  Confirmation (/ideate/confirm):     17.610s
+  DAG generation (/dag):              12.151s
+  Execution (/execute/all):           204.600s
+  ───────────────────────────────────────────
+  Total pipeline:                     251.172s
+
+execution event_types: ['node_done', 'node_start', 'pipeline_complete']
+```
+
+5 nodes generated, 5 nodes executed (T1 Milvus 22s; T2-T5 LLM 41-49s each — consistent with the §17.341 per-node profile). The bench validates end-to-end: each /endpoint call returned 200, the SSE event types are clean (no `dag_generated` because we explicitly POSTed /dag first, no auto-gen race), the four-phase total reconciles exactly with the sum of the per-phase timers.
+
+**Outside scope.**
+
+- TTFT raw-inference probes (Phase 1) are unchanged. The TTFT improvement §17.351 noted has a partial answer surfaced during this bench's pre-flight: pre-§17.353 bench saw "Ollama: no models currently loaded (cold start)" and got TTFT~5s for qwen2.5:7b; post-§17.353 re-run saw "Ollama loaded: ['qwen3:4b', 'qwen2.5:7b']" and got TTFT~1.9s for the same model. The 2.4× delta is real and tracks Ollama's keep-alive state. Worth investigating fully as §17.355 (separate ticket); not blocked by §17.353.
+- `make rebaseline` target that runs all three benches + bench-check as one operator command — queued as the next follow-up.
+- Bench Phase-1 cohort doesn't include the cloud-flipped roles (`model_router`/`model_coder`/`model_verifier` post-§17.346). Those are exercised via the pipeline; raw_inference still probes the two local Ollama models. Sufficient for regression detection on the local-inference floor.
+
+**Cohort.** Sits in the perf-measurement-infrastructure axis: §17.57 (X.21 — framework + gates) → §17.351 (post-cloud-flip baseline refresh + bench API drift fix) → §17.352 (per-stage RAG decomp + CI wiring + QUERIES correctness) → §17.353 (per-phase pipeline decomp via modern endpoint flow). The bench is now structurally aligned with the modern orchestrator surface; the next bench drift will not require a generate_dag-style 409 workaround because the bench drives the explicit endpoints the API contract intends operators to use.
+
+**Cost.** +110 LOC, 1 new baseline row, ~5.3 min bench wall-clock for end-to-end verification. Zero new deps, zero migrations, zero production-code changes. Net result: bench measures the four phases the modern orchestrator actually has; per-phase regression detection works against each phase's own median rather than masking drift in a bundled timer.
+
+---
+
 ### §17.352 per-stage RAG bench decomposition + ci-tier-2 wiring + bench QUERIES correctness fix (2026-05-31)
 
 Closes the remaining §16.5/§17.57 perf-benchmarking deferred items called out as still-open in §17.351's "Outside scope": per-component coverage inside `bench_rag.py` (embedder TTFT in isolation, Milvus search latency separately from reranker, reranker per-pair) plus CI wiring of the bench-check gates into `ci-tier-2` so PR-time regressions land rather than gates that run by hand. Plus an unrelated correctness fix the smoke run surfaced: the `QUERIES` list referenced partition names (`ml`, `infra`) that aren't in `VALID_DOMAINS`, so two of five fixtures returned 0 hits and silently averaged into `rerank_per_pair_mean_ms` as zero — dragging the system metric ~40% below truth.
