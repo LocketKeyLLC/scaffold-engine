@@ -68,6 +68,13 @@ class TestSystemForTool:
         assert "No-fabrication guard" in pa.EXECUTION_SYSTEM_LLM
         assert "preserve the placeholder verbatim" in pa.EXECUTION_SYSTEM_LLM
 
+    def test_runbook_mirror_has_placeholder_first_rule(self):
+        # §17.361 — assist-mode mirror must carry the placeholder-first
+        # rule so assist-mode runbook output matches autonomous runs.
+        assert "Placeholder-first rule" in pa.EXECUTION_SYSTEM_RUNBOOK
+        assert "SCREAMING_SNAKE_CASE" in pa.EXECUTION_SYSTEM_RUNBOOK
+        assert "<HOST_IP>" in pa.EXECUTION_SYSTEM_RUNBOOK
+
 
 # ---------------------------------------------------------------------------
 # truncate_output — head/tail preserve + marker.

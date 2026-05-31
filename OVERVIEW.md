@@ -19708,6 +19708,68 @@ The §17.359 retry run that surfaced the regression — job `44a1ff97-80cd-43dc-
 
 ---
 
+### §17.361 runbook placeholder-first rule — close the §17.360 retry's residual `e.g., 192.168.1.10` lure (2026-05-31)
+
+Follow-up to §17.360. After §17.360 landed, the homelab job was re-run a second time (job `aaa7b37c-fbd6-4854-8e74-683ef3cd13b5`, 8 nodes, 6 Shell + 2 LLM, validator clean on first attempt). The §17.360 surfaces — T8 LLM-documentation leaf and the synthesizer — were verified clean: T8 zero fabrication markers (`tskey-…`, `192.168.10.100`, `pve01.internal`, `0000:01:00.0` all absent), `<PROXMOX_*>` + `<TAIL*>` placeholders preserved, compiled_output clean. But the Shell nodes (T1–T6) still showed concrete IP-shaped values in their `## Run this` blocks: `Set static IP for management interface (e.g., 192.168.1.10/24 gateway 192.168.1.1)`, `Set hostname: homelab-pve`, `ssh root@<host-ip>` (mixed style — some placeholders, some examples).
+
+This is not LLM-node fabrication (which §17.360 closed) and not synthesizer fabrication (also §17.360 closed). It's a third class: the runbook prompt (`EXECUTION_SYSTEM_RUNBOOK`, §17.359) instructed the model to produce "copy-paste-ready commands" and to flag missing inputs under `## Inputs needed` — but it never said "the values listed in Inputs needed must appear as `<PLACEHOLDER>` tokens in the Run-this block, not as `e.g., concrete-value` examples." The model split the rule's intent: it correctly enumerated the operator-supplied values under `## Inputs needed`, then helpfully inlined plausible example values inside the Run-this commands. The operator copying the runbook gets `dd if=/path/to/proxmox-ve.iso of=/dev/sdX` (correct — uses conventional placeholders) but also gets `Set hostname: homelab-pve` (wrong — concrete value where operator-supplied is required) on adjacent lines.
+
+The risk shape: an operator skimming a 20-step runbook copies the commands as-is. `e.g., 192.168.1.10` next to a comment is a soft hint to substitute; `Set hostname: homelab-pve` in step 3 of a Run-this block is read as "this is the hostname I should set." The placeholder version `Set hostname: <PROXMOX_HOSTNAME>` forces a pause-and-substitute because the angle-bracketed token will fail any literal copy-paste check (`<PROXMOX_HOSTNAME>` is not a valid hostname).
+
+**The fix — one layer.**
+
+A "Placeholder-first rule (§17.361)" clause added to `EXECUTION_SYSTEM_RUNBOOK` (and mirrored in `prompt_assembly.py` per the W.10 assist/executor mirror invariant). Four parts:
+
+1. **Hard rule**: "Every value you list under `## Inputs needed` MUST appear in `## Run this` as a `<SCREAMING_SNAKE_CASE>` placeholder, not as an `e.g., <concrete-value>` example." Pairs the two sections so the model can't enumerate a value under Inputs and then inline its own example version under Run-this — same value, two representations, the second must be a slot.
+
+2. **Bad/Good anti-example pair**: three concrete pairs drawn from the §17.360 retry's actual T1 output. `Set hostname: homelab-pve` → `Set hostname: <PROXMOX_HOSTNAME>`. `Set static IP for management interface (e.g., 192.168.1.10/24 gateway 192.168.1.1)` → `Set static IP for management interface: <MGMT_IP>/<MGMT_PREFIX> gateway <MGMT_GW>`. `ssh root@192.168.1.10` → `ssh root@<HOST_IP>`. The model needs the contrast to pattern-match against its own draft; abstract rules without anti-examples regress on the next live run.
+
+3. **Conventional-concrete exemptions**: not every concrete value in a runbook should be wrapped. `/dev/sdX` (arbitrary device), `/path/to/<FILE>` (mixed-style path placeholder), universal package names (`apt install proxmox-ve`), and deployment-fixed flags (`bs=4M`) stay concrete. Without this carve-out the model over-corrects and starts placeholder-wrapping universals like package names — equally annoying for the operator. The decision rule the model applies: "does this value vary per operator?" — if yes, use a placeholder; if no, stay concrete.
+
+4. **Placeholder format guidance**: two-token (`<TAILSCALE_AUTH_KEY>`) and one-token (`<HOST_IP>`) both match; mixed-case (`<host-ip>`) tolerated for compatibility with shell-style conventions but uppercase is the convention. Closes the "what shape should the placeholder be?" question explicitly so the model doesn't oscillate between `<host_ip>` and `${HOST_IP}` and `[HOST_IP]` across nodes.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_RUNBOOK` gains "Placeholder-first rule (§17.361)" block. Existing hard-rules + capability-boundary + section structure preserved. |
+| `app/modules/prompt_assembly.py` | Mirror of the runbook update (W.10 assist/executor mirror invariant). |
+| `tests/test_execution_agent_tools.py` | Two new tests: `test_runbook_prompt_has_placeholder_first_rule` (asserts the clause's marker phrases + Bad/Good contrast + canonical placeholder examples present); `test_runbook_prompt_names_conventional_concrete_exemptions` (asserts `/dev/sdX`, `bs=4M`, the per-operator decision rule). Anti-regression pin so a future prompt edit that drops the exemptions can't ship silently. |
+| `tests/test_prompt_assembly.py` | `test_runbook_mirror_has_placeholder_first_rule` — assist-mode mirror parity. |
+| `OVERVIEW.md` | this entry |
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_execution_agent_tools.py tests/test_prompt_assembly.py \
+    --timeout=30 -q
+67 passed in 7.35s
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+<smoke result captured in commit message>
+```
+
+The §17.360 retry's compiled job (`aaa7b37c-…`) is preserved as the
+before-snapshot — Shell nodes' `e.g., 192.168.1.10/24` example values are
+the regression shape §17.361 closes. A third retry against the same brief
+will surface whether the placeholder-first rule lands cleanly on the live
+model; deferred to operator decision (the §17.359 + §17.360 retries
+together already validated the systematic effect).
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Add a runtime regex that fails verification on `e.g., \d+\.\d+\.\d+\.\d+`.** The verifier still doesn't pattern-match against fabrication classes. A post-execution validator that scans Shell-tagged output_text for forbidden inline values would be a layer-4 guard — deferred for the same reason §17.360 deferred a value-fabrication regex: the prompt-layer fix is empirically sufficient on the next live run, and adding a regex layer adds maintenance + false-positive surface. Revisit if a third retry shows the model still leaking concrete values.
+- **Retroactively re-execute the `aaa7b37c-…` Shell nodes.** Operator can `POST /prompts/{job_id}/{node_key}` + `/exec retry` per node if they want clean runbook output now; bulk retroactive fix stays out of scope.
+- **Tighten the runbook prompt's tolerance of mixed-case placeholders.** `<host-ip>` and `<HOST_IP>` both work; standardizing on one breaks compatibility with existing operator runbooks that use the lower-kebab convention. Tolerate, don't enforce.
+- **Apply the placeholder-first rule to `EXECUTION_SYSTEM_CODEGEN`.** Code blobs that ship a runnable artifact (the deliverable IS the code, per §17.359's CodeGen guard) don't have the same operator-substitution shape — code is meant to be run as-is, not edited per-deploy. Not a one-size-fits-all rule.
+
+**Cohort.** Third commit in the §17.359 → §17.360 → §17.361 LLM-narration-and-fabrication arc. §17.359 closed past-tense execution narration (Shell + LLM + CodeGen prompts). §17.360 closed concrete-value fabrication in LLM/documentation nodes + the synthesizer + extended the verbatim-tool guard. §17.361 closes the runbook's `e.g., concrete-value` lure that survived the first two passes. Each retry surfaced the next layer's gap; the prompt-layer surface is now structurally complete for the homelab job class (install/configure/document on a host). Further iteration should be operator-driven against new failure shapes, not pre-emptive.
+
+**Cost.** +~30 LOC of prompt + ~25 LOC of tests + this entry. Zero new deps, zero migrations, zero schema changes, zero behavior change for non-Shell tools or for Shell tasks that already used `<PLACEHOLDER>` tokens — the clause only constrains the case where Inputs-needed values were being inlined as `e.g., concrete-value` examples in Run-this commands.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

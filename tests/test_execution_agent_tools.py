@@ -252,3 +252,33 @@ class TestSystemPromptRouting:
         assert "192.168.10.100" in EXECUTION_SYSTEM_LLM
         assert "tskey-" in EXECUTION_SYSTEM_LLM
 
+    # ----- §17.361 — runbook placeholder-first rule -----
+
+    def test_runbook_prompt_has_placeholder_first_rule(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_RUNBOOK
+        # §17.361 closes the §17.360 retry's residual: Shell runbooks were
+        # emitting `e.g., 192.168.1.10/24` example values in commands
+        # instead of routing operator-supplied values through
+        # <SCREAMING_SNAKE> placeholders.
+        assert "Placeholder-first rule" in EXECUTION_SYSTEM_RUNBOOK
+        # SCREAMING_SNAKE_CASE convention named (model needs the canonical
+        # name to recall the convention).
+        assert "SCREAMING_SNAKE_CASE" in EXECUTION_SYSTEM_RUNBOOK
+        # Good/Bad anti-example pair must both be present so the model has
+        # a concrete contrast to pattern-match against.
+        assert "Bad:" in EXECUTION_SYSTEM_RUNBOOK
+        assert "Good:" in EXECUTION_SYSTEM_RUNBOOK
+        assert "<HOST_IP>" in EXECUTION_SYSTEM_RUNBOOK
+        assert "<PROXMOX_HOSTNAME>" in EXECUTION_SYSTEM_RUNBOOK
+
+    def test_runbook_prompt_names_conventional_concrete_exemptions(self):
+        """The rule must allow conventional shell variables (`/dev/sdX`,
+        `/path/to/<FILE>`, fixed deployment flags like `bs=4M`) — otherwise
+        the model over-corrects and starts placeholder-wrapping things
+        that are NOT operator-supplied. Spot-check the exemption list."""
+        from app.modules.execution_agent import EXECUTION_SYSTEM_RUNBOOK
+        assert "/dev/sdX" in EXECUTION_SYSTEM_RUNBOOK
+        assert "bs=4M" in EXECUTION_SYSTEM_RUNBOOK
+        # The decision rule the model applies.
+        assert "does this value vary per" in EXECUTION_SYSTEM_RUNBOOK.lower()
+

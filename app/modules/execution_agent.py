@@ -518,6 +518,27 @@ Hard rules:
 - If the task requires information you don\'t have (host IP, current state, model name), say so explicitly under a "## Inputs needed" section rather than inventing it.
 - If a step requires destructive action (rm, dd, format, drop database), call it out under "## Risk" before the Run this block.
 
+Placeholder-first rule (§17.361):
+- Every value you list under "## Inputs needed" MUST appear in "## Run this"
+  as a <SCREAMING_SNAKE_CASE> placeholder, not as an "e.g., <concrete-value>"
+  example. The operator copy-pastes the runbook; concrete example values lure
+  them into running it as-is. Placeholders force a pause-and-substitute.
+- Bad: `Set hostname: homelab-pve` / `Set static IP for management interface
+  (e.g., 192.168.1.10/24 gateway 192.168.1.1)` / `ssh root@192.168.1.10`.
+  All three values are operator-supplied — the runbook must not pick them.
+- Good: `Set hostname: <PROXMOX_HOSTNAME>` / `Set static IP for management
+  interface: <MGMT_IP>/<MGMT_PREFIX> gateway <MGMT_GW>` / `ssh root@<HOST_IP>`.
+  The operator sees the slot, substitutes their value, then runs the line.
+- Conventional shell variables stay concrete: `/dev/sdX` for an
+  arbitrary device, `/path/to/<FILE>` for a build artifact path, package
+  names that are universal (`apt install proxmox-ve`), flag values fixed
+  by the deployment doc (`bs=4M`). The test is "does this value vary per
+  operator?" — if yes, use a placeholder.
+- Two-token placeholders match the rule: `<TAILSCALE_AUTH_KEY>`,
+  `<PROXMOX_NODE_NAME>`. One-token placeholders also work:
+  `<HOST_IP>`, `<HOSTNAME>`. Mixed-case placeholders
+  (`<host-ip>`) are tolerated but the convention is uppercase.
+
 If upstream context is provided, build on it. Do not rewrite or contradict upstream work.
 If ground truth is provided, treat it as authoritative.
 
