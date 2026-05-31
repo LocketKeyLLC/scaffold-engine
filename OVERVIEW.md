@@ -19167,6 +19167,53 @@ The OWUI admin panel "Pipelines → scaffold_router" valve editor is the canonic
 
 ---
 
+### §17.345 Anthropic provider — any model role routes to Claude via `MODEL_<ROLE>_PROVIDER=anthropic` (2026-05-31)
+
+Closes §17.344's "deferred Claude provider" item. The operator's stated direction is to use any model in their existing Ollama list AND any Claude model under their existing Anthropic payment plan, routed per role. Sprint E's provider abstraction (`app/providers/`, `_resolve_role()` in `app/model_router.py:316`) is provider-agnostic by design; before §17.345 it was Ollama and OpenAI-compatible only. This entry adds Anthropic as the third backend.
+
+**Implementation honors the established codebase convention: raw httpx, not the SDK.** Both existing providers (Ollama, OpenAI) use the shared httpx client (`app/utils/http_clients.get_<provider>_client`) rather than the official Python SDK. The rationale is documented in `app/providers/openai.py`: keeps the dependency surface flat, matches the OllamaProvider pattern, makes mocking trivial. Anthropic-specific features that motivate using the SDK (prompt caching, adaptive thinking, tool use) are all wire-format-only — they translate cleanly to JSON request fields, no SDK runtime help required. **Net new deps: zero.**
+
+**Five-file scope (~250 LOC), per pre-implementation Explore-agent assessment, landed on the nose.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `app/config.py` | Added 5 Pydantic Settings fields: `anthropic_api_key: SecretStr`, `anthropic_base_url: str`, `anthropic_timeout: int`, `anthropic_version: str`, `anthropic_prompt_caching: bool` (default `True`). All blank-key-safe — provider raises `ProviderUnavailableError` at call time only if a role is bound to `"anthropic"` while the key is empty, mirroring OpenAIProvider's posture. | +13 |
+| `app/utils/http_clients.py` | Added `_build_anthropic()` builder (httpx.AsyncClient with `base_url=settings.anthropic_base_url`, 20-connection limit, 30s keepalive — same shape as `_build_openai`), wired into `init_clients()`, exposed via `get_anthropic_client()`. | +28 |
+| `app/providers/anthropic.py` | New module. `AnthropicProvider(LLMProvider)` with `chat_completion` / `stream_chat` / `tool_call` / `list_models` / `embed`-as-`ProviderCapabilityError`. `supports_embeddings=False` (Anthropic has no embeddings endpoint — capability gate fires at config-resolve, not mid-pipeline). Self-registers as `"anthropic"` at module-import time via `register("anthropic", AnthropicProvider())`. | +393 |
+| `app/providers/__init__.py` | Added `"app.providers.anthropic"` to the `_autoload` tuple. Per-module import-failure isolation means a missing dep here would only unregister anthropic, not crash the other providers. | +1 |
+| `tests/test_provider_anthropic.py` | New test file modeled on `test_provider_openai.py`. 20 tests covering: capability flags, registry self-registration, role routing override, embedder-role rejection, empty-key auth handling, system-top-level split, Opus 4.7 sampling-param stripping, Sonnet sampling-param passthrough, prompt-caching default-on behavior, prompt-caching disabled fallback, text + usage extraction, HTTP error envelope parsing, tool wire shape (no `function` wrapper), `tool_choice` translation (`required→any`, name→`{type:tool,name}`), list_models fail-soft. | +320 |
+| `.env.example` | Added `anthropic` to the `MODEL_*_PROVIDER` allowed-value comment; added an `ANTHROPIC_*` section parallel to the existing `OPENAI_*` section, with the no-embeddings caveat and prompt-caching toggle documented. | +12 |
+| **Total** | | **+767** |
+
+(The +393 / +320 / +767 are gross line counts including docstrings + comments — the scope agent's "~250 LOC" estimate was for non-trivial logic.)
+
+**Six Anthropic-API-specific concerns the provider handles internally so callers stay in the unified OpenAI shape.**
+
+1. **System message extraction.** Anthropic puts `system` at the request top level — `role: "system"` entries inside `messages` would 400. `_split_system()` walks the unified input and promotes any system content to top-level, leaving only `user` / `assistant` in `messages`. Multiple system entries are joined with `\n\n`.
+2. **Auth scheme.** Uses `x-api-key` header (not `Authorization: Bearer`). Plus the required `anthropic-version: 2023-06-01` header on every request.
+3. **`max_tokens` is required.** Anthropic rejects requests without it. Default of 4096 honored from `LLMProvider`'s base signature; callers can override.
+4. **Opus 4.7 sampling-param removal.** `temperature`, `top_p`, `top_k` were removed on Opus 4.7 — sending any of them returns 400. The provider's `_strips_sampling()` check is prefix-based (`claude-opus-4-7`) and silently omits these fields when the model matches; other model families (Sonnet 4.6, Haiku 4.5, older Opus) still receive `temperature`. Adding future "no-sampling" model families is a one-line update to `_NO_SAMPLING_MODEL_PREFIXES`.
+5. **Prompt caching on by default.** This is a high-volume routing path — the same role-based system prompts get reused across many requests. When `settings.anthropic_prompt_caching` is `True` AND `system` is present, the provider wraps the system as a typed block with `cache_control: {"type": "ephemeral"}`. Sub-1024-token prefixes silently won't cache (Anthropic's documented behavior); the marker is harmless either way. Operators wanting byte-identical request shape (e.g. for replay) set `ANTHROPIC_PROMPT_CACHING=false`.
+6. **Tool wire shape.** Anthropic uses a flat list of `{name, description, input_schema}` objects — NOT wrapped in `{type:"function", function:{...}}` the way OpenAI does. `input_schema` is the same field name as our `Tool` dataclass, so translation is mechanical. Response `tool_use` blocks carry `input` as a parsed dict already (no `json.loads` needed, unlike OpenAI's stringified `function.arguments`). `tool_choice` strings translate to typed objects: `auto → {type:auto}`, `required → {type:any}` (Anthropic uses "any" not "required"), `none → {type:none}`, `<name> → {type:tool,name:<name>}`.
+
+**Cost-tracking already covered.** `db/migrations/030_cost_telemetry.sql:47-54` (shipped pre-§17.345) already seeds `model_costs` rows for `('anthropic', 'claude-opus-4-7', 5.00, 25.00)`, `('anthropic', 'claude-sonnet-4-6', 3.00, 15.00)`, `('anthropic', 'claude-haiku-4-5', 1.00, 5.00)`. No migration needed. Provider returns `ModelResponse.provider="anthropic"` and `.model` matches the seeded key; existing `record_llm_call()` looks up rates by `(provider, model)` and writes the row.
+
+**Verification.** `pytest tests/test_provider_anthropic.py -v` in dev image — 20 passed in 1.88s. Regression check via `pytest tests/test_provider_openai.py tests/test_providers.py` — 66 passed in 6.66s, no breakage in the existing OpenAI or registry tests. Total green: 86. Live-API verification (real `sk-ant-*` key) NOT run — held off because it bills against the operator's account; the unit-test envelope-parsing fixtures mirror the documented Anthropic response shape, and a single real call is the cheapest way for the operator to confirm end-to-end when they choose to.
+
+**Outside scope (deferred).**
+
+- **`scaffold model` CLI for switching valves.** Operator-stated direction from the §17.345 planning interview was "easily switch to stay up to date." Today switching a role to Anthropic requires editing `.env` (or the equivalent OWUI valve) and restarting; a CLI like `scaffold model set --role general --provider anthropic --model claude-sonnet-4-6` would close the friction. Mechanical follow-up to §17.345 now that the multi-provider infrastructure exists.
+- **Auto-pull / model discovery.** Pulling from Hugging Face leaderboards or Ollama's library at scheduled intervals to keep "best in class" defaults current. Risky on its own (the 512-dim embedder lock is the canonical "don't auto-upgrade" example — see [[invariants]]); held until after the manual-switch CLI is proven.
+- **Uncensored model routing.** Operator mentioned interest in uncensored Ollama variants for unbiased / true facts. Achievable today via tag choice alone (e.g. `MODEL_GENERAL=huihui_ai/qwen3-abliterated`, no provider change needed) — no infrastructure work required. Logged here as a future operator-side experiment, not a §-numbered code change.
+- **Live integration test against real Anthropic API.** Single `pytest tests/integration/test_anthropic_provider_live.py` style test (`@pytest.mark.timeout(900)`, skipped unless `ANTHROPIC_API_KEY` is set) would close the "did this actually work end-to-end" gap. Held until the operator runs the first real call against a real key — then we'd know what assertions to write based on observed response shape.
+- **`MODEL_<ROLE>_PROVIDER` schema validation.** The current resolver accepts any string and raises `ProviderError` at call time on an unknown name. A Pydantic-level Literal type would catch typos at boot. Out of scope here; logged for a future settings-validation pass.
+
+**Cohort.** §17.342 → §17.343 → §17.344 → §17.345 = four entries on the cross-cutting "operator UX + provider flexibility" arc. The triage-prompt work (§17.342, §17.343) was about *what one specific role does well*; the model-bump (§17.344) closed the discipline-limit-via-better-model question; §17.345 closes the *provider-flexibility* question by making any role swap-able to Anthropic via a settings change. Combined, the operator can now: route triage to a fast cloud Ollama model (§17.344 default), route verifier to a Claude model for precision-sensitive work (§17.345 enables), keep coder on a local Ollama 7b for cost — each per-role, configurable via `.env` or OWUI valves, with cost-tracking that already understands all three providers.
+
+**Cost.** ~767 LOC across 6 files (5 production + 1 test), zero new dependencies, zero migrations, zero breaking changes to existing providers (66 regression tests still green). One-time verification cycle: 1.88s test pass + 6.66s regression check = under 10s.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

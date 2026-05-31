@@ -221,6 +221,21 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr = SecretStr("")
     openai_base_url: str = "https://api.openai.com/v1"
     openai_timeout: int = Field(default=600, ge=1, le=86400)
+
+    # Anthropic provider config (§17.345). Key blank by default — provider
+    # raises ProviderUnavailableError at call time only if a role is bound
+    # to "anthropic" while the key is empty, mirroring OpenAIProvider.
+    # ``anthropic_version`` pins the API version header (current GA value
+    # since 2023; bump only when migrating to a new API version with a
+    # tested code path). ``anthropic_prompt_caching`` toggles automatic
+    # ephemeral caching of the system block — on by default because this
+    # is a high-volume routing path; turn off if you need byte-identical
+    # request shape (e.g. for replay).
+    anthropic_api_key: SecretStr = SecretStr("")
+    anthropic_base_url: str = "https://api.anthropic.com/v1"
+    anthropic_timeout: int = Field(default=600, ge=1, le=86400)
+    anthropic_version: str = "2023-06-01"
+    anthropic_prompt_caching: bool = True
     openai_organization: str = ""
 
     # Timeouts (seconds)

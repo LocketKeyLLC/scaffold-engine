@@ -133,6 +133,7 @@ def _autoload() -> None:
     for mod in (
         "app.providers.ollama",
         "app.providers.openai",
+        "app.providers.anthropic",
     ):
         try:
             __import__(mod)

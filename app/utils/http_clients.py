@@ -201,6 +201,27 @@ def _build_openai() -> httpx.AsyncClient:
     return client
 
 
+def _build_anthropic() -> httpx.AsyncClient:
+    """Anthropic-API client. Auth (``x-api-key``) and the
+    ``anthropic-version`` header are added per-request by the provider
+    so key rotation doesn't force a client rebuild and so we can adapt
+    the version per call if needed.
+    """
+    client = httpx.AsyncClient(
+        base_url=settings.anthropic_base_url,
+        timeout=float(settings.anthropic_timeout),
+        headers={"User-Agent": "scaffold-engine"},
+        follow_redirects=True,
+        limits=httpx.Limits(
+            max_connections=20,
+            max_keepalive_connections=10,
+            keepalive_expiry=30,
+        ),
+    )
+    logger.info("Anthropic client initialized: %s", settings.anthropic_base_url)
+    return client
+
+
 def init_clients() -> None:
     """Eager-init all shared clients. Call once from app lifespan startup."""
     _get_or_create("searxng", _build_searxng)
@@ -209,6 +230,7 @@ def init_clients() -> None:
     _get_or_create("generic", _build_generic)
     _get_or_create("ollama", _build_ollama)
     _get_or_create("openai", _build_openai)
+    _get_or_create("anthropic", _build_anthropic)
     _get_or_create("ngspice", _build_ngspice)
     _get_or_create("verilator", _build_verilator)
     _get_or_create("symbiyosys", _build_symbiyosys)
@@ -253,6 +275,13 @@ def get_openai_client() -> httpx.AsyncClient:
     client = _clients.get("openai")
     if client is None or client.is_closed:
         raise RuntimeError("OpenAI client not initialized; call init_clients() at startup")
+    return client
+
+
+def get_anthropic_client() -> httpx.AsyncClient:
+    client = _clients.get("anthropic")
+    if client is None or client.is_closed:
+        raise RuntimeError("Anthropic client not initialized; call init_clients() at startup")
     return client
 
 
