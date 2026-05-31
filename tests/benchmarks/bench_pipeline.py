@@ -255,7 +255,16 @@ def submit_idea(idea: str) -> tuple[str, float]:
 
 
 def generate_dag(job_id: str) -> tuple[dict, float]:
-    """POST /dag → returns (dag_response, elapsed_seconds)."""
+    """POST /dag → returns (dag_response, elapsed_seconds).
+
+    §17.351 — POST /ideas now auto-generates the DAG as part of refinement
+    (the orchestrator's behavior shifted between the 2026-04-02 baselines
+    and now). An explicit POST /dag then returns 409 Conflict via the
+    §17.131 "DAG already exists" guard. Treat 409 as success — DAG was
+    already generated during /ideas, no incremental work needed — and
+    record elapsed=0 with a marker so the result distinguishes auto-generated
+    from explicit-generation runs.
+    """
     t0 = time.monotonic()
     r = httpx.post(
         f"{SCAFFOLD_URL}/dag",
@@ -264,6 +273,10 @@ def generate_dag(job_id: str) -> tuple[dict, float]:
         timeout=300,
     )
     elapsed = round(time.monotonic() - t0, 3)
+    if r.status_code == 409:
+        # DAG was auto-generated during /ideas — that work landed in
+        # idea_submission_s, not here. Return 0 + the auto marker.
+        return {"auto_generated_during_ideas": True}, 0.0
     r.raise_for_status()
     return r.json(), elapsed
 
