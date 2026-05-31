@@ -234,7 +234,12 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-scaffold}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@scaffold-postgres:5432/scaffold_engine
-      OLLAMA_BASE_URL: http://172.18.0.1:11434
+      # §17.349 — parameterized so operators with a remote Ollama or
+      # non-default port can override via .env (same precedence chain as
+      # the MODEL_* parameterization landed in §17.348). 172.18.0.1 is
+      # the default ai-network bridge gateway, correct on Pop!_OS native
+      # Docker where host.docker.internal isn't available.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://172.18.0.1:11434}
       MILVUS_URI: http://milvus-standalone:19530
       SEARXNG_URL: http://searxng:8080
       LOG_LEVEL: ${LOG_LEVEL:-info}

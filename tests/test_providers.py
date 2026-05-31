@@ -636,3 +636,38 @@ async def test_base_health_check_reports_down_on_error():
     health = await p.health_check()
     assert health["status"] == "down"
     assert "nope" in health["error"]
+
+
+# ---------------------------------------------------------------------------
+# §17.349 — Pydantic Literal validation on MODEL_<ROLE>_PROVIDER
+# ---------------------------------------------------------------------------
+@pytest.mark.smoke
+def test_provider_name_literal_rejects_typo(monkeypatch):
+    """A typo in MODEL_<ROLE>_PROVIDER must fail at orchestrator boot
+    (ValidationError) instead of silently surviving until first dispatch
+    raises ProviderError. Mirrors the .env line `MODEL_GENERAL_PROVIDER=
+    anthrpoic` (note the typo) — pre-§17.349 the field was `str` so it
+    parsed as the literal string and only failed at provider_for_role()
+    lookup. Now typed Literal["ollama","openai","anthropic"]."""
+    import pydantic
+    from app.config import Settings
+    monkeypatch.setenv("MODEL_GENERAL_PROVIDER", "anthrpoic")  # deliberate typo
+    monkeypatch.setenv("POSTGRES_PASSWORD", "test")             # required by Settings
+    with pytest.raises(pydantic.ValidationError) as exc_info:
+        Settings()
+    err = str(exc_info.value)
+    # Pydantic surfaces the allowed values in the error message
+    assert "ollama" in err
+    assert "openai" in err
+    assert "anthropic" in err
+
+
+@pytest.mark.smoke
+def test_provider_name_literal_accepts_all_three_providers(monkeypatch):
+    """The three registered providers must all parse cleanly."""
+    from app.config import Settings
+    monkeypatch.setenv("POSTGRES_PASSWORD", "test")
+    for prov in ("ollama", "openai", "anthropic"):
+        monkeypatch.setenv("MODEL_GENERAL_PROVIDER", prov)
+        s = Settings()
+        assert s.model_general_provider == prov

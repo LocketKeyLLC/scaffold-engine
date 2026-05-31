@@ -2094,6 +2094,48 @@ def _remove_pipeline_valve(valves_path: "Path", key: str) -> str:
     return f"removed pipeline valve {key}= (was {prev!r})"
 
 
+def _check_compose_shadow(repo_root: "Path", env_key: str) -> str | None:
+    """§17.349 — catch the §17.348 silent-shadow class.
+
+    Grep ``docker-compose.yml`` for an unparameterized ``<env_key>: <literal>``
+    line. Docker Compose's ``environment:`` block wins over ``env_file:``,
+    so if compose hardcodes the var, writing to ``.env`` has no effect —
+    the operator restarts, sees no change, and the CLI looks broken.
+
+    Returns a warning string when a shadow is found, or ``None`` if clean.
+    Matches ONLY the ``KEY: bareword`` pattern; ``KEY: ${VAR:-default}`` is
+    the correct form and is intentionally not flagged.
+    """
+    compose = repo_root / "docker-compose.yml"
+    if not compose.is_file():
+        return None
+    try:
+        text = compose.read_text()
+    except Exception:
+        return None
+    # Match `<spaces>KEY: <value>` where value is NOT `$...` (the
+    # parameterized form). The `KEY` must match env_key exactly to avoid
+    # false positives on similar-named vars.
+    import re
+    pattern = re.compile(
+        rf"^\s+{re.escape(env_key)}:\s+([^\s$\"'#].*?)\s*$",
+        re.MULTILINE,
+    )
+    for m in pattern.finditer(text):
+        value = m.group(1).strip()
+        # Skip parameterized forms — defensive in case the regex matches
+        # something weird.
+        if value.startswith("$"):
+            continue
+        return (
+            f"docker-compose.yml hardcodes {env_key}={value!r} in an "
+            f"environment: block. Compose env wins over .env, so this "
+            f"change will not take effect until you also parameterize "
+            f"the compose line (see §17.348 for the pattern)."
+        )
+    return None
+
+
 @cli.group(help="Inspect model role assignments and Ollama availability.",
            epilog=MODEL_EPILOG)
 def model() -> None:
@@ -2296,6 +2338,15 @@ def model_set(role: str, model_name: str, provider: str | None,
         touched_pipeline = True
     for e in edits:
         click.echo(f"  ✓ {e}")
+
+    # §17.349 — warn if compose shadows this env var (closes the §17.348
+    # silent-failure class on any future host that introduces such a line).
+    for key_to_check in [env_key] + ([f"{env_key}_PROVIDER"] if provider else []):
+        warning = _check_compose_shadow(root, key_to_check)
+        if warning:
+            click.echo("")
+            click.secho(f"⚠ {warning}", fg="yellow")
+
     _print_restart_hint(touched_pipeline)
 
 

@@ -108,6 +108,60 @@ class TestCleanMessages:
         assert result[1]["role"] == "assistant"
 
 
+@pytest.mark.smoke
+class TestNoiseInputGuard:
+    """§17.349 — bare single-char input ("a", "?", etc.) skips the LLM
+    call. Closes the operator-reported bug from the §17.342 transcript
+    where a bare "a" triggered an expensive triage roundtrip that
+    treated the noise as a real input.
+    """
+
+    def test_bare_single_char_after_first_turn_skips_triage(self, pipe):
+        """Mid-conversation single-char input → friendly nudge, no LLM call."""
+        messages = [
+            {"role": "user", "content": "Build a homelab dashboard"},
+            {"role": "assistant", "content": "Sure, what's the use case?"},
+            {"role": "user", "content": "a"},  # noise
+        ]
+        with patch.object(pipe, "_call_triage") as mock_triage:
+            chunks = list(pipe.pipe("a", "test-model", messages, {}))
+        combined = "".join(chunks)
+        assert "didn't catch that" in combined
+        mock_triage.assert_not_called()
+
+    def test_bare_question_mark_skips_triage(self, pipe):
+        """Single '?' is also noise; should skip triage."""
+        messages = [
+            {"role": "user", "content": "real prior message"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "?"},
+        ]
+        with patch.object(pipe, "_call_triage") as mock_triage:
+            chunks = list(pipe.pipe("?", "test-model", messages, {}))
+        combined = "".join(chunks)
+        assert "didn't catch that" in combined
+        mock_triage.assert_not_called()
+
+    def test_short_real_word_invokes_triage(self, pipe):
+        """'ok' is terse but a real intent signal — must NOT be filtered."""
+        messages = [
+            {"role": "user", "content": "Build a homelab dashboard"},
+            {"role": "assistant", "content": "Sure, what's the use case?"},
+            {"role": "user", "content": "ok"},
+        ]
+        with patch.object(pipe, "_call_triage", return_value="triage response") as mock_triage:
+            list(pipe.pipe("ok", "test-model", messages, {}))
+        mock_triage.assert_called_once()
+
+    def test_first_turn_single_char_still_invokes_triage(self, pipe):
+        """First-turn input is exempt — the welcome preamble handles
+        orientation, no second-guess on top."""
+        messages = [{"role": "user", "content": "a"}]
+        with patch.object(pipe, "_call_triage", return_value="triage response") as mock_triage:
+            list(pipe.pipe("a", "test-model", messages, {}))
+        mock_triage.assert_called_once()
+
+
 # --- _help -----------------------------------------------------------
 # Returns the help text shown when a user types /help.
 # We just verify it contains the key command names.

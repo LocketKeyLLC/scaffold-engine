@@ -1169,6 +1169,24 @@ class Pipeline:
         ):
             yield self._WELCOME_PREAMBLE
 
+        # §17.349 — guard against single-char / noise input (e.g. the
+        # bare "a" case from the §17.342 transcript). The triage prompt
+        # is expensive (cloud roundtrip, ~7-10 s) and unhelpful on input
+        # the user clearly typed by accident or while mid-thought. Cut
+        # the LLM call entirely; respond with a short clarifying nudge
+        # instead. Bar is intentionally low: 2 chars after strip — catches
+        # "a", "?", "x" while preserving "hi" / "ok" as real (if terse)
+        # input. The first user message is excluded from this check on
+        # purpose: a brand-new chat may not have history yet, and the
+        # welcome preamble above already gives the operator orientation.
+        last_user = msg.strip() if msg else ""
+        if len(last_user) < 2 and not self._is_first_turn(messages):
+            yield (
+                "I didn't catch that — could you describe what you're "
+                "trying to build or change? A sentence or two is enough."
+            )
+            return
+
         yield self._call_triage(messages)
 
     # ------------------------------------------------------------------

@@ -19397,6 +19397,66 @@ Defaults match the §17.346 Settings defaults so a deploy with no overrides gets
 
 ---
 
+### §17.349 small-tail closure of the §17.342→§17.348 cohort — noise-input guard, Literal provider validation, CLI shadow warning, OLLAMA_BASE_URL parameterization (2026-05-31)
+
+Bundle of four small follow-ups deferred across the prior cohort. Each one closes a specific failure-mode class without architectural change. Landed together because they're each small enough that splitting into four §-entries would inflate overhead without aiding review.
+
+**1. Triage noise-input guard (§17.342 deferred).** The §17.342 operator transcript opened with the user typing a bare `"a"` and the model treating it as a real input (returning a generic plan). Pre-§17.349, every user message — regardless of length or content — was forwarded to `_call_triage`, costing ~7-10 s of cloud-Ollama roundtrip on the §17.344 cloud model (or 23+ min pre-§17.344). Now `pipe()` checks `len(msg.strip()) < 2` *after* the first turn and responds with a short clarifying nudge — *"I didn't catch that — could you describe what you're trying to build or change? A sentence or two is enough."* — without invoking the LLM at all.
+
+The first-turn exemption is deliberate: brand-new chats already get the §17.300 welcome preamble for orientation, and adding a second-guess on top would create a friction tax on operators who genuinely intended a short opener. The 2-char bar catches `"a"`, `"?"`, `"x"`, but preserves `"ok"`, `"go"`, `"hi"` as real (if terse) intent signals. Tests anchor all four cases.
+
+**2. Pydantic `Literal[ProviderName]` validation on `MODEL_<ROLE>_PROVIDER` (§17.345 deferred).** Pre-§17.349 the eight `model_<role>_provider` fields in `app/config.py` were typed `str`, so a typo like `MODEL_GENERAL_PROVIDER=anthrpoic` parsed cleanly at boot and only failed at the first `provider_for_role()` lookup mid-pipeline — surfacing as `ProviderError: unknown provider 'anthrpoic'` deep in a stream rather than at `uvicorn` startup. §17.349 introduces a module-level `ProviderName = Literal["ollama", "openai", "anthropic"]` type alias and switches all eight fields to it. Now Pydantic surfaces a `ValidationError` at orchestrator boot with the full allowed-value list in the message. When a new provider is added, two-line update: this `Literal` constant + the `_autoload` tuple in `app/providers/__init__.py`.
+
+**3. CLI compose-shadow warning (§17.348 deferred).** §17.348 fixed the one known instance where `docker-compose.yml` shadowed `.env` for MODEL_* vars. To catch the same class of bug on any FUTURE host or service introduction, §17.349 adds a `_check_compose_shadow(repo_root, env_key)` helper to the §17.347 CLI. After `model set` writes to `.env`, the helper greps `docker-compose.yml` for an unparameterized `KEY: literal` line (with `KEY: ${VAR:-...}` correctly NOT flagged) and prints a yellow `⚠` warning when a shadow exists. The warning includes a §17.348 reference so the operator can find the parameterization pattern. The check fires for both `MODEL_<ROLE>` and `MODEL_<ROLE>_PROVIDER` when `--provider` is set.
+
+**4. `OLLAMA_BASE_URL` parameterization (§17.348 audit finding).** Audit grep for compose env literals matching the §17.348 antipattern surfaced one remaining tunable variable left in literal form: `OLLAMA_BASE_URL: http://172.18.0.1:11434`. An operator with a remote Ollama, a non-default port, or a non-default bridge gateway can't override via `.env` without editing compose directly. Converted to `${OLLAMA_BASE_URL:-http://172.18.0.1:11434}` — same pattern §17.348 established for the MODEL_* lines. The default value preserves Pop!_OS-native-Docker behavior (172.18.0.1 is the ai-network bridge gateway). Other literal env values in the file were audited and intentionally left hardcoded: `MILVUS_URI`, `SEARXNG_URL`, `DATABASE_URL` are internal Docker service URLs (cross-service routing within the compose stack, not operator-tunable); `MODEL_EMBEDDER_PIPELINE` and `MODEL_RERANKER` are config-locked per [[invariants]] (embedder dim locked at 512 to match Milvus; reranker singleton outside provider system); paths like `LOG_FILE`, `HF_HOME`, `POSTGRES_DB` are container-internal.
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `pipelines/scaffold_router.py` | Noise-input guard in `pipe()` after the welcome preamble dispatch — 11 LOC of logic + comment. | +14 |
+| `tests/test_scaffold_router_helpers.py` | `TestNoiseInputGuard` class with 4 tests: bare single-char skips, bare `?` skips, short word `ok` invokes triage, first-turn single-char invokes triage (exempt). | +50 |
+| `app/config.py` | Added `ProviderName = Literal["ollama", "openai", "anthropic"]` type alias + comment; converted 8 `model_*_provider: str` to `: ProviderName`. | +13 |
+| `tests/test_providers.py` | Two tests: typo rejects at boot via `Settings()`; all three valid values accept. | +29 |
+| `docker-compose.yml` | `OLLAMA_BASE_URL: http://172.18.0.1:11434` → `${OLLAMA_BASE_URL:-http://172.18.0.1:11434}` + rationale comment. | +6 |
+| `cli/scaffold_cli/main.py` | `_check_compose_shadow()` helper (regex-based grep of compose env block) + integration into `model_set` (warns for `MODEL_<ROLE>` and `MODEL_<ROLE>_PROVIDER` when present). | +45 |
+| `cli/tests/test_commands.py` | Four tests: warning fires when compose hardcodes value, NO warning when compose uses `${VAR:-default}`, NO warning when no compose file, warning fires on provider key too. | +66 |
+| **Total** | | **+223** |
+
+**Verification.**
+
+- **Noise-input guard:** `pytest tests/test_scaffold_router_helpers.py -k Noise` = **4 passed in 0.57 s**. All four cases anchored (skip-on-bare, skip-on-punct, invoke-on-short-word, invoke-on-first-turn-exempt).
+- **Literal validation:** `pytest tests/test_providers.py -k provider_name_literal` = **2 passed in 0.31 s**. The typo case (`MODEL_GENERAL_PROVIDER=anthrpoic`) raises `ValidationError` with `ollama`, `openai`, `anthropic` listed in the error message. All three valid values parse cleanly.
+- **CLI shadow warning:** `pytest tests/test_commands.py -k "shadow or no_warning or compose_*"` = **4 passed in 0.54 s**. The regex (`^\s+KEY:\s+([^\s$"'#].*?)\s*$`) correctly distinguishes literal from parameterized forms. One iteration cost: the initial regex used POSIX `[[:space:]]` which Python's `re` doesn't support — `FutureWarning: Possible nested set` surfaced in the first test run, fixed in one line by switching to `\s`.
+- **OLLAMA_BASE_URL parameterization:** No new test needed (same shape as §17.348's MODEL_* parameterization, which is exercised by the running orchestrator). Visual verification: `printenv OLLAMA_BASE_URL` in the recreated container returns the default value, confirming the substitution works without explicit `.env` override.
+- **Regression sweeps:**
+  - Full CLI suite: **157 passed in 1.32 s** (4 new + 153 existing).
+  - Pipeline + provider sweep (test_scaffold_router_*, test_providers, test_provider_anthropic, test_provider_openai): **241 passed in 5.65 s** (4 noise-guard + 2 Literal + 235 existing).
+  - Total green across the affected surface: **398 passed**.
+
+**Live behavior change post-restart (not exercised in tests).**
+
+- Operators typing `"a"` mid-conversation now see the friendly nudge in ~10 ms (no LLM round trip), instead of waiting 7-10 s for an unhelpful generic plan.
+- `scaffold model set ROLE NAME` against a host with a future §17.348-shape compose shadow shows a yellow `⚠` warning explaining why the .env write won't take effect.
+- A typo in `MODEL_<ROLE>_PROVIDER` env var raises `ValidationError` at `uvicorn` startup, listing the three valid choices, instead of failing silently at first dispatch.
+- An operator pointing at a remote Ollama (`OLLAMA_BASE_URL=http://my.lan:11434` in `.env`) now works without editing compose.
+
+**Outside scope (deferred — these are now genuinely small and operator-driven).**
+
+- **`scaffold model recommend` auto-pick** (§17.347 deferred) — still risky (the embedder dim-lock invariant). Not blocking.
+- **Auto-restart with `--restart` flag** (§17.347 deferred) — would need a pre-check for in-flight jobs; logged for if/when operators ask.
+- **Remote-host CLI** (§17.347 deferred) — SSH + run is the workaround today.
+- **§17.345 deferred items** (live integration test against real Anthropic API, auto-pull / model discovery, uncensored model routing) — all operator-driven, no engineering blockers.
+- **§17.158 corpus regression** — older, unrelated to this arc. Three failing `test_golden_retrieval` cases, remediation options logged.
+- **§17.318 design_circuit job_type cancellation root-cause.**
+
+**Cohort.** §17.342 → §17.343 → §17.344 → §17.345 → §17.346 → §17.347 → §17.348 → **§17.349** = eight entries on the "operator UX + provider flexibility" arc. §17.348 was the last entry that *added* infrastructure; §17.349 is the *closure* entry that mops up the small failure-mode classes the prior entries left behind. The arc that opened with "OWUI triage doesn't surface missing info clearly" ends with: triage is fast (cloud, ~7-10 s), surfaces direct-question Gaps, refuses to fabricate, accepts noise-input gracefully; the provider catalog is open (ollama/openai/anthropic) with typo-guarded env validation; one-line switching via the §17.347 CLI with §17.348 silent-shadow protection AND §17.349 forward-shadow-detection. **Materially done.** Future work on this axis will be driven by operator-reported issues, not by deferred-item rollup.
+
+**Cost.** +223 LOC (115 production / 108 tests). Zero new dependencies. Zero migrations. One regex fix during verification (POSIX `[[:space:]]` → Python `\s`, caught by FutureWarning in the first test run). Verification cycle: ~7 s total across all three test groups.
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---

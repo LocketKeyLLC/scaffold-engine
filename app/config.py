@@ -1,8 +1,17 @@
 """Scaffold Engine configuration — loaded from environment variables."""
 import logging
+from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
+
+# §17.349 — provider-name allowlist. Matches the registered providers in
+# app/providers/__init__.py (ollama + openai + Sprint §17.345's anthropic).
+# Used as a Literal type on all model_<role>_provider fields so typos in
+# .env fail at orchestrator boot (ValidationError) instead of mid-pipeline
+# at first call (ProviderError). When a new provider is added, update
+# this constant AND the registry _autoload tuple in providers/__init__.py.
+ProviderName = Literal["ollama", "openai", "anthropic"]
 
 _logger = logging.getLogger("scaffold.config")
 
@@ -216,14 +225,18 @@ class Settings(BaseSettings):
     # as a CrossEncoder singleton outside the provider system. Any value
     # other than a registered provider raises ProviderError at call time
     # via app.providers.provider_for_role.
-    model_general_provider: str = "ollama"
-    model_verifier_provider: str = "ollama"
-    model_coder_provider: str = "ollama"
-    model_router_provider: str = "ollama"
-    model_fallback_provider: str = "ollama"
-    model_cloud_heavy_provider: str = "ollama"
-    model_cloud_alt_provider: str = "ollama"
-    model_embedder_pipeline_provider: str = "ollama"
+    # §17.349 — typed as Literal[ProviderName] so a typo in .env
+    # (e.g. MODEL_GENERAL_PROVIDER=anthrpoic) fails Pydantic validation
+    # at orchestrator boot with the full list of valid choices, instead
+    # of silently returning ProviderError at first dispatch.
+    model_general_provider: ProviderName = "ollama"
+    model_verifier_provider: ProviderName = "ollama"
+    model_coder_provider: ProviderName = "ollama"
+    model_router_provider: ProviderName = "ollama"
+    model_fallback_provider: ProviderName = "ollama"
+    model_cloud_heavy_provider: ProviderName = "ollama"
+    model_cloud_alt_provider: ProviderName = "ollama"
+    model_embedder_pipeline_provider: ProviderName = "ollama"
 
     # OpenAI-compatible provider config (Sprint F). The base URL defaults to
     # api.openai.com but can be overridden to point at any OpenAI-compatible

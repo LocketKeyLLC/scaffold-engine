@@ -961,6 +961,82 @@ def test_model_set_errors_when_no_env_found(runner, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# §17.349 — compose-shadow warning on model set
+# ---------------------------------------------------------------------------
+def test_model_set_warns_when_compose_shadows_unparameterized(runner, tmp_path):
+    """If docker-compose.yml hardcodes the var as `KEY: literal` (no ${VAR}),
+    `scaffold model set` must warn that the .env write will have no effect.
+    Closes the §17.348 silent-shadow class for future hosts."""
+    root = _seed_repo(tmp_path, env_content="")
+    # Hardcoded literal in compose — the §17.348 antipattern
+    (root / "docker-compose.yml").write_text(
+        "services:\n"
+        "  scaffold-orchestrator:\n"
+        "    environment:\n"
+        "      MODEL_ROUTER: qwen3:4b\n"
+    )
+    res = runner.invoke(cli, [
+        "model", "set", "router", "qwen3-vl:235b-instruct-cloud",
+        "--repo-root", str(root),
+    ])
+    assert res.exit_code == 0, res.output
+    assert "MODEL_ROUTER" in (root / ".env").read_text()
+    # Warning must surface; mentions both the key and §17.348 for context
+    assert "MODEL_ROUTER" in res.output
+    assert "docker-compose.yml" in res.output
+    assert "§17.348" in res.output or "17.348" in res.output
+
+
+def test_model_set_no_warning_when_compose_parameterized(runner, tmp_path):
+    """The §17.348-correct form `${VAR:-default}` must NOT trigger the warning."""
+    root = _seed_repo(tmp_path, env_content="")
+    (root / "docker-compose.yml").write_text(
+        "services:\n"
+        "  scaffold-orchestrator:\n"
+        "    environment:\n"
+        "      MODEL_ROUTER: ${MODEL_ROUTER:-qwen3-vl:235b-instruct-cloud}\n"
+    )
+    res = runner.invoke(cli, [
+        "model", "set", "router", "anything-new",
+        "--repo-root", str(root),
+    ])
+    assert res.exit_code == 0, res.output
+    # No shadow warning when compose uses ${VAR:-...} form
+    assert "docker-compose.yml hardcodes" not in res.output
+
+
+def test_model_set_no_warning_when_compose_missing(runner, tmp_path):
+    """No compose file = nothing to warn about."""
+    root = _seed_repo(tmp_path, env_content="")
+    # Deliberately no docker-compose.yml
+    res = runner.invoke(cli, [
+        "model", "set", "router", "anything",
+        "--repo-root", str(root),
+    ])
+    assert res.exit_code == 0, res.output
+    assert "docker-compose.yml" not in res.output
+
+
+def test_model_set_warns_on_provider_shadow_too(runner, tmp_path):
+    """If --provider is set AND MODEL_<ROLE>_PROVIDER is also compose-shadowed,
+    the warning must fire for the provider key too."""
+    root = _seed_repo(tmp_path, env_content="")
+    (root / "docker-compose.yml").write_text(
+        "services:\n"
+        "  scaffold-orchestrator:\n"
+        "    environment:\n"
+        "      MODEL_GENERAL_PROVIDER: ollama\n"
+    )
+    res = runner.invoke(cli, [
+        "model", "set", "general", "claude-haiku-4-5",
+        "--provider", "anthropic", "--repo-root", str(root),
+    ])
+    assert res.exit_code == 0, res.output
+    assert "MODEL_GENERAL_PROVIDER" in res.output
+    assert "docker-compose.yml" in res.output
+
+
+# ---------------------------------------------------------------------------
 # assist group (Sprint U.8.A)
 # ---------------------------------------------------------------------------
 
