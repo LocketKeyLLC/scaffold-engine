@@ -19878,6 +19878,116 @@ The first draft of the validator filter used a bare `"scope" in reason` substrin
 
 ---
 
+### §17.364 close-out — §17.363 retry verification + arc audit refresh (2026-05-31)
+
+Docs-only entry. Counterpart to §17.362, but for the scope-discipline surface §17.362 missed. The §17.363 fix ran live against the homelab brief one more time (job `37c57021-f28e-4e53-b547-063c9229ab69`); this entry records the empirical close-out and updates the cumulative audit trail.
+
+**The §17.363 retry — single-job verification.**
+
+| Run | Job ID | Date | DAG | Validator | Outcome |
+|---|---|---|---|---|---|
+| §17.363 retry | `37c57021-f28e-4e53-b547-063c9229ab69` | 2026-05-31 | 9 nodes / 7 Shell + 2 LLM | clean first attempt, no warnings | scope-distinct decomposition matches the new 8-node Good-shape walkthrough; total container creation 17 → 4 across the DAG |
+
+The model picked the more idiomatic Proxmox split this time — VMs for Jellyfin (HW transcoding) and Ollama (GPU passthrough), LXCs for AdGuard + Monitoring — vs. the §17.361 retry's LXCs-everywhere choice. The naming shift from "VM" (Jellyfin/Ollama) and "LXC" (AdGuard/Monitoring) aligned with the underlying tool used (`qm create` vs `pct create`), closing the §17.362-review-flagged "T3 named 'Deploy Jellyfin VM' actually used `pct create`" inconsistency.
+
+**The scope-discipline metric grid.** All counts are totals across the full DAG, NOT per-node.
+
+| Operator-action marker | §17.361 retry (broken) | §17.363 retry (fixed) | Reduction |
+|---|---:|---:|---:|
+| `dd if=` (Proxmox ISO burn) | 5 | **1** (T1 only) | -80 % |
+| `pct create` (LXC creation) | 17 | **2** (T3 only, AdGuard + Monitoring) | -88 % |
+| `qm create` (VM creation) | 0 | **2** (T4 Jellyfin, T5 Ollama) | n/a |
+| Total container-creation calls | 17 | **4** (matches reality: 2 VMs + 2 LXCs) | -76 % |
+| `tailscale up` (any) | 24 | **5** (4 daemon installs + 1 exit-node config) | -79 % |
+| `--advertise-exit-node` (exit-node advertisement) | many | **1** (T7 only) | matches §17.363 example |
+
+The §17.361 retry's 17 `pct create` calls were the smoking gun for the redundancy class: with only 4 actual containers in the design, 17 creations means each container is being `pct create`d ~4 times across redundant scope-inflated nodes — the operator hits "VMID already in use" on the 2nd through 4th attempts. The §17.363 retry's `pct create=2 + qm create=2 = 4 total container creations` is the dimensionally-correct count for a 4-service deployment. The same reduction holds for ISO burn (5 → 1, since only one node should burn the ISO) and `tailscale up` (24 → 5, since exit-node advertisement should be once, not per-LXC-per-node).
+
+**Per-node scope shape.**
+
+| Node | Tool | What it does in this retry | §17.363 rule alignment |
+|---|---|---|---|
+| T1 Install Proxmox VE host | Shell | ISO burn + install; no container creation | ✓ matches "Install X stops at working X" |
+| T2 Configure VLAN bridges | Shell | adds vmbr0.<VLAN_*> stanzas; no container creation | ✓ matches "Configure Y starts from upstream" |
+| T3 Create LXC containers | Shell | `pct create` × 2 for AdGuard + Monitoring; no VMs, no service install | ✓ matches "Create Z creates only Z" |
+| T4 Deploy Jellyfin VM | Shell | `qm create` × 1; Jellyfin install in created VM | ✓ matches "Deploy Z service creates only Z" |
+| T5 Deploy Ollama VM with GPU | Shell | `qm create` × 1 + PCI passthrough; Ollama install | ✓ matches the same rule |
+| T6 Install services in LXCs | Shell | AdGuard + Prometheus install inside the LXCs from T3; one residual scope-leak line (step 7 re-states GPU assignment) | ✓ mostly aligns, minor leak noted |
+| T7 Enable Tailscale remote access | Shell | exactly one `tailscale up --advertise-exit-node` + DNS policy via AdGuard | ✓ matches "ONE exit node, not four" example |
+| T8 Validate FOSS and privacy | LLM | compliance report | ✓ no installs, no config edits |
+| T9 Document setup and security | LLM | README.md | ✓ documentation, not Shell |
+
+The validator was clean on first attempt (`validator_attempts: 1`, `warnings: []`) — the scope-discipline clauses in `DAG_SYSTEM` landed without needing the W.3 retry loop. The validator's new SCOPE DISCIPLINE audit block was therefore not exercised on this retry; that path is unit-tested but unverified on live LLM dispatch. Expected to fire on adversarial briefs where the initial decomposition over-scopes a single node.
+
+**Cumulative homelab audit trail (five runs).**
+
+| Run | Job ID | Surface verified |
+|---|---|---|
+| Original trial | `bc54760c-…` | the regression — 9/9 LLM fabricated past-tense execution |
+| §17.359 retry | `44a1ff97-…` | past-tense narration closed; T9 invented IPs/keys |
+| §17.360 retry | `aaa7b37c-…` | value fabrication closed; runbooks used `e.g., 192.168.1.10` |
+| §17.361 retry | `64a27ecb-…` | runbook placeholder discipline; T1/T2/T5 redundancy invisible to scan |
+| §17.363 retry | `37c57021-…` | scope discipline; container creation count dimensionally correct |
+
+§17.362's archived close-out claimed the fabrication arc was structurally complete. That was true for the fabrication surface (5 retries × multiple fabrication markers, all-clean post-§17.361). It was wrong for the decomposition surface, which §17.362's metric grid didn't measure. The §17.363 retry both closes the decomposition surface AND demonstrates the methodological lesson: metric grids saturate the failure classes they're designed to detect, not the failure classes that exist. §17.364's grid adds the decomposition markers (`pct create`, `qm create`, `dd if=`, `tailscale up`, `--advertise-exit-node`) as a permanent diff baseline; a future model upgrade or prompt edit that regresses on either fabrication OR scope discipline can be detected by re-running the metric scan against any of the five job IDs above.
+
+**Minor residuals** (well below regression threshold, flagged for next-class detection).
+
+- **T6 step 7 GPU-assignment overlap with T5.** T6's runbook re-states "Assign Tesla P40 exclusively to Ollama" as a single sub-step, even though T5's runbook already does this with `qm create … --hostpci0 <GPU_PCI_ADDRESS>,pcie=1,x-vga=1`. An operator following T6 step 7 to the letter would issue a redundant assignment, which is a no-op on the running VM but adds a confusing line in their command history. The §17.363 prompt's anti-example targets whole-pipeline overlap (T1≈T2≈T5); single-line overlap is a finer-grained issue. Not a §17.365 trigger yet — would become one if a future retry shows multi-step single-line overlaps stacking across many nodes.
+- **Five total `tailscale up` calls.** T3 (1) + T4 (1) + T5 (1) + T6 (1) + T7 (1). Of these, T7 is the canonical exit-node config; T3-T6's `tailscale up` calls install the daemon plus a non-exit-node `tailscale up` to enroll the LXC/VM in the tailnet. Defensible separation of concerns (daemon enrollment ≠ exit-node policy) but tighter than ideal — a stricter interpretation of "ONE exit node" rolls daemon enrollment into T7 too. Acceptable as-is; revisit if the per-node-enrollment pattern itself becomes an operator hazard.
+- **§17.362-review technical-correctness findings remain unaddressed.** `pct create … --pcidev <GPU_PCI_ADDRESS>` (a `qm`-only flag misapplied to `pct` in the §17.361 retry's T3) doesn't appear in the §17.363 retry — the model correctly chose `qm create … --hostpci0` for the GPU VM. The §17.362-review findings about broken Tailscale install commands, OpenVPN cipher defaults, and AdGuard DNS-bypass have NOT been systematically re-verified on this retry; spot-check shows they're improved (Tailscale install uses the canonical `curl -fsSL …/install.sh | sh` everywhere) but the AdGuard DNS-bypass risk class would need a dedicated scan to fully audit. Deferred until a future retry's review surfaces a concrete recurrence.
+
+**The arc — current state.**
+
+| § | Surface closed |
+|---|---|
+| §17.359 | past-tense execution narration (Shell + LLM + CodeGen prompts) |
+| §17.360 | concrete-value fabrication in LLM/synth nodes + verbatim-tool guard for Shell |
+| §17.361 | runbook `e.g., concrete-value` lure → `<SCREAMING_SNAKE>` placeholder discipline |
+| §17.362 | empirical close-out / audit trail for the fabrication arc |
+| §17.363 | DAG scope discipline / per-node deliverable matching |
+| §17.364 | empirical close-out / audit trail for the scope-discipline retry |
+
+Six entries, five live retries, one regression class closed per fix. The §17.362 "saturation" claim is now retroactively scoped to the fabrication surface; §17.364 makes the decomposition-surface saturation claim with the same caveat — the grid catches the classes it measures.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `OVERVIEW.md` | this entry |
+
+**Verification.** Job IDs above are the audit trail. The §17.363 retry's per-node `output_text` and the four prior retries' outputs are all preserved in Postgres (no `/jobs delete`); reproduce the metric grid via:
+
+```sql
+SELECT
+  (SELECT COUNT(*) FROM dag_nodes n,
+     regexp_matches(n.output_text, 'pct create', 'g')
+     WHERE n.job_id='<job_id>') AS pct_create_total,
+  (SELECT COUNT(*) FROM dag_nodes n,
+     regexp_matches(n.output_text, 'qm create', 'g')
+     WHERE n.job_id='<job_id>') AS qm_create_total,
+  (SELECT COUNT(*) FROM dag_nodes n,
+     regexp_matches(n.output_text, 'dd if=', 'g')
+     WHERE n.job_id='<job_id>') AS dd_total,
+  (SELECT COUNT(*) FROM dag_nodes n,
+     regexp_matches(n.output_text, '--advertise-exit-node', 'g')
+     WHERE n.job_id='<job_id>') AS exit_node_advertisements;
+```
+
+Substitute any of the five homelab job IDs to get that retry's grid row.
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Empirically verify the validator's SCOPE DISCIPLINE audit path on live LLM dispatch.** The §17.363 retry's first-pass DAG was already scope-clean; the validator-retry loop didn't fire. The audit block is exercised in unit tests (`test_scope_issue_same_tool_kept_when_reason_says_scope`, `test_validator_system_documents_scope_audit`); live exercise requires an adversarial brief that the prompt's first pass over-scopes. Not engineered on purpose; expected to surface organically.
+- **Stack the metric-grid technique across task classes.** The grid is homelab-class specific (`pct create`, `qm create`, `dd if=` are Proxmox-class markers). A digital-design-class grid would track different markers (`module` declarations, `assign` statements, testbench instantiations). The grid template is the pattern, not the marker list; documenting the template as a reusable observation rubric is a defensible follow-up — deferred until a second task class needs one.
+- **Close the §17.362-review technical-correctness backlog.** §17.362's review surfaced bugs that are model-capability-ceiling failures (the cloud Qwen 235b can know Proxmox 80% well, not 100%); RAG-injecting Proxmox-specific knowledge into the `eng` partition would help but is a different surface. Not in §17.364's scope.
+
+**Cohort.** Closes the §17.359 → §17.360 → §17.361 → §17.362 → §17.363 → §17.364 homelab-class arc with two close-out audits (§17.362 fabrication; §17.364 scope). The pattern of "fix → retry → review → close-out" yielded five retries × two audit entries in one operator session; the diminishing-returns inflection is now visible (each retry's residual was finer-grained than the previous one's headline regression). Recommended close until a non-homelab task class surfaces a different failure shape.
+
+**Cost.** Docs-only; +~70 LOC OVERVIEW + zero code. Zero new deps, zero migrations, zero schema changes, zero behavior change. Net result: the homelab class now has a five-job audit trail across two failure-surface classes (fabrication + scope), each retry's metric row is reproducible from `dag_nodes.output_text`, and a future regression on either surface can be detected by re-running the published query against any of the five job IDs.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
