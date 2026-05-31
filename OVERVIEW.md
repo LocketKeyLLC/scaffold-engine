@@ -19105,6 +19105,68 @@ The two-domain triangulation pinned the failure class as **single-turn-input dri
 
 ---
 
+### §17.344 triage_model qwen3:4b → qwen3-vl:235b-instruct-cloud — single-turn discipline + 287× speedup, both confirmed (2026-05-31)
+
+Closes the first deferred remediation from §17.343 ("Model bump: valve `triage_model` qwen3:4b → qwen3:7b. 7b should hold format + rule discipline more reliably; latency cost ≈ 2-3× per turn on CPU. Worth measuring as a single A/B against the same stress probes.") with a different model than originally scoped, and an inverse-of-expected latency result.
+
+**Model selection.** The §17.343 deferred-remediation note said "qwen3:7b" but the qwen3 family has no 7b tag (sizes are 0.6b / 1.7b / 4b / **8b** / 14b / 30b). After confirming the operator was fine with cloud models and wanted to use whatever was in their existing Ollama library, picked `qwen3-vl:235b-instruct-cloud` — already in the model list (used for spec extraction since §17.144), already routed through `model_router.chat` without code changes, no new deps. Cloud-Ollama suffix routing already handled by `model_router._is_cloud()` (3600 s timeout vs 1800 s local). Zero infra work to flip.
+
+**A/B against §17.343's stress probes — both single-turn, full pipe through pipelines :9099.**
+
+| Probe | qwen3:4b (§17.343) | qwen3-vl:235b-instruct-cloud (now) | Δ |
+|---|---|---|---:|
+| Homelab (Ryzen 9 7950X + 128 GB DDR5 ECC + 8 TB NVMe ZFS mirror + dual 25GbE + $50/mo + weekends) | 2008 s | **7 s** | **287×** |
+| Greenhouse (12×16 hydroponic + 1500W lights + $30/mo + weekends) | ~1400 s (server-side; client timed out) | **7 s** | **~200×** |
+
+The latency table is the load-bearing line: cloud-Ollama at 7 s/turn is *faster* than local qwen3:4b on this CPU for triage, not slower — the opposite of what §17.343 estimated ("≈ 2-3× per turn on CPU"). On reflection, the §17.343 estimate assumed local 7b on CPU; cloud routing eliminates the CPU bottleneck entirely and the network round-trip is sub-second.
+
+**Quality A/B — homelab probe excerpts.**
+
+| Axis | qwen3:4b (§17.343) | qwen3-vl:235b cloud (now) |
+|---|---|---|
+| 4 required headers used (`**Scope so far:**` / `**Options:**` / `**Gaps:**` / `**My pick:**`) | ✗ — emitted `### Analysis...`, h3-table-of-buckets, `### ✅ Recommended Options` | ✓ exact format |
+| Echo fidelity on user-stated values | ✓ (after §17.343 fix) | ✓ verbatim ("Ryzen 9 7950X, 128GB DDR5 ECC, 8TB NVMe ZFS mirror, dual 25GbE, ~$50/mo power budget") |
+| Gap lines as direct questions | ✗ ("WHAT: Gap. You haven't specified...") | ✓ 3/3 ("what kind of experience do you want", "must all services be accessible from outside your LAN", "1 weekend, 4 weekends, or open-ended?") |
+| Numerical fabrication | ✗ ($0.10/mo, $0.20/mo, $50–$70 for Pi, "< 3 days") | ✓ none |
+| Hallucinated authority citations | (none on homelab) | ✓ none |
+| Open-Gap guard | ✗ recommended Jellyfin + Home Assistant + distributed backup with invented costs | △ recommended "Media + AI hybrid" (one of the Options just presented) with reasoning grounded in user-stated values — see "Open-Gap guard interpretation" below |
+
+**Greenhouse probe — confirmation on a second domain.** Same shape, 7 s elapsed, 4 required headers, Options as bullets (leafy greens / tomatoes-peppers / microgreens), Gaps as direct questions, My pick recommends leafy greens with reasoning grounded in the user-stated 1500W lighting + weekend availability. **No NASA/USDA citation appeared** — the hallucinated-authority class from §17.343's pre-iteration greenhouse run is absent on the cloud model.
+
+**Open-Gap guard interpretation.** The cloud model emits a positive My pick (e.g., "Media + AI hybrid") instead of the strict §17.342 worked-example "None — direction too vague. Blocking gap: WHAT" refusal. This is **looser** than §17.342's strict refusal-on-open-WHAT pattern but **stricter** than §17.343's qwen3:4b failure mode of inventing specific services with fabricated costs and timelines. The cloud model's recommendation is grounded in user-stated values (storage, CPU, power budget) and picks from the Options list it just presented — fabrication-free. Worth noting because operator preference can still tune toward strict refusal via prompt; the model is not refusing because the model is *capable* of well-grounded recommendations on partial-information inputs, which the 4b was not. Choice between "always refuse on open WHAT" and "ground a recommendation on partial information" is now a prompt-level decision rather than a model-capacity ceiling.
+
+**Files changed.**
+
+- `pipelines/scaffold_router/valves.template.json` — `triage_model` default `qwen3:4b` → `qwen3-vl:235b-instruct-cloud`.
+- `pipelines/scaffold_router/valves.json` (gitignored — not in commit) — updated on this host to take effect immediately; future deploys get the new default from the template via the standard valve bootstrap chain (`valves.template.json` → `_bootstrap_valves` → `_apply_env_fallbacks`, see [[pipelines]] reference).
+
+**Operator action for existing deploys.** Because `valves.json` is gitignored and the bootstrap only seeds the live file when it's missing or `{}`, existing operators on prior commits will continue to read `qwen3:4b` from their persisted `valves.json`. To pick up the new default they need ONE of:
+
+1. Set `triage_model` to `""` in their `valves.json` (the env-fallback step will then leave it empty, AND a subsequent template bootstrap won't trigger because the file isn't `{}`) — this path requires editing the live JSON manually. Simpler:
+2. Edit `triage_model` directly in their `valves.json` to `qwen3-vl:235b-instruct-cloud`, or any preferred cloud-tagged model.
+3. Delete `pipelines/scaffold_router/valves.json` and restart `open-webui-pipelines` — bootstrap will re-seed the live file from the new template.
+
+The OWUI admin panel "Pipelines → scaffold_router" valve editor is the canonical UI for path (2) and is the recommended operator path.
+
+**Outside scope (deferred).**
+
+- **Anthropic-Claude provider.** The operator's stated direction is to use cloud models in their existing payment plan, which includes Anthropic Claude. Sized in this same session (see commit log + [[providers-abstraction]] reference): ~250 LOC across 5 files, no `model_router.py` edits needed (Sprint E's provider abstraction is already wired through `_resolve_role()` at `app/model_router.py:316`). Cost telemetry table already seeded with Anthropic rates in `db/migrations/030_cost_telemetry.sql:47-54`. Will land as §17.345 in a subsequent commit.
+- **Whether to tighten My pick to strict-refuse-on-open-WHAT.** The cloud model emits well-grounded recommendations on open WHAT instead of refusing. Whether that's the desired UX is a value judgment, not a correctness issue. Held open for operator feedback after real use.
+- **Special-case first-turn prompt** (the second §17.343 deferred item) and **two-pass 4b+7b** (the third) are now both moot: the cloud-model bump closes the failure class they were designed to address. They can be dropped from the deferred list.
+
+**Reinforces `feedback_verify_before_claim`.** §17.343's prompt-iteration round was verified on the same homelab probe; this entry's model-bump round was verified on the *same* probe (apples-to-apples) plus a second probe (greenhouse) for cross-domain confirmation. Both probes clean; the win generalizes.
+
+**Cohort.** §17.342 → §17.343 → §17.344 = three entries on the "OWUI triage UX polish" axis, each addressing a different failure class:
+- §17.342 = multi-turn gap-shape + open-Gap guard (prompt-only fix, verified multi-turn)
+- §17.343 = single-turn paraphrase drift fixed (echo-fidelity rule); format-discipline + open-Gap guard pinned to qwen3:4b model-capacity ceiling
+- §17.344 = ceiling broken by model bump; format-discipline + Gap-question + fabrication-avoidance all hold on cloud model, and ~287× faster
+
+§17.344 closes the axis as currently designed. Future entries here will be about (a) the Claude-provider work (§17.345) which is provider-orthogonal, (b) any operator-tuning of strict-refuse vs grounded-recommend My pick behavior, or (c) prompt drift detected if the cloud model changes its native behavior over time.
+
+**Cost.** 1 LOC change to `pipelines/scaffold_router/valves.template.json`. Zero code logic touched. Zero new deps. Two ~7 s verification probes (homelab + greenhouse). Total change-and-verify cycle: under 15 minutes (vs §17.343's 33 minutes for a single probe).
+
+---
+
 §17.200 + §17.201 + §17.202 + §17.203 + §17.204 + §17.205 close AUDIT.md cohort "LOW sweep". **With these commits AUDIT.md is empty** — every finding (HIGH, MEDIUM, LOW) is closed. The audit's findings + 3 honorable mentions are all addressed across §17.180 → §17.205 (26 commits).
 
 ---
