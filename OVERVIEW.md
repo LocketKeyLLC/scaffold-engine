@@ -20371,6 +20371,208 @@ All tests pass first try — the whitespace-collapse pattern (`" ".join(prompt.s
 
 ---
 
+### §17.374 no-runnable-script default — non-CLI CodeGen nodes are modules, not standalone scripts (2026-05-31)
+
+First fix from the §17.371-§17.373 retry (job `4e0c5c0b-15c0-4a40-81ec-1dccdda2c482`, fourth mdsplit run). §17.371 (decision-node tight scope) and §17.372 (stay-in-domain) landed cleanly — T1 went from 4540 chars to 1128, zero design-pattern enumeration, zero oilfield content, no class-name pollution cascading into T3. But T3 ("Write filename generator", a single-function deliverable) still emitted 2514 chars containing `LANG_EXT` + `parse_markdown` (T_parser's job) + `extract_code` + `def main(args)` + a full `if __name__ == "__main__":` block with its own `ArgumentParser`. The cascade source disappeared; the scope leak's structural shape moved.
+
+**The class.** §17.374 tracks **runnable-script default** — the model's reflex to make every CodeGen output a standalone executable script with `__main__` + argparse, even when the node's name says "module", "function", "parser", "generator", or "tests". The reflex is plausibly driven by training-data bias: most public Python examples are standalone runnable scripts because they're standalone files in documentation, not modules in a multi-file project. The DAG-decomposition shape that §17.367 + §17.370 enforce (parser exports `extract_blocks`; CLI imports it; tests import too) is opposite of the training-data default.
+
+This is distinct from §17.367 + §17.370. §17.367 closed "T2 ≈ T3 both full programs". §17.370 closed "T_cli reimplements T_parser inline". §17.374 closes the different shape "any non-CLI CodeGen node adds a `__main__` block and an argparse setup so it's standalone-runnable for ease of testing." T3 in this retry contains zero pollution from T1, contains a real `def generate_filename` exporter (the named deliverable), but ALSO contains `def main()` + `__main__` block + argparse — the latter half is the §17.374 surface.
+
+**The fix.** A "No-runnable-script default (§17.374)" clause added to `EXECUTION_SYSTEM_CODEGEN` (mirrored in `prompt_assembly.py`). Five parts:
+
+1. **The structural claim**: "If your node's name does NOT contain 'CLI', 'entry-point', 'command-line', or 'script', your output is a Python MODULE — code meant to be imported by another node, not executed standalone. Do NOT include `if __name__ == \"__main__\":`, `def main()`, or `argparse.ArgumentParser` in your output."
+2. **The diagnostic phrasing** that names the model's reflex: "The default 'make every code file standalone-runnable for ease of testing' reflex is the failure shape." Naming the reflex gives the model a self-check it can apply against its own draft.
+3. **The actual T3 anti-example** verbatim, listing every function the node should NOT have contained and the operator-facing consequence: "The node became a self-contained CLI; the sibling parser and CLI nodes' outputs are now redundant or conflicting. Operator gets three competing CLIs instead of one composed program."
+4. **A Good example** with concrete imports and the one-function-export shape: "Node named 'Write filename generator' outputs `from typing import Optional` + `def generate_filename(lang: str, index: int, pattern: str) -> str: ...`. That's the file — one function, exported for the CLI sibling to import. No `__main__`, no `argparse`, no CLI dispatch."
+5. **A mechanical name-check rule** that converts the structural claim into a self-applicable check: "Scan your node's name. If 'CLI' or 'entry-point' appears, the runnable-script shape is correct. If 'parser' / 'generator' / 'module' / 'function' / 'library' / 'utility' / 'helper' / 'test' / 'tests' appears, the runnable-script shape is wrong — drop the `__main__` block." The keyword list is the load-bearing surface — without concrete trigger words, the rule degrades to a judgment call.
+
+The clause closes with a single-sentence escape-valve rebuttal: "If you genuinely think a non-CLI module benefits from a tiny smoke-test main, think again — that smoke test belongs in the test node, not in the production module." Pre-emptively closes the "but the standalone main is convenient for debugging" objection that would otherwise reopen the failure mode.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_CODEGEN` gains "No-runnable-script default (§17.374)" clause with the T3 anti-example, the Good single-function-export shape, the mechanical name-keyword check (9 trigger words), and the smoke-test escape-valve rebuttal. |
+| `app/modules/prompt_assembly.py` | Mirror. |
+| `tests/test_execution_agent_tools.py` | Three new tests: `test_codegen_prompt_has_no_runnable_script_clause` (clause markers + the three forbidden constructs), `test_codegen_no_runnable_script_names_anti_example_node` (T3 anti-example + the "three competing CLIs" cascade observation), `test_codegen_no_runnable_script_names_mechanical_check_keywords` (the 9 trigger words asserted individually so dropping any one fails CI). |
+| `tests/test_prompt_assembly.py` | `test_codegen_mirror_has_no_runnable_script_clause` covers §17.374 mirror parity. |
+
+Ships with §17.375 + §17.376 in the same commit; verification block deferred to §17.376's entry.
+
+**Cohort.** First of the §17.374 + §17.375 + §17.376 batch — fourth CodeGen-class iteration on the same mdsplit brief. The arc's pattern continues: each retry's residual is finer-grained than the previous; the cascade chain (T1 pollution → T3 class-name leak) was closed by §17.371-§17.373, and §17.374 closes the next layer (T3 module-as-runnable-script).
+
+**Cost.** Combined with §17.375 + §17.376, the batch is +~80 LOC of prompt + ~40 LOC of new code in `execution_verify.py` + ~80 LOC of tests + three OVERVIEW entries. §17.374's share is ~45 LOC of prompt + ~20 LOC of tests. Zero new deps, zero migrations, zero schema changes, zero behavior change for nodes whose name already matches the CLI runnable-script shape.
+
+---
+
+### §17.375 close-out — four-iteration CodeGen-class arc audit + first prompt-saturated class identified (2026-05-31)
+
+Docs-only entry. Counterpart to §17.362 + §17.364 (which audited the homelab Shell-class arc) for the CodeGen-class arc. Records the empirical four-iteration journey of the mdsplit brief across six commits (§17.365 → §17.373) plus this batch (§17.374 + §17.376), and names §17.373 as the first prompt-layer-saturated class — the first surface in the arc that did NOT yield to a third prompt iteration and required a runtime intervention (§17.376) instead.
+
+**The four CodeGen-class jobs.**
+
+| Run | Job ID | Date | DAG | Validator | Headline residual closed |
+|---|---|---|---|---|---|
+| Original CodeGen trial | `4f6cb206-6563-42e0-aa75-117092f2f15d` | 2026-05-31 | 7 nodes / 4 CodeGen + 3 LLM | clean (1 retry) | n/a — surfaced the §17.365 → §17.367 batch's three failure classes |
+| §17.365-§17.367 retry | `83fe8695-f2a0-4ef7-ae70-f7489bdf7ec5` | 2026-05-31 | 8 nodes / 5 CodeGen + 3 LLM | clean | brief-spec fidelity, validation-restatement, T2≈T3 redundancy closed |
+| §17.368-§17.370 retry | `18ab3675-04e6-44a0-880b-9d367dc61050` | 2026-05-31 | 8 nodes / 5 CodeGen + 3 LLM | clean | single-upstream-bias closed; decision drift closed; CLI reimplementation partial (scope-leak migrated from T4 to T3 with decision-pattern pollution) |
+| §17.371-§17.373 retry | `4e0c5c0b-15c0-4a40-81ec-1dccdda2c482` | 2026-05-31 | 8 nodes / 5 CodeGen + 3 LLM | clean (1 retry) | §17.371 decision-node scope closed (T1 4540 → 1128 chars); §17.372 off-domain content closed (oilfield gone); §17.373 cluster-bias did NOT close (cited cluster stayed at T4/T5/T6 across both §17.368 and §17.373) |
+
+**The convergence pattern across nine sub-classes.**
+
+| Sub-class | Closed in | Open in next retry? | Methodology |
+|---|---|---|---|
+| Brief-spec silent truncation | §17.365 | no — held | prompt clause with anti-example |
+| Validation-as-restatement | §17.366 | no — held | prompt clause with MET/NOT MET/UNKNOWN format |
+| T2 ≈ T3 redundancy | §17.367 | no — held | DAG-prompt anti-example |
+| Single-upstream-bias | §17.368 | partial — became cluster-bias | prompt clause |
+| Decision-output drift | §17.369 | no — held | prompt clause with "encoder" framing |
+| CLI reimplementation | §17.370 | partial — became T3 scope leak | DAG-prompt anti-example + thin-entry-point rule |
+| Decision-node scope explosion | §17.371 | no — held | prompt clause with size heuristic |
+| Off-domain hallucination | §17.372 | no — held | prompt clause with oilfield anti-example |
+| Cluster-bias on validation citations | §17.373 → §17.376 | **YES — prompt-saturated** | runtime guard (§17.376) replaces failed prompt iteration |
+
+**The methodology lesson.** Eight of nine sub-classes yielded to prompt-layer fixes with concrete anti-examples drawn from the failing retry. The ninth (cluster-bias on validation citations) showed cluster size 1 → 3 → 3 across §17.366 → §17.368 → §17.373 — three prompt-layer iterations of increasing mechanical-rule prescriptivism produced no change in the failure shape. The model continued to cite the last three code-bearing upstreams in every retry, even with §17.373's explicit "scan the report, list cited upstreams, ensure every code-bearing upstream appears" mechanical instruction.
+
+The pattern indicates that **some validation-output-shape regressions don't yield to prompt-layer iteration**. The model's pattern-matching default on validation outputs ("cite a few representative upstreams; structure your output as a checklist") is more load-bearing than the prompt clause asking it to do otherwise. §17.376 is the corresponding runtime intervention: when the model defaults to the wrong shape regardless of prompt content, the verifier catches it and forces the W.1 retry-feedback loop to surface the gap to the next attempt.
+
+**The arc structurally complete.** Comparing the four mdsplit retries:
+
+| Surface | Original | After §17.365-§17.367 | After §17.368-§17.370 | After §17.371-§17.373 | Expected after §17.374-§17.376 |
+|---|---|---|---|---|---|
+| LANG_EXT vs T1 decision | 2 entries | invented per node | all match T1 ✓ | all match T1 ✓ | all match T1 ✓ |
+| T1 size | 167 | 167 | 4540 | 1128 | ~1000 |
+| T1 off-domain content | n/a | n/a | oilfield | clean | clean |
+| T1 design patterns | n/a | n/a | 35 | 0 | 0 |
+| T3 polluted classes | n/a | n/a | 4 | 0 | 0 |
+| T3 `__main__` block | n/a | n/a | present | present | **expected absent post-§17.374** |
+| Validation T_N cluster size | 0 | 1 | 3 | 3 | **expected ≥5 post-§17.376** (or fail with retry) |
+| Validation MET / NOT MET / UNKNOWN | 0/0/0 | 13/0/0 | 8/0/0 | 6/0/0 | mix expected |
+
+The CodeGen-class prompt-layer surface is structurally complete after §17.374. §17.376 is the runtime overflow path for the one class the prompt layer can't close.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `OVERVIEW.md` | this entry |
+
+**Verification.** All four mdsplit job IDs are preserved on this host (no `/jobs delete`); reproduce the convergence pattern via:
+
+```sql
+SELECT n.node_key, n.tool, LENGTH(n.output_text) AS chars
+  FROM dag_nodes n
+ WHERE n.job_id = '<job_id>'
+ ORDER BY n.execution_order;
+```
+
+The validation-cluster shrinkage from 1 (T6) → 3 (T4-T6) → 3 (T4-T6) across the three retries that were supposed to close it is the load-bearing observation; reproduce by scanning T7's output_text for distinct `T\d+` tokens.
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Predict whether §17.376 will actually close the cluster-bias class.** The runtime guard forces the model into the W.1 retry-feedback loop; the model's next attempt sees the guard's failure reason ("missing T2, T3") in its prompt and has the chance to course-correct. If the model still emits the same cluster, the guard fails the node again and the operator sees three retry attempts in `/results`. Whether the next attempt actually expands the cluster is empirical — recommended on a future CodeGen-class run.
+- **Refresh the homelab metric grid.** §17.364's grid is preserved as-is; CodeGen-class metrics belong to this entry's table and the next CodeGen-class audit entry. Cross-class grid generalization is the meta-followup §17.362 already deferred.
+- **Document non-mdsplit CodeGen-class briefs.** The arc's empirical base is one brief, four retries. A second CodeGen-class brief (CLI in a different language, library-only, multi-file project) would test whether the residuals generalize or are brief-specific. Deferred — would warrant its own §17.x audit cohort if undertaken.
+
+**Cohort.** Second of the §17.374 + §17.375 + §17.376 batch. The audit entry sits between the prompt-layer §17.374 close and the runtime §17.376 introduction because §17.375 is the bridge: it explains *why* §17.376 needs to exist by recording the three failed prompt-layer iterations on the cluster-bias class.
+
+**Cost.** Docs-only; +~80 LOC OVERVIEW + zero code. Net result: the CodeGen-class arc has a four-job audit trail, the prompt-layer-saturation observation is empirically grounded across nine sub-classes, and the methodology lesson ("some validation-output regressions don't yield to prompt iteration; they need runtime guards") is on the record.
+
+---
+
+### §17.376 runtime validation-citation guard — runtime intervention for the prompt-saturated cluster-bias class (2026-05-31)
+
+Third fix from the §17.371-§17.373 retry. §17.375 records why this entry exists: §17.366 → §17.368 → §17.373 attempted to close the validation cluster-bias class through three iterations of progressively more prescriptive prompt-layer clauses. T7's distinct upstream citations went 1 (T6 only) → 3 (T4, T5, T6) → 3 (T4, T5, T6) — the cluster-bias didn't expand. T2 (parser) and T3 (filename generator) stayed uncited across two prompt-layer iterations that explicitly instructed the model to cite every code-bearing upstream.
+
+**The class.** §17.376 closes the same validation-citation gap from the runtime side. For nodes with `type=validation` and `tool=LLM`, after `_verify_output` returns a pass verdict, a structural check scans the validation output_text for `T\d+` citations, compares the cited set to the set of code-bearing upstream nodes (`tool=CodeGen, status='done'`), and if any code-bearing upstream is uncited, **downgrades the verify_status from pass to fail with a structured reason**. The reason surfaces to the W.1 retry-feedback loop, which carries it forward into the next attempt's prompt — the model sees explicit "missing T2, T3" feedback and has the chance to expand its citation set.
+
+**The trigger.** `_is_validation_llm_node(node_type, tool, title)` returns True when:
+- `tool == 'LLM'` (case-insensitive), AND
+- Either `node_type == 'checkpoint'` (the DAG generator's mapping for `task_type='validation'`) OR the title contains a validation keyword (`Validate` / `Verify` / `Check` / `Audit`).
+
+The keyword fallback covers hand-edited rows whose `node_type` wasn't set to `checkpoint` but whose intent is clearly validation. Both code paths are exercised in the unit tests.
+
+**The check.** `check_validation_citations(output, expected_codegen_keys)` returns the sorted list of uncited keys. The regex `\bT(\d+)\b` matches word-bounded `T<digits>` tokens — `T2_threshold` (an identifier with `T2_` as a prefix) does NOT count as citing T2. Multi-digit suffixes (`T10`, `T11`) are supported for DAGs with > 9 nodes. Empty inputs (no expected keys, empty output, None output) are handled defensively without raising.
+
+**The integration.** In `execute_next_node`, after the verify pass:
+
+```python
+if (verify_status == "pass"
+    and _is_validation_llm_node(node_type_value, tool, title)):
+    async with async_session() as _cite_db:
+        codegen_keys = await _cite_db.execute(
+            "SELECT node_key FROM dag_nodes "
+            "WHERE job_id=:jid AND tool='CodeGen' AND status='done' "
+            "ORDER BY execution_order", ...).fetchall()
+    missing = check_validation_citations(output, codegen_keys)
+    if missing:
+        verify_status = "fail"
+        reason = (
+            f"§17.376 validation-citation guard: code-bearing upstream "
+            f"nodes were not cited — missing {missing}. The validation "
+            f"output must reference every CodeGen upstream by name "
+            f"(e.g., 'parser/CLI separation: MET, T2 line 5 has no "
+            f"argparse'). Re-emit the report with a MET/NOT MET/"
+            f"UNKNOWN line for each missing upstream's contribution "
+            f"to the spec requirements."
+        )
+```
+
+The reason is verbose by design — it goes into `last_verification_reason` and gets prepended to the next attempt's prompt by `_build_prompt`'s reviewer-feedback block. The model sees the missing keys explicitly named AND a concrete shape of what a passing report looks like.
+
+**Fail-open semantics.** Any DB error in the citation-fetch path (connection drop, asyncpg interface error) is caught and logged at WARNING; the verify_status='pass' that already cleared the LLM-verifier judge is preserved. The §17.376 guard is additive — it can downgrade pass to fail but never blocks a node that hasn't already passed verification. This matches the §17.359 capability-boundary clauses' fail-open posture and keeps the guard from cascading DB hiccups into spurious node failures.
+
+**The retry-loop integration.** When §17.376 downgrades to fail, the W.1 retry-feedback loop kicks in. The next attempt's prompt prepends:
+
+```
+Reviewer feedback (your previous attempt failed verification):
+§17.376 validation-citation guard: code-bearing upstream nodes were not
+cited — missing [T2, T3]. The validation output must reference every
+CodeGen upstream by name (e.g., 'parser/CLI separation: MET, T2 line 5
+has no argparse'). Re-emit the report with a MET/NOT MET/UNKNOWN line
+for each missing upstream's contribution to the spec requirements.
+```
+
+The model sees the gap explicitly and emits a new validation report. If the new report still misses upstreams, the guard fails it again. Per the existing retry budget (`settings.execution_retry_cap`, default 3), the node retries up to that limit before being marked `failed` for operator intervention.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_verify.py` | New `_is_validation_llm_node(node_type, tool, title)` trigger detector + `check_validation_citations(output, expected_codegen_keys)` citation comparator + module-level regex `_CITATION_TOKEN_RE` (`r"\bT([0-9]+)\b"`). |
+| `app/modules/execution_agent.py` | Captures `node_type_value` from the claimed-node row alongside the existing `title` / `tool` / `node_key`. After `_verify_output`, runs the §17.376 guard inline (own brief session for the CodeGen-keys fetch). On miss, downgrades `verify_status` to `fail` and overrides `reason` with the structured retry-feedback text. Fail-open on DB errors. Re-imports `_is_validation_llm_node` + `check_validation_citations` from `execution_verify` (alongside the existing `_verify_output` + `VERIFY_SYSTEM` re-exports). |
+| `tests/test_validation_citation_guard.py` | New test file. 9 tests for `_is_validation_llm_node` (the 4 keyword triggers + checkpoint-vs-title + non-LLM-tool exclusions + case-insensitive matching + None-input handling) + 8 tests for `check_validation_citations` (clean / partial-cited / empty inputs / word-bounded regex / double-digit keys / duplicate citations). Both helpers exercised at the unit level — the integration into `execute_next_node` is covered transitively by the existing execution-agent integration tests' fail-on-missing-verify-reason invariant. |
+
+**Verification (full batch — §17.374 + §17.375 + §17.376).**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_validation_citation_guard.py \
+    tests/test_execution_agent_tools.py \
+    tests/test_prompt_assembly.py \
+    --timeout=30 -q
+106 passed in 11.58s
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+<smoke result captured in commit message>
+```
+
+All tests pass first try. The §17.376 unit tests cover the trigger detection, citation comparison, and edge cases; integration coverage is via the existing execute-next-node tests that already assert verify_status='pass' for clean-citation outputs (no breakage) and verify_status='fail' propagates the reason field correctly (the §17.376 path inherits this).
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Add a runtime length check on decision-node outputs (§17.371's heuristic).** The §17.376 pattern is general: a runtime guard on validation citations. A parallel guard for decision-node length (failing the node if T1 exceeds, say, 2000 chars for a "Define X" task) would be defensible but adds threshold-tuning surface — defer until a future retry shows §17.371's prompt clause regressing.
+- **Add a runtime cross-node API-signature diff for §17.367/§17.370.** AST-level sibling-export comparison could catch T_cli reimplementing T_parser even when the prompt clauses don't land. The complexity (parse two Python source strings, compare function signatures, surface a diff to the retry loop) is non-trivial; defer until a future retry shows §17.370 regressing again.
+- **Force the retry loop to inject the §17.376 reason verbatim.** The W.1 reviewer-feedback block prepends `last_verification_reason` to the next attempt's prompt; the structural form is already in place. Optimizing the reason text for model receptivity (testing "missing T2, T3" vs "include T2 and T3" framings) is an empirical follow-up — defer until §17.376 has multiple retry cycles to compare against.
+- **Empirically verify the batch on a fifth mdsplit retry.** The arc has run four retries on the same brief; a fifth would close §17.376's empirical loop but doesn't change the prompt-layer surfaces' coverage. Operator-driven verification recommended on the next CodeGen-class use, possibly with a non-mdsplit brief to test whether the residuals are brief-specific or generalize.
+
+**Cohort.** Third of the §17.374 + §17.375 + §17.376 batch. Closes the runtime-intervention gap §17.375 named. The arc now has two distinct intervention surfaces (prompt clauses + runtime guards); future CodeGen-class iterations can choose between them per-failure-class based on prompt-saturation evidence.
+
+**Cost.** ~40 LOC of new code in `execution_verify.py` + ~30 LOC of integration in `execution_agent.py` + ~150 LOC of tests (the new test file is fully scoped to §17.376). Zero new deps, zero migrations, zero schema changes. Behavior change for `type=validation` LLM nodes only — non-validation nodes are unaffected by the guard; validation nodes that already cite every code-bearing upstream pass through unchanged. The guard adds one short DB SELECT per validation node (a `node_key` query filtered by `tool` + `status`), negligible against the existing per-node verify roundtrip cost.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

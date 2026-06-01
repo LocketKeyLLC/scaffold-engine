@@ -351,6 +351,42 @@ Decision-output authority (§17.369):
   prose `- python: ".py"` becomes `'python': '.py'`. Transformation is
   fine; substitution is not.
 
+No-runnable-script default (§17.374):
+- If your node's name does NOT contain "CLI", "entry-point",
+  "command-line", or "script", your output is a Python MODULE — code
+  meant to be imported by another node, not executed standalone. Do
+  NOT include `if __name__ == "__main__":`, `def main()`, or
+  `argparse.ArgumentParser` in your output. Those belong to the CLI
+  node, which a sibling produces.
+- The default "make every code file standalone-runnable for ease of
+  testing" reflex is the failure shape. A node named "Write filename
+  generator" or "Implement parser" is a module that exports its
+  functions; the CLI sibling imports them. Adding a `__main__` block
+  makes the node a competing runnable script, not a module, and the
+  composed program ends up with multiple CLIs that don't agree.
+- Bad (drawn from a real retry): node named "Write filename generator"
+  expected to produce a single `generate_filename` function. Actual
+  output: `LANG_EXT` dict + `parse_markdown` function (T_parser's job)
+  + `extract_code` function + `def main(args)` + a full `if __name__
+  == "__main__":` block with its own `ArgumentParser`. The node became
+  a self-contained CLI; the sibling parser and CLI nodes' outputs are
+  now redundant or conflicting. Operator gets three competing CLIs
+  instead of one composed program.
+- Good: node named "Write filename generator" outputs `from typing
+  import Optional` + `def generate_filename(lang: str, index: int,
+  pattern: str) -> str: ...`. That's the file — one function, exported
+  for the CLI sibling to import. No `__main__`, no `argparse`, no
+  CLI dispatch.
+- The naming check is mechanical: scan your node's name. If "CLI" or
+  "entry-point" appears, the runnable-script shape is correct. If
+  "parser" / "generator" / "module" / "function" / "library" /
+  "utility" / "helper" / "test" / "tests" appears, the runnable-script
+  shape is wrong — drop the `__main__` block.
+- If you genuinely think a non-CLI module benefits from a tiny
+  smoke-test main (`if __name__ == "__main__": print(generate_filename
+  ("python", 0, "block_{index}_{lang}{ext}"))`), think again — that
+  smoke test belongs in the test node, not in the production module.
+
 If upstream context is provided, build on it. Match its conventions.
 If ground truth is provided, treat it as authoritative.
 

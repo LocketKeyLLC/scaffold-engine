@@ -152,3 +152,69 @@ async def _verify_output(
     except Exception as e:
         logger.exception("verify_unexpected_error")
         return "fail", f"verifier unexpected error: {e}", 0.0
+
+
+# ---------------------------------------------------------------------------
+# §17.376 — validation-citation guard
+# ---------------------------------------------------------------------------
+
+_CITATION_TOKEN_RE = __import__("re").compile(r"\bT([0-9]+)\b")
+
+
+def _is_validation_llm_node(node_type: str | None, tool: str | None, title: str | None) -> bool:
+    """Detect a `type=validation` LLM node.
+
+    §17.376 — the citation guard only applies to validation-shaped LLM
+    nodes. Two triggers: dag_nodes.node_type='checkpoint' (the DAG
+    generator's mapping for task_type='validation') OR the title
+    contains a validation keyword (Validate / Verify / Check / Audit).
+    The keyword fallback covers hand-edited rows whose node_type wasn't
+    set to checkpoint but whose intent is clearly validation.
+
+    All three args are accepted as Optional so the caller can pass raw
+    DB row values without defensive .get() calls.
+    """
+    if (tool or "").lower() != "llm":
+        return False
+    if (node_type or "").lower() == "checkpoint":
+        return True
+    title_lower = (title or "").lower()
+    return any(kw in title_lower for kw in ("validate", "verify", "check", "audit"))
+
+
+def check_validation_citations(
+    output: str,
+    expected_codegen_keys: list[str],
+) -> list[str]:
+    """Return the code-bearing upstream node_keys that the validation
+    output does NOT cite. Empty list = clean.
+
+    §17.376 — the validation grounding clauses (§17.366, §17.368,
+    §17.373) progressively asked the model to cite every code-bearing
+    upstream. Four mdsplit retries showed the prompt-layer rule
+    plateaued at "cite the last 3 upstreams" — T2 (parser) and T3
+    (filename generator) remained uncited even with §17.373's
+    "scan the report" mechanical instruction. The citation guard
+    moves the check from prompt-time to verify-time: scan `output`
+    for `T\\d+` tokens, compare to the expected set, return what's
+    missing so the caller can fail the verify and surface the gap to
+    the W.1 retry loop.
+
+    Inputs:
+        output: validation node's output_text.
+        expected_codegen_keys: list of upstream node_keys whose tool
+            was CodeGen and status='done' at the time the validation
+            ran. The validation is expected to cite every one of these
+            at least once.
+
+    Returns:
+        Sorted list of missing keys. Empty if every key appears at
+        least once in output.
+    """
+    if not expected_codegen_keys:
+        return []
+    cited_numeric = {m.group(1) for m in _CITATION_TOKEN_RE.finditer(output or "")}
+    # Compare on the numeric suffix — node_keys are "T2", "T3", etc.
+    expected_numeric = {k.lstrip("T") for k in expected_codegen_keys if k.startswith("T")}
+    missing_numeric = expected_numeric - cited_numeric
+    return sorted(f"T{n}" for n in missing_numeric)

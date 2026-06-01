@@ -115,6 +115,13 @@ class TestSystemForTool:
         assert "Drift Test Requirements" in flat
         assert "scan the report" in flat
 
+    def test_codegen_mirror_has_no_runnable_script_clause(self):
+        # §17.374 — CodeGen mirror.
+        flat = " ".join(pa.EXECUTION_SYSTEM_CODEGEN.split())
+        assert "No-runnable-script default" in flat
+        assert "Write filename generator" in flat
+        assert 'if __name__ == "__main__":' in flat
+
 
 # ---------------------------------------------------------------------------
 # truncate_output — head/tail preserve + marker.

@@ -38,7 +38,10 @@ from app.database import async_session
 from app import model_router
 from app.config import settings, get_model
 from app.modules.execution_compile import _compile_output  # re-exported for test patches
-from app.modules.execution_verify import VERIFY_SYSTEM, _verify_output  # re-exported for test patches
+from app.modules.execution_verify import (
+    VERIFY_SYSTEM, _verify_output,  # re-exported for test patches
+    _is_validation_llm_node, check_validation_citations,
+)
 from app.modules.prompt_optimizer import optimize_prompt
 from app.modules.rag_pipeline import query_rag
 from app.utils.cost_tracking import current_job_id, current_node_id
@@ -758,6 +761,42 @@ Decision-output authority (§17.369):
   prose `- python: ".py"` becomes `'python': '.py'`. Transformation is
   fine; substitution is not.
 
+No-runnable-script default (§17.374):
+- If your node's name does NOT contain "CLI", "entry-point",
+  "command-line", or "script", your output is a Python MODULE — code
+  meant to be imported by another node, not executed standalone. Do
+  NOT include `if __name__ == "__main__":`, `def main()`, or
+  `argparse.ArgumentParser` in your output. Those belong to the CLI
+  node, which a sibling produces.
+- The default "make every code file standalone-runnable for ease of
+  testing" reflex is the failure shape. A node named "Write filename
+  generator" or "Implement parser" is a module that exports its
+  functions; the CLI sibling imports them. Adding a `__main__` block
+  makes the node a competing runnable script, not a module, and the
+  composed program ends up with multiple CLIs that don't agree.
+- Bad (drawn from a real retry): node named "Write filename generator"
+  expected to produce a single `generate_filename` function. Actual
+  output: `LANG_EXT` dict + `parse_markdown` function (T_parser's job)
+  + `extract_code` function + `def main(args)` + a full `if __name__
+  == "__main__":` block with its own `ArgumentParser`. The node became
+  a self-contained CLI; the sibling parser and CLI nodes' outputs are
+  now redundant or conflicting. Operator gets three competing CLIs
+  instead of one composed program.
+- Good: node named "Write filename generator" outputs `from typing
+  import Optional` + `def generate_filename(lang: str, index: int,
+  pattern: str) -> str: ...`. That's the file — one function, exported
+  for the CLI sibling to import. No `__main__`, no `argparse`, no
+  CLI dispatch.
+- The naming check is mechanical: scan your node's name. If "CLI" or
+  "entry-point" appears, the runnable-script shape is correct. If
+  "parser" / "generator" / "module" / "function" / "library" /
+  "utility" / "helper" / "test" / "tests" appears, the runnable-script
+  shape is wrong — drop the `__main__` block.
+- If you genuinely think a non-CLI module benefits from a tiny
+  smoke-test main (`if __name__ == "__main__": print(generate_filename
+  ("python", 0, "block_{index}_{lang}{ext}"))`), think again — that
+  smoke test belongs in the test node, not in the production module.
+
 If upstream context is provided, build on it. Match its conventions.
 If ground truth is provided, treat it as authoritative.
 
@@ -1131,6 +1170,9 @@ async def execute_next_node(
         node_id = node["id"]
         title = node["title"]
         node_key = node["node_key"]
+        # §17.376 — node_type captured so the post-verify citation guard
+        # can detect type=validation LLM nodes without a re-fetch.
+        node_type_value = node.get("node_type")
         _raw_model = node.get("assigned_model", "")
         _assigned = _raw_model if _raw_model and str(_raw_model).lower() not in ("none", "null") else ""
         # Tool comparisons are case-insensitive — VALID_TOOLS pins the
@@ -1453,6 +1495,56 @@ async def execute_next_node(
         verify_status = vstatus
         if verify_status == "fail":
             logger.warning("node_verification_failed: node='%s' reason=%s", title, reason)
+
+    # §17.376 — validation-citation guard. Four mdsplit retries showed the
+    # prompt-layer rule (§17.366 → §17.368 → §17.373) plateaued at "cite
+    # the last 3 upstreams" — T2 and T3 stayed uncited even with §17.373's
+    # mechanical "scan the report" instruction. The runtime guard moves
+    # the check from prompt-time to verify-time: scan the validation
+    # output for T_N tokens, compare to the code-bearing upstream set,
+    # downgrade verify_status to fail if any are missing so the W.1
+    # retry loop surfaces the gap to the next attempt's prompt.
+    if (
+        verify_status == "pass"
+        and _is_validation_llm_node(node_type_value, tool, title)
+    ):
+        try:
+            async with async_session() as _cite_db:
+                _cite_rows = await _cite_db.execute(
+                    text(
+                        "SELECT node_key FROM dag_nodes "
+                        "WHERE job_id = :jid AND tool = 'CodeGen' "
+                        "  AND status = 'done' ORDER BY execution_order"
+                    ),
+                    {"jid": job_id},
+                )
+                codegen_keys = [r[0] for r in _cite_rows.fetchall()]
+            missing = check_validation_citations(output, codegen_keys)
+            if missing:
+                verify_status = "fail"
+                reason = (
+                    f"§17.376 validation-citation guard: code-bearing "
+                    f"upstream nodes were not cited — missing {missing}. "
+                    f"The validation output must reference every CodeGen "
+                    f"upstream by name (e.g., 'parser/CLI separation: MET, "
+                    f"T2 line 5 has no argparse'). Re-emit the report "
+                    f"with a MET/NOT MET/UNKNOWN line for each missing "
+                    f"upstream's contribution to the spec requirements."
+                )
+                logger.warning(
+                    "validation_citation_guard_fail: node='%s' "
+                    "missing=%s expected=%s",
+                    title, missing, codegen_keys,
+                )
+        except Exception as exc:
+            # Fail-open: any DB error in the guard must not block a
+            # verify_status='pass' that has otherwise cleared. Logged for
+            # operators; the validation node passes through.
+            logger.warning(
+                "validation_citation_guard_error: node='%s' error=%s",
+                title, exc,
+            )
+
     verified = (verify_status == "pass")
     db_confidence = confidence if (verify_status != "skipped" and confidence > 0.0) else None
 

@@ -442,3 +442,39 @@ class TestSystemPromptRouting:
         # on T4/T5/T6.
         assert "T4 / T5 / T6" in flat or "T4/T5/T6" in flat
 
+    # ----- §17.374 — no-runnable-script default -----
+
+    def test_codegen_prompt_has_no_runnable_script_clause(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_CODEGEN
+        flat = " ".join(EXECUTION_SYSTEM_CODEGEN.split())
+        assert "No-runnable-script default" in flat
+        # The mechanical name-check phrasing — CLI vs module distinction.
+        assert "name does NOT contain" in flat
+        # The three forbidden constructs in non-CLI nodes must be named.
+        assert 'if __name__ == "__main__":' in flat
+        assert "def main()" in flat
+        assert "argparse.ArgumentParser" in flat
+
+    def test_codegen_no_runnable_script_names_anti_example_node(self):
+        """The §17.374 clause must name the actual T3 ("Write filename
+        generator") regression so the model has a concrete shape to
+        pattern-match against. Drop the anti-example and the model
+        regresses on the next retry."""
+        from app.modules.execution_agent import EXECUTION_SYSTEM_CODEGEN
+        flat = " ".join(EXECUTION_SYSTEM_CODEGEN.split())
+        assert "Write filename generator" in flat
+        # The cascade observation — sibling nodes' outputs become
+        # redundant or conflicting.
+        assert "three competing CLIs" in flat
+
+    def test_codegen_no_runnable_script_names_mechanical_check_keywords(self):
+        """The §17.374 naming check is mechanical. The keyword list
+        ("parser / generator / module / function / library / utility /
+        helper / test / tests") must be present so the model has the
+        exact triggers."""
+        from app.modules.execution_agent import EXECUTION_SYSTEM_CODEGEN
+        flat = " ".join(EXECUTION_SYSTEM_CODEGEN.split())
+        for kw in ("parser", "generator", "module", "function", "library",
+                   "utility", "helper", "test"):
+            assert kw in flat, f"missing keyword: {kw!r}"
+
