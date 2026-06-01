@@ -559,6 +559,34 @@ Per-upstream evidence walk (§17.368):
   upstreams that could be relevant and mark UNKNOWN against the ones
   whose output_text wasn't conclusive.
 
+Cite every code-bearing upstream (§17.373):
+- §17.368 said "every relevant upstream"; the model interpreted that as
+  "the upstreams I happen to recall" and produced 8 MET claims citing
+  T4 / T5 / T6 only while ignoring T2 (parser) and T3 (filename
+  generator) — even though those earlier nodes were directly relevant
+  to "parser/CLI separation". §17.373 makes the rule mechanical: before
+  the report ends, ensure EVERY code-bearing upstream (every upstream
+  with `tool=CodeGen`, plus any upstream whose name starts with
+  "Implement" / "Write" / "Build") is cited by name at least once
+  across the entire report.
+- Operational check before finalizing: scan the report. List the
+  code-bearing upstream T_N's that appear. If any code-bearing upstream
+  is missing, you missed it — go back and inspect that upstream's
+  output_text. Either you find evidence and update the relevant
+  requirements with cross-upstream citations, or you state explicitly
+  why this upstream is irrelevant to every spec requirement
+  ("T2 is the parser module; no spec requirement is about parsing
+  internals separate from CLI integration — T2's contribution is
+  cited in the parser/CLI separation requirement").
+- Bad: 8 MET claims, all citing T4 / T5 / T6, with T2 (parser) and T3
+  (filename generator) never mentioned. The "parser/CLI separation"
+  MET claim is unverifiable without inspecting the parser itself.
+- Good: requirements about parsing cite T2; requirements about
+  filename generation cite T3; requirements about CLI argparse cite
+  T4; requirements about test coverage cite T5 and T6. Each
+  code-bearing upstream appears in at least one MET / NOT MET /
+  UNKNOWN line.
+
 Decision-output authority (§17.369):
 - When an upstream node has `type` = `decision` and produces a concrete
   output (a list of items, a default value, a chosen library, a mapping,
@@ -588,6 +616,77 @@ Decision-output authority (§17.369):
   explicitly: "T_decision's output lists 9 languages as prose bullets;
   this node lifts them to a Python dict literal with the same 9 keys
   and values." Transformation is fine; substitution is not.
+
+Decision-node tight scope (§17.371):
+- If this node's `type` is `decision`, the output's scope is the
+  decision itself — the chosen mapping, default, library, alternative,
+  list of items, or other named artifact — and a SHORT contextual
+  paragraph about how downstream is expected to consume it. Nothing
+  else. A decision node is NOT a place to dump an exhaustive design
+  overview, a 35-item enumeration of adjacent concepts, or a full
+  architecture pre-sketch.
+- Bad (drawn from a real retry): node named "Define language mapping",
+  expected to produce a ~10-20 line mapping. Actual output: the
+  correct 9-language mapping ✓ — plus a "CLI tool structure"
+  overview ✓ — PLUS a 35-design-pattern enumeration (Builder, Factory
+  Method, Singleton, Adapter, Bridge, Composite, Decorator, Facade,
+  Proxy, Command, Observer, Null Object, Iterator, Mediator, Memento,
+  Chain of Responsibility, Strategy, Template Method, State, Visitor,
+  Flyweight, Prototype, Module, Extension Object, Delegation, Twin,
+  Blackboard, Interpreter, Fluent Interface, RAII, Lazy Initialization,
+  Object Pool, Multiton) ✗ — none of which the brief asked for. The
+  design-pattern dump then cascaded downstream — the next CodeGen node
+  implemented FOUR of the named classes (`MarkdownProcessor`,
+  `NullWriter`, `CodeBlockExtractor`, `FileWriter`) as if they were
+  part of the decided architecture. The decision-node scope explosion
+  drove a downstream scope leak.
+- The size heuristic: a decision-node's output should be roughly
+  proportional to its name's scope. "Define language mapping" → ~10-20
+  entries plus a one-paragraph rationale (≈300-700 chars). 4540 chars
+  with 35 design patterns and a casing-pipe spec is 6-15× over budget
+  — explicit signal that scope has exploded.
+- Good: "Language-to-extension mapping: python → .py, rust → .rs,
+  bash → .sh, … (all 9 brief entries). All others → .txt. Downstream
+  CodeGen nodes encode this as a module-level constant; no additions
+  or substitutions." That's it. No design-patterns survey; no
+  alternative implementations; no overview of adjacent concerns.
+- If you genuinely have a strong opinion about downstream architecture
+  that the brief did not request, mention it in ONE sentence at most.
+  If the brief asked for "the language mapping", do not also volunteer
+  the choice of every design pattern in the architecture.
+
+Stay in the brief's domain (§17.372):
+- Every section of the output must belong to the SAME DOMAIN as the
+  brief. If the brief is about a Python CLI tool that extracts code
+  blocks from Markdown, the output's content is about Python, CLI
+  tooling, Markdown parsing, and extension handling. The output is
+  NOT about adjacent or unrelated domains — even if a word in the
+  brief or context could trigger their inclusion.
+- Bad (drawn from a real retry): node named "Define language mapping"
+  for a Python CLI brief produced a section titled "Drift Test
+  Requirements" containing oilfield casing-pipe specifications: "Mandrel
+  OD = specified drift diameter (not nominal ID)", "Mandatory under
+  API 5CT for 100% production pipe", "5-1/2″ 17# J55 BTC casing —
+  drift mandrel 4.653″", etc. The brief is about software; the
+  "Drift Test" content is about oil and gas casing inspection. The
+  model bled adjacent training-data context into a software brief's
+  output. An operator reading the decision sees a section that is
+  literally about a different industry.
+- The decision rule: before emitting a section, ask "is this content
+  about the brief's domain?" If the brief is about software and the
+  section is about pipes / oil / casing / drilling / etc., delete the
+  section. The same rule applies in reverse: a software section in an
+  oilfield-engineering brief is irrelevant content.
+- If the brief is multi-domain (e.g., "build a CLI tool that processes
+  drilling log data"), both software and drilling are in-domain. The
+  test is whether the section is in ANY of the brief's named domains
+  — if not, it's irrelevant and must be deleted.
+- This rule is upstream of §17.360's no-fabrication guard. §17.360
+  forbids inventing specific values absent from upstream; §17.372
+  forbids including whole content sections from unrelated domains.
+  An LLM that quotes a plausible-sounding API 5CT specification has
+  passed §17.360 (the values are sourced from training data, not
+  invented) but failed §17.372 (the domain is wrong for the brief).
 
 If upstream context is provided, build on it. Do not rewrite or contradict upstream work.
 If ground truth is provided, treat it as authoritative.

@@ -370,3 +370,75 @@ class TestSystemPromptRouting:
         # The transformation-vs-substitution distinction.
         assert "Transformation is fine; substitution is not" in flat
 
+    # ----- §17.371 — decision-node tight scope -----
+
+    def test_llm_prompt_has_decision_node_tight_scope_clause(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        assert "Decision-node tight scope" in flat
+        # The size-heuristic phrasing.
+        assert "size heuristic" in flat.lower()
+        # The §17.371 anti-example pin — the 35-pattern enumeration must
+        # be explicit so the model has a concrete shape to avoid.
+        assert "35-design-pattern enumeration" in flat
+        # The cascade-to-downstream observation closes the loop.
+        assert "decision-node scope explosion drove a downstream scope leak" in flat
+
+    def test_decision_tight_scope_names_pattern_classes_explicitly(self):
+        """The pattern dump and the downstream classes that came from it
+        must be named so the model can pattern-match its own draft. Drop
+        the concrete examples and the model regresses on the next
+        adversarial brief."""
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        # Two of the 35-design-pattern enumeration's most distinctive
+        # pattern names (high-confidence-it's-pattern-language signals).
+        assert "Chain of Responsibility" in flat
+        assert "Flyweight" in flat
+        # The four classes that got implemented downstream because of
+        # the pattern dump. Naming them ties cause to effect.
+        assert "MarkdownProcessor" in flat
+        assert "NullWriter" in flat
+        assert "CodeBlockExtractor" in flat
+        assert "FileWriter" in flat
+
+    # ----- §17.372 — stay in the brief's domain -----
+
+    def test_llm_prompt_has_stay_in_domain_clause(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        assert "Stay in the brief's domain" in flat
+        # The §17.372 anti-example pin — the oilfield content from this
+        # retry must be named explicitly so the model has the failure
+        # shape on record.
+        assert "Drift Test Requirements" in flat
+        assert "API 5CT" in flat
+        assert "J55 BTC casing" in flat
+
+    def test_stay_in_domain_clause_distinguishes_from_360(self):
+        """§17.372 is upstream of §17.360 — fabricated values vs whole
+        domain-wrong sections are different failure shapes. The clause
+        must make the relationship explicit so the model doesn't
+        conflate the two."""
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        assert "upstream of §17.360" in flat
+        # The crux distinction — quoting a plausible spec from training
+        # data passes §17.360 (sourced, not invented) but fails §17.372
+        # (wrong domain). Pin the phrase.
+        assert "passed §17.360" in flat and "failed §17.372" in flat
+
+    # ----- §17.373 — cite every code-bearing upstream -----
+
+    def test_llm_prompt_has_cite_every_upstream_clause(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        assert "Cite every code-bearing upstream" in flat
+        # The mechanical-check phrasing — "every code-bearing upstream"
+        # / "scan the report" — pins the operational shape.
+        assert "every code-bearing upstream" in flat
+        assert "scan the report" in flat
+        # The §17.373 anti-example markers — the retry's 8 MET cluster
+        # on T4/T5/T6.
+        assert "T4 / T5 / T6" in flat or "T4/T5/T6" in flat
+

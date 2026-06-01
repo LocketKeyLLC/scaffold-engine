@@ -20245,6 +20245,132 @@ Unlike the §17.365 + §17.366 + §17.367 batch (which had two line-wrap-fragile
 
 ---
 
+### §17.371 decision-node tight scope — close the §17.368-§17.370 retry's T1 4540-char design-patterns explosion (2026-05-31)
+
+First fix from the §17.368-§17.370 retry (job `18ab3675-04e6-44a0-880b-9d367dc61050`, third mdsplit run). §17.369 landed dramatically — 4 of 5 CodeGen nodes' `LANG_EXT` matched T1's authoritative 9-language decision verbatim, with zero substitutions, vs the prior retry's 0-of-4 match rate. But T1 itself (the LLM decision node) exploded from the prior retry's 167 chars to **4,540 chars** containing the correct 9-language mapping, plus a CLI-structure overview, plus an exhaustive **35-design-pattern enumeration** (Builder, Factory Method, Singleton, Adapter, Bridge, Composite, Decorator, Facade, Proxy, Command, Observer, Null Object, Iterator, Mediator, Memento, Chain of Responsibility, Strategy, Template Method, State, Visitor, Flyweight, Prototype, Module, Extension Object, Delegation, Twin, Blackboard, Interpreter, Fluent Interface, RAII, Lazy Initialization, Object Pool, Multiton).
+
+**The cascade.** T3 ("Write filename generator") then implemented **four** of the named classes inline: `MarkdownProcessor`, `NullWriter`, `CodeBlockExtractor`, `FileWriter`. T3's scope-leak was directly caused by T1's pattern dump — the model read T1's "implied architecture" and treated it as canonical. The §17.370 fix made T4 thinner (the prior retry's CLI-scope-leak target) but the scope leak migrated to T3 because T1's expanded output gave T3 a much larger "implied scope" via the named classes.
+
+**The class.** §17.371 tracks **decision-node scope explosion**: a `type=decision` LLM node interprets "produce a decision" as "produce an exhaustive design overview adjacent to the decision". The format-faithfulness clauses (§17.365 brief-spec, §17.369 decision-output authority) all assumed the decision node's output was scoped to the decision. When the decision itself balloons into adjacent design-pattern enumerations, those downstream clauses become load-bearing on a much larger upstream surface than they were designed for.
+
+**The fix.** A "Decision-node tight scope (§17.371)" clause added to `EXECUTION_SYSTEM_LLM` (mirrored in `prompt_assembly.py`). Five parts:
+
+1. **The structural claim**: "If this node's `type` is `decision`, the output's scope is the decision itself — the chosen mapping, default, library, alternative, list of items, or other named artifact — and a SHORT contextual paragraph about how downstream is expected to consume it. Nothing else."
+2. **Explicit prohibition** of the failure shape: "A decision node is NOT a place to dump an exhaustive design overview, a 35-item enumeration of adjacent concepts, or a full architecture pre-sketch."
+3. **The actual T1 anti-example** verbatim — all 35 patterns enumerated by name, plus the cascade observation: "The design-pattern dump then cascaded downstream — the next CodeGen node implemented FOUR of the named classes (`MarkdownProcessor`, `NullWriter`, `CodeBlockExtractor`, `FileWriter`) as if they were part of the decided architecture. The decision-node scope explosion drove a downstream scope leak." Naming the cause-effect chain explicitly closes the loop the prior clauses don't.
+4. **A size heuristic**: "'Define language mapping' → ~10-20 entries plus a one-paragraph rationale (≈300-700 chars). 4540 chars with 35 design patterns and a casing-pipe spec is 6-15× over budget — explicit signal that scope has exploded." The size heuristic gives the model a self-check it can apply before emitting.
+5. **A Good example** for contrast: "Language-to-extension mapping: python → .py, rust → .rs, bash → .sh, … (all 9 brief entries). All others → .txt. Downstream CodeGen nodes encode this as a module-level constant; no additions or substitutions. That's it. No design-patterns survey; no alternative implementations; no overview of adjacent concerns."
+
+The clause closes with a single-sentence escape valve for legitimate cross-decision opinions ("If you genuinely have a strong opinion about downstream architecture that the brief did not request, mention it in ONE sentence at most"), so the rule doesn't over-correct on briefs where the decision node legitimately needs to opine on architecture.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_LLM` gains "Decision-node tight scope (§17.371)" clause with all 35 design pattern names + the 4 downstream class names + the size heuristic + Good example. |
+| `app/modules/prompt_assembly.py` | Mirror. |
+| `tests/test_execution_agent_tools.py` | Two new tests: `test_llm_prompt_has_decision_node_tight_scope_clause` (clause markers + size heuristic + cascade observation) and `test_decision_tight_scope_names_pattern_classes_explicitly` (the 35-pattern enumeration's signature names + the 4 downstream class names, so a future prompt edit dropping the concrete examples can't ship silently). |
+| `tests/test_prompt_assembly.py` | `test_llm_mirror_has_371_372_373_clauses` covers §17.371 mirror parity. |
+
+Ships with §17.372 + §17.373 in the same commit; verification block deferred to §17.373's entry.
+
+**Cohort.** First of the §17.371 + §17.372 + §17.373 batch — third CodeGen-class iteration on the same mdsplit brief. The pattern from the §17.359→§17.364 Shell-class arc and the first two CodeGen-class iterations continues: each retry surfaces 2-3 new sub-classes; the asymptote hasn't arrived on CodeGen yet.
+
+**Cost.** Combined with §17.372 + §17.373, the batch is +~110 LOC of prompt + ~50 LOC of tests + three OVERVIEW entries. §17.371's share is ~50 LOC of prompt + ~20 LOC of tests. Zero new deps, zero migrations, zero schema changes, zero behavior change for non-decision-node executions.
+
+---
+
+### §17.372 stay in the brief's domain — close the §17.368-§17.370 retry's T1 oilfield casing-pipe content (2026-05-31)
+
+Second fix from the same retry. Separately from the 35-design-pattern enumeration (§17.371), T1's 4,540-char output included a section titled **"Drift Test Requirements"** containing oilfield casing-pipe specifications:
+
+> - Mandrel OD = specified drift diameter (not nominal ID).
+> - Mandatory under API 5CT for 100% production pipe.
+> - Critical for surplus/used pipe — checks for dents, scale, deformation.
+> - Fresh test report required for non-new pipe.
+> - Confirm drift after threading for premium connections.
+> - Match drift ID to largest tool OD for workover/completion strings.
+> - …
+> - Example: 5-1/2″ 17# J55 BTC casing — drift mandrel 4.653″; flagged joints indicate internal restrictions.
+
+The brief is about a Python CLI tool that extracts code blocks from Markdown. API 5CT, J55 BTC casing, and drift-mandrel diameters are oil-and-gas casing inspection — a completely different industry. The model bled adjacent training-data context (possibly triggered by the word "drift" or "test" appearing in the brief or context) into the decision node's output.
+
+**The class.** §17.372 tracks **irrelevant-content hallucination**: the model includes whole content sections from domains adjacent to but unrelated to the brief. This is a different shape from §17.360's no-fabrication guard. §17.360 forbids inventing specific values absent from upstream. The "Drift Test Requirements" content is not invented in §17.360's sense — every drift-test fact the model wrote is plausibly correct against the actual API 5CT casing standard. It's just from the wrong domain. An operator reading the decision sees a section about a different industry inside the output of a Python tooling brief.
+
+The cleanest interpretation: §17.360 catches fabricated values; §17.372 catches off-topic content. Both fail in different directions on the "stay grounded in the brief" axis. Without §17.372, an LLM that quotes a plausible-sounding API 5CT specification has passed §17.360 (the values are sourced from training data, not invented) but failed §17.372 (the domain is wrong for the brief).
+
+**The fix.** A "Stay in the brief's domain (§17.372)" clause added to `EXECUTION_SYSTEM_LLM` (mirrored in `prompt_assembly.py`). Four parts:
+
+1. **The structural claim**: every section of the output must belong to the SAME DOMAIN as the brief. The decision rule the model applies: "before emitting a section, ask 'is this content about the brief's domain?' If the brief is about software and the section is about pipes / oil / casing / drilling / etc., delete the section."
+2. **The actual T1 anti-example** verbatim, naming "Drift Test Requirements", "API 5CT", and "5-1/2″ 17# J55 BTC casing — drift mandrel 4.653″" explicitly. Naming the specific oilfield-content shape closes the pattern-match surface.
+3. **The multi-domain edge case**: if the brief is genuinely multi-domain ("build a CLI tool that processes drilling log data"), both software and drilling are in-domain. The test is whether the section belongs to ANY of the brief's named domains — if not, delete.
+4. **The relationship to §17.360**: explicitly states "this rule is upstream of §17.360's no-fabrication guard … An LLM that quotes a plausible-sounding API 5CT specification has passed §17.360 (the values are sourced from training data, not invented) but failed §17.372 (the domain is wrong for the brief)." The two-clause-axis distinction is named so the model doesn't conflate them.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_LLM` gains "Stay in the brief's domain (§17.372)" clause with the oilfield anti-example, the multi-domain edge case, and the §17.360-relationship clarification. |
+| `app/modules/prompt_assembly.py` | Mirror. |
+| `tests/test_execution_agent_tools.py` | Two new tests: `test_llm_prompt_has_stay_in_domain_clause` (clause markers + the oilfield anti-example pins) and `test_stay_in_domain_clause_distinguishes_from_360` (the explicit relationship-to-§17.360 phrase). |
+| `tests/test_prompt_assembly.py` | Mirror coverage via the shared `test_llm_mirror_has_371_372_373_clauses`. |
+
+**Cohort.** Second of the §17.371 + §17.372 + §17.373 batch. Sits alongside §17.371 because both close T1 regressions from the same retry — but they're separate classes (scope explosion within the brief's domain vs content sections from outside the brief's domain). The two failures co-occurred in this retry's T1; in principle each can occur independently.
+
+**Cost.** ~30 LOC of prompt + ~10 LOC of tests as part of the §17.371 + §17.372 + §17.373 batch. Zero behavior change for briefs whose decision nodes naturally stay in-domain.
+
+---
+
+### §17.373 cite every code-bearing upstream — close the §17.368-§17.370 retry's T7 last-three-cluster bias (2026-05-31)
+
+Third fix from the same retry. §17.368's per-upstream evidence walk closed "single-upstream-bias" — the prior retry's T7 produced 13 MET claims all citing the same upstream T6. The §17.368-§17.370 retry's T7 cited **three distinct upstreams** (T4, T5, T6) for 8 MET claims — an improvement, but still bias: the validator picked the **last three** code-bearing upstreams and cited only those. T2 (the parser) and T3 (the filename generator) — both earlier code-bearing nodes — were never cited. The "Parser/CLI separation" MET claim is unverifiable without inspecting the parser; T7 marked it MET citing T4 (the CLI) and T5/T6 (the tests), but not T2 (the parser itself).
+
+**The class.** §17.373 tracks **cluster bias** in validation: the model interpreted §17.368's "every relevant upstream" as "every upstream I happen to recall — typically the last few code-bearing ones." The decision rule was insufficiently mechanical — relevance was a judgment call the model could shortcut. §17.373 makes the rule explicit: every code-bearing upstream (every upstream with `tool=CodeGen`, plus any whose name starts with "Implement"/"Write"/"Build") must be cited by name at least once across the report. The mechanical-check phrasing replaces a judgment call with a counting check the model can self-apply.
+
+**The fix.** A "Cite every code-bearing upstream (§17.373)" clause added to `EXECUTION_SYSTEM_LLM`'s Validation grounding block (mirrored in `prompt_assembly.py`), right after §17.368's per-upstream walk clause. Four parts:
+
+1. **The historical observation**: §17.368 said "every relevant upstream"; the model interpreted that loosely. Naming the prior clause's failure shape explicitly closes the loophole.
+2. **The mechanical rule**: scan the report; list the code-bearing upstreams cited; if any code-bearing upstream is missing, inspect that upstream's output_text. Either find evidence and update relevant requirements, or state explicitly why this upstream is irrelevant to every spec requirement. The "either/or" structure forces the model to address every code-bearing upstream rather than implicitly skip it.
+3. **The Bad/Good anti-example pair** drawn from the retry: Bad = "8 MET claims, all citing T4 / T5 / T6, with T2 (parser) and T3 (filename generator) never mentioned"; Good = "requirements about parsing cite T2; requirements about filename generation cite T3; requirements about CLI argparse cite T4; requirements about test coverage cite T5 and T6. Each code-bearing upstream appears in at least one MET / NOT MET / UNKNOWN line."
+4. **The escape valve** for legitimately-irrelevant upstreams: if an upstream is genuinely not addressed by any spec requirement, state so explicitly ("T2 is the parser module; no spec requirement is about parsing internals separate from CLI integration — T2's contribution is cited in the parser/CLI separation requirement"). The escape valve prevents over-correction on briefs where some upstreams are infrastructure-only.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_LLM` Validation grounding block extended with "Cite every code-bearing upstream (§17.373)" sub-clause. |
+| `app/modules/prompt_assembly.py` | Mirror. |
+| `tests/test_execution_agent_tools.py` | `test_llm_prompt_has_cite_every_upstream_clause` (clause markers + mechanical-check phrasing + the retry's T4/T5/T6 anti-example pin). |
+| `tests/test_prompt_assembly.py` | Mirror coverage via `test_llm_mirror_has_371_372_373_clauses`. |
+| `OVERVIEW.md` | §17.371 + §17.372 + §17.373 entries. |
+
+**Verification (full batch — §17.371 + §17.372 + §17.373).**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_execution_agent_tools.py tests/test_prompt_assembly.py \
+    --timeout=30 -q
+85 passed in 9.51s
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+<smoke result captured in commit message>
+```
+
+All tests pass first try — the whitespace-collapse pattern (`" ".join(prompt.split())`) for substring-asserts is now the default for prompt-clause tests, so the line-wrap fragility that caught the §17.367 batch on first run doesn't recur.
+
+**What this does NOT do** (deliberately out of scope across the §17.371 + §17.372 + §17.373 batch).
+
+- **Empirically verify the three fixes on a fourth mdsplit retry.** Each retry burns cloud LLM tokens for ~5-10 minutes; this is the third batch on the same brief, and the asymptote isn't here yet. The unit tests pin the prompt structure; operator-driven verification recommended on the next CodeGen-class use, possibly with a different brief that exercises a non-decision-node-heavy DAG.
+- **Add a runtime length-bound check on `type=decision` LLM nodes.** The §17.371 size heuristic ("≈300-700 chars for a language map") could be enforced as a post-execution flag — but length is correlated with quality, not causal, and a 1500-char decision with three legitimate paragraphs would false-positive. Defer the runtime check; the prompt-layer rule is the closer-to-source intervention.
+- **Add a runtime domain classifier.** A post-execution "is this section's content in the brief's domain?" classifier could catch §17.372 regressions automatically. The classifier itself is an LLM call (or an embedding-distance proxy against the brief), so the cost is non-trivial; the prompt-layer fix is the cheaper path and worked for §17.359-§17.367.
+- **Refresh the metric grid.** §17.364 documented a homelab-class grid; the CodeGen-class grid (LANG_EXT entries per CodeGen node, validation upstream-citation distribution, T1 decision-node size, in-domain section count) needs a fixed baseline to compare against. After the §17.371-§17.373 fixes' verification retry produces that baseline pair, a grid refresh is warranted — currently deferred to that retry's audit entry.
+
+**Cohort.** Third of the §17.371 + §17.372 + §17.373 batch. The third CodeGen-class iteration on the same mdsplit brief; six § entries (§17.365-§17.370) plus this batch (§17.371-§17.373) covering nine sub-classes total across three retries. Each retry's residual was finer-grained than the previous; convergence depends on whether the next retry surfaces new sub-classes or asymptotes against the current rule set.
+
+**Cost.** Combined with §17.371 + §17.372, the batch is +~110 LOC of prompt + ~50 LOC of tests + three OVERVIEW entries. §17.373's share is ~30 LOC of prompt + ~10 LOC of tests. Zero new deps, zero migrations, zero schema changes, zero behavior change for non-validation nodes.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

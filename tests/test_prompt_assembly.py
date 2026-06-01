@@ -101,6 +101,20 @@ class TestSystemForTool:
         assert "Decision-output authority" in flat
         assert "decision node is the authority" in flat
 
+    def test_llm_mirror_has_371_372_373_clauses(self):
+        # §17.371 + §17.372 + §17.373 — assist-mode mirror invariant
+        # across the three new clauses. Without these the assist-mode
+        # operator sees a different prompt than autonomous runs.
+        flat = " ".join(pa.EXECUTION_SYSTEM_LLM.split())
+        assert "Decision-node tight scope" in flat
+        assert "Stay in the brief's domain" in flat
+        assert "Cite every code-bearing upstream" in flat
+        # Anti-example pins so the mirror can't silently drop one
+        # without the test catching it.
+        assert "35-design-pattern enumeration" in flat
+        assert "Drift Test Requirements" in flat
+        assert "scan the report" in flat
+
 
 # ---------------------------------------------------------------------------
 # truncate_output — head/tail preserve + marker.
