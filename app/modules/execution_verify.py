@@ -186,35 +186,84 @@ def check_validation_citations(
     output: str,
     expected_codegen_keys: list[str],
 ) -> list[str]:
-    """Return the code-bearing upstream node_keys that the validation
-    output does NOT cite. Empty list = clean.
+    """§17.376 substring-presence check. Kept for backward compat with
+    `tests/test_validation_citation_guard.py`; the integration call site
+    in `execute_next_node` uses the §17.377 per-claim tightening below.
 
-    §17.376 — the validation grounding clauses (§17.366, §17.368,
-    §17.373) progressively asked the model to cite every code-bearing
-    upstream. Four mdsplit retries showed the prompt-layer rule
-    plateaued at "cite the last 3 upstreams" — T2 (parser) and T3
-    (filename generator) remained uncited even with §17.373's
-    "scan the report" mechanical instruction. The citation guard
-    moves the check from prompt-time to verify-time: scan `output`
-    for `T\\d+` tokens, compare to the expected set, return what's
-    missing so the caller can fail the verify and surface the gap to
-    the W.1 retry loop.
+    Returns the code-bearing upstream node_keys that the validation
+    output does NOT cite anywhere. Empty list = clean.
+    """
+    if not expected_codegen_keys:
+        return []
+    cited_numeric = {m.group(1) for m in _CITATION_TOKEN_RE.finditer(output or "")}
+    expected_numeric = {k.lstrip("T") for k in expected_codegen_keys if k.startswith("T")}
+    missing_numeric = expected_numeric - cited_numeric
+    return sorted(f"T{n}" for n in missing_numeric)
+
+
+# §17.377 — tighter check. The substring-presence version of §17.376
+# was gamed by the fifth mdsplit retry: T7's output contained "decision
+# node (T2 or T3)" as a passing aside, satisfying the regex while the
+# actual MET claims still cited only T4/T5/T6 as evidence. The tighter
+# check requires each expected upstream to appear in at least one
+# CLAIM LINE (a line containing MET / NOT MET / UNKNOWN), not just
+# anywhere in the prose.
+_CLAIM_MARKERS = (": MET", "MET.", "MET ", "NOT MET", "UNKNOWN")
+
+
+def _is_claim_line(line: str) -> bool:
+    """A 'claim line' is a validation report line that contains a
+    MET / NOT MET / UNKNOWN verdict — typically a bullet point of the
+    form `- <requirement>: MET. <evidence>`.
+    """
+    s = line.strip()
+    if not s:
+        return False
+    return any(marker in s for marker in _CLAIM_MARKERS)
+
+
+def check_validation_citation_coverage(
+    output: str,
+    expected_codegen_keys: list[str],
+) -> list[str]:
+    """§17.377 per-claim citation coverage check.
+
+    Stricter version of `check_validation_citations`. Returns the
+    code-bearing upstream node_keys that do NOT appear in at least
+    one MET/NOT MET/UNKNOWN claim line. A passing reference like
+    "decision node (T2 or T3)" outside any claim line does NOT count.
+
+    Rationale: §17.376's substring check was satisfied by the fifth
+    mdsplit retry's T7 even though T7's 4 MET claims all cited
+    T4/T5/T6 as canonical evidence; T2 and T3 appeared only in one
+    factually-wrong aside ("decision node (T2 or T3)" — T1 is the
+    decision node). §17.377 closes the gaming by requiring per-claim
+    attribution rather than substring presence.
 
     Inputs:
         output: validation node's output_text.
         expected_codegen_keys: list of upstream node_keys whose tool
             was CodeGen and status='done' at the time the validation
-            ran. The validation is expected to cite every one of these
-            at least once.
+            ran.
 
     Returns:
-        Sorted list of missing keys. Empty if every key appears at
-        least once in output.
+        Sorted list of missing keys — upstreams that did not appear
+        in any claim line. Empty if every expected key appears in at
+        least one MET / NOT MET / UNKNOWN line.
     """
     if not expected_codegen_keys:
         return []
-    cited_numeric = {m.group(1) for m in _CITATION_TOKEN_RE.finditer(output or "")}
-    # Compare on the numeric suffix — node_keys are "T2", "T3", etc.
+    if not output:
+        expected_numeric = {k.lstrip("T") for k in expected_codegen_keys if k.startswith("T")}
+        return sorted(f"T{n}" for n in expected_numeric)
+
+    cited_in_claims: set[str] = set()
+    for line in output.split("\n"):
+        if not _is_claim_line(line):
+            continue
+        for m in _CITATION_TOKEN_RE.finditer(line):
+            cited_in_claims.add(m.group(1))
+
     expected_numeric = {k.lstrip("T") for k in expected_codegen_keys if k.startswith("T")}
-    missing_numeric = expected_numeric - cited_numeric
+    missing_numeric = expected_numeric - cited_in_claims
     return sorted(f"T{n}" for n in missing_numeric)

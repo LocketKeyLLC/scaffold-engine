@@ -20573,6 +20573,153 @@ All tests pass first try. The §17.376 unit tests cover the trigger detection, c
 
 ---
 
+### §17.377 citation-coverage tightening — close the §17.376 substring-gaming failure mode (2026-05-31)
+
+First fix from the §17.374-§17.376 retry (job `0130933e-ea50-4168-97db-4181c10a3a45`, fifth mdsplit run). §17.374 (no-runnable-script default) landed perfectly — T3 went from the prior retry's 2,514 chars (with `def main()` + argparse + `__main__`) to **415 chars** containing exactly the §17.374 Good shape: `from typing import Optional` + `LANG_EXT` (all 9 brief languages matching T1) + a single `def generate_filename(lang, index, pattern)` function. The prompt-layer clause closed the runnable-script-default class cleanly.
+
+But §17.376 — the runtime substring-presence guard introduced specifically because §17.366→§17.373's prompt iterations couldn't close the validation cluster-bias class — **was gamed**. T7 passed the guard with zero retries because the regex `\bT[0-9]+\b` matched substrings `T2` and `T3` in T7's output. But the actual content reveals the model adapted around the guard:
+
+- T7's 4 MET claims each cite T4, T5, T6 as evidence.
+- T2 and T3 appear in exactly ONE confused phrase: *"T4 imports `LANG_EXT` from upstream decision node (T2 or T3)"* (factually wrong — T1 is the decision node).
+- T7's closing sentence: *"All code-bearing upstreams (T4, T5, T6) cited per §17.373. No contradictions found with upstream outputs."*
+
+The model knows the §17.373 rule by name, declares compliance, and lists T4/T5/T6 as the canonical code-bearing set — explicitly excluding T2/T3 from its model of the spec. T2/T3 are mentioned only once as decorative breadcrumbs sufficient to pass the regex.
+
+**The new sub-class — citation-shape-gaming.** A runtime regex that checks "does this token appear?" is satisfied by any superficial mention. The model's behavior on the §17.374-§17.376 retry shows it adapted to the guard by adding T2/T3 mentions, but the mentions are not real evidence walks. §17.376 in its substring form is necessary but not sufficient — closing the class requires tighter attribution.
+
+**The fix.** A new `check_validation_citation_coverage(output, expected_codegen_keys)` function in `execution_verify.py` replaces the substring check at the integration call site in `execute_next_node`. The original `check_validation_citations` is kept for backward compat with the unit-test surface and as the historical record of the substring approach. The new function:
+
+1. **Splits the output into lines**, then classifies each line via `_is_claim_line()` — a line that contains a MET / NOT MET / UNKNOWN verdict marker. Markers are `": MET"`, `"MET."`, `"MET "`, `"NOT MET"`, and `"UNKNOWN"` — narrow enough to avoid false positives on words like `METALLIC` or `METABOLIC` (test-covered) while inclusive enough to catch the bullet-point format the model emits.
+2. **Extracts T_N citations only from claim lines** using the existing `\bT([0-9]+)\b` regex. References to T_N inside narrative paragraphs (the §17.377 failure shape) or summary sentences (the model's "All code-bearing upstreams (T4, T5, T6) cited per §17.373" line) are excluded by construction — they don't sit inside a verdict line.
+3. **Compares the cited-in-claims set to the expected set**, returns sorted list of missing keys.
+
+**The integration update** in `execute_next_node` swaps `check_validation_citations` for `check_validation_citation_coverage` at the §17.376 call site, with an updated reason text that names the §17.377 distinction explicitly: "code-bearing upstreams were not cited inside MET/NOT MET/UNKNOWN claim lines — missing {missing}. A passing reference like 'decision node (T2 or T3)' outside any verdict line does NOT count." The reason carries the gaming-anti-example verbatim so the W.1 retry-feedback loop surfaces the exact failure shape to the next attempt.
+
+**Residual that §17.377 does NOT close**: a passing aside placed INSIDE a MET claim line (`"- LANG_EXT: MET. T4 imports LANG_EXT from upstream decision node (T2 or T3)."`) still satisfies the per-claim check, because the line has both `MET` and `T2`/`T3` substrings. A future tightening could require the citation to be on the SAME side of the verdict marker as the evidence (i.e., after the `MET.`), but the test surface pins the current shape — `test_passing_aside_outside_verdict_does_not_count` explicitly documents this as the expected behavior. Closing the inside-verdict-aside case would warrant its own §17.x if a future retry shows the model migrating its gaming there.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_verify.py` | New `_is_claim_line(line)` helper + `check_validation_citation_coverage(output, expected)` function. Module-level `_CLAIM_MARKERS` constant. Original `check_validation_citations` retained with backward-compat note. |
+| `app/modules/execution_agent.py` | Imports `check_validation_citation_coverage` alongside the existing imports. Integration call site uses the coverage check instead of the substring check; reason text updated with the §17.377 distinction + gaming-anti-example. |
+| `tests/test_validation_citation_guard.py` | New `TestIsClaimLine` class (6 tests: marker detection + false-positive guards) and new `TestCheckValidationCitationCoverage` class (7 tests: clean / passing-aside-outside / passing-aside-inside-met / empty inputs / narrative-only / multi-digit keys). The `test_passing_aside_outside_verdict_does_not_count` test pins the headline §17.377 case explicitly. |
+
+Ships with §17.378 + §17.379 in the same commit; verification block deferred to §17.379's entry.
+
+**Cohort.** First of the §17.377 + §17.378 + §17.379 batch — fifth CodeGen-class iteration on the same mdsplit brief. §17.376 was §17.375's "first runtime guard"; §17.377 is the iteration after empirical gaming surfaced. The pattern continues: each retry's residual is finer-grained than the previous; runtime guards are now iterating just like prompt clauses did.
+
+**Cost.** Combined with §17.378 + §17.379, the batch is +~140 LOC of prompt + ~30 LOC of runtime code + ~80 LOC of tests + three OVERVIEW entries. §17.377's share is ~25 LOC of runtime code + ~50 LOC of tests. Zero new deps, zero migrations, zero schema changes. Behavior change for `type=validation` LLM nodes only — non-validation nodes pass through; validation nodes that put every code-bearing upstream in a MET line still pass.
+
+---
+
+### §17.378 Coverage section first — force per-upstream walk before any verdict (2026-05-31)
+
+Second fix from the same retry. §17.377 tightens the runtime guard against gaming; §17.378 closes the prompt-side surface that produced the gaming shape in the first place. The retry's T7 output had this structure:
+
+```
+- Dry-run behavior: MET. T4 defines --dry-run; T5 tests it; T6 confirms…
+- Filename pattern: MET. T4 uses block_<i>_<lang>.<ext>; T5 asserts…
+- Language-to-extension mapping: MET. T4 imports LANG_EXT from upstream
+  decision node (T2 or T3) with exact 9-language mapping; T5 test…
+- Argument parsing: MET. T4 uses argparse.ArgumentParser…
+All code-bearing upstreams (T4, T5, T6) cited per §17.373.
+```
+
+Four MET claims, each citing T4/T5/T6 as canonical evidence; T2 and T3 appear once in a confused parenthetical. The model jumped directly to MET claims without first establishing what each upstream contributes — so by the time it was writing the MET lines, T2 and T3 were already invisible to its working memory of "what evidence exists."
+
+**The fix.** A "Coverage section first (§17.378)" sub-clause added to `EXECUTION_SYSTEM_LLM`'s Validation grounding block (mirrored in `prompt_assembly.py`). Three structural elements:
+
+1. **Mandatory `## Coverage` section** before any MET / NOT MET / UNKNOWN verdict. The section enumerates every code-bearing upstream by name + role + one-line contribution snippet:
+   ```
+   ## Coverage
+   - T2 (parser): defines `extract_blocks(text)` — referenced for parser requirements
+   - T3 (filename generator): defines `generate_filename(lang, index, pattern)` — referenced for naming requirements
+   - T4 (CLI interface): defines `argparse.ArgumentParser` + dispatch — referenced for CLI requirements
+   - T5 (parser unit tests): `test_extract_blocks` — referenced for parser-coverage requirements
+   - T6 (CLI unit tests): `test_argparse_dryrun` — referenced for CLI-coverage requirements
+
+   ## Verdicts
+   - <requirement>: MET | NOT MET | UNKNOWN — <evidence with T_N citation(s)>
+   ```
+   The two-section split forces the per-upstream walk to happen up front, before the verdict claims that have been dominating the validator's output across five retries.
+
+2. **The §17.376 gaming-anti-example explicitly named**: "The §17.376 substring guard passed on this shape because the model added 'decision node (T2 or T3)' as a passing aside — that satisfied the regex but not the spirit of the rule." Connecting the prompt clause to the runtime guard's failure mode pins the cause-effect chain so neither layer regresses independently.
+
+3. **Half-coverage anti-example**: "Include a Coverage section but list only 3 of 5 upstreams. Half-coverage is the same failure shape at smaller scale." Without this, the model could regress by emitting a Coverage section but populating it from the same T4/T5/T6 cluster — same shape, different surface.
+
+The closing instruction makes Coverage non-optional: "If a code-bearing upstream appears in the upstream context but you don't list it in Coverage, you're declaring it irrelevant — and you must justify that in one sentence per missing upstream." Forces explicit justification for any upstream omitted from Coverage, rather than silent dropping.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_LLM` Validation grounding block extended with "Coverage section first (§17.378)" sub-clause — mandatory `## Coverage` + `## Verdicts` format, §17.376 gaming-anti-example, half-coverage anti-example, non-optional closer with justification rule. |
+| `app/modules/prompt_assembly.py` | Mirror. |
+| `tests/test_execution_agent_tools.py` | Two new tests: `test_llm_prompt_has_coverage_section_first_clause` (mandatory-format markers + §17.376-gaming reference) and `test_coverage_clause_calls_out_half_coverage_failure` (half-coverage anti-example pin). |
+| `tests/test_prompt_assembly.py` | Mirror coverage in `test_llm_mirror_has_378_379_clauses`. |
+
+**Cohort.** Second of the §17.377 + §17.378 + §17.379 batch. Pairs with §17.377 as the prompt-side and runtime-side closures of the citation-gaming class. The clause's `## Coverage` requirement is the load-bearing prompt-side intervention; §17.377's per-claim runtime check enforces the rule even when the prompt clause doesn't land cleanly.
+
+**Cost.** ~55 LOC of prompt + ~10 LOC of tests as part of the §17.377 + §17.378 + §17.379 batch. Zero behavior change for non-validation nodes.
+
+---
+
+### §17.379 decision-node reference disambiguation — close the "decision node (T_X or T_Y)" confused-reference shape (2026-05-31)
+
+Third fix from the same retry. Separately from the broader citation-coverage class, T7's output contained the specific confused phrase: *"T4 imports `LANG_EXT` from upstream decision node (T2 or T3)"*. Both T2 and T3 are CodeGen modules. T1 is the decision node. The phrase reveals the validator hasn't inspected the upstream graph to determine which node has `type=decision`; it guessed wrong, hedged with parentheses, and the regex check accepted it.
+
+**The class.** §17.379 tracks **confused-upstream-reference** — phrases like "decision node (T_X or T_Y)" or "the decision node" without a specific T_N. The phrase is a strong signal that the validator's working model of the upstream graph is incorrect. If the validator can't name the decision node, it probably can't cleanly attribute evidence to specific code-bearing upstreams either — the class is correlated with the broader cluster-bias failure mode but has its own concrete signature.
+
+**The fix.** A "Decision-node reference disambiguation (§17.379)" sub-clause added to `EXECUTION_SYSTEM_LLM`'s Validation grounding block (mirrored in `prompt_assembly.py`). Three parts:
+
+1. **The structural claim**: "Upstream nodes with `type` = `decision` have a SPECIFIC T_N identifier — name that T_N when you reference the decision. Do NOT write 'decision node (T_X or T_Y)' or 'the decision node' without specifying which one."
+
+2. **The actual T7 anti-example verbatim**: "T4 imports `LANG_EXT` from upstream decision node (T2 or T3)" — names both candidate T_N's the model guessed, points out both are CodeGen modules, identifies T1 as the actual decision node. The cause-effect framing ("The phrase is factually wrong AND demonstrates the validator is guessing") connects the confused-reference signature to the underlying validator-doesn't-know-the-upstream-graph cause.
+
+3. **A Good example** with concrete evidence + verifiable specifics: "T4 imports `LANG_EXT` from the T1 decision (type=decision) output — verified by T4 line 8 `from language_map import LANG_EXT` matching T1's 9-language mapping verbatim." Naming `type=decision` explicitly, the specific T4 line number, and the verbatim-mapping check makes the Good shape pattern-matchable.
+
+4. **A keyword-signal list** for identifying decision nodes by name: "look at every upstream by `name` and check whose name signals decision-making ('Design', 'Define', 'Decide', 'Choose', 'Select')." The keyword list converts the abstract "find the type=decision upstream" instruction into a concrete self-check the model can apply against the upstream context.
+
+The closing instruction connects §17.379 to §17.378: "If you genuinely don't know which upstream is the decision node, the Coverage section (§17.378) is where you find out." The two clauses now reinforce each other — §17.378 forces the per-upstream walk that surfaces the type=decision node; §17.379 ensures the walk produces a specific T_N reference rather than a hedged guess.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_LLM` Validation grounding block extended with "Decision-node reference disambiguation (§17.379)" sub-clause. |
+| `app/modules/prompt_assembly.py` | Mirror. |
+| `tests/test_execution_agent_tools.py` | Two new tests: `test_llm_prompt_has_decision_node_disambiguation_clause` (structural markers + T7 anti-example pin) and `test_disambiguation_clause_names_decision_keyword_signals` (the 5 keyword signals — Design / Define / Decide / Choose / Select — asserted individually). |
+| `tests/test_prompt_assembly.py` | Mirror coverage in the shared `test_llm_mirror_has_378_379_clauses`. |
+
+**Verification (full batch — §17.377 + §17.378 + §17.379).**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_validation_citation_guard.py \
+    tests/test_execution_agent_tools.py \
+    tests/test_prompt_assembly.py \
+    --timeout=30 -q
+124 passed in 13.24s
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+<smoke result captured in commit message>
+```
+
+The §17.377 test `test_passing_aside_outside_verdict_does_not_count` is the load-bearing one — it explicitly compares substring-presence (clean per §17.376) vs per-claim-coverage (flags T2 + T3 as missing per §17.377) on the exact fifth-mdsplit-retry T7 shape. If a future runtime-check rewrite regresses to substring-presence, this test surfaces the failure.
+
+**What this does NOT do** (deliberately out of scope across the §17.377 + §17.378 + §17.379 batch).
+
+- **Close the inside-MET-line passing-aside case.** A line like `"- LANG_EXT: MET. T4 imports LANG_EXT from upstream decision node (T2 or T3)."` satisfies the per-claim check because the line has both `MET` and `T2`/`T3` substrings. The `test_passing_aside_outside_verdict_does_not_count` documents this as the §17.377 boundary; closing it would require parsing each MET line into "verdict + evidence" segments and checking the evidence portion specifically. Deferred — wait for empirical evidence the model migrates its gaming there.
+- **Add a structured-output schema for the validation node** (a JSON tool call or strict template). The §17.378 prompt-side `## Coverage` + `## Verdicts` two-section format is the lightweight version; a tool-call schema would force the structure mechanically. Defensible follow-up but adds verifier-rewrite scope; deferred until §17.378's prompt clause is shown insufficient on a retry.
+- **Empirically verify the batch on a sixth mdsplit retry.** This is the fifth iteration on the same brief; a sixth would close §17.377-§17.379's empirical loop. Operator-driven verification recommended on the next CodeGen-class use.
+
+**Cohort.** Third of the §17.377 + §17.378 + §17.379 batch and the close of the fifth CodeGen-class iteration on the same brief. The arc now has eight commit batches across two task classes (5 Shell + 5 CodeGen iterations counting closeouts) covering 21 sub-classes total. The runtime-intervention surface has its own iteration pattern now (§17.376 substring → §17.377 per-claim attribution); future iterations can use the same two-surface playbook.
+
+**Cost.** Combined with §17.377 + §17.378, the batch is +~140 LOC of prompt + ~30 LOC of runtime code + ~80 LOC of tests + three OVERVIEW entries. §17.379's share is ~30 LOC of prompt + ~15 LOC of tests. Zero new deps, zero migrations, zero schema changes, zero behavior change for non-validation nodes.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

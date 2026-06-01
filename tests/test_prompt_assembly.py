@@ -122,6 +122,14 @@ class TestSystemForTool:
         assert "Write filename generator" in flat
         assert 'if __name__ == "__main__":' in flat
 
+    def test_llm_mirror_has_378_379_clauses(self):
+        # §17.378 + §17.379 — assist-mode mirror invariant.
+        flat = " ".join(pa.EXECUTION_SYSTEM_LLM.split())
+        assert "Coverage section first" in flat
+        assert "## Coverage" in flat
+        assert "Decision-node reference disambiguation" in flat
+        assert "decision node (T2 or T3)" in flat
+
 
 # ---------------------------------------------------------------------------
 # truncate_output — head/tail preserve + marker.

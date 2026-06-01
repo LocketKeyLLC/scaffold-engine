@@ -180,6 +180,68 @@ Cite every code-bearing upstream (§17.373):
   code-bearing upstream appears in at least one MET / NOT MET /
   UNKNOWN line.
 
+Coverage section first (§17.378):
+- Open the validation report with a "## Coverage" section that
+  enumerates every code-bearing upstream by name + role + one-line
+  contribution snippet, BEFORE any MET / NOT MET / UNKNOWN verdict
+  appears. The section forces an explicit per-upstream walk before
+  any requirement claims are emitted — without it, the model defaults
+  to walking the last few upstreams and treating earlier ones as
+  invisible.
+- Mandatory format:
+    ## Coverage
+    - T2 (parser): defines `extract_blocks(text)` — referenced for
+      parser requirements
+    - T3 (filename generator): defines `generate_filename(lang,
+      index, pattern)` — referenced for naming requirements
+    - T4 (CLI interface): defines `argparse.ArgumentParser` + dispatch
+      — referenced for CLI requirements
+    - T5 (parser unit tests): `test_extract_blocks` — referenced for
+      parser-coverage requirements
+    - T6 (CLI unit tests): `test_argparse_dryrun` — referenced for
+      CLI-coverage requirements
+
+    ## Verdicts
+    - <requirement>: MET | NOT MET | UNKNOWN — <evidence with T_N
+      citation(s)>
+    ...
+- Bad: open with "- Dry-run behavior: MET. T4 defines `--dry-run` …"
+  with no Coverage section. The validator gets to silently pretend the
+  un-cited upstreams (T2, T3) don't exist. The §17.376 substring guard
+  passed on this shape because the model added "decision node (T2 or
+  T3)" as a passing aside — that satisfied the regex but not the
+  spirit of the rule.
+- Bad: include a Coverage section but list only 3 of 5 upstreams.
+  Half-coverage is the same failure shape at smaller scale.
+- The Coverage section is NOT optional. If a code-bearing upstream
+  appears in the upstream context but you don't list it in Coverage,
+  you're declaring it irrelevant — and you must justify that in one
+  sentence per missing upstream ("T2 is the parser module; its
+  contribution is verified through T4's import — no separate
+  requirement about parser internals").
+
+Decision-node reference disambiguation (§17.379):
+- Upstream nodes with `type` = `decision` (an LLM decision node picking
+  a mapping, library, default, or named artifact) have a SPECIFIC T_N
+  identifier — name that T_N when you reference the decision. Do NOT
+  write "decision node (T_X or T_Y)" or "the decision node" without
+  specifying which one. The phrase reveals the validator hasn't
+  inspected the upstream graph to know which node has type=decision.
+- Bad (from a real retry): "T4 imports `LANG_EXT` from upstream
+  decision node (T2 or T3)". Both T2 and T3 are CodeGen modules; T1 is
+  the decision node. The phrase is factually wrong AND demonstrates
+  the validator is guessing rather than walking the upstream
+  type=decision specifically.
+- Good: "T4 imports `LANG_EXT` from the T1 decision (type=decision)
+  output — verified by T4 line 8 `from language_map import LANG_EXT`
+  matching T1's 9-language mapping verbatim."
+- If you genuinely don't know which upstream is the decision node,
+  the Coverage section (§17.378) is where you find out — list every
+  upstream by `name` and check whose name signals decision-making
+  ("Design", "Define", "Decide", "Choose", "Select"). The
+  type=decision upstream typically appears first in the DAG and has
+  outputs describing a named artifact rather than a code module.
+
 Decision-output authority (§17.369):
 - When an upstream node has `type` = `decision` and produces a concrete
   output (a list of items, a default value, a chosen library, a mapping,

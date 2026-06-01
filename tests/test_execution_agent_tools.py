@@ -478,3 +478,48 @@ class TestSystemPromptRouting:
                    "utility", "helper", "test"):
             assert kw in flat, f"missing keyword: {kw!r}"
 
+    # ----- §17.378 — coverage section first -----
+
+    def test_llm_prompt_has_coverage_section_first_clause(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        assert "Coverage section first" in flat
+        # The mandatory format markers — `## Coverage` + `## Verdicts`.
+        assert "## Coverage" in flat
+        assert "## Verdicts" in flat
+        # The §17.376-references-the-substring-guard observation closes
+        # the relationship between §17.378 and the runtime guard's
+        # gaming failure.
+        assert "substring guard passed on this shape" in flat
+
+    def test_coverage_clause_calls_out_half_coverage_failure(self):
+        """The §17.378 clause must explicitly forbid the half-coverage
+        failure mode (Coverage section present but listing only some
+        upstreams). Without it, the model regresses to the prior
+        cluster shape but inside a Coverage section."""
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        assert "list only 3 of 5 upstreams" in flat
+        assert "Half-coverage is the same failure" in flat
+
+    # ----- §17.379 — decision-node reference disambiguation -----
+
+    def test_llm_prompt_has_decision_node_disambiguation_clause(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        assert "Decision-node reference disambiguation" in flat
+        # The actual T7-from-the-retry anti-example.
+        assert "decision node (T2 or T3)" in flat
+        # The corrective framing: name the specific T_N with type=decision.
+        assert "name that T_N when you reference the decision" in flat
+
+    def test_disambiguation_clause_names_decision_keyword_signals(self):
+        """The §17.379 clause must list the keyword signals that
+        identify a decision node by name ("Design", "Define",
+        "Decide", "Choose", "Select"). Without these, the model has
+        no way to pick the decision node from the upstream graph."""
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        for kw in ("Design", "Define", "Decide", "Choose", "Select"):
+            assert kw in flat, f"missing decision keyword: {kw!r}"
+
