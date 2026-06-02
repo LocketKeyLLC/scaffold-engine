@@ -538,10 +538,19 @@ validation? If you're not sure, look at the task title — does it start
 with "Validate", "Verify", "Check", or "Audit"? If not, none of the
 clauses §17.366-§17.379 apply to you. Move on.
 
-Validation grounding (§17.366):
-- If this node's `type` is `validation` (the title contains "Validate",
-  "Verify", "Check", "Audit", or the task notes describe a validation
-  step), produce a comparison report, NOT a spec checklist.
+Validation grounding (§17.366) — VALIDATION NODES ONLY:
+- **Applicability gate (§17.384).** This clause applies ONLY if your
+  node is `type=checkpoint`, OR its title contains "Validate", "Verify",
+  "Check", or "Audit". If your node is `type=decision` (e.g., "Define
+  X"), `type=task` (e.g., "Write X"), or its title is "Document"/
+  "Generate"/"Design"/"Choose", this clause does NOT apply — skip past
+  every bullet below, including any "must"/"mandatory" directive, until
+  you reach the next §17.NNN clause or the §17.380 End-marker. The
+  §17.380 wrapper says the same thing at the block level; this
+  restatement closes the §17.383 leak where inner-clause specificity
+  ("Mandatory format: ## Coverage / ## Verdicts...") overrode the
+  outer wrapper's skip.
+- Produce a comparison report, NOT a spec checklist.
 - A validation report walks each requirement from the brief/spec and
   marks it `MET`, `NOT MET`, or `UNKNOWN`, with concrete evidence drawn
   from the upstream node outputs: a quoted line, a function name, an
@@ -565,7 +574,11 @@ Validation grounding (§17.366):
   state why (`"upstream T4 output does not contain a default-dir
   value"`). Do not silently downgrade UNKNOWN to MET.
 
-Per-upstream evidence walk (§17.368):
+Per-upstream evidence walk (§17.368) — VALIDATION NODES ONLY:
+- **Applicability gate (§17.384).** This clause applies ONLY if your
+  node is `type=checkpoint`, OR its title contains "Validate"/"Verify"/
+  "Check"/"Audit". Decision/task/output nodes: skip past every bullet
+  below to the next §17.NNN clause or the §17.380 End-marker.
 - For each requirement, inspect EVERY upstream node whose deliverable is
   relevant to that requirement; do not pick one upstream and describe it
   while ignoring the others. Single-upstream-bias is the §17.368-tracked
@@ -593,7 +606,11 @@ Per-upstream evidence walk (§17.368):
   upstreams that could be relevant and mark UNKNOWN against the ones
   whose output_text wasn't conclusive.
 
-Cite every code-bearing upstream (§17.373):
+Cite every code-bearing upstream (§17.373) — VALIDATION NODES ONLY:
+- **Applicability gate (§17.384).** This clause applies ONLY if your
+  node is `type=checkpoint`, OR its title contains "Validate"/"Verify"/
+  "Check"/"Audit". Decision/task/output nodes: skip past every bullet
+  below to the next §17.NNN clause or the §17.380 End-marker.
 - §17.368 said "every relevant upstream"; the model interpreted that as
   "the upstreams I happen to recall" and produced 8 MET claims citing
   T4 / T5 / T6 only while ignoring T2 (parser) and T3 (filename
@@ -621,7 +638,16 @@ Cite every code-bearing upstream (§17.373):
   code-bearing upstream appears in at least one MET / NOT MET /
   UNKNOWN line.
 
-Coverage section first (§17.378):
+Coverage section first (§17.378) — VALIDATION NODES ONLY:
+- **Applicability gate (§17.384).** This clause applies ONLY if your
+  node is `type=checkpoint`, OR its title contains "Validate"/"Verify"/
+  "Check"/"Audit". Decision/task/output nodes: skip past every bullet
+  below — including the "Mandatory format" directive — to the next
+  §17.NNN clause or the §17.380 End-marker. §17.383's seventh-retry
+  T1 was a decision node that ignored the §17.380 wrapper and emitted
+  this clause's Coverage+Verdicts shape; this per-clause gate sits in
+  front of the Mandatory-format directive so the gate carries the
+  same specificity as the directive.
 - Open the validation report with a "## Coverage" section that
   enumerates every code-bearing upstream by name + role + one-line
   contribution snippet, BEFORE any MET / NOT MET / UNKNOWN verdict
@@ -629,7 +655,7 @@ Coverage section first (§17.378):
   any requirement claims are emitted — without it, the model defaults
   to walking the last few upstreams and treating earlier ones as
   invisible.
-- Mandatory format:
+- Mandatory format (for validation nodes only — see Applicability gate above):
     ## Coverage
     - T2 (parser): defines `extract_blocks(text)` — referenced for
       parser requirements
@@ -661,7 +687,11 @@ Coverage section first (§17.378):
   contribution is verified through T4's import — no separate
   requirement about parser internals").
 
-Decision-node reference disambiguation (§17.379):
+Decision-node reference disambiguation (§17.379) — VALIDATION NODES ONLY:
+- **Applicability gate (§17.384).** This clause applies ONLY if your
+  node is `type=checkpoint`, OR its title contains "Validate"/"Verify"/
+  "Check"/"Audit". Decision/task/output nodes: skip past every bullet
+  below to the §17.380 End-marker.
 - Upstream nodes with `type` = `decision` (an LLM decision node picking
   a mapping, library, default, or named artifact) have a SPECIFIC T_N
   identifier — name that T_N when you reference the decision. Do NOT

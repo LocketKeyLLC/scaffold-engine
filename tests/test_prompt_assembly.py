@@ -138,6 +138,47 @@ class TestSystemForTool:
         assert "SKIP THIS ENTIRE BLOCK" in flat
         assert "End validation-only block (§17.380)" in flat
 
+    def test_llm_mirror_has_384_per_clause_applicability_gates(self):
+        # §17.384 — every one of §17.366/§17.368/§17.373/§17.378/§17.379 must
+        # carry its own per-clause "Applicability gate" + "VALIDATION NODES
+        # ONLY" heading suffix. The §17.380 block-wrapper alone proved
+        # insufficient (§17.383 seventh-retry T1 leaked the §17.378 Coverage
+        # format despite the wrapper); per-clause gates sit at the same
+        # specificity as the "Mandatory format"/"must" directives so the
+        # gate is co-located with the imperative it gates.
+        s = pa.EXECUTION_SYSTEM_LLM
+        for clause in (
+            "Validation grounding (§17.366) — VALIDATION NODES ONLY",
+            "Per-upstream evidence walk (§17.368) — VALIDATION NODES ONLY",
+            "Cite every code-bearing upstream (§17.373) — VALIDATION NODES ONLY",
+            "Coverage section first (§17.378) — VALIDATION NODES ONLY",
+            "Decision-node reference disambiguation (§17.379) — VALIDATION NODES ONLY",
+        ):
+            assert clause in s, f"§17.384 gate missing: {clause!r}"
+        assert s.count("Applicability gate (§17.384)") == 5, (
+            "§17.384 expects exactly 5 per-clause applicability-gate bullets"
+        )
+        # The §17.378 mandatory-format directive must carry its own
+        # restated gate at the directive line itself — that's the
+        # specificity match §17.383 said was needed.
+        assert (
+            "Mandatory format (for validation nodes only — see Applicability gate above):"
+            in s
+        )
+
+    def test_llm_and_assist_mirror_byte_equal(self):
+        # §17.384 — the EXECUTION_SYSTEM_LLM in prompt_assembly.py
+        # (assist-mode mirror) and execution_agent.py (autonomous
+        # executor) MUST stay byte-identical. Drift produces silent
+        # divergence between autonomous and assist runs. Five prior
+        # mirror tests (§17.360 / §17.365 / §17.368 / §17.371 /
+        # §17.378) check substrings; this one guarantees full parity.
+        from app.modules import execution_agent as ea
+        assert pa.EXECUTION_SYSTEM_LLM == ea.EXECUTION_SYSTEM_LLM, (
+            "EXECUTION_SYSTEM_LLM mirror drift between prompt_assembly.py "
+            "and execution_agent.py. Edit both in lockstep."
+        )
+
 
 # ---------------------------------------------------------------------------
 # truncate_output — head/tail preserve + marker.

@@ -21002,6 +21002,76 @@ Per-claim citation cluster on T8 reproduced mechanically (the §17.377 algorithm
 
 ---
 
+### §17.384 per-clause applicability gates — close the §17.383 wrapper-insufficiency leak (2026-06-02)
+
+Closes the structural finding §17.383 documented: the §17.380 wrapper-only gating is necessary but not sufficient. T1 in the seventh-retry job `c6ece060-…` was a decision node that read past the §17.380 block-wrapper header, found the §17.378 *"Mandatory format: ## Coverage / ## Verdicts"* directive, and treated the inner-clause specificity as authoritative over the outer-wrapper skip. §17.384 closes the class by making every clause inside the wrapper carry its own per-clause applicability gate, co-located with the imperative it gates, at the same specificity level as the "Mandatory format"/"must" directives the model was pattern-matching to.
+
+**The pattern, applied uniformly to all five validation-only clauses.** Each of §17.366 (Validation grounding) / §17.368 (Per-upstream evidence walk) / §17.373 (Cite every code-bearing upstream) / §17.378 (Coverage section first) / §17.379 (Decision-node reference disambiguation) is rewritten with:
+
+1. **Heading suffix.** `(§17.NNN) — VALIDATION NODES ONLY` — the gate appears in the clause heading itself, so the model encounters the type restriction before any clause body.
+2. **First-bullet gate (`**Applicability gate (§17.384).**`).** Restates the §17.380 rule at the clause's own specificity level. For non-validation nodes the bullet says "skip past every bullet below — including any 'must'/'mandatory' directive — to the next §17.NNN clause or the §17.380 End-marker." The §17.378 gate explicitly mentions the Mandatory-format directive by name (the §17.383 failure case).
+3. **Directive-line restatement.** §17.378's `Mandatory format:` line becomes `Mandatory format (for validation nodes only — see Applicability gate above):` — so even a model that skips the first bullet still hits the gate at the directive line.
+
+The gate uses `type=checkpoint` (the canonical DB enum, matching §17.376's `_is_validation_llm_node`) OR the title-keyword fallback (`Validate`/`Verify`/`Check`/`Audit`) — the same trigger surface the runtime guard uses. Decision/task/output nodes are named explicitly so the model can pattern-match its own node's type against the skip list.
+
+**Why this works where the wrapper alone didn't.** §17.383 documented the failure mode as "inner-clause specificity overrode the outer wrapper's skip." The wrapper's `APPLY THIS BLOCK ONLY IF VALIDATION` directive sits at the block boundary; the §17.378 `Mandatory format: ## Coverage / ## Verdicts ...` directive sits in the middle of the block with a concrete shape attached. When the model encounters a concrete shape directive, the wrapper's abstract type-gate at the boundary loses to the inner clause's concrete imperative at the directive line. §17.384's first-bullet gate restores parity: each clause's gate now sits at the same level as its imperatives. The model can't reach the imperative without passing through the gate.
+
+**What §17.384 does NOT do** (deliberately).
+
+- **Does not remove the §17.380 wrapper.** The wrapper stays as defense-in-depth at the block boundary. §17.383 showed it attenuates the leak ~3× (8023 → 2813 chars) even when it doesn't close the class; that attenuation is real and worth preserving. Per-clause gates are the surgical fix; the wrapper is the safety net behind them.
+- **Does not modify §17.377's runtime citation guard.** T8 on §17.383 cleared the guard cleanly (5/5 code-bearing upstreams cited in claim lines) — the runtime path is healthy. §17.384 is prompt-layer only.
+- **Does not refactor the EXECUTION_SYSTEM_LLM duplication between `prompt_assembly.py` and `execution_agent.py`.** The two files carry byte-identical copies of the prompt; consolidating to a single source is a structurally cleaner change but out of §17.384's scope. The new `test_llm_and_assist_mirror_byte_equal` regression test (added this commit) catches drift between the two — if a future edit forgets to mirror, the test fires loudly. Defer consolidation until a future edit shows the parity test isn't enough.
+- **Does not add per-clause gates to the non-validation clauses below the wrapper (§17.369 / §17.371 / §17.372 — decision-output authority, decision-node tight scope, stay-in-domain).** Those clauses apply to all LLM nodes by design; they're the wrapper's "below" partition. No gating needed.
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `app/modules/prompt_assembly.py` | Per-clause gate prefix added to §17.366/§17.368/§17.373/§17.378/§17.379. Heading suffix `— VALIDATION NODES ONLY` on each. §17.378's Mandatory-format directive line restates the gate. | +50 |
+| `app/modules/execution_agent.py` | Identical edits — byte-equal mirror with `prompt_assembly.py` preserved. | +50 |
+| `tests/test_prompt_assembly.py` | New `test_llm_mirror_has_384_per_clause_applicability_gates` (asserts all 5 heading suffixes + 5 gate bullets + Mandatory-format restatement) and `test_llm_and_assist_mirror_byte_equal` (locks the parallel-mirror invariant first-class). | +37 |
+| `OVERVIEW.md` | this entry | +~85 |
+| **Total** | | **~+220** |
+
+Zero new deps, zero migrations, zero schema changes.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_prompt_assembly.py tests/test_execution_agent_tools.py \
+    tests/test_validation_citation_guard.py --timeout=30 -q
+131 passed in 13.88s
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+2013 passed, 1246 deselected, 7 warnings in 395.96s (0:06:35)
+```
+
+Byte-equality between the two mirrors verified post-edit:
+```
+pa len: 22708 | ea len: 22708 | byte-equal: True
+Applicability gate (§17.384) occurrences in pa: 5
+Applicability gate (§17.384) occurrences in ea: 5
+VALIDATION NODES ONLY occurrences in pa: 5
+VALIDATION NODES ONLY occurrences in ea: 5
+```
+
+**Operational note.** The running `scaffold-orchestrator` container loaded the pre-§17.384 prompt at startup. A `docker restart scaffold-orchestrator` is required for the new gates to apply to live jobs; tests pick up the new strings from disk at collection time and don't need a restart.
+
+**Future verification.** The empirical close on §17.384 requires an eighth mdsplit retry (or a similar CodeGen-class brief with a decision node) post-orchestrator-restart to confirm T1 emits a structured language mapping rather than a Coverage+Verdicts report. Defer until operator-driven — the §17.383 → §17.384 → empirical close loop is the same pattern as §17.382 → §17.383, and forcing it pre-empts genuine operator load.
+
+**Cohort.** Closes the §17.383-named structural follow-up. CodeGen-class arc playbook now has all three intervention surfaces hardened: prompt clauses with anti-examples (§17.359-class), runtime guards (§17.376→§17.377), and clause-scope gating via wrapper PLUS per-clause gates (§17.380 + §17.384). The §17.382 three-surface table updates to:
+
+| Surface | Intervention pattern |
+|---|---|
+| Prompt clauses with anti-examples | §17.359-style Bad/Good pairs |
+| Runtime guards | §17.376 substring → §17.377 per-claim |
+| Clause-scope gating | §17.380 block-wrapper (defense in depth) + §17.384 per-clause gates (surgical) |
+
+**Cost.** +220 LOC, 2 new regression-guard tests, ~7 min smoke verification. Zero runtime behavior change for validation nodes (the gate's "if applicable" branch is the always-taken branch for them) — net change is for non-validation LLM nodes only, which now have an additional explicit skip directive at every clause boundary.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
