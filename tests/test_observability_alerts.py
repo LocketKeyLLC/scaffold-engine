@@ -177,3 +177,208 @@ class TestCLI:
         # Falls back to {"raw": "..."} so the alert still records the
         # operator's intent without raising.
         assert emit_call.await_args.kwargs["payload"] == {"raw": "not-json"}
+
+
+# ---------------------------------------------------------------------------
+# §17.388 — per-kind cooldown resolution
+# ---------------------------------------------------------------------------
+
+@pytest.mark.smoke
+class TestCooldownResolution:
+    """§17.388 — pre-§17.388 every alert kind used the same uniform
+    `alert_cooldown_seconds`. The third §17.161 deferred follow-up
+    (per-kind cooldown) splits this into a precedence chain:
+    emit-time kwarg > per-kind setting > default.
+    """
+
+    def test_default_returns_alert_cooldown_seconds(self, monkeypatch):
+        monkeypatch.setattr(
+            _alerts.settings, "alert_cooldown_seconds", 3600, raising=False,
+        )
+        monkeypatch.setattr(
+            _alerts.settings, "alert_kind_cooldowns", {}, raising=False,
+        )
+        assert _alerts._resolve_cooldown("any.kind") == 3600
+
+    def test_per_kind_override_beats_default(self, monkeypatch):
+        monkeypatch.setattr(
+            _alerts.settings, "alert_cooldown_seconds", 3600, raising=False,
+        )
+        monkeypatch.setattr(
+            _alerts.settings, "alert_kind_cooldowns",
+            {"host.oom_killed": 300, "calibration.no_fire": 86400},
+            raising=False,
+        )
+        assert _alerts._resolve_cooldown("host.oom_killed") == 300
+        assert _alerts._resolve_cooldown("calibration.no_fire") == 86400
+        # Other kinds fall back to default.
+        assert _alerts._resolve_cooldown("test.unknown") == 3600
+
+    def test_emit_kwarg_overrides_per_kind_and_default(self, monkeypatch):
+        """emit-time cooldown_seconds kwarg wins over BOTH per-kind and
+        default — the most specific source always wins."""
+        monkeypatch.setattr(
+            _alerts.settings, "alert_cooldown_seconds", 3600, raising=False,
+        )
+        monkeypatch.setattr(
+            _alerts.settings, "alert_kind_cooldowns",
+            {"host.oom_killed": 300}, raising=False,
+        )
+        # kwarg 60 beats the per-kind 300 and the default 3600.
+        assert _alerts._resolve_cooldown("host.oom_killed", 60) == 60
+        # kwarg also beats default for a kind with no per-kind entry.
+        assert _alerts._resolve_cooldown("test.kind", 5) == 5
+
+    def test_kwarg_zero_disables_dedup_for_that_call(self, monkeypatch):
+        """cooldown=0 means 'every emit lands a row' — useful for test
+        seeding or one-off burst-mode emits."""
+        monkeypatch.setattr(
+            _alerts.settings, "alert_cooldown_seconds", 3600, raising=False,
+        )
+        assert _alerts._resolve_cooldown("any.kind", 0) == 0
+
+    def test_negative_override_clamps_to_zero(self, monkeypatch):
+        """Defensive: a caller passing a negative cooldown gets 0
+        (disable dedup) rather than negative-interval SQL errors."""
+        monkeypatch.setattr(
+            _alerts.settings, "alert_cooldown_seconds", 3600, raising=False,
+        )
+        assert _alerts._resolve_cooldown("any.kind", -100) == 0
+
+    async def test_emit_uses_per_kind_cooldown_in_dedup_probe(self, monkeypatch):
+        """End-to-end: when a per-kind cooldown is configured, emit()
+        passes it to the dedup probe (not the default)."""
+        monkeypatch.setattr(
+            _alerts.settings, "alert_cooldown_seconds", 3600, raising=False,
+        )
+        monkeypatch.setattr(
+            _alerts.settings, "alert_kind_cooldowns",
+            {"test.kind": 60}, raising=False,
+        )
+        captured_window: list[int] = []
+
+        async def fake_execute(sql, params=None):
+            sql_text = str(sql)
+            result = MagicMock()
+            if "FROM system_alerts" in sql_text and "WHERE dedup_key" in sql_text:
+                # Capture the `:w` (cooldown) param passed to the probe.
+                captured_window.append(int(params.get("w", -1)))
+                result.first.return_value = None  # no cooldown match
+                return result
+            if "INSERT INTO system_alerts" in sql_text:
+                result.scalar.return_value = str(uuid4())
+                return result
+            return result
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=fake_execute)
+        db.commit = AsyncMock()
+        await _alerts.emit(
+            kind="test.kind", severity="warning", message="x",
+            dedup_key="test:1", db=db,
+        )
+        assert captured_window == [60], (
+            "dedup probe should receive the per-kind 60s, not the default 3600s"
+        )
+
+    async def test_emit_kwarg_beats_per_kind_in_dedup_probe(self, monkeypatch):
+        """End-to-end: emit-time kwarg propagates to the dedup probe."""
+        monkeypatch.setattr(
+            _alerts.settings, "alert_cooldown_seconds", 3600, raising=False,
+        )
+        monkeypatch.setattr(
+            _alerts.settings, "alert_kind_cooldowns",
+            {"test.kind": 60}, raising=False,
+        )
+        captured_window: list[int] = []
+
+        async def fake_execute(sql, params=None):
+            sql_text = str(sql)
+            result = MagicMock()
+            if "FROM system_alerts" in sql_text and "WHERE dedup_key" in sql_text:
+                captured_window.append(int(params.get("w", -1)))
+                result.first.return_value = None
+                return result
+            if "INSERT INTO system_alerts" in sql_text:
+                result.scalar.return_value = str(uuid4())
+                return result
+            return result
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=fake_execute)
+        db.commit = AsyncMock()
+        await _alerts.emit(
+            kind="test.kind", severity="warning", message="x",
+            dedup_key="test:1", db=db, cooldown_seconds=15,
+        )
+        assert captured_window == [15], (
+            "emit-time kwarg should beat both per-kind 60s and default 3600s"
+        )
+
+    def test_cli_propagates_cooldown_seconds_flag(self):
+        emit_call = AsyncMock(return_value={"emitted": True, "suppressed": False, "id": "x", "reason": None})
+        with patch("app.observability.alerts.emit", new=emit_call):
+            rc = _alerts.main([
+                "emit", "--kind", "host.oom_killed",
+                "--message", "x", "--cooldown-seconds", "120",
+            ])
+        assert rc == 0
+        assert emit_call.await_args.kwargs["cooldown_seconds"] == 120
+
+    def test_cli_default_passes_none_cooldown(self):
+        """Without the flag, the CLI passes cooldown_seconds=None so
+        emit() falls into the per-kind / default resolution chain."""
+        emit_call = AsyncMock(return_value={"emitted": True, "suppressed": False, "id": "x", "reason": None})
+        with patch("app.observability.alerts.emit", new=emit_call):
+            rc = _alerts.main([
+                "emit", "--kind", "host.oom_killed", "--message", "x",
+            ])
+        assert rc == 0
+        assert emit_call.await_args.kwargs["cooldown_seconds"] is None
+
+
+# ---------------------------------------------------------------------------
+# §17.388 — Pydantic validator on alert_kind_cooldowns
+# ---------------------------------------------------------------------------
+
+@pytest.mark.smoke
+class TestAlertKindCooldownsValidator:
+    """§17.388 — the model_validator on Settings clamps each dict value
+    to [0, 86400] (same range as alert_cooldown_seconds Field). Bad
+    values are clamped + logged, NOT rejected — a typo in env shouldn't
+    crash the orchestrator at boot.
+    """
+
+    def test_valid_values_pass_through(self):
+        from app.config import Settings
+        s = Settings(alert_kind_cooldowns={"a.b": 300, "c.d": 86400})
+        assert s.alert_kind_cooldowns == {"a.b": 300, "c.d": 86400}
+
+    def test_negative_clamps_to_zero(self):
+        from app.config import Settings
+        s = Settings(alert_kind_cooldowns={"a.b": -50})
+        assert s.alert_kind_cooldowns == {"a.b": 0}
+
+    def test_over_cap_clamps_to_86400(self):
+        from app.config import Settings
+        s = Settings(alert_kind_cooldowns={"a.b": 999999})
+        assert s.alert_kind_cooldowns == {"a.b": 86400}
+
+    def test_non_int_value_is_dropped(self):
+        """A non-int value (e.g. dict-typing-bypass via JSON env) is
+        dropped from the resolved dict so callers can't get e.g. a list
+        passed to make_interval."""
+        from app.config import Settings
+        # Pydantic v2 coerces strings to int when possible; explicit
+        # non-coercible types like list/dict should be dropped. To
+        # bypass Pydantic's coercion entirely, construct then mutate.
+        s = Settings()
+        object.__setattr__(s, "alert_kind_cooldowns", {"a.b": "not-an-int"})
+        # Re-run the validator manually.
+        s = s._validate_alert_kind_cooldowns()
+        assert "a.b" not in s.alert_kind_cooldowns
+
+    def test_empty_dict_is_the_default(self):
+        from app.config import Settings
+        s = Settings()
+        assert s.alert_kind_cooldowns == {}

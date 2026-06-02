@@ -535,6 +535,23 @@ class Settings(BaseSettings):
     # (the underlying alerts still land in the DB).
     oom_alerts_health_window_hours: int = Field(default=24, ge=0, le=720)
 
+    # §17.388 — per-kind dedup-cooldown override. `alert_cooldown_seconds`
+    # is the default for every kind; entries in this dict override it for
+    # named kinds. Useful when one kind has a different cadence than the
+    # rest — e.g., `host.oom_killed` may want a tighter cooldown than the
+    # default 1 h so a multi-victim host OOM episode produces one alert per
+    # comm without suppressing distinct victims, while
+    # `calibration.no_fire` keeps the default to avoid notification storms
+    # on the quarterly cron.
+    #
+    # JSON-parseable env: ALERT_KIND_COOLDOWNS='{"host.oom_killed":300,"calibration.no_fire":86400}'
+    #
+    # Values are clamped to [0, 86400] (same range as the scalar default)
+    # by the model_validator below. 0 disables dedup for that kind (every
+    # emit lands a row); 86400 is one day. Empty dict (the default) means
+    # "no overrides — every kind uses alert_cooldown_seconds."
+    alert_kind_cooldowns: dict[str, int] = Field(default_factory=dict)
+
     calibration_watchdog_enabled: bool = True
     calibration_watchdog_interval_seconds: int = Field(default=900, ge=60, le=86400)
     calibration_grace_minutes: int = Field(default=120, ge=10, le=1440)
@@ -600,6 +617,49 @@ class Settings(BaseSettings):
     )
 
     model_config = {"env_file": ".env", "extra": "ignore"}
+
+    @model_validator(mode="after")
+    def _validate_alert_kind_cooldowns(self) -> "Settings":
+        """§17.388 — clamp per-kind cooldown overrides to [0, 86400].
+
+        Pydantic v2's ``Field(ge=..., le=...)`` constraint applies to
+        scalar fields but not to dict values. Validate-after-load
+        enforces the same range as the scalar default
+        (`alert_cooldown_seconds`'s Field constraint) for every
+        per-kind override. Out-of-range values are clamped (not
+        rejected) so a typo in env var doesn't crash the orchestrator
+        at boot — the operator sees a warning instead and the kind
+        gets the nearest valid value.
+        """
+        clamped: dict[str, int] = {}
+        for kind, seconds in (self.alert_kind_cooldowns or {}).items():
+            if not isinstance(seconds, int):
+                _logger.warning(
+                    "config_alert_kind_cooldowns_bad_value: kind=%r value=%r — "
+                    "must be int; dropping override",
+                    kind, seconds,
+                )
+                continue
+            if seconds < 0:
+                _logger.warning(
+                    "config_alert_kind_cooldowns_negative: kind=%r value=%d — "
+                    "clamping to 0",
+                    kind, seconds,
+                )
+                seconds = 0
+            elif seconds > 86400:
+                _logger.warning(
+                    "config_alert_kind_cooldowns_over_cap: kind=%r value=%d — "
+                    "clamping to 86400",
+                    kind, seconds,
+                )
+                seconds = 86400
+            clamped[kind] = seconds
+        # Replace via object.__setattr__ because pydantic models are
+        # mutable post-validation but the field still goes through the
+        # __setattr__ machinery.
+        object.__setattr__(self, "alert_kind_cooldowns", clamped)
+        return self
 
     @model_validator(mode="after")
     def _warn_timeout_vs_reaper(self) -> "Settings":

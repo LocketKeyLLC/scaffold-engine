@@ -43,6 +43,30 @@ _VALID_SEVERITIES = ("info", "warning", "critical")
 
 # ── Dedup ────────────────────────────────────────────────────────────
 
+def _resolve_cooldown(kind: str, override: int | None = None) -> int:
+    """§17.388 — pick the dedup-cooldown for a given alert kind.
+
+    Precedence (most specific wins):
+
+      1. ``override`` kwarg (emit-time, e.g. caller pinned the cooldown
+         for one specific event).
+      2. ``settings.alert_kind_cooldowns[kind]`` (deployment-tuned per-kind).
+      3. ``settings.alert_cooldown_seconds`` (default for every kind).
+
+    Pre-§17.388 the resolution was always step 3 — a single uniform
+    cooldown for every kind. §17.388 keeps that as the floor but lets
+    operators tune busy kinds (e.g. shorter cooldown for
+    ``host.oom_killed`` so a multi-victim episode doesn't suppress
+    distinct comm names) without touching code.
+    """
+    if override is not None:
+        return max(0, int(override))
+    per_kind = (settings.alert_kind_cooldowns or {}).get(kind)
+    if per_kind is not None:
+        return max(0, int(per_kind))
+    return settings.alert_cooldown_seconds
+
+
 async def _is_in_cooldown(db, dedup_key: str, cooldown_seconds: int) -> bool:
     """Return True if `dedup_key` was emitted within the cooldown window."""
     if not dedup_key or cooldown_seconds <= 0:
@@ -86,6 +110,7 @@ async def emit(
     payload: dict[str, Any] | None = None,
     dedup_key: str | None = None,
     db=None,
+    cooldown_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Emit one alert through all configured sinks.
 
@@ -97,6 +122,13 @@ async def emit(
     Pass an existing session to participate in a caller's transaction
     (rare — most callers don't, and the alert write should not roll
     back with the caller's work).
+
+    `cooldown_seconds` is optional and overrides both the per-kind
+    setting and the global default for this call only. Use when a
+    specific event has different cadence than the kind's typical
+    pattern (e.g., a burst-mode test or a one-off probe). Most
+    callers omit it and rely on the per-kind setting resolution
+    via `_resolve_cooldown` — see §17.388.
     """
     from app.observability import metrics as _metrics  # local import: keep test isolation simple
 
@@ -115,7 +147,7 @@ async def emit(
 
     # Dedup gate. A standalone DB session is opened only if the caller
     # didn't pass one — keeps the dedup probe outside the caller's tx.
-    cooldown = settings.alert_cooldown_seconds
+    cooldown = _resolve_cooldown(kind, cooldown_seconds)
     own_db = db is None
     if own_db:
         try:
@@ -267,6 +299,15 @@ def _parse_argv(argv: list[str]) -> argparse.Namespace:
     em.add_argument("--message", required=True)
     em.add_argument("--payload", default="", help="JSON string (optional)")
     em.add_argument("--dedup-key", default="", dest="dedup_key")
+    em.add_argument(
+        "--cooldown-seconds", default=None, type=int, dest="cooldown_seconds",
+        help=(
+            "§17.388 — override the dedup cooldown for THIS emit only "
+            "(beats both alert_kind_cooldowns and alert_cooldown_seconds). "
+            "Useful for one-off scripts that need a tighter or looser "
+            "window than the kind's default."
+        ),
+    )
     em.add_argument("--strict", action="store_true",
                     help="Exit non-zero on emit failure (default: always 0).")
     return p.parse_args(argv)
@@ -285,6 +326,7 @@ async def _cli_emit(ns: argparse.Namespace) -> int:
         result = await emit(
             kind=ns.kind, severity=ns.severity, message=ns.message,
             payload=payload, dedup_key=ns.dedup_key or None,
+            cooldown_seconds=ns.cooldown_seconds,
         )
     except Exception as exc:
         sys.stderr.write(f"alert_cli_emit_failed: {exc}\n")

@@ -21389,6 +21389,100 @@ The unit's `WorkingDirectory=` and `ExecStart=` paths default to `/home/aedefrus
 
 ---
 
+### §17.388 per-kind alert cooldown — third (and final) §17.161 deferred follow-up (2026-06-02)
+
+Closes the last of §17.161's three deferred follow-ups. Pre-§17.388 every alert kind shared one uniform `alert_cooldown_seconds` (default 1 h) — fine when every kind has the same cadence, awkward when one kind is intrinsically burstier than the rest. The §17.387 host-OOM watcher is the immediate motivating case: a single host-OOM episode can kill three or four distinct processes within a second, and a 1 h per-comm cooldown shared with the rest of the alerting system suppresses everything after the first emit, hiding the multi-victim shape. §17.388 lets operators tune each kind independently without code changes.
+
+**Precedence chain (most specific wins).**
+
+| Source | Where set | Use case |
+|---|---|---|
+| `cooldown_seconds=N` kwarg on `emit()` / `--cooldown-seconds N` on CLI | Per call | One-off override — burst-mode test seeding, a probe with a tighter window, an experiment |
+| `settings.alert_kind_cooldowns[kind]` | Per deployment (env var) | Persistent tuning — e.g., `host.oom_killed: 300` (5 min) for multi-victim episode visibility, `calibration.no_fire: 86400` (1 day) for quarterly cron noise suppression |
+| `settings.alert_cooldown_seconds` | Global default | Every other kind |
+
+The resolver `_resolve_cooldown(kind, override)` lives in `app/observability/alerts.py` and is called from exactly one place — `emit()` — so the precedence is uniform across the API, the CLI, and any future caller.
+
+**JSON-parseable env var.** Pydantic v2 accepts JSON for `dict[str, int]` env values:
+
+```
+ALERT_KIND_COOLDOWNS='{"host.oom_killed":300,"calibration.no_fire":86400}'
+```
+
+A new `_validate_alert_kind_cooldowns` model_validator clamps each value to `[0, 86400]` (same range as the scalar `alert_cooldown_seconds`'s `Field(ge=0, le=86400)`). **Out-of-range values are clamped, NOT rejected** — a typo in env var must not crash the orchestrator at boot. Negative → 0 (with warning log); over 86400 → 86400 (with warning log); non-int → dropped from the dict (with warning log). Pydantic v2's `Field(ge=, le=)` validators don't reach into dict values, so the explicit `@model_validator(mode="after")` is the simplest correct place to put the clamp.
+
+**`cooldown_seconds=0` disables dedup.** The existing `_is_in_cooldown` helper already short-circuits on `cooldown_seconds <= 0` (return False = "not in cooldown"). The precedence chain preserves this — pass 0 via kwarg, env, or settings and every emit of that key lands a row. Useful for: test seeding (CI fixtures that need to write multiple identical alerts), burst-mode probes (post-fix verification where you want to see every emit), or kinds where dedup is structurally wrong (an alert tied to a unique-per-emit identifier that already self-dedupes).
+
+**CLI `--cooldown-seconds` flag.** The host-OOM and container-OOM watcher scripts (§17.161, §17.387) dispatch alerts via `docker exec scaffold-orchestrator python -m app.observability.alerts emit ...`. Threading a CLI flag means those scripts can opt into per-event overrides without environment-variable plumbing through the systemd unit. Default `None` (omit the flag) → emit() falls into the per-kind / default resolution chain. The new flag passes through `_cli_emit → emit(..., cooldown_seconds=ns.cooldown_seconds)`.
+
+**Backwards compatibility.** All existing call sites continue to work unchanged. The new `cooldown_seconds` kwarg on `emit()` is keyword-only (everything else in `emit()` is already keyword-only via `*`) with `None` default, so omitting it reproduces the pre-§17.388 behavior exactly. The new `alert_kind_cooldowns` setting defaults to `{}` — zero-config deployments behave identically to pre-§17.388. The model_validator's clamp + warning path means deployments with an existing (and currently unused) `ALERT_KIND_COOLDOWNS` env var won't break.
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `app/config.py` | New `alert_kind_cooldowns: dict[str, int]` setting + `_validate_alert_kind_cooldowns` model_validator. | +56 |
+| `app/observability/alerts.py` | New `_resolve_cooldown(kind, override)` helper. `emit()` gains `cooldown_seconds: int \| None = None` keyword arg. CLI emit gains `--cooldown-seconds` flag (typed `int`). | +50 |
+| `tests/test_observability_alerts.py` | `TestCooldownResolution` (9 cases: default, per-kind override, kwarg precedence, kwarg=0 disables dedup, negative clamps to zero, end-to-end probe-window for per-kind + kwarg, CLI flag propagation in both directions) + `TestAlertKindCooldownsValidator` (5 cases: valid, negative→0, over-cap→86400, non-int dropped, empty default). | +200 |
+| `OVERVIEW.md` | this entry | +~90 |
+| **Total** | | **~+395** |
+
+Zero new deps, zero migrations, zero schema changes.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest tests/test_observability_alerts.py --timeout=30 -q
+23 passed in 5.44s
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+2041 passed, 1261 deselected, 7 warnings in 407.48s (0:06:47)
+```
+
+Live CLI smoke post-orchestrator-restart:
+```
+$ docker exec scaffold-orchestrator python -m app.observability.alerts emit \
+    --kind test.cooldown_cli --severity info \
+    --message "§17.388 CLI smoke" --cooldown-seconds 1
+{"emitted": true, "suppressed": false, "id": "c50c852f-...", "reason": null}
+```
+
+The `--cooldown-seconds 1` override is accepted, propagates through `_cli_emit → emit() → _resolve_cooldown`, and the alert lands with the tight 1-second window instead of the default 3600. Live `/health` shows both `oom_alerts` and `host_oom_alerts` blocks intact — no regression in the §17.386 + §17.387 surfaces.
+
+**Recommended deployment tuning (operator-driven, not shipped).** Two example overrides for this host's posture:
+
+```
+# .env additions (commented; uncomment when the pattern is observed)
+# ALERT_KIND_COOLDOWNS='{"host.oom_killed":300,"calibration.no_fire":86400}'
+#   - host.oom_killed at 5 min: a multi-victim host OOM episode produces
+#     one alert per comm without suppressing the second / third victim;
+#     the §17.387 watcher dedups per-comm so distinct names land but
+#     repeated kills of the SAME comm rate-limit at 5 min instead of 1 h
+#   - calibration.no_fire at 1 day: the quarterly cron is a low-frequency
+#     event; a 1 h cooldown is way tighter than needed, and a 1 day window
+#     means at most one "you missed a calibration" alert per day even if
+#     the watchdog ticks every 15 min
+```
+
+Not shipped because (a) the host hasn't had a host-OOM episode yet (steady-state empty per §17.387 verification) so the 5-min number is a best-guess until empirically validated, and (b) operator tuning is exactly what §17.388 enables — shipping opinionated defaults would just replace one "uniform cooldown" with a different one.
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Surface the resolved cooldown on `/health` or a debug endpoint.** Operators can read `settings.alert_kind_cooldowns` from `/config` (the existing redacted-settings dump) to inspect what's configured. Adding a separate readout for "which cooldown applies to kind X right now" would add API surface against a question nobody's asked.
+- **Add a wildcard / prefix-match override.** `alert_kind_cooldowns["cache.*"]` would let operators tune all `cache.embedding_pressure` / `cache.embedder_drift` / `cache.oom_event` alerts in one entry. Skipped because (a) there are only ~12 distinct alert kinds total and exact-match is fine at that scale, and (b) prefix-match introduces precedence ambiguity ("does `cache.embedding_pressure` use the exact-match or the `cache.*` override?") that uniform exact-match avoids.
+- **Per-severity override.** `alert_severity_cooldowns: dict[str, int]` would let operators tune "all critical alerts dedup at 5 min, all warnings at 1 h." Skipped because severity is already a strong enough partition (critical alerts are rare and severity-appropriate cooldowns are usually achievable via per-kind tuning, since the high-severity kinds are a small named set).
+
+**Cohort.** Closes the §17.161 deferred-items list completely. All three follow-ups now landed:
+- §17.386 — oom-history surfacing on /health (2026-06-02)
+- §17.387 — dmesg host-OOM coverage (2026-06-02)
+- §17.388 — per-kind cooldown (2026-06-02)
+
+§17.161 itself transitions from "one of N deferred follow-ups" to fully closed. The OOM-alerting subsystem is now end-to-end visible from kernel OOM-kill → docker event or kernel log → host-side script → system_alerts row (with per-kind cooldown tunable) → /health rollup (split by container vs host).
+
+**Cost.** +395 LOC across 4 files, 14 new regression-guard tests, ~7 min smoke verification + live CLI smoke. Zero new deps, zero migrations, zero behavior change for the existing dedup path (the per-kind override defaults to empty dict, so pre-§17.388 deployments behave identically post-deploy). Net result: operators tune cadence per alert kind without code changes; emit-time callers override the kind setting for one-off needs; the alerts subsystem matches the operator-tunability of the rest of the configuration surface.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
