@@ -548,3 +548,197 @@ class TestHealthCalibrationBlock:
         assert cal["status"] == "unknown"
         # The raw kind is still surfaced so the operator can grep journald.
         assert cal["last_kind"] == "calibration.future_event_we_havent_seen_yet"
+
+
+# ---------------------------------------------------------------------------
+# §17.386 — oom_alerts block surfaced on /health
+# ---------------------------------------------------------------------------
+
+def _call_health_with_oom(*, rows=None, db_raises=False, window_hours=None):
+    """Variant of _call_health that lets the test stub BOTH the calibration
+    probe and the §17.386 OOM-alerts rollup against the same async_session
+    mock — /health calls async_session() twice (once per block) so the mock
+    has to satisfy both query shapes.
+
+    ``rows`` is a list of (container_name, count, most_recent_dt) tuples to
+    return from the OOM rollup query. None → empty list (no OOM events).
+    ``db_raises`` simulates a DB error → fail-open path.
+    ``window_hours`` lets a test override the settings default before the
+    call; restored after.
+    """
+    from datetime import datetime, timezone
+    from contextlib import asynccontextmanager
+
+    mock_conn = AsyncMock()
+    mock_conn.execute = AsyncMock()
+    mock_connect_cm = AsyncMock()
+    mock_connect_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_connect_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value = mock_connect_cm
+
+    mock_ollama_resp = MagicMock()
+    mock_ollama_resp.raise_for_status = MagicMock()
+    mock_ollama_resp.json.return_value = {"models": [{"name": "qwen3:4b"}]}
+    mock_ollama_client = MagicMock()
+    mock_ollama_client.get = AsyncMock(return_value=mock_ollama_resp)
+
+    mock_utility = MagicMock()
+    mock_collection_cls = MagicMock()
+    mock_utility.list_collections.return_value = ["toon_v2"]
+    mock_col_instance = MagicMock()
+    mock_col_instance.num_entities = 8
+    mock_collection_cls.return_value = mock_col_instance
+
+    mock_cache = MagicMock()
+    mock_cache.stats = {"hits": 5, "misses": 2}
+    mock_redis_conn = AsyncMock()
+    mock_redis_conn.ping = AsyncMock()
+    mock_redis_conn.dbsize = AsyncMock(return_value=10)
+    mock_cache._get_redis = AsyncMock(return_value=mock_redis_conn)
+
+    fake_state = SimpleNamespace(
+        reranker_prewarmed_at="2026-05-08T00:00:00+00:00",
+        reranker_prewarm_elapsed_s=12.5,
+        reranker_prewarm_error=None,
+        reranker_prewarm_skipped=False,
+    )
+
+    # Shared mock_db satisfies both probes via SQL-text inspection on
+    # execute(). Calibration probe → .first(). OOM probe → .mappings().all().
+    oom_mappings = [
+        {"container": name, "count": count, "most_recent": mr}
+        for (name, count, mr) in (rows or [])
+    ]
+    oom_result = MagicMock()
+    oom_result.mappings.return_value.all.return_value = oom_mappings
+    cal_result = MagicMock()
+    cal_result.first.return_value = None
+
+    async def fake_execute(stmt, *args, **kwargs):
+        if db_raises:
+            raise RuntimeError("simulated DB down")
+        sql = str(getattr(stmt, "text", stmt))
+        if "container.oom_killed" in sql:
+            return oom_result
+        return cal_result
+
+    shared_db = AsyncMock()
+    shared_db.execute = AsyncMock(side_effect=fake_execute)
+
+    @asynccontextmanager
+    async def fake_session():
+        yield shared_db
+
+    async def do_call():
+        from app.config import settings as _settings
+        old_window = _settings.oom_alerts_health_window_hours
+        if window_hours is not None:
+            _settings.oom_alerts_health_window_hours = window_hours
+        try:
+            with patch("app.main.engine", mock_engine), \
+                 patch(
+                     "app.utils.http_clients.get_ollama_client",
+                     return_value=mock_ollama_client,
+                 ), \
+                 patch("app.main.utility", mock_utility), \
+                 patch("app.main.Collection", mock_collection_cls), \
+                 patch(
+                     "app.utils.embedding_cache.get_cache",
+                     return_value=mock_cache,
+                 ), \
+                 patch("app.main.async_session", fake_session):
+                from app.main import app, health
+                old_state = getattr(app, "state", None)
+                app.state = fake_state
+                try:
+                    return await health()
+                finally:
+                    if old_state is not None:
+                        app.state = old_state
+                    else:
+                        delattr(app, "state")
+        finally:
+            _settings.oom_alerts_health_window_hours = old_window
+
+    return _run(do_call())
+
+
+@pytest.mark.smoke
+class TestHealthOomAlertsBlock:
+    """§17.386 — oom_alerts: rollup of §17.161 system_alerts rows on /health.
+
+    Pre-§17.386 OOM events landed in the system_alerts table (§17.161) but
+    operators had to grep that table to know whether anything had been
+    OOM-killed recently. This block surfaces a per-container count +
+    most-recent timestamp over a configurable window, mirroring §17.194's
+    calibration block in shape and fail-safe posture.
+    """
+
+    def test_oom_block_present_in_checks(self):
+        result = _call_health_with_oom()
+        assert "oom_alerts" in result["checks"]
+
+    def test_empty_rollup_when_no_oom_rows(self):
+        result = _call_health_with_oom(rows=[])
+        oom = result["checks"]["oom_alerts"]
+        assert oom["total"] == 0
+        assert oom["most_recent_at"] is None
+        assert oom["by_container"] == {}
+        assert oom["window_hours"] >= 1
+
+    def test_populated_rollup_with_per_container_counts(self):
+        from datetime import datetime, timezone
+        ts_orch = datetime(2026, 6, 2, 18, 30, tzinfo=timezone.utc)
+        ts_milvus = datetime(2026, 6, 2, 17, 15, tzinfo=timezone.utc)
+        result = _call_health_with_oom(rows=[
+            ("scaffold-orchestrator", 3, ts_orch),
+            ("milvus-standalone", 2, ts_milvus),
+        ])
+        oom = result["checks"]["oom_alerts"]
+        assert oom["total"] == 5
+        assert oom["by_container"] == {
+            "scaffold-orchestrator": 3,
+            "milvus-standalone": 2,
+        }
+        # most_recent_at must be the latest timestamp across containers,
+        # not just the first row — explicit max() in the helper.
+        assert oom["most_recent_at"] == ts_orch.isoformat()
+
+    def test_disabled_when_window_zero(self):
+        """window_hours=0 disables the /health surfacing entirely; alerts
+        still land in system_alerts via §17.161 but aren't surfaced."""
+        result = _call_health_with_oom(window_hours=0)
+        oom = result["checks"]["oom_alerts"]
+        assert oom == {"disabled": True, "window_hours": 0}
+
+    def test_db_error_falls_back_to_empty_rollup(self):
+        """Fail-safe: DB error → empty rollup, never breaks /health."""
+        result = _call_health_with_oom(db_raises=True)
+        oom = result["checks"]["oom_alerts"]
+        assert oom["total"] == 0
+        assert oom["by_container"] == {}
+        # Top-level /health must still be intact.
+        assert "checks" in result and "status" in result
+
+    def test_oom_block_does_not_degrade_overall_status(self):
+        """Policy guard: OOM events are post-hoc evidence, not a current
+        service-degradation signal (containers are restarted by docker by
+        the time /health reads). Top-level status must stay 'healthy'
+        even with 100 OOMs in the window."""
+        from datetime import datetime, timezone
+        ts = datetime(2026, 6, 2, 20, 0, tzinfo=timezone.utc)
+        result = _call_health_with_oom(rows=[("scaffold-orchestrator", 100, ts)])
+        assert result["status"] == "healthy"
+        assert result["checks"]["oom_alerts"]["total"] == 100
+
+    def test_null_container_name_renders_as_unknown(self):
+        """Defensive: if a future malformed alert has no container_name in
+        payload, the rollup must not crash. Bucket as '<unknown>' so the
+        operator can see something landed but with an empty name."""
+        from datetime import datetime, timezone
+        ts = datetime(2026, 6, 2, 19, 0, tzinfo=timezone.utc)
+        result = _call_health_with_oom(rows=[(None, 1, ts)])
+        oom = result["checks"]["oom_alerts"]
+        assert oom["total"] == 1
+        assert oom["by_container"] == {"<unknown>": 1}

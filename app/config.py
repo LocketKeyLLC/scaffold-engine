@@ -528,6 +528,13 @@ class Settings(BaseSettings):
     alert_embedding_evictions_threshold: int = Field(default=500, ge=0, le=1_000_000)
     alert_embedding_hit_rate_floor: float = Field(default=0.5, ge=0.0, le=1.0)
 
+    # §17.386 — /health window for the OOM-event summary. Aggregates
+    # `system_alerts` rows with kind='container.oom_killed' (written by
+    # the §17.161 host-side oom_watcher) into per-container counts +
+    # most-recent timestamp. Set to 0 to disable the /health block
+    # (the underlying alerts still land in the DB).
+    oom_alerts_health_window_hours: int = Field(default=24, ge=0, le=720)
+
     calibration_watchdog_enabled: bool = True
     calibration_watchdog_interval_seconds: int = Field(default=900, ge=60, le=86400)
     calibration_grace_minutes: int = Field(default=120, ge=10, le=1440)

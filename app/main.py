@@ -754,10 +754,70 @@ async def health():
             logger.debug("health_calibration_probe_failed: %s", exc)
             return {"status": "unknown", "last_check_at": None, "last_kind": None}
 
-    pg, ollama, milvus, redis_pair, ngspice, verilator, symbiyosys, calibration = await asyncio.gather(
+    async def _check_oom_alerts():
+        """§17.386 — surface §17.161 OOM-kill alerts on /health.
+
+        The §17.161 host-side oom_watcher writes one
+        ``system_alerts`` row per Docker OOM event with
+        kind='container.oom_killed' and payload.container_name. This
+        block rolls them up into a per-container count + most-recent
+        timestamp over the configured window so operators see "the
+        signal" on /health without grepping system_alerts directly.
+
+        Closes the §17.161 follow-up "oom-history surfacing on /health"
+        explicitly logged as deferred at that commit. Mirrors §17.194's
+        calibration block in shape (status dict in checks{}) and its
+        fail-safe posture (every DB error → empty rollup, never
+        crashes /health).
+
+        Window of 0 disables the block (returns {"disabled": True})
+        for operators who want the alerts persisted to system_alerts
+        but not surfaced on the public /health.
+        """
+        window_h = settings.oom_alerts_health_window_hours
+        if window_h == 0:
+            return {"disabled": True, "window_hours": 0}
+        try:
+            async with async_session() as db:
+                rows = await db.execute(
+                    text(
+                        "SELECT payload->>'container_name' AS container, "
+                        "COUNT(*) AS count, MAX(created_at) AS most_recent "
+                        "FROM system_alerts "
+                        "WHERE kind = 'container.oom_killed' "
+                        f"  AND created_at >= NOW() - INTERVAL '{int(window_h)} hours' "
+                        "GROUP BY container "
+                        "ORDER BY count DESC"
+                    ),
+                )
+                records = rows.mappings().all()
+            by_container: dict[str, int] = {}
+            most_recent: datetime | None = None
+            for r in records:
+                name = r["container"] or "<unknown>"
+                by_container[name] = int(r["count"] or 0)
+                mr = r["most_recent"]
+                if mr is not None and (most_recent is None or mr > most_recent):
+                    most_recent = mr
+            return {
+                "window_hours": window_h,
+                "total": sum(by_container.values()),
+                "most_recent_at": most_recent.isoformat() if most_recent else None,
+                "by_container": by_container,
+            }
+        except Exception as exc:
+            logger.debug("health_oom_alerts_probe_failed: %s", exc)
+            return {
+                "window_hours": window_h,
+                "total": 0,
+                "most_recent_at": None,
+                "by_container": {},
+            }
+
+    pg, ollama, milvus, redis_pair, ngspice, verilator, symbiyosys, calibration, oom_alerts = await asyncio.gather(
         _check_pg(), _check_ollama(), _check_milvus(), _check_redis(),
         _check_ngspice(), _check_verilator(), _check_symbiyosys(),
-        _check_calibration(),
+        _check_calibration(), _check_oom_alerts(),
         return_exceptions=True,
     )
     # §17.171 — defensive unpack. If _check_redis raises a BaseException
@@ -785,6 +845,15 @@ async def health():
     if isinstance(calibration, BaseException):
         logger.warning("health_calibration_check_raised: %s", calibration)
         calibration = {"status": "unknown", "last_check_at": None, "last_kind": None}
+    # §17.386 — oom_alerts probe; same fail-safe pattern.
+    if isinstance(oom_alerts, BaseException):
+        logger.warning("health_oom_alerts_check_raised: %s", oom_alerts)
+        oom_alerts = {
+            "window_hours": settings.oom_alerts_health_window_hours,
+            "total": 0,
+            "most_recent_at": None,
+            "by_container": {},
+        }
     reranker = _check_reranker_state(getattr(app, "state", None))
     checks = {
         "postgresql": pg, "ollama": ollama, "milvus": milvus,
@@ -805,6 +874,13 @@ async def health():
         # Does NOT affect top-level `status` (a missed calibration window
         # is an operational concern, not a service-degradation signal).
         "calibration": calibration,
+        # §17.386 — OOM-event rollup over `oom_alerts_health_window_hours`.
+        # Source: §17.161 host-side oom_watcher → system_alerts rows.
+        # Read-only; advisory. Does NOT affect top-level `status` — an
+        # OOM is post-hoc evidence of a mem_limit miss, not a current
+        # service-degradation signal (the container has already been
+        # restarted by docker by the time /health reads this).
+        "oom_alerts": oom_alerts,
     }
     pg_up = pg["status"] == "up"
     ollama_up = ollama["status"] == "up"

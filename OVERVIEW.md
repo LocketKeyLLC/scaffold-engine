@@ -21196,6 +21196,76 @@ T8  LLM      task        0  769
 
 ---
 
+### §17.386 OOM-event /health surfacing — close §17.161's deferred follow-up (2026-06-02)
+
+Closes the §17.161 follow-up "oom-history surfacing on /health" explicitly logged as deferred at that commit. §17.161 had wired the alert sink end-to-end — `scripts/oom_watcher.py` streams `docker events --filter event=oom`, filters to compose-managed scaffold-engine containers, and writes a `container.oom_killed` row to `system_alerts` for every kernel OOM kill. But the only way for an operator to see those rows was to grep the DB directly. §17.386 adds an `oom_alerts` block to `/health` that rolls up the `system_alerts` rows over a configurable window so the signal surfaces alongside the existing `calibration` block (§17.194), `embedding_cache` stats, and the sim-sidecar status.
+
+**The block.** A new `_check_oom_alerts()` async helper mirrors `_check_calibration()` in shape and fail-safe posture. Runs one indexed SELECT against `system_alerts` (the `idx_system_alerts_kind_created` index makes this cheap):
+
+```sql
+SELECT payload->>'container_name' AS container,
+       COUNT(*) AS count,
+       MAX(created_at) AS most_recent
+  FROM system_alerts
+ WHERE kind = 'container.oom_killed'
+   AND created_at >= NOW() - INTERVAL '<N> hours'
+ GROUP BY container
+ ORDER BY count DESC;
+```
+
+The Python side aggregates rows into `total` (sum across containers), `most_recent_at` (max across containers — never just the first row), and `by_container` (per-container count dict). Window is set by the new `oom_alerts_health_window_hours` setting (default 24 h; range [0, 720]). Setting it to 0 returns `{"disabled": True, "window_hours": 0}` for operators who want the alerts persisted to `system_alerts` but not surfaced on the public `/health`.
+
+**Mirrors §17.194's policy guard.** The block does NOT affect top-level `status` — an OOM is post-hoc evidence (the container was already restarted by docker by the time `/health` reads), not a current service-degradation signal. Even 100 OOMs in the window leave top-level `status="healthy"`; the `oom_alerts.total` field is what an operator (or `make doctor` / dashboard / OWUI) reads for "have we been thrashing." This matches §17.194's calibration policy ("a missed quarterly window is operational, not service-degradation") and §17.171's sim-sidecar policy ("a wedged ngspice leaves /health 'healthy' so legacy workflows keep working").
+
+**Fail-safe posture (single failure class).** Any exception in the DB probe falls through to an empty rollup (`{total: 0, by_container: {}, ...}`) — never breaks `/health`. `asyncio.gather(..., return_exceptions=True)` protects against the same `BaseException` escape the §17.171 redis-pair defensive unpack handles for the sim sidecars. A separate test (`test_db_error_falls_back_to_empty_rollup`) locks this invariant.
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `app/config.py` | New `oom_alerts_health_window_hours: int = Field(default=24, ge=0, le=720)` setting with explanatory comment tying back to §17.161. | +7 |
+| `app/main.py` | `_check_oom_alerts()` helper + added to `asyncio.gather` block, defensive unpack, and `checks` dict assembly. | +75 |
+| `tests/test_health_cleanup.py` | New `_call_health_with_oom` helper (mirrors `_call_health_with_calibration` but the shared mock_db satisfies BOTH probes via SQL-text inspection) + `TestHealthOomAlertsBlock` (7 tests: presence, empty rollup, populated rollup, window=0 disable, DB-error fail-open, no-degradation invariant, null-container fallback). | +180 |
+| `OVERVIEW.md` | this entry | +~80 |
+| **Total** | | **~+340** |
+
+Zero new deps, zero migrations, zero schema changes. The `system_alerts` table + the `idx_system_alerts_kind_created` index both pre-date §17.386 — they were the existing landing pad §17.161 wrote to.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_health_cleanup.py tests/test_oom_watcher.py --timeout=30 -q
+52 passed in 9.66s
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+2020 passed, 1246 deselected, 7 warnings in 405.82s (0:06:45)
+```
+
+Live `/health` post-orchestrator-restart:
+```json
+"oom_alerts": {
+  "window_hours": 24,
+  "total": 0,
+  "most_recent_at": null,
+  "by_container": {}
+}
+```
+
+Empty rollup is the expected steady state on this host — §17.160's `mem_limit` caps were sized off measured idle + peak headroom, so OOM events should be rare. The block is now ready to surface them when they do happen.
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Trigger an alert when an OOM crosses a frequency threshold.** §17.386 is a passive rollup of what §17.161 already alerts on (each OOM is its own `system_alerts` row with severity=critical). A threshold like "≥3 OOMs in 1 h on the same container" would be a §17.132-style threshold check, useful but distinct. Defer until a multi-OOM week shows the dedup-key cooldown (default 1 h, per-container) is insufficient.
+- **Close the §17.161 deferred items #2 (per-kind cooldown) and #3 (dmesg host-OOM coverage).** Per-kind cooldown is a settings split — different alert kinds may want different windows. dmesg host-OOM coverage requires kernel-log access (`/var/log/kern.log` mount or `journalctl -k` from a host-side helper) and catches host-wide OOMs that aren't tied to a docker container. Both are independent of `/health` surfacing; defer until empirically needed.
+- **Surface alert-id or message text on /health.** The rollup ships only counts + timestamps + container names — minimal data needed to spot "is anything thrashing." Full alert detail stays in `GET /observability/alerts` (the existing X.26 endpoint) where the operator drills in. Keeping `/health` payload small.
+
+**Cohort.** Closes the §17.161 → §17.386 follow-up loop. The §17.161 OVERVIEW deferred-items list (line 7192 of OVERVIEW.md) shrinks from three items to two: per-kind cooldown + dmesg host-OOM coverage remain, both empirically gated. The OOM-alert sink is now end-to-end visible from kernel OOM-kill → docker event → host-side script → `system_alerts` row → `/health` rollup.
+
+**Cost.** +340 LOC, 7 new regression-guard tests, ~7 min smoke verification. Zero new deps, zero migrations, zero behavior change for the alert path itself (alerts still land identically; only the readout surface changes). Net result: operators reading `/health` for "anything broken / anything thrashing" now see OOM history without grepping the DB.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
