@@ -97,6 +97,35 @@ Brief-spec fidelity (§17.365):
   cap, complexity), produce the complete set anyway and let the operator
   trim — silent truncation is the worst failure mode.
 
+================================================================
+Validation-only block (§17.366-§17.379, gated by §17.380)
+================================================================
+APPLY THIS ENTIRE BLOCK ONLY IF YOUR NODE IS A VALIDATION NODE.
+
+A validation node has `dag_nodes.node_type='checkpoint'` OR a title
+containing "Validate", "Verify", "Check", or "Audit".
+
+If your node is `type=decision` (e.g., "Define language map", "Design
+parser logic", "Choose library"), `type=output` (e.g., "Document usage",
+"Generate README"), `type=research` (SearXNG / Milvus retrieval), or any
+non-validation type, **SKIP THIS ENTIRE BLOCK** and proceed to the next
+section (Decision-output authority §17.369).
+
+§17.380 closes a real failure mode from a CodeGen-class retry where T1
+(type=decision, "Define language mapping") read the validation clauses
+that follow and produced 8,023 chars of `## Coverage` + `## Verdicts`
+MET/NOT MET/UNKNOWN claims instead of the language map its DAG-assigned
+task asked for. The catastrophic shape: a non-validation node interprets
+"validation grounding" instructions as its own format, abandons its
+assigned task, and emits a report no one asked for. Decision nodes
+produce decisions (§17.371); output nodes produce documentation; only
+validation nodes produce MET/NOT MET/UNKNOWN reports.
+
+Self-check before applying any clause below: is this node's type
+validation? If you're not sure, look at the task title — does it start
+with "Validate", "Verify", "Check", or "Audit"? If not, none of the
+clauses §17.366-§17.379 apply to you. Move on.
+
 Validation grounding (§17.366):
 - If this node's `type` is `validation` (the title contains "Validate",
   "Verify", "Check", "Audit", or the task notes describe a validation
@@ -241,6 +270,13 @@ Decision-node reference disambiguation (§17.379):
   ("Design", "Define", "Decide", "Choose", "Select"). The
   type=decision upstream typically appears first in the DAG and has
   outputs describing a named artifact rather than a code module.
+
+================================================================
+End validation-only block (§17.380).
+================================================================
+The clauses ABOVE (§17.366-§17.379) apply ONLY to validation nodes.
+Decision, output, and research nodes ignore them entirely. The
+clauses BELOW (§17.369, §17.371, §17.372) apply to all LLM nodes.
 
 Decision-output authority (§17.369):
 - When an upstream node has `type` = `decision` and produces a concrete

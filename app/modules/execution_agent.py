@@ -509,6 +509,35 @@ Brief-spec fidelity (§17.365):
   cap, complexity), produce the complete set anyway and let the operator
   trim — silent truncation is the worst failure mode.
 
+================================================================
+Validation-only block (§17.366-§17.379, gated by §17.380)
+================================================================
+APPLY THIS ENTIRE BLOCK ONLY IF YOUR NODE IS A VALIDATION NODE.
+
+A validation node has `dag_nodes.node_type='checkpoint'` OR a title
+containing "Validate", "Verify", "Check", or "Audit".
+
+If your node is `type=decision` (e.g., "Define language map", "Design
+parser logic", "Choose library"), `type=output` (e.g., "Document usage",
+"Generate README"), `type=research` (SearXNG / Milvus retrieval), or any
+non-validation type, **SKIP THIS ENTIRE BLOCK** and proceed to the next
+section (Decision-output authority §17.369).
+
+§17.380 closes a real failure mode from a CodeGen-class retry where T1
+(type=decision, "Define language mapping") read the validation clauses
+that follow and produced 8,023 chars of `## Coverage` + `## Verdicts`
+MET/NOT MET/UNKNOWN claims instead of the language map its DAG-assigned
+task asked for. The catastrophic shape: a non-validation node interprets
+"validation grounding" instructions as its own format, abandons its
+assigned task, and emits a report no one asked for. Decision nodes
+produce decisions (§17.371); output nodes produce documentation; only
+validation nodes produce MET/NOT MET/UNKNOWN reports.
+
+Self-check before applying any clause below: is this node's type
+validation? If you're not sure, look at the task title — does it start
+with "Validate", "Verify", "Check", or "Audit"? If not, none of the
+clauses §17.366-§17.379 apply to you. Move on.
+
 Validation grounding (§17.366):
 - If this node's `type` is `validation` (the title contains "Validate",
   "Verify", "Check", "Audit", or the task notes describe a validation
@@ -653,6 +682,13 @@ Decision-node reference disambiguation (§17.379):
   ("Design", "Define", "Decide", "Choose", "Select"). The
   type=decision upstream typically appears first in the DAG and has
   outputs describing a named artifact rather than a code module.
+
+================================================================
+End validation-only block (§17.380).
+================================================================
+The clauses ABOVE (§17.366-§17.379) apply ONLY to validation nodes.
+Decision, output, and research nodes ignore them entirely. The
+clauses BELOW (§17.369, §17.371, §17.372) apply to all LLM nodes.
 
 Decision-output authority (§17.369):
 - When an upstream node has `type` = `decision` and produces a concrete
@@ -1591,23 +1627,47 @@ async def execute_next_node(
             # UNKNOWN line, not just anywhere in the prose.
             missing = check_validation_citation_coverage(output, codegen_keys)
             if missing:
+                # §17.381 — the sixth mdsplit retry showed the model
+                # oscillating between subsets (attempt 1: cite T4/T5/T6,
+                # attempt 2: cite T2/T3 but drop T4/T5/T6, attempt 3: back
+                # to T4/T5/T6, …). The W.1 retry loop carries only the
+                # most recent verification_reason, so each attempt sees
+                # "missing X" and patches X while dropping what the
+                # previous attempt cited correctly. The reason text now
+                # names the PREVIOUSLY CITED set explicitly so the model
+                # has both halves of the union it needs to maintain. The
+                # union itself is asserted as the target — model treats
+                # the report as accumulative, not patch-by-patch.
+                missing_set = set(missing)
+                cited = sorted([k for k in codegen_keys if k not in missing_set])
+                union = sorted(codegen_keys)
                 verify_status = "fail"
                 reason = (
                     f"§17.377 validation-coverage guard: code-bearing "
                     f"upstreams were not cited inside MET/NOT MET/"
-                    f"UNKNOWN claim lines — missing {missing}. A passing "
-                    f"reference like 'decision node (T2 or T3)' outside "
-                    f"any verdict line does NOT count. Re-emit with a "
-                    f"dedicated MET/NOT MET/UNKNOWN line per missing "
-                    f"upstream — name the upstream, state the verdict, "
-                    f"and quote the evidence (e.g., 'parser/CLI "
+                    f"UNKNOWN claim lines.\n\n"
+                    f"PREVIOUSLY CITED (KEEP THESE — do not drop): "
+                    f"{cited}\n"
+                    f"MISSING (ADD THESE): {missing}\n"
+                    f"TARGET UNION (all of these must appear in "
+                    f"MET/NOT MET/UNKNOWN lines): {union}\n\n"
+                    f"§17.381 — the W.1 retry loop only shows you THIS "
+                    f"feedback, not your prior attempt's text. Re-emit "
+                    f"a single report whose claim lines cite every "
+                    f"upstream in the TARGET UNION above. Do NOT drop "
+                    f"any upstream from PREVIOUSLY CITED when adding "
+                    f"the MISSING ones. A passing reference like "
+                    f"'decision node (T2 or T3)' outside any verdict "
+                    f"line does NOT count — each upstream needs a "
+                    f"dedicated MET/NOT MET/UNKNOWN line citing it by "
+                    f"name with quoted evidence (e.g., 'parser/CLI "
                     f"separation: MET — T2 lines 5-15 contain no "
                     f"argparse or main()')."
                 )
                 logger.warning(
                     "validation_citation_guard_fail: node='%s' "
-                    "missing=%s expected=%s",
-                    title, missing, codegen_keys,
+                    "missing=%s cited=%s union=%s",
+                    title, missing, cited, union,
                 )
         except Exception as exc:
             # Fail-open: any DB error in the guard must not block a

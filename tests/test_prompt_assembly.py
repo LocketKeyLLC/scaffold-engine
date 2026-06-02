@@ -130,6 +130,14 @@ class TestSystemForTool:
         assert "Decision-node reference disambiguation" in flat
         assert "decision node (T2 or T3)" in flat
 
+    def test_llm_mirror_has_380_validation_block_gate(self):
+        # §17.380 — mirror must carry the validation-only block gate.
+        flat = " ".join(pa.EXECUTION_SYSTEM_LLM.split())
+        assert "Validation-only block (§17.366-§17.379, gated by §17.380)" in flat
+        assert "APPLY THIS ENTIRE BLOCK ONLY IF YOUR NODE IS A VALIDATION NODE" in flat
+        assert "SKIP THIS ENTIRE BLOCK" in flat
+        assert "End validation-only block (§17.380)" in flat
+
 
 # ---------------------------------------------------------------------------
 # truncate_output — head/tail preserve + marker.

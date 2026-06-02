@@ -20720,6 +20720,198 @@ The §17.377 test `test_passing_aside_outside_verdict_does_not_count` is the loa
 
 ---
 
+### §17.380 clause-scope gating — close the T1 catastrophic role confusion from the §17.377-§17.379 retry (2026-06-01)
+
+First fix from the §17.377-§17.379 retry (job `ca204d44-f4ce-4820-97d9-760346a68b02`, sixth mdsplit run). This retry surfaced the most diagnostically rich failure of the arc — three distinct sub-classes co-occurring in one run, of which the headline is a clause-scope-leakage class §17.380 closes.
+
+**The catastrophic failure shape.** The DAG had T1 ("Define language mapping", `type=decision`) and T8 ("Validate end-to-end", `type=validation`) — the documentation and validation node positions swapped vs prior retries' T7 / T8. T1's actual output was **8,023 chars of validation report**: opens with `## Coverage`, has `## Verdicts`, contains MET / NOT MET / UNKNOWN claims against T1-T6. The decision-node task was effectively abandoned; T1 instead emitted the format the §17.378 + §17.379 validation-grounding clauses describe.
+
+**The root cause.** I added §17.366, §17.368, §17.373, §17.378, §17.379 to `EXECUTION_SYSTEM_LLM` — the system prompt used for **every** LLM-tool node, including decision (T1) and output (T7 README) types. Only §17.366 had the conditional gate ("If this node's type is validation, ..."). The clauses added since (§17.368, §17.373, §17.378, §17.379) don't gate at all. T1 read "Open the validation report with `## Coverage`..." and applied it to its own (non-validation) task. The prompt clauses I'd been progressively adding to close validation-class regressions were quietly accumulating into a load-bearing block that decision and output nodes also read — and applied — verbatim.
+
+This is **the first methodological discovery in the arc that wasn't a refinement of an earlier class**. The §17.359 → §17.379 arc had been iterating against failure shapes the model exhibited. §17.380 is a failure shape *I introduced* by adding clauses without gating. The pattern: when adding a clause that targets a specific node type, the gate is part of the clause — not an afterthought. Adding §17.378 / §17.379 without explicit `type=validation` gates was a structural mistake.
+
+**The fix.** A `Validation-only block (§17.366-§17.379, gated by §17.380)` wrapper added to `EXECUTION_SYSTEM_LLM` (mirrored in `prompt_assembly.py`). Three structural elements:
+
+1. **Opening header gate** before the §17.366 block: "APPLY THIS ENTIRE BLOCK ONLY IF YOUR NODE IS A VALIDATION NODE. A validation node has `dag_nodes.node_type='checkpoint'` OR a title containing 'Validate', 'Verify', 'Check', or 'Audit'." The gate names both detection paths (the DB enum and the title keyword) so the model has two independent signals to check.
+
+2. **Explicit skip-this-block instruction** for non-validation nodes: "If your node is `type=decision` (e.g., 'Define language map', 'Design parser logic', 'Choose library'), `type=output` (e.g., 'Document usage', 'Generate README'), `type=research` (SearXNG / Milvus retrieval), or any non-validation type, **SKIP THIS ENTIRE BLOCK** and proceed to the next section." Names the three non-validation node-type categories with concrete name examples so the model can self-classify.
+
+3. **The actual T1-collapse anti-example verbatim** with the catastrophic-shape framing: "T1 (type=decision, 'Define language mapping') read the validation clauses that follow and produced 8,023 chars of `## Coverage` + `## Verdicts` MET/NOT MET/UNKNOWN claims instead of the language map its DAG-assigned task asked for. The catastrophic shape: a non-validation node interprets 'validation grounding' instructions as its own format, abandons its assigned task, and emits a report no one asked for."
+
+4. **Closing marker** after §17.379: "End validation-only block (§17.380). The clauses ABOVE (§17.366-§17.379) apply ONLY to validation nodes. Decision, output, and research nodes ignore them entirely. The clauses BELOW (§17.369, §17.371, §17.372) apply to all LLM nodes." The closing marker prevents the gate from contaminating downstream clauses (Decision-output authority §17.369, Decision-node tight scope §17.371, Stay in domain §17.372) which legitimately apply to all LLM nodes.
+
+The self-check the gate teaches: "is this node's type validation? If you're not sure, look at the task title — does it start with 'Validate', 'Verify', 'Check', or 'Audit'? If not, none of the clauses §17.366-§17.379 apply to you. Move on."
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | `EXECUTION_SYSTEM_LLM` gains opening header gate + skip instruction + T1 anti-example + closing marker wrapping §17.366-§17.379. |
+| `app/modules/prompt_assembly.py` | Mirror. |
+| `tests/test_execution_agent_tools.py` | Three new tests: `test_llm_prompt_has_validation_only_block_gate` (header + skip-this-block markers), `test_llm_prompt_names_t1_catastrophic_anti_example` (the 8,023-chars + catastrophic-shape pins), `test_llm_prompt_has_validation_block_end_marker` (closing marker so downstream clauses aren't quarantined). |
+| `tests/test_prompt_assembly.py` | `test_llm_mirror_has_380_validation_block_gate` covers §17.380 mirror parity. |
+
+Ships with §17.381 + §17.382 in the same commit; verification block deferred to §17.382's audit entry.
+
+**Cohort.** First of the §17.380 + §17.381 + §17.382 batch — and a methodological inflection point in the arc. Future iterations adding type-specific guidance to `EXECUTION_SYSTEM_LLM` must include the explicit gate at the clause level; the §17.380 wrapper is the safety net for the existing §17.366-§17.379 block but doesn't relieve future clauses from including their own type gates.
+
+**Cost.** Combined with §17.381 + §17.382, the batch is +~70 LOC of prompt + ~30 LOC of runtime code + ~50 LOC of tests + three OVERVIEW entries. §17.380's share is ~40 LOC of prompt + ~20 LOC of tests. Zero new deps, zero migrations, zero schema changes. Behavior change: decision/output/research LLM nodes now see an explicit "skip this block" instruction; validation nodes see the same block as before. Net effect for validation nodes is zero; for non-validation nodes it's the removal of the false-positive prompt influence that caused T1's catastrophic collapse.
+
+---
+
+### §17.381 accumulating retry feedback — name the cited set so the model maintains the union across attempts (2026-06-01)
+
+Second fix from the same retry. §17.377's runtime guard fired correctly four times on T8 (the actual validation node), but the model **oscillated between two clusters** instead of converging:
+
+| Attempt | Missing per guard | Model cited that attempt |
+|---|---|---|
+| 1 | `[T2, T3]` | T4, T5, T6 (historical cluster) |
+| 2 | `[T4, T5, T6]` | T2, T3 (swung the other way) |
+| 3 | `[T2, T3]` | T4, T5, T6 (back to first cluster) |
+| 4 | `[T4, T5, T6]` | T2, T3 (back to second cluster) |
+
+After 4 attempts the retry budget exhausted; T8 marked `failed`; job status flipped to `blocked`. The runtime guard worked as designed (caught both directions of the failure); the model just couldn't produce a report citing all five upstreams.
+
+**The class.** §17.381 tracks **patch-not-union retry behavior**. The W.1 reviewer-feedback loop carries only the most recent `last_verification_reason` into the next attempt's prompt — single-step memory. When attempt 4 sees "missing T4/T5/T6" in the reason, it has no contextual signal that attempt 3 cited those correctly. The model patches the named gap and treats the new attempt as a from-scratch report, dropping whatever the previous attempt got right.
+
+**The fix.** The §17.377 reason text now names three explicit sets: PREVIOUSLY CITED, MISSING, and TARGET UNION. The model sees both halves of what it needs to maintain, with the union explicitly named as the convergence target.
+
+The integration computes the cited set from the codegen_keys minus the missing set, then prepends them to the reason:
+
+```python
+missing_set = set(missing)
+cited = sorted([k for k in codegen_keys if k not in missing_set])
+union = sorted(codegen_keys)
+reason = (
+    f"§17.377 validation-coverage guard: ...\n\n"
+    f"PREVIOUSLY CITED (KEEP THESE — do not drop): {cited}\n"
+    f"MISSING (ADD THESE): {missing}\n"
+    f"TARGET UNION (all of these must appear in MET/NOT MET/UNKNOWN "
+    f"lines): {union}\n\n"
+    f"§17.381 — the W.1 retry loop only shows you THIS feedback, not "
+    f"your prior attempt's text. Re-emit a single report whose claim "
+    f"lines cite every upstream in the TARGET UNION above. Do NOT drop "
+    f"any upstream from PREVIOUSLY CITED when adding the MISSING ones. ..."
+)
+```
+
+The reason explicitly tells the model: "the W.1 retry loop only shows you THIS feedback, not your prior attempt's text" — naming the single-step memory limit gives the model the architectural context for why it needs to preserve the cited set in its new emission.
+
+**The log line** also updated to record cited / union alongside missing for operator visibility:
+
+```python
+logger.warning(
+    "validation_citation_guard_fail: node='%s' missing=%s cited=%s union=%s",
+    title, missing, cited, union,
+)
+```
+
+**Why this is prompt-shape and not structural retry-loop change.** A more invasive fix would extend `last_verification_reason` to a multi-attempt list and have the executor reconstruct full history into the next prompt. That changes the DB schema, the W.1 retry contract, and every existing test fixture for retry behavior. §17.381 is the cheap prompt-shape version — same retry loop, richer single-message reason text. If §17.381 doesn't close the oscillation on the next retry, the structural change becomes the §17.x candidate.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `app/modules/execution_agent.py` | §17.377 integration's reason text rewritten to name PREVIOUSLY CITED, MISSING, TARGET UNION explicitly with rationale comment + the "W.1 only shows THIS feedback" architectural context. Log line extended with cited + union. |
+| `tests/test_execution_agent_tools.py` | New `test_validation_citation_guard_reason_includes_cited_set` test — uses `inspect.getsource` to assert the source contains the three labels (PREVIOUSLY CITED, MISSING, TARGET UNION) plus the §17.381 marker. Pins the reason-text shape against future regressions. |
+
+**Cohort.** Second of the §17.380 + §17.381 + §17.382 batch. Pairs with §17.377 + §17.378 — §17.378 prompt clause says "produce ## Coverage with all upstreams"; §17.377 runtime guard checks the produced output; §17.381 closes the loop by giving the model the right reason text to patch into a converging single report across retries.
+
+**Cost.** ~20 LOC of runtime code + ~10 LOC of tests as part of the §17.380 + §17.381 + §17.382 batch. Zero new deps, zero schema changes, zero behavior change when the guard doesn't fire (the cited/union computation runs only on the failure path).
+
+---
+
+### §17.382 close-out audit — six-iteration CodeGen-class arc + three-surface intervention playbook (2026-06-01)
+
+Docs-only entry. Counterpart to §17.362 (homelab Shell-class fabrication audit) and §17.364 (homelab Shell-class scope audit) for the CodeGen-class arc. Tabulates six iterations against the same mdsplit brief, documents the runtime-surface iteration pattern §17.376 → §17.377 established, and records the §17.380 clause-scope-leakage discovery as the methodological inflection point of the arc.
+
+**The six CodeGen-class jobs.**
+
+| Run | Job ID | Date | T1 chars | T_validation cluster | New residuals surfaced |
+|---|---|---|---:|---|---|
+| Original trial | `4f6cb206-…` | 2026-05-31 | 673 | 0 (18 must-statements) | brief-spec truncation, validation-as-restatement, T2≈T3 redundancy |
+| §17.365-§17.367 retry | `83fe8695-…` | 2026-05-31 | 167 | 1 (T6 only) | single-upstream-bias, decision drift, CLI reimplementation |
+| §17.368-§17.370 retry | `18ab3675-…` | 2026-05-31 | 4540 | 3 (T4/T5/T6) | decision-node scope explosion, off-domain hallucination, cluster bias |
+| §17.371-§17.373 retry | `4e0c5c0b-…` | 2026-05-31 | 1128 | 3 (T4/T5/T6) | runnable-script default (cluster bias asymptoted at prompt layer) |
+| §17.374-§17.376 retry | `0130933e-…` | 2026-05-31 | 1487 | 3 (T4/T5/T6 — substring guard gamed) | citation-shape-gaming |
+| §17.377-§17.379 retry | `ca204d44-…` | 2026-06-01 | **8023** | oscillating 2↔3 (4 retries, failed) | **clause-scope leakage**, patch-not-union retry behavior |
+
+**Convergence pattern across the eighteen sub-classes.**
+
+| Sub-class | Layer | Closed in | Status |
+|---|---|---|---|
+| Brief-spec silent truncation | prompt | §17.365 | held |
+| Validation-as-restatement | prompt | §17.366 | held |
+| T2 ≈ T3 redundancy | DAG-prompt | §17.367 | held |
+| Single-upstream-bias | prompt | §17.368 | became cluster-bias |
+| Decision-output drift | prompt | §17.369 | held |
+| CLI reimplementation | DAG-prompt | §17.370 | became T3 scope-leak |
+| Decision-node scope explosion | prompt | §17.371 | held until §17.380 surfaced re-occurrence |
+| Off-domain hallucination | prompt | §17.372 | held |
+| Cluster-bias on validation citations | prompt → runtime | §17.373 → §17.376 → §17.377 | runtime closes; §17.381 closes oscillation |
+| Runnable-script default | prompt | §17.374 | held |
+| Citation-shape-gaming (substring) | runtime | §17.376 → §17.377 | tightened to per-claim |
+| Coverage section first | prompt | §17.378 | held but caused leakage |
+| Decision-node reference disambiguation | prompt | §17.379 | held but caused leakage |
+| **Clause-scope leakage** | **prompt-structure** | **§17.380** | **NEW SURFACE** |
+| Patch-not-union retry behavior | prompt-shape | §17.381 | tested; verification pending |
+
+**The three-surface intervention playbook.**
+
+The arc establishes three distinct intervention surfaces with their own iteration patterns:
+
+| Surface | First introduced | Pattern |
+|---|---|---|
+| Prompt clauses with anti-examples | §17.359 | Concrete Bad/Good pairs; iterate when model defaults override |
+| Runtime guards with structural checks | §17.376 | Iterate when prompt-layer saturates; tighten when the regex is gamed (§17.376 → §17.377) |
+| **Clause-scope gating wrappers** | **§17.380** | Add gates around type-specific clause groups so non-target nodes don't read them |
+
+The third surface is the methodological inflection point. Prompt clauses and runtime guards address what the model emits. Clause-scope gating addresses what the model **reads** — recognizing that the system prompt is read by ALL LLM nodes regardless of their type, so type-specific guidance needs explicit type gates or it leaks. Future iterations adding type-specific guidance to `EXECUTION_SYSTEM_LLM` (or its mirrors) must include the gate at the clause level; the §17.380 wrapper is a one-shot fix for the §17.366-§17.379 block but doesn't relieve future clauses from carrying their own type gates.
+
+**The mdsplit brief's empirical baseline.**
+
+All six job IDs are preserved on this host. Reproduce the convergence pattern (and the §17.380 catastrophic divergence) via:
+
+```sql
+SELECT n.node_key, n.tool, n.node_type, LENGTH(n.output_text) AS chars
+  FROM dag_nodes n
+ WHERE n.job_id = '<job_id>'
+ ORDER BY n.execution_order;
+```
+
+The T1 size column is the canonical clause-scope-leakage signal: 167 / 4540 / 1128 / 1487 chars across the prior retries (decision-node sized normal-to-explosive); 8023 chars in the §17.377-§17.379 retry (decision-node emitting a validation report). The T_validation cluster size column tracks the citation-coverage class's progression.
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `OVERVIEW.md` | this entry |
+
+**Verification (full batch — §17.380 + §17.381 + §17.382).**
+
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_execution_agent_tools.py tests/test_prompt_assembly.py \
+    tests/test_validation_citation_guard.py --timeout=30 -q
+129 passed in 13.78s
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+<smoke result captured in commit message>
+```
+
+**What this does NOT do** (deliberately out of scope across the §17.380 + §17.381 + §17.382 batch).
+
+- **Empirically verify the batch on a seventh mdsplit retry.** The arc has run six iterations on the same brief; a seventh would close §17.380's empirical loop but doesn't change the structural coverage. Operator-driven verification recommended on the next CodeGen-class use, possibly with a non-mdsplit brief to test whether the three-surface playbook generalizes.
+- **Refactor every existing validation clause to carry its own explicit type gate.** The §17.380 wrapper is the safety net for §17.366-§17.379. A cleaner architecture would have every clause carry its own gate as a first-class element. Defer until a future iteration shows the wrapper is insufficient (e.g., a clause added inside the wrapper still leaks because the model loses track of the gate after enough intervening text).
+- **Convert the W.1 retry feedback to multi-attempt history.** §17.381 takes the cheap prompt-shape path. If a seventh retry shows the model still oscillating despite the cited/union explicit naming, the structural change (extend `last_verification_reason` to a multi-attempt list; rebuild the retry-feedback block from history) becomes the next surface.
+- **Add a fourth intervention surface for failure modes that don't yield to prompt + runtime + scope-gating.** The arc's six iterations didn't surface one yet. If a future retry shows a class that resists all three, that's the §17.x candidate.
+
+**Cohort.** Third of the §17.380 + §17.381 + §17.382 batch and the close of the sixth CodeGen-class iteration on the same brief. With the §17.380 clause-scope-gating surface introduced, the arc now has three distinct intervention surfaces; future task-class iterations have the full playbook documented. Eighteen sub-classes across six retries; the residuals are now structural (how clauses interact with each other) rather than per-class.
+
+**Cost.** Docs-only; +~150 LOC OVERVIEW + zero code. Net result: six-job audit trail across the CodeGen-class arc, three-surface playbook documented as the methodology, the §17.380 inflection point on the record as a structural lesson for adding type-specific guidance to shared system prompts.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

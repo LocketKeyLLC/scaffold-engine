@@ -523,3 +523,59 @@ class TestSystemPromptRouting:
         for kw in ("Design", "Define", "Decide", "Choose", "Select"):
             assert kw in flat, f"missing decision keyword: {kw!r}"
 
+    # ----- §17.380 — validation-only block gating -----
+
+    def test_llm_prompt_has_validation_only_block_gate(self):
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        # The opening header gate must be present so the model sees
+        # "APPLY ONLY IF type=validation" before any §17.366-§17.379 rule.
+        assert "Validation-only block (§17.366-§17.379, gated by §17.380)" in flat
+        assert "APPLY THIS ENTIRE BLOCK ONLY IF YOUR NODE IS A VALIDATION NODE" in flat
+        # The skip-this-block escape clause for non-validation nodes.
+        assert "SKIP THIS ENTIRE BLOCK" in flat
+
+    def test_llm_prompt_names_t1_catastrophic_anti_example(self):
+        """The §17.380 anti-example pins the actual T1-collapse failure
+        shape (an 8023-char validation report instead of a language map).
+        Without the explicit anti-example the model regresses on the
+        scope-leakage class."""
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        assert "8,023 chars" in flat
+        # "catastrophic shape" + "abandons its assigned task" mark the
+        # T1 anti-example's narrative core.
+        assert "catastrophic shape" in flat
+        assert "abandons its assigned task" in flat
+
+    def test_llm_prompt_has_validation_block_end_marker(self):
+        """The §17.380 closing marker tells the model where the
+        validation-only block ends. Without it, clauses after §17.379
+        (Decision-output authority §17.369, Decision-node tight scope
+        §17.371, Stay in domain §17.372) might also get treated as
+        validation-only by association."""
+        from app.modules.execution_agent import EXECUTION_SYSTEM_LLM
+        flat = " ".join(EXECUTION_SYSTEM_LLM.split())
+        assert "End validation-only block (§17.380)" in flat
+
+    # ----- §17.381 — accumulating retry feedback (reason text shape) -----
+
+    def test_validation_citation_guard_reason_includes_cited_set(self):
+        """The §17.381 update — the §17.377 reason text must name
+        PREVIOUSLY CITED, MISSING, and TARGET UNION explicitly, so
+        the model maintains the union across retry attempts instead
+        of oscillating between subsets.
+
+        Static check on the source — the reason format string is in
+        execution_agent.py at the §17.377 integration point. Drop the
+        format and the §17.381 fix regresses without the test catching
+        it."""
+        import inspect
+        from app.modules import execution_agent
+        src = inspect.getsource(execution_agent.execute_next_node)
+        assert "PREVIOUSLY CITED" in src
+        assert "MISSING (ADD THESE)" in src
+        assert "TARGET UNION" in src
+        # The §17.381 marker on the rationale comment.
+        assert "§17.381" in src
+
