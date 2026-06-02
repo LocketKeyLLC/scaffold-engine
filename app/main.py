@@ -814,10 +814,66 @@ async def health():
                 "by_container": {},
             }
 
-    pg, ollama, milvus, redis_pair, ngspice, verilator, symbiyosys, calibration, oom_alerts = await asyncio.gather(
+    async def _check_host_oom_alerts():
+        """§17.387 — surface §17.387 host-scope OOM alerts on /health.
+
+        The §17.387 host-side host_oom_watcher writes one
+        ``system_alerts`` row per kernel host-OOM event (the kind that
+        isn't tied to a docker container — global memory pressure on
+        the host) with kind='host.oom_killed' and payload.comm. This
+        block rolls them up into a per-comm count + most-recent
+        timestamp over the configured window.
+
+        Parallel to ``_check_oom_alerts`` (§17.386) — same shape, same
+        fail-safe posture, same window setting. The two alert kinds are
+        kept distinct because they correspond to different operator
+        actions: container OOM → raise this container's mem_limit;
+        host OOM → lower compose mem_limits or buy more RAM.
+        """
+        window_h = settings.oom_alerts_health_window_hours
+        if window_h == 0:
+            return {"disabled": True, "window_hours": 0}
+        try:
+            async with async_session() as db:
+                rows = await db.execute(
+                    text(
+                        "SELECT payload->>'comm' AS comm, "
+                        "COUNT(*) AS count, MAX(created_at) AS most_recent "
+                        "FROM system_alerts "
+                        "WHERE kind = 'host.oom_killed' "
+                        f"  AND created_at >= NOW() - INTERVAL '{int(window_h)} hours' "
+                        "GROUP BY comm "
+                        "ORDER BY count DESC"
+                    ),
+                )
+                records = rows.mappings().all()
+            by_comm: dict[str, int] = {}
+            most_recent: datetime | None = None
+            for r in records:
+                comm = r["comm"] or "<unknown>"
+                by_comm[comm] = int(r["count"] or 0)
+                mr = r["most_recent"]
+                if mr is not None and (most_recent is None or mr > most_recent):
+                    most_recent = mr
+            return {
+                "window_hours": window_h,
+                "total": sum(by_comm.values()),
+                "most_recent_at": most_recent.isoformat() if most_recent else None,
+                "by_comm": by_comm,
+            }
+        except Exception as exc:
+            logger.debug("health_host_oom_alerts_probe_failed: %s", exc)
+            return {
+                "window_hours": window_h,
+                "total": 0,
+                "most_recent_at": None,
+                "by_comm": {},
+            }
+
+    pg, ollama, milvus, redis_pair, ngspice, verilator, symbiyosys, calibration, oom_alerts, host_oom_alerts = await asyncio.gather(
         _check_pg(), _check_ollama(), _check_milvus(), _check_redis(),
         _check_ngspice(), _check_verilator(), _check_symbiyosys(),
-        _check_calibration(), _check_oom_alerts(),
+        _check_calibration(), _check_oom_alerts(), _check_host_oom_alerts(),
         return_exceptions=True,
     )
     # §17.171 — defensive unpack. If _check_redis raises a BaseException
@@ -854,6 +910,15 @@ async def health():
             "most_recent_at": None,
             "by_container": {},
         }
+    # §17.387 — host_oom_alerts probe; same fail-safe pattern.
+    if isinstance(host_oom_alerts, BaseException):
+        logger.warning("health_host_oom_alerts_check_raised: %s", host_oom_alerts)
+        host_oom_alerts = {
+            "window_hours": settings.oom_alerts_health_window_hours,
+            "total": 0,
+            "most_recent_at": None,
+            "by_comm": {},
+        }
     reranker = _check_reranker_state(getattr(app, "state", None))
     checks = {
         "postgresql": pg, "ollama": ollama, "milvus": milvus,
@@ -881,6 +946,13 @@ async def health():
         # service-degradation signal (the container has already been
         # restarted by docker by the time /health reads this).
         "oom_alerts": oom_alerts,
+        # §17.387 — host-scope OOM-event rollup, parallel to oom_alerts.
+        # Source: §17.387 host-side host_oom_watcher → system_alerts rows
+        # with kind='host.oom_killed'. Same fail-safe posture; same
+        # no-degradation policy. Distinct block because the operator
+        # action differs (host OOM = host-wide pressure, container OOM
+        # = per-container mem_limit miss).
+        "host_oom_alerts": host_oom_alerts,
     }
     pg_up = pg["status"] == "up"
     ollama_up = ollama["status"] == "up"

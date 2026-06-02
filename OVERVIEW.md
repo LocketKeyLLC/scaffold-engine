@@ -21266,6 +21266,129 @@ Empty rollup is the expected steady state on this host — §17.160's `mem_limit
 
 ---
 
+### §17.387 dmesg host-OOM coverage — second §17.161 deferred follow-up (2026-06-02)
+
+Closes the §17.161 follow-up "dmesg host-OOM coverage" — the second of three items §17.161 deferred. §17.161 catches CONTAINER OOMs (a container hits its `mem_limit` and the cgroup OOM-killer engages) via `docker events --filter event=oom`. §17.387 catches HOST OOMs (host-wide memory pressure, kernel OOM-killer picks a victim not necessarily inside any container) via `journalctl -kf`. The two watchers are complementary and partition the OOM event space cleanly: the kernel itself distinguishes them in the OOM-kill message text, so no runtime dedup is needed.
+
+**The kernel's distinction (parse-time partition).** Linux 5.x+ emits two different OOM-kill messages depending on scope:
+
+| Scope | Kernel line shape |
+|---|---|
+| **Host OOM** (global pressure) | `Out of memory: Killed process <pid> (<comm>) ...` |
+| **Cgroup OOM** (container mem_limit breach) | `Memory cgroup out of memory: Killed process <pid> (<comm>) ...` |
+
+The literal `Memory cgroup ` prefix is the cgroup-OOM signal. §17.387's parser uses this as a stateless skip: cgroup OOMs return `None` (already handled by §17.161 via docker events), host OOMs return `{pid, comm}`. No state machine, no time-window heuristics, no dedup against §17.161's alerts — the partition is byte-level at parse time.
+
+**The watcher.** `scripts/host_oom_watcher.py` mirrors §17.161's `scripts/oom_watcher.py` in shape and ergonomics: same `--dry-run`, `--stdin`, `--test-event`, `--orchestrator`, `--log-level` flags; same `_run_emit_with_retry` exponential-backoff dispatch (4 attempts, 1s → 30s cap) to the orchestrator's `python -m app.observability.alerts emit` CLI; same systemd-user-service install pattern (`scripts/scaffold-host-oom-watcher.service`). The differences are surgical: source is `journalctl -kf -o cat --since=now` instead of `docker events`; alert kind is `host.oom_killed` instead of `container.oom_killed`; payload carries `{comm, pid, event_time_utc}` instead of `{container_name, container_id, image, event_time_utc}`; dedup key is `host.oom_killed:<comm>` instead of `container.oom_killed:<container_name>`.
+
+**`--since=now` matters.** The kernel ring buffer holds historical OOMs. Without `--since=now` the watcher would re-emit every historical OOM on each restart, which would (a) spam `system_alerts` and (b) confuse the §17.386 / §17.387 `/health` rollup with stale events. `--since=now` makes each watcher restart a fresh slate — only NEW kernel events get alerts. This matches `docker events`' implicit start-at-now behavior.
+
+**The /health surfacing — parallel to §17.386 (additive).** A new `host_oom_alerts` block on `/health`, structurally identical to §17.386's `oom_alerts` block but querying `kind='host.oom_killed'` and bucketing by `payload->>'comm'` instead of `payload->>'container_name'`:
+
+```json
+"host_oom_alerts": {
+  "window_hours": 24,
+  "total": 0,
+  "most_recent_at": null,
+  "by_comm": {}
+}
+```
+
+Same `oom_alerts_health_window_hours` setting governs both blocks (one knob, symmetric behavior — 0 disables both, 24h is the default for both). Same fail-safe posture: DB error → empty rollup, never breaks `/health`. Same no-degradation policy: even 100 host OOMs leave top-level `status="healthy"` because the kill is already past and docker has already restarted whatever was killed (or the host has).
+
+**Two parallel blocks, NOT one merged block — by design.** I considered restructuring §17.386's `oom_alerts` into a nested `{container: {...}, host: {...}}` shape to surface both kinds under one key. Decided against:
+
+1. §17.386 is 4 days old but its shape is already pinned in `TestHealthOomAlertsBlock` regression tests. Restructuring would break the tests for cosmetic gain.
+2. The two kinds correspond to different operator actions: container OOM → raise THIS container's `mem_limit`; host OOM → lower compose `mem_limit`s OR add physical memory. Two distinct blocks make the operator-facing semantics clearer than one merged block where the operator has to inspect a nested key to know which action applies.
+3. Additive change is non-breaking for any downstream consumer (`make doctor`, dashboards, OWUI). `test_container_and_host_blocks_are_independent` locks the no-cross-contamination invariant.
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `scripts/host_oom_watcher.py` | New host-side watcher. Mirrors §17.161 shape. Stateless parser (`parse_oom_line`) skips `Memory cgroup ` lines, matches `Out of memory: Killed process <pid> (<comm>)`. `build_emit_argv` composes the alert CLI invocation. | +245 |
+| `scripts/scaffold-host-oom-watcher.service` | New systemd unit. Mirrors §17.161 unit. Uses post-§17.214 NVMe canonical repo path. `Documentation=` is a single GitHub URL (lesson from §17.161's "Invalid URL, ignoring" journal noise). | +60 |
+| `app/main.py` | New `_check_host_oom_alerts()` async helper. Added to `asyncio.gather` block, defensive unpack, and `checks` dict assembly. Reuses the §17.386 `oom_alerts_health_window_hours` setting (one knob covers both). | +65 |
+| `tests/test_host_oom_watcher.py` | New `TestParseOomLine` (9 cases: host yields, cgroup skips, kernel-prefix tolerated, empty/unrelated/malformed lines return None, comm with special chars, truncated line) + `TestBuildEmitArgv` (6 cases: dispatch, kind, severity, dedup-key, payload, message). | +175 |
+| `tests/test_health_cleanup.py` | `_call_health_with_oom` extended to accept `host_rows`; SQL-routing fake_execute branch added for `host.oom_killed`. New `TestHealthHostOomAlertsBlock` (7 cases: presence, empty rollup, populated rollup, window=0 disable, DB-error fail-open, no-degradation invariant, container/host independence). | +95 |
+| `OVERVIEW.md` | this entry | +~90 |
+| **Total** | | **~+730** |
+
+Zero new deps, zero migrations, zero changes to the `system_alerts` schema (the new kind is just another value of the existing `kind` text column, indexed by `idx_system_alerts_kind_created` which §17.386 already exercises).
+
+**Verification.**
+
+```
+$ python3 scripts/host_oom_watcher.py --dry-run --test-event \
+    'Out of memory: Killed process 1234 (postgres) total-vm:1234kB anon-rss:567kB'
+INFO host_oom_watcher watcher_starting orchestrator=scaffold-orchestrator dry_run=True
+INFO host_oom_watcher host_oom_observed pid=1234 comm=postgres
+{"would_emit": [
+  "docker", "exec", "scaffold-orchestrator",
+  "python", "-m", "app.observability.alerts", "emit",
+  "--kind", "host.oom_killed", "--severity", "critical",
+  "--message", "Host kernel OOM-killed process postgres (pid 1234) — global memory pressure ...",
+  "--payload", "{\"comm\":\"postgres\",\"pid\":1234,\"event_time_utc\":\"...\"}",
+  "--dedup-key", "host.oom_killed:postgres"
+]}
+INFO host_oom_watcher watcher_exit seen=1 emitted=1
+```
+
+Cgroup-OOM line correctly skipped (via the same `--test-event` interface):
+```
+$ python3 scripts/host_oom_watcher.py --dry-run --test-event \
+    'Memory cgroup out of memory: Killed process 1234 (python) total-vm:1234kB'
+INFO host_oom_watcher watcher_starting orchestrator=scaffold-orchestrator dry_run=True
+INFO host_oom_watcher watcher_exit seen=0 emitted=0
+```
+
+Targeted tests:
+```
+$ docker exec scaffold-orchestrator pytest \
+    tests/test_host_oom_watcher.py tests/test_health_cleanup.py \
+    tests/test_oom_watcher.py --timeout=30 -q
+74 passed in 11.96s
+```
+
+Smoke tier:
+```
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+2027 passed, 1261 deselected, 8 warnings in 410.74s (0:06:50)
+```
+
+Live `/health` post-restart:
+```json
+"oom_alerts":      {"window_hours":24,"total":0,"most_recent_at":null,"by_container":{}},
+"host_oom_alerts": {"window_hours":24,"total":0,"most_recent_at":null,"by_comm":{}}
+```
+
+Steady-state empty on this host. `journalctl -k --since "1 month ago" --grep="oom-kill|Out of memory"` returns no entries — consistent with §17.160's mem_limit caps holding.
+
+**Operator install (not run by §17.387 itself — that's an operator action).**
+
+```
+sudo cp scripts/scaffold-host-oom-watcher.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now scaffold-host-oom-watcher
+systemctl status scaffold-host-oom-watcher
+journalctl -u scaffold-host-oom-watcher -f
+```
+
+The unit's `WorkingDirectory=` and `ExecStart=` paths default to `/home/aedefruscio/scaffold-engine` (post-§17.214 NVMe canonical); other operators must edit those two lines before install. Same caveat applied to §17.161's unit when that landed.
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Catch the OOM that kills the watcher itself.** If a host OOM picks `host_oom_watcher` as the victim (unlikely but possible — it's a ~10 MB Python process), the watcher dies and the kill goes unreported until systemd's `Restart=always` brings it back, by which point the `--since=now` window has moved past the event. Mitigations exist (re-run with `--since=-5m` on startup; persist last-seen timestamp to disk) but each adds state to a deliberately stateless watcher. Deferred until a real incident shows the missed-event class matters.
+- **Distinguish "host with no swap" from "host with swap" OOMs.** The kernel message contains enough info to derive this (`oom_score_adj`, `Mem-Info:` block, etc.), but the marginal operator value is small — both cases have the same action (lower compose caps or add RAM). Defer until an operator asks for the discrimination.
+- **Track non-kill OOM events.** The kernel sometimes fires the OOM-killer but the targeted process exits gracefully before being killed; this leaves an "invoked oom-killer:" line without a corresponding "Killed process" line. Those are weak signals (no actual death) and would need their own dedup; skipping them keeps the watcher's signal-to-noise ratio high.
+- **Generalise to non-Linux hosts.** macOS / BSD have their own memory-pressure mechanisms (`pressure-monitor`, `memorystatus`); they're outside the scaffold-engine deployment surface (the orchestrator's compose file is Linux-only). Hard-coding to `journalctl -k` is fine.
+
+**Cohort.** Closes the second of §17.161's three deferred follow-ups (line 7192 of OVERVIEW.md). The remaining one — "per-kind cooldown" — stays empirically gated: the current single `alert_cooldown_seconds=3600` covers all kinds uniformly. Splitting by kind is straightforward when needed (one setting per kind, override via `alert_<kind>_cooldown_seconds`) but adds tunable surface against a problem nobody's reported. Defer until a multi-OOM week shows the uniform 1 h cooldown is insufficient for one kind.
+
+**Cost.** +730 LOC across 5 files, 22 new regression-guard tests (15 watcher + 7 health), ~7 min smoke verification + dry-run live check. Zero new deps, zero migrations, zero behavior change for the existing container-OOM path. Net result: kernel-level OOMs that aren't tied to a docker container (host-wide pressure killing host services, or a process slipping out of its cgroup) are now alertable and surfaced on `/health` alongside the container-scoped events.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

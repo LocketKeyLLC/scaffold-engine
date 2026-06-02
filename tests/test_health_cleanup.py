@@ -554,15 +554,18 @@ class TestHealthCalibrationBlock:
 # §17.386 — oom_alerts block surfaced on /health
 # ---------------------------------------------------------------------------
 
-def _call_health_with_oom(*, rows=None, db_raises=False, window_hours=None):
+def _call_health_with_oom(*, rows=None, host_rows=None, db_raises=False, window_hours=None):
     """Variant of _call_health that lets the test stub BOTH the calibration
-    probe and the §17.386 OOM-alerts rollup against the same async_session
-    mock — /health calls async_session() twice (once per block) so the mock
-    has to satisfy both query shapes.
+    probe AND the §17.386 OOM-alerts rollup AND the §17.387 host-OOM rollup
+    against the same async_session mock — /health calls async_session()
+    THREE times (one per block) so the mock has to satisfy all three query
+    shapes via SQL-text inspection.
 
-    ``rows`` is a list of (container_name, count, most_recent_dt) tuples to
-    return from the OOM rollup query. None → empty list (no OOM events).
-    ``db_raises`` simulates a DB error → fail-open path.
+    ``rows`` is a list of (container_name, count, most_recent_dt) tuples
+    for the §17.386 container-OOM rollup. None → empty list.
+    ``host_rows`` is the analog for the §17.387 host-OOM rollup —
+    (comm, count, most_recent_dt) tuples. None → empty list.
+    ``db_raises`` simulates a DB error → both rollups fail-open.
     ``window_hours`` lets a test override the settings default before the
     call; restored after.
     """
@@ -604,14 +607,21 @@ def _call_health_with_oom(*, rows=None, db_raises=False, window_hours=None):
         reranker_prewarm_skipped=False,
     )
 
-    # Shared mock_db satisfies both probes via SQL-text inspection on
-    # execute(). Calibration probe → .first(). OOM probe → .mappings().all().
+    # Shared mock_db satisfies all three probes via SQL-text inspection
+    # on execute(). Calibration probe → .first(). OOM probes →
+    # .mappings().all() with different row shapes per kind.
     oom_mappings = [
         {"container": name, "count": count, "most_recent": mr}
         for (name, count, mr) in (rows or [])
     ]
     oom_result = MagicMock()
     oom_result.mappings.return_value.all.return_value = oom_mappings
+    host_oom_mappings = [
+        {"comm": comm, "count": count, "most_recent": mr}
+        for (comm, count, mr) in (host_rows or [])
+    ]
+    host_oom_result = MagicMock()
+    host_oom_result.mappings.return_value.all.return_value = host_oom_mappings
     cal_result = MagicMock()
     cal_result.first.return_value = None
 
@@ -621,6 +631,8 @@ def _call_health_with_oom(*, rows=None, db_raises=False, window_hours=None):
         sql = str(getattr(stmt, "text", stmt))
         if "container.oom_killed" in sql:
             return oom_result
+        if "host.oom_killed" in sql:
+            return host_oom_result
         return cal_result
 
     shared_db = AsyncMock()
@@ -742,3 +754,82 @@ class TestHealthOomAlertsBlock:
         oom = result["checks"]["oom_alerts"]
         assert oom["total"] == 1
         assert oom["by_container"] == {"<unknown>": 1}
+
+
+@pytest.mark.smoke
+class TestHealthHostOomAlertsBlock:
+    """§17.387 — host_oom_alerts: rollup of host-scope OOM kills on /health.
+
+    Parallel to TestHealthOomAlertsBlock (§17.386 container OOMs).
+    The two blocks coexist with the same shape pattern (window_hours +
+    total + most_recent_at + per-bucket dict) but different bucket keys
+    (by_container vs by_comm) and different source alert kinds
+    (container.oom_killed vs host.oom_killed).
+    """
+
+    def test_host_block_present_in_checks(self):
+        result = _call_health_with_oom()
+        assert "host_oom_alerts" in result["checks"]
+
+    def test_empty_rollup_when_no_host_oom_rows(self):
+        result = _call_health_with_oom(host_rows=[])
+        host = result["checks"]["host_oom_alerts"]
+        assert host["total"] == 0
+        assert host["most_recent_at"] is None
+        assert host["by_comm"] == {}
+        assert host["window_hours"] >= 1
+
+    def test_populated_rollup_with_per_comm_counts(self):
+        from datetime import datetime, timezone
+        ts_pg = datetime(2026, 6, 2, 18, 30, tzinfo=timezone.utc)
+        ts_py = datetime(2026, 6, 2, 17, 15, tzinfo=timezone.utc)
+        result = _call_health_with_oom(host_rows=[
+            ("postgres", 2, ts_pg),
+            ("python", 1, ts_py),
+        ])
+        host = result["checks"]["host_oom_alerts"]
+        assert host["total"] == 3
+        assert host["by_comm"] == {"postgres": 2, "python": 1}
+        assert host["most_recent_at"] == ts_pg.isoformat()
+
+    def test_disabled_when_window_zero(self):
+        """The same `oom_alerts_health_window_hours=0` toggle that
+        disables the §17.386 block also disables this one — symmetric
+        operator control over both surfaces."""
+        result = _call_health_with_oom(window_hours=0)
+        host = result["checks"]["host_oom_alerts"]
+        assert host == {"disabled": True, "window_hours": 0}
+
+    def test_db_error_falls_back_to_empty_rollup(self):
+        """Fail-safe: DB error → empty rollup, never breaks /health.
+        Mirrors the §17.386 fail-open invariant."""
+        result = _call_health_with_oom(db_raises=True)
+        host = result["checks"]["host_oom_alerts"]
+        assert host["total"] == 0
+        assert host["by_comm"] == {}
+        assert "checks" in result and "status" in result
+
+    def test_host_block_does_not_degrade_overall_status(self):
+        """Same policy as §17.386: post-hoc evidence, no current
+        degradation. Even 100 host OOMs keep top-level status='healthy'."""
+        from datetime import datetime, timezone
+        ts = datetime(2026, 6, 2, 20, 0, tzinfo=timezone.utc)
+        result = _call_health_with_oom(host_rows=[("python", 100, ts)])
+        assert result["status"] == "healthy"
+        assert result["checks"]["host_oom_alerts"]["total"] == 100
+
+    def test_container_and_host_blocks_are_independent(self):
+        """The two rollups MUST stay independent — populating only one
+        must leave the other empty (no cross-contamination via shared
+        SQL routing). Critical because they target different operator
+        actions (raise per-container cap vs. lower all caps / add RAM)."""
+        from datetime import datetime, timezone
+        ts = datetime(2026, 6, 2, 18, 0, tzinfo=timezone.utc)
+        # Populate container only, assert host is empty.
+        result = _call_health_with_oom(rows=[("scaffold-orchestrator", 5, ts)])
+        assert result["checks"]["oom_alerts"]["total"] == 5
+        assert result["checks"]["host_oom_alerts"]["total"] == 0
+        # Populate host only, assert container is empty.
+        result = _call_health_with_oom(host_rows=[("postgres", 3, ts)])
+        assert result["checks"]["oom_alerts"]["total"] == 0
+        assert result["checks"]["host_oom_alerts"]["total"] == 3
