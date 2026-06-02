@@ -166,17 +166,25 @@ class TestSystemForTool:
             in s
         )
 
-    def test_llm_and_assist_mirror_byte_equal(self):
-        # §17.384 — the EXECUTION_SYSTEM_LLM in prompt_assembly.py
-        # (assist-mode mirror) and execution_agent.py (autonomous
-        # executor) MUST stay byte-identical. Drift produces silent
-        # divergence between autonomous and assist runs. Five prior
-        # mirror tests (§17.360 / §17.365 / §17.368 / §17.371 /
-        # §17.378) check substrings; this one guarantees full parity.
+    def test_llm_and_assist_mirror_is_same_object(self):
+        # §17.389 — promoted from byte-equality (§17.384) to identity:
+        # `execution_agent.EXECUTION_SYSTEM_LLM` is now a re-export of
+        # `prompt_assembly.EXECUTION_SYSTEM_LLM` (the literal definition
+        # was deleted from execution_agent.py and replaced with a
+        # `from app.modules.prompt_assembly import ...` block). Identity
+        # is impossible to circumvent except by re-creating the constant
+        # locally, which is what §17.389 explicitly forbids. Same check
+        # applied to all three prompt constants for symmetry.
         from app.modules import execution_agent as ea
-        assert pa.EXECUTION_SYSTEM_LLM == ea.EXECUTION_SYSTEM_LLM, (
-            "EXECUTION_SYSTEM_LLM mirror drift between prompt_assembly.py "
-            "and execution_agent.py. Edit both in lockstep."
+        assert pa.EXECUTION_SYSTEM_LLM is ea.EXECUTION_SYSTEM_LLM, (
+            "EXECUTION_SYSTEM_LLM mirror drift — execution_agent must "
+            "re-export from prompt_assembly, not re-define."
+        )
+        assert pa.EXECUTION_SYSTEM_CODEGEN is ea.EXECUTION_SYSTEM_CODEGEN, (
+            "EXECUTION_SYSTEM_CODEGEN mirror drift — same rule as LLM."
+        )
+        assert pa.EXECUTION_SYSTEM_RUNBOOK is ea.EXECUTION_SYSTEM_RUNBOOK, (
+            "EXECUTION_SYSTEM_RUNBOOK mirror drift — same rule as LLM."
         )
 
 

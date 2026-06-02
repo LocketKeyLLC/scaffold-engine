@@ -21483,6 +21483,96 @@ Not shipped because (a) the host hasn't had a host-OOM episode yet (steady-state
 
 ---
 
+### §17.389 EXECUTION_SYSTEM_LLM mirror consolidation — collapse byte-equal duplication into one canonical home (2026-06-02)
+
+Closes the long-tail item §17.384's `test_llm_and_assist_mirror_byte_equal` was created to defend. Pre-§17.389 the three prompt-system strings (`EXECUTION_SYSTEM_LLM`, `EXECUTION_SYSTEM_CODEGEN`, `EXECUTION_SYSTEM_RUNBOOK`) were declared TWICE — once in `app/modules/prompt_assembly.py` (assist-mode mirror) and once in `app/modules/execution_agent.py` (autonomous executor). ~31.8 KB of byte-equal triple-quoted strings that drifted silently for an unknown stretch of commits until §17.384 added the byte-equality regression test as a stopgap. §17.389 makes `prompt_assembly.py` the single source of truth and turns the `execution_agent.py` definitions into re-exports.
+
+**Why §17.389 is finally warranted.** §17.384 explicitly considered consolidation and deferred:
+
+> Does not refactor the EXECUTION_SYSTEM_LLM duplication between prompt_assembly.py and execution_agent.py. The two files carry byte-identical copies of the prompt; consolidating to a single source is a structurally cleaner change but out of §17.384's scope. The new test_llm_and_assist_mirror_byte_equal regression test (added this commit) catches drift between the two — if a future edit forgets to mirror, the test fires loudly. Defer consolidation until a future edit shows the parity test isn't enough.
+
+The parity test IS enough — it catches drift. But "catches drift" is a runtime safety net; what eliminates the class is making drift structurally impossible. §17.389 does the latter: after this commit, `execution_agent.EXECUTION_SYSTEM_LLM is prompt_assembly.EXECUTION_SYSTEM_LLM` (Python identity, same object reference). A future edit can't "forget to mirror" because there's only one definition; the parity test is correspondingly upgraded from `==` (byte-equal) to `is` (identity).
+
+**The implementation.** Three changes, all surgical:
+
+1. **`app/modules/execution_agent.py`** — the three literal `NAME = """..."""` declarations (lines 447 / 829 / 935 pre-§17.389, ~530 lines total) are deleted. A new re-export block sits next to the existing `prompt_assembly` imports near the top of the file:
+
+   ```python
+   # §17.389 — re-export the canonical prompt strings from prompt_assembly.
+   from app.modules.prompt_assembly import (  # noqa: F401  re-exported for callers
+       EXECUTION_SYSTEM_LLM,
+       EXECUTION_SYSTEM_CODEGEN,
+       EXECUTION_SYSTEM_RUNBOOK,
+   )
+   ```
+
+   The `# noqa: F401` suppresses the unused-import warning that ruff/pyflakes would otherwise emit; the import is used by external callers via `from app.modules.execution_agent import EXECUTION_SYSTEM_*`, which the static checker can't see.
+
+2. **`tests/test_prompt_assembly.py`** — `test_llm_and_assist_mirror_byte_equal` is renamed to `test_llm_and_assist_mirror_is_same_object` and rewritten:
+   - Changes the assertion from `==` (byte-equality, false if either side accidentally reconstructs the string) to `is` (identity, true only if both names bind to the exact same object).
+   - Extends coverage from `EXECUTION_SYSTEM_LLM` (the original §17.384 scope) to all three constants — CODEGEN and RUNBOOK had the same drift class and now get the same structural guarantee.
+
+3. **Non-breaking by construction.** All 30+ test cases that `from app.modules.execution_agent import EXECUTION_SYSTEM_*` continue to work — re-export preserves the public import path. Anything elsewhere in the codebase importing from either module gets the same object reference.
+
+**What §17.389 does NOT touch.**
+
+- **`_system_for_tool` (execution_agent) vs `system_for_tool` (prompt_assembly).** Two ~10-line helper functions with one defensive difference (`tool.lower()` vs `(tool or "").lower()`). Out of scope — the asymmetry is small, intentional in places (the assist-mode caller path can pass `None`), and consolidating it would require disentangling Settings-dependent dispatch differences. §17.389 is specifically the duplicated-prompt-string class.
+- **The `_compile_output` / `_verify_output` re-exports already in `execution_agent.py`** (lines 40-46 pre-§17.389). Those re-exports exist for test-patch convenience, not source-of-truth consolidation; they're the same pattern §17.389 applies to the prompt strings.
+- **Public API renames.** `execution_agent.EXECUTION_SYSTEM_*` continues to work. Nothing changes for any caller.
+
+**Files changed.**
+
+| File | Change | LOC |
+|---|---|---:|
+| `app/modules/execution_agent.py` | Delete three triple-quoted literal definitions (~530 lines). Add re-export import block (~10 lines incl. comment) near the existing `prompt_assembly` imports. | -533 / +12 |
+| `tests/test_prompt_assembly.py` | Rename + upgrade `test_llm_and_assist_mirror_byte_equal` → `test_llm_and_assist_mirror_is_same_object`. Extend coverage from LLM to all three constants. | +8 / -7 |
+| `OVERVIEW.md` | this entry | +~90 |
+| **Total** | | **net -440 LOC + entry** |
+
+The net negative LOC is the headline number — §17.389 deletes more than it adds. Pre-§17.389: ~31.8 KB of prompt content × 2 = 63.6 KB. Post-§17.389: 31.8 KB once, plus 10 lines of import. The prompt content is unchanged; only the duplication is gone.
+
+Zero new deps, zero migrations, zero schema changes.
+
+**Verification.**
+
+```
+$ docker exec scaffold-orchestrator python -c "
+> from app.modules import execution_agent as ea
+> from app.modules import prompt_assembly as pa
+> print('LLM     same object:', ea.EXECUTION_SYSTEM_LLM is pa.EXECUTION_SYSTEM_LLM)
+> print('CODEGEN same object:', ea.EXECUTION_SYSTEM_CODEGEN is pa.EXECUTION_SYSTEM_CODEGEN)
+> print('RUNBOOK same object:', ea.EXECUTION_SYSTEM_RUNBOOK is pa.EXECUTION_SYSTEM_RUNBOOK)
+> "
+LLM     same object: True
+CODEGEN same object: True
+RUNBOOK same object: True
+```
+
+Tests:
+```
+$ docker exec scaffold-orchestrator pytest tests/test_prompt_assembly.py tests/test_execution_agent_tools.py --timeout=30 -q
+101 passed in 10.71s
+
+$ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
+2041 passed, 1261 deselected, 7 warnings in 417.85s (0:06:57)
+```
+
+Live orchestrator post-restart confirms identity holds:
+```
+$ docker exec scaffold-orchestrator python -c "from app.modules import execution_agent as ea, prompt_assembly as pa; print('post-restart identity:', ea.EXECUTION_SYSTEM_LLM is pa.EXECUTION_SYSTEM_LLM)"
+post-restart identity: True
+```
+
+**What this enables for future iterations.** A §17.x entry that adds a new prompt clause now edits ONE file — `prompt_assembly.py`. Pre-§17.389 the same edit touched two files (with a parity test catching the missed mirror); now there's no mirror to forget. The mirror-test failure mode (caught at test time, fixed by editing both files) becomes structurally impossible.
+
+The §17.380 wrapper + §17.384 per-clause gates already live in prompt_assembly.py; §17.389 means execution_agent.py automatically inherits any future updates to those clauses via the same object reference. No edit gymnastics, no `replace_all: false` checks across two files, no risk of one mirror going stale during a rushed fix.
+
+**Cohort.** Closes the §17.384 "defer consolidation until parity test proves insufficient" loop. The parity test never failed — but the existence of "the parity test could fail" is itself a non-trivial bit of structural complexity. §17.389 retires that complexity by making it impossible. The final long-tail item from the start-of-session list (which was wrong about most of its other items being open — see [[verify-deferred-items-status]]) is now closed.
+
+**Cost.** Net -440 LOC, 0 new tests (renamed + strengthened 1 existing), ~7 min smoke verification. Zero new deps, zero migrations. Zero runtime behavior change for any caller (re-export preserves the import path; the constant objects are identical). Net result: ~31.8 KB of duplicated prompt content collapses to a single canonical home; the drift-risk class §17.384 patched at the test layer is now structurally impossible.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
