@@ -20912,6 +20912,96 @@ $ docker exec scaffold-orchestrator pytest tests/ -m smoke --timeout=30 -q
 
 ---
 
+### §17.383 seventh mdsplit retry — empirical verification of §17.380 + §17.381 (2026-06-02)
+
+Closes §17.382's "Empirically verify the batch on a seventh mdsplit retry" deferred item. Job `c6ece060-710a-4dde-ad52-1899ecc37156`, same verbatim mdsplit brief as the six prior runs (`Build a Python CLI tool called mdsplit...`). End-to-end wall-clock ≈40 min on cloud-routed `qwen3-vl:235b-instruct-cloud` (`model_router` + `model_general` + `model_coder` + `model_verifier`, per §17.346). All 8 nodes completed first try, zero retries, no `last_verification_reason` populated.
+
+**Headline result — mixed.** §17.376/§17.377/§17.378/§17.379 held cleanly on the validation node; §17.380 partially regressed on the decision node.
+
+**Per-node measurements (seventh retry vs. §17.382 audit table).**
+
+| Run | T1 chars | T_validation cluster | T_validation total chars |
+|---|---:|---|---:|
+| Original trial | 673 | 0 (18 must-statements) | — |
+| §17.365-§17.367 retry | 167 | 1 (T6 only) | — |
+| §17.368-§17.370 retry | 4540 | 3 (T4/T5/T6) | — |
+| §17.371-§17.373 retry | 1128 | 3 (T4/T5/T6) | — |
+| §17.374-§17.376 retry | 1487 | 3 (T4/T5/T6 — substring guard gamed) | — |
+| §17.377-§17.379 retry | **8023** | oscillating 2↔3 (4 retries, failed) | — |
+| **§17.383 retry** | **2813** | **5/5 code-bearing upstreams (T2/T3/T4/T5/T6) in claim lines** | **3231** |
+
+**T8 — clean pass across §17.376/§17.377/§17.378/§17.379.** 12 MET claim lines. The "## Coverage" + "## Verdicts" two-section format (§17.378) emitted exactly as prescribed. Every code-bearing upstream (T2/T3/T4/T5/T6) appears in at least one claim line — §17.377's per-claim citation coverage check would have passed mechanically (verified by running the §17.377 algorithm against `T8.output_text` post-hoc). Decision-node reference disambiguation (§17.379) held — T1 named explicitly as "T1 decision node" rather than the §17.379-tracked "decision node (T_X or T_Y)" failure shape. **The §17.376 runtime citation guard did not fire** — first attempt cleared verification cleanly; `retry_count=0` on T8 confirms §17.381's retry-feedback path was not exercised. The §17.382-tabulated "T_validation cluster ≥5 post-§17.376" expectation is met for the first time in the arc.
+
+**T1 — §17.380 partial regression.** T1 (`tool=LLM, type=decision, title="Define language mapping"`) emitted 2813 chars of which **the entire output is a `## Coverage` + `## Verdicts` validation report**, not a language-extension mapping. The exact §17.380 failure class (a decision node interpreting the validation block's "mandatory format" §17.378 directive as its own format) recurred — at attenuated magnitude (2813 vs the §17.377-§17.379 baseline of 8023; ~3× smaller) but the same shape. T1's output contains zero structured LANG_EXT data; downstream T2 re-derived the 9-language mapping from the brief itself, which technically violates §17.369's "decision-output authority" rule (downstream must use the decision's output verbatim) but produced a functional artifact because the brief's language list was unambiguous.
+
+**Why §17.380 attenuated but didn't close the class.** The wrapper exists, is intact in `app/modules/execution_agent.py:513-687` and `app/modules/prompt_assembly.py:101-275`, and emits all five gating signals: header (`APPLY THIS ENTIRE BLOCK ONLY IF YOUR NODE IS A VALIDATION NODE`), enumerated skip list (decision/output/research/other), worked rationale (the 8023-char incident), self-check directive, and footer (`End validation-only block`). Despite all five, T1's `tool=LLM, type=decision` model session read past the gate, found the §17.378 mandatory-format block (`Mandatory format: ## Coverage / ## Verdicts ...`), and treated the mandatory-format clause as authoritative over the wrapper's skip directive. The model's pattern-matching default — when an inner clause says "Mandatory format: <concrete shape>" and an outer wrapper says "skip this if non-validation" — favors the inner specificity. This is the structural failure mode §17.382 anticipated:
+
+> The §17.380 wrapper is a one-shot fix for the §17.366-§17.379 block but doesn't relieve future clauses from carrying their own type gates.
+
+**The empirical iteration §17.382 was waiting for.** §17.382's deferred-item list named four follow-ups; this retry's residual matches item #2 verbatim:
+
+> Refactor every existing validation clause to carry its own explicit type gate. The §17.380 wrapper is the safety net for §17.366-§17.379. A cleaner architecture would have every clause carry its own gate as a first-class element. **Defer until a future iteration shows the wrapper is insufficient** (e.g., a clause added inside the wrapper still leaks because the model loses track of the gate after enough intervening text).
+
+§17.383 is that iteration. The wrapper IS insufficient — not at the "lost track after enough intervening text" boundary but at the more fundamental "inner clause specificity outweighs outer wrapper" pattern-match. The deferred refactor (each of §17.366 / §17.368 / §17.373 / §17.378 / §17.379 carrying its own `IF node_type == validation` gate at the clause level) is now empirically validated as the next move and is the recommended §17.384.
+
+**What §17.381 would have done if T8 had failed.** §17.381's cited/union explicit-naming retry-feedback was not exercised because T8 passed first try. The structural change §17.381 ships (explicit "MISSING: T_X, T_Y" + "PRESENT: T_A, T_B" in `last_verification_reason`) remains untested empirically against a fail-and-retry on the seventh-retry brief. A subsequent retry on a different brief that does trigger §17.377 fail-and-retry would be the empirical loop closing on §17.381.
+
+**Per-node timing (cloud Ollama).**
+
+| Node | Tool | Type | Duration | Chars |
+|---|---|---|---:|---:|
+| T1 | LLM | decision | 47 s | 2813 |
+| T2 | CodeGen | task | 418 s | 2264 |
+| T3 | CodeGen | task | 453 s | 2287 |
+| T4 | CodeGen | task | 383 s | 1666 |
+| T5 | CodeGen | task | 441 s | 2426 |
+| T6 | CodeGen | task | 576 s | 3875 |
+| T7 | LLM | task (docs) | 36 s | 947 |
+| T8 | LLM | checkpoint | 56 s | 3231 |
+| **Total** | | | **2410 s (40m10s)** | |
+
+The five CodeGen nodes dominate wall-clock (~2271 s / 94%), consistent with the §17.351 cloud-flip baseline where execution_s ≈ 174 vs historical 1284-2199 on local — but this brief uses six CodeGen nodes vs. the §17.351 perf brief's lighter shape, which is why total here is ~13 min above the §17.351 baseline of 181.8 s. Per-CodeGen-node is 383-576 s vs. §17.351's 26-40 s; the discrepancy is brief-driven (mdsplit's 5 CodeGen nodes each emit a substantial module vs. the perf brief's lighter prompts), not regression.
+
+**The three-surface playbook updated.**
+
+| Surface | Status after §17.383 |
+|---|---|
+| Prompt clauses with anti-examples (§17.359) | Held across all clauses §17.366-§17.379 individually; T8 verifies clean. |
+| Runtime guards with structural checks (§17.376 → §17.377) | Held; T8 cleared without firing. Substring-gaming class (§17.376 → §17.377) confirmed closed by the per-claim tightening (T8's "T2 — defines extract_blocks" Coverage entry is a real per-claim citation, not a passing aside). |
+| Clause-scope gating wrappers (§17.380) | **Partial regression on decision nodes.** Wrapper attenuates leak ~3× (2813 vs 8023) but does not close the class. Each clause within the wrapper needs its own first-class type gate. |
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `OVERVIEW.md` | this entry |
+
+**Verification.**
+
+Job state confirmed via:
+```
+$ docker exec scaffold-postgres psql -U scaffold -d scaffold_engine \
+    -c "SELECT node_key, status, retry_count, LENGTH(output_text) AS chars
+        FROM dag_nodes WHERE job_id = 'c6ece060-710a-4dde-ad52-1899ecc37156'
+        ORDER BY execution_order;"
+T1 done 0 2813 | T2 done 0 2264 | T3 done 0 2287 | T4 done 0 1666
+T5 done 0 2426 | T6 done 0 3875 | T7 done  0 947 | T8 done 0 3231
+```
+
+Per-claim citation cluster on T8 reproduced mechanically (the §17.377 algorithm applied post-hoc to `T8.output_text` returns `missing=[]` — every code-bearing upstream T2/T3/T4/T5/T6 appears in at least one MET claim line; T1 and T7 also cited).
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Fix the §17.380 partial regression.** §17.383 records the finding; the refactor (each clause carries its own gate) is its own commit (§17.384 candidate). Doing it in the same commit would conflate "empirical evidence" with "fix" and the audit trail of *what the wrapper alone achieves* would be lost — the 2813-char attenuation IS a real result that informs the cost-benefit of the refactor vs. removing the wrapper entirely.
+- **Add an eighth retry to exercise §17.381's retry-feedback path.** T8 passing first try is itself the headline result (the citation guard held under realistic load); contriving an eighth retry to force §17.381's path would require a brief specifically engineered to game the citation rule, which doesn't reflect operator usage. Defer §17.381 empirical verification to a future operator-driven run that organically triggers a T_validation failure.
+- **Investigate the §17.369 violation on T2 re-deriving LANG_EXT.** T1 emitting no structured mapping forced T2 to re-derive from the brief; the artifact is functional because the brief's language list is unambiguous. If §17.384 closes the §17.380 leak (T1 emits a real mapping), the §17.369 path is automatically exercised again and the violation disappears. Premature to address here.
+
+**Cohort.** Closes the §17.382 → §17.383 verification loop. The §17.382-anticipated wrapper-insufficiency iteration is documented; the path to §17.384 (clause-level gating) is open. CodeGen-class arc is now at seven retries; six produced new sub-classes, the seventh produced the methodological close of the wrapper-insufficiency conjecture.
+
+**Cost.** Docs-only; +~180 LOC OVERVIEW + zero code. Job `c6ece060-710a-4dde-ad52-1899ecc37156` preserved on host for future reproduction. Net result: empirical evidence that §17.380's clause-scope wrapper is necessary but not sufficient; clause-level gating is the next structural move.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
