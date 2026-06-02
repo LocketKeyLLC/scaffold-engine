@@ -21072,6 +21072,130 @@ VALIDATION NODES ONLY occurrences in ea: 5
 
 ---
 
+### §17.385 eighth mdsplit retry — empirical close on §17.384 AND §17.381 in a single run (2026-06-02)
+
+Closes both deferred items §17.383 named: (1) verify §17.384 actually fixes the §17.383 wrapper-insufficiency leak, and (2) empirically exercise §17.381's cited/union retry-feedback path. Job `6aecaf22-5649-4bed-acc3-dbf5c5382de7`, same verbatim mdsplit brief as the seven prior runs. End-to-end wall-clock ≈43 min on cloud-routed `qwen3-vl:235b-instruct-cloud` post-orchestrator-restart (§17.384's gates went live). All 8 nodes completed, two retries fired (T6 once, T7 once), zero failures.
+
+**Headline result — both deferred items closed cleanly in one organic run.**
+
+**(1) §17.384 closes the §17.383 leak completely. T1 = 160 chars of pure language mapping.** T1 (`tool=LLM, type=decision, title="Design language mapping"`) emitted **exactly the expected decision-node output** — a 10-line LANG_EXT mapping with zero `## Coverage` / `## Verdicts` content. The full T1 output:
+
+```
+- python → .py
+- rust → .rs
+- bash → .sh
+- go → .go
+- javascript → .js
+- sql → .sql
+- yaml → .yaml
+- json → .json
+- dockerfile → .dockerfile
+- all others → .txt
+```
+
+This is the smallest T1 across the entire eight-retry arc (prior minimum was 167 in §17.365-§17.367; §17.383 was 2813; §17.377-§17.379 was 8023). The structured LANG_EXT data is now present and citeable by downstream nodes; the §17.369 "decision-output authority" path is exercised properly (T1 is the authority, downstream uses it verbatim) instead of forcing T2 to re-derive from the brief as §17.383 had to.
+
+**(2) §17.381 cited/union retry-feedback empirically exercised and proven effective.** T7 (validation, `node_type=checkpoint` after planner normalization, title "Validate end-to-end") fired the §17.377 per-claim citation guard on first attempt. The exact retry-feedback text §17.381 constructs surfaced in `last_verification_reason`:
+
+```
+§17.377 validation-coverage guard: code-bearing upstreams were not cited
+inside MET/NOT MET/UNKNOWN claim lines.
+
+PREVIOUSLY CITED (KEEP THESE — do not drop): ['T2', 'T3', 'T4']
+MISSING (ADD THESE): ['T5', 'T6']
+TARGET UNION (all of these must appear in MET/NOT MET/UNKNOWN lines):
+    ['T2', 'T3', 'T4', 'T5', 'T6']
+
+§17.381 — the W.1 retry loop only shows you THIS feedback, not your prior
+attempt's text. Re-emit a single report whose claim lines cite every
+upstream in the TARGET UNION above. Do NOT drop any upstream from
+PREVIOUSLY CITED when adding the MISSING ones. ...
+```
+
+T7's first attempt cited T2/T3/T4 only (3 of 5 code-bearing — the same single-upstream-bias pattern §17.368-§17.373 fought against, just at a smaller scale). The §17.381 retry-feedback fed back to the model named EVERY required upstream by ID. T7's second attempt emitted **11 MET claim lines spanning all 5 code-bearing upstreams (T2/T3/T4/T5/T6)** — converged in one retry, no drops of the previously-cited set, no oscillation. **This is the §17.381 design's pattern-match working empirically: the explicit-naming feedback solves the "drop the old set when adding the new set" failure shape that §17.382 named as the residual after the prompt-shape §17.381 patch.**
+
+**Per-node measurements (eighth retry vs. seven-retry arc).**
+
+| Run | T1 chars | T_validation outcome | Notes |
+|---|---:|---|---|
+| Original trial | 673 | 0/5 cited (18 must-statements) | brief-spec restate |
+| §17.365-§17.367 retry | 167 | 1/5 (T6 only) | single-upstream-bias surfaced |
+| §17.368-§17.370 retry | 4540 | 3/5 (T4/T5/T6) | decision-node scope explosion |
+| §17.371-§17.373 retry | 1128 | 3/5 (T4/T5/T6) | cluster-bias asymptoted at prompt layer |
+| §17.374-§17.376 retry | 1487 | 3/5 (T4/T5/T6 substring-gamed) | runtime guard introduced + gamed |
+| §17.377-§17.379 retry | **8023** | oscillating 2↔3 (4 retries, failed) | catastrophic clause-scope leak |
+| §17.383 retry | 2813 | 5/5 (T2/T3/T4/T5/T6 first try) | §17.380 wrapper attenuated leak ~3× |
+| **§17.385 retry** | **160** | **5/5 (after §17.381 retry from 3/5 first try)** | **§17.384 closes leak; §17.381 path proven** |
+
+**Per-node timing (cloud Ollama, post-restart).**
+
+| Node | Tool | Type | Retries | Duration | Chars | Notes |
+|---|---|---|---:|---:|---:|---|
+| T1 | LLM | decision | 0 | 30 s | 160 | §17.384 gate held — pure LANG_EXT |
+| T2 | CodeGen | task | 0 | 374 s | 1774 | |
+| T3 | CodeGen | task | 0 | 450 s | 2129 | |
+| T4 | CodeGen | task | 0 | 476 s | 2728 | |
+| T5 | CodeGen | task | 0 | 437 s | 1963 | |
+| T6 | CodeGen | task | 1 | 345 s | 1651 | LLM-judge: "is a script, not CLI tests" — retry passed |
+| T7 | LLM | checkpoint | 1 | 39 s | 2139 | §17.377→§17.381 path proven |
+| T8 | LLM | task (docs) | 0 | 30 s | 769 | |
+| **Total** | | | **2** | **2581 s (43m01s)** | | |
+
+CodeGen aggregate 2082 s (81% of wall), slightly higher than §17.383's 2271 s with one fewer retry — within run-to-run variance on cloud Ollama.
+
+**Both §17.383 deferred items closed simultaneously.** §17.383's `What this does NOT do` section explicitly deferred two items the eighth retry organically closed:
+
+| §17.383 deferral | §17.385 outcome |
+|---|---|
+| "Add an eighth retry to exercise §17.381's retry-feedback path. Defer to a future operator-driven run that organically triggers a T_validation failure." | T7 organically triggered §17.377; §17.381 retry-feedback shown verbatim above; second attempt converged 3/5 → 5/5 in one shot. |
+| "Investigate the §17.369 violation on T2 re-deriving LANG_EXT. If §17.384 closes the §17.380 leak (T1 emits a real mapping), the §17.369 path is automatically exercised again and the violation disappears." | T1 now emits a real structured mapping; T2 has citeable upstream data; §17.369 violation no longer in play. |
+
+**The three-surface playbook — final empirical state.**
+
+| Surface | Status after §17.385 |
+|---|---|
+| Prompt clauses with anti-examples (§17.359-class) | Held across §17.366-§17.379 individually; T7 verifies clean post-§17.381-retry. |
+| Runtime guards (§17.376 → §17.377) | Held; T7 fired correctly on first attempt; retry path produced clean output. Substring-gaming class (§17.376) closed by §17.377 per-claim tightening — confirmed by T7's 5/5 claim-line distribution. |
+| Clause-scope gating (§17.380 + §17.384) | **Class closed.** §17.380 wrapper alone was insufficient (§17.383 leak: 2813 chars); §17.384 per-clause gates close the class (§17.385 measurement: 160 chars, zero Coverage/Verdicts). |
+
+**Files touched.**
+
+| File | Change |
+|---|---|
+| `OVERVIEW.md` | this entry |
+
+**Verification.**
+
+Final per-node DB snapshot:
+```
+$ docker exec scaffold-postgres psql -U scaffold -d scaffold_engine \
+    -c "SELECT node_key, tool, node_type, retry_count, LENGTH(output_text) AS chars
+        FROM dag_nodes WHERE job_id = '6aecaf22-5649-4bed-acc3-dbf5c5382de7'
+        ORDER BY execution_order;"
+T1  LLM      decision    0  160
+T2  CodeGen  task        0  1774
+T3  CodeGen  task        0  2129
+T4  CodeGen  task        0  2728
+T5  CodeGen  task        0  1963
+T6  CodeGen  task        1  1651
+T7  LLM      checkpoint  1  2139
+T8  LLM      task        0  769
+```
+
+§17.377 algorithm mechanically re-run against T7's final `output_text` returns `missing=[]` — 11 claim lines spanning T2/T3/T4/T5/T6 (the explicit `claim_re.finditer` walk reproducible from the §17.383 audit recipe).
+
+**What this does NOT do** (deliberately out of scope).
+
+- **Force the unconverged-T7-with-retry-exhaustion path.** §17.381's retry-feedback could in principle still loop indefinitely if the model never reaches the TARGET UNION; §17.385 shows it converges in one retry on this brief but doesn't characterize the worst case. Defer until a future run shows T7 needing 2+ retries — at that point the retry-budget question becomes empirical.
+- **Refactor T7's first-attempt prompt to pre-empt the §17.377 fail.** T7 needed one retry to converge; the prompt layer's §17.378 Coverage-first + §17.373 cite-every-upstream clauses didn't pre-empt the single-upstream-bias on this run. A prompt-tightening commit could reduce the §17.377 fire rate but adds prompt-tuning surface against a single data point; not worth it until a multi-run sample shows persistent 50%+ first-attempt fail rate.
+- **Generalize beyond mdsplit.** The eight-retry arc is mdsplit-specific. The §17.384 gates and §17.381 retry-feedback are brief-agnostic — they trigger on `type` + title patterns, not on mdsplit-specific content. Generalization is automatic on the next CodeGen-class brief; explicit testing on a non-mdsplit brief is operator-driven, not §17.385's job.
+
+**Cohort.** Closes the §17.383 → §17.384 → §17.385 sub-arc. CodeGen-class arc reaches a true methodological close: each of the three intervention surfaces (prompt clauses, runtime guards, clause-scope gating) has been (a) introduced, (b) shown insufficient on a specific failure class, (c) hardened, and (d) empirically verified to close the class. The §17.382-named "three-surface playbook" is now battle-tested across eight retries.
+
+**Cost.** Docs-only; +~150 LOC OVERVIEW + zero code. Job `6aecaf22-5649-4bed-acc3-dbf5c5382de7` preserved on host. Net result: §17.380 + §17.384 wrapper-plus-clause-gating is empirically validated as the closure pattern for the leak-through-inner-specificity class; §17.381's explicit-naming retry-feedback is empirically validated as the closure pattern for the W.1 oscillation class. Arc closed.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
