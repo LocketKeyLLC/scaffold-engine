@@ -168,6 +168,13 @@ COPY --chown=root:root scripts/       /code/scripts/
 COPY --chown=root:root db/            /code/db/
 COPY --chown=root:root sdk/           /code/sdk/
 COPY --chown=root:root cli/           /code/cli/
+# §17.400 — pipelines/ into the DEV/test stage only (the prod `runtime`
+# stage deliberately omits it; pipelines live in the OWUI container). The
+# suite has ~21 vendor-parity tests (test_status_icons_vendor.py etc.) that
+# assert on pipelines/_vendor/* files; without this COPY they fail when run
+# inside a freshly-built image (test.yml's `docker build` path) — locally
+# they pass only because docker-compose.dev.yml bind-mounts ./pipelines.
+COPY --chown=root:root pipelines/     /code/pipelines/
 COPY --chown=root:root Makefile       /code/Makefile
 COPY --chown=root:root pyproject.toml /code/pyproject.toml
 

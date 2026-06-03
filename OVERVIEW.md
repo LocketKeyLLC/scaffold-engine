@@ -1890,7 +1890,7 @@ The real CI surface is **three workflows / four jobs** — the old 3-tier `make`
 |---|---|---|---|---|
 | `ci.yml` · **smoke** | §17.175 OpenAPI gate → `make ci-tier-0` (§17.393/§17.395 static-parity: 4 vendor byte-equal gates + SSE-inventory + SDK-schema scans) → `make ci-smoke` (~1766 `-m smoke` tests) | every push & `pull_request:[main]` | `ubuntu-latest` | green, ~7 min — **the real PR gate** |
 | `ci.yml` · **integration** | `make ci-tier-2` — `/health` + `make doctor` + golden-retrieval sidecar + bench gates | push to `main`, **gated** `vars.RUN_TIER2_INTEGRATION=='true'` | self-hosted | **skipped** by default (§17.397 — host runner is bound to a different repo) |
-| `test.yml` · **unit-tests** | builds the orchestrator image + a Postgres service, runs `pytest tests/ -k "not integration"` (~3230 tests) | push & `pull_request:[main]` | `ubuntu-latest` + postgres svc | ~20 min; cap 35 min + `cancel-in-progress` concurrency (§17.399, was timing out at 15 min) |
+| `test.yml` · **unit-tests** | builds the `dev`-stage image + a Postgres service, runs `pytest tests/ -k "not integration"` (~3230 tests) | push & `pull_request:[main]` | `ubuntu-latest` + postgres svc | ~13 min test run, cap 35 min + `cancel-in-progress` (§17.399); green after the §17.400 `pipelines/` image fix |
 | `retrieval-quality.yml` · **score** | `pytest test_score_retrieval.py test_rag_pipeline_smoke.py` (recall@k / MRR math + 3-query fusion smoke) | PR touching `rag_pipeline.py` / `rerankers.py` / `golden_set.json` | `ubuntu-latest` | non-blocking (`continue-on-error`) |
 
 **Cloud-safe (`ubuntu-latest`):** `smoke` needs no live services (`ci-tier-0` + `ci-smoke` are static / no-stack); `test.yml` provisions only a Postgres service (no Milvus/Ollama).
@@ -21680,11 +21680,23 @@ The §17.398 finding, fixed. `test.yml`'s `unit-tests` job was cancelled on **ev
 - `timeout-minutes: 15 → 35` — gives the full suite room (build ~3 min + tests est. ~17–22 min on 2 cores) while still failing loud on a genuine Postgres/probe hang.
 - Added a workflow-level `concurrency: { group: ${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true }`. There was none, so rapid pushes to the same ref **stacked** in-flight runs — this session alone spawned ~9 stacked timed-out runs, each burning metered private-repo minutes for zero signal. New pushes to a ref now cancel the prior in-flight run.
 
-**Verification.** YAML parses; `concurrency` + `timeout-minutes: 35` confirmed via `yaml.safe_load`. The real green/red proof is the next push's run (watched after this commit). Updated the §14.3 row from "times out, unfixed" to the new cap/concurrency reality.
+**Verification.** YAML parses; `concurrency` + `timeout-minutes: 35` confirmed. The next push's run **completed in 12:48** (test step 768s, no cancellation) — the timeout is fixed. But completing *for the first time ever* exposed **21 pre-existing failures** (the suite was running inside an image that lacks `pipelines/`); root-caused and fixed in §17.400. So §17.399 fixed the asked-for timeout; §17.400 makes the now-completing job actually green.
 
 **Deliberately not done.** Didn't narrow to PR-only or retire the job (operator kept both triggers); didn't add `pytest-xdist` (would mean a prod-image dep + auditing the suite for parallel-safety against the shared Postgres — a bigger change than the timeout fix asked for). If metered-minute spend becomes a concern, PR-only is the next lever.
 
 **Cost.** +1 `concurrency` block + 1 timeout value + comment rewrites in `test.yml`, 0 src/test change.
+
+---
+
+### §17.400 COPY `pipelines/` into the Dockerfile `dev` stage — fix test.yml's 21 image-env failures (2026-06-02)
+
+Exposed by §17.399. Once `test.yml`'s `unit-tests` job could run to completion (12:48, within the new 35-min cap), its first-ever full result was **21 failed / 2574 passed / 50 skipped**. Root cause is structural, not a regression: `test.yml` does `docker build -t scaffold-orchestrator:ci .` with no `--target`, so it builds the Dockerfile's last stage = **`dev`** (line 134), which copies `tests/` but — like the prod `runtime` stage — **never copies `pipelines/`** (pipelines deliberately live in the OWUI container, not the orchestrator image). But ~21 suite tests are vendor-parity guards (`test_status_icons_vendor.py`, `test_assist_agent_mirror_divergence.py`, `test_execution_agent_blocked_cause.py`) that assert on `pipelines/_vendor/*` files via `_REPO_ROOT/"pipelines"/…`. Inside the image those paths don't exist → fail. They pass everywhere else only because the path is present: `docker-compose.dev.yml` bind-mounts `./pipelines` for the local dev container, and `ci.yml` smoke + local `make test` (dev container) see the full tree. `test.yml` was the one path running the suite in a standalone built image — and it had never finished before, so the gap was invisible.
+
+**Fix.** `COPY --chown=root:root pipelines/ /code/pipelines/` in the **`dev` stage only** (after the `cli/` copy). The prod `runtime` stage (line 65) is untouched — it still ships without `pipelines/`, preserving the §17.62 hermetic-image boundary. The dev/test image now carries everything the suite asserts on.
+
+**Verification.** Built `docker build --target dev` locally (the exact stage `test.yml`'s default build resolves to) and ran the three previously-failing files inside the fresh image: **37 passed in 4.84s** (was 21 failed). Heavy builder layers cached; only the new COPY + downstream layers rebuilt.
+
+**Cost.** +1 `COPY` line (+ comment) in the Dockerfile `dev` stage, 0 prod-image change, 0 src/test change. Together with §17.399, `test.yml` goes from "cancelled every run" to a completing, green gate.
 
 ---
 
