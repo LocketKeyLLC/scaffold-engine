@@ -501,7 +501,13 @@ class DagInput(BaseModel):
 
 
 class RagInput(BaseModel):
-    query: str
+    # §17.390 — reject empty/blank queries at the schema layer. A missing
+    # `query` field already 422s, but an empty string ("") previously passed
+    # pydantic's presence check and reached retrieval, returning arbitrary
+    # top-3 matches with HTTP 200 instead of an error. min_length catches ""
+    # on the raw value; the _validate_query validator below strips and re-checks
+    # so whitespace-only ("   ") is caught too.
+    query: str = Field(min_length=1)
     top_k: int = Field(default=10, ge=1, le=100)
     confidence_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
     skip_rerank: bool = False
@@ -528,6 +534,18 @@ class RagInput(BaseModel):
     # its matching content lives between chars 250-500. Same bounds as
     # the underlying setting.
     doc_truncate: int | None = Field(default=None, ge=100, le=20000)
+
+    @field_validator("query")
+    @classmethod
+    def _validate_query(cls, v: str) -> str:
+        # min_length=1 already rejects "", but whitespace-only ("   ")
+        # passes the length check — strip and re-check so it 422s too.
+        # Returns the stripped value so retrieval never sees leading/
+        # trailing whitespace.
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("query must be non-empty")
+        return v
 
 
 class GtInput(BaseModel):

@@ -21573,6 +21573,20 @@ The §17.380 wrapper + §17.384 per-clause gates already live in prompt_assembly
 
 ---
 
+### §17.390 RagInput.query rejects empty/blank — schema-layer non-empty guard (2026-06-02)
+
+Surfaced during a `/verify` run that drove the live `/rag` surface. A `POST /rag` body of `{"query":""}` returned HTTP 200 with three arbitrary top-matches — including a stray bibliography fragment — instead of an error. The cause: `RagInput.query` was a bare `str`, so pydantic enforced only *presence*. A missing field 422'd correctly, but an empty string passed validation and reached retrieval, which happily ran a degenerate embedding and fell back to `top3`. A user who fat-fingers a blank query gets confident-looking garbage rather than a clear rejection.
+
+**Fix.** Two complementary guards on `app/schemas.py::RagInput`:
+- `query: str = Field(min_length=1)` — rejects `""` at the constraint layer with the standard pydantic 422 shape.
+- `_validate_query` field-validator — `min_length` alone lets whitespace-only (`"   "`) through (length 3), so the validator strips and re-checks, 422ing blank-but-nonempty input. It also returns the stripped value, so retrieval never sees leading/trailing whitespace. Mirrors the existing `_validate_title` pattern (§ JobCreate).
+
+**Surface behavior after fix.** `{"query":""}` and `{"query":"   "}` → 422 `query must be non-empty` / `String should have at least 1 character`; `{}` (missing) → 422 `Field required` (unchanged); a real query → 200 (unchanged). The OWUI `scaffold_router` chat path and the SDK both send through this schema, so the guard applies everywhere `/rag` is reachable — no per-caller fix needed.
+
+**Cost.** +13 LOC (1 field constraint + 1 validator), 0 new deps, 0 migrations, 0 behavior change for any non-empty query. The SDK's vendored `schemas.py` copy ([[reference-overview-log]] glossary, "scaffold-engine-client") should be re-synced on its next byte-equal refresh; flagged, not blocking.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
