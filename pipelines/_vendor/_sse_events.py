@@ -94,10 +94,14 @@ BLOCKED = "blocked"
 # Design-pipeline events (app/sim/design_pipeline.py)
 # ---------------------------------------------------------------------------
 # Per-stage start/done/error emitted by /design/{id}/advance?stage=…
+# ``cancelled`` is a terminal event emitted by the §17.356 sticky-cancel
+# guards when a /jobs/{id}/cancel landed mid-stage — a literal ``_sse(
+# "cancelled", …)``, so the inventory scanner sees it and it must live here.
 
 STAGE_START = "stage_start"
 STAGE_DONE = "stage_done"
 STAGE_ERROR = "stage_error"
+CANCELLED = "cancelled"
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +151,7 @@ ALL_EVENT_NAMES = frozenset({
     # DAG / job-terminal
     DAG_GENERATED, EXECUTION_FAILED, BLOCKED,
     # design
-    STAGE_START, STAGE_DONE, STAGE_ERROR,
+    STAGE_START, STAGE_DONE, STAGE_ERROR, CANCELLED,
     # consumer-synthesized
     STREAM_STALLED,
     # generic

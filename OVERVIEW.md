@@ -21597,6 +21597,16 @@ First of two pre-existing failures surfaced by a post-§17.390 full-suite run (`
 
 ---
 
+### §17.392 register `cancelled` SSE event in ALL_EVENT_NAMES — §17.356 emitter gap (2026-06-02)
+
+Second of the two pre-existing failures from the post-§17.390 full-suite run. §17.356 added five literal `_sse("cancelled", …)` emits to `app/sim/design_pipeline.py` (the sticky-cancel guards that yield a terminal `cancelled` event when a `/jobs/{id}/cancel` lands mid-stage), but never registered `"cancelled"` in `app/sse_events.py::ALL_EVENT_NAMES`. The §17.190 inventory-parity guard (`test_sse_event_inventory.py`) scans emitter files for `_sse("…")` literals and asserts every one is declared in the canonical set — so it correctly flagged `{'cancelled': ['app/sim/design_pipeline.py']}`. Runtime emission was never broken (the OWUI consumer matches on the raw string), but the invariant the repo deliberately enforces — "every emitted event name is declared in one place" — was violated, and the guard had been red since §17.356 for want of a full-suite run.
+
+**Fix.** Add `CANCELLED = "cancelled"` to the design-pipeline namespace block in `app/sse_events.py` (that's the emitter file) with a comment tying it to the §17.356 sticky-cancel guards, and include it in the `ALL_EVENT_NAMES` frozenset under the `# design` group. Re-sync the byte-equal vendor `pipelines/_vendor/_sse_events.py` via `make sync-sse-events` (the §17.190 OWUI-side copy), confirmed by `make check-sse-events`. Verified in-container: `pytest tests/test_sse_event_inventory.py --timeout=30 -q` → 6 passed.
+
+**Cost.** +2 LOC (constant + frozenset entry) in 2 byte-equal files, 0 src-behavior change, 0 migrations. Companion to §17.391; together they take the suite from 2-failed/3300-passed back to fully green (§17.390 itself was clean). Follow-up flagged: the inventory guard only fires on a full `make test` run — neither failure was caught at commit time because §17.356/§17.358 didn't run the whole suite. A pre-push hook or a fast ci-tier-0 that runs the static-scan guards (schemas-parity, sse-inventory, milvus-schema) would surface this class at commit time; logged, not implemented.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
