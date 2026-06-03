@@ -1890,7 +1890,7 @@ The real CI surface is **three workflows / four jobs** — the old 3-tier `make`
 |---|---|---|---|---|
 | `ci.yml` · **smoke** | §17.175 OpenAPI gate → `make ci-tier-0` (§17.393/§17.395 static-parity: 4 vendor byte-equal gates + SSE-inventory + SDK-schema scans) → `make ci-smoke` (~1766 `-m smoke` tests) | every push & `pull_request:[main]` | `ubuntu-latest` | green, ~7 min — **the real PR gate** |
 | `ci.yml` · **integration** | `make ci-tier-2` — `/health` + `make doctor` + golden-retrieval sidecar + bench gates | push to `main`, **gated** `vars.RUN_TIER2_INTEGRATION=='true'` | self-hosted | **skipped** by default (§17.397 — host runner is bound to a different repo) |
-| `test.yml` · **unit-tests** | builds the orchestrator image + a Postgres service, runs `pytest tests/ -k "not integration"` | push & `pull_request:[main]` | `ubuntu-latest` + postgres svc | ⚠ **times out at 15 min** on the 2-vCPU free runner → cancelled every run; not currently a working gate (flagged §17.398, unfixed) |
+| `test.yml` · **unit-tests** | builds the orchestrator image + a Postgres service, runs `pytest tests/ -k "not integration"` (~3230 tests) | push & `pull_request:[main]` | `ubuntu-latest` + postgres svc | ~20 min; cap 35 min + `cancel-in-progress` concurrency (§17.399, was timing out at 15 min) |
 | `retrieval-quality.yml` · **score** | `pytest test_score_retrieval.py test_rag_pipeline_smoke.py` (recall@k / MRR math + 3-query fusion smoke) | PR touching `rag_pipeline.py` / `rerankers.py` / `golden_set.json` | `ubuntu-latest` | non-blocking (`continue-on-error`) |
 
 **Cloud-safe (`ubuntu-latest`):** `smoke` needs no live services (`ci-tier-0` + `ci-smoke` are static / no-stack); `test.yml` provisions only a Postgres service (no Milvus/Ollama).
@@ -21669,6 +21669,22 @@ Flagged in §17.395. §14.3 described a 3-tier `make` model that no longer match
 **Honest finding while verifying (flagged, NOT fixed).** `test.yml`'s `unit-tests` job has been **cancelled on every recent run** — not a transient: `gh run view` shows "exceeded the maximum execution time of 15m0s" → the job builds the orchestrator image + runs `pytest tests/ -k "not integration"` on a 2-vCPU free runner and blows the 15-min cap. So it's been a non-functional gate for a while; the §14.3 row says so. Fixing it (raise the cap, cache the Docker build, or shard the suite) is a separate operator decision, not bundled here. The working PR gate is `ci.yml`'s `smoke` job.
 
 **Cost.** Doc-only — §14.3 + §14.5 in OVERVIEW, 0 code/CI change. (`ci.yml`'s stale `~681 smoke tests` header comment is left as-is; out of scope for an OVERVIEW edit.)
+
+---
+
+### §17.399 fix the `test.yml` unit-tests timeout — raise cap + add concurrency (2026-06-02)
+
+The §17.398 finding, fixed. `test.yml`'s `unit-tests` job was cancelled on **every** recent run — `gh api .../jobs` step timing showed setup 23s + image build 183s + tests **705s and still running** when the 15-min job cap killed it. Root cause is plain scale, not a bug: the `-k "not integration"` selection is **~3230 tests** (excluding `validate` drops only 7 — already integration-named; `xdist` isn't in the prod image, so no parallel option), and on a **private-repo 2-core** `ubuntu-latest` runner that exceeds 15 min. The §17.276 cap of 15 assumed a "well under 5 min" suite that has since ~quadrupled.
+
+**Two changes** (operator chose "keep push+PR triggers, just cap + concurrency"):
+- `timeout-minutes: 15 → 35` — gives the full suite room (build ~3 min + tests est. ~17–22 min on 2 cores) while still failing loud on a genuine Postgres/probe hang.
+- Added a workflow-level `concurrency: { group: ${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true }`. There was none, so rapid pushes to the same ref **stacked** in-flight runs — this session alone spawned ~9 stacked timed-out runs, each burning metered private-repo minutes for zero signal. New pushes to a ref now cancel the prior in-flight run.
+
+**Verification.** YAML parses; `concurrency` + `timeout-minutes: 35` confirmed via `yaml.safe_load`. The real green/red proof is the next push's run (watched after this commit). Updated the §14.3 row from "times out, unfixed" to the new cap/concurrency reality.
+
+**Deliberately not done.** Didn't narrow to PR-only or retire the job (operator kept both triggers); didn't add `pytest-xdist` (would mean a prod-image dep + auditing the suite for parallel-safety against the shared Postgres — a bigger change than the timeout fix asked for). If metered-minute spend becomes a concern, PR-only is the next lever.
+
+**Cost.** +1 `concurrency` block + 1 timeout value + comment rewrites in `test.yml`, 0 src/test change.
 
 ---
 

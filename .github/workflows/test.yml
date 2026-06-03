@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+# §17.399 — cancel superseded runs. This job is a ~20-min full-suite build
+# on a metered 2-core private-repo runner; without this, rapid pushes to the
+# same ref stack multiple in-flight runs (observed: 9 stacked timed-out runs
+# in one session). Keyed by workflow+ref so different branches/PRs don't
+# cancel each other; a new push to the same ref cancels the prior in-flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   POSTGRES_USER: scaffold
   POSTGRES_PASSWORD: scaffold_ci_pw
@@ -23,11 +32,13 @@ jobs:
   unit-tests:
     name: Unit Tests (no live services)
     runs-on: ubuntu-latest
-    # §17.276 — bound runtime. Dev-image suite finishes well under 5 min
-    # on a hot runner; cap at 15 to fail loud if Postgres/probe stalls
-    # rather than burning the runner's 6-hour default ceiling. Matches
-    # ci.yml's 10-min smoke + 20-min integration tier.
-    timeout-minutes: 15
+    # §17.399 — raised 15→35. The §17.276 cap of 15 assumed a "well under
+    # 5 min" suite, but it has since grown to ~3230 non-integration tests
+    # that build the image (~3 min) + run on a 2-core private runner — the
+    # job was hitting "exceeded 15m0s" and getting cancelled on EVERY run
+    # (verified: tests ran 705s and were still going when cut). 35 min gives
+    # the full suite room while still failing loud if Postgres/probe hangs.
+    timeout-minutes: 35
 
     services:
       postgres:
