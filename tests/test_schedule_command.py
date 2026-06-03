@@ -18,6 +18,12 @@ SPEC = importlib.util.spec_from_file_location("scaffold_router", _ROUTER_PATH)
 sr = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sr)
 
+# §17.402 — stub the Ollama embedder probe (matches §17.333 in
+# tests/_scaffold_router_setup.py). Pipeline.__init__ POSTs to Ollama at
+# 172.18.0.1, unroutable on cloud CI (test.yml) → these tests errored there.
+# Live embedder-dim verification lives in /health + tests/integration/.
+sr.Pipeline._probe_embedder_dim = lambda self, model=None: (True, "test stub (§17.402)")
+
 
 @pytest.fixture
 def pipe():

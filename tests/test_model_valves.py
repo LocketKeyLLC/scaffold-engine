@@ -11,7 +11,6 @@ Run:
 """
 
 import importlib.util
-import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -75,10 +74,13 @@ _router_mod = importlib.util.module_from_spec(_router_spec)
 _router_spec.loader.exec_module(_router_mod)
 Pipeline = _router_mod.Pipeline
 
-# See note in tests/_scaffold_router_setup.py — Pipeline.__init__ probes
-# Ollama at 172.18.0.1 which is unroutable on cloud CI runners.
-if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
-    Pipeline._probe_embedder_dim = lambda self, model=None: (True, "ci-smoke stub")
+# §17.402 — UNCONDITIONAL embedder-probe stub (matches §17.333 in
+# tests/_scaffold_router_setup.py). Pipeline.__init__ does a real HTTP POST
+# to Ollama at 172.18.0.1, unroutable on cloud CI (test.yml) and a flake
+# source under local suite contention. Was gated on SCAFFOLD_CI_SMOKE_MODE,
+# which test.yml doesn't set → these tests errored there. The live
+# embedder-dim invariant is covered by /health + tests/integration/.
+Pipeline._probe_embedder_dim = lambda self, model=None: (True, "test stub (§17.402)")
 
 # ---------------------------------------------------------------------------
 # Constants

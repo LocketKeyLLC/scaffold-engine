@@ -21706,7 +21706,21 @@ Exposed by §17.399. Once `test.yml`'s `unit-tests` job could run to completion 
 
 **Fix.** `--chown=root:root` → `--chown=scaffold:scaffold` on the `pipelines/` COPY (one token). This mirrors local dev exactly — `docker-compose.dev.yml` bind-mounts `./pipelines` writable, which is why the valve-write fixture never failed locally or in the `make test` dev container. Verified in a freshly-built `--target dev` image: `valves.json` now `rw-rw-r-- scaffold:scaffold`, and the vendor-parity tests **plus** the previously-erroring `test_schedule_command.py` / `test_scaffold_router_welcome.py` → **49 passed** (the exact files that produced the 526 errors). The definitive full-suite result comes from the watched `test.yml` run after this push — not claimed green from a subset this time (that was §17.400's mistake).
 
-**Cost.** 1-token Dockerfile change (`root:root` → `scaffold:scaffold`), 0 prod-image change, 0 src/test change. §17.399 (timeout) + §17.400/§17.401 (image completeness + ownership) together aim to take `test.yml` from "cancelled every run" to a real green gate — confirmation pending the post-push run.
+**Cost.** 1-token Dockerfile change (`root:root` → `scaffold:scaffold`), 0 prod-image change, 0 src/test change. The post-push run came back **3190 passed / 0 failed / 26 errors** — the 504 PermissionErrors gone, but a *different* env gap surfaced (the embedder probe), closed in §17.402.
+
+---
+
+### §17.402 stub the embedder probe in 2 router test files — close test.yml's last 26 errors (2026-06-02)
+
+The §17.401 run's residual 26 errors were a third, distinct env gap (not pipelines this time): `RuntimeError: Embedder probe failed: cannot reach Ollama at http://172.18.0.1:11434`. `scaffold_router.Pipeline.__init__` unconditionally POSTs to Ollama (`_probe_embedder_dim`, scaffold_router.py:563, no env gate in prod code). The shared test helper `tests/_scaffold_router_setup.py` stubs that out **unconditionally** (§17.333) — but two files that load the router on their own bypass the helper: `test_model_valves.py` gated its stub on `if os.environ.get("SCAFFOLD_CI_SMOKE_MODE")` (which `test.yml` doesn't set), and `test_schedule_command.py` had **no** stub at all. Both pass locally only because the dev container reaches host Ollama via the bridge; on `test.yml`'s postgres-only cloud runner the probe fails and every Pipeline-instantiating test in those files errors (10 + 16 = 26).
+
+**Fix.** Make the stub unconditional in both files (the §17.333 pattern): drop the `SCAFFOLD_CI_SMOKE_MODE` gate in `test_model_valves.py` (and its now-unused `import os`), add the one-line stub after the router `exec_module` in `test_schedule_command.py`. The live embedder-dim invariant is unaffected — it's verified by `/health` + `tests/integration/`, never by these unit tests ([[scaffold_router-tests-stub-embedder-probe]]).
+
+**Verification (done right this time).** Built `--target dev` and ran both files in a **default-network container where Ollama at 172.18.0.1 is unreachable** — the exact CI condition that produced the 26 errors: **34 passed in 2.85s** (was 26 errored). Definitive full-suite green is the watched `test.yml` run after this push.
+
+**Cost.** 2 test files (unconditional stub + 1 dead-import removal), 0 src change. This is the third and (per the §17.401 run, which showed 0 failed and these as the only errors) **last** env gap between `test.yml` and green — §17.399 timeout + §17.400/§17.401 image + §17.402 isolation.
+
+**Pattern worth noting.** Each of §17.400→§17.402 was the same shape: a test with a latent dependency on the local dev container's environment (pipelines/ present, pipelines/ writable, Ollama reachable) that only surfaced once `test.yml` ran the full suite in a clean cloud env. The suite was implicitly "dev-container-shaped"; running it elsewhere is what exposed the non-hermetic seams.
 
 ---
 
