@@ -21587,6 +21587,16 @@ Surfaced during a `/verify` run that drove the live `/rag` surface. A `POST /rag
 
 ---
 
+### §17.391 remove stale `test_ignores_eval_retrieval_script` — §17.358 left an orphaned guard (2026-06-02)
+
+First of two pre-existing failures surfaced by a post-§17.390 full-suite run (`make test`: 2 failed / 3300 passed — neither failure caused by §17.390, which only touched `schemas.py` + this log). §17.358 retired `scripts/eval_retrieval.py` (and `ground_truth.json`) by deprecation, but left `tests/test_infra_scaffolding.py::TestCIWorkflow::test_ignores_eval_retrieval_script` behind. That test asserts the CI workflow's run commands **must** contain the literal `"eval_retrieval.py"` — a guard that made sense when the script existed and had to be excluded from CI (needs Milvus+Ollama), but inverts to a permanent red once the script is gone and the workflow legitimately stops mentioning it. The test had been failing silently since §17.358 because no full-suite run happened between then and now.
+
+**Fix.** Delete the obsolete test method (the last method in `TestCIWorkflow`). No replacement guard: there's nothing left to exclude, so there's nothing to assert. `tests/test_infra_scaffolding.py` now 16 passed (was 17 with the red one). Verified in-container: `pytest tests/test_infra_scaffolding.py --timeout=30 -q` → 16 passed in 2.41s.
+
+**Cost.** -14 LOC, 0 src change, test-only. Companion fix to §17.392 (the second failure from the same suite run).
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

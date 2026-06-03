@@ -317,18 +317,3 @@ class TestCIWorkflow:
             if found:
                 break
         assert found, "No workflow step invokes pytest"
-
-    def test_ignores_eval_retrieval_script(self, workflow):
-        """The retrieval eval script is excluded from CI (needs Milvus+Ollama)."""
-        # This check is inherently about "the exclusion string appears somewhere"
-        # — structurally it's in an addopts/--ignore flag inside a run command.
-        jobs = workflow.get("jobs", {})
-        all_runs = []
-        for job in jobs.values():
-            for step in job.get("steps", []):
-                if isinstance(step, dict) and step.get("run"):
-                    all_runs.append(step["run"])
-        combined = "\n".join(all_runs)
-        assert "eval_retrieval.py" in combined, (
-            "eval_retrieval.py not referenced in any CI run command"
-        )
