@@ -21694,9 +21694,19 @@ Exposed by §17.399. Once `test.yml`'s `unit-tests` job could run to completion 
 
 **Fix.** `COPY --chown=root:root pipelines/ /code/pipelines/` in the **`dev` stage only** (after the `cli/` copy). The prod `runtime` stage (line 65) is untouched — it still ships without `pipelines/`, preserving the §17.62 hermetic-image boundary. The dev/test image now carries everything the suite asserts on.
 
-**Verification.** Built `docker build --target dev` locally (the exact stage `test.yml`'s default build resolves to) and ran the three previously-failing files inside the fresh image: **37 passed in 4.84s** (was 21 failed). Heavy builder layers cached; only the new COPY + downstream layers rebuilt.
+**Verification (insufficient — see §17.401).** Built `docker build --target dev` and ran the three previously-failing files inside the fresh image: 37 passed. **This was the wrong verification:** it ran only the previously-failing subset, not the full `-k "not integration"` selection `test.yml` runs — so it missed that adding `pipelines/` *unleashed* ~585 other tests that the missing-dir collection had been silencing. The real `test.yml` run came back **504 errors / 22 failed** (all `PermissionError` on a `valves.json` write — the COPY used `--chown=root:root` but the runtime user is `scaffold`). Corrected in §17.401.
 
-**Cost.** +1 `COPY` line (+ comment) in the Dockerfile `dev` stage, 0 prod-image change, 0 src/test change. Together with §17.399, `test.yml` goes from "cancelled every run" to a completing, green gate.
+**Cost.** +1 `COPY` line (+ comment) in the Dockerfile `dev` stage, 0 prod-image change, 0 src/test change. Lesson: verify a test-collection/env fix by running the **full** CI selection in the image, not just the formerly-failing files.
+
+---
+
+### §17.401 chown `pipelines/` to `scaffold` in the dev image — fix §17.400's 526 PermissionErrors (2026-06-02)
+
+§17.400 added `COPY --chown=root:root pipelines/` to the dev stage. That made the `pipelines/` tree root-owned, but the image's runtime `USER` is `scaffold` (Dockerfile line 176), and a shared pipeline-bootstrap fixture **writes** `pipelines/<name>/valves.json` (the valve-bootstrap persist path: template → live `valves.json`). Root-owned + non-root runtime → `PermissionError: [Errno 13] Permission denied: '/code/pipelines/scaffold_router/valves.json'`, ×526, cascading into ~526 collection/setup errors across otherwise-unrelated tests that share the fixture (`test_schedule_command.py`, `test_scaffold_router_welcome.py`, …). The §17.400 run: **504 errors / 22 failed / 2690 passed**.
+
+**Fix.** `--chown=root:root` → `--chown=scaffold:scaffold` on the `pipelines/` COPY (one token). This mirrors local dev exactly — `docker-compose.dev.yml` bind-mounts `./pipelines` writable, which is why the valve-write fixture never failed locally or in the `make test` dev container. Verified in a freshly-built `--target dev` image: `valves.json` now `rw-rw-r-- scaffold:scaffold`, and the vendor-parity tests **plus** the previously-erroring `test_schedule_command.py` / `test_scaffold_router_welcome.py` → **49 passed** (the exact files that produced the 526 errors). The definitive full-suite result comes from the watched `test.yml` run after this push — not claimed green from a subset this time (that was §17.400's mistake).
+
+**Cost.** 1-token Dockerfile change (`root:root` → `scaffold:scaffold`), 0 prod-image change, 0 src/test change. §17.399 (timeout) + §17.400/§17.401 (image completeness + ownership) together aim to take `test.yml` from "cancelled every run" to a real green gate — confirmation pending the post-push run.
 
 ---
 

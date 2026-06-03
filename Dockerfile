@@ -168,13 +168,15 @@ COPY --chown=root:root scripts/       /code/scripts/
 COPY --chown=root:root db/            /code/db/
 COPY --chown=root:root sdk/           /code/sdk/
 COPY --chown=root:root cli/           /code/cli/
-# §17.400 — pipelines/ into the DEV/test stage only (the prod `runtime`
-# stage deliberately omits it; pipelines live in the OWUI container). The
-# suite has ~21 vendor-parity tests (test_status_icons_vendor.py etc.) that
-# assert on pipelines/_vendor/* files; without this COPY they fail when run
-# inside a freshly-built image (test.yml's `docker build` path) — locally
-# they pass only because docker-compose.dev.yml bind-mounts ./pipelines.
-COPY --chown=root:root pipelines/     /code/pipelines/
+# §17.400/§17.401 — pipelines/ into the DEV/test stage only (the prod
+# `runtime` stage deliberately omits it; pipelines live in the OWUI
+# container). The suite has vendor-parity tests (test_status_icons_vendor.py
+# etc.) that READ pipelines/_vendor/*, AND pipeline-bootstrap fixtures that
+# WRITE pipelines/<name>/valves.json — so this must be owned by the runtime
+# `scaffold` user (§17.401: root:root made ~526 tests error with
+# PermissionError on the valves.json write). Mirrors local dev, where
+# docker-compose.dev.yml bind-mounts ./pipelines writable.
+COPY --chown=scaffold:scaffold pipelines/ /code/pipelines/
 COPY --chown=root:root Makefile       /code/Makefile
 COPY --chown=root:root pyproject.toml /code/pyproject.toml
 
