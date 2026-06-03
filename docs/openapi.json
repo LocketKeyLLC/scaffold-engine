@@ -1861,6 +1861,7 @@
             "title": "Max Candidates"
           },
           "query": {
+            "minLength": 1,
             "title": "Query",
             "type": "string"
           },

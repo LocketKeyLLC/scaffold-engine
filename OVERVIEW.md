@@ -21633,6 +21633,18 @@ Closes the §17.393 follow-up loop: the pre-push hook protects only clones that 
 
 ---
 
+### §17.396 regenerate `docs/openapi.json` — fix §17.390-introduced snapshot drift (2026-06-02)
+
+**Self-inflicted, caught by watching the real CI run.** §17.395 wired `ci-tier-0` into the `smoke` job; checking the actual GitHub Actions runs afterward showed `smoke` had been **failing since §17.390** — and the failing step was the §17.175 OpenAPI snapshot gate, which runs *before* the new ci-tier-0 step (so ci-tier-0 never even executed; it showed `-`/skipped). §17.390 added `Field(min_length=1)` to `RagInput.query`, which adds `"minLength": 1` to that property in the live OpenAPI spec — but §17.390 ran `make sync-schemas` (SDK vendor) and **forgot `make openapi-snapshot`**. The committed `docs/openapi.json` drifted, and `python scripts/openapi_snapshot.py --check` (§17.175) red-flagged every push from §17.390 through §17.395 (6 commits).
+
+**Fix.** `make openapi-snapshot` → `docs/openapi.json` regenerated. The diff is exactly one line (`+ "minLength": 1` on the `query` property) — confirmed nothing else drifted. No FastAPI `version=` bump: tightening request-input validation (rejecting `""`) is not a breaking response-contract change. `make openapi-check` now green.
+
+**Process lesson** ([[feedback-overview-entries]] companion): a change to `app/schemas.py` needs BOTH `make sync-schemas` AND `make openapi-snapshot` in the same commit — the SDK vendor gate (§17.186) and the OpenAPI gate (§17.175) are independent. §17.390's entry mentioned the SDK sync but not the snapshot; that asymmetry is the bug. Note ci-tier-0 does **not** catch this: `openapi-check` must import the live app (`from app.main import app`, needs asyncpg et al.), so it can't run in the host-only, no-services pre-push hook — it legitimately lives as its own CI step + `make openapi-check` (in-container) for operators. Adding a best-effort `make openapi-check` to the hook when the dev container is up is a candidate follow-up.
+
+**Cost.** +1 line in a generated file, 0 src/test change. Unblocks CI back to green so the §17.395 ci-tier-0 gate can actually run in the cloud (verification of that is the immediate next step after this commit lands).
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
