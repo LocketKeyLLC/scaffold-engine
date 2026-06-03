@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# §17.393 — Pre-push static-parity gate.
+#
+# Runs the fast, no-services guards (`make ci-tier-0`) so the drift classes
+# that have bitten this repo before a full-suite run get caught BEFORE they
+# reach origin:
+#   - §17.157 — SDK schema vendor drift (app/schemas.py vs sdk copy)
+#   - §17.190 — SSE-event vendor drift + emitter-not-in-inventory (§17.392)
+#   - §17.195 — next-actions vendor drift
+#   - §17.245 — MODEL_RERANKER default drift across 3 sites
+#
+# These are file-diff / grep / static-AST checks — no docker, no Milvus/
+# Postgres/Ollama, ~2s. Live-schema drift (§17.319 Milvus parity) needs the
+# stack and stays in `make ci-tier-2` / `make test`.
+#
+# Activate (once per clone): make hooks-install   (sets core.hooksPath=.githooks)
+# Bypass a one-off push:     git push --no-verify
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+if ! make --no-print-directory ci-tier-0; then
+	printf '\n\033[1;31m✗ pre-push blocked by ci-tier-0.\033[0m Fix the gate above, or bypass this one push with: \033[1mgit push --no-verify\033[0m\n' >&2
+	exit 1
+fi
