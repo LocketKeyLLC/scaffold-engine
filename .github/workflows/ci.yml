@@ -62,45 +62,32 @@ jobs:
           PYTHONPATH: "."
         run: python scripts/openapi_snapshot.py --check
 
-      # §17.186 — Schemas-in-sync drift gate. `app/schemas.py` is vendored
-      # into `sdk/scaffold_client/schemas.py` (byte-equal copy) so `pip
-      # install scaffold-engine-client` works without the orchestrator's
-      # runtime deps. A developer that edits the source without running
-      # `make sync-schemas` ships a client that mis-serializes against the
-      # current orchestrator. The §17.157 catch-up was triggered by exactly
-      # this drift accumulating across §17.143-§17.156; §17.186 makes the
-      # gate explicit and fast (zero-cost `diff`, runs before smoke tests).
+      # §17.395 — static-parity gate, consolidated into `make ci-tier-0`.
+      # This is the SAME target the §17.393 pre-push hook runs, so local
+      # pre-push, a bare `make ci-tier-0`, and this PR gate are provably
+      # identical — no drift between what blocks a push and what blocks a PR.
       #
-      # If this step fails: `make sync-schemas` locally, review the diff,
-      # commit the regenerated sdk/scaffold_client/schemas.py.
-      - name: Verify SDK schemas vendor is in sync (§17.186)
-        run: make check-schemas
-
-      # §17.190 — SSE-event constants drift gate. app/sse_events.py is the
-      # canonical event-name vocabulary; pipelines/_vendor/_sse_events.py is the
-      # byte-equal vendor that the OWUI pipelines container imports. Same
-      # rationale as §17.186: a developer who edits one side without the
-      # other ships a router that matches against names the orchestrator
-      # no longer emits (the §17.190 audit found exactly this drift in
-      # the pre-§17.190 scaffold_router.py).
-      - name: Verify SSE-event constants vendor is in sync (§17.190)
-        run: make check-sse-events
-
-      # §17.195 — next_actions formatter vendor gate. sdk/scaffold_client/
-      # next_actions.py is the source; pipelines/_vendor/_next_actions.py is the
-      # byte-equal vendor imported by the OWUI pipeline. Same rationale as
-      # §17.186 / §17.190: a developer editing one side without the other
-      # ships a router that renders next_actions differently from the CLI/SDK.
-      - name: Verify next_actions vendor is in sync (§17.195)
-        run: make check-next-actions
-
-      # §17.246 — gate on MODEL_RERANKER default alignment across the
-      # 3 sites it ships at. Same logic as `make doctor` section 12
-      # (§17.245), but file-only so it runs on a stock CI runner
-      # without a docker compose stack. Catches drift at PR time,
-      # not just at next operator `make doctor`.
-      - name: Verify MODEL_RERANKER default agrees across 3 sites (§17.245)
-        run: make check-rerank-drift
+      # Bundles the four byte-equal/grep vendor gates that used to be
+      # separate steps here:
+      #   §17.186 check-schemas      — app/schemas.py → sdk/scaffold_client vendor
+      #   §17.190 check-sse-events   — app/sse_events.py → pipelines/_vendor
+      #   §17.195 check-next-actions — next_actions formatter vendor
+      #   §17.245 check-rerank-drift — MODEL_RERANKER default across 3 sites
+      # PLUS the two host static-scan pytest guards the per-gate steps never
+      # ran (neither is `smoke`-marked, so `make ci-smoke` skips them):
+      #   test_sse_event_inventory.py — every _sse("…") literal must be in
+      #     ALL_EVENT_NAMES; this is the §17.392 class that slipped to a full
+      #     `make test` because nothing fast caught it at push/PR time.
+      #   test_sdk_schema_parity.py   — SDK vendor file-content parity.
+      # No live services; runs in seconds. Live-schema drift (Milvus parity,
+      # §17.319/§17.336) needs a live collection and stays in tier 2.
+      #
+      # On failure the make output names the failing sub-gate; the fix is the
+      # matching `make sync-<x>` (schemas / sse-events / next-actions) then
+      # commit the regenerated vendor file. `app/__init__.py` is empty and
+      # app.sse_events is dep-free, so the pytest guards need no app deps.
+      - name: Static-parity gate — ci-tier-0 (§17.393/§17.395)
+        run: make ci-tier-0
 
       - name: Run ci-smoke tests
         env:

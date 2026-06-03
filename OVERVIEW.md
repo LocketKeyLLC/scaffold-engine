@@ -21619,6 +21619,20 @@ Full-suite run after the §17.390→§17.393 cohort. Refreshes the rolling basel
 
 ---
 
+### §17.395 wire `ci-tier-0` as the PR static-parity gate — pre-push/CI parity (2026-06-02)
+
+Closes the §17.393 follow-up loop: the pre-push hook protects only clones that ran `make hooks-install` (verified per-clone-dormant in the §17.393 fresh-clone test), so the gate needed a server-side counterpart that can't be skipped. `.github/workflows/ci.yml`'s tier-1 `smoke` job (runs on every push **and** `pull_request: [main]`) already ran the four byte-equal/grep vendor gates as four separate steps — but it never ran the two static-scan pytest guards, because neither is `smoke`-marked so `make ci-smoke` skips them. That's exactly why §17.392 (an `_sse("cancelled")` literal missing from `ALL_EVENT_NAMES`) reached a full `make test` instead of failing fast.
+
+**Change.** Replaced the four individual gate steps (§17.186/§17.190/§17.195/§17.245) in the `smoke` job with a single `run: make ci-tier-0`. CI now runs the **identical target** the pre-push hook runs — local pre-push, `make ci-tier-0`, and the PR gate can't drift apart. The consolidation folds in the two missing guards (`test_sse_event_inventory.py` — the §17.392 class — and `test_sdk_schema_parity.py`). Net `ci.yml` change: −4 steps +1 step, same four sub-gates plus two new ones.
+
+**Why it's cloud-safe (verified, not assumed).** The two guards have no app-dependency surface: `app/__init__.py` is empty and `app/sse_events.py` imports nothing, so `from app.sse_events import ALL_EVENT_NAMES` needs zero runtime deps; `test_sdk_schema_parity.py` imports only `pathlib`. Proven by running the exact recipe command in a **clean venv with only `pytest`** (no `structlog`, no `requirements-ci.txt`, no app deps) → 8 passed, exit 0. The cloud `smoke` runner has strictly more than that. The four `check-*` prereqs are pure `diff`/`grep`/`sed` shell — already proven on `ubuntu-latest` by the steps they replace.
+
+**Scope boundary.** Tier-2 (Milvus live-schema parity, §17.319/§17.336) stays on the self-hosted runner — a no-services PR gate can't read a live collection. `test.yml`'s dev-image full-suite job already covers the inventory tests too; this change adds the *fast* catch on the cloud `smoke` path so the failure surfaces in seconds, not after a Docker build + full run. Could not exercise the actual Actions run locally (`act` not installed); verified via YAML parse + clean-venv recipe simulation. The §14.3 CI-tier table is independently stale (names `ci-local`/`ci-eval` targets that no longer exist) — flagged, left for a focused doc pass.
+
+**Cost.** Net −10 lines in `ci.yml`, 0 src/test change, 0 new deps, 0 migrations. Closes the §17.391/§17.392 root-cause class: the cheap static guards now fail fast at push (hook) AND PR (CI), with `make test` as the backstop.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
