@@ -1884,15 +1884,18 @@ This is the rolling snapshot; per-commit deltas live in the §-log below. The st
 
 ### 14.3 CI tiers
 
-| Tier | Target | Trigger | Where | Tests | Time |
-|---|---|---|---|---|---|
-| 1 | `make ci-smoke` | Every push & PR | GitHub cloud runners | 24 unit (extraction pipeline) | <30s |
-| 2 | `make ci-local` | Manual / main merge | local self-hosted | 24 unit + 4 integration + 7 golden | ~5 min |
-| 3 | `make ci-eval` | Manual | local | 40-query ground truth | ~8 min (cached <1s) |
+The real CI surface is **three workflows / four jobs** — the old 3-tier `make` model here was stale: `make ci-local` and `make ci-eval` **never existed** (the names predate §17.247's `ci-tier-2` and §17.358's retirement of `make eval`), and "24 tests / <30s" was off by ~70× (refreshed §17.398).
 
-**Cloud-safe (Tier 1):** `tests/test_verify_extraction.py` — 24 pure-Python tests, no Docker, no Milvus, no Postgres, no Ollama. Installs from `requirements-ci.txt`. Runs on GitHub free `ubuntu-latest` (7 GB RAM, 2 vCPU).
+| Workflow · job | What it runs | Trigger | Runner | Status |
+|---|---|---|---|---|
+| `ci.yml` · **smoke** | §17.175 OpenAPI gate → `make ci-tier-0` (§17.393/§17.395 static-parity: 4 vendor byte-equal gates + SSE-inventory + SDK-schema scans) → `make ci-smoke` (~1766 `-m smoke` tests) | every push & `pull_request:[main]` | `ubuntu-latest` | green, ~7 min — **the real PR gate** |
+| `ci.yml` · **integration** | `make ci-tier-2` — `/health` + `make doctor` + golden-retrieval sidecar + bench gates | push to `main`, **gated** `vars.RUN_TIER2_INTEGRATION=='true'` | self-hosted | **skipped** by default (§17.397 — host runner is bound to a different repo) |
+| `test.yml` · **unit-tests** | builds the orchestrator image + a Postgres service, runs `pytest tests/ -k "not integration"` | push & `pull_request:[main]` | `ubuntu-latest` + postgres svc | ⚠ **times out at 15 min** on the 2-vCPU free runner → cancelled every run; not currently a working gate (flagged §17.398, unfixed) |
+| `retrieval-quality.yml` · **score** | `pytest test_score_retrieval.py test_rag_pipeline_smoke.py` (recall@k / MRR math + 3-query fusion smoke) | PR touching `rag_pipeline.py` / `rerankers.py` / `golden_set.json` | `ubuntu-latest` | non-blocking (`continue-on-error`) |
 
-**Local-only (Tier 2+):** Milvus standalone needs 8+ GB RAM (free runners cap at 7); Ollama CPU inference too slow for cloud CI timeouts. The integration job is conditioned on a self-hosted runner being available.
+**Cloud-safe (`ubuntu-latest`):** `smoke` needs no live services (`ci-tier-0` + `ci-smoke` are static / no-stack); `test.yml` provisions only a Postgres service (no Milvus/Ollama).
+
+**Self-hosted only:** tier 2 (`make ci-tier-2`) needs the full live compose stack — Milvus standalone wants 8+ GB (free runners cap at 7) and Ollama CPU inference exceeds cloud timeouts. Gated off by default (§17.397).
 
 ### 14.4 Pipeline-test caveat
 
@@ -1905,12 +1908,12 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 | `make test` | Full orchestrator suite (in-container) |
 | `make test-sdk` | SDK suite (`/code/sdk/tests/`) |
 | `make test-cli` | CLI suite (`/code/cli/tests/`) |
-| `make ci` | CI-safe tests (no live deps) |
-| `make ci-smoke` | Tier 1 (cloud-safe) |
-| `make ci-local` | Tier 2 (needs local stack) |
-| `make ci-eval` | Tier 3 (40-query ground-truth) |
-| `make agent` | Smoke-marked execution agent tests |
-| `make eval` | Retrieval eval against ground truth |
+| `make ci` | CI-safe tests, dev image (no live deps) + bench gates |
+| `make ci-smoke` | Cloud-safe smoke (`-m smoke`, host pytest) — `ci.yml` tier 1 |
+| `make ci-tier-0` | §17.393 static-parity gate (no services, ~2s) — pre-push hook + PR gate |
+| `make ci-tier-2` | §17.247 full-stack integration (needs the live compose stack) |
+| `make hooks-install` | §17.393 — activate `.githooks` pre-push hook (run once per clone) |
+| `make agent` | Smoke-marked execution-agent tests |
 | `make bench` | Performance benchmark suite |
 | `make health` / `status` / `clean` | Hit `/health`, `/status`, `/jobs/cleanup` via curl |
 | `make migrate` | Force-run migrations inside container |
@@ -21654,6 +21657,18 @@ Surfaced while verifying §17.395 in real CI. `ci.yml`'s Tier 2 `integration` jo
 **Not done (operator decision).** Re-registering the runner to serve scaffold-engine touches the user's separate `smokieRAGs` CI, so it's left to the operator; the two repos have different owners (`AEDeFruscio` personal vs `LocketKeyLLC` org), so a repo-level runner can't serve both — org-level registration is the clean path. See [[verify-actual-ci-and-schema-gates]].
 
 **Cost.** +1 condition + comment rewrite in `ci.yml`, 0 src/test change. Tier-1 smoke (the real PR gate, §17.395) is unaffected.
+
+---
+
+### §17.398 fix the stale §14.3 CI-tier table (+ §14.5 targets) (2026-06-02)
+
+Flagged in §17.395. §14.3 described a 3-tier `make` model that no longer matches reality: it named `make ci-local` and `make ci-eval` as tier-2/tier-3 targets — **neither exists** (verified `grep -E '^ci-eval:' Makefile` → missing; the names predate §17.247's `ci-tier-2` and §17.358's retirement of `make eval`/`eval_retrieval.py`), claimed tier 1 was "24 extraction tests / <30s" (actual: `make ci-smoke` collects **~1766 `-m smoke` tests**, ~7 min observed on `ubuntu-latest`), and omitted `ci-tier-0` (§17.393/§17.395) entirely.
+
+**Change.** Rewrote §14.3 as the actual surface — **three workflows / four jobs**: `ci.yml` `smoke` (the real PR gate: OpenAPI → ci-tier-0 → ci-smoke) and `integration` (gated `ci-tier-2`, §17.397); `test.yml` `unit-tests`; `retrieval-quality.yml` `score` (non-blocking). Each row carries trigger + runner + status, all read from the live workflow files. Fixed the matching stale rows in §14.5's make-targets table (dropped `ci-local`/`ci-eval`/`eval`, added `ci-tier-0`/`ci-tier-2`/`hooks-install`).
+
+**Honest finding while verifying (flagged, NOT fixed).** `test.yml`'s `unit-tests` job has been **cancelled on every recent run** — not a transient: `gh run view` shows "exceeded the maximum execution time of 15m0s" → the job builds the orchestrator image + runs `pytest tests/ -k "not integration"` on a 2-vCPU free runner and blows the 15-min cap. So it's been a non-functional gate for a while; the §14.3 row says so. Fixing it (raise the cap, cache the Docker build, or shard the suite) is a separate operator decision, not bundled here. The working PR gate is `ci.yml`'s `smoke` job.
+
+**Cost.** Doc-only — §14.3 + §14.5 in OVERVIEW, 0 code/CI change. (`ci.yml`'s stale `~681 smoke tests` header comment is left as-is; out of scope for an OVERVIEW edit.)
 
 ---
 
