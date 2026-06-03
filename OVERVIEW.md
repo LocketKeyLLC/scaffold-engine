@@ -21645,6 +21645,18 @@ Closes the §17.393 follow-up loop: the pre-push hook protects only clones that 
 
 ---
 
+### §17.397 gate the Tier 2 integration job behind a repo variable — stop the perpetual queue (2026-06-02)
+
+Surfaced while verifying §17.395 in real CI. `ci.yml`'s Tier 2 `integration` job is `runs-on: self-hosted` and fired on every push to `main`. The host's self-hosted runner (`actions.runner.AEDeFruscio-smokieRAGs.pop-os`, active) is registered to **`AEDeFruscio/smokieRAGs`**, not `LocketKeyLLC/scaffold-engine` — so `repos/LocketKeyLLC/scaffold-engine/actions/runners` reports **0 runners** and each Tier 2 job **queued indefinitely** (one observed queued ~17 h). The pre-§17.397 comment claimed the job "sits dormant and never blocks tier 1" — half-true: it doesn't block smoke, but a `self-hosted` job with no runner *queues*, it doesn't skip, leaving every run perpetually in-progress.
+
+**Fix.** Added a `vars.RUN_TIER2_INTEGRATION == 'true'` clause to the job's `if:`. With the variable unset (the current state), the job **skips** — instant, clean, run goes green on smoke alone. To re-enable once a runner serves this repo: register the runner (org-level on `LocketKeyLLC`, or a second instance) and `gh variable set RUN_TIER2_INTEGRATION --body true`. Corrected the misleading comment to describe the queue-forever reality and the enable path. Job definition + `make ci-tier-2` are untouched, so nothing is lost — only the auto-trigger is gated.
+
+**Not done (operator decision).** Re-registering the runner to serve scaffold-engine touches the user's separate `smokieRAGs` CI, so it's left to the operator; the two repos have different owners (`AEDeFruscio` personal vs `LocketKeyLLC` org), so a repo-level runner can't serve both — org-level registration is the clean path. See [[verify-actual-ci-and-schema-gates]].
+
+**Cost.** +1 condition + comment rewrite in `ci.yml`, 0 src/test change. Tier-1 smoke (the real PR gate, §17.395) is unaffected.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

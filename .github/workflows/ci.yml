@@ -111,9 +111,16 @@ jobs:
   # ──────────────────────────────────────────────────────────
   # Tier 2: full-stack integration (§17.247)
   # ──────────────────────────────────────────────────────────
-  # Activates on push to main when a self-hosted runner is registered.
-  # Inactive without a runner — the job sits dormant and never blocks
-  # tier 1 (smoke) which runs on ubuntu-latest.
+  # §17.397 — gated behind the `RUN_TIER2_INTEGRATION` repo variable.
+  # With `runs-on: self-hosted` and NO runner registered to this repo, a
+  # job whose `if:` is true does NOT sit "dormant" — it QUEUES forever and
+  # leaves the whole run perpetually in-progress (observed: a Tier 2 job
+  # queued ~17h because the host's runner is bound to a different repo).
+  # The repo-variable gate makes the job SKIP (clean, instant) until both
+  # (a) a self-hosted runner serves this repo and (b) someone opts in:
+  #     gh variable set RUN_TIER2_INTEGRATION --body true
+  # Unset / anything-but-"true" → skipped, so smoke (ubuntu-latest) is the
+  # effective gate and the run completes green. Tier 1 is never blocked.
   #
   # The work itself is bundled in `make ci-tier-2` (Makefile, §17.247)
   # so an operator can run the SAME sequence locally before pushing:
@@ -130,7 +137,7 @@ jobs:
   integration:
     name: "Tier 2 · Full-stack integration (§17.247)"
     runs-on: self-hosted
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: vars.RUN_TIER2_INTEGRATION == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: smoke
     timeout-minutes: 20
 
