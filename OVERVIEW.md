@@ -1865,23 +1865,15 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (post-U.7, 2026-05-07)
+### 14.1 Test counts (post-§17.393, 2026-06-02)
 
-- **Orchestrator (`make test`)**: 961 passed, 14 pre-existing failed, 5 skipped. Net additions since v1.0.0:
-  - +4 `test_pre_migration_sweep.py` (audit item 7 / lifespan sweep)
-  - +25 `test_recovery.py` (audit item 10 / next-actions registry)
-  - +4 in `test_execution_handler_module.py` for the `next_actions` field
-  - +10 `test_config_endpoint.py` (Sprint U.5 / `/config`)
-  - +1 `test_recovery.py::test_cancelled_offers_rerun_alongside_delete` (Sprint U.7 / F7)
-  - +2 `test_status_logs.py` (Sprint U.7 / F1+F3 — title and next_actions parity)
-  - +2 `test_schedule_command.py` (Sprint U.7 / F4 — `--tz` parsed and forwarded)
-- **SDK (`make test-sdk`)**: 88 passed. Unchanged across U-sprints.
-- **CLI (`make test-cli`)**: 78 passed (was 38 at v1.0.0; 65 post-U.6). Net additions:
-  - +23 `test_project.py` (Sprint U.4 / nicknames + status explainer)
-  - +4 in `test_commands.py` for `scaffold whatnow` (Sprint U.6)
-  - +13 in `test_commands.py` for the U.7 parity sweep (jobs find/rename/delete, schedule, rag, optimize, skip, research list/rename, model list/available)
+Rolling baseline — all three suites run on this host in the dev image, verified this session:
 
-The 14 orchestrator failures span: `test_cleanup.py` (6 — `reap_stale_jobs` mock side_effect drift after 4→5+ statement expansion), `test_execution_handler.py::test_status_connection_error_rendered`, `test_retrieval_golden.py` (1 TDD case), `test_scaffold_router_commands.py` (4 — status/research commands), `test_scaffold_router_helpers.py::test_contains_key_commands`, `test_schedule_command.py::test_unknown_sub_returns_help`. Pre-existing on clean main; not regressions from any U-sprint commit.
+- **Orchestrator (`make test`)**: **3301 passed, 0 failed, 0 skipped** in 10:51. Fully green after §17.391 (removed the stale `test_ignores_eval_retrieval_script` orphaned by §17.358) and §17.392 (registered the `cancelled` SSE event in `ALL_EVENT_NAMES`); §17.390's empty-query guard added its cases clean. The prior baseline was §17.336's 3144/0/3 — the +157 net is the §17.337→§17.393 work plus the §17.350 golden-retrieval skips going active.
+- **SDK (`make test-sdk`)**: **138 passed** in 2.1s.
+- **CLI (`make test-cli`)**: **157 passed** in 1.2s.
+
+This is the rolling snapshot; per-commit deltas live in the §-log below. The static-parity subset (schemas / sse-events / next-actions vendor byte-equality + the SSE-inventory and SDK-schema scans) now also runs at push time via the §17.393 `ci-tier-0` pre-push hook (`make hooks-install` to activate per clone).
 
 ### 14.2 Markers
 
@@ -21618,6 +21610,12 @@ Closes the §17.392 follow-up. §17.391 and §17.392 were both pre-existing reds
 **Hook wiring.** `.githooks/pre-push` (version-controlled, `chmod +x`) cd's to the repo root and runs `make ci-tier-0`; non-zero blocks the push with a "bypass with `git push --no-verify`" hint. Activation is per-clone via **`make hooks-install`** → `git config core.hooksPath .githooks` (`.git/hooks` isn't tracked, so a committed hook needs this one-time pointer; `core.hooksPath` is local config, not shareable). Verified end-to-end on this host: (1) happy path — this very §17.393 push ran the hook green; (2) block path — injecting a one-char drift into `pipelines/_vendor/_sse_events.py` made `.githooks/pre-push` exit 1 at `check-sse-events`, and reverting restored green.
 
 **Cost.** +~25 LOC Makefile (2 targets) + 1 hook script, 0 src change, 0 new deps (host pytest already present), 0 migrations. The gate is advisory-strong: `--no-verify` bypasses it, and CI's full `make test` remains the backstop — tier-0 just moves the cheap catches left to push time.
+
+---
+
+### §17.394 test-suite baseline refresh — §14.1 → 3301/0/0 (2026-06-02)
+
+Full-suite run after the §17.390→§17.393 cohort. Refreshes the rolling baseline in §14.1, which was badly stale (961 passed, post-U.7, 2026-05-07 — predates ~10 sprints of work). All three suites verified on this host in the dev image: **orchestrator `make test` 3301 passed / 0 failed / 0 skipped in 10:51**, SDK `make test-sdk` 138 passed, CLI `make test-cli` 157 passed. The orchestrator suite is fully green — the only two reds (the post-§17.390 run's 2 failures) were the pre-existing §17.391/§17.392 cases, now closed. Net vs the prior recorded baseline (§17.336, 3144/0/3): +157 passing, and the 3 skips went active (§17.350 golden-retrieval). Doc-only — §14.1 heading/counts updated + this log entry; no code or test change.
 
 ---
 
