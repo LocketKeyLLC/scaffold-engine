@@ -18,6 +18,7 @@ See OVERVIEW.md §9 ("Assist Mode") for the design.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import asdict
@@ -732,19 +733,39 @@ async def handoff_step(
     finally:
         # On return, restore assist mode unless all_remaining took over.
         if mode == "single":
-            async with async_session() as db3:
-                # Only restore if the session is still active.
-                still = (await db3.execute(
-                    text("SELECT status FROM assist_sessions WHERE id = :sid"),
-                    {"sid": session_id},
-                )).scalar()
-                if still == "active":
-                    await db3.execute(
-                        text("UPDATE jobs SET status = 'assisted_executing', updated_at = NOW() "
-                             "WHERE id = :jid AND status NOT IN ('completed', 'failed', 'cancelled')"),
-                        {"jid": job_id},
-                    )
-                    await db3.commit()
+            # §17.410 — shield the restore so a client disconnect mid-handoff
+            # can't abort it. The bare awaits here used to run unprotected: a
+            # CancelledError (SSE disconnect while the handed-off node executes)
+            # interrupted the restore, leaving the job stuck in 'executing'
+            # instead of 'assisted_executing' until the reaper. Mirrors the
+            # cancel-safe finalize in research_state._run_with_session_lifecycle.
+            async def _restore_assist_mode() -> None:
+                async with async_session() as db3:
+                    # Only restore if the session is still active.
+                    still = (await db3.execute(
+                        text("SELECT status FROM assist_sessions WHERE id = :sid"),
+                        {"sid": session_id},
+                    )).scalar()
+                    if still == "active":
+                        await db3.execute(
+                            text("UPDATE jobs SET status = 'assisted_executing', updated_at = NOW() "
+                                 "WHERE id = :jid AND status NOT IN ('completed', 'failed', 'cancelled')"),
+                            {"jid": job_id},
+                        )
+                        await db3.commit()
+
+            try:
+                await asyncio.shield(_restore_assist_mode())
+            except asyncio.CancelledError:
+                # Caller-side cancellation hit while the shielded restore runs;
+                # the UPDATE continues on the loop. Re-raise to preserve
+                # asyncio cancellation semantics.
+                logger.warning(
+                    "assist_handoff_restore_cancel_propagated_but_shielded: "
+                    "session_id=%s job_id=%s — UPDATE continues on loop",
+                    session_id, job_id,
+                )
+                raise
 
     yield _sse("assist_handoff_done", {
         "session_id": session_id,

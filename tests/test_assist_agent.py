@@ -7,6 +7,7 @@ Postgres.
 """
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -153,3 +154,95 @@ async def test_submit_step_rejects_non_claimable_non_pending():
             evidence="x", action="submit", db=db,
         )
     assert "must_claim_first" not in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# §17.410 — handoff_step (mode='single') restore must survive cancellation.
+# The restore to 'assisted_executing' runs in a finally wrapped in
+# asyncio.shield; a client disconnect mid-handoff must NOT leave the job
+# stranded in 'executing'.
+# ---------------------------------------------------------------------------
+class _FakeSession:
+    """Module-level async_session() stand-in that records execute/commit."""
+
+    def __init__(self, rec):
+        self._rec = rec
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, stmt, params=None):
+        self._rec.append(("execute", str(stmt), params))
+        r = MagicMock()
+        r.scalar.return_value = "active"  # db3 SELECT sees an active session
+        return r
+
+    async def commit(self):
+        self._rec.append(("commit", None, None))
+
+
+def _handoff_db():
+    """The injected `db`: SELECT active session, then UPDATE handed_off."""
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _result(mappings_first={"id": "sess-1", "job_id": "job-1"}),
+        _result(),
+    ]
+    return db
+
+
+@pytest.mark.asyncio
+async def test_handoff_single_restores_assist_mode(monkeypatch):
+    rec: list = []
+    monkeypatch.setattr(assist_agent, "async_session", lambda: _FakeSession(rec))
+
+    async def _fake_exec_all(job_id):
+        yield 'event: node\ndata: {}\n\n'
+
+    monkeypatch.setattr(
+        "app.modules.execution_agent.execute_all_nodes", _fake_exec_all,
+    )
+
+    events = [
+        ev async for ev in assist_agent.handoff_step(
+            session_id="sess-1", node_key="T1", mode="single", db=_handoff_db(),
+        )
+    ]
+    assert any("assist_handoff_done" in e for e in events)
+    restore = [c for c in rec if c[0] == "execute" and "assisted_executing" in c[1]]
+    assert restore, "happy-path restore to assisted_executing did not run"
+    assert any(c[0] == "commit" for c in rec)
+
+
+@pytest.mark.asyncio
+async def test_handoff_single_restore_survives_cancellation(monkeypatch):
+    rec: list = []
+    monkeypatch.setattr(assist_agent, "async_session", lambda: _FakeSession(rec))
+
+    async def _fake_exec_all(job_id):
+        yield 'event: node\ndata: {}\n\n'
+        await asyncio.sleep(10)  # block so we can cancel mid-stream
+
+    monkeypatch.setattr(
+        "app.modules.execution_agent.execute_all_nodes", _fake_exec_all,
+    )
+
+    async def _drive():
+        async for _ in assist_agent.handoff_step(
+            session_id="sess-1", node_key="T1", mode="single", db=_handoff_db(),
+        ):
+            pass
+
+    task = asyncio.create_task(_drive())
+    await asyncio.sleep(0.05)  # let it reach the blocking execute_all_nodes
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Give the shielded restore a tick to complete on the loop.
+    await asyncio.sleep(0.1)
+    restore = [c for c in rec if c[0] == "execute" and "assisted_executing" in c[1]]
+    assert restore, "shielded restore did not run under cancellation (E1 regression)"
+    assert any(c[0] == "commit" for c in rec)

@@ -21804,6 +21804,18 @@ The four deferred low-severity items from the §17.408 ledger, fixed as one cohe
 
 ---
 
+### §17.410 shield the assist handoff restore against client disconnect — ext-review E1 (2026-06-04)
+
+From the 2026-06-04 extended-coverage review (finding E1). `assist_agent.handoff_step(mode='single')` runs the autonomous executor for one node, then in a `finally` restores the job from `executing` back to `assisted_executing`. That restore was a bare `await` chain (open session → SELECT session status → UPDATE → commit) with **no cancellation protection**. A client SSE disconnect while the handed-off node executes raises `CancelledError` into the `async for … yield`, the `finally` fires, and its first `await` was itself cancelled — so the restore never ran and the job stayed stuck in `executing` until the stale-job reaper (24h on this host).
+
+**The fix.** The restore body moved into a nested `_restore_assist_mode()` coroutine wrapped in `asyncio.shield`, with an `except asyncio.CancelledError` that logs and re-raises (UPDATE continues on the loop). Identical pattern to the cancel-safe finalize in `research_state._run_with_session_lifecycle` (§17.168). Restore logic is otherwise byte-for-byte unchanged. `import asyncio` added to the module.
+
+**Tests.** Two new unit tests in `tests/test_assist_agent.py`: `test_handoff_single_restores_assist_mode` (happy path — restore UPDATE + commit run) and `test_handoff_single_restore_survives_cancellation` (drives the generator in a task, cancels it mid-`execute_all_nodes`, asserts the shielded restore still committed the `assisted_executing` UPDATE — the direct E1 regression guard). Full assist suite: 103 passed.
+
+**Cost.** 1 import + a finally refactor (logic-preserving) + 2 tests. No schema/API change.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
