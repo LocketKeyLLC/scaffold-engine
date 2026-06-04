@@ -21724,6 +21724,16 @@ The §17.401 run's residual 26 errors were a third, distinct env gap (not pipeli
 
 ---
 
+### §17.404 `paths-ignore: ['**.md']` on ci.yml + test.yml — skip docs-only runs (2026-06-02)
+
+Now that `test.yml` is a real ~14-min metered full-suite run (§17.399→§17.402) firing on every push to `main`, a pure-docs push (an OVERVIEW.md `§`-entry, a README tweak) was triggering it — and `ci.yml` smoke — for zero code signal. Added `paths-ignore: ['**.md']` to the `push` and `pull_request` triggers of both. GitHub fires `paths-ignore` only when **every** changed file matches, so a mixed code+docs commit still runs the gates; a markdown-only commit skips them. Scoped to `**.md` only — deliberately NOT `docs/**`, because `docs/openapi.json` is a contract artifact the §17.175 gate checks (though in practice it only changes alongside a schema edit that would trigger the run anyway).
+
+**Safe here.** `main` is **not branch-protected** (`branches/main/protection` → 404), so there are no required status checks — the usual `paths-ignore` gotcha (a required check never reporting on a docs-only PR, blocking merge) doesn't apply. `retrieval-quality.yml` already uses positive `paths:` filters; untouched.
+
+**Cost.** +2 trigger keys per workflow, 0 code/test change. This very commit is mixed (workflows + this entry) so it still runs; the *next* markdown-only push is what demonstrates the skip.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

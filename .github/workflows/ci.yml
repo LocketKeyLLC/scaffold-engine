@@ -9,10 +9,15 @@
 name: CI
 
 on:
+  # §17.404 — skip docs-only pushes/PRs. paths-ignore fires only when EVERY
+  # changed file matches, so a mixed code+docs commit still runs the gates;
+  # a pure OVERVIEW.md/README edit doesn't burn a metered run.
   push:
     branches: ["*"]
+    paths-ignore: ['**.md']
   pull_request:
     branches: [main]
+    paths-ignore: ['**.md']
 
 env:
   PYTHON_VERSION: "3.12.13"

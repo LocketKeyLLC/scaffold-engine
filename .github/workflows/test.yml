@@ -1,10 +1,15 @@
 name: Scaffold Engine CI
 
 on:
+  # §17.404 — skip docs-only pushes/PRs (paths-ignore fires only when ALL
+  # changed files match), so a pure OVERVIEW.md edit doesn't trigger the
+  # ~14-min metered full-suite build. Mixed code+docs commits still run.
   push:
     branches: [main]
+    paths-ignore: ['**.md']
   pull_request:
     branches: [main]
+    paths-ignore: ['**.md']
 
 # §17.399 — cancel superseded runs. This job is a ~20-min full-suite build
 # on a metered 2-core private-repo runner; without this, rapid pushes to the
