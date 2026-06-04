@@ -84,3 +84,40 @@ def test_slow_health_logs_info(fast_app, caplog):
     perf_records = [r for r in caplog.records if r.name == "scaffold.perf"]
     assert perf_records, "expected a scaffold.perf log record"
     assert perf_records[-1].levelno == logging.INFO
+
+
+# ---------- §17.411 — 404 cardinality guard ----------
+
+def test_matched_route_uses_path_template(fast_app):
+    """A matched route records its template (here the literal /work, which
+    is also the template since it has no path params)."""
+    captured = []
+    with patch(
+        "app.observability.metrics.record_http_request",
+        side_effect=lambda **kw: captured.append(kw),
+    ):
+        client = TestClient(fast_app)
+        client.get("/work")
+    assert captured, "expected a record_http_request call"
+    assert captured[-1]["path_template"] == "/work"
+    assert captured[-1]["status"] == 200
+
+
+def test_unmatched_path_buckets_under_sentinel(fast_app):
+    """Unrouted 404 paths must collapse to the '__unmatched__' sentinel so a
+    fuzzer can't explode http_requests_total label cardinality (E1→§17.411)."""
+    captured = []
+    with patch(
+        "app.observability.metrics.record_http_request",
+        side_effect=lambda **kw: captured.append(kw),
+    ):
+        client = TestClient(fast_app)
+        # Two distinct unmatched paths — both must report the SAME template.
+        client.get("/no/such/path/aaa")
+        client.get("/no/such/path/bbb-different")
+    assert len(captured) == 2
+    templates = {c["path_template"] for c in captured}
+    assert templates == {"__unmatched__"}, (
+        f"unmatched paths leaked literal URLs into the metric label: {templates}"
+    )
+    assert all(c["status"] == 404 for c in captured)

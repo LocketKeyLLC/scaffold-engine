@@ -58,12 +58,17 @@ class PerformanceMiddleware(BaseHTTPMiddleware):
         )
         # Sprint X.26 — record into Prometheus. Use the matched route's
         # path template when available so per-id paths (/jobs/{id}/...)
-        # don't explode label cardinality. Falls back to the literal
-        # path for unrouted requests (404s before route resolution).
+        # don't explode label cardinality.
+        # §17.411 — unrouted requests (404s before route resolution) have no
+        # route in scope. Bucket them under a single "__unmatched__" sentinel
+        # rather than the literal URL, so a path fuzzer/scanner hitting many
+        # distinct unmatched paths can't blow up http_requests_total label
+        # cardinality (and the Prometheus scrape memory). The literal path is
+        # still in the structured perf log line above for per-request detail.
         try:
             from app.observability import metrics as _metrics
             route = request.scope.get("route")
-            template = getattr(route, "path", None) or path
+            template = getattr(route, "path", None) or "__unmatched__"
             _metrics.record_http_request(
                 method=request.method,
                 path_template=template,

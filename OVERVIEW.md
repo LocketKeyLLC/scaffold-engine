@@ -21816,6 +21816,18 @@ From the 2026-06-04 extended-coverage review (finding E1). `assist_agent.handoff
 
 ---
 
+### §17.411 bucket unmatched 404 paths under a metric sentinel — ext-review E2 (2026-06-04)
+
+From the 2026-06-04 extended-coverage review (finding E2). `PerformanceMiddleware` records every request into `http_requests_total{method,path_template,status}`. For **matched** routes it uses the route template (`/jobs/{id}/...`) so per-id paths don't explode label cardinality — but for **unmatched** routes (404s before route resolution) `request.scope["route"]` is `None`, and the code fell back to the **literal URL path**. A scanner or fuzzer hitting many distinct unrouted paths (`/aaa`, `/../../etc/passwd`, `/x?…`) therefore minted a new Prometheus label series per path — unbounded cardinality growth, i.e. a slow memory leak on the scrape target. `/metrics` is auth-exempt, widening exposure.
+
+**The fix.** One line: `template = getattr(route, "path", None) or "__unmatched__"`. All unrouted requests now collapse to a single `__unmatched__` bucket. Per-path detail is preserved in the structured `scaffold.perf` log line (which already logs the literal `path=%s`), just not as a metric label. Stale comment ("falls back to the literal path") corrected.
+
+**Tests.** Two new in `tests/test_performance_middleware.py`: `test_matched_route_uses_path_template` (a routed `/work` still records `/work`) and `test_unmatched_path_buckets_under_sentinel` (two *distinct* 404 URLs both record `__unmatched__`, status 404). Both patch `metrics.record_http_request` to capture the label. Perf+metrics suites: 28 passed.
+
+**Cost.** 1-line behavior change + comment + 2 tests. No schema/API change.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
