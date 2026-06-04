@@ -626,6 +626,26 @@ def _extract_threshold(page_count: int) -> int:
     return max(200, page_count * 50)
 
 
+async def _bounded_extract(fn, pdf_bytes: bytes) -> tuple[str, int]:
+    """Run a sync extractor off-loop with a wall-clock bound (§17.406).
+
+    ``wait_for`` cancels our await on timeout; the thread keeps running until
+    the lib returns (Python can't cancel threads), but the research session
+    fails cleanly instead of hanging on a corrupt/adversarial PDF.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(fn, pdf_bytes),
+            timeout=settings.research_pdf_extract_timeout,
+        )
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            f"PDF text extraction exceeded "
+            f"{settings.research_pdf_extract_timeout}s "
+            f"(corrupt or adversarially large PDF)"
+        ) from exc
+
+
 async def _extract_pdf_text(
     pdf_bytes: bytes,
     extractor: str = "auto",
@@ -637,14 +657,14 @@ async def _extract_pdf_text(
 
     _m = _ra()
     if extractor == "pypdf":
-        text_out, pages = await asyncio.to_thread(_m._extract_pypdf, pdf_bytes)
+        text_out, pages = await _bounded_extract(_m._extract_pypdf, pdf_bytes)
         return (text_out, pages, "pypdf", False)
 
     if extractor == "plumber":
-        text_out, pages = await asyncio.to_thread(_m._extract_pdfplumber, pdf_bytes)
+        text_out, pages = await _bounded_extract(_m._extract_pdfplumber, pdf_bytes)
         return (text_out, pages, "plumber", False)
 
-    text_out, pages = await asyncio.to_thread(_m._extract_pypdf, pdf_bytes)
+    text_out, pages = await _bounded_extract(_m._extract_pypdf, pdf_bytes)
     if len(text_out) >= _extract_threshold(pages):
         return (text_out, pages, "pypdf", False)
 
@@ -652,7 +672,7 @@ async def _extract_pdf_text(
         "pdf_extract_fallback: pypdf_chars=%d pages=%d threshold=%d",
         len(text_out), pages, _extract_threshold(pages),
     )
-    plumber_text, _ = await asyncio.to_thread(_m._extract_pdfplumber, pdf_bytes)
+    plumber_text, _ = await _bounded_extract(_m._extract_pdfplumber, pdf_bytes)
     if len(plumber_text) >= _extract_threshold(pages):
         return (plumber_text, pages, "plumber", True)
 

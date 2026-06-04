@@ -345,6 +345,12 @@ class Settings(BaseSettings):
     research_fetch_concurrency: int = Field(default=5, ge=1, le=100)
     research_fetch_timeout: int = Field(default=15, ge=1, le=300)
     research_url_fetch_timeout: int = Field(default=30, ge=1, le=300)
+    # §17.406 — bound the CPU-bound pypdf/pdfplumber extract so a corrupt or
+    # adversarially large PDF can't hang the research session indefinitely.
+    # wait_for cancels the awaiting coroutine on timeout (the off-loop thread
+    # keeps running until the lib returns — Python can't kill threads — but the
+    # session fails cleanly instead of blocking forever).
+    research_pdf_extract_timeout: int = Field(default=120, ge=1, le=600)
     research_heartbeat_interval: int = Field(default=8, ge=1, le=120)
     research_max_entry_chars: int = Field(default=8000, ge=100, le=100000)
     # §17.97 — global request body size cap (applies to all routes except

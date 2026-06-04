@@ -21740,6 +21740,18 @@ This entry is the test case: a **markdown-only** commit (touches only `OVERVIEW.
 
 ---
 
+### §17.406 bound PDF text extraction with a wall-clock timeout — close the architectural-review R1 (2026-06-04)
+
+From the 2026-06-04 architectural review (Phase A, finding R1). `_extract_pdf_text` (`app/modules/research_extractors.py`) dispatched the CPU-bound `pypdf`/`pdfplumber` parse via `asyncio.to_thread(...)` with **no** wall-clock bound. The event loop stays responsive (the work is off-loop), but a corrupt or adversarially large PDF could pin a thread-pool worker indefinitely, and the research session awaiting the result would hang with no clean failure — the only exit was the §17.x stale-job reaper hours later.
+
+**The fix.** New `_bounded_extract(fn, pdf_bytes)` wraps each `to_thread` call in `asyncio.wait_for(..., timeout=settings.research_pdf_extract_timeout)` (new setting, default **120 s**, range 1–600). On timeout it raises a typed `RuntimeError("PDF text extraction exceeded {N}s ...")`, which the existing research lifecycle (`_run_with_session_lifecycle`, research_state.py:441) catches and finalizes the session as `failed` with a readable message. All four `to_thread` sites (pypdf-direct, plumber-direct, auto-pypdf, auto-plumber-fallback) now route through the helper.
+
+**Honest limit.** `wait_for` cancels the *awaiting coroutine*, not the thread — Python can't cancel a running thread, so the orphaned worker keeps churning until the lib returns and only then frees its pool slot. This does **not** fully prevent pool starvation under a sustained adversarial-PDF flood; it does guarantee the session fails cleanly and promptly instead of blocking forever. A hard fix (separate process + kill) was judged not worth the complexity for the threat model (operator-supplied PDFs, not open upload).
+
+**Cost.** +1 config setting, +1 helper, 4 call-site swaps. No schema change. Behaviour for well-formed PDFs is unchanged (they return well under 120 s).
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
