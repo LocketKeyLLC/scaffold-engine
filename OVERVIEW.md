@@ -21764,6 +21764,31 @@ From the 2026-06-04 architectural review (Phase A, finding R2). The verification
 
 ---
 
+### §17.408 architectural review (2026-06-04) — findings ledger + skill-doc refresh (M1)
+
+A full inline architectural review of the engine core (`app/` + `pipelines/`). Five subsystem fan-out scans surfaced ~50 candidate findings (8 self-rated "CRITICAL"); each was verified against the actual code before acceptance. **Most were false positives** — the scanners flagged documented invariants because they hadn't read the surrounding hardening. This entry is the durable record so the cleared items aren't re-raised.
+
+**Fixed this review (Phase A):** §17.406 (PDF-extract timeout, R1), §17.407 (fold confidence write, R2).
+
+**Deferred — real but low-severity (Phase B, not yet done):**
+- **R3** `app/utils/staleness.py:~51` — cursor expr interpolates `entry_id > "{last_id}"` raw instead of `_escape_literal(last_id)`. Safe today (entry_ids are slug/hash) but violates the documented Milvus-expr-safety invariant.
+- **R4** `app/model_router.py:273,296` — `_dispatch_with_retry` mutates the caller's `payload` dict in place (`payload["model"]=…`). Prefer `{**payload, "model": model}`.
+- **R5** `app/modules/execution_agent.py:266` — `_get_next_node` does dep-check then atomic-claim as two statements. Safe under today's one-executor-per-job model; document the precondition or push the dep-check into the claim's `WHERE` if same-job concurrency is ever added.
+- **R6** `app/modules/rag_pipeline.py:733` — in-place `r.final_score = r.rrf_score` vs the `replace()` discipline used elsewhere in the file. Consistency only; objects there are fresh from `_rrf_fuse`, so no live-data risk.
+
+**M1 (this entry's doc work):** the skill reference at `~/.claude/skills/scaffold-engine/` described ~6,700 app lines / ~10 modules; reality is ~38k app lines with entire undocumented subsystems (`providers/`, `observability/`, `sim/`, `web/`, `cli/`, `sdk/`). The stale map actively misled the review agents. Refreshed `references/architecture.md` (accurate module map + new subsystem sections + a "truth lives in code, counts drift" caveat) and the `SKILL.md` header line-count. *(Skill files live outside this repo, so they're not in this commit — only this ledger is.)*
+
+**Cleared as FALSE POSITIVES (verified — do not re-raise without new evidence):**
+- "6× CRITICAL: `task.result()` orphans the research session on `CancelledError`" — handled by `research_state.py:436-499` `_run_with_session_lifecycle` `finally:` + `asyncio.shield` finalize (§17.168).
+- "providers swallow `CancelledError`" — `except Exception` deliberately doesn't catch `BaseException`; cancellation propagates and `async with client.stream()` cleans up.
+- "`embedding_cache._get_redis` race / returns None" — `aioredis.from_url()` is synchronous; no await between check and assign.
+- "RagResult mutation corrupts cached siblings" — `fused` objects are freshly built per request, not shared.
+- "pipeline `time.sleep` is a DoS" / "`rerankers.py:147` blocks the loop" — OWUI pipelines are synchronous by design; the reranker sleep is inside a `run_in_executor` cold-load (off-loop, commented).
+
+**Coverage honesty:** deep-verified core + execution + RAG + research + model-router/providers + pipelines. NOT equally deep-reviewed: `sim/` (4.6k EDA lines), `cli/`, `sdk/`, `observability/`, `scheduler.py`, `cleanup.py`, `assist_*`. Those remain open for a future pass.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
