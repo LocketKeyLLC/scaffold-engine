@@ -21828,6 +21828,22 @@ From the 2026-06-04 extended-coverage review (finding E2). `PerformanceMiddlewar
 
 ---
 
+### §17.412 ext-review low-severity cleanup batch — E3, E4, E6 (E5 dropped) (2026-06-04)
+
+The remaining low-severity items from the extended-coverage review, as one batch.
+
+- **E3 — sim measurement coercion (`app/sim/ngspice.py`, `verilator.py`, `symbiyosys.py`).** All three converted sidecar measurements with a bare `float(v)`: a non-numeric value (`"N/A"`, `None`) raised an uncaught `ValueError`/`TypeError` crashing the sizing iteration, while `"nan"`/`"inf"` converted *successfully* and flowed into the constraint checker — where `nan` comparisons are always `False`, so a failing constraint could silently read as 'met'. New shared `app/sim/_measure.py::coerce_finite_measurements()` drops both classes (logging each) and returns only finite floats; all three wrappers route through it. New `tests/test_sim_measure.py` (15 cases: finite kept, nan/inf/Infinity dropped, unparseable dropped, no NaN survives).
+- **E4 — alert file sink off the event loop (`app/observability/alerts.py`).** `_write_file_sink` does blocking `open()`+`write()` and was called directly from async `emit()` (which runs under the scheduler tick). Wrapped in `await asyncio.to_thread(...)` so a slow/stalled disk can't lag the loop. Only fires when `alert_file_path` is configured.
+- **E6 — dead assist step statuses (`app/modules/assist_agent.py`).** `awaiting_input` and `received` appeared in submit/handoff/next-pending guards and docstrings but a whole-repo write-grep confirmed **no code path ever sets them** (leftovers from the 023/024 migrations' CHECK lists). Removed from the read-side `status IN (…)` guards and validation tuples and corrected the docstrings; behavior-preserving since no row can hold those values. The DB CHECK constraints still permit them — harmless, and dropping them is a future migration not worth the churn here.
+
+**E5 dropped — not a valid improvement.** The review flagged `alerts.py`'s `finally` session-close using `except Exception` (not `BaseException`) as a consistency gap vs `database.py`. On inspection the current code is correct: `except Exception` lets a `CancelledError` during `__aexit__` propagate, preserving cancellation semantics; switching to `except BaseException` would *swallow* the cancellation — strictly worse. A best-effort alert close doesn't warrant `asyncio.shield`. No change made.
+
+**Verification.** Imports load; `coerce_finite_measurements` filters as designed. Affected suites (sim/alerts/assist/observability/sizing): 335 passed; new helper suite: 15 passed.
+
+**Cost.** +1 shared module + 1 test file, 3 call-site swaps, 1 executor-wrap, 5 dead-status removals. No schema/API change.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

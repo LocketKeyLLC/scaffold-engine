@@ -34,6 +34,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.sim._measure import coerce_finite_measurements
 from app.utils.http_clients import get_verilator_client
 
 logger = logging.getLogger("scaffold")
@@ -192,9 +193,7 @@ async def run_verilator(
             stderr=str(body.get("stderr", "")),
             build_stdout=str(body.get("build_stdout", "")),
             build_stderr=str(body.get("build_stderr", "")),
-            measurements={
-                k: float(v) for k, v in (body.get("measurements") or {}).items()
-            },
+            measurements=coerce_finite_measurements(body.get("measurements")),
             duration_ms=int(body.get("duration_ms", 0)),
             build_duration_ms=int(body.get("build_duration_ms", 0)),
             tool_version=str(body.get("tool_version", "unknown")),

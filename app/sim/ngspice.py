@@ -27,6 +27,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.sim._measure import coerce_finite_measurements
 from app.utils.http_clients import get_ngspice_client
 
 logger = logging.getLogger("scaffold")
@@ -171,7 +172,7 @@ async def run_ngspice(
             exit_code=int(body.get("exit_code", -1)),
             stdout=str(body.get("stdout", "")),
             stderr=str(body.get("stderr", "")),
-            measurements={k: float(v) for k, v in (body.get("measurements") or {}).items()},
+            measurements=coerce_finite_measurements(body.get("measurements")),
             duration_ms=int(body.get("duration_ms", 0)),
             tool_version=str(body.get("tool_version", "unknown")),
             timed_out=bool(body.get("timed_out", False)),

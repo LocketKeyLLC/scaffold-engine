@@ -32,6 +32,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.sim._measure import coerce_finite_measurements
 from app.utils.http_clients import get_symbiyosys_client
 
 logger = logging.getLogger("scaffold")
@@ -224,7 +225,9 @@ async def run_symbiyosys(
     # rest of the verification semantics live in the verdict column.
     measurements: dict[str, float] = {}
     if result.depth_reached is not None:
-        measurements["depth_reached"] = float(result.depth_reached)
+        measurements.update(
+            coerce_finite_measurements({"depth_reached": result.depth_reached})
+        )
 
     result.sim_run_id = await _insert_sim_run(
         db,

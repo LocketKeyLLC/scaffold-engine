@@ -171,8 +171,8 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
     Returns the step + assembled context, or None when the session is
     complete (no pending steps with satisfied deps remain). The caller
     should treat None as "session complete" only when also no
-    presented/awaiting_input/received/applied steps are in flight —
-    otherwise it just means the user has work to submit.
+    presented steps are in flight — otherwise it just means the user
+    has work to submit.
 
     Concurrency: an atomic UPDATE with FOR UPDATE SKIP LOCKED prevents
     two readers from claiming the same step.
@@ -302,8 +302,8 @@ async def submit_step(
 
     `action` is "submit" (mark dag_node done) or "skip" (mark skipped).
 
-    Concurrency: requires the step's prior status to be presented /
-    awaiting_input / received. Double-submit is a no-op.
+    Concurrency: requires the step's prior status to be 'presented'.
+    Double-submit is a no-op.
     """
     if action not in ("submit", "skip"):
         raise ValueError(f"action must be 'submit' or 'skip', got {action!r}")
@@ -329,7 +329,7 @@ async def submit_step(
     )).mappings().first()
     if not step:
         raise ValueError(f"step not found or session not active: {session_id}/{node_key}")
-    if step["status"] not in ("presented", "awaiting_input", "received"):
+    if step["status"] not in ("presented",):
         # Idempotent: already-committed submits return current state, not error.
         if step["status"] in ("committed", "skipped"):
             await db.commit()
@@ -509,7 +509,7 @@ async def _next_pending_node_key(*, session_id: str, db) -> Optional[str]:
         text("""
             SELECT node_key FROM assist_steps
              WHERE session_id = :sid
-               AND status IN ('pending', 'presented', 'awaiting_input', 'received')
+               AND status IN ('pending', 'presented')
              ORDER BY node_key LIMIT 1
         """),
         {"sid": session_id},
@@ -692,7 +692,7 @@ async def handoff_step(
             text("""
                 UPDATE assist_steps SET status = 'handed_off', updated_at = NOW()
                  WHERE session_id = :sid AND node_key = :nk
-                   AND status IN ('pending', 'presented', 'awaiting_input')
+                   AND status IN ('pending', 'presented')
             """),
             {"sid": session_id, "nk": node_key},
         )
@@ -701,7 +701,7 @@ async def handoff_step(
             text("""
                 UPDATE assist_steps SET status = 'handed_off', updated_at = NOW()
                  WHERE session_id = :sid
-                   AND status IN ('pending', 'presented', 'awaiting_input')
+                   AND status IN ('pending', 'presented')
             """),
             {"sid": session_id},
         )

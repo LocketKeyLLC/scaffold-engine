@@ -217,12 +217,16 @@ async def emit(
                     kind, exc,
                 )
 
-        # File sink
+        # File sink — §17.412: the append is blocking open()+write(); run it
+        # off the event loop so a slow/stalled disk (e.g. NFS) can't lag the
+        # scheduler tick that emit() runs under.
         if settings.alert_file_path:
             record_with_id = dict(record)
             if alert_id:
                 record_with_id["id"] = alert_id
-            _write_file_sink(settings.alert_file_path, record_with_id)
+            await asyncio.to_thread(
+                _write_file_sink, settings.alert_file_path, record_with_id,
+            )
 
         try:
             _metrics.alerts_emitted_total.labels(kind=kind, severity=severity).inc()
