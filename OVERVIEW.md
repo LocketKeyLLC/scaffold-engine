@@ -21752,6 +21752,18 @@ From the 2026-06-04 architectural review (Phase A, finding R1). `_extract_pdf_te
 
 ---
 
+### §17.407 fold the node-confidence write into `_set_node_status` — arch-review R2 (2026-06-04)
+
+From the 2026-06-04 architectural review (Phase A, finding R2). The verification-complete path in `execution_agent.py` persisted the terminal node state in **two** transactions: `_set_node_status(...)` (which `commit()`s internally), immediately followed by a separate `UPDATE dag_nodes SET confidence = :conf` + a second `commit()`. Two round-trips where one suffices, and a crash between them left the node at its terminal status with a stale/NULL confidence.
+
+**The fix.** `_set_node_status` gains `confidence: float | None = None` and `set_confidence: bool = False`. The UPDATE now carries `confidence = CASE WHEN :set_confidence THEN CAST(:confidence AS double precision) ELSE confidence END`. The `CAST` is load-bearing: without it asyncpg can't infer the param's type when the verification path writes an explicit `None` (skipped / zero-confidence nodes), and would raise *"could not determine data type of parameter"*. The CASE guard means the five non-verification callers of `_set_node_status` (claim-fail, prompt-build-error, tool-skip, etc.) leave the column untouched, exactly as before. The verification call site passes `confidence=db_confidence, set_confidence=True` and the separate UPDATE+commit is deleted.
+
+**Verification.** 79 execution-agent unit tests pass (feedback / citation-guard / verify-extraction / upstream-fetch / timeout / blocked-cause / prompt-build). Bind-level check against a non-existent row confirmed all three param shapes — `(True, 0.87)`, `(True, None)`, `(False, None)` — execute cleanly under asyncpg.
+
+**Cost.** Net −1 DB round-trip and −1 commit per verified node; confidence now lands atomically with status. 2 params added, 1 statement removed. No schema change.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

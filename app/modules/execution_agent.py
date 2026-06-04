@@ -317,6 +317,8 @@ async def _set_node_status(
     output: str | None = None,
     optimized_prompt: str | None = None,
     verification_reason: str | None = None,
+    confidence: float | None = None,
+    set_confidence: bool = False,
 ) -> None:
     """Update node status. COALESCE preserves prior values when caller passes None.
 
@@ -326,9 +328,15 @@ async def _set_node_status(
     re-injected because the read path on the next retry is gated by status
     + retry_count, not by the column itself.
 
-    Migration 026 added the column; pre-026 deployments of this code path
-    raise ``UndefinedColumn`` on the first call. Run migrations on startup
-    (default) or via `make migrate` after deploy.
+    ``confidence`` is written **only** when ``set_confidence=True`` (§17.407 —
+    folded in from a separate UPDATE+commit so the verifier's confidence lands
+    atomically with the terminal status, one round-trip instead of two). The
+    CASE guard lets the verification path write ``None`` explicitly (skipped /
+    zero-confidence nodes) while every other caller leaves the column untouched.
+
+    Migration 026 added ``last_verification_reason``; pre-026 deployments of
+    this code path raise ``UndefinedColumn`` on the first call. Run migrations
+    on startup (default) or via `make migrate` after deploy.
     """
     await db.execute(
         text("""
@@ -337,6 +345,9 @@ async def _set_node_status(
                 output_text = COALESCE(:output, output_text),
                 optimized_prompt = COALESCE(:optimized_prompt, optimized_prompt),
                 last_verification_reason = COALESCE(:verification_reason, last_verification_reason),
+                confidence = CASE WHEN :set_confidence
+                             THEN CAST(:confidence AS double precision)
+                             ELSE confidence END,
                 completed_at = CASE WHEN :status IN ('done','failed','skipped')
                                THEN NOW() ELSE completed_at END
             WHERE id = :id
@@ -347,6 +358,8 @@ async def _set_node_status(
             "output": output,
             "optimized_prompt": optimized_prompt,
             "verification_reason": verification_reason,
+            "confidence": confidence,
+            "set_confidence": set_confidence,
         },
     )
     await db.commit()
@@ -1181,12 +1194,9 @@ async def execute_next_node(
             output=output,
             optimized_prompt=exec_prompt,
             verification_reason=verify_reason_for_db,
+            confidence=db_confidence,
+            set_confidence=True,
         )
-        await db.execute(
-            text("UPDATE dag_nodes SET confidence = :conf WHERE id = :nid"),
-            {"conf": db_confidence, "nid": str(node_id)},
-        )
-        await db.commit()
         await _log_execution(
             db, job_id, node_id, "info" if verified else "warning",
             f"Node '{title}' -> {final_status}",
