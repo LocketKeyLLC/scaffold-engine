@@ -21734,6 +21734,12 @@ Now that `test.yml` is a real ~14-min metered full-suite run (§17.399→§17.40
 
 ---
 
+### §17.405 verify the §17.404 docs-only skip (2026-06-02)
+
+This entry is the test case: a **markdown-only** commit (touches only `OVERVIEW.md`). Per §17.404's `paths-ignore: ['**.md']`, pushing it should cause GitHub to create **no** `ci.yml` and **no** `test.yml` run for this commit's SHA — while the local `ci-tier-0` pre-push hook still runs (it's a git hook, independent of Actions path filters). Confirmed by checking `gh run list --workflow={ci,test}.yml` for the SHA after the push: absent = skip working. (If a run *had* appeared, `paths-ignore` would be misconfigured — e.g., a non-`.md` file sneaking into the commit.)
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
