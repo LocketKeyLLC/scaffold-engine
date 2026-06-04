@@ -159,9 +159,23 @@ class TestConfidenceInExecutionAgent:
         )
 
     def test_confidence_is_bound_as_parameter(self, sql_literals):
-        """Some string literal must parameterize confidence via :conf."""
-        matches = [s for s in sql_literals if "SET confidence = :conf" in s]
-        assert matches, "No SQL literal uses parameterized ':conf' for confidence"
+        """Confidence must be written via a bound parameter, never interpolated.
+
+        §17.407 folded the confidence write into ``_set_node_status``: the
+        literal changed from a standalone ``SET confidence = :conf`` to a CASE
+        guard binding ``:confidence`` (with a CAST for asyncpg NULL type
+        inference). The invariant under test is unchanged — confidence is
+        parameterized, not f-string interpolated — so accept either shape.
+        """
+        matches = [
+            s for s in sql_literals
+            if "SET confidence = :conf" in s
+            or ("confidence = CASE" in s and ":confidence" in s)
+        ]
+        assert matches, (
+            "No SQL literal binds confidence as a parameter "
+            "(expected ':conf' or a CASE guard with ':confidence')"
+        )
 
 
 # =====================================================================
