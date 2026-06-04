@@ -21789,6 +21789,21 @@ A full inline architectural review of the engine core (`app/` + `pipelines/`). F
 
 ---
 
+### §17.409 architectural-review Phase B — low-severity consistency batch R3–R6 (2026-06-04)
+
+The four deferred low-severity items from the §17.408 ledger, fixed as one cohesive low-risk batch (no behavior change beyond R4's defensive copy).
+
+- **R3 — `app/utils/staleness.py`.** The cursor-pagination expr interpolated `entry_id > "{last_id}"` raw, skipping the Milvus expr-safety escape the rest of the codebase uses. `_escape_literal` was rag_pipeline-private, and importing `modules` from `utils` would invert layering — so the escape now has a shared home: **new `escape_milvus_literal()` in `app/utils/milvus_utils.py`** (which staleness already imports). Staleness builds the cursor literal through it. rag_pipeline's private copy is left untouched (correct already; not worth the parity-gate churn to re-point it).
+- **R4 — `app/model_router.py`.** `_dispatch_with_retry` mutated the **caller's** `payload` dict via `payload["model"] = …` on each attempt/fallback. Added `payload = dict(payload)` on entry (shallow copy) so the swaps stay local. Defensive — no current caller depended on the mutation, but it removes a latent foot-gun.
+- **R5 — `app/modules/execution_agent.py`.** `_get_next_node` does dep-check then atomic-claim as two statements. **Comment-only** (no code change): documented that this is safe under the one-executor-per-job model and what to change (fold a `NOT EXISTS` over unfinished deps into the claim's WHERE) if same-job parallelism is ever added.
+- **R6 — `app/modules/rag_pipeline.py`.** The skip-rerank path mutated `r.final_score` in place; switched to `replace(r, final_score=r.rrf_score)` for uniformity with the module's immutable-RagResult discipline. The objects are fresh `_rrf_fuse` outputs so in-place was already safe — this is consistency, not a bug fix.
+
+**Verification.** Imports load; `escape_milvus_literal('a"b\\c')` → `a\"b\\c`. Targeted suites pass: 105 RAG/dedup/provenance + 164 model_router/dispatch/fallback. Full suite run separately.
+
+**Cost.** +1 shared util fn, 1 import, 3 one-line code changes + 1 comment. No schema change, no API change.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

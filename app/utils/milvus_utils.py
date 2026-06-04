@@ -29,6 +29,17 @@ _cached_at: float = 0.0
 _cache_lock = threading.Lock()
 
 
+def escape_milvus_literal(s: str) -> str:
+    """Escape ``\\`` and ``"`` for safe interpolation into a Milvus expr literal.
+
+    §17.409 (arch-review R3) — shared home for the escape that
+    ``rag_pipeline._escape_literal`` also performs, so layers that can't import
+    the `modules` package (e.g. ``app.utils.staleness``) still build expr
+    literals through the documented contract instead of raw f-string interpolation.
+    """
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _invalidate_cache() -> None:
     """Drop cached Collection so next get_collection() re-verifies.
 

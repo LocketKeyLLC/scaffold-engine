@@ -265,6 +265,10 @@ async def _dispatch_with_retry(
     retries = max_retries if max_retries is not None else settings.max_retries
     fallback = fallback or _smart_fallback(model, settings.model_fallback)
 
+    # §17.409 (arch-review R4) — shallow-copy so the per-attempt/fallback
+    # ``payload["model"] = …`` swaps below never mutate the caller's dict.
+    payload = dict(payload)
+
     # Phase 1: retry primary model
     last_resp = ModelResponse(model=model, success=False, error="no attempt", provider="ollama")
     attempts_used = 0

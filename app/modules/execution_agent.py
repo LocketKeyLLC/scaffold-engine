@@ -268,6 +268,15 @@ async def _get_next_node(db: AsyncSession, job_id: str) -> dict | None:
 
     Uses compound UPDATE ... WHERE id = (...) AND status='pending' RETURNING *
     so only one concurrent executor can claim a given node.
+
+    Concurrency precondition (§17.409, arch-review R5): the dependency check
+    and the claim are two statements, not one. This is safe under the current
+    **one-executor-per-job** model — `execute_next_node` claims a single node
+    per call and the job's loop is sequential, so no peer can revert a
+    dependency from 'done' to 'pending' between the check and the claim. If
+    same-job parallel execution is ever introduced, fold the dep-satisfied
+    predicate into the claim's WHERE (a NOT EXISTS over unfinished deps) so the
+    claim is atomic w.r.t. dependency state.
     """
     rows = await db.execute(
         text("""

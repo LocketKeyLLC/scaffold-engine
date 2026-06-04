@@ -729,8 +729,10 @@ async def query_rag(
 
     rerank_meta: dict[str, Any] = {"skipped_rerank": False, "backend": None, "warnings": []}
     if skip_rerank or not fused:
-        for r in fused:
-            r.final_score = r.rrf_score
+        # §17.409 (arch-review R6) — use replace() for uniformity with the rest
+        # of this module's immutable-RagResult discipline (these are fresh
+        # _rrf_fuse objects, so in-place was already safe; this is consistency).
+        fused = [replace(r, final_score=r.rrf_score) for r in fused]
         ranked = fused[:top_k]
         if skip_rerank:
             rerank_meta["skipped_rerank"] = True
