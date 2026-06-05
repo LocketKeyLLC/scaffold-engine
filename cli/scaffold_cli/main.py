@@ -15,7 +15,7 @@ import click
 
 from scaffold_cli import __version__
 from scaffold_cli.client import CLIError, Client
-from scaffold_cli.config import resolve_config
+from scaffold_cli.config import provenance_security_note, resolve_config
 from scaffold_cli import project as _project
 
 
@@ -114,6 +114,9 @@ def version(ctx: click.Context) -> None:
     click.echo(f"scaffold-cli {__version__}")
     click.echo(f"  api_url: {cfg.api_url}  ({cfg.source})")
     click.echo(f"  api_key: {'set' if cfg.api_key else 'unset'}")
+    note = provenance_security_note(cfg)
+    if note:
+        click.secho(f"  ⚠ {note}", fg="yellow", err=True)
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +138,9 @@ Examples:
 @click.pass_context
 def doctor(ctx: click.Context) -> None:
     cfg = ctx.obj["cfg"]
+    note = provenance_security_note(cfg)
+    if note:
+        click.secho(f"⚠ {note}", fg="yellow", err=True)
     click.echo(f"Probing {cfg.api_url}/health …")
     try:
         with Client(cfg.api_url, cfg.api_key) as c:

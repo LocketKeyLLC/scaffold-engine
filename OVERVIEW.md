@@ -21949,6 +21949,24 @@ Deep review of `app/observability/` (1,211 LOC: `alerts` / `thresholds` / `metri
 
 ---
 
+### §17.420 cli/ deep-review — clean bill + walked-.env provenance note (C1) (2026-06-04)
+
+Deep review of `cli/` (4,007 LOC: `main.py` 3,494 + `config`/`client`/`project`). Infra files read in full; `main.py`'s security-relevant sections (CLI group, `doctor`, the `.env`/valves writers, repo-root resolution) read + whole-file risk-grepped. **The CLI is well-built** — SDK-backed HTTP with typed-exception→`CLIError` translation, the API key masked everywhere (`set`/`unset`, never the value), **no** `subprocess`/`shell`/`eval`/`os.system`, never writes `config.toml`, and the `.env`/valves writers touch only `MODEL_<ROLE>` vars (model names, not secrets). One low-severity finding, fixed.
+
+**C1 — walked-`.env` auto-discovery trusts the first `.env` found, no repo-marker gate.** The config chain is `flag > env > ~/.scaffold > walked-.env > default`. A `.env` in an untrusted cwd (≤6 levels up) can supply `SCAFFOLD_API_URL` when it isn't set higher — and a config/env-sourced **API key would then be sent to the attacker's URL** (the classic auto-loaded-`.env`-from-cwd credential footgun; narrow blast radius — local self-hosted key). The catch: the mismatch shape (key trusted, url from a walked `.env`) is *also a common legit pattern* (key in shell env, url from the repo's own `.env`), so a per-command warning would be a false-positive nag.
+
+**Fix (lightweight, no resolution-behavior change):** `config.CLIConfig` gains `key_source` (api_key provenance, alongside the existing url `source`); new `config.provenance_security_note(cfg)` returns a note only when api_url came from a walked `.env` **and** api_key came from a higher-precedence source (and *not* the same `.env`). Surfaced as a yellow ⚠ to **stderr** in `scaffold version` + `scaffold doctor` only — informs without nagging every command. Live-verified: the note fires on the mismatch (naming both sources, key still masked) and stays silent when the url is pinned in env or both come from the same `.env`.
+
+**Cleared as false positives (traced):** env/valve change-descriptions embed `{value!r}` (only `model set/unset` use them — model names, not secrets); `config get` "redacted" line counts server-redacted settings without printing them; malformed `config.toml`/`.env` silently skipped (intentional fallback); `get_or_none`'s `"(404)"` substring match (SDK-contract + test covered).
+
+**Coverage honesty:** deep-read the 3 infra files + security-relevant `main.py` sections + whole-file risk grep; did NOT line-by-line read all 3,494 `main.py` command handlers (SDK-call + format, lower risk, 2,227 test lines back them).
+
+**Verification.** `cli/tests/test_config.py` (+4 provenance tests) + `test_commands.py` — **121 passed**. Live `scaffold version` confirmed the note fires only on mismatch and keeps the key masked.
+
+**§17.408 review shelf remaining:** `sdk/`, `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

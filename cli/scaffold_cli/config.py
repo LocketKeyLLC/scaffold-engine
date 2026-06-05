@@ -30,6 +30,7 @@ class CLIConfig:
     api_url: str
     api_key: str | None
     source: str  # human-readable: where the api_url came from (for `scaffold doctor`)
+    key_source: str = ""  # §17.420 — where the api_key came from (provenance note)
 
 
 def _user_config_path() -> Path:
@@ -111,10 +112,13 @@ def resolve_config(
 
     if flag_key:
         api_key: str | None = flag_key
+        key_source = "flag"
     elif (env_key := os.environ.get("SCAFFOLD_API_KEY")):
         api_key = env_key
+        key_source = "env SCAFFOLD_API_KEY"
     else:
         api_key = None
+        key_source = ""
 
     # 2. User config file
     if not api_url or api_key is None:
@@ -124,6 +128,7 @@ def resolve_config(
             url_source = f"user config {_user_config_path()}"
         if api_key is None and (cfg_key := cfg.get("api_key")):
             api_key = cfg_key
+            key_source = f"user config {_user_config_path()}"
 
     # 3. Walked-up .env
     if not api_url or api_key is None:
@@ -135,10 +140,48 @@ def resolve_config(
                 url_source = f"walked .env at {dotenv}"
             if api_key is None and "SCAFFOLD_API_KEY" in env_data:
                 api_key = env_data["SCAFFOLD_API_KEY"] or None
+                if api_key is not None:
+                    key_source = f"walked .env at {dotenv}"
 
     # 4. Default
     if not api_url:
         api_url = DEFAULT_API_URL
         url_source = "default"
 
-    return CLIConfig(api_url=api_url, api_key=api_key, source=url_source)
+    return CLIConfig(
+        api_url=api_url, api_key=api_key,
+        source=url_source, key_source=key_source,
+    )
+
+
+def provenance_security_note(cfg: CLIConfig) -> str | None:
+    """§17.420 — flag the case where a credential from a trusted source would
+    be sent to a URL discovered from a walked-up ``.env``.
+
+    The walked-``.env`` discovery (resolution step 4) trusts the first
+    ``.env`` found above cwd, with no repo-marker gate — so a ``.env`` in an
+    untrusted directory can supply ``api_url``. When ``api_key`` came from a
+    HIGHER-precedence source (flag / env / user config), that key would be
+    sent to the walked-``.env``'s URL. Both the common-legit shape (key in
+    shell env, url from the repo's own ``.env``) and the redirect-attack
+    shape match, so this is a surfaced note in ``version`` / ``doctor`` — not
+    a hard error or a per-command nag.
+
+    Returns the note string, or None when there's nothing to flag.
+    """
+    if cfg.api_key is None:
+        return None
+    if not cfg.source.startswith("walked .env"):
+        return None
+    if cfg.key_source.startswith("walked .env"):
+        # key + url from the SAME walked .env — the intended "run from the
+        # repo" case; no provenance mismatch to flag.
+        return None
+    return (
+        f"api_url was discovered from a walked-up .env ({cfg.source}), but "
+        f"your api_key came from {cfg.key_source or 'a higher-precedence source'}. "
+        f"Your API key WILL be sent to that URL — only proceed if you trust "
+        f"the directory you're running from. Pin the URL explicitly "
+        f"(--api-url, SCAFFOLD_API_URL, or ~/.scaffold/config.toml) to "
+        f"silence this."
+    )
