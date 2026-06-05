@@ -297,6 +297,13 @@ class Settings(BaseSettings):
     symbiyosys_run_timeout_s: float = Field(default=120.0, gt=0.0, le=3600.0)
     symbiyosys_http_timeout_s: float = Field(default=3700.0, gt=0.0, le=7200.0)
 
+    # §17.414 — formal-verify stage (symbiyosys-in-the-loop). Closed-loop
+    # repair budget mirrors device_sizing_max_iterations; mode/depth are the
+    # sby defaults the stage passes through to run_symbiyosys.
+    formal_verify_max_iterations: int = Field(default=3, ge=1, le=10)
+    formal_verify_mode: str = "bmc"
+    formal_verify_depth: int = Field(default=20, ge=1, le=200)
+
     # Research agent
     research_max_iterations: int = Field(default=3, ge=1, le=20)
     research_max_queries: int = Field(default=8, ge=1, le=50)

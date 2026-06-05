@@ -21861,6 +21861,22 @@ The deferred `sim/` deep review §17.408 flagged as not-yet-done (the 4.6k-line 
 
 ---
 
+### §17.414 formal-verify stage, part 1 — migration + closed-loop core (`app/sim/formal_verify.py`) (2026-06-04)
+
+§17.413's review found the symbiyosys wrapper (`run_symbiyosys`, §17.142) fully built/tested/health-checked but with **zero production callers** (S5). This is the first of three commits wiring a `verify` stage into the engineering-design pipeline so the dormant formal oracle attests **digital** designs (`design.kind == 'digital_logic'`). Operator-chosen design: **hybrid property source** (reuse the converged DUT from `digital_sizings`; LLM authors the SVA harness from the spec's constraints — no spec-schema change) + **closed-loop repair** (on `FAIL`, feed the counterexample back and re-verify, bounded by a budget).
+
+**Migration `046_formal_verifications.sql`.** Audit table mirroring §17.152's `digital_sizings` shape (audit-the-attempt: the row IS the attempt, `converged = (verdict == 'PASS')` is the outcome). Adds `digital_sizing_id` (FK → the DUT it verified), `dut_source`/`properties_source` (final formal-clean DUT + SVA harness), `mode`/`depth`/`engine`/`verdict`/`depth_reached`, and `sim_run_ids[]` → `sim_runs` rows with `tool='symbiyosys'`. CASCADE from spec/topology/digital_sizing. `db/init.sql` left untouched (baseline rule); runner auto-applied it on restart (verified: table + 6 indexes + 3 FKs live, row in `schema_migrations`).
+
+**`app/sim/formal_verify.py` (~360 LOC).** `verify_design(digital_sizing_id, ...)` runs the loop, pattern-matched on `digital_sizing.size_digital_device` (reuses `_fetch_topology_selection`/`_candidate_to_dict` from `device_sizing`, `require_confirmed_spec`, `run_symbiyosys`, `parse_json_object`). LLM emits `{dut, properties}` where `properties` is a `module formal_top` harness binding the SVA; `sv_source = dut + properties`, `top_module='formal_top'`. Never raises on LLM/sby failure; `DigitalSizingNotFoundError`/`CandidateIndexError` raise for 404/400.
+
+**Property-locking (anti-gaming) — the load-bearing design rule.** A repair-looping LLM could *weaken an assertion* to escape a real `FAIL`. So: the first time an attempt returns a **real verdict** (PASS/FAIL — the SVA compiled and BMC ran), the `properties` harness is **frozen**; every later iteration reuses it verbatim and only the DUT may change. Before that (`ERROR`/`UNKNOWN`/`TIMEOUT` from non-compiling SVA or an inconclusive bound) properties may still be revised. Enforced in code (the LLM's `properties` field is ignored once locked), not just the prompt.
+
+**Config.** `formal_verify_max_iterations` (default 3), `formal_verify_mode` (`bmc`), `formal_verify_depth` (20). symbiyosys timeouts already existed (§17.142).
+
+**Verification.** `tests/test_formal_verify.py` — **12 passed** (PASS-iter1; FAIL→repair→PASS; **property-freeze** asserted via the sby call args — a weakened iter-2 harness is ignored, the locked one is what's verified + persisted; ERROR-allows-revision-before-lock; budget exhaustion; sidecar-unreachable; refusal paths; prompt guards). Module imports with no cycle. **Not yet wired** into the pipeline/router — that's §17.415.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
