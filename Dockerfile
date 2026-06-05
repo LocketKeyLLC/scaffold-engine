@@ -49,9 +49,24 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 # (no rate-limited HF Hub round-trip; see §17.239).
 ARG MODEL_RERANKER=tomaarsen/Qwen3-Reranker-0.6B-seq-cls
 ENV HF_HOME=/code/.cache/huggingface
-RUN python -c "\
-from huggingface_hub import snapshot_download; \
-snapshot_download('${MODEL_RERANKER}')"
+# §17.423 — retry with backoff. The bare snapshot_download failed the WHOLE
+# image build whenever the HF Hub returned "429 Too Many Requests" on the
+# model-info call — a recurring CI flake (broke the §17.419 + §17.421 full-suite
+# runs). 5 attempts with increasing backoff (15/30/45/60 s) ride out a transient
+# rate-limit; a genuinely persistent failure still fails the build (exit 1)
+# rather than baking an image with no reranker weights.
+RUN for i in 1 2 3 4 5; do \
+      if python -c "from huggingface_hub import snapshot_download; snapshot_download('${MODEL_RERANKER}')"; then \
+        echo "snapshot_download: ${MODEL_RERANKER} cached (attempt $i)"; \
+        break; \
+      fi; \
+      if [ "$i" = "5" ]; then \
+        echo "snapshot_download: failed after 5 attempts" >&2; \
+        exit 1; \
+      fi; \
+      echo "snapshot_download attempt $i failed (likely HF 429); backing off $((i * 15))s..." >&2; \
+      sleep $((i * 15)); \
+    done
 
 
 # ────────────────────────────────────────────────────────────────────────────

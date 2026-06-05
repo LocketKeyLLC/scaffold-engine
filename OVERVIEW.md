@@ -21982,6 +21982,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.423 Dockerfile — retry the reranker snapshot_download against HF 429 (CI build flake) (2026-06-04)
+
+The `test.yml` full-suite "Build orchestrator image" step failed twice this session (§17.419, §17.421) with `httpx.HTTPStatusError: 429 Too Many Requests` from `huggingface.co/api/models/${MODEL_RERANKER}/revision/main`. The Dockerfile's `RUN python -c "... snapshot_download('${MODEL_RERANKER}')"` had **no retry** — a single transient HF rate-limit on the model-info call aborted the whole image build (and thus the entire test run, before any test executed). Smoke (`ci.yml`, no full build) was unaffected, which is why the failures looked spurious.
+
+**Fix.** Wrapped the `snapshot_download` in a 5-attempt shell retry loop with increasing backoff (15/30/45/60 s between attempts) to ride out a transient 429. On success it `break`s; on the 5th consecutive failure it `exit 1`s — so a genuinely-down HF still fails the build loudly rather than baking a weightless image. Validated the loop logic under `sh` (success-after-failures → exit 0; all-fail → exit 1 after attempt 5) and the RUN line under `sh -n`.
+
+**Note.** This only hardens the *build-time* pre-bake; runtime already runs `HF_HUB_OFFLINE` from the baked cache (§17.239/§17.243), so production never round-trips HF. A fuller fix (pre-baking weights into a pinned base image so CI never touches HF at all) is deferred.
+
+---
+
 ### §17.422 cleanup.py deep-review — restore the shadowed planning→cancelled reaper (P1) + sweep logging (P2) (2026-06-04)
 
 Deep review of `app/modules/cleanup.py` (321 LOC stale-job reaper). One real logic finding, fixed (operator chose option a).
