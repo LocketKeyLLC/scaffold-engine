@@ -214,3 +214,21 @@ def test_cleanup_settings_are_sourced_from_config():
     )
     assert settings.long_phase_stale_minutes >= settings.stale_threshold_minutes
     assert settings.planning_stale_minutes >= settings.stale_threshold_minutes
+
+
+# ---------------------------------------------------------------------------
+# §17.422 — planning-reaper shadow regression guard
+# ---------------------------------------------------------------------------
+
+def test_long_phase_reaper_excludes_planning():
+    """'planning' must NOT be in the long-phase IN-list. _REAP_LONG_PHASE runs
+    before _REAP_PLANNING in the same transaction, so including 'planning'
+    there would set the job 'failed' before the dedicated planning reaper
+    could set it 'cancelled' — the shadow §17.422 fixes (dead under default
+    45<60 and live 1440==1440 configs)."""
+    assert "'planning'" not in cleanup._REAP_LONG_PHASE_SQL
+    assert "'researching'" in cleanup._REAP_LONG_PHASE_SQL
+    assert "'refining'" in cleanup._REAP_LONG_PHASE_SQL
+    # The dedicated planning reaper is the sole handler and ends 'cancelled'.
+    assert "status = 'planning'" in cleanup._REAP_PLANNING_SQL
+    assert "'cancelled'" in cleanup._REAP_PLANNING_SQL

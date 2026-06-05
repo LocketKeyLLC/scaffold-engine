@@ -1,14 +1,22 @@
 """
 cleanup.py — Periodic stale-job reaper.
 
-Runs every `settings.cleanup_interval_seconds`, marks stuck jobs as failed.
+Runs every `settings.cleanup_interval_seconds`, marks stuck jobs terminal.
 State-aware thresholds:
-  - executing / running                       -> settings.stale_threshold_minutes (default 30)
-  - researching / refining / planning (jobs)  -> settings.long_phase_stale_minutes (default 45)
-  - planning (legacy column sweep)            -> settings.planning_stale_minutes (default 60)
-  - research_sessions pending/running         -> settings.stale_threshold_minutes
-  - research_sessions paused past expiry      -> immediate
+  - executing / running                       -> settings.stale_threshold_minutes (default 30)  -> failed
+  - researching / refining (jobs)             -> settings.long_phase_stale_minutes (default 45)  -> failed
+  - planning (jobs)                           -> settings.planning_stale_minutes (default 60)    -> cancelled
+  - research_sessions pending/running         -> settings.stale_threshold_minutes               -> failed
+  - research_sessions paused past expiry      -> immediate                                       -> cancelled
 One eager sweep runs at task start before entering the sleep loop.
+
+§17.422 — ``planning`` is deliberately NOT in the long-phase ``failed``
+sweep: it has its own ``planning_stale_minutes`` threshold and ends
+``cancelled`` (a softer outcome than ``failed``). Pre-§17.422 ``planning``
+WAS in the long-phase IN-list, and since ``_REAP_LONG_PHASE`` runs before
+``_REAP_PLANNING`` in the same transaction, it shadowed the planning reaper
+under every sane config (default 45<60; live 1440==1440) — planning jobs
+silently went ``failed`` and ``planning_stale_minutes`` was inert.
 """
 import asyncio
 import logging
@@ -96,11 +104,16 @@ _REAP_LONG_PHASE_SQL = """
     SET status = 'failed',
         error_summary = :msg,
         updated_at = NOW()
-    WHERE status IN ('researching', 'refining', 'planning')
+    WHERE status IN ('researching', 'refining')
       AND updated_at < NOW() - make_interval(mins => :threshold_min)
     RETURNING id
 """
 
+# §17.422 — dedicated 'planning' reaper. MUST NOT add 'planning' to
+# _REAP_LONG_PHASE's IN-list above: that reaper runs first in the same
+# transaction, so it would set the job 'failed' before this 'cancelled'
+# UPDATE could match (the shadow this entry fixes). Planning gets a softer
+# 'cancelled' outcome on its own planning_stale_minutes threshold.
 _REAP_PLANNING_SQL = """
     UPDATE jobs
     SET status = 'cancelled',
@@ -281,7 +294,10 @@ async def _run_once() -> None:
         if result.get("expired_count", 0) > 0:
             logger.info("staleness_sweep expired=%d", result["expired_count"])
     except Exception:
-        logger.debug("staleness_sweep_skipped")
+        # §17.422 — was logger.debug (invisible at default level), so a
+        # persistently-broken Milvus TTL sweep failed silently. WARNING +
+        # exc_info surfaces it without aborting the reaper cycle.
+        logger.warning("staleness_sweep_failed", exc_info=True)
 
 
 async def _cleanup_loop() -> None:

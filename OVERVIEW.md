@@ -21982,6 +21982,21 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.422 cleanup.py deep-review — restore the shadowed planning→cancelled reaper (P1) + sweep logging (P2) (2026-06-04)
+
+Deep review of `app/modules/cleanup.py` (321 LOC stale-job reaper). One real logic finding, fixed (operator chose option a).
+
+- **P1 (medium) — the planning→`cancelled` reaper was dead under every sane config.** Three reaper UPDATEs can match a `'planning'` job, all in one transaction: `_REAP_LONG_PHASE` (`status IN ('researching','refining','planning')` → `failed`, runs **first**) and `_REAP_PLANNING` (`status='planning'` → `cancelled`, runs after). Because the two share the `'planning'` status and long-phase runs first, `_REAP_PLANNING` only fires when `planning_stale_minutes < long_phase_stale_minutes` — but the **default** is `45 < 60` and the **live host** is `1440 == 1440`, so in both the long-phase reaper set the job `failed` before the planning reaper could set it `cancelled`. The documented soft-stop never happened and `planning_stale_minutes` was inert. The unit test couldn't catch it — it mocks the DB (`db.execute.side_effect` returns canned `fetchall` counts), so it never exercises the WHERE-clause collision. **Fix (option a):** dropped `'planning'` from `_REAP_LONG_PHASE`'s IN-list (now `('researching','refining')`), so planning is handled solely by `_REAP_PLANNING` → `cancelled` on its own threshold. Added a load-bearing comment forbidding re-adding `'planning'` to the long-phase list, and corrected the module docstring's threshold table.
+- **P2 (low) — silent TTL-sweep failures.** `_run_once` swallowed `sweep_expired()` exceptions at `logger.debug("staleness_sweep_skipped")` (invisible at default level, no error detail) — a persistently-broken Milvus TTL sweep failed silently (same class as the §17.277 DEBUG→WARNING fixes). Bumped to `logger.warning("staleness_sweep_failed", exc_info=True)`.
+
+**Cleared (traced):** single-transaction all-or-nothing reap (acceptable — periodic retry next cycle); orphan-reset-before-job-reapers + parent `updated_at` refresh (correct, well-commented); `awaiting_confirmation` hardcoded `error_summary` (fine — no prior summary). **P3 cosmetic** (`getattr(settings, "assist_idle_threshold_days", 7)` dead defensiveness) left as-is.
+
+**Verification.** `tests/test_cleanup.py` — **10 passed** (+1 static guard asserting `'planning'` is out of the long-phase SQL and the planning reaper ends `cancelled`). **Live, rollback-safe**: inserted a 2-day-stale `planning` job, ran `_REAP_LONG_PHASE` then `_REAP_PLANNING` against real Postgres, confirmed final status `'cancelled'` (long-phase no longer touches it), then rolled back — nothing persisted. No schema change.
+
+**§17.408 review shelf remaining:** `assist_*` (last one).
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
