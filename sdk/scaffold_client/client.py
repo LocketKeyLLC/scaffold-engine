@@ -57,7 +57,10 @@ class Client:
             base_url=self.base_url,
             headers=headers,
             timeout=timeout,
-            follow_redirects=True,
+            # §17.421 — a JSON API client has no reason to follow redirects, and
+            # httpx does NOT strip custom headers (X-API-Key) on a cross-host
+            # 3xx, so following one would leak the key to the redirect target.
+            follow_redirects=False,
         )
 
         # Resource sub-objects — instantiated once per Client so callers can

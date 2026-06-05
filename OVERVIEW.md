@@ -21967,6 +21967,21 @@ Deep review of `cli/` (4,007 LOC: `main.py` 3,494 + `config`/`client`/`project`)
 
 ---
 
+### §17.421 sdk/ deep-review fixes — stream error-translation bug (S2) + no-follow-redirects (S1) (2026-06-04)
+
+Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`/`_transport`/`_sse`/`client`/`async_client`/`next_actions`; `schemas.py` is vendored from `app/schemas.py`, out of scope). Two real findings, fixed.
+
+- **S2 (medium; real bug) — streaming endpoints leaked raw httpx exceptions.** `AsyncClient._stream` wrapped `self._http.stream(...)` in `try/except` to translate connect/timeout into `ScaffoldError`. But httpx's `.stream()` is **lazy** — it returns a context manager and the connect happens on `__aenter__`, which was OUTSIDE the `try`. **Verified** live: `httpx.Client.stream` returns a `_GeneratorContextManager` with no I/O; the `ConnectError` fires on `__enter__`. So every streaming endpoint (`aiter_research`, `aiter_research_reply`, `aiter_research_pdf`, `aiter_execute_all`, `aiter_resume_job`, `aiter_assist_handoff`) raised a **raw `httpx.ConnectError`/`TimeoutException`** when the orchestrator was down — breaking the SDK's "catch `ScaffoldError` once" contract and contradicting `_stream`'s own docstring. The SDK tests only covered stream 404/500 (post-connect), so it slipped through. **Fix:** translate on the actual stream-open (`await stream_ctx.__aenter__()` wrapped), with a `try/finally` for the body that closes the stream on every exit path and preserves the documented mid-stream-raw behavior (ScaffoldError from `raise_for_status` and raw mid-stream httpx errors both propagate; the consumer-break clean-disconnect path still runs `__aexit__`).
+- **S1 (low; hardening) — `follow_redirects=True` could leak `X-API-Key`.** Both `Client` and `AsyncClient` followed redirects while injecting a custom `X-API-Key` header. httpx strips only its built-in sensitive headers (`Authorization`/`Cookie`/`Proxy-Authorization`) on a cross-host 3xx — **not** custom headers — so a redirect to another host (compromised/misconfigured orchestrator, or a MITM `Location:`) would forward the key to the target. A JSON API client has no reason to follow redirects. **Fix:** `follow_redirects=False` on both.
+
+**Cleared as FALSE POSITIVES (verified):** `errors.py` shadowing builtin `ConnectionError`/`TimeoutError`/`PermissionError` (intentional SDK namespacing; httpx errors mapped via explicit `isinstance`); `_transport` httpx-subclass ordering (correct — specific before generic); `_sse` malformed-JSON pass-through + unbounded `data_lines` (by-design, trusted server); `next_actions.format_block` `.format()` (only the format string's braces interpreted, no value injection); resource path interpolation (UUID IDs to a trusted server).
+
+**Verification.** Full SDK suite — **142 passed** (4 new: sync + async `follow_redirects is False`, stream connect→`ConnectionError`, stream timeout→`TimeoutError` — the missing regression for S2). ci-tier-0 green (no vendored file touched). Coverage honesty: deep-read the 6 core modules + scanned resource wrappers; did not exhaustively read the thin resource method bodies.
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

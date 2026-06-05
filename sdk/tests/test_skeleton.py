@@ -125,6 +125,14 @@ def test_timeout_translates_to_timeout_error():
                 c.request("GET", "/health")
 
 
+def test_client_does_not_follow_redirects():
+    """§17.421 — httpx does NOT strip the custom X-API-Key header on a
+    cross-host 3xx, so following a redirect would leak the key. The sync
+    Client must disable redirect-following."""
+    with Client("http://example.com", api_key="secret") as c:
+        assert c._http.follow_redirects is False
+
+
 # -- AsyncClient mirror -----------------------------------------------------
 
 

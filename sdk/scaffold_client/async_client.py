@@ -61,7 +61,10 @@ class AsyncClient:
             base_url=self.base_url,
             headers=headers,
             timeout=timeout,
-            follow_redirects=True,
+            # §17.421 — a JSON API client has no reason to follow redirects, and
+            # httpx does NOT strip custom headers (X-API-Key) on a cross-host
+            # 3xx, so following one would leak the key to the redirect target.
+            follow_redirects=False,
         )
 
         self.jobs = AsyncJobsResource(self)
@@ -198,15 +201,23 @@ class AsyncClient:
         ``_transport.raise_for_status`` after the body is read. Mid-stream
         connection errors propagate as raw httpx exceptions — the caller
         should treat ``async for`` interruption as an abnormal end.
+
+        §17.421 — httpx's ``.stream()`` is LAZY: it returns a context manager
+        and the connect happens on ``__aenter__``, NOT on the ``.stream()``
+        call. So the connect/timeout translation MUST wrap the enter; the
+        pre-§17.421 code wrapped the bare (never-raising) ``.stream()`` call,
+        which leaked raw ``httpx.ConnectError`` / ``TimeoutException`` out of
+        every streaming endpoint when the orchestrator was down.
         """
+        stream_ctx = self._http.stream(
+            method, path, params=params, json=json, files=files, data=data,
+        )
         try:
-            stream_ctx = self._http.stream(
-                method, path, params=params, json=json, files=files, data=data,
-            )
+            resp = await stream_ctx.__aenter__()
         except Exception as exc:
             raise _transport.translate_request_error(exc, url=self.base_url) from None
 
-        async with stream_ctx as resp:
+        try:
             if resp.status_code >= 400:
                 # Drain the body so error mapping has a meaningful detail.
                 await resp.aread()
@@ -216,6 +227,12 @@ class AsyncClient:
                 resp.aiter_lines(), include_heartbeats=include_heartbeats
             ):
                 yield event
+        finally:
+            # Always close the stream — covers normal completion, a
+            # raise_for_status ScaffoldError, a mid-stream httpx error (which
+            # still propagates raw, as documented), and the clean-disconnect
+            # path when the consumer breaks out of the ``async for``.
+            await stream_ctx.__aexit__(None, None, None)
 
     async def aiter_research(
         self,

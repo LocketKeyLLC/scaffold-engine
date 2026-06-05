@@ -15,7 +15,13 @@ from typing import AsyncIterator
 import httpx
 import pytest
 
-from scaffold_client import AsyncClient, NotFoundError, OrchestratorError
+from scaffold_client import (
+    AsyncClient,
+    ConnectionError,
+    NotFoundError,
+    OrchestratorError,
+    TimeoutError,
+)
 from scaffold_client._sse import parse_sse_lines
 
 
@@ -212,6 +218,48 @@ async def test_streaming_500_raises_orchestrator_error():
         with pytest.raises(OrchestratorError):
             async for _ in c.aiter_execute_all("abc"):
                 pass
+    finally:
+        await c.aclose()
+
+
+async def test_streaming_connect_error_translates_to_connection_error():
+    """§17.421 — a connect failure when OPENING the stream must surface as the
+    SDK's ConnectionError, not a raw httpx.ConnectError. httpx's .stream() is
+    lazy (the connect happens on __aenter__), so the pre-§17.421 try/except
+    around the bare .stream() call missed it and leaked the raw exception."""
+    def handler(_req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    c = _aclient_with_transport(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ConnectionError):
+            async for _ in c.aiter_research("x"):
+                pass
+    finally:
+        await c.aclose()
+
+
+async def test_streaming_timeout_translates_to_timeout_error():
+    """§17.421 — a timeout when opening the stream surfaces as the SDK's
+    TimeoutError, mirroring the non-streaming request() path."""
+    def handler(_req: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out")
+
+    c = _aclient_with_transport(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(TimeoutError):
+            async for _ in c.aiter_execute_all("abc"):
+                pass
+    finally:
+        await c.aclose()
+
+
+async def test_async_client_does_not_follow_redirects():
+    """§17.421 — the AsyncClient must not follow redirects (X-API-Key leak
+    guard); httpx doesn't strip custom headers on a cross-host 3xx."""
+    c = AsyncClient("http://example.com", api_key="secret")
+    try:
+        assert c._http.follow_redirects is False
     finally:
         await c.aclose()
 
