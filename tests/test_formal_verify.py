@@ -416,9 +416,15 @@ async def test_candidate_idx_oob_raises(monkeypatch):
 def test_system_prompt_enforces_no_weakening_and_formal_top():
     prompt = fv_mod._SYSTEM_PROMPT
     assert "formal_top" in prompt
-    assert "assert property" in prompt
     # The anti-gaming instruction must be present.
     assert "weaken" in prompt.lower()
     assert "FROZEN" in prompt or "frozen" in prompt
-    # Yosys formal-subset guardrails.
-    assert "$display" in prompt  # told NOT to use it
+    # §17.417 — empirical guardrails verified against the live sidecar. The
+    # Yosys `read -formal` frontend (no Verific) rejects concurrent SVA and
+    # there is no sidecar-supplied clock; a regression that drops these
+    # lessons sends the LLM straight back to verdict=ERROR.
+    assert "always @(posedge clk)" in prompt          # immediate-assert pattern
+    assert "read -formal" in prompt                    # toolchain awareness
+    assert "does NOT support concurrent" in prompt     # the v2 ERROR lesson
+    assert "Do NOT generate a clock" in prompt         # the clock-gen lesson
+    assert "$display" in prompt                         # told NOT to use it

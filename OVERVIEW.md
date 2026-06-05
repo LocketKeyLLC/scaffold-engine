@@ -21903,6 +21903,22 @@ Final of three. Surfaces the formal-verification result in the read paths and pr
 
 ---
 
+### §17.417 formal-verify prompt tuning — ERROR → PASS, grounded in live sidecar probes (2026-06-04)
+
+Closes the §17.416 follow-up. The stage worked end-to-end but the live LLM's harness returned `verdict=ERROR` (never compiled): `formal_verify._SYSTEM_PROMPT` told it to "drive its clock" and use concurrent SVA (`assert property`/`assume property`/`cover property`). Rather than guess, the rewrite is grounded in **direct probes against the live symbiyosys sidecar** (`docker/symbiyosys/server.py`'s `.sby` contract is `read -formal design.sv; prep -top formal_top` + smtbmc — open-source Yosys, **no Verific**):
+
+- **v1** (immediate `assert` inside `always @(posedge clk)`, no-overflow) → **PASS**.
+- **v2** (concurrent `assert property (@(posedge clk) ...)`) → **ERROR**: `design.sv:23: syntax error, unexpected '@'`. This frontend does not parse concurrent SVA.
+- **v3/v4** (`$past` / shadow-register increment property) → **FAIL** at the async-reset-release boundary (the DUT output holds its reset value one cycle after `init_done` flips) — confirming that's a fragile pattern to keep out of the example.
+
+**The rewrite** encodes exactly those facts: top module is `formal_top (input logic clk)` (smtbmc advances the clock — **never** write a clock generator / `#delay` / `$display` / `initial` / testbench); assertions are **immediate only**, inside clocked `always` blocks; concurrent `assert property`, `$past`/`$rose`/`disable iff`/`|->` are explicitly forbidden as ERROR-producers; reset is modeled with the verified `init_done` + `assume` idiom; prior values use a shadow register with a reset-boundary warning. The **worked example is the byte-exact v1 harness** that PASSed the sidecar, plus its JSON-escaped form.
+
+**Proof (live, end-to-end).** Re-ran `verify_design` against the real sidecar + cloud LLM: **`verdict=PASS, converged=True, iterations=1`** — the model produced precisely the immediate-assert/`init_done`-reset harness on the first try (was ERROR/2-iters pre-tuning). The prompt-guard unit test now asserts the empirical invariants (`always @(posedge clk)`, `read -formal`, "does NOT support concurrent", "Do NOT generate a clock") so a future edit that drops a lesson is caught.
+
+**Verification.** `test_formal_verify.py` — **12 passed**; live `test_formal_verify_db.py` — **passed (converged)**. Prompt-only + test-only change; no schema/API/DB change.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
