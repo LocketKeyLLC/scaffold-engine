@@ -60,6 +60,10 @@ async def init_scheduler() -> Optional[AsyncIOScheduler]:
     await _rehydrate()
     _register_observability_jobs()
     _scheduler.start()
+    # §17.418 — prune orphan jobstore entries after start() (jobstore is now
+    # live and get_jobs is authoritative). Heals orphans from any cause:
+    # add-then-commit-failure, crash between the two transactions, etc.
+    await _reconcile_orphans()
     logger.info('event="scheduler_started" jobs=%d', len(_scheduler.get_jobs()))
     return _scheduler
 
@@ -160,6 +164,16 @@ async def shutdown_scheduler() -> None:
     # Snapshot pending async futures across every executor. We list()
     # the set because the executor's done-callbacks mutate it as tasks
     # complete during our drain.
+    #
+    # §17.418 — this reaches into APScheduler internals (``_executors`` /
+    # ``AsyncIOExecutor._pending_futures``), valid for the pinned
+    # ``apscheduler==3.10.4``. The ``getattr(..., default)`` guards keep this
+    # from crashing if a future bump renames them — but it would then SILENTLY
+    # degrade the drain to a no-op (the §17.137 bug returns: jobs cancelled
+    # abruptly, sessions stranded ``running``). ``tests/test_scheduler_shutdown.py``
+    # asserts a real ``AsyncIOExecutor`` still exposes ``_pending_futures`` so a
+    # bump that breaks this fails loudly. If that test fails after upgrading,
+    # re-derive the drain against the new internals before shipping.
     pending: list = []
     for executor in getattr(sched, "_executors", {}).values():
         futs = getattr(executor, "_pending_futures", None)
@@ -242,6 +256,57 @@ async def _rehydrate() -> None:
         logger.warning(
             'event="schedule_rehydrate_summary" ok=%d skipped=%d', ok, skipped,
         )
+
+
+async def _reconcile_orphans() -> None:
+    """§17.418 — prune APScheduler jobs with no matching *enabled*
+    ``scheduled_jobs`` row.
+
+    The ``SQLAlchemyJobStore`` commits add/remove on its OWN engine,
+    independent of the request's asyncpg transaction. So a request that
+    registers a job (``add_schedule``) then fails to commit its
+    ``scheduled_jobs`` row — e.g. a pool-exhaustion commit failure, the very
+    condition scheduled jobs can provoke (``config.py``) — leaves an orphan
+    APScheduler job that fires ``_execute_research_job`` every tick, doing
+    real research and recording nothing (its result-write hits
+    ``rowcount=0``). ``_rehydrate`` only ADDS, so without this pass orphans
+    survive every restart.
+
+    Runs after ``start()`` so the jobstore is live and ``get_jobs`` is
+    authoritative. Best-effort: a failure here is logged, never fatal to
+    startup. Only the default (SQLAlchemy) jobstore is scanned — the X.26
+    observability jobs live in the in-memory store and carry non-``schedule_``
+    ids, so they're doubly excluded.
+    """
+    if _scheduler is None:
+        return
+    try:
+        async with async_session() as db:
+            ids = (await db.execute(text(
+                "SELECT id FROM scheduled_jobs WHERE enabled = TRUE"
+            ))).scalars().all()
+        valid = {f"schedule_{i}" for i in ids}
+        removed = 0
+        for job in _scheduler.get_jobs(jobstore="default"):
+            jid = getattr(job, "id", "")
+            if jid.startswith("schedule_") and jid not in valid:
+                try:
+                    _scheduler.remove_job(jid)
+                    removed += 1
+                    logger.warning(
+                        'event="scheduler_orphan_pruned" job_id=%s', jid,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        'event="scheduler_orphan_prune_failed" '
+                        'job_id=%s error=%s', jid, exc,
+                    )
+        if removed:
+            logger.warning(
+                'event="scheduler_reconcile_summary" pruned=%d', removed,
+            )
+    except Exception as exc:
+        logger.error('event="scheduler_reconcile_failed" error=%s', exc)
 
 
 def _add_job(

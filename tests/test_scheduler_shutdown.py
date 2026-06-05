@@ -298,3 +298,37 @@ def test_lifespan_calls_shutdown_scheduler_before_engine_dispose():
         "shutdown_scheduler() must precede engine.dispose() so in-flight "
         "scheduled jobs can flush their DB writes against a live pool"
     )
+
+
+# ---------------------------------------------------------------------------
+# §17.418 — version-pin guard for the private-internal drain
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_asyncio_executor_still_exposes_pending_futures():
+    """The §17.137 drain reaches into ``sched._executors[*]._pending_futures``
+    — private internals valid for the pinned ``apscheduler==3.10.4``. If a
+    future bump renames or removes them, ``shutdown_scheduler``'s
+    ``getattr(..., default)`` guards would silently return empty and the drain
+    would degrade to a no-op (the §17.137 bug returns: jobs cancelled abruptly,
+    sessions stranded ``running``). This fails loudly on such a bump so the
+    drain is re-derived before shipping. ``_pending_futures`` is set in
+    ``AsyncIOExecutor.start()``, so the check is against a STARTED scheduler —
+    exactly the state the drain iterates. See the matching comment in
+    ``app/scheduler.py``."""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    sched = AsyncIOScheduler()
+    sched.start(paused=True)
+    try:
+        assert hasattr(sched, "_executors"), (
+            "AsyncIOScheduler._executors vanished — re-derive the drain."
+        )
+        default = sched._executors.get("default")
+        assert default is not None
+        assert hasattr(default, "_pending_futures"), (
+            "AsyncIOExecutor._pending_futures vanished — apscheduler was "
+            "bumped; re-derive the shutdown_scheduler drain."
+        )
+    finally:
+        sched.shutdown(wait=False)

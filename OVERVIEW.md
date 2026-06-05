@@ -21919,6 +21919,21 @@ Closes the §17.416 follow-up. The stage worked end-to-end but the live LLM's ha
 
 ---
 
+### §17.418 scheduler.py deep-review fixes — orphan reconciliation + drain-pin guard + delete symmetry (2026-06-04)
+
+Deep review of `app/scheduler.py` (573 LOC, APScheduler 3.10.4). Mature/hardened (§17.137 drain, §17.155/§17.168 cancel-shield); findings below were each traced through the code.
+
+- **S1 (medium) — orphan APScheduler jobs.** The `SQLAlchemyJobStore` commits add/remove on its **own** engine, NOT in the request's asyncpg transaction. So `add_schedule` (which registers the job) followed by a failed `db.commit()` on the `scheduled_jobs` INSERT — e.g. the pool-exhaustion commit failure scheduled jobs can themselves provoke — leaves an orphan job that fires `_execute_research_job` every tick, doing real research and recording nothing (`rowcount=0`). `_rehydrate` only ADDs, so orphans survived every restart. The router comment claiming "rollback ... leaving system state aligned" was false for the commit-failure case. **Fix (reconciliation approach):** new `_reconcile_orphans()` runs after `start()` and prunes any default-jobstore `schedule_N` job with no enabled `scheduled_jobs` row — heals orphans from **any** cause (commit-failure, crash between the two commits). Best-effort (a failure is logged, never fatal to startup). Belt-and-suspenders: the add-route `except` now also `remove_schedule()`s on commit failure, and the misleading comment is corrected.
+  - **Live validation:** on the first restart after deploy, reconciliation **found and pruned a real pre-existing orphan** (`schedule_4`) — `scheduler_orphan_pruned` / `reconcile_summary pruned=1`. Post-pass `apscheduler_jobs` count == enabled `scheduled_jobs` count (0/0). The bug was real and is now closed.
+- **S2 (low) — drain-internal fragility.** `shutdown_scheduler` reaches into `sched._executors[*]._pending_futures` (the §17.137 workaround for APScheduler 3.10's broken `shutdown(wait=True)`). Guarded by `getattr(..., default)` — so a future apscheduler bump that renames them would **silently** degrade the drain to a no-op (the §17.137 bug returns). Added a comment tying the workaround to the `==3.10.4` pin + a guard test asserting a started `AsyncIOExecutor` still exposes `_pending_futures` (it's set in `.start()`, so the test checks a started scheduler). A breaking bump now fails loudly.
+- **S3 (low) — delete-path asymmetry.** The add route wrapped its commit in `try/except → rollback → clean 502`; the delete route did a bare `await db.commit()` (raw 500 on failure). Wrapped it to mirror add (rollback + 502); a delete commit-failure leaves the row, which startup `_rehydrate` re-adds.
+
+**Cleared (traced, not raised):** drain-cancel skipping the `scheduled_jobs` result-write (documented/intentional; `research_sessions` is still finalized under shield); timeout marking the session `cancelled` while the schedule logs `timeout` (deliberate; `error_message` disambiguates); same-schedule overlap (APScheduler default `max_instances=1`); `_extract_session_id` `line[5:]` (correct).
+
+**Verification.** `test_scheduler.py` + `test_scheduler_shutdown.py` + `test_router_schedule.py` — **41 passed** (3 new reconcile tests, 1 pin-guard test, 2 router commit-failure tests). Live reconcile pruned a real orphan at startup. No schema/API change.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

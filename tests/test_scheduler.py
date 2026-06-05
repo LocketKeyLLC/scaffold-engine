@@ -313,3 +313,77 @@ class TestExtractSessionId:
         assert _extract_session_id('event: other\ndata: {"foo": "bar"}\n\n') is None
         assert _extract_session_id("not json at all") is None
         assert _extract_session_id(42) is None
+
+
+class TestReconcileOrphans:
+    """§17.418 — _reconcile_orphans prunes APScheduler jobs with no enabled
+    scheduled_jobs row (orphans from add-then-commit-failure / crashes)."""
+
+    @staticmethod
+    def _job(jid):
+        j = MagicMock()
+        j.id = jid
+        return j
+
+    @staticmethod
+    def _enabled_ids_session(ids):
+        sess = MagicMock()
+        sess.__aenter__ = AsyncMock(return_value=sess)
+        sess.__aexit__ = AsyncMock(return_value=None)
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = ids
+        sess.execute = AsyncMock(return_value=result)
+        return sess
+
+    @pytest.mark.asyncio
+    async def test_prunes_only_orphan_schedule_jobs(self):
+        from app import scheduler as sched_mod
+
+        sess = self._enabled_ids_session([1, 2])  # enabled rows: 1, 2
+        mock_scheduler = MagicMock()
+        mock_scheduler.get_jobs.return_value = [
+            self._job("schedule_1"),         # valid
+            self._job("schedule_2"),         # valid
+            self._job("schedule_999"),       # ORPHAN — no enabled row
+            self._job("x26_threshold_eval"), # observability job — never touched
+        ]
+        sched_mod._scheduler = mock_scheduler
+
+        with patch.object(sched_mod, "async_session", return_value=sess):
+            await sched_mod._reconcile_orphans()
+
+        # Exactly the orphan is removed; valid + non-schedule jobs untouched.
+        mock_scheduler.remove_job.assert_called_once_with("schedule_999")
+        sched_mod._scheduler = None
+
+    @pytest.mark.asyncio
+    async def test_no_op_when_all_jobs_valid(self):
+        from app import scheduler as sched_mod
+
+        sess = self._enabled_ids_session([1, 2])
+        mock_scheduler = MagicMock()
+        mock_scheduler.get_jobs.return_value = [
+            self._job("schedule_1"), self._job("schedule_2"),
+        ]
+        sched_mod._scheduler = mock_scheduler
+
+        with patch.object(sched_mod, "async_session", return_value=sess):
+            await sched_mod._reconcile_orphans()
+
+        mock_scheduler.remove_job.assert_not_called()
+        sched_mod._scheduler = None
+
+    @pytest.mark.asyncio
+    async def test_failure_is_swallowed_never_blocks_startup(self):
+        from app import scheduler as sched_mod
+
+        sess = self._enabled_ids_session([])
+        mock_scheduler = MagicMock()
+        mock_scheduler.get_jobs.side_effect = RuntimeError("jobstore unreachable")
+        sched_mod._scheduler = mock_scheduler
+
+        with patch.object(sched_mod, "async_session", return_value=sess):
+            # Must NOT raise — reconciliation is best-effort.
+            await sched_mod._reconcile_orphans()
+
+        sched_mod._scheduler = None

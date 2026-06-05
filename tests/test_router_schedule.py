@@ -227,3 +227,37 @@ def test_delete_schedule_not_found_returns_404(client, mock_db):
     assert r.status_code == 404
     assert "not found" in r.json()["detail"].lower()
     mock_db.commit.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# §17.418 — cross-transaction commit-failure handling
+# ---------------------------------------------------------------------------
+
+def test_create_schedule_commit_failure_removes_orphan_job(client, mock_db, patch_models_ok):
+    """add_schedule SUCCEEDS (job committed to apscheduler_jobs on its own
+    engine) but db.commit() then fails → the orphan must be removed via
+    remove_schedule and a 502 returned with the INSERT rolled back."""
+    res = MagicMock()
+    res.mappings.return_value.first.return_value = _row_for_insert()
+    mock_db.execute = AsyncMock(return_value=res)
+    mock_db.commit = AsyncMock(side_effect=RuntimeError("pool exhausted"))
+
+    with patch("app.scheduler.add_schedule", new_callable=AsyncMock, return_value=None) as m_add, \
+         patch("app.scheduler.remove_schedule", new_callable=AsyncMock) as m_remove:
+        r = client.post("/schedule", json=_VALID_BODY)
+
+    assert r.status_code == 502
+    m_add.assert_awaited_once()
+    m_remove.assert_awaited_once()       # §17.418 orphan cleanup ran
+    mock_db.rollback.assert_awaited_once()
+
+
+def test_delete_schedule_commit_failure_returns_502(client, mock_db):
+    """delete_schedule SUCCEEDS (APScheduler job removed) but db.commit()
+    fails → clean 502 + rollback (symmetry with add; was a raw 500)."""
+    mock_db.commit = AsyncMock(side_effect=RuntimeError("commit boom"))
+    with patch("app.scheduler.delete_schedule", new_callable=AsyncMock, return_value=True):
+        r = client.delete("/schedule/42")
+    assert r.status_code == 502
+    assert "commit failed" in r.json()["detail"].lower()
+    mock_db.rollback.assert_awaited_once()
