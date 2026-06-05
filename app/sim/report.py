@@ -54,7 +54,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.utils.milvus_utils import get_collection
+from app.sim.device_sizing import DEFAULT_TOLERANCE_PCT, _is_measurable_kind
+from app.utils.milvus_utils import escape_milvus_literal, get_collection
 
 logger = logging.getLogger("scaffold")
 
@@ -65,10 +66,6 @@ REPORT_SCHEMA_VERSION = "1.0.0"
 # reading the Markdown sees enough to remember what the citation is
 # without paging the corpus.
 _SNIPPET_CHARS = 800
-
-_MEASURABLE_KIND_PREFIXES = (
-    "electrical.", "timing.", "thermal.", "signal.",
-)
 
 
 class ReportNotAvailableError(LookupError):
@@ -283,12 +280,6 @@ async def _fetch_sim_runs(
 # Milvus best-effort chunk fetch
 # ---------------------------------------------------------------------------
 
-def _escape_milvus_literal(s: str) -> str:
-    """Escape a string for Milvus expression syntax — backslash and
-    quote are the only characters that need handling for our use."""
-    return s.replace("\\", "\\\\").replace('"', '\\"')
-
-
 async def _fetch_chunk_content(
     entry_ids: list[str],
 ) -> dict[str, dict[str, str]]:
@@ -307,7 +298,7 @@ async def _fetch_chunk_content(
         collection = await loop.run_in_executor(None, get_collection)
         if collection is None:
             return {}
-        quoted = [f'"{_escape_milvus_literal(e)}"' for e in entry_ids]
+        quoted = [f'"{escape_milvus_literal(e)}"' for e in entry_ids]
         expr = f"entry_id in [{', '.join(quoted)}]"
 
         def _sync():
@@ -336,12 +327,6 @@ async def _fetch_chunk_content(
 # Constraint status classification
 # ---------------------------------------------------------------------------
 
-def _is_measurable_kind(kind: str | None) -> bool:
-    return bool(kind) and any(
-        kind.startswith(p) for p in _MEASURABLE_KIND_PREFIXES
-    )
-
-
 def _classify_constraint(
     c: dict[str, Any],
     measurements: dict[str, float],
@@ -363,7 +348,7 @@ def _classify_constraint(
     cmax = c.get("max")
 
     if target is not None:
-        tol_pct = c.get("tolerance_pct", 1.0)
+        tol_pct = c.get("tolerance_pct", DEFAULT_TOLERANCE_PCT)
         if abs(measured - target) > abs(target) * (tol_pct / 100.0):
             return "out_of_tolerance", measured
 

@@ -62,7 +62,6 @@ from app.sim.report import (
 )
 from app.sim.spec_extractor import ExtractionAmbiguity, extract_spec
 from app.sim.spec_store import (
-    SpecNotConfirmedError,
     SpecNotFoundError,
 )
 from app.sim.topology_select import select_topologies
@@ -507,9 +506,10 @@ async def advance_design_stage(
             yield _sse("done", {"ok": False})
             return
         await _set_job_status(db, job_id, "executing")
-        # §17.152 — dispatch on the spec's design.kind. Read directly
-        # from the already-fetched spec_row so we don't round-trip
-        # back to the DB just for the discriminator.
+        # §17.152 — dispatch on the spec's design.kind. _fetch_spec_for_job
+        # only selected id+confirmed_at, so fetch spec_json here for the
+        # discriminator. One extra SELECT; the sizing loop that follows
+        # dwarfs it.
         spec_full = await db.execute(
             text(
                 "SELECT spec_json FROM specs WHERE id = :id"

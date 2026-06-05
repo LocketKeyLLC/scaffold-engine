@@ -49,7 +49,6 @@ from app.config import settings
 from app.sim.ngspice import run_ngspice
 from app.sim.spec_store import (
     SpecNotConfirmedError,
-    SpecNotFoundError,
     require_confirmed_spec,
 )
 from app.utils.llm_parsing import parse_json_object

@@ -46,7 +46,6 @@ from app.sim.device_sizing import (
 )
 from app.sim.spec_store import (
     SpecNotConfirmedError,
-    SpecNotFoundError,
     require_confirmed_spec,
 )
 from app.sim.verilator import run_verilator

@@ -21844,6 +21844,23 @@ The remaining low-severity items from the extended-coverage review, as one batch
 
 ---
 
+### §17.413 sim/ deep-review pass — report↔device_sizing SSOT dedup + dead-import/comment cleanup (2026-06-04)
+
+The deferred `sim/` deep review §17.408 flagged as not-yet-done (the 4.6k-line EDA pipeline). Full read of all 12 modules (4,673 LOC); each candidate verified against the actual code before acceptance (the usual high false-positive rate held — `output_fields` field names, NaN-in-stored-measurements, and the `_check_constraints` target/min/max fall-through all **cleared** on inspection). The subsystem is mature and matches the rest of the codebase's hardening; findings are consistency/cosmetic, no live bug. Fixed as one low-risk batch.
+
+- **S1 — `report.py` re-implemented `device_sizing`'s constraint classifier by hand.** `report.py`'s docstring states its classification *"mirrors §17.147's `_check_constraints` logic exactly,"* yet it carried hand-copied duplicates: the `tolerance_pct` default hardcoded as `1.0` (vs `device_sizing.DEFAULT_TOLERANCE_PCT`), plus byte-identical `_MEASURABLE_KIND_PREFIXES` + `_is_measurable_kind`. Same value today → no live bug, but a single-source-of-truth violation that would silently diverge if the default changed. `report.py` now imports `DEFAULT_TOLERANCE_PCT` + `_is_measurable_kind` from `device_sizing` (same precedent as `digital_sizing.py:40-46`, which already imports the private `_check_constraints`/`_candidate_to_dict`/`_fetch_topology_selection`). No import cycle — `device_sizing` doesn't import `report`.
+- **S2 — `report.py` private `_escape_milvus_literal`.** §17.409 (R3) promoted this exact helper to shared `escape_milvus_literal` in `milvus_utils.py`, which `report.py` already imports from (`get_collection`). Swapped to the shared fn; deleted the private copy.
+- **S3 — three unused imports.** `SpecNotFoundError` in `device_sizing.py` + `digital_sizing.py`, `SpecNotConfirmedError` in `design_pipeline.py` — confirmed unreferenced and not re-exported. Not caught by CI (no ruff/flake8 gate; `pyproject.toml` configures only pytest). Removed.
+- **S4 — wrong comment in `design_pipeline.py`.** The size-stage comment claimed it read the discriminator *"from the already-fetched spec_row so we don't round-trip"* — the next line does `SELECT spec_json FROM specs`. Corrected to describe the (intentional) extra SELECT.
+
+**Deferred — S5 (informational, not fixed): symbiyosys formal-verification wrapper is dormant.** `run_symbiyosys` (247 LOC, `app/sim/symbiyosys.py`) is fully built, unit+integration tested, health-checked (`main.py:697`) and configured (`config.py:296`), but has **zero production callers** — no pipeline stage runs formal verification; digital sizing uses Verilator only. Built ahead of a consumer (§17.142). Left as-is; a future entry should either wire a formal-verify stage or formally mark it deferred so it isn't assumed active.
+
+**Verification.** Imports load with no cycle (`report._is_measurable_kind is device_sizing._is_measurable_kind` → True). Affected suites: `test_report` + `test_device_sizing` + `test_digital_sizing` + `test_design_pipeline` = **65 passed**; `test_topology_select`/`test_spec`/`test_spec_store`/`test_spec_extractor`/`test_sim_measure`/`test_sim_{ngspice,verilator,symbiyosys}_adapter` = **113 passed**. 178 total, 0 failures. No grep hit for the removed report symbols anywhere in `app/` or `tests/`.
+
+**Cost.** 4 one-/few-line edits + 1 import-line change + 3 import removals + 1 comment. Net −1 helper, −1 constant block, −3 dead imports. No schema/API/behavior change.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.
