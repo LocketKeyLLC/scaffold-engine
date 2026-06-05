@@ -160,4 +160,6 @@ async def get_state(
         topology_selection_id=state.topology_selection_id,
         device_sizing_id=state.device_sizing_id,
         device_sizing_converged=state.device_sizing_converged,
+        formal_verification_id=state.formal_verification_id,
+        formal_verdict=state.formal_verdict,
     )

@@ -436,6 +436,14 @@ def _doc_to_report_read(doc) -> ReportRead:
         ],
         errors=list(doc.errors),
         model_used=doc.model_used,
+        formal_verdict=doc.formal_verdict,
+        formal_converged=doc.formal_converged,
+        formal_mode=doc.formal_mode,
+        formal_engine=doc.formal_engine,
+        formal_depth=doc.formal_depth,
+        formal_depth_reached=doc.formal_depth_reached,
+        formal_iterations=doc.formal_iterations,
+        formal_properties=doc.formal_properties,
     )
 
 

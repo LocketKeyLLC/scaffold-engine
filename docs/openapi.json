@@ -570,6 +570,29 @@
             ],
             "title": "Device Sizing Id"
           },
+          "formal_verdict": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Formal Verdict"
+          },
+          "formal_verification_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Formal Verification Id"
+          },
           "job_id": {
             "format": "uuid",
             "title": "Job Id",
@@ -3640,7 +3663,7 @@
     },
     "/design/{job_id}/advance": {
       "post": {
-        "description": "Advance the design_circuit pipeline by one stage. Returns an\nSSE stream — clients should read ``text/event-stream`` events of\ntype ``stage_start`` / ``stage_done`` / ``stage_error`` / ``done``.\n\nStage semantics:\n  * ``topology`` — requires confirmed spec; runs §17.146.\n  * ``size``     — requires prior topology selection; runs §17.147.\n  * ``report``   — requires prior device sizing; renders §17.148.\n\nPer-stage granularity is intentional (per §17.151 design choice) —\nthe operator can inspect persisted audit rows between stages and\ncorrect course without re-running the entire chain.\n\nStatus mapping at the HTTP layer:\n  * 400 — unknown stage\n  * 404 — job_id not a design_circuit row\n  * 200 + SSE stream — every successful invocation; stage outcomes\n          live inside the event payloads, not the HTTP code.",
+        "description": "Advance the design_circuit pipeline by one stage. Returns an\nSSE stream — clients should read ``text/event-stream`` events of\ntype ``stage_start`` / ``stage_done`` / ``stage_error`` / ``done``.\n\nStage semantics:\n  * ``topology`` — requires confirmed spec; runs §17.146.\n  * ``size``     — requires prior topology selection; runs §17.147.\n  * ``verify``   — requires a prior *converged* digital sizing; runs the\n                   §17.414 symbiyosys formal-verify loop (digital-only).\n  * ``report``   — requires prior device sizing; renders §17.148.\n\nPer-stage granularity is intentional (per §17.151 design choice) —\nthe operator can inspect persisted audit rows between stages and\ncorrect course without re-running the entire chain.\n\nStatus mapping at the HTTP layer:\n  * 400 — unknown stage\n  * 404 — job_id not a design_circuit row\n  * 200 + SSE stream — every successful invocation; stage outcomes\n          live inside the event payloads, not the HTTP code.",
         "operationId": "post_advance_design__job_id__advance_post",
         "parameters": [
           {

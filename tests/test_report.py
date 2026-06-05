@@ -554,6 +554,70 @@ def test_render_markdown_analog_still_uses_spice_fence():
 
 
 # ---------------------------------------------------------------------------
+# §17.416 — formal-verification section
+# ---------------------------------------------------------------------------
+
+@pytest.mark.smoke
+def test_render_markdown_no_formal_section_when_unverified():
+    """Analog / unverified designs (formal_verdict is None) render NO
+    formal-verification section."""
+    doc = _baseline_doc()
+    md = render_markdown(doc)
+    assert "## Formal Verification" not in md
+
+
+@pytest.mark.smoke
+def test_render_markdown_formal_section_pass():
+    """A digital design that ran the verify stage renders a Formal
+    Verification section with the verdict and the frozen SVA harness."""
+    doc = _baseline_doc()
+    doc.kind = "digital"
+    doc.formal_verdict = "PASS"
+    doc.formal_converged = True
+    doc.formal_mode = "bmc"
+    doc.formal_depth = 20
+    doc.formal_depth_reached = 20
+    doc.formal_engine = "smtbmc z3"
+    doc.formal_iterations = 2
+    doc.formal_properties = "module formal_top;\n  assert property (1);\nendmodule"
+
+    md = render_markdown(doc)
+    assert "## Formal Verification" in md
+    assert "✅ PASS" in md
+    assert "smtbmc z3" in md
+    assert "### Properties (frozen SVA harness)" in md
+    assert "```systemverilog" in md
+    assert "assert property (1)" in md
+
+
+@pytest.mark.smoke
+def test_render_markdown_formal_section_fail():
+    """A FAIL verdict renders the not-proven marker."""
+    doc = _baseline_doc()
+    doc.kind = "digital"
+    doc.formal_verdict = "FAIL"
+    doc.formal_converged = False
+    doc.formal_mode = "bmc"
+    doc.formal_depth = 20
+    doc.formal_depth_reached = 3
+    md = render_markdown(doc)
+    assert "## Formal Verification" in md
+    assert "❌ FAIL" in md
+    assert "Depth reached:** 3" in md
+
+
+@pytest.mark.smoke
+def test_render_markdown_formal_section_is_deterministic():
+    """The formal section preserves the byte-identical render invariant."""
+    doc = _baseline_doc()
+    doc.kind = "digital"
+    doc.formal_verdict = "PASS"
+    doc.formal_converged = True
+    doc.formal_properties = "module formal_top; assert property(1); endmodule"
+    assert render_markdown(doc) == render_markdown(doc)
+
+
+# ---------------------------------------------------------------------------
 # §17.319 — Milvus output_fields regression guard
 # ---------------------------------------------------------------------------
 # §17.148 shipped `_fetch_chunk_content` querying output_fields=[..., "content", ...].

@@ -143,6 +143,18 @@ class ReportDocument:
     sim_runs: list[ReportSimRun] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     model_used: str = ""
+    # §17.416 — formal-verification summary (digital designs only; defaults
+    # for analog or not-yet-verified). Projected from the latest
+    # formal_verifications row for this sizing's DUT — keeps the report
+    # regenerable from the audit tables alone.
+    formal_verdict: str | None = None
+    formal_converged: bool | None = None
+    formal_mode: str = ""
+    formal_engine: str = ""
+    formal_depth: int | None = None
+    formal_depth_reached: int | None = None
+    formal_iterations: int | None = None
+    formal_properties: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +288,29 @@ async def _fetch_sim_runs(
     return out
 
 
+async def _fetch_formal_for_sizing(
+    db: AsyncSession, digital_sizing_id: uuid.UUID
+) -> dict[str, Any] | None:
+    """§17.416 — the latest ``formal_verifications`` row for a digital
+    sizing's DUT, or None (analog designs, or digital ones not yet verified).
+    Best-effort: a missing row just omits the formal section from the report."""
+    row = await db.execute(
+        text(
+            """
+            SELECT verdict, converged, mode, engine, depth, depth_reached,
+                   iterations, properties_source
+            FROM formal_verifications
+            WHERE digital_sizing_id = :dsid
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"dsid": str(digital_sizing_id)},
+    )
+    r = row.mappings().first()
+    return dict(r) if r else None
+
+
 # ---------------------------------------------------------------------------
 # Milvus best-effort chunk fetch
 # ---------------------------------------------------------------------------
@@ -388,6 +423,11 @@ async def build_report(
         db, sizing["topology_selection_id"]
     )
     sim_run_map = await _fetch_sim_runs(db, sizing["sim_run_ids"] or [])
+    # §17.416 — formal-verification summary (digital DUTs only).
+    formal = (
+        await _fetch_formal_for_sizing(db, sizing["id"])
+        if sizing.get("kind") == "digital" else None
+    )
 
     candidates: list[Any] = selection["candidates"] or []
     candidate_idx = sizing["candidate_idx"]
@@ -498,6 +538,17 @@ async def build_report(
         sim_runs=sim_runs_list,
         errors=list(sizing["errors"] or []),
         model_used=str(sizing["model_used"] or ""),
+        formal_verdict=(formal["verdict"] if formal else None),
+        formal_converged=(
+            bool(formal["converged"]) if formal and formal["converged"] is not None
+            else None
+        ),
+        formal_mode=str(formal["mode"]) if formal else "",
+        formal_engine=str(formal["engine"]) if formal else "",
+        formal_depth=(formal["depth"] if formal else None),
+        formal_depth_reached=(formal["depth_reached"] if formal else None),
+        formal_iterations=(formal["iterations"] if formal else None),
+        formal_properties=str(formal["properties_source"]) if formal else "",
     )
 
 
@@ -677,6 +728,34 @@ def render_markdown(doc: ReportDocument) -> str:
     else:
         lines.append("_(no simulation runs recorded)_")
     lines.append("")
+
+    # §17.416 — formal-verification section (digital designs that ran the
+    # verify stage). Omitted entirely for analog / unverified designs.
+    if doc.formal_verdict is not None:
+        lines.append("## Formal Verification")
+        status = (
+            "✅ PASS — properties proven"
+            if doc.formal_converged
+            else f"❌ {doc.formal_verdict} — not proven"
+        )
+        lines.append(f"- **Verdict:** {status}")
+        depth_str = f"{doc.formal_mode}"
+        if doc.formal_depth is not None:
+            depth_str += f", depth {doc.formal_depth}"
+        lines.append(f"- **Mode:** {depth_str}")
+        if doc.formal_depth_reached is not None:
+            lines.append(f"- **Depth reached:** {doc.formal_depth_reached}")
+        if doc.formal_engine:
+            lines.append(f"- **Engine:** `{doc.formal_engine}`")
+        if doc.formal_iterations is not None:
+            lines.append(f"- **Iterations:** {doc.formal_iterations}")
+        if doc.formal_properties:
+            lines.append("")
+            lines.append("### Properties (frozen SVA harness)")
+            lines.append("```systemverilog")
+            lines.append(doc.formal_properties.rstrip())
+            lines.append("```")
+        lines.append("")
 
     if doc.errors:
         lines.append("## Audit — Diagnostics")

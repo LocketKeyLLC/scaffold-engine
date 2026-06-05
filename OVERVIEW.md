@@ -21889,6 +21889,20 @@ Second of three. Wires §17.414's `verify_design` into `advance_design_stage` as
 
 ---
 
+### §17.416 formal-verify stage, part 3 — report integration + read schemas + live integration (2026-06-04)
+
+Final of three. Surfaces the formal-verification result in the read paths and proves the stage end-to-end against the live sidecar.
+
+- **Report (`app/sim/report.py`).** `ReportDocument` gains a formal summary block (`formal_verdict`/`formal_converged`/`mode`/`engine`/`depth`/`depth_reached`/`iterations`/`properties`, all defaulted so existing constructors are untouched). `build_report` fetches the latest `formal_verifications` row for the sizing's DUT **only when `kind == 'digital'`** (new `_fetch_formal_for_sizing`, keyed on `digital_sizing_id`) — analog reports are byte-identical to before. `render_markdown` adds a `## Formal Verification` section (verdict banner + frozen SVA harness in a `systemverilog` fence), omitted entirely when unverified. The deterministic-render invariant holds (the section is a pure projection of the row).
+- **Read schemas (`app/schemas.py`).** `DesignStateRead` gains `formal_verification_id` + `formal_verdict`; `ReportRead` gains the eight formal-summary fields. Mappers updated: `routers/design.py::get_state` (the piece deferred from §17.415) and `routers/specs.py::_doc_to_report_read`. No standalone `FormalVerificationRead` — v1 has no endpoint returning a bare formal row; the read surface is the SSE `stage_done`, `GET /design/{job_id}`, and the report. **Schema gates re-run**: `make sync-schemas` (SDK vendor) + `make openapi-snapshot` (docs/openapi.json +25 lines) + `make ci-tier-0` green.
+- **Live integration (`tests/integration/test_formal_verify_db.py`, `@timeout(900)`).** Seeds a confirmed digital spec + topology + converged `digital_sizings` DUT, drives `verify_design` against the **real symbiyosys sidecar + cloud LLM**. Asserts the audit-the-attempt invariant (a `formal_verifications` row persists regardless of verdict) and that `sim_run_ids` link to `sim_runs` rows with `tool='symbiyosys'`. **Passed live in 13.6s** — the LLM authored a DUT+SVA harness and sby ran it; verdict was `ERROR` (the first-cut harness didn't compile within 2 iterations). Non-convergence is tolerated by design: the plumbing/audit/persistence are proven; getting actual `PASS` proofs is prompt-tuning work (cf. the §17.155 digital-sizing prompt evolution) for a follow-up.
+
+**Verification.** Unit sweep across report/design/formal/device/digital/topology/spec/measure/symbiyosys-adapter = **180 passed**; report suite alone +4 new formal-render tests. ci-tier-0 green (SDK schema in sync, OpenAPI regenerated). Live integration passed.
+
+**Feature complete (§17.414→§17.416).** The dormant symbiyosys wrapper (§17.413 S5) is now wired: `topology → size → verify → report`, digital-only, closed-loop with property-locking, attested in `sim_runs` + `formal_verifications` and rendered in the report. **Open follow-up:** prompt-tune `formal_verify._SYSTEM_PROMPT` toward genuine PASS proofs (the Yosys `-formal` synthesizable-subset + valid-SVA generation is the hard part, as flagged in the plan).
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

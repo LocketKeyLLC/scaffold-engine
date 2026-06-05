@@ -971,6 +971,10 @@ class DesignStateRead(BaseModel):
     topology_selection_id: UUID | None = None
     device_sizing_id: UUID | None = None
     device_sizing_converged: bool | None = None
+    # §17.416 — formal-verify stage surface (digital designs). NULL until the
+    # verify stage has run for this job's topology selection.
+    formal_verification_id: UUID | None = None
+    formal_verdict: str | None = None
 
 
 class ReportRead(BaseModel):
@@ -1010,6 +1014,16 @@ class ReportRead(BaseModel):
     sim_runs: list[ReportSimRunRead]
     errors: list[str]
     model_used: str
+    # §17.416 — formal-verification summary (digital designs that ran the
+    # verify stage; defaults for analog / unverified).
+    formal_verdict: str | None = None
+    formal_converged: bool | None = None
+    formal_mode: str = ""
+    formal_engine: str = ""
+    formal_depth: int | None = None
+    formal_depth_reached: int | None = None
+    formal_iterations: int | None = None
+    formal_properties: str = ""
 
 
 # ---------------------------------------------------------------------------
