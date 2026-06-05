@@ -10,7 +10,11 @@ This watchdog covers that gap: every tick, if today is one of the
 quarterly fire dates and we're past the configured grace window, and no
 ``calibration.*`` alert and no successful run timestamp shows the cron
 fired today, emit ``calibration.no_fire``. dedup_key is keyed to the
-date so we fire once per missed quarter, not once per tick.
+date, so the per-tick cadence is suppressed — but with the default
+``alert_cooldown_seconds`` (1 h) the alert then re-fires roughly hourly
+for the rest of a missed-cron day (an incident reminder, not a single
+shot). Set ``alert_kind_cooldowns["calibration.no_fire"]`` (§17.388) to a
+day-length cooldown if you want exactly one alert per missed quarter.
 """
 from __future__ import annotations
 

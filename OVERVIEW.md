@@ -21934,6 +21934,21 @@ Deep review of `app/scheduler.py` (573 LOC, APScheduler 3.10.4). Mature/hardened
 
 ---
 
+### §17.419 observability/ deep-review — subsystem clean; two docstring corrections (2026-06-04)
+
+Deep review of `app/observability/` (1,211 LOC: `alerts` / `thresholds` / `metrics` / `calibration_watchdog` / `otel`). All 6 `emit()` call sites traced. **The subsystem is notably clean** — unlike the sim/ (SSOT dedup) and scheduler.py (live orphan) passes, this one surfaced no bugs, only two doc-accuracy issues. The durable value of this entry is recording *that it was reviewed and found solid*, so the cleared items aren't re-raised.
+
+- **O1 (doc) — `alerts.emit` session contract.** The docstring claimed a caller-passed `db` lets the alert "participate in a caller's transaction … should not roll back with the caller's work" — but `emit` issues an unconditional `await db.commit()` on the passed session, which commits *all* the caller's pending work (the opposite of "participate"). **Verified not a live bug:** the only `db=` callers (`thresholds.tick`, `calibration_watchdog`) pass read-only sessions holding nothing but the alert INSERT, and actually *rely* on `emit` committing (they don't commit afterward; `async_session` would otherwise roll the alert back on exit). `embedder_drift` omits `db`. Corrected the docstring to state plainly that `emit` commits the passed session — so a future caller with pending writes isn't surprised.
+- **O2 (doc) — `calibration_watchdog` dedup cadence.** Docstring said `calibration.no_fire` fires "once per missed quarter, not once per tick." The date-keyed `dedup_key` does suppress the 15-min tick cadence, but with the default 1 h `alert_cooldown_seconds` it re-fires ~hourly for the rest of a missed-cron day. Corrected to describe the hourly incident-reminder cadence + the `alert_kind_cooldowns` (§17.388) knob for a true once-per-quarter alert.
+
+**Cleared as FALSE POSITIVES (verified — do not re-raise):** emit returning `emitted:True` when the DB insert failed (by contract — the always-on logger leg fired); emit dedup check-then-insert TOCTOU (callers are single-threaded serialized ticks / one-shot lifespan); `_prev_embedding_snapshot` module-global (ticks serialized by APScheduler `max_instances=1`); metric label cardinality (every label set is bounded — status enum, route templates per §17.411, model_costs-seeded provider/model, validator-bounded reranker knobs); `jobs_by_status` clear()+repopulate scrape race (transient, self-correcting, inherent to the pattern); OTel global instrumentation (idempotent `_initialized` guard, inline imports keep the off-path clean).
+
+**Verification.** Docstring-only — no behavior change. Imports load; observability suites (`alerts`/`thresholds`/`metrics`/`calibration_watchdog`/`resolve`/`rollups`/`router`/`embedding_cache`/`x1`) — **130 passed**.
+
+**§17.408 review shelf remaining:** `cli/`, `sdk/`, `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

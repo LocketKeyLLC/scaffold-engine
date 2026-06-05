@@ -118,10 +118,14 @@ async def emit(
     "suppressed": bool, "id": str | None, "reason": str | None}`. Never
     raises — sink failures are logged and absorbed.
 
-    `db` is optional; when omitted, a short-lived session is opened.
-    Pass an existing session to participate in a caller's transaction
-    (rare — most callers don't, and the alert write should not roll
-    back with the caller's work).
+    `db` is optional; when omitted, a short-lived session is opened and
+    closed here. **If you DO pass a session, emit() commits it** — the alert
+    INSERT must persist independently of any caller rollback, so emit issues
+    its own ``db.commit()``. Only pass a session whose pending work you are
+    happy to have committed. In practice the only callers that pass `db` are
+    the read-only periodic ticks (thresholds / calibration_watchdog), whose
+    sessions hold nothing but the alert itself and which rely on this commit
+    to persist it. Most callers omit `db`.
 
     `cooldown_seconds` is optional and overrides both the per-kind
     setting and the global default for this call only. Use when a
