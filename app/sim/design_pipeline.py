@@ -54,6 +54,10 @@ from app.sim.device_sizing import (
     size_device,
 )
 from app.sim.digital_sizing import size_digital_device
+from app.sim.formal_verify import (
+    DigitalSizingNotFoundError,
+    verify_design,
+)
 from app.sim.report import (
     ReportDocument,
     ReportNotAvailableError,
@@ -69,7 +73,7 @@ from app.sim.topology_select import select_topologies
 logger = logging.getLogger("scaffold")
 
 JOB_TYPE = "design_circuit"
-VALID_STAGES = frozenset({"topology", "size", "report"})
+VALID_STAGES = frozenset({"topology", "size", "verify", "report"})
 
 
 class DesignJobNotFoundError(LookupError):
@@ -109,6 +113,10 @@ class DesignState:
     topology_selection_id: uuid.UUID | None
     device_sizing_id: uuid.UUID | None
     device_sizing_converged: bool | None
+    # §17.414 — formal-verify stage surface. NULL until a digital design's
+    # verify stage has run; ``formal_verdict`` is the latest sby verdict.
+    formal_verification_id: uuid.UUID | None
+    formal_verdict: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +295,50 @@ async def _fetch_latest_sizing_any_kind(
     return dict(r) if r else None
 
 
+async def _fetch_latest_converged_digital_sizing(
+    db: AsyncSession, topology_selection_id: uuid.UUID
+) -> dict[str, Any] | None:
+    """§17.414 — the latest *converged* digital sizing for a topology
+    selection. The formal-verify stage needs a Verilator-proven DUT as its
+    starting point; a non-converged sizing has nothing trustworthy to verify."""
+    row = await db.execute(
+        text(
+            """
+            SELECT id, converged
+            FROM digital_sizings
+            WHERE topology_selection_id = :sid AND converged = TRUE
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"sid": str(topology_selection_id)},
+    )
+    r = row.mappings().first()
+    return dict(r) if r else None
+
+
+async def _fetch_latest_formal_verification(
+    db: AsyncSession, topology_selection_id: uuid.UUID
+) -> dict[str, Any] | None:
+    """§17.414 — the latest formal-verification attempt for a topology
+    selection (surfaced by ``get_design_state``). ``formal_verifications``
+    carries ``topology_selection_id`` directly, so no join is needed."""
+    row = await db.execute(
+        text(
+            """
+            SELECT id, verdict, converged
+            FROM formal_verifications
+            WHERE topology_selection_id = :sid
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"sid": str(topology_selection_id)},
+    )
+    r = row.mappings().first()
+    return dict(r) if r else None
+
+
 # ---------------------------------------------------------------------------
 # Public — create
 # ---------------------------------------------------------------------------
@@ -382,6 +434,8 @@ async def advance_design_stage(
     Status transitions on success:
       topology: awaiting_confirmation → planning
       size:     planning → executing
+      verify:   executing → executing (no transition — §17.414 formal
+                attestation; digital-only)
       report:   executing → completed
     On terminal stage failure: → failed.
     """
@@ -581,6 +635,83 @@ async def advance_design_stage(
         yield _sse("done", {"ok": True})
         return
 
+    if stage == "verify":
+        # §17.414 — formal verification (symbiyosys). Digital-only and runs
+        # against a *converged* digital sizing (the Verilator-proven DUT).
+        sel = await _fetch_latest_topology_selection(db, spec_id)
+        if sel is None:
+            yield _sse(
+                "stage_error",
+                {
+                    "stage": stage,
+                    "errors": [
+                        "no topology_selection for this job — run "
+                        "stage=topology first"
+                    ],
+                },
+            )
+            yield _sse("done", {"ok": False})
+            return
+        sizing = await _fetch_latest_converged_digital_sizing(db, sel["id"])
+        if sizing is None:
+            yield _sse(
+                "stage_error",
+                {
+                    "stage": stage,
+                    "errors": [
+                        "no converged digital sizing for this job — formal "
+                        "verification applies only to design.kind="
+                        "'digital_logic'; run stage=size until it converges "
+                        "first"
+                    ],
+                },
+            )
+            yield _sse("done", {"ok": False})
+            return
+        # Job stays in ``executing`` (no new status value — verify is a formal
+        # attestation step; ``report`` still finalizes to ``completed``).
+        try:
+            v_result = await verify_design(sizing["id"], db=db)
+        except (
+            TopologySelectionNotFoundError,
+            CandidateIndexError,
+            DigitalSizingNotFoundError,
+        ) as exc:
+            await _set_job_status(db, job_id, "failed")
+            yield _sse(
+                "stage_error",
+                {"stage": stage, "errors": [str(exc)]},
+            )
+            yield _sse("done", {"ok": False})
+            return
+        # §17.356 — post-await cancellation check. verify_design runs an
+        # LLM+sby repair loop that can take minutes; honor a cancel landing
+        # during the window.
+        if await _job_was_cancelled(db, job_id):
+            yield _sse(
+                "cancelled",
+                {"stage": stage, "job_id": str(job_id),
+                 "reason": "cancelled during formal verification"},
+            )
+            yield _sse("done", {"ok": False})
+            return
+        yield _sse(
+            "stage_done",
+            {
+                "stage": stage,
+                "formal_verification_id": str(v_result.formal_verification_id),
+                "verdict": v_result.verdict,
+                "converged": v_result.converged,
+                "depth_reached": v_result.depth_reached,
+                "iterations": v_result.iterations,
+                "errors": v_result.errors,
+            },
+        )
+        # Non-PASS leaves the job in ``executing`` — operator can re-run
+        # verify or proceed to report (which renders a non-converged result).
+        yield _sse("done", {"ok": v_result.converged})
+        return
+
     if stage == "report":
         sel = await _fetch_latest_topology_selection(db, spec_id)
         if sel is None:
@@ -687,6 +818,10 @@ async def get_design_state(
         await _fetch_latest_device_sizing(db, sel["id"])
         if sel else None
     )
+    formal = (
+        await _fetch_latest_formal_verification(db, sel["id"])
+        if sel else None
+    )
     return DesignState(
         job_id=job_id,
         job_type=str(job["job_type"]),
@@ -700,4 +835,6 @@ async def get_design_state(
         device_sizing_converged=(
             bool(sizing["converged"]) if sizing else None
         ),
+        formal_verification_id=(formal["id"] if formal else None),
+        formal_verdict=(formal["verdict"] if formal else None),
     )

@@ -21877,6 +21877,18 @@ The deferred `sim/` deep review §17.408 flagged as not-yet-done (the 4.6k-line 
 
 ---
 
+### §17.415 formal-verify stage, part 2 — `verify` stage wired into the design pipeline (2026-06-04)
+
+Second of three. Wires §17.414's `verify_design` into `advance_design_stage` as a new `verify` stage between `size` and `report`.
+
+- **`design_pipeline.py`.** `VALID_STAGES` gains `"verify"`; new `if stage == "verify":` branch: fetch the latest topology selection, then the latest **converged** `digital_sizings` row (new `_fetch_latest_converged_digital_sizing` — the Verilator-proven DUT is the formal stage's starting point); `stage_error` if either is absent (with a digital-only hint). Calls `verify_design`, wrapped in the §17.356 post-await `_job_was_cancelled` probe + a lookup-error guard. Emits `stage_done {formal_verification_id, verdict, converged, depth_reached, iterations}`. **No job-status transition** — verify runs within `executing` (avoids touching the 14-value CHECK set); `report` still finalizes to `completed`. A non-PASS verdict yields `done {ok: False}` and leaves the job in `executing` (re-runnable), mirroring the size stage's non-convergence behaviour.
+- **State surface.** `DesignState` gains `formal_verification_id` + `formal_verdict`, populated by `get_design_state` via new `_fetch_latest_formal_verification` (keyed on `topology_selection_id`, which `formal_verifications` carries directly — no join). The router's `DesignStateRead` mapping is deliberately **left untouched here** — that schema change + the report integration is §17.416, so this commit doesn't trip the schema gates.
+- **Router.** `routers/design.py` docstrings updated to advertise `verify`. `VALID_STAGES` is imported, so the 400 unknown-stage guard auto-includes it.
+
+**Verification.** `test_design_pipeline.py` + `test_formal_verify.py` — **33 passed** (4 new verify-stage tests: PASS happy-path, no-converged-digital-sizing error, non-PASS leaves done(ok=False), §17.356 mid-stage cancellation; plus the full-chain state test now asserts the formal fields). No import cycle (`design_pipeline → formal_verify → device_sizing`; formal_verify imports nothing that imports it back).
+
+---
+
 ### §17.356 design_circuit cancellation respect — `_set_job_status` sticky-cancel + post-await probes (2026-05-31)
 
 Closes the §17.318-flagged "design_circuit cancellation root-cause" operator-driven item §17.350 listed as one of two genuinely-open follow-ups. Pre-§17.356 `advance_design_stage` had no cancellation respect: a `POST /jobs/{id}/cancel` (§17.322) landing mid-stage was silently clobbered by the stage's `_set_job_status('completed' | 'failed')` write at the end of each stage. Operator's cancel intent lost; design pipeline ran to terminal status regardless. The other-status guard `cancel_active_job` documented at line 244 ("the worker's next DB write sees the cancellation via the status check at the top of the execution loop — see `execute_all_nodes`' precondition probe") was a contract the regular DAG executor honored but the design pipeline did not.

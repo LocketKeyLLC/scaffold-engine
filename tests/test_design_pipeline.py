@@ -29,6 +29,7 @@ from app.sim.design_pipeline import (
     get_design_state,
 )
 from app.sim.device_sizing import DeviceSizingResult
+from app.sim.formal_verify import FormalVerifyResult
 from app.sim.spec_extractor import ExtractionAmbiguity, ExtractionResult
 from app.sim.topology_select import TopologyCandidate, TopologySelectionResult
 from tests.conftest import make_mock_db
@@ -38,6 +39,8 @@ JOB_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 SPEC_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
 SEL_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 SIZING_ID = uuid.UUID("44444444-4444-4444-4444-444444444444")
+DSID = uuid.UUID("55555555-5555-5555-5555-555555555555")
+FORMAL_ID = uuid.UUID("66666666-6666-6666-6666-666666666666")
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +156,10 @@ def _patch_chain(
     spec=None,
     sel=None,
     sizing=None,
+    formal=None,
+    digital_sizing=None,
 ):
-    """Mock all four DB fetchers + the per-stage workers. Patches are
+    """Mock all the DB fetchers + the per-stage workers. Patches are
     set per-test based on which sub-state the test cares about."""
     async def fake_fetch_job(db, jid):
         if job is None:
@@ -170,6 +175,12 @@ def _patch_chain(
     async def fake_fetch_sizing(db, ssid):
         return sizing
 
+    async def fake_fetch_formal(db, sid):
+        return formal
+
+    async def fake_fetch_converged_digital(db, sid):
+        return digital_sizing
+
     async def fake_set_status(db, jid, status):
         # §17.356 — `_set_job_status` now returns bool (True on transition,
         # False if the row was already cancelled). Tests that don't care
@@ -184,6 +195,9 @@ def _patch_chain(
     # Patch it to the same fake so the test fixtures unify across the
     # old (device-only) and new (device+digital) lookup paths.
     monkeypatch.setattr("app.sim.design_pipeline._fetch_latest_sizing_any_kind", fake_fetch_sizing)
+    # §17.414 — formal-verify stage fetchers.
+    monkeypatch.setattr("app.sim.design_pipeline._fetch_latest_formal_verification", fake_fetch_formal)
+    monkeypatch.setattr("app.sim.design_pipeline._fetch_latest_converged_digital_sizing", fake_fetch_converged_digital)
     monkeypatch.setattr("app.sim.design_pipeline._set_job_status", fake_set_status)
 
 
@@ -367,6 +381,131 @@ async def test_advance_report_success(monkeypatch):
 
 
 @pytest.mark.smoke
+async def test_advance_verify_success(monkeypatch):
+    """§17.414 — verify stage against a converged digital sizing emits
+    stage_done with the formal verdict."""
+    async def fake_verify(digital_sizing_id, *, db, **kwargs):
+        assert digital_sizing_id == DSID
+        return FormalVerifyResult(
+            ok=True,
+            formal_verification_id=FORMAL_ID,
+            spec_id=SPEC_ID,
+            topology_selection_id=SEL_ID,
+            digital_sizing_id=DSID,
+            converged=True,
+            verdict="PASS",
+            depth_reached=20,
+            iterations=1,
+        )
+
+    _patch_chain(
+        monkeypatch,
+        job=_job_row(status="executing"),
+        spec=_spec_row(),
+        sel={"id": SEL_ID},
+        digital_sizing={"id": DSID, "converged": True},
+    )
+    monkeypatch.setattr("app.sim.design_pipeline.verify_design", fake_verify)
+    db = make_mock_db()
+
+    events = _parse_sse(
+        await _collect(advance_design_stage(JOB_ID, "verify", db=db))
+    )
+    kinds = [e[0] for e in events]
+    assert kinds == ["stage_start", "stage_done", "done"]
+    payload = events[1][1]
+    assert payload["verdict"] == "PASS"
+    assert payload["converged"] is True
+    assert payload["formal_verification_id"] == str(FORMAL_ID)
+    assert events[-1][1]["ok"] is True
+
+
+@pytest.mark.smoke
+async def test_advance_verify_no_converged_digital_sizing(monkeypatch):
+    """No converged digital sizing → stage_error (formal verify is
+    digital-only and needs a Verilator-proven DUT to start from)."""
+    _patch_chain(
+        monkeypatch,
+        job=_job_row(status="executing"),
+        spec=_spec_row(),
+        sel={"id": SEL_ID},
+        digital_sizing=None,  # nothing converged
+    )
+    db = make_mock_db()
+
+    events = _parse_sse(
+        await _collect(advance_design_stage(JOB_ID, "verify", db=db))
+    )
+    kinds = [e[0] for e in events]
+    assert kinds == ["stage_start", "stage_error", "done"]
+    assert "digital_logic" in events[1][1]["errors"][0]
+
+
+@pytest.mark.smoke
+async def test_advance_verify_non_pass_leaves_done_false(monkeypatch):
+    """A non-PASS verdict yields stage_done + done(ok=False); the job is
+    left in 'executing' (no failed/completed transition)."""
+    async def fake_verify(digital_sizing_id, *, db, **kwargs):
+        return FormalVerifyResult(
+            ok=False,
+            formal_verification_id=FORMAL_ID,
+            converged=False,
+            verdict="FAIL",
+            depth_reached=3,
+            iterations=3,
+        )
+
+    _patch_chain(
+        monkeypatch,
+        job=_job_row(status="executing"),
+        spec=_spec_row(),
+        sel={"id": SEL_ID},
+        digital_sizing={"id": DSID, "converged": True},
+    )
+    monkeypatch.setattr("app.sim.design_pipeline.verify_design", fake_verify)
+    db = make_mock_db()
+
+    events = _parse_sse(
+        await _collect(advance_design_stage(JOB_ID, "verify", db=db))
+    )
+    kinds = [e[0] for e in events]
+    assert kinds == ["stage_start", "stage_done", "done"]
+    assert events[1][1]["verdict"] == "FAIL"
+    assert events[-1][1]["ok"] is False
+
+
+@pytest.mark.smoke
+async def test_advance_verify_honors_mid_stage_cancellation(monkeypatch):
+    """§17.356 post-await check applies to the verify stage too: a cancel
+    landing during verify_design yields 'cancelled', not stage_done."""
+    async def fake_verify(digital_sizing_id, *, db, **kwargs):
+        return FormalVerifyResult(ok=True, formal_verification_id=FORMAL_ID,
+                                  converged=True, verdict="PASS")
+
+    async def fake_was_cancelled(db, jid):
+        return True
+
+    _patch_chain(
+        monkeypatch,
+        job=_job_row(status="executing"),
+        spec=_spec_row(),
+        sel={"id": SEL_ID},
+        digital_sizing={"id": DSID, "converged": True},
+    )
+    monkeypatch.setattr("app.sim.design_pipeline.verify_design", fake_verify)
+    monkeypatch.setattr("app.sim.design_pipeline._job_was_cancelled", fake_was_cancelled)
+    db = make_mock_db()
+
+    events = _parse_sse(
+        await _collect(advance_design_stage(JOB_ID, "verify", db=db))
+    )
+    kinds = [e[0] for e in events]
+    assert "stage_done" not in kinds
+    assert "cancelled" in kinds
+    assert events[-1][1]["ok"] is False
+
+
+@pytest.mark.smoke
 async def test_advance_unknown_stage_emits_stage_error(monkeypatch):
     _patch_chain(monkeypatch, job=_job_row(), spec=_spec_row())
     db = make_mock_db()
@@ -402,6 +541,7 @@ async def test_get_design_state_full_chain(monkeypatch):
         spec=_spec_row(),
         sel={"id": SEL_ID},
         sizing={"id": SIZING_ID, "converged": True},
+        formal={"id": FORMAL_ID, "verdict": "PASS", "converged": True},
     )
     db = make_mock_db()
     state = await get_design_state(JOB_ID, db=db)
@@ -410,6 +550,8 @@ async def test_get_design_state_full_chain(monkeypatch):
     assert state.topology_selection_id == SEL_ID
     assert state.device_sizing_id == SIZING_ID
     assert state.device_sizing_converged is True
+    assert state.formal_verification_id == FORMAL_ID
+    assert state.formal_verdict == "PASS"
 
 
 @pytest.mark.smoke

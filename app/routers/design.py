@@ -7,7 +7,7 @@ Three endpoints under ``/design``:
                                           return ambiguities inline)
   POST   /design/{job_id}/advance      — SSE-streaming per-stage
                                           advance (``?stage=topology``
-                                          / ``size`` / ``report``)
+                                          / ``size`` / ``verify`` / ``report``)
   GET    /design/{job_id}              — aggregated pipeline state
 
 All routes inherit the global ``Depends(require_api_key)`` mounted on
@@ -92,6 +92,8 @@ async def post_advance(
     Stage semantics:
       * ``topology`` — requires confirmed spec; runs §17.146.
       * ``size``     — requires prior topology selection; runs §17.147.
+      * ``verify``   — requires a prior *converged* digital sizing; runs the
+                       §17.414 symbiyosys formal-verify loop (digital-only).
       * ``report``   — requires prior device sizing; renders §17.148.
 
     Per-stage granularity is intentional (per §17.151 design choice) —
