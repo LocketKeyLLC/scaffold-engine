@@ -510,3 +510,63 @@ class TestContextOnlyAsync:
             )
         assert result is None
         det_mock.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# §17.424 — A1 (trailing-comma SQL) + A2 (full = all-pending)
+# ---------------------------------------------------------------------------
+
+def test_no_trailing_comma_in_sql_in_lists():
+    """A1 regression — a trailing comma in an IN/NOT IN list ('skipped',) is a
+    Postgres syntax error. The mocked-DB tests can't catch it (the SQL never
+    reaches Postgres), so scan the module source for the pattern."""
+    import inspect
+    import re
+    from app.modules import assist_replan
+    src = inspect.getsource(assist_replan)
+    bad = re.findall(r"\bIN\s*\(\s*'[^']*'\s*,\s*\)", src)
+    assert not bad, f"trailing-comma IN list(s) found (PG syntax error): {bad}"
+
+
+async def test_all_pending_node_keys_excludes_terminal_and_root():
+    """A2 — the full-replan node set is all non-terminal nodes minus the root."""
+    from app.modules import assist_replan
+    db = AsyncMock()
+    db.execute.return_value = _result(rows=[
+        {"node_key": "T1"},  # the just-submitted root — excluded explicitly
+        {"node_key": "T2"},
+        {"node_key": "T3"},
+    ])
+    keys = await assist_replan.all_pending_node_keys(
+        db=db, job_id="j1", exclude_node_key="T1",
+    )
+    assert keys == ["T2", "T3"]
+
+
+async def test_full_policy_replans_all_pending_not_just_downstream():
+    """A2 — policy='full' must regenerate ALL pending nodes (via
+    all_pending_node_keys + scope='full'), not the downstream subgraph that
+    'selective' uses. Pre-§17.424 'full' silently behaved like 'selective'."""
+    from app.modules import assist_replan
+    div = {"diverges": True, "severity": "major", "reason": "x"}
+    captured: dict = {}
+
+    async def fake_apply(**kwargs):
+        captured.update(kwargs)
+        return {"scope": kwargs.get("scope"), "affected_nodes": kwargs.get("affected_override")}
+
+    db = AsyncMock()
+    with patch.object(assist_replan, "detect_divergence", AsyncMock(return_value=div)), \
+         patch.object(assist_replan, "all_pending_node_keys",
+                      AsyncMock(return_value=["T2", "T3", "T4"])) as m_all, \
+         patch.object(assist_replan, "apply_selective_replan",
+                      AsyncMock(side_effect=fake_apply)):
+        result = await assist_replan.maybe_replan(
+            db=db, session_id="s1", job_id="j1", node_key="T1",
+            title="t", prompt="p", evidence="e", policy="full",
+        )
+
+    m_all.assert_awaited_once()
+    assert captured["affected_override"] == ["T2", "T3", "T4"]  # all pending, not downstream
+    assert captured["scope"] == "full"
+    assert result["scope"] == "full"

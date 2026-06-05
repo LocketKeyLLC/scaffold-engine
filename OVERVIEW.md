@@ -21982,6 +21982,21 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.424 assist_* deep-review fixes — selective/full replan SQL syntax error (A1) + full = all-pending (A2) (2026-06-05)
+
+Deep review of the Assist Mode modules (`assist_agent` 779 / `assist_replan` 418 / `assist.py` router 218 / `assist_session_map` 93). Two real bugs in `assist_replan.py`, both fixed; the rest (session map, router, mirror invariant, status-transition SQL) traced clean.
+
+- **A1 (medium-high; real production bug) — trailing-comma SQL syntax error broke selective/full replan.** `apply_selective_replan`'s `assist_steps` reset had `AND status NOT IN ('skipped',)` — Python tuple syntax that leaked into the SQL string. **Verified against live Postgres:** `NOT IN ('skipped',)` → `ERROR: syntax error at or near ")"`. So any `selective`/`full` replan that reached the reset (a `submit` with a major divergence) threw → `submit_step` returned **500** (the evidence is committed first, but the replan errored and never reset the subgraph). The default `context_only` policy uses a different path, hiding it. **The tests never caught it because they mock `db.execute`** (`MagicMock` results — the malformed SQL never reaches Postgres). Fix: `status <> 'skipped'` (verified live: corrected UPDATE parses + runs, `UPDATE 0`). Regression guard scans the module source for any `IN ('x',)` trailing-comma pattern (confirmed it catches the old form, passes the new).
+- **A2 (medium; behavior/doc bug) — `full` replan policy silently behaved like `selective`.** `maybe_replan` dispatched `full` to `apply_selective_replan(root_node_key=node_key)`, which BFSs only the **downstream** subgraph — despite the docstring promising *"regenerate all pending nodes."* Fix (operator chose: implement it properly): new `all_pending_node_keys()` returns every non-terminal node (`status NOT IN ('done','skipped')`) minus the just-submitted root; `apply_selective_replan` gained `affected_override` + `scope` params so `full` reuses the same regen+reset machinery over the full pending set and is labelled `scope="full"`. `selective` is unchanged (defaults preserve prior behavior).
+
+**Cleared (traced):** `assist.py:147` `must_claim_first` split (the raise at `assist_agent.py:348` includes the colon-space, so the router parse works — fragile coupling, not a bug); `assist_session_map` (Redis-only, fail-open, TTL-aligned); the §17.286 mirror invariant in `submit_step` (rowcount-checked + surfaced); all other assist SQL IN-lists (no further trailing commas — grep-confirmed A1 was isolated).
+
+**Verification.** `test_assist_replan_divergence` + `test_assist_replan_regen` (+3: A1 source guard, A2 `all_pending_node_keys`, A2 `full→all-pending+scope`) + `test_assist_agent` — **41 passed**. A1 corrected SQL live-verified against Postgres (rollback-safe). No schema change.
+
+**§17.408 review shelf: COMPLETE** — sim/, scheduler.py, observability/, cli/, sdk/, cleanup.py, assist_* all reviewed.
+
+---
+
 ### §17.423 Dockerfile — retry the reranker snapshot_download against HF 429 (CI build flake) (2026-06-04)
 
 The `test.yml` full-suite "Build orchestrator image" step failed twice this session (§17.419, §17.421) with `httpx.HTTPStatusError: 429 Too Many Requests` from `huggingface.co/api/models/${MODEL_RERANKER}/revision/main`. The Dockerfile's `RUN python -c "... snapshot_download('${MODEL_RERANKER}')"` had **no retry** — a single transient HF rate-limit on the model-info call aborted the whole image build (and thus the entire test run, before any test executed). Smoke (`ci.yml`, no full build) was unaffected, which is why the failures looked spurious.

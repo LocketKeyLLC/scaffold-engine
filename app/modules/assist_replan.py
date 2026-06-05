@@ -186,6 +186,29 @@ async def downstream_node_keys(*, db, job_id: str, root_node_key: str) -> list[s
     return sorted(seen)
 
 
+async def all_pending_node_keys(
+    *, db, job_id: str, exclude_node_key: str | None = None,
+) -> list[str]:
+    """§17.424 — every non-terminal node_key for a job (for policy='full').
+
+    "Pending" here means not yet completed: ``status NOT IN ('done','skipped')``.
+    Excludes ``exclude_node_key`` (the just-submitted root, which submit_step
+    already flipped to 'done' — so it's naturally excluded too; the explicit
+    skip is belt-and-suspenders). Empty list when nothing is left to do.
+    """
+    rows = (await db.execute(
+        text("""
+            SELECT node_key FROM dag_nodes
+             WHERE job_id = :jid
+               AND status NOT IN ('done', 'skipped')
+        """),
+        {"jid": job_id},
+    )).mappings().all()
+    return sorted(
+        r["node_key"] for r in rows if r["node_key"] != exclude_node_key
+    )
+
+
 # ── Selective re-plan ──────────────────────────────────────────────────────
 
 
@@ -198,11 +221,17 @@ async def apply_selective_replan(
     root_evidence: str,
     divergence: dict,
     model_overrides: dict | None = None,
+    affected_override: list[str] | None = None,
+    scope: str = "selective",
 ) -> dict:
     """For policy='selective': identify the subgraph that depends on the
     changed node, regenerate prompt_template for those nodes via LLM
     (Sprint W.5), and reset their assist_steps + dag_nodes to pending so
     the user (or autonomous handoff) can re-walk them.
+
+    §17.424 — ``affected_override`` lets policy='full' reuse this machinery
+    with an explicit node set (all pending nodes) instead of the downstream
+    BFS; ``scope`` labels the returned dict accordingly.
 
     The DAG topology stays the same — what changed is the *upstream
     context*. Two layers of compensation now apply:
@@ -219,9 +248,14 @@ async def apply_selective_replan(
     Returns: {affected_nodes, scope, regenerated_count, regen_errors,
               severity, reason}.
     """
-    affected = await downstream_node_keys(db=db, job_id=job_id, root_node_key=root_node_key)
+    if affected_override is not None:
+        affected = affected_override
+    else:
+        affected = await downstream_node_keys(
+            db=db, job_id=job_id, root_node_key=root_node_key,
+        )
     if not affected:
-        return {"affected_nodes": [], "scope": "selective", "details": "no_dependents"}
+        return {"affected_nodes": [], "scope": scope, "details": "no_dependents"}
 
     # Sprint W.5 — regenerate prompt templates BEFORE the reset so that if
     # regen fails (fail-open), we still preserve the legacy reset-only
@@ -265,18 +299,18 @@ async def apply_selective_replan(
                    updated_at = NOW()
              WHERE session_id = :sid
                AND node_key = ANY(:keys)
-               AND status NOT IN ('skipped',)
+               AND status <> 'skipped'
         """),
         {"sid": session_id, "keys": affected},
     )
     await db.commit()
     logger.info(
-        "assist_selective_replan session_id=%s root=%s affected=%d severity=%s",
-        session_id, root_node_key, len(affected), divergence.get("severity"),
+        "assist_replan scope=%s session_id=%s root=%s affected=%d severity=%s",
+        scope, session_id, root_node_key, len(affected), divergence.get("severity"),
     )
     return {
         "affected_nodes": affected,
-        "scope": "selective",
+        "scope": scope,
         "severity": divergence.get("severity"),
         "reason": divergence.get("reason"),
         "regenerated_count": regen_result.get("regenerated", 0),
@@ -403,12 +437,18 @@ async def maybe_replan(
             model_overrides=model_overrides,
         )
     if policy == "full":
-        # Treat as "select all pending" — implemented via the same
-        # selective machinery with the entire pending set.
+        # §17.424 — regenerate ALL pending nodes (not just the downstream
+        # subgraph). Pre-§17.424 this passed the single root to the selective
+        # machinery, so 'full' silently behaved identically to 'selective'
+        # despite the policy name. Now it computes the full pending set.
+        all_pending = await all_pending_node_keys(
+            db=db, job_id=job_id, exclude_node_key=node_key,
+        )
         return await apply_selective_replan(
             db=db, session_id=session_id, job_id=job_id,
             root_node_key=node_key, root_evidence=evidence, divergence=div,
             model_overrides=model_overrides,
+            affected_override=all_pending, scope="full",
         )
     # The replan_policy column has a CHECK constraint (migration 023)
     # restricting values to context_only/selective/full/disabled. Reaching
