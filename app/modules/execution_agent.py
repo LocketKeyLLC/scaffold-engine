@@ -40,6 +40,9 @@ from app.config import settings, get_model
 from app.modules.execution_compile import _compile_output  # re-exported for test patches
 from app.modules.execution_verify import (
     VERIFY_SYSTEM, _verify_output,  # re-exported for test patches
+    _verify_codegen_output,  # §17.429 — stricter CodeGen verifier
+    extract_brief_goal,
+    collect_upstream_code,
     _is_validation_llm_node,
     check_validation_citations,
     check_validation_citation_coverage,
@@ -1125,6 +1128,22 @@ async def execute_next_node(
             verify_status = "fail"
             reason, confidence = syntax_reason, 0.0
             logger.warning("codegen_syntax_gate_fail: node='%s'", title)
+        elif settings.codegen_verifier_strict and (tool or "").lower() == "codegen":
+            # §17.429 — CodeGen nodes get the stricter code-reviewer verifier:
+            # semantics + completeness + upstream-signature consistency
+            # (§17.367) + brief-spec coverage (§17.365). Fed the brief goal and
+            # the upstream sibling code (already in scope from the prompt-build
+            # session above). Same dispatch/cache/fail-closed path as the
+            # generic verifier. Flip codegen_verifier_strict=False to fall back.
+            vstatus, reason, confidence = await _verify_codegen_output(
+                title, output,
+                brief_goal=extract_brief_goal(brief),
+                upstream_code=collect_upstream_code(upstream_outputs),
+                overrides=model_overrides,
+            )
+            verify_status = vstatus
+            if verify_status == "fail":
+                logger.warning("node_verification_failed: node='%s' reason=%s", title, reason)
         else:
             vstatus, reason, confidence = await _verify_output(
                 title, output, overrides=model_overrides,

@@ -20,6 +20,7 @@ from app import model_router
 from app.config import get_model, settings
 from app.providers.base import Tool
 from app.utils.llm_response_cache import get_verifier_cache
+from app.modules.execution_codegen_gate import PYTHON_LANGS, extract_code_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -75,25 +76,22 @@ VERIFY_TOOL = Tool(
 )
 
 
-async def _verify_output(
-    task_title: str,
-    output: str,
+async def _run_verification(
+    messages: list[dict],
     *,
     role: str = "model_verifier",
     overrides: dict | None = None,
 ) -> tuple[Literal["pass", "fail"], str, float]:
-    """Verify output quality. Fail-closed: any error/parse/timeout => ('fail', ...).
+    """Shared verifier dispatch: cache → tool_call → parse, fail-closed.
+
+    §17.429 — extracted from ``_verify_output`` so both the generic verifier
+    and ``_verify_codegen_output`` build their own ``messages`` and route
+    through one place, keeping dispatch, caching, and fail-closed semantics
+    byte-identical. Any error/parse/timeout => ('fail', ...).
 
     §17.89 Pattern 3 — dispatch via ``role=`` so the configured
-    ``MODEL_VERIFIER_PROVIDER`` is honored. Pre-§17.89 the helper took a
-    pre-resolved model string and went through the legacy Ollama-only
-    path. The default ``role="model_verifier"`` matches the upstream
-    caller's prior `get_model("model_verifier", ...)` resolution.
+    ``MODEL_VERIFIER_PROVIDER`` is honored.
     """
-    messages = [
-        {"role": "system", "content": VERIFY_SYSTEM},
-        {"role": "user", "content": f"TASK: {task_title}\n\nOUTPUT:\n{output}"},
-    ]
     # Cache lookup key needs a concrete model tag, not a role — the same role
     # can resolve to different tags via overrides. Resolution is cheap (dict
     # lookup) and the result is stable for the call.
@@ -152,6 +150,144 @@ async def _verify_output(
     except Exception as e:
         logger.exception("verify_unexpected_error")
         return "fail", f"verifier unexpected error: {e}", 0.0
+
+
+async def _verify_output(
+    task_title: str,
+    output: str,
+    *,
+    role: str = "model_verifier",
+    overrides: dict | None = None,
+) -> tuple[Literal["pass", "fail"], str, float]:
+    """Generic verifier — the lenient presence-checker for all node types.
+
+    Unchanged across §17.429: builds the same messages and routes through
+    ``_run_verification`` so behavior (and the cache key) is byte-identical
+    to the pre-refactor implementation. CodeGen nodes route through
+    ``_verify_codegen_output`` instead when ``codegen_verifier_strict``.
+    """
+    messages = [
+        {"role": "system", "content": VERIFY_SYSTEM},
+        {"role": "user", "content": f"TASK: {task_title}\n\nOUTPUT:\n{output}"},
+    ]
+    return await _run_verification(messages, role=role, overrides=overrides)
+
+
+# ---------------------------------------------------------------------------
+# §17.429 — stricter CodeGen verifier (semantics + completeness +
+# upstream-signature consistency + brief-spec coverage)
+# ---------------------------------------------------------------------------
+
+CODEGEN_VERIFY_SYSTEM = """You are a senior code reviewer. Decide whether the generated code correctly and completely implements the task. Report your verdict ONLY by calling the ``record_verification`` tool — no prose.
+
+The code has already passed a syntax check; judge SEMANTICS, COMPLETENESS, and CONSISTENCY.
+
+PASS only when ALL hold:
+- It implements what the task asked for (the requested function/class/module/behavior is present and does the right thing).
+- It is complete: no leftover TODO/FIXME and no placeholder bodies (`pass`, `...`, "implement me") UNLESS the task explicitly asked only for a signature, interface, or stub.
+- It is consistent with the upstream code it builds on: any function/class/constant it imports or calls from an UPSTREAM block is used with a signature that matches that upstream's actual definition (same name, compatible parameters). Do NOT accept an invented or drifted signature.
+- If the brief enumerates specific required items (flags, fields, mappings, formats, supported values), they are all implemented — or explicitly marked out of scope. Silently implementing only a subset is a FAIL.
+
+FAIL when:
+- The requested functionality is missing, stubbed where real code was required, or fundamentally incorrect.
+- It calls an upstream symbol with a signature that does not match the upstream definition (signature drift → it would raise at runtime).
+- It silently drops enumerated requirements from the brief.
+
+Be precise in `reason`: name the specific gap (the missing item, the mismatched signature, the leftover stub) so the next attempt can fix exactly that. confidence: 0.0 to 1.0.
+
+Example — FAIL (signature drift):
+UPSTREAM defines `def render_table(rows): ...`; OUTPUT calls `render_table(rows, headers=hdr)`.
+record_verification(pass=false, reason="Calls upstream render_table(rows, headers=...) but the upstream signature is render_table(rows) — the extra 'headers' arg raises TypeError at runtime", confidence=0.9)
+
+Example — PASS:
+TASK "implement parse_line splitting 'key=value'"; OUTPUT defines parse_line that partitions on '=' and strips whitespace.
+record_verification(pass=true, reason="parse_line implemented per spec: partitions on '=', strips whitespace, returns (key, value)", confidence=0.92)"""
+
+
+def extract_brief_goal(brief: dict | None) -> str:
+    """One-line goal/description from the refined brief.
+
+    Mirrors ``execution_agent._build_prompt``'s extraction so the verifier
+    sees the same goal the executor was given.
+    """
+    if not brief:
+        return ""
+    goal = brief.get("description", "") or ""
+    if not goal:
+        goals = brief.get("goals") or []
+        goal = goals[0] if goals else ""
+    return str(goal).strip()
+
+
+# Per-upstream code cap fed to the CodeGen verifier — enough to read a
+# module's public signatures without blowing the verifier's context budget.
+_UPSTREAM_CODE_CHAR_CAP = 2000
+
+
+def collect_upstream_code(
+    upstream_outputs: dict | None,
+    *,
+    per_block_cap: int = _UPSTREAM_CODE_CHAR_CAP,
+) -> list[tuple[str, str]]:
+    """From ``{node_key: output_text}`` keep only the upstreams that carry a
+    Python fenced block — the siblings whose signatures this node must match —
+    returning ``[(node_key, code_text)]`` with each code truncated to
+    ``per_block_cap``.
+
+    Reuses §17.428's ``extract_code_blocks`` so "has Python code" means the
+    same thing the syntax gate uses.
+    """
+    if not upstream_outputs:
+        return []
+    out: list[tuple[str, str]] = []
+    for key, text in upstream_outputs.items():
+        if not text:
+            continue
+        py = "\n\n".join(
+            code for lang, code in extract_code_blocks(text) if lang in PYTHON_LANGS
+        )
+        if not py.strip():
+            continue
+        if len(py) > per_block_cap:
+            py = py[:per_block_cap] + "\n# … (truncated)"
+        out.append((str(key), py))
+    return out
+
+
+async def _verify_codegen_output(
+    task_title: str,
+    output: str,
+    *,
+    brief_goal: str = "",
+    upstream_code: list[tuple[str, str]] | None = None,
+    role: str = "model_verifier",
+    overrides: dict | None = None,
+) -> tuple[Literal["pass", "fail"], str, float]:
+    """Stricter verifier for CodeGen nodes (§17.429).
+
+    Same dispatch/cache/fail-closed path as ``_verify_output`` (via
+    ``_run_verification``) but with a code-reviewer system prompt plus the
+    brief goal and upstream sibling code, so it can check signature
+    consistency (§17.367) and brief-spec completeness (§17.365).
+    """
+    parts = [f"TASK: {task_title}"]
+    if brief_goal:
+        parts.append(f"\nPROJECT GOAL / BRIEF:\n{brief_goal}")
+    if upstream_code:
+        blocks = "\n\n".join(
+            f"### upstream {key}\n```python\n{code}\n```"
+            for key, code in upstream_code
+        )
+        parts.append(
+            "\nUPSTREAM CODE (siblings this node builds on — any call/import "
+            "of these symbols must match their signatures):\n" + blocks
+        )
+    parts.append(f"\nOUTPUT TO REVIEW:\n{output}")
+    messages = [
+        {"role": "system", "content": CODEGEN_VERIFY_SYSTEM},
+        {"role": "user", "content": "\n".join(parts)},
+    ]
+    return await _run_verification(messages, role=role, overrides=overrides)
 
 
 # ---------------------------------------------------------------------------
