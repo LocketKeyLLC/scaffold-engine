@@ -492,6 +492,45 @@ services:
       retries: 3
       start_period: 10s
 
+  # §17.433 — code-execution sandbox sidecar. Runs UNTRUSTED LLM-generated
+  # code + its tests in isolation (software-path ground-truth oracle, analog
+  # of the EDA sidecars above). NON-DEFAULT profile "sandbox" so `docker
+  # compose up` does NOT start it; opt in with
+  #   docker compose --profile sandbox up -d scaffold-coderunner
+  # then set CODERUNNER_URL=http://scaffold-coderunner:8010 on the orchestrator.
+  # Hardening mirrors the EDA sidecars; the strong-isolation upgrade is the
+  # gVisor `runsc` runtime (operator step — add `runtime: runsc` here once
+  # runsc is installed + registered in /etc/docker/daemon.json). No published
+  # host port (smaller surface for untrusted code); reached via ai-network DNS.
+  scaffold-coderunner:
+    image: scaffold-coderunner:${SCAFFOLD_CODERUNNER_IMAGE_TAG:-local}
+    build:
+      context: ./docker/coderunner
+      dockerfile: Dockerfile
+    container_name: scaffold-coderunner
+    profiles: ["sandbox"]
+    logging: *default-logging
+    mem_limit: 512m
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    # Generated code is written into a per-run tempdir under /tmp and executed
+    # there, so /tmp must be writable AND exec (Docker's tmpfs defaults noexec).
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,exec,size=256m
+    restart: always
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys;sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8010/health\",timeout=2).status==200 else 1)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
 networks:
   ai-network:
     external: true
