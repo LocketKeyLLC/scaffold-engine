@@ -269,6 +269,13 @@ class Settings(BaseSettings):
     local_timeout: int = Field(default=1800, ge=1, le=86400)
     verify_timeout_seconds: int = Field(default=120, ge=1, le=3600)
     max_retries: int = Field(default=3, ge=0, le=20)
+    # §17.428 — deterministic Python-syntax gate for CodeGen node output.
+    # Runs before the (lenient) LLM verifier; a fenced ```python block that
+    # fails ast.parse downgrades the node to 'failed' so the retry loop
+    # surfaces the SyntaxError. Default on (fail-closed posture); flip to
+    # False via CODEGEN_SYNTAX_GATE_ENABLED to disable. See
+    # app/modules/execution_codegen_gate.py.
+    codegen_syntax_gate_enabled: bool = Field(default=True)
 
     # §17.140 — ngspice sidecar (scaffold-ngspice). Reachable over the
     # ai-network bridge. The sidecar enforces its own per-run timeout

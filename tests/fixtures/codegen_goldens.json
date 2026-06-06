@@ -1,0 +1,67 @@
+{
+  "_doc": "§17.428 codegen goldens. Each entry pairs a brief with a representative good_output and the STRUCTURAL assertions that output must satisfy. Assertions are deterministic (parse / defines symbol / banned + required substrings) — never exact-match, because LLM output is non-deterministic (see tests/_codegen_golden_checks.py and the test_retrieval_golden anti-brittleness note). The offline tier (test_codegen_golden.py) runs these checks against the committed good_output. The deferred live tier will run the same checks against real model output for each brief.",
+  "goldens": [
+    {
+      "id": "module-function",
+      "brief": "Write a module function generate_filename(prefix, ext) that returns '<prefix>.<ext>'. Module only — no CLI.",
+      "good_output": "```python\ndef generate_filename(prefix: str, ext: str) -> str:\n    return f\"{prefix}.{ext}\"\n```",
+      "must_parse": true,
+      "must_define": ["generate_filename"],
+      "must_not_contain": ["argparse", "def main(", "__main__"]
+    },
+    {
+      "id": "cli-entrypoint",
+      "brief": "Write the CLI entry-point: argparse over --prefix/--ext, dispatch into generate_filename, print the result.",
+      "good_output": "```python\nimport argparse\n\nfrom filename import generate_filename\n\n\ndef main() -> None:\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--prefix\", required=True)\n    parser.add_argument(\"--ext\", required=True)\n    args = parser.parse_args()\n    print(generate_filename(args.prefix, args.ext))\n\n\nif __name__ == \"__main__\":\n    main()\n```",
+      "must_parse": true,
+      "must_define": ["main"],
+      "must_contain": ["argparse", "generate_filename("]
+    },
+    {
+      "id": "class-definition",
+      "brief": "Write a Config class with a from_env() classmethod returning a Config.",
+      "good_output": "```python\nimport os\n\n\nclass Config:\n    def __init__(self, url: str, timeout: int) -> None:\n        self.url = url\n        self.timeout = timeout\n\n    @classmethod\n    def from_env(cls) -> \"Config\":\n        return cls(os.environ[\"URL\"], int(os.environ.get(\"TIMEOUT\", \"30\")))\n```",
+      "must_parse": true,
+      "must_define": ["Config"]
+    },
+    {
+      "id": "parser-module",
+      "brief": "Write parse_line(line) that splits 'key=value' into a (key, value) tuple, stripping whitespace. Module only.",
+      "good_output": "```python\ndef parse_line(line: str) -> tuple[str, str]:\n    key, _, value = line.partition(\"=\")\n    return key.strip(), value.strip()\n```",
+      "must_parse": true,
+      "must_define": ["parse_line"],
+      "must_not_contain": ["argparse", "__main__"]
+    },
+    {
+      "id": "dataclass-module",
+      "brief": "Write a frozen dataclass Point with x and y floats.",
+      "good_output": "```python\nfrom dataclasses import dataclass\n\n\n@dataclass(frozen=True)\nclass Point:\n    x: float\n    y: float\n```",
+      "must_parse": true,
+      "must_define": ["Point"],
+      "must_contain": ["dataclass"]
+    },
+    {
+      "id": "signature-stub",
+      "brief": "Define the function signature for merge_sorted(a, b) that merges two sorted lists. Signature/contract only.",
+      "good_output": "```python\ndef merge_sorted(a: list, b: list) -> list:\n    \"\"\"Merge two sorted lists into one sorted list.\"\"\"\n    ...\n```",
+      "must_parse": true,
+      "must_define": ["merge_sorted"]
+    },
+    {
+      "id": "sibling-api-producer",
+      "brief": "Write render_table(rows: list[dict]) -> str that renders rows as a markdown table. Module only.",
+      "good_output": "```python\ndef render_table(rows: list[dict]) -> str:\n    if not rows:\n        return \"\"\n    headers = list(rows[0].keys())\n    lines = [\"| \" + \" | \".join(headers) + \" |\"]\n    lines.append(\"| \" + \" | \".join(\"---\" for _ in headers) + \" |\")\n    for row in rows:\n        lines.append(\"| \" + \" | \".join(str(row[h]) for h in headers) + \" |\")\n    return \"\\n\".join(lines)\n```",
+      "must_parse": true,
+      "must_define": ["render_table"],
+      "must_not_contain": ["argparse", "__main__"]
+    },
+    {
+      "id": "sibling-api-consumer",
+      "brief": "Write a report module that imports render_table and exposes build_report(rows) calling render_table(rows). Sibling API must match the producer's render_table(rows) signature.",
+      "good_output": "```python\nfrom table import render_table\n\n\ndef build_report(rows: list[dict]) -> str:\n    return \"# Report\\n\\n\" + render_table(rows)\n```",
+      "must_parse": true,
+      "must_define": ["build_report"],
+      "must_contain": ["render_table("]
+    }
+  ]
+}
