@@ -830,8 +830,14 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str], list[str
         raw_model = str(raw.get("assigned_model", "")).strip()
         if raw_model and raw_model.lower() not in ("none", "null", ""):
             task["assigned_model"] = raw_model
-        elif task.get("tool") == "CodeGen":
-            task["assigned_model"] = "qwen2.5-coder:7b"
+        # §17.427 — do NOT auto-assign a model to CodeGen nodes. Leaving
+        # assigned_model unset lets execution_agent route them through the
+        # `model_coder` role (config.py:196 → execution_agent.py:799). The old
+        # hardcode here (since the Apr-2 initial commit) set "qwen2.5-coder:7b",
+        # which made `_assigned` truthy and silently bypassed the model_coder
+        # role — pinning ALL generated code to the local specialized coder that
+        # §17.346's A/B test explicitly rejected (21× slower on this CPU AND it
+        # ignored the no-markdown-fences instruction the cloud model honored).
         if raw.get("notes"):
             task["notes"] = str(raw["notes"]).strip()
 
