@@ -57,6 +57,7 @@
     },
     {
       "id": "sibling-api-consumer",
+      "live_single_node": false,
       "brief": "Write a report module that imports render_table and exposes build_report(rows) calling render_table(rows). Sibling API must match the producer's render_table(rows) signature.",
       "good_output": "```python\nfrom table import render_table\n\n\ndef build_report(rows: list[dict]) -> str:\n    return \"# Report\\n\\n\" + render_table(rows)\n```",
       "must_parse": true,

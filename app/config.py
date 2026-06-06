@@ -276,6 +276,13 @@ class Settings(BaseSettings):
     # False via CODEGEN_SYNTAX_GATE_ENABLED to disable. See
     # app/modules/execution_codegen_gate.py.
     codegen_syntax_gate_enabled: bool = Field(default=True)
+    # §17.429 — route CodeGen nodes through a stricter, code-reviewer verifier
+    # (semantics + completeness + upstream-signature consistency + brief-spec
+    # coverage) instead of the generic lenient presence-checker. Gets the brief
+    # goal + upstream sibling code as context. Default on; flip to False via
+    # CODEGEN_VERIFIER_STRICT to fall back to the generic verifier if it ever
+    # over-rejects. See app/modules/execution_verify._verify_codegen_output.
+    codegen_verifier_strict: bool = Field(default=True)
 
     # §17.140 — ngspice sidecar (scaffold-ngspice). Reachable over the
     # ai-network bridge. The sidecar enforces its own per-run timeout
