@@ -21984,6 +21984,21 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.434 Code-execution sandbox — wire it into the CodeGen verifier as an exec-smoke gate (PR B) (2026-06-06)
+
+PR B of #4: connect the §17.433 sandbox to the §17.429 verify path so generated code is actually **executed** as a ground-truth check, not just statically reviewed. Completes the CodeGen verification stack: §17.428 `ast.parse` (does it parse?) → **§17.434 exec-smoke (does it run?)** → §17.429 LLM reviewer (is it correct/complete/consistent?), each short-circuiting to fail and feeding the W.1 retry loop.
+
+- **`app/sandbox/codegen_check.py`** *(new)* — `codegen_exec_smoke(output)`: extract the node's Python (reuses §17.428 `extract_code_blocks`) → `run_code({"solution.py": …}, ["python","solution.py"])` → classify **pass / skip / fail**. **Fail-soft is the whole design:** `skip` on no-Python / sandbox-off-or-unreachable / **unresolved sibling import** (`ModuleNotFoundError`/`ImportError` — the §17.367 multi-file case, NOT a defect) / ambiguous timeout; `fail` ONLY on a genuine runtime error (other traceback / non-zero exit). So a node is failed here only on a definite, reproducible runtime error in self-contained code.
+- **`app/modules/execution_agent.py`** — exec-smoke step inserted in the verify chain after the syntax gate, before the LLM verifier; a `fail` downgrades `verify_status` with the traceback tail as the reason. Computed only when syntax is clean and gated on `codegen_execution_check_enabled` + a configured `coderunner_url` + `tool==codegen`.
+- **`app/config.py`** — `codegen_execution_check_enabled: bool = False`. Both this and `coderunner_url` default off, so the verify path is **byte-unchanged until an operator brings up the sandbox + opts in**.
+
+**Operator activation:** bring up the §17.433 sandbox (`docker compose --profile sandbox up -d scaffold-coderunner` + `CODERUNNER_URL=…`) → set `CODEGEN_EXECUTION_CHECK_ENABLED=true` → restart.
+
+- **Live proof (against the real hardened sandbox via `codegen_exec_smoke`):** clean module → `pass`; `undefined_name` → `fail` (§17.434 reason); `from siblingmod import …` → `skip` (no false fail). 3/3 correct.
+- **Verification.** 6 exec-smoke unit tests + the rerouted verify-chain suites (`test_codegen_exec_smoke` + `test_coderunner_client` + `test_execution_codegen_verify` + `test_execution_codegen_gate` + `test_execution_agent_compile` + `test_execution_agent_tools` + `test_validation_citation_guard`) → **157 passed**. No-live-services suite (`pytest -k "not integration"`): **3354 passed, 80 deselected, 0 failed in 8:52** (+6 from the 3348 baseline = the exec-smoke tests). Additive + default-off.
+
+---
+
 ### §17.433 Code-execution sandbox sidecar — software-path ground-truth oracle (PR A: foundation) (2026-06-06)
 
 The #4 OSS-research pick and the natural completion of the §17.427–429 codegen arc: a sidecar that **runs untrusted LLM-generated code + its tests** and returns a ground-truth pass/fail — the software analog of the ngspice/Verilator/symbiyosys oracles for circuits. PR A lands the foundation (sidecar + client + compose service, default-off); PR B (follow-up) wires it into the §17.429 CodeGen verifier as a real run-the-tests check feeding the retry loop.

@@ -51,6 +51,7 @@ from app.modules.execution_codegen_gate import (
     check_python_syntax,
     format_syntax_reason,
 )
+from app.sandbox.codegen_check import codegen_exec_smoke  # §17.434
 from app.modules.prompt_optimizer import optimize_prompt
 # §17.389 — re-export the canonical prompt strings from prompt_assembly.
 # Pre-§17.389 these three constants were duplicated literally here AND
@@ -1124,10 +1125,40 @@ async def execute_next_node(
                 logger.warning(
                     "codegen_syntax_gate_error: node='%s' error=%s", title, exc,
                 )
+        # §17.434 — sandbox exec-smoke, AFTER the syntax gate, BEFORE the LLM
+        # verifier. Executes the node's own Python module top-level to catch
+        # runtime/module-level errors the ast.parse gate + LLM verifier miss.
+        # Fail-soft (codegen_check classifies skip vs fail): only a genuine
+        # runtime error in self-contained code yields a reason; unresolved
+        # sibling imports / sandbox-off / timeout are SKIP. Gated on the sandbox
+        # being configured + opted in, so this is inert by default. Computed
+        # only when syntax is clean (no point running code that doesn't parse).
+        exec_reason: str | None = None
+        if (
+            syntax_reason is None
+            and settings.codegen_execution_check_enabled
+            and (settings.coderunner_url or "").strip()
+            and (tool or "").lower() == "codegen"
+        ):
+            try:
+                _chk = await codegen_exec_smoke(output)
+                logger.info(
+                    "codegen_exec_smoke: node='%s' verdict=%s reason=%s",
+                    title, _chk.verdict, _chk.reason,
+                )
+                if _chk.verdict == "fail":
+                    exec_reason = _chk.reason
+            except Exception as exc:
+                logger.warning("codegen_exec_smoke_error: node='%s' error=%s", title, exc)
+
         if syntax_reason is not None:
             verify_status = "fail"
             reason, confidence = syntax_reason, 0.0
             logger.warning("codegen_syntax_gate_fail: node='%s'", title)
+        elif exec_reason is not None:
+            verify_status = "fail"
+            reason, confidence = exec_reason, 0.0
+            logger.warning("codegen_exec_smoke_fail: node='%s'", title)
         elif settings.codegen_verifier_strict and (tool or "").lower() == "codegen":
             # §17.429 — CodeGen nodes get the stricter code-reviewer verifier:
             # semantics + completeness + upstream-signature consistency

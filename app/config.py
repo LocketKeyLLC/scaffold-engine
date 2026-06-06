@@ -179,6 +179,13 @@ class Settings(BaseSettings):
     # operator opts in (CODERUNNER_URL=http://scaffold-coderunner:8010). See
     # docker/coderunner/ + app/sandbox/client.py.
     coderunner_url: str = ""
+    # §17.434 — run a sandbox exec-smoke of CodeGen node output during
+    # verification (execute the module top-level to catch runtime/import errors
+    # the ast.parse gate + LLM verifier miss). Requires coderunner_url set AND
+    # this flag True; both default off, so the verify path is unchanged until an
+    # operator brings up the sandbox + opts in. Fail-soft: only a genuine
+    # runtime error fails the node. See app/sandbox/codegen_check.py.
+    codegen_execution_check_enabled: bool = False
 
     searxng_url: str = "http://searxng:8080"
     redis_url: str = "redis://scaffold-redis:6379/0"
