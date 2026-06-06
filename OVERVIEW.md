@@ -21984,6 +21984,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.432 CI fix — `retrieval-quality.yml` couldn't import the app (missing deps); install requirements-ci.txt (2026-06-06)
+
+The non-blocking "Retrieval Quality" workflow (`continue-on-error: true`, triggers on RAG-file edits) failed at collection on the §17.431 PR (#9) with `ModuleNotFoundError: No module named 'httpx'`. Root cause: it `pip install`ed only `pytest pytest-asyncio`, but both target tests import the app — `tests/conftest.py` eager-imports `app.model_router` (→ httpx) and `test_rag_pipeline_smoke` imports `app.modules.rag_pipeline` (→ pymilvus). So the "cheap" install was structurally insufficient; the workflow had been latently broken and only surfaced now because #9 touched a trigger path (`rag_pipeline.py`). Not a §17.431 regression — pre-existing, and non-blocking so it never gated a merge.
+
+- **Fix.** Install `-r requirements-ci.txt` (pins httpx + pymilvus + pytest + pytest-asyncio + pytest-timeout — the same proven set `ci.yml`'s smoke job uses; still no torch / no live services). Added `SCAFFOLD_API_KEY` + `PYTHONPATH: "."` env to the test step (parity with `ci.yml`). Added the workflow's own path to its `paths` trigger so future edits self-test (the prior trigger list excluded it, so its own fix couldn't be proven by CI otherwise).
+- **Verification.** YAML validates (`continue-on-error: true` preserved). The two target tests pass standalone: `pytest tests/test_score_retrieval.py tests/test_rag_pipeline_smoke.py` → **22 passed in 3.4 s**. The workflow now re-triggers on this PR (self-trigger path) and will run green — the durable proof.
+- **Note.** Coverage here is also subsumed by the "Unit Tests (no live services)" job (`pytest -k "not integration"`, which runs both files with full deps); this workflow is kept as the focused fast RAG-PR signal, now actually functional.
+
+---
+
 ### §17.431 RAG retrieval: Milvus 2.5 native BM25 sparse hybrid (replaces the naive LIKE keyword scan) — default-off + operator migration (2026-06-06)
 
 The hybrid keyword leg was a naive `canonical_text like "%word%"` substring scan scored by raw match-count (`rag_pipeline._keyword_search`) — no TF/IDF, no length normalization, and `like "%…%"` can't use an index (full scan per partition). This replaces it with Milvus 2.5 **native BM25 sparse-vector search** (Milvus tokenizes + scores via a BM25 `Function` on `canonical_text`; query is raw text). The #2 pick from the post-§17.429 OSS research, measured by the §17.430 eval gate.

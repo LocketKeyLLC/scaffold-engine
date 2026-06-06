@@ -9,6 +9,9 @@ on:
       - 'tests/fixtures/golden_set.json'
       - 'tests/test_score_retrieval.py'
       - 'tests/test_rag_pipeline_smoke.py'
+      # §17.432 — self-trigger so edits to this workflow re-run it (its own
+      # fix can't be proven otherwise; the paths above don't include it).
+      - '.github/workflows/retrieval-quality.yml'
 
 jobs:
   score:
@@ -22,14 +25,26 @@ jobs:
         with:
           python-version: '3.12'
 
+      # §17.432 — install requirements-ci.txt, not a bare `pytest pytest-asyncio`.
+      # Both target tests import the app (conftest.py eager-imports
+      # app.model_router → httpx) and rag_pipeline (→ pymilvus), so the old
+      # minimal install failed at collection with ModuleNotFoundError: httpx.
+      # requirements-ci.txt pins httpx + pymilvus + pytest + pytest-asyncio +
+      # pytest-timeout — the same proven set ci.yml's smoke job uses — and is
+      # still "cheap" (no torch, no live services).
       - name: Install test deps
-        run: pip install pytest pytest-asyncio
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-ci.txt
 
       # Sprint X.14 — runs two layers cheaply (no Milvus / Ollama / cross-encoder):
       #   - test_score_retrieval.py: scoring math (recall@k, MRR)
       #   - test_rag_pipeline_smoke.py: 3-query orchestration smoke
       #     (RRF fusion, dedup, threshold-skip path)
       - name: Run scoring + smoke tests
+        env:
+          SCAFFOLD_API_KEY: "test-key-for-ci"
+          PYTHONPATH: "."
         run: pytest tests/test_score_retrieval.py tests/test_rag_pipeline_smoke.py -v
 
       - name: Upload report if present
