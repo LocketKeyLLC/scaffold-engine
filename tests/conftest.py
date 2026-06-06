@@ -66,6 +66,7 @@ if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
         "test_observability_alerts.py",
         "test_observability_metrics.py",
         "test_observability_rollups.py",
+        "test_llm_spans.py",
         "test_pre_migration_sweep.py",
         "test_rag_pipeline_smoke.py",
         "test_reindex.py",

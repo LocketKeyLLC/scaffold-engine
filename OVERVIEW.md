@@ -21984,6 +21984,22 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.435 LLM observability — gen_ai.* spans on the existing OTel + Arize Phoenix backend (#5) (2026-06-06)
+
+The #5 OSS-research pick and the last item of the arc. The OTel plumbing has been wired since Sprint X.26 but **dormant** (`otel_enabled`/`otel_otlp_endpoint` both default off, no backend), and the only LLM signal was generic httpx spans ("POST :11434"). This (a) makes every LLM call an **LLM-semantic span**, and (b) deploys a backend that renders them.
+
+- **`app/observability/llm_spans.py`** *(new)* — `record_llm_span(resp)`: emits a `gen_ai.*` span (OTel GenAI semantic conventions, which Phoenix/OpenInference map natively) — `gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`/`output_tokens`, `gen_ai.response.tokens_per_second`, `llm.latency_ms`/`success`, and `scaffold.job_id`/`node_id`/`call_kind` from the cost-tracking ContextVars. Back-dates `start_time` by the recorded duration so the trace window is accurate. **No-op unless `otel.is_initialized()`** (so the default-off path + every test/CI run never imports the OTel SDK here) and **never raises**.
+- **`app/model_router.py`** — calls it fire-and-forget from `_record_call` (the central hook already firing on every LLM call right after the `cost_tracking`/`llm_call_logs` write), guarded so telemetry can't break the call path.
+- **`docker-compose.yml`** — `scaffold-phoenix` (Arize Phoenix) on the **non-default `observability` profile** (confirmed absent from the default service set), pinned by digest (`sha256:25bd4fd8…`), `mem_limit 1g`, persistent `phoenix-data` volume, loopback-published UI/OTLP on `:6006`. Single container — fits the §17.160 RAM budget where Langfuse's 4-service stack would not. **License: Elastic License 2.0 (source-available, NOT OSI-OSS)** — operator-confirmed for this box; the true-OSS alternative (SigNoz, MIT) was rejected on RAM (ClickHouse+collector+zookeeper).
+- **No new config** — reuses the existing `otel_enabled` + `otel_otlp_endpoint`.
+
+**Operator activation (dormant until then):** `docker compose --profile observability up -d scaffold-phoenix` → set `OTEL_ENABLED=true` + `OTEL_OTLP_ENDPOINT=http://scaffold-phoenix:6006/v1/traces` on the orchestrator → restart → view traces at `http://127.0.0.1:6006`.
+
+- **Live proof:** ran Phoenix, exported a `gen_ai` span from the orchestrator through the **real `OTLPSpanExporter`** → **`SpanExportResult.SUCCESS`** (Phoenix accepted the span over OTLP/HTTP). The gen_ai-span pipeline works end-to-end.
+- **Verification.** 5 span unit tests pass (`test_llm_spans` — no-op-when-off / attribute mapping / job-node tagging / error marking / never-raises; collect_ignore'd for ci-smoke since the OTel SDK isn't in requirements-ci.txt); live export proof above. No-live-services suite (`pytest -k "not integration"`): **3359 passed, 80 deselected, 0 failed in 8:53** (+5 from the 3354 baseline = the span tests). Additive + default-off (LLM-call path byte-unchanged unless OTel is initialized).
+
+---
+
 ### §17.434 Code-execution sandbox — wire it into the CodeGen verifier as an exec-smoke gate (PR B) (2026-06-06)
 
 PR B of #4: connect the §17.433 sandbox to the §17.429 verify path so generated code is actually **executed** as a ground-truth check, not just statically reviewed. Completes the CodeGen verification stack: §17.428 `ast.parse` (does it parse?) → **§17.434 exec-smoke (does it run?)** → §17.429 LLM reviewer (is it correct/complete/consistent?), each short-circuiting to fail and feeding the W.1 retry loop.

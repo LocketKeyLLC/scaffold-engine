@@ -244,6 +244,13 @@ async def _record_call(resp: ModelResponse) -> ModelResponse:
         await record_llm_call(resp)
     except Exception:
         logger.exception("record_call_unexpected_escape")
+    # §17.435 — emit a gen_ai.* OTel span for LLM observability (Phoenix).
+    # No-op unless OTel is initialized; guarded so it never breaks the call.
+    try:
+        from app.observability.llm_spans import record_llm_span
+        record_llm_span(resp)
+    except Exception:
+        logger.debug("record_llm_span_escape", exc_info=True)
     return resp
 
 

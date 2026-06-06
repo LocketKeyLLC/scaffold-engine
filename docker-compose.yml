@@ -531,6 +531,39 @@ services:
       retries: 3
       start_period: 10s
 
+  # §17.435 — LLM observability backend (Arize Phoenix). Ingests the
+  # orchestrator's OTLP traces (incl. the gen_ai.* LLM spans) and renders
+  # per-job/node model/token/latency views. NON-DEFAULT profile "observability"
+  # so `docker compose up` does NOT start it; opt in with
+  #   docker compose --profile observability up -d scaffold-phoenix
+  # then set on the orchestrator: OTEL_ENABLED=true and
+  #   OTEL_OTLP_ENDPOINT=http://scaffold-phoenix:6006/v1/traces, and restart.
+  # UI + OTLP/HTTP both on :6006 (loopback-published for the operator UI).
+  # License: Elastic License 2.0 (source-available, not OSI-OSS) — see §17.435.
+  scaffold-phoenix:
+    image: arizephoenix/phoenix@sha256:25bd4fd8b2ad7ac99677247ff0aab899c42b0c3452f8302b7d2feaba190a75d6
+    container_name: scaffold-phoenix
+    profiles: ["observability"]
+    logging: *default-logging
+    mem_limit: 1g
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - PHOENIX_WORKING_DIR=/mnt/data
+    volumes:
+      - phoenix-data:/mnt/data
+    ports:
+      - "127.0.0.1:6006:6006"
+    restart: always
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys;sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:6006/\",timeout=2).status<500 else 1)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
 networks:
   ai-network:
     external: true
@@ -546,6 +579,7 @@ volumes:
   scaffold-logs:
   redis-data:
   searxng-cache:
+  phoenix-data:
   milvus-data-v2:
     external: true
     name: milvus-data-v2
