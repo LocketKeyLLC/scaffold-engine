@@ -1865,15 +1865,17 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (post-§17.393, 2026-06-02)
+### 14.1 Test counts (CI-refreshed post-§17.426, 2026-06-05)
 
-Rolling baseline — all three suites run on this host in the dev image, verified this session:
+**Current CI-verified baseline (`test.yml` unit-tests, the `-k "not integration"` subset):** **3265 passed, 14 skipped, 72 deselected (the integration tests), 16 warnings in 13:41** — latest green full-suite run `27047591331` (§17.426). This is the authoritative current count; it grew from the §17.393 local `make test` figure below via the §17.394→§17.426 work (formal-verify §17.414–417, the §17.418–424 deep-review fixes, etc.).
 
-- **Orchestrator (`make test`)**: **3301 passed, 0 failed, 0 skipped** in 10:51. Fully green after §17.391 (removed the stale `test_ignores_eval_retrieval_script` orphaned by §17.358) and §17.392 (registered the `cancelled` SSE event in `ALL_EVENT_NAMES`); §17.390's empty-query guard added its cases clean. The prior baseline was §17.336's 3144/0/3 — the +157 net is the §17.337→§17.393 work plus the §17.350 golden-retrieval skips going active.
-- **SDK (`make test-sdk`)**: **138 passed** in 2.1s.
-- **CLI (`make test-cli`)**: **157 passed** in 1.2s.
+Local rolling baseline — all three suites in the dev image, **last measured at §17.393 (2026-06-02); not re-run this session** (the §17.425/§17.426 changes were doc/CI-only, no test logic touched, so the local container was left on the prod image undisturbed):
 
-This is the rolling snapshot; per-commit deltas live in the §-log below. The static-parity subset (schemas / sse-events / next-actions vendor byte-equality + the SSE-inventory and SDK-schema scans) now also runs at push time via the §17.393 `ci-tier-0` pre-push hook (`make hooks-install` to activate per clone).
+- **Orchestrator (`make test`)**: **3301 passed, 0 failed, 0 skipped** in 10:51 (§17.393). Note `make test` runs the *full* suite (no `-k` filter) in the dev image where live sidecars are reachable, so its count differs in scope from the CI `not integration` subset above. Prior baseline was §17.336's 3144/0/3.
+- **SDK (`make test-sdk`)**: **138 passed** in 2.1s (§17.393).
+- **CLI (`make test-cli`)**: **157 passed** in 1.2s (§17.393).
+
+The CI figure is the rolling snapshot refreshed each run; the local figures need a `make test` to refresh. Per-commit deltas live in the §-log below. The static-parity subset (schemas / sse-events / next-actions vendor byte-equality + the SSE-inventory and SDK-schema scans) now also runs at push time via the §17.393 `ci-tier-0` pre-push hook (`make hooks-install` to activate per clone).
 
 ### 14.2 Markers
 
@@ -1890,7 +1892,7 @@ The real CI surface is **three workflows / four jobs** — the old 3-tier `make`
 |---|---|---|---|---|
 | `ci.yml` · **smoke** | §17.175 OpenAPI gate → `make ci-tier-0` (§17.393/§17.395 static-parity: 4 vendor byte-equal gates + SSE-inventory + SDK-schema scans) → `make ci-smoke` (~1766 `-m smoke` tests) | every push & `pull_request:[main]` | `ubuntu-latest` | green, ~7 min — **the real PR gate** |
 | `ci.yml` · **integration** | `make ci-tier-2` — `/health` + `make doctor` + golden-retrieval sidecar + bench gates | push to `main`, **gated** `vars.RUN_TIER2_INTEGRATION=='true'` | self-hosted | **skipped** by default (§17.397 — host runner is bound to a different repo) |
-| `test.yml` · **unit-tests** | builds the `dev`-stage image + a Postgres service, runs `pytest tests/ -k "not integration"` (~3230 tests) | push & `pull_request:[main]` | `ubuntu-latest` + postgres svc | **green: 3216 passed in 13:45**, cap 35 min + `cancel-in-progress` — first working run after §17.399 (timeout) → §17.400/§17.401 (image) → §17.402 (probe isolation) |
+| `test.yml` · **unit-tests** | builds the `dev`-stage image + a Postgres service, runs `pytest tests/ -k "not integration"` (~3280 non-integration tests) | push & `pull_request:[main]` | `ubuntu-latest` + postgres svc | **green: 3265 passed, 14 skipped, 72 deselected in 13:41** (pytest) / 17:19 job wall-clock on a warm cache (§17.426 run `27047591331`); cap 35 min + `cancel-in-progress`. §17.426 swapped the bare `docker build` for buildx + gha layer cache (warm builds skip the reranker HF pull entirely; cold cache-export runs ~26 min). |
 | `retrieval-quality.yml` · **score** | `pytest test_score_retrieval.py test_rag_pipeline_smoke.py` (recall@k / MRR math + 3-query fusion smoke) | PR touching `rag_pipeline.py` / `rerankers.py` / `golden_set.json` | `ubuntu-latest` | non-blocking (`continue-on-error`) |
 
 **Cloud-safe (`ubuntu-latest`):** `smoke` needs no live services (`ci-tier-0` + `ci-smoke` are static / no-stack); `test.yml` provisions only a Postgres service (no Milvus/Ollama).
