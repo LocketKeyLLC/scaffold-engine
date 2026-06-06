@@ -33,6 +33,7 @@ if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
     collect_ignore = [
         "integration/test_execution_db.py",
         "integration/test_codegen_golden_live.py",
+        "integration/test_retrieval_eval.py",
         "integration/test_sim_ngspice_db.py",
         "integration/test_sim_verilator_db.py",
         "integration/test_sim_symbiyosys_db.py",
