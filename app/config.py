@@ -171,6 +171,14 @@ class Settings(BaseSettings):
     # falls back to the LIKE path even when this flag is True. Set True only
     # after migrating. See app/modules/rag_pipeline.py::_keyword_search.
     rag_bm25_enabled: bool = Field(default=False)
+    # §17.433 — code-execution sandbox sidecar (scaffold-coderunner). Base URL
+    # the orchestrator uses to run untrusted LLM-generated code + its tests in
+    # isolation (the software-path ground-truth oracle). Empty (default) =
+    # disabled: app.sandbox.run_code() short-circuits with no network call, and
+    # the sidecar is a non-default compose profile so it isn't started until an
+    # operator opts in (CODERUNNER_URL=http://scaffold-coderunner:8010). See
+    # docker/coderunner/ + app/sandbox/client.py.
+    coderunner_url: str = ""
 
     searxng_url: str = "http://searxng:8080"
     redis_url: str = "redis://scaffold-redis:6379/0"
