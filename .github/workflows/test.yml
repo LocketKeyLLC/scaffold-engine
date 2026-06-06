@@ -66,10 +66,28 @@ jobs:
       - name: Apply DB schema
         run: PGPASSWORD=scaffold_ci_pw psql -h localhost -U scaffold -d scaffold_engine -f db/init.sql
 
-      # §17.426 — buildx + GitHub Actions layer cache. The reranker
-      # snapshot_download is the last builder layer; on a warm cache (Dockerfile
-      # + requirements unchanged) the whole builder stage is a layer-cache HIT,
-      # so snapshot_download never runs and never round-trips to the HF Hub —
+      # §17.426 — reclaim runner disk before the buildx build. `cache-to:
+      # type=gha,mode=max` (needed to cache the builder's reranker-download
+      # layer) + `load: true` (needed so the next step's `docker run` finds the
+      # image) write the ~3-4 GB image to disk several times over, which
+      # overflows the ubuntu-latest ~14 GB free disk (the prior plain
+      # `docker build` kept a single copy and fit). ubuntu-latest preinstalls
+      # ~25 GB of toolchains this docker-build job never uses; dropping them
+      # gives ample headroom. Real failure observed on the first §17.426 run:
+      # `no space left on device` during "importing to docker".
+      - name: Free up runner disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/powershell /usr/local/share/chromium || true
+          sudo docker image prune -af || true
+          df -h /
+
+      # buildx + GitHub Actions layer cache. The reranker snapshot_download is
+      # the last builder layer; on a warm cache (Dockerfile + requirements
+      # unchanged) the whole builder stage is a layer-cache HIT, so
+      # snapshot_download never runs and never round-trips to the HF Hub —
       # killing the recurring 429 build flake (issue #3; the bare `docker build`
       # did a cold HF pull on every run). The §17.423 in-Dockerfile retry stays
       # as the fallback for the rarer cache-miss case (a requirements change
