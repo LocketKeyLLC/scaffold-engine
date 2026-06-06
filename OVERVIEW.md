@@ -21984,6 +21984,21 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.430 Retrieval eval gate — graded nDCG@k/MRR/hit@k regression test + reusable metrics module (2026-06-06)
+
+First deterministic, graded retrieval-quality **regression gate**. Until now retrieval quality was checked only by binary substring goldens (`test_retrieval_golden.py`: "expected title in top-3, pass/fail") + an ad-hoc `scripts/score_retrieval.py` (hit@k + MRR, not run in the suite, no nDCG). This adds the missing measurement layer — the prerequisite for safely landing the Milvus BM25 hybrid (#2, next) without flying blind.
+
+- **`app/utils/retrieval_metrics.py`** *(new)* — pure, dependency-free `hit_at_k` / `reciprocal_rank` / `dcg_at_k` / `ndcg_at_k` (binary relevance over the ranked retrieved list). No LLM judge (unlike Ragas → cost/nondeterminism), no C-extension dep (unlike pytrec_eval); the small math is unit-tested against hand-computed values. nDCG@k is the new metric the existing script lacked.
+- **`tests/test_retrieval_metrics.py`** *(new)* — 12 offline unit tests (default suite + smoke).
+- **`tests/integration/test_retrieval_eval.py`** *(new)* — live gate: runs the 7 curated, corpus-present queries (same set as `test_retrieval_golden`, so it measures *ranking quality* not corpus-coverage gaps) through the real `query_rag` pipeline, scores with the metrics module, asserts aggregate floors. Relevance = title-substring (re-ingestion-robust, §17.211/§17.230). Excluded from both CI jobs (`-k "not integration"` + `collect_ignore`); dev `make test` runs it, skips on empty Milvus; `@timeout(900)`.
+- **Measured baseline (KB ~1011 entries):** mean **hit@5 = nDCG@10 = MRR = 1.000** across all 7 queries (every relevant doc ranks #1; 105 s). Floors set with margin — hit@5 ≥ 0.80, nDCG@10 ≥ 0.75, MRR ≥ 0.75 — tolerant of one borderline query, tripping when 2+ regress. This is the number any future embedder/reranker/fusion change (incl. #2 BM25) must hold or beat.
+
+**Provenance — pivot from the #1 Infinity rerank spike.** The output-quality research (post-§17.429) recommended, in priority order: (#1) an Infinity rerank sidecar to kill the in-process CrossEncoder bottleneck (~50 s/12 candidates), (#2) Milvus 2.5 native BM25 hybrid replacing the naive `LIKE "%word%"` keyword scan, (#3) this eval gate, (#4) a gVisor code-execution sandbox, (#5) Phoenix/Langfuse observability on the already-wired-but-dormant OTel. A **live proof refuted #1 on the stock image**: `michaelf34/infinity:latest-cpu` bundles `transformers 4.49.0.dev0`, which cannot load the `qwen3` reranker architecture (needs ≥4.51; the orchestrator runs 5.8.1, which is why the in-process path works). The generic, default-off `rerank_infinity()` backend + config flag + tests are **shelved** on branch `feat/17.430-infinity-rerank-sidecar` (correct + reusable; revisit with a custom Infinity image at transformers ≥ 4.51, or a different reranker). Pivoted to the unblocked, high-certainty wins — this gate now, BM25 hybrid (#2) next, measured against this baseline.
+
+- **Verification.** Metrics unit tests **12 passed**; live eval gate **1 passed in 105 s** (baseline above). Full `make test`: **3413 passed, 0 failed, 16 warnings in 14:40** (dev image), up from the 3400 baseline.
+
+---
+
 ### §17.429 CodeGen output-quality: stricter code-reviewer verifier + live codegen golden tier (2026-06-06)
 
 Closes the two items §17.428 deferred. (1) The generic verifier (`VERIFY_SYSTEM`) is a lenient presence-checker for *all* node types — too weak for code. (2) §17.428 shipped an *offline* golden harness but deferred the *live* tier that runs against the real model.
