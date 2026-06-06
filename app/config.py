@@ -161,6 +161,16 @@ class Settings(BaseSettings):
     rerank_doc_truncate: int = Field(default=500, ge=100, le=20000)
     rerank_warn_ms: int = Field(default=30000, ge=0, le=60000)
     rerank_error_ms: int = Field(default=120000, ge=0, le=300000)
+    # §17.431 — Milvus 2.5 native BM25 sparse retrieval. When True, the
+    # hybrid keyword leg uses a real BM25 sparse-vector search (Milvus
+    # tokenizes + scores via a BM25 Function on canonical_text) instead of
+    # the naive `canonical_text like "%word%"` substring scan (no TF/IDF, no
+    # index). Default False: requires a one-time toon_v2 migration to add the
+    # sparse field + Function (scripts/migrate_toon_v2_bm25.py) — until then
+    # the collection has no sparse field, so _keyword_search detects that and
+    # falls back to the LIKE path even when this flag is True. Set True only
+    # after migrating. See app/modules/rag_pipeline.py::_keyword_search.
+    rag_bm25_enabled: bool = Field(default=False)
 
     searxng_url: str = "http://searxng:8080"
     redis_url: str = "redis://scaffold-redis:6379/0"
