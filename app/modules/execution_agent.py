@@ -44,6 +44,10 @@ from app.modules.execution_verify import (
     check_validation_citations,
     check_validation_citation_coverage,
 )
+from app.modules.execution_codegen_gate import (
+    check_python_syntax,
+    format_syntax_reason,
+)
 from app.modules.prompt_optimizer import optimize_prompt
 # §17.389 — re-export the canonical prompt strings from prompt_assembly.
 # Pre-§17.389 these three constants were duplicated literally here AND
@@ -1093,16 +1097,41 @@ async def execute_next_node(
         }
 
     # Verify (LLM call — still outside DB session).
+    verify_status: Literal["pass", "fail", "skipped"]
     if skip_verify:
-        verify_status: Literal["pass", "fail", "skipped"] = "skipped"
+        verify_status = "skipped"
         reason, confidence = "verification skipped", 0.0
     else:
-        vstatus, reason, confidence = await _verify_output(
-            title, output, overrides=model_overrides,
-        )
-        verify_status = vstatus
-        if verify_status == "fail":
-            logger.warning("node_verification_failed: node='%s' reason=%s", title, reason)
+        # §17.428 — deterministic Python-syntax gate for CodeGen nodes,
+        # BEFORE the LLM verifier. The verifier (VERIFY_SYSTEM) passes output
+        # that "contains what the task requested, even partially" — it cannot
+        # catch code that does not parse. ast.parse each ```python fenced
+        # block; a SyntaxError short-circuits to fail without spending a
+        # verifier call, and the reason flows into the W.1 retry loop verbatim
+        # (persisted as verification_reason → _format_reviewer_feedback).
+        # Fail-open: any exception in the gate lets the node proceed to the
+        # LLM verifier — only a genuine SyntaxError can block.
+        syntax_reason: str | None = None
+        if settings.codegen_syntax_gate_enabled and (tool or "").lower() == "codegen":
+            try:
+                _findings = check_python_syntax(output)
+                if _findings:
+                    syntax_reason = format_syntax_reason(_findings)
+            except Exception as exc:
+                logger.warning(
+                    "codegen_syntax_gate_error: node='%s' error=%s", title, exc,
+                )
+        if syntax_reason is not None:
+            verify_status = "fail"
+            reason, confidence = syntax_reason, 0.0
+            logger.warning("codegen_syntax_gate_fail: node='%s'", title)
+        else:
+            vstatus, reason, confidence = await _verify_output(
+                title, output, overrides=model_overrides,
+            )
+            verify_status = vstatus
+            if verify_status == "fail":
+                logger.warning("node_verification_failed: node='%s' reason=%s", title, reason)
 
     # §17.376 — validation-citation guard. Four mdsplit retries showed the
     # prompt-layer rule (§17.366 → §17.368 → §17.373) plateaued at "cite
