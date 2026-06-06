@@ -382,6 +382,22 @@ async def select_topologies(
     if not (MIN_CANDIDATES <= len(candidates) <= MAX_CANDIDATES):
         # Soft-fail with a clear under-coverage error rather than
         # silently persisting an unusable result.
+        msg = (
+            f"got {len(candidates)} candidates; need "
+            f"{MIN_CANDIDATES}-{MAX_CANDIDATES}"
+        )
+        # Operator sharp edge (observed §17.425): an over-prescriptive
+        # brief that names one architecture ("a synchronous 4-bit binary
+        # up-counter") reliably yields a single candidate, gating the whole
+        # design pipeline at this stage. Surface the fix in the error so the
+        # operator doesn't have to know the stage internals.
+        if len(candidates) < MIN_CANDIDATES:
+            msg += (
+                " — the brief is likely too prescriptive (it pins one "
+                "architecture). Restate the functional requirement and "
+                "invite alternatives so the model can propose distinct "
+                "candidates to weigh."
+            )
         return TopologySelectionResult(
             ok=False,
             spec_id=spec_id,
@@ -389,10 +405,7 @@ async def select_topologies(
             rag_query=rag_query,
             rag_domain=domain,
             model_used=resp.model or role,
-            errors=[
-                f"got {len(candidates)} candidates; need "
-                f"{MIN_CANDIDATES}-{MAX_CANDIDATES}"
-            ],
+            errors=[msg],
             candidates=candidates,
             llm_raw_text=resp.text,
         )

@@ -21982,6 +21982,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.425 topology-brief sharp edge — actionable under-coverage error (observed driving formal-verify end-to-end) (2026-06-05)
+
+Exercised the §17.414–417 formal-verify stage end-to-end on a **real design job** through the full HTTP pipeline (`POST /design` → `/specs/{id}/confirm` → advance `topology → size → verify → report`), rather than the SQL-seeded `test_formal_verify_db.py` shortcut. The feature works exactly as §17.417 claimed: a 4-bit wrap-counter brief drove `verify` to **`verdict=PASS, converged=true, depth_reached=19, iterations=1`** on the first iteration; `formal_verifications` persisted (`bmc` / `smtbmc z3` / `top_module=formal_top`), its `sim_run_ids` link to a `sim_runs` row with `tool='symbiyosys', verdict='PASS'`, and the report rendered the `## Formal Verification` section with the frozen immediate-assert/`init_done`-reset SVA harness. `GET /design/{job}` surfaced `formal_verdict=PASS`. No bug in the formal path.
+
+- **The sharp edge (usability, not a bug) — an over-prescriptive brief gates the whole pipeline at `topology`.** A first attempt with a brief that named one architecture ("a synchronous 4-bit binary up-counter") failed `stage=topology` **twice** with `got 1 candidates; need 2-4`: §17.146's `topology_select` hard-requires `MIN_CANDIDATES=2`, but a brief that pins the architecture leaves the LLM nothing to vary, so it proposes a single candidate. Rephrasing to state the *functional requirement* and invite alternatives (synchronous / ripple / Gray-code) yielded 3 candidates and cleared the stage. So the happy path to `verify` depends on brief phrasing that an operator can't infer from the error.
+- **Fix (doc follow-up).** `topology_select.py`'s under-coverage soft-fail now appends an actionable hint **only when too few** (`len < MIN_CANDIDATES`, the operator-facing case — the too-many case is a model-discipline issue, not a brief issue): *"the brief is likely too prescriptive (it pins one architecture). Restate the functional requirement and invite alternatives…"*. The greppable core (`got N candidates; need 2-4`) is unchanged, so logs/alerts that match it still fire. No test pinned the string (grep-confirmed).
+
+**Verification.** Doc/UX-only change to one error-message branch — no behavior change, no schema/API change. The live end-to-end run above is the proof the formal path is sound; the dead-end first job was cleaned up (`DELETE FROM jobs` cascaded its confirmed spec via `specs.job_id ON DELETE CASCADE`).
+
+---
+
 ### §17.424 assist_* deep-review fixes — selective/full replan SQL syntax error (A1) + full = all-pending (A2) (2026-06-05)
 
 Deep review of the Assist Mode modules (`assist_agent` 779 / `assist_replan` 418 / `assist.py` router 218 / `assist_session_map` 93). Two real bugs in `assist_replan.py`, both fixed; the rest (session map, router, mirror invariant, status-transition SQL) traced clean.
