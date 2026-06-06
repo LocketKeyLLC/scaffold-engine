@@ -339,7 +339,7 @@ async def _vector_search(
 
 
 # ---------------------------------------------------------------------------
-# Keyword search
+# Keyword search — §17.431 BM25 sparse (preferred) with LIKE-scan fallback
 # ---------------------------------------------------------------------------
 
 async def _keyword_search(
@@ -350,7 +350,101 @@ async def _keyword_search(
     *,
     domain_hint: str | None = None,
 ) -> list[RagResult]:
-    """Keyword-based search (off event loop).
+    """Dispatch the hybrid keyword leg: Milvus BM25 sparse search when enabled
+    AND the collection is migrated (has the sparse field), else the substring
+    LIKE scan. Both return RagResult lists with keyword_score set; the score
+    SCALE differs but _rrf_fuse is rank-based so fusion is unaffected (§17.431).
+    """
+    from app.utils.milvus_utils import collection_has_bm25
+    if (
+        settings.rag_bm25_enabled
+        and collection is not None
+        and collection_has_bm25(collection)
+    ):
+        return await _bm25_search(
+            collection, query, top_k, domain, domain_hint=domain_hint,
+        )
+    return await _keyword_search_like(
+        collection, query, top_k, domain, domain_hint=domain_hint,
+    )
+
+
+async def _bm25_search(
+    collection: Collection,
+    query: str,
+    top_k: int,
+    domain: str | None = None,
+    *,
+    domain_hint: str | None = None,
+) -> list[RagResult]:
+    """Milvus 2.5 native BM25 sparse search (off event loop).
+
+    Queries the ``sparse_bm25`` field with the RAW query text — Milvus
+    tokenizes + scores via the BM25 Function. Per-partition fan-out mirrors
+    _vector_search (partition-key isolation rejects IN / unfiltered exprs).
+    keyword_score = BM25 relevance (higher = better); feeds the rank-based RRF.
+    """
+    from app.utils.milvus_utils import BM25_SPARSE_FIELD
+
+    if not (query or "").strip():
+        return []
+    domains = _iter_search_domains(domain, hint=domain_hint)
+
+    def _sync() -> list[RagResult]:
+        if collection is None:
+            return []
+        all_hits: list[RagResult] = []
+        for d in domains:
+            try:
+                results = collection.search(
+                    data=[query],
+                    anns_field=BM25_SPARSE_FIELD,
+                    param={"metric_type": "BM25"},
+                    limit=top_k,
+                    expr=f'domain == "{_escape_literal(d)}"',
+                    output_fields=[
+                        "canonical_text", "title", "domain_tags", "source_url",
+                        "entry_id", "domain", "version", "supersedes_id",
+                        "confidence_score", "source_type",
+                    ],
+                )
+                for hit in results[0]:
+                    entity = hit.entity
+                    tags_list = entity.get("domain_tags", [])
+                    tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
+                    all_hits.append(RagResult(
+                        content=entity.get("canonical_text", ""),
+                        title=entity.get("title", ""),
+                        tags=tags_str,
+                        source_url=entity.get("source_url", ""),
+                        entry_id=entity.get("entry_id", ""),
+                        domain=entity.get("domain", ""),
+                        keyword_score=float(hit.score),
+                        version=entity.get("version", 1),
+                        supersedes_id=entity.get("supersedes_id", ""),
+                        confidence_score=float(entity.get("confidence_score", 0.0) or 0.0),
+                        source_type=entity.get("source_type", ""),
+                    ))
+            except Exception as e:
+                logger.warning("BM25 search failed (domain=%s): %s", d, e)
+                continue
+        all_hits.sort(key=lambda r: r.keyword_score, reverse=True)
+        return all_hits[:top_k]
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync)
+
+
+async def _keyword_search_like(
+    collection: Collection,
+    query: str,
+    top_k: int,
+    domain: str | None = None,
+    *,
+    domain_hint: str | None = None,
+) -> list[RagResult]:
+    """Keyword search via substring LIKE scan (off event loop) — the pre-§17.431
+    fallback used when BM25 is disabled or the collection isn't migrated.
 
     Tokens are restricted to [a-z0-9]+ via _KEYWORD_TERM_RE — eliminates
     LIKE wildcards, escape chars, and quotes from the interpolation path.

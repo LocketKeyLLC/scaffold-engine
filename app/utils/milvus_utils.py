@@ -5,7 +5,10 @@ import logging
 import threading
 import time
 
-from pymilvus import Collection, MilvusClient, DataType, connections, utility
+from pymilvus import (
+    Collection, MilvusClient, DataType, Function, FunctionType,
+    connections, utility,
+)
 
 from app.config import settings
 
@@ -15,6 +18,9 @@ COLLECTION_NAME = "toon_v2"
 DIM = 512
 PRIMARY_FIELD = "entry_id"
 VECTOR_FIELD = "dense_vector"
+# §17.431 — BM25 sparse field + Function (added only when bm25 is enabled).
+BM25_SPARSE_FIELD = "sparse_bm25"
+BM25_FUNCTION_NAME = "bm25_canonical_text"
 
 
 # ---------------------------------------------------------------------------
@@ -51,12 +57,29 @@ def _invalidate_cache() -> None:
         _cached_at = 0.0
 
 
-def build_toon_v2_schema():
-    """Build the canonical toon_v2 TOON schema (16 fields, 512d vector)."""
+def _bm25_default(bm25: bool | None) -> bool:
+    """Resolve the bm25 flag: explicit arg wins, else settings.rag_bm25_enabled."""
+    return settings.rag_bm25_enabled if bm25 is None else bm25
+
+
+def build_toon_v2_schema(*, bm25: bool | None = None):
+    """Build the canonical toon_v2 TOON schema (16 fields, 512d vector).
+
+    §17.431 — when ``bm25`` (or settings.rag_bm25_enabled) is True, also adds
+    an analyzer to ``canonical_text``, a ``sparse_bm25`` SPARSE_FLOAT_VECTOR
+    field, and a BM25 ``Function`` that auto-generates the sparse vector from
+    ``canonical_text`` on insert (17 fields + 1 function). Default (flag off)
+    is the unchanged 16-field schema.
+    """
+    use_bm25 = _bm25_default(bm25)
     schema = MilvusClient.create_schema(auto_id=False, enable_dynamic_field=False)
     schema.add_field("entry_id", DataType.VARCHAR, max_length=128, is_primary=True)
     schema.add_field("title", DataType.VARCHAR, max_length=512)
-    schema.add_field("canonical_text", DataType.VARCHAR, max_length=65535)
+    # §17.431 — BM25 requires an analyzer on the text input field.
+    schema.add_field(
+        "canonical_text", DataType.VARCHAR, max_length=65535,
+        **({"enable_analyzer": True} if use_bm25 else {}),
+    )
     schema.add_field("domain", DataType.VARCHAR, max_length=128, is_partition_key=True)
     schema.add_field("domain_tags", DataType.ARRAY, element_type=DataType.VARCHAR,
                      max_capacity=20, max_length=64)
@@ -71,11 +94,23 @@ def build_toon_v2_schema():
     schema.add_field("updated_at", DataType.INT64)
     schema.add_field("expires_at", DataType.INT64)
     schema.add_field("dense_vector", DataType.FLOAT_VECTOR, dim=DIM)
+    if use_bm25:
+        schema.add_field(BM25_SPARSE_FIELD, DataType.SPARSE_FLOAT_VECTOR)
+        schema.add_function(Function(
+            name=BM25_FUNCTION_NAME,
+            input_field_names=["canonical_text"],
+            output_field_names=[BM25_SPARSE_FIELD],
+            function_type=FunctionType.BM25,
+        ))
     return schema
 
 
-def build_toon_v2_index_params(client: MilvusClient):
-    """Build the canonical toon_v2 index params (HNSW_SQ8 + scalar indexes)."""
+def build_toon_v2_index_params(client: MilvusClient, *, bm25: bool | None = None):
+    """Build the canonical toon_v2 index params (HNSW_SQ8 + scalar indexes).
+
+    §17.431 — adds a SPARSE_INVERTED_INDEX (metric BM25) on ``sparse_bm25``
+    when bm25 is enabled.
+    """
     index_params = client.prepare_index_params()
     index_params.add_index(
         field_name="dense_vector",
@@ -95,7 +130,26 @@ def build_toon_v2_index_params(client: MilvusClient):
     index_params.add_index(field_name="confidence_score", index_type="INVERTED")
     index_params.add_index(field_name="created_at", index_type="STL_SORT")
     index_params.add_index(field_name="version", index_type="BITMAP")
+    if _bm25_default(bm25):
+        index_params.add_index(
+            field_name=BM25_SPARSE_FIELD,
+            index_type="SPARSE_INVERTED_INDEX",
+            metric_type="BM25",
+        )
     return index_params
+
+
+def collection_has_bm25(col: "Collection") -> bool:
+    """§17.431 — True if the live collection carries the BM25 sparse field.
+
+    Used by the keyword-search dispatcher to fall back to the LIKE path when
+    the flag is on but the collection hasn't been migrated yet (graceful, so
+    flipping rag_bm25_enabled before running the migration can't break search).
+    """
+    try:
+        return any(f.name == BM25_SPARSE_FIELD for f in col.schema.fields)
+    except Exception:
+        return False
 
 
 def _auto_create_collection() -> None:
