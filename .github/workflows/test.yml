@@ -66,8 +66,27 @@ jobs:
       - name: Apply DB schema
         run: PGPASSWORD=scaffold_ci_pw psql -h localhost -U scaffold -d scaffold_engine -f db/init.sql
 
+      # §17.426 — buildx + GitHub Actions layer cache. The reranker
+      # snapshot_download is the last builder layer; on a warm cache (Dockerfile
+      # + requirements unchanged) the whole builder stage is a layer-cache HIT,
+      # so snapshot_download never runs and never round-trips to the HF Hub —
+      # killing the recurring 429 build flake (issue #3; the bare `docker build`
+      # did a cold HF pull on every run). The §17.423 in-Dockerfile retry stays
+      # as the fallback for the rarer cache-miss case (a requirements change
+      # invalidates the download layer). `load: true` puts the built image into
+      # the docker daemon so the next step's `docker run` finds it.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build orchestrator image
-        run: docker build -t scaffold-orchestrator:ci .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: scaffold-orchestrator:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
 
       - name: Run unit tests
         run: |

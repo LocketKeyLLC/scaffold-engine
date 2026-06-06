@@ -21982,6 +21982,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.426 CI: buildx + GitHub Actions layer cache on the full-suite image build — kill the HF-429 flake (issue #3) (2026-06-05)
+
+The `Scaffold Engine CI` (`test.yml`) full-suite **Build orchestrator image** step did a cold `docker build` on every run, so each run cold-pulled the reranker weights (`tomaarsen/Qwen3-Reranker-0.6B-seq-cls`) from the HF Hub and was fully exposed to HF's rate limiter. The §17.423 retry-with-backoff (5 attempts, 15/30/45/60 s) rides out a *transient* 429 but **not a sustained throttle window** — it exhausted all 5 attempts and red-failed the build at §17.419, §17.421, and again on PR #2 (which only merged after a manual job re-run). Tracked as issue #3.
+
+- **Fix.** Swapped the `run: docker build` step for `docker/setup-buildx-action@v3` + `docker/build-push-action@v6` with `cache-from: type=gha` / `cache-to: type=gha,mode=max` (+ `load: true` so the next step's `docker run` finds the image, `provenance: false` for a clean loadable manifest). The reranker `snapshot_download` is the **last builder layer**, so on a warm cache (Dockerfile + `requirements*.txt` unchanged) the whole builder stage is a layer-cache **HIT** — `snapshot_download` never runs and never round-trips to HF. The §17.423 in-Dockerfile retry is **kept** as the fallback for the rarer cache-miss case (a requirements change invalidates the download layer and forces a real pull).
+- **Scope.** `test.yml` only. `ci.yml` Tier-1 smoke uses `setup-python` + direct pip (no image build — never hit the flake); Tier-2 is the unregistered self-hosted runner using an already-populated `scaffold-engine_hf-cache` volume. **No Dockerfile change** — the §17.239 `HF_HUB_OFFLINE` runtime posture is untouched.
+- **Verification cadence.** The **first** run after this lands populates the gha cache and may still cold-pull HF (retry covers it); the **second** run is the proof — a layer-cache hit with no HF call and a much faster build. Acceptance (issue #3): two consecutive full-suite runs pass the image build without a re-run.
+
+---
+
 ### §17.425 topology-brief sharp edge — actionable under-coverage error (observed driving formal-verify end-to-end) (2026-06-05)
 
 Exercised the §17.414–417 formal-verify stage end-to-end on a **real design job** through the full HTTP pipeline (`POST /design` → `/specs/{id}/confirm` → advance `topology → size → verify → report`), rather than the SQL-seeded `test_formal_verify_db.py` shortcut. The feature works exactly as §17.417 claimed: a 4-bit wrap-counter brief drove `verify` to **`verdict=PASS, converged=true, depth_reached=19, iterations=1`** on the first iteration; `formal_verifications` persisted (`bmc` / `smtbmc z3` / `top_module=formal_top`), its `sim_run_ids` link to a `sim_runs` row with `tool='symbiyosys', verdict='PASS'`, and the report rendered the `## Formal Verification` section with the frozen immediate-assert/`init_done`-reset SVA harness. `GET /design/{job}` surfaced `formal_verdict=PASS`. No bug in the formal path.
