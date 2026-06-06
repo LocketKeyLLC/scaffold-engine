@@ -1865,17 +1865,17 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (CI-refreshed post-§17.426, 2026-06-05)
+### 14.1 Test counts (refreshed post-§17.426, 2026-06-05 — both CI + local)
 
 **Current CI-verified baseline (`test.yml` unit-tests, the `-k "not integration"` subset):** **3265 passed, 14 skipped, 72 deselected (the integration tests), 16 warnings in 13:41** — latest green full-suite run `27047591331` (§17.426). This is the authoritative current count; it grew from the §17.393 local `make test` figure below via the §17.394→§17.426 work (formal-verify §17.414–417, the §17.418–424 deep-review fixes, etc.).
 
-Local rolling baseline — all three suites in the dev image, **last measured at §17.393 (2026-06-02); not re-run this session** (the §17.425/§17.426 changes were doc/CI-only, no test logic touched, so the local container was left on the prod image undisturbed):
+Local rolling baseline — all three suites in the dev image, **re-measured 2026-06-05 (post-§17.426)** on this host:
 
-- **Orchestrator (`make test`)**: **3301 passed, 0 failed, 0 skipped** in 10:51 (§17.393). Note `make test` runs the *full* suite (no `-k` filter) in the dev image where live sidecars are reachable, so its count differs in scope from the CI `not integration` subset above. Prior baseline was §17.336's 3144/0/3.
-- **SDK (`make test-sdk`)**: **138 passed** in 2.1s (§17.393).
-- **CLI (`make test-cli`)**: **157 passed** in 1.2s (§17.393).
+- **Orchestrator (`make test`)**: **3351 passed, 0 failed, 0 skipped** in 9:08. `make test` runs the *full* suite (no `-k` filter) in the dev image where live sidecars are reachable, so it differs in scope from the CI `not integration` subset above — the 3351 reconciles exactly: 3265 (CI passed) + 72 (integration, deselected in CI but run live here) + 14 (skipped in CI without services). Prior baseline was §17.393's 3301/0/0; the +50 net is the §17.394→§17.426 work (formal-verify §17.414–417 + the §17.418–424 deep-review tests).
+- **SDK (`make test-sdk`)**: **142 passed** in 1.9s (was 138 @ §17.393; +4 from the §17.421 stream-error-translation regression tests).
+- **CLI (`make test-cli`)**: **161 passed** in 1.0s (was 157 @ §17.393; +4 from the §17.420 walked-.env provenance tests).
 
-The CI figure is the rolling snapshot refreshed each run; the local figures need a `make test` to refresh. Per-commit deltas live in the §-log below. The static-parity subset (schemas / sse-events / next-actions vendor byte-equality + the SSE-inventory and SDK-schema scans) now also runs at push time via the §17.393 `ci-tier-0` pre-push hook (`make hooks-install` to activate per clone).
+The CI figure is the rolling snapshot refreshed each run; the local figures are refreshed by a `make test` sweep. Per-commit deltas live in the §-log below. The static-parity subset (schemas / sse-events / next-actions vendor byte-equality + the SSE-inventory and SDK-schema scans) now also runs at push time via the §17.393 `ci-tier-0` pre-push hook (`make hooks-install` to activate per clone).
 
 ### 14.2 Markers
 
