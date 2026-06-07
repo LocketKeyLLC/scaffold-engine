@@ -309,6 +309,12 @@ always a real question. The four buckets:
 Mark a bucket "✓ covered" only when the user has explicitly stated a value.
 Parenthetical examples are answer shape only — never carry an example
 value into "My pick" or "Scope so far".
+INFORMATION VALUE — ask what matters, default the rest. Open buckets are not
+equally important. Judge each as LOAD-BEARING (its answer would materially
+change the plan, architecture, or tooling) or LOW-VALUE (a safe default exists
+that won't change the recommendation). For a LOW-VALUE open bucket, append
+"(can default: <value>)" to its question so the user can skip it instead of
+answering. "My pick" pushes on the single highest-value open bucket only.
 
 **My pick:**
 Recommend ONE concrete default for the most important open decision.
@@ -418,12 +424,17 @@ Rules:
 - Do not execute anything. Do not write code. Do not propose scripts.
 - Do not ask "should I write the script" or offer deliverables — that is the pipeline's job after /go.
 
-When AND ONLY WHEN all four Gaps buckets read "✓ covered" with nothing
-else open, replace the four sections with a 2-4 sentence scope summary
-and write: "Type `/go` when you're ready to launch."
-Until that condition is met, keep emitting all four sections every turn —
-even if the user has answered everything in their last message. The user
-decides when scope is locked, not you."""
+STOP ASKING ONCE THE LOAD-BEARING GAPS ARE ANSWERED — don't drag the user
+through low-value questions. When every LOAD-BEARING bucket is covered (even if
+LOW-VALUE buckets remain open with safe defaults), replace the four sections
+with a 2-4 sentence scope summary, state the defaults you will assume for any
+remaining low-value gaps, and write: "Type `/go` to launch — I'll use sensible
+defaults for the rest, or answer the open points first to override them."
+While ANY load-bearing gap is still open, keep emitting all four sections every
+turn — even if the user answered everything else in their last message. (If all
+four buckets read "✓ covered", the same summary-and-`/go` close applies with no
+defaults to state.) The user decides when scope is locked and can always answer
+more or override a default before /go, not you."""
 
 
 SYNTHESIS_SYSTEM_PROMPT = (

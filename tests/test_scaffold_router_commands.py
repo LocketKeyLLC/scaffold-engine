@@ -1704,3 +1704,24 @@ class TestB2ConfidenceLabels:
             mock_http.get.return_value = resp
             out = pipe._handle_logs(["/logs", "abc12345-0000-0000-0000-000000000000"])
         assert "Verify" in out and "Conf |" not in out
+
+
+class TestInfoGainTriage:
+    """§17.451 (Phase C) — info-gain clarification directives in the triage prompt
+    (ask the load-bearing question first; default low-value gaps; offer /go early)."""
+
+    def test_prompt_ranks_gaps_by_information_value(self):
+        p = _mod.TRIAGE_SYSTEM_PROMPT
+        assert "INFORMATION VALUE" in p
+        assert "LOAD-BEARING" in p and "can default" in p
+
+    def test_prompt_stops_asking_when_load_bearing_covered(self):
+        p = _mod.TRIAGE_SYSTEM_PROMPT
+        assert "STOP ASKING" in p
+        assert "defaults for the rest" in p  # the early-/go offer
+
+    def test_prompt_keeps_four_section_template(self):
+        # The standout asset must survive the upgrade.
+        p = _mod.TRIAGE_SYSTEM_PROMPT
+        for header in ("Scope so far", "Options", "Gaps", "My pick"):
+            assert header in p
