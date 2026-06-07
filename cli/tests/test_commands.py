@@ -1727,3 +1727,17 @@ def test_alerts_list_renders_rows(runner):
     args, kwargs = get.call_args
     assert args[0] == "/observability/alerts"
     assert kwargs["params"].get("kind") == "oncall.errors_unresolved"
+
+
+def test_logs_confidence_column_labeled_verify(runner):
+    """§17.447 (B2) — the CLI logs conf column is labeled as the verifier's."""
+    response = {
+        "job_id": "abc-123", "job_status": "completed", "node_count": 1,
+        "nodes": [{"node_key": "T1", "status": "done", "confidence": 0.92,
+                   "tool": "LLM", "output_preview": "ok"}],
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = response
+        res = runner.invoke(cli, ["logs", "abc-123"])
+    assert res.exit_code == 0
+    assert "verify" in res.output
