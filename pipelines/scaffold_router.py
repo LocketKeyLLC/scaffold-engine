@@ -528,12 +528,12 @@ class Pipeline:
         # Model overrides — §17.346 flipped router/coder/verifier defaults to
         # the same cloud model as §17.344's triage flip. Keep in sync with
         # app/config.py Settings defaults; the per-role rationale lives there.
-        model_general: str = "qwen3-vl:235b-instruct-cloud"
-        model_verifier: str = "qwen3-vl:235b-instruct-cloud"
-        model_coder: str = "qwen3-vl:235b-instruct-cloud"
+        model_general: str = "qwen3.5:397b-cloud"
+        model_verifier: str = "qwen3.5:397b-cloud"
+        model_coder: str = "qwen3.5:397b-cloud"
         model_embedder: str = "qwen3-embedding:8b"
         model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-        model_router: str = "qwen3-vl:235b-instruct-cloud"
+        model_router: str = "qwen3.5:397b-cloud"
         model_fallback: str = "qwen3.5:latest"
         model_cloud_alt: str = "qwen3.5:397b-cloud"
 

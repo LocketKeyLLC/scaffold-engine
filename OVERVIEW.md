@@ -21984,6 +21984,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.440 Cloud model migration qwen3-vl:235b-instruct-cloud → qwen3.5:397b-cloud (instruct retires 2026-06-16) (2026-06-07)
+
+Follow-on to the §17.439 operator audit. Testing triage in the WebUI surfaced an Ollama Cloud **403 `subscription payment past due`** — root-caused to the `ollama serve` daemon being signed into a **past-due account** (the daemon's cloud identity is the `ollama`-system-user ed25519 key in `/usr/share/ollama/.ollama/`, NOT the `aedefruscio` CLI key; no `ollama whoami` exists — match the pubkey at ollama.com/settings/keys). `/health` could not catch this — it lists loaded models but never *invokes* one, so billing/auth failures are invisible there. Operator fixed it via `ollama signout`/`ollama signin` to the billing-current paid account (same daemon key re-registered); cloud calls then 200 and triage passed.
+
+Deep-research (web, adversarially verified) then confirmed the operator's report: **Ollama Cloud retires `qwen3-vl:235b` AND `qwen3-vl:235b-instruct` on 2026-06-16** (official deprecation table at docs.ollama.com/cloud; the public library/tags pages do NOT carry the notice). Recommended successor: **`qwen3.5:397b-cloud`** (full Qwen3.5-397B-A17B, 256K ctx, Text+Image — same ctx/modality as the outgoing instruct model; already pulled on this host).
+
+- **Breaking-diff handled:** qwen3.5 is a *thinking* model (the instruct one wasn't). On native `/api/chat` it populates `message.thinking` (`think:false` suppresses it). BUT on the OpenAI-compat `/v1/chat/completions` endpoint — which `scaffold_router._call_triage` uses (`scaffold_router.py:871`) — Ollama strips reasoning server-side: verified `content` returns clean, **no `<think>` leakage, no `reasoning_content`**. So triage migrates with **no code change**. (`_synthesize_idea` already strips `<think>` tags as belt-and-suspenders.)
+- **Roles migrated (6):** `docker-compose.yml` MODEL_ROUTER/CODER/VERIFIER/GENERAL defaults; `app/config.py` model_router/coder/general/verifier/cloud_heavy; `pipelines/scaffold_router.py` Valves model_general/verifier/coder/router; `triage_model` in `valves.template.json` + live `valves.json`. `model_cloud_alt` was already qwen3.5:397b-cloud. **`model_fallback` left LOCAL** (`qwen3.5:latest`, §17.346 failure-mode diversity). `.env` has no MODEL_* overrides, so the compose defaults apply.
+- **Tests:** updated 3 default-assertions (`test_scaffold_router_commands.py` x2, `test_model_valves.py` x1) to the new string; other tests' `qwen3-vl:235b-instruct-cloud` occurrences are arbitrary fixture data, left as-is. `.env.example` commented examples refreshed.
+- **Verification.** Orchestrator recreated `--no-deps` (no §17.436 cascade) — env shows all 5 cloud roles = qwen3.5:397b-cloud, fallback = qwen3.5:latest, `/health` healthy. Pipelines restarted to reload the triage valve. **Live triage on qwen3.5 (turn 1 via the real pipeline): clean 4-section template, zero thinking leakage.** Affected pipeline tests in dev image: **109 passed**. Orchestrator flipped back to prod image (`scaffold-engine:local`), healthy.
+- **Rollback:** revert the 6 role strings to `qwen3-vl:235b-instruct-cloud` + recreate orchestrator + restart pipelines (works until 2026-06-16; after that the instruct tag 403/404s).
+
+---
+
 ### §17.439 open-webui image bump 0.8.10 → 0.9.6 (re-pin :main digest) (2026-06-07)
 
 Operator connection/update audit. GitHub (gh authed as AEDeFruscio, `ls-remote origin` OK) and Ollama (host v0.17.5 up; container reachable via bridge `172.18.0.1:11434`; orchestrator `/health` ollama up 17 ms) both verified healthy — **nothing to fix on connections**. The one actionable item was a stale OWUI image.

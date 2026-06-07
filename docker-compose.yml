@@ -253,10 +253,10 @@ services:
       # and the container would still read the compose-baked value at boot.
       # Defaults below match the §17.346 Settings defaults so a deploy with
       # no overrides gets the cloud-flipped routing layer out of the box.
-      MODEL_ROUTER: ${MODEL_ROUTER:-qwen3-vl:235b-instruct-cloud}
-      MODEL_CODER: ${MODEL_CODER:-qwen3-vl:235b-instruct-cloud}
-      MODEL_VERIFIER: ${MODEL_VERIFIER:-qwen3-vl:235b-instruct-cloud}
-      MODEL_GENERAL: ${MODEL_GENERAL:-qwen3-vl:235b-instruct-cloud}
+      MODEL_ROUTER: ${MODEL_ROUTER:-qwen3.5:397b-cloud}
+      MODEL_CODER: ${MODEL_CODER:-qwen3.5:397b-cloud}
+      MODEL_VERIFIER: ${MODEL_VERIFIER:-qwen3.5:397b-cloud}
+      MODEL_GENERAL: ${MODEL_GENERAL:-qwen3.5:397b-cloud}
       MODEL_CLOUD_ALT: ${MODEL_CLOUD_ALT:-qwen3.5:397b-cloud}
       # MODEL_FALLBACK stays local by default (§17.346) — fallback must be
       # different from primary to actually help on cloud-side failure.
