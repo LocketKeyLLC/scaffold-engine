@@ -21984,6 +21984,19 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.439 open-webui image bump 0.8.10 → 0.9.6 (re-pin :main digest) (2026-06-07)
+
+Operator connection/update audit. GitHub (gh authed as AEDeFruscio, `ls-remote origin` OK) and Ollama (host v0.17.5 up; container reachable via bridge `172.18.0.1:11434`; orchestrator `/health` ollama up 17 ms) both verified healthy — **nothing to fix on connections**. The one actionable item was a stale OWUI image.
+
+- **What:** the `open-webui` digest pinned in `docker-compose.yml` (`b80a96e1…`, app **v0.8.10**, image built 2026-03-09) was behind the rolling `:main` tag (`7f1b0a1a…`). Re-pinned to the current `:main` digest and recreated.
+- **pipelines image:** already current (pinned `b48e9bc3…` == live `:main` digest) — no change.
+- **Tag policy:** kept tracking `:main` (operator choice) rather than switching to versioned release tags; re-pin the digest each update per the all-images-pinned-by-SHA256 invariant.
+- **Steps:** edit compose line 45 to `sha256:7f1b0a1a50cfbac23da3b16f96bc968fd757b26dc9e54e93813d61768ea9184e` → `docker pull <digest>` → `docker compose up -d open-webui` (only `open-webui` recreated; no `depends_on` cascade).
+- **Verified:** container `healthy` in 2 s; running digest == new pin; `/app/package.json` version **0.9.6**; container→Ollama via bridge still returns `{"version":"0.17.5"}`.
+- **Rollback:** revert line 45 to `b80a96e14bb15ea79aec96fbdad4aeab6b3ee7b61520d83b5dbc8c4f47d433a9` + `docker compose up -d open-webui`.
+
+---
+
 ### §17.438 Phoenix observability ACTIVATED — and two activation bugs fixed (OTel-in-lifespan + distroless healthcheck) (2026-06-06)
 
 Operator activation of §17.435 (the last of the three). Bringing it up surfaced **two real bugs that were latent because OTel had never been enabled** — exactly what activation-with-verification exists to catch.

@@ -42,7 +42,7 @@ x-default-logging: &default-logging
 
 services:
   open-webui:
-    image: ghcr.io/open-webui/open-webui@sha256:b80a96e14bb15ea79aec96fbdad4aeab6b3ee7b61520d83b5dbc8c4f47d433a9
+    image: ghcr.io/open-webui/open-webui@sha256:7f1b0a1a50cfbac23da3b16f96bc968fd757b26dc9e54e93813d61768ea9184e
     container_name: open-webui
     logging: *default-logging
     mem_limit: 512m
