@@ -43,7 +43,8 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
     # All nodes
     nodes_result = await db.execute(
         text("""
-            SELECT node_key, title, status, execution_order, depends_on, assigned_model
+            SELECT node_key, title, status, execution_order, depends_on,
+                   assigned_model, last_verification_reason
             FROM dag_nodes
             WHERE job_id = :job_id
             ORDER BY execution_order
@@ -76,6 +77,9 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
             "deps_met": deps_met,
             "actionable": is_actionable,
             "assigned_model": r.assigned_model,
+            # §17.450 (Phase B / B3) — surface WHY a node failed to the web +
+            # CLI exec-status consumers (dag_nodes.last_verification_reason).
+            "failure_reason": r.last_verification_reason,
         }
         nodes.append(node)
 

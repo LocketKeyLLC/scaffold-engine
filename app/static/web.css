@@ -252,3 +252,19 @@ tr.next-node { background: #eff6ff; }
 .event-meta { color: var(--fg-muted); font-size: 12px; margin-left: 8px; }
 .event-error { color: var(--status-failed); }
 .event-verified { color: var(--status-completed); }
+
+/* §17.450 (Phase B / B3) — job-level failure banner + per-node "why" row */
+.job-error-banner {
+  margin: .75rem 0;
+  padding: .6rem .85rem;
+  border-left: 4px solid var(--status-failed);
+  background: #fee2e2;
+  color: var(--status-failed);
+  border-radius: 4px;
+}
+.nodes-table .node-reason-row td { border-top: 0; padding-top: 0; }
+.nodes-table .node-reason {
+  color: var(--status-failed);
+  font-size: .9em;
+  white-space: pre-wrap;
+}

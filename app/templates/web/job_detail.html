@@ -11,6 +11,13 @@
     </p>
   </header>
 
+  {# §17.450 (Phase B / B3) — job-level failure reason. error_summary is in the
+     /exec/status payload but was never shown, so a failed job looked identical
+     to a stalled one. #}
+  {% if job.error_summary %}
+  <p class="job-error-banner">⚠ <strong>Failed:</strong> {{ job.error_summary }}</p>
+  {% endif %}
+
   {% if job.synthesis_override is not none or job.synthesized %}
   <section class="synthesis-flags">
     {% if job.synthesis_override is true %}
@@ -103,6 +110,14 @@
           <td><span class="status-badge status-{{ node.status }}">{{ node.status }}</span></td>
           <td>{% if node.actionable %}✓{% endif %}</td>
         </tr>
+        {# §17.450 (B3) — per-node "why" for failed/blocked nodes
+           (dag_nodes.last_verification_reason, plumbed through /exec/status). #}
+        {% if node.failure_reason and node.status in ("failed", "blocked") %}
+        <tr class="node-reason-row">
+          <td></td>
+          <td colspan="4" class="node-reason">↳ {{ node.failure_reason }}</td>
+        </tr>
+        {% endif %}
         {% endfor %}
       </tbody>
     </table>
