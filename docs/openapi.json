@@ -1649,6 +1649,17 @@
             ],
             "title": "Domain"
           },
+          "failure_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Reason"
+          },
           "node_key": {
             "title": "Node Key",
             "type": "string"

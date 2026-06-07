@@ -1114,9 +1114,9 @@ class TestU8DCommands:
             "node_count": 2,
             "nodes": [
                 {"node_key": "T1", "status": "done", "confidence": 0.92,
-                 "tool": "LLM", "output_text": "Plan first"},
+                 "tool": "LLM", "output_preview": "Plan first"},
                 {"node_key": "T2", "status": "done", "confidence": 0.85,
-                 "tool": "LLM", "output_text": "Then build"},
+                 "tool": "LLM", "output_preview": "Then build"},
             ],
         })
         out = pipe._handle_command("/logs abc-123")
@@ -1647,3 +1647,37 @@ class TestPhaseAUxPolish:
 
     def test_welcome_drops_fabricated_count(self, pipe):
         assert "22 commands" not in pipe._WELCOME_PREAMBLE
+
+
+class TestLogsFailureReason:
+    """§17.445 (Phase A / A1) — /logs renders per-node failure reason and the
+    correct output preview (was reading the absent `output_text`)."""
+
+    def test_logs_shows_reason_and_preview(self, pipe):
+        resp = _make_response(200, {
+            "job_id": "abc12345", "job_status": "failed", "node_count": 2,
+            "nodes": [
+                {"node_key": "T1", "status": "done", "tool": "LLM",
+                 "confidence": 0.9, "output_preview": "did the thing"},
+                {"node_key": "T2", "status": "failed", "tool": "CodeGen",
+                 "confidence": 0.0, "output_preview": "",
+                 "failure_reason": "verifier: signature drift vs T1"},
+            ],
+        })
+        with patch.object(_mod, "_HTTP_SESSION") as mock_http:
+            mock_http.get.return_value = resp
+            out = pipe._handle_logs(["/logs", "abc12345-0000-0000-0000-000000000000"])
+        assert "did the thing" in out          # output_preview now renders
+        assert "Why these failed/blocked" in out
+        assert "signature drift" in out
+
+    def test_logs_no_reason_section_when_all_ok(self, pipe):
+        resp = _make_response(200, {
+            "job_id": "abc12345", "job_status": "completed", "node_count": 1,
+            "nodes": [{"node_key": "T1", "status": "done", "tool": "LLM",
+                       "confidence": 0.9, "output_preview": "ok"}],
+        })
+        with patch.object(_mod, "_HTTP_SESSION") as mock_http:
+            mock_http.get.return_value = resp
+            out = pipe._handle_logs(["/logs", "abc12345-0000-0000-0000-000000000000"])
+        assert "Why these failed" not in out

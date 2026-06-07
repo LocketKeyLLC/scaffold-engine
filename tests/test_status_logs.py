@@ -80,6 +80,9 @@ NodeLog = _mod.NodeLog
 
 def _make_row(**kwargs):
     """Create a mock DB row with attribute access."""
+    # §17.445 — get_logs now SELECTs last_verification_reason; default it so a
+    # MagicMock attribute (which would fail NodeLog's str|None) isn't auto-made.
+    kwargs.setdefault("last_verification_reason", None)
     obj = MagicMock()
     for k, v in kwargs.items():
         setattr(obj, k, v)

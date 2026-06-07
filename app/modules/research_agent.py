@@ -768,6 +768,56 @@ _SUMMARY_PROMPT_BUDGET_CHARS = 6000
 _SUMMARY_PROMPT_TIMEOUT_S = 120
 
 
+# §17.445 (Phase A / A2) — research summaries were an UN-ATTRIBUTED synthesis:
+# per-entry source URLs live in state.all_entries but were stripped before the
+# summarizer and absent from the complete payload. These helpers surface them as
+# post-hoc citation (the SOTA-preferred attribution for synthesis tasks) without
+# touching summary generation.
+_MAX_SOURCES_RENDERED = 15
+
+
+def _build_sources_list(state: "ResearchState") -> list[dict]:
+    """Deduped, confidence-ranked source list from collected entries.
+
+    Returns ``[{"url", "source_type", "confidence_score"}]`` best-first; one
+    row per distinct URL (keeps the highest-confidence occurrence).
+    """
+    by_url: dict[str, dict] = {}
+    for e in state.all_entries:
+        url = (e.get("source") or "").strip()
+        if not url:
+            continue
+        conf = e.get("confidence_score")
+        conf = float(conf) if isinstance(conf, (int, float)) else 0.0
+        existing = by_url.get(url)
+        if existing is None or conf > existing["confidence_score"]:
+            by_url[url] = {
+                "url": url,
+                "source_type": e.get("source_type") or "unknown",
+                "confidence_score": round(conf, 2),
+            }
+    return sorted(
+        by_url.values(), key=lambda s: s["confidence_score"], reverse=True
+    )
+
+
+def _attach_sources_block(summary: str, state: "ResearchState") -> str:
+    """Append a deterministic ``**Sources**`` markdown block to a summary."""
+    srcs = _build_sources_list(state)
+    if not srcs:
+        return summary
+    shown = srcs[:_MAX_SOURCES_RENDERED]
+    lines = "\n".join(
+        f"- {s['url']} ({s['source_type']}, confidence {s['confidence_score']:.2f})"
+        for s in shown
+    )
+    more = (
+        f"\n…and {len(srcs) - len(shown)} more."
+        if len(srcs) > len(shown) else ""
+    )
+    return f"{summary}\n\n**Sources** ({len(srcs)}):\n{lines}{more}"
+
+
 def _build_summary_prompt_body(state: "ResearchState") -> str:
     """Pack as many ``[facet] content`` lines as fit under the char budget.
 
@@ -822,11 +872,17 @@ async def _generate_summary(
             "summary_timeout: topic=%s entries=%d budget_s=%d — falling back",
             state.topic, len(state.all_entries), _SUMMARY_PROMPT_TIMEOUT_S,
         )
-        return f"Research collected {len(state.all_entries)} entries on '{state.topic}'."
+        return _attach_sources_block(
+            f"Research collected {len(state.all_entries)} entries on '{state.topic}'.",
+            state,
+        )
 
     if resp.success:
-        return resp.text.strip()
-    return f"Research collected {len(state.all_entries)} entries on '{state.topic}'."
+        return _attach_sources_block(resp.text.strip(), state)
+    return _attach_sources_block(
+        f"Research collected {len(state.all_entries)} entries on '{state.topic}'.",
+        state,
+    )
 
 
 # =============================================================================
@@ -860,6 +916,8 @@ def _build_research_complete_payload(
         "skipped_hash": state.total_skipped_hash,
         "total_urls_searched": len(state.url_history),
         "total_queries": len(state.search_history),
+        # §17.445 (A2) — post-hoc source attribution for any consumer.
+        "sources": _build_sources_list(state),
     }
     if summary is not None:
         payload["summary"] = summary

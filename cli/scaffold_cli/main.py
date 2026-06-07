@@ -3247,8 +3247,14 @@ def logs(
         conf = n.get("confidence")
         conf_s = f"{conf:>5.2f}" if isinstance(conf, (int, float)) else f"{'-':>5}"
         tool = str(n.get("tool", ""))[:9]
-        out = (n.get("output_text") or "")[:60].replace("\n", " ")
+        # §17.445 — the API field is `output_preview` (NodeLog); reading
+        # `output_text` always yielded blank (latent bug fixed here).
+        out = (n.get("output_preview") or "")[:60].replace("\n", " ")
         click.echo(f"{key:<10} {st:<10} {conf_s}  {tool:<10} {out}")
+        # §17.445 (Phase A / A1) — show WHY a node failed/blocked.
+        reason = n.get("failure_reason")
+        if reason and n.get("status") in ("failed", "blocked"):
+            click.secho(f"{'':<10}↳ why: {str(reason)[:96]}", fg="yellow")
 
     compiled = data.get("compiled_output")
     if compiled:
