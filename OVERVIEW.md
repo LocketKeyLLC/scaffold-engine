@@ -21984,6 +21984,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.450 Phase B — B3 web error surface + a CRITICAL web-UI deadlock fix it uncovered (2026-06-07)
+
+The deferred B3 web-layer pass — which surfaced a far bigger latent bug than B3 itself.
+
+- **🔴 Web UI was fully deadlocked under single-worker (pre-existing, prod-affecting).** `app/run_server.py` runs uvicorn with **no `workers`** (single event loop), and `jobs_list` + `job_detail` were `async def` making a **blocking sync loopback call** (`client.jobs.list/status` → the orchestrator's own `/jobs`,`/exec/status`). The async handler blocked the only event loop waiting for its own loopback request, which the same loop then couldn't serve → 30 s timeout → **502 on every `/web/jobs` page**. The unit tests never caught it (they mock the loopback client). **Fix:** convert both routes `async def` → `def` so FastAPI threadpools them and the sync call no longer blocks the loop. The POST routes (`post_ideate`/`post_confirm`) were already safe — they use the threadpooled BackgroundTask pattern, no inline loopback call. **Verified live: `/web/jobs` 35 s-timeout → 0.06 s / 200.**
+- **B3 — web error surface (the original goal).** Added `failure_reason` to the `/exec/status` node payload (`execution_handler.py` SELECT + node dict, from `dag_nodes.last_verification_reason`), and rendered in `job_detail.html`: a job-level **error banner** when `error_summary` is set, and a per-node **"why" row** (`↳ reason`) for failed/blocked nodes, with styles in `web.css`. Closes the A1 web deferral. **Verified live:** the blocked job's page renders `↳ §17.377 validation-coverage guard…` under the failed node.
+- **Verification.** New web tests (`TestJobDetailPage`: error banner shown, per-node reason shown, none on a healthy job); fixed `test_execution_handler_module._row` for the new SELECT column. Full offline suite **3415 passed**; `openapi-check` + `check-schemas` green (plain-dict + template change, no response-model touched). **Go-live:** rebuild prod. **This completes Phase B (B1–B5).** **Lesson: mock-only web tests hid a 100%-deadlock — a live page fetch is the only thing that catches an event-loop block.**
+
+---
+
 ### §17.449 Fix §17.448 — faithfulness tool must be a Tool object, not a raw dict (2026-06-07)
 
 The §17.448 live smoke (post-merge) caught a real integration bug the unit tests couldn't: `_FAITHFULNESS_TOOL` was a raw OpenAI-format `dict`, but `model_router.tool_call` expects `app.providers.base.Tool` objects → live call failed with `'dict' object has no attribute 'name'` and `score_faithfulness` returned `None` every time (silently — it's fail-soft). The mocked unit tests passed because they patch `tool_call` entirely, bypassing the tool-shape handling.

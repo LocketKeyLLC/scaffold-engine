@@ -194,6 +194,45 @@ class TestJobDetailPage:
         assert "Total:" in body
         # Next-node row gets the highlighted class.
         assert "next-node" in body
+        # §17.450 (B3) — no error banner / reason rows on a healthy job.
+        assert "job-error-banner" not in body
+        assert "node-reason" not in body
+
+    def test_error_summary_banner_shown(self, client, fake_client):
+        """§17.450 (B3) — a failed job surfaces error_summary as a banner."""
+        fake_client.jobs.status.return_value = {
+            "job_id": "jf", "job_title": "Broken job", "job_status": "failed",
+            "compiled_output": None, "synthesized": False, "synthesis_override": None,
+            "counts": {"failed": 1}, "total_nodes": 1, "next_node": None,
+            "next_actions": [],
+            "error_summary": "Job timed out after 1560 minutes of inactivity",
+            "nodes": [{"node_key": "T1", "title": "x", "status": "failed",
+                       "execution_order": 1, "actionable": False}],
+        }
+        body = client.get("/web/jobs/jf").text
+        assert "job-error-banner" in body
+        assert "Job timed out after 1560 minutes" in body
+
+    def test_per_node_failure_reason_shown(self, client, fake_client):
+        """§17.450 (B3) — a failed/blocked node surfaces its failure_reason."""
+        fake_client.jobs.status.return_value = {
+            "job_id": "jb", "job_title": "Blocked job", "job_status": "blocked",
+            "compiled_output": None, "synthesized": False, "synthesis_override": None,
+            "counts": {"failed": 1, "done": 1}, "total_nodes": 2, "next_node": None,
+            "next_actions": [], "error_summary": None,
+            "nodes": [
+                {"node_key": "T1", "title": "ok", "status": "done",
+                 "execution_order": 1, "actionable": False, "failure_reason": None},
+                {"node_key": "T2", "title": "bad", "status": "failed",
+                 "execution_order": 2, "actionable": False,
+                 "failure_reason": "verifier: signature drift vs T1"},
+            ],
+        }
+        body = client.get("/web/jobs/jb").text
+        assert "node-reason" in body
+        assert "signature drift vs T1" in body
+        # error banner absent (no job-level error_summary)
+        assert "job-error-banner" not in body
 
     def test_compiled_output_rendered_in_pre_block(self, client, fake_client):
         fake_client.jobs.status.return_value = {

@@ -120,7 +120,7 @@ def get_sdk_async_long_client():
 
 
 @router.get("/jobs", response_class=HTMLResponse, dependencies=[])
-async def jobs_list(
+def jobs_list(
     request: Request,
     status: str | None = None,
     q: str | None = None,
@@ -128,7 +128,14 @@ async def jobs_list(
     offset: int = 0,
     client=Depends(get_sdk_client),
 ):
-    """Paginated jobs list. ``?status=`` and ``?q=`` filter via the SDK."""
+    """Paginated jobs list. ``?status=`` and ``?q=`` filter via the SDK.
+
+    §17.450 — `def` (not `async def`): the body does a BLOCKING loopback call
+    via the sync SDK Client. As `async def` on the single-worker event loop it
+    deadlocked — the handler blocked the loop waiting for its own loopback
+    `/jobs`, which the same loop then couldn't serve (30 s → 502). FastAPI runs
+    `def` routes in a threadpool, so the sync call no longer blocks the loop.
+    """
     if limit < 1 or limit > 100:
         raise HTTPException(status_code=422, detail="limit must be 1..100")
     if offset < 0:
@@ -159,12 +166,16 @@ async def jobs_list(
 
 
 @router.get("/jobs/{job_id}", response_class=HTMLResponse, dependencies=[])
-async def job_detail(
+def job_detail(
     request: Request,
     job_id: str,
     client=Depends(get_sdk_client),
 ):
-    """Per-job detail: status, nodes, compiled_output, synthesis flags."""
+    """Per-job detail: status, nodes, compiled_output, synthesis flags.
+
+    §17.450 — `def` (not `async def`): same single-worker loopback-deadlock fix
+    as jobs_list. The body's only I/O is the blocking sync `client.jobs.status`.
+    """
     try:
         payload = client.jobs.status(job_id)
     except Exception as exc:

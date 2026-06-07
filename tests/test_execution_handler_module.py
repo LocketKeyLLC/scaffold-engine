@@ -9,6 +9,9 @@ from app.modules import execution_handler
 
 
 def _row(**kw):
+    # §17.450 — execution_status now SELECTs last_verification_reason; default
+    # it so node-row SimpleNamespaces don't AttributeError on the new column.
+    kw.setdefault("last_verification_reason", None)
     return SimpleNamespace(**kw)
 
 
