@@ -397,6 +397,12 @@ class Settings(BaseSettings):
     # behaviour. faithfulness_model_role picks which role scores it.
     faithfulness_check_enabled: bool = False
     faithfulness_model_role: str = "model_verifier"
+    # §17.452 (Phase C) — Chain-of-Verification revision of research summaries
+    # (draft → verification questions → independent answers → revise). Where
+    # faithfulness *scores*, CoVe *corrects*. Default-OFF: it adds ~3 LLM calls
+    # per research run (cost); fail-soft, so flag-off = unchanged behaviour.
+    cove_check_enabled: bool = False
+    cove_model_role: str = "model_verifier"
     # §17.406 — bound the CPU-bound pypdf/pdfplumber extract so a corrupt or
     # adversarially large PDF can't hang the research session indefinitely.
     # wait_for cancels the awaiting coroutine on timeout (the off-loop thread

@@ -837,9 +837,40 @@ async def _maybe_score_faithfulness(
         return None
 
 
+async def _maybe_cove_revise(
+    summary_text: str, state: "ResearchState", overrides: dict | None,
+) -> str:
+    """§17.452 (CoVe) — gate + run the revision pass. Default-off, fail-soft;
+    returns the revised summary, or the original unchanged on disable/error."""
+    if not settings.cove_check_enabled or not state.all_entries:
+        return summary_text
+    try:
+        from app.modules.cove import cove_revise
+        result = await cove_revise(
+            summary_text,
+            _build_summary_prompt_body(state),
+            role=settings.cove_model_role,
+            overrides=overrides,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("cove_wire_error: %s", exc)
+        return summary_text
+    if result and result.get("revised"):
+        state.cove = {"changed": bool(result.get("changed")),
+                      "questions": len(result.get("questions") or [])}
+        return result["revised"]
+    return summary_text
+
+
 def _finalize_summary_text(summary_text: str, state: "ResearchState") -> str:
-    """Attach the Sources block (A2) + a one-line faithfulness note (B1)."""
+    """Attach the Sources block (A2) + CoVe (C) + faithfulness (B1) notes."""
     out = _attach_sources_block(summary_text, state)
+    c = getattr(state, "cove", None)
+    if c and c.get("changed"):
+        out += (
+            f"\n\n_Chain-of-Verification: revised after {c['questions']} "
+            "verification checks against the sources._"
+        )
     f = getattr(state, "faithfulness", None)
     if f:
         out += (
@@ -910,8 +941,11 @@ async def _generate_summary(
 
     if resp.success:
         summary_text = resp.text.strip()
-        # §17.448 (Phase B / B1) — score the generated summary against the
-        # collected sources (default-off, fail-soft → None when disabled/erroring).
+        # §17.452 (Phase C / CoVe) — revise the summary against the sources FIRST,
+        # so the faithfulness score below reflects the revised text (default-off).
+        summary_text = await _maybe_cove_revise(summary_text, state, overrides)
+        # §17.448 (Phase B / B1) — score the (possibly revised) summary against
+        # the collected sources (default-off, fail-soft → None when disabled).
         state.faithfulness = await _maybe_score_faithfulness(
             summary_text, state, overrides,
         )
@@ -958,6 +992,8 @@ def _build_research_complete_payload(
         # §17.448 (B1) — faithfulness of the summary vs sources (None if the
         # check is disabled or didn't run). Structured for programmatic readers.
         "faithfulness": getattr(state, "faithfulness", None),
+        # §17.452 (CoVe) — whether the summary was revised by Chain-of-Verification.
+        "cove": getattr(state, "cove", None),
     }
     if summary is not None:
         payload["summary"] = summary
