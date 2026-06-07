@@ -74,7 +74,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    current = _generate()
+    # §17.442 — generating the spec imports app.main, which configures logging to
+    # bind a StreamHandler to sys.stdout AND (with OTEL_ENABLED, §17.438) logs an
+    # `otel_fastapi_instrumented` line plus config-validator warnings at import
+    # time. Those would land on stdout and corrupt the `> docs/openapi.json`
+    # redirect (the snapshot's first line became a log JSON object — §17.441 #6).
+    # Point stdout at stderr for the duration of generation so the StreamHandler
+    # binds to stderr and only the spec reaches real stdout.
+    real_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        current = _generate()
+    finally:
+        sys.stdout = real_stdout
 
     if args.check:
         return _check(current)
