@@ -21984,6 +21984,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.437 Code sandbox ACTIVATED — exec-smoke gate live in the CodeGen verifier (2026-06-06)
+
+Operator activation of §17.433/§17.434. The CodeGen verification stack is now fully live end-to-end: **§17.428 ast.parse → §17.434 sandbox exec-smoke → §17.429 LLM reviewer**.
+
+- **Sidecar up:** `docker compose --profile sandbox up -d scaffold-coderunner` (image `scaffold-coderunner:local`, 185 MB) → healthy. Hardened (cap_drop ALL / no-new-privileges / read_only / exec-tmpfs / mem 512m / pids 256), no published port.
+- **Flags:** `CODERUNNER_URL=http://scaffold-coderunner:8010` + `CODEGEN_EXECUTION_CHECK_ENABLED=true` appended to `.env`; orchestrator recreated with `up -d --no-deps` (Postgres/Milvus/Redis untouched). Verified live: both settings active, orchestrator healthy.
+- **End-to-end verification through the wired config (no overrides):** `run_code` reaches the live sidecar and returns real results; `codegen_exec_smoke` verdicts correct — clean module → **pass**, `x=undefined+1` → **fail** (§17.434 reason, feeds the retry loop), `from siblingmod import g` → **skip** (the fail-soft multi-file case). So a CodeGen node that doesn't *run* now fails verification on a genuine runtime error.
+- **Isolation:** runs under **runc + the hardening above** (operator-accepted interim for this single-operator host). The strong upgrade — **gVisor `runsc`** — remains the documented operator step (host verified: no `/dev/kvm` + cgroup v2 → systrap, no KVM needed). **Egress caveat:** under the runc interim the sidecar is on `ai-network` (network-reachable); full egress isolation arrives with gVisor / an internal network.
+- **Rollback:** `CODEGEN_EXECUTION_CHECK_ENABLED=false` + recreate the orchestrator (gate off, verify path reverts to parse→review); or `docker compose --profile sandbox stop scaffold-coderunner` (run_code then returns `error` → exec-smoke SKIPs, so even leaving the flag on is safe).
+
+**Operator-activation status: BM25 (§17.436) + code sandbox (§17.437) DONE; Phoenix observability still pending.**
+
+---
+
 ### §17.436 BM25 hybrid ACTIVATED on the live toon_v2 + before/after measurement (2026-06-06)
 
 Operator activation of §17.431. Migrated the live `toon_v2`, flipped `RAG_BM25_ENABLED=true`, recreated the orchestrator, and measured before/after.
