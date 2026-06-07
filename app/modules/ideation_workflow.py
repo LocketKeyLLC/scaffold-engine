@@ -46,6 +46,28 @@ from app.utils.topic_detection import detect_topic_id
 logger = logging.getLogger("scaffold.ideation")
 
 
+# §17.442 — global ideation concurrency cap. Mirrors execution_agent's
+# _execution_slot_sem (single-process asyncio.Semaphore; if this ever goes
+# multi-worker the cap must move to Redis). Acquired by the /ideas + /ideate
+# router handlers so a burst of ideation requests queues instead of all hitting
+# the cloud at once (§17.441 stress finding #4). Lazy-init so a test overriding
+# settings.ideation_global_concurrency takes effect via _reset_ideation_slot_sem.
+_ideation_slot_sem: asyncio.Semaphore | None = None
+
+
+def get_ideation_slot_sem() -> asyncio.Semaphore:
+    global _ideation_slot_sem
+    if _ideation_slot_sem is None:
+        _ideation_slot_sem = asyncio.Semaphore(settings.ideation_global_concurrency)
+    return _ideation_slot_sem
+
+
+def _reset_ideation_slot_sem() -> None:
+    """Test hook — drop the cached semaphore so the next call re-reads settings."""
+    global _ideation_slot_sem
+    _ideation_slot_sem = None
+
+
 FEASIBILITY_SYSTEM = (
     "You are a technical feasibility analyst. Given a structured brief, assess:\n"
     "1. Is this achievable with local CPU-only LLM infrastructure (Ollama, Milvus, SearXNG)?\n"

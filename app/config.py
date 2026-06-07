@@ -423,9 +423,18 @@ class Settings(BaseSettings):
     default_domain: str = "eng"
 
     # Stale-job reaper
-    stale_threshold_minutes: int = Field(default=30, ge=1, le=1440)
-    planning_stale_minutes: int = Field(default=60, ge=1, le=1440)
-    long_phase_stale_minutes: int = Field(default=45, ge=1, le=1440)
+    # §17.442 — cap raised 1440 → 2880 (48h). node_timeout_seconds caps at
+    # 86400s (24h); with the old 1440-min (24h) cap the reaper window could only
+    # ever EQUAL a max node_timeout, never exceed it, so a job running a single
+    # ~24h node raced the reaper (the `config_timeout_reaper_overlap` warning).
+    # The higher cap lets an operator set the reaper window strictly above the
+    # node timeout (this host: STALE_THRESHOLD_MINUTES=1560 = 26h, 2h margin).
+    stale_threshold_minutes: int = Field(default=30, ge=1, le=2880)
+    # §17.442 — caps raised 1440 → 2880 in lockstep with stale_threshold_minutes.
+    # The reaper hierarchy invariant requires planning/long_phase >= stale, so
+    # lifting stale above a 24h node_timeout means these must be liftable too.
+    planning_stale_minutes: int = Field(default=60, ge=1, le=2880)
+    long_phase_stale_minutes: int = Field(default=45, ge=1, le=2880)
     # Sprint X.1 — tightened from 7d to 72h (4320 min). 7d was generous
     # but in practice a 3-day stall on a pending confirmation almost
     # always means the operator forgot, and the stuck job is more
@@ -523,6 +532,13 @@ class Settings(BaseSettings):
     # poorly (each additional concurrent job further carves the cores).
     # Operators on stronger inference hardware can raise via env override.
     execution_global_concurrency: int = Field(default=2, ge=1, le=32)
+    # §17.442 — bound concurrent ideation requests (/ideas + /ideate). Unlike
+    # execution, ideation had NO cap: the §17.441 stress test fired 6 concurrent
+    # /ideate and all 6 hit the cloud at once (latency 33→81 s). The cap queues
+    # bursts instead — acquired at the router layer so jobs aren't even created
+    # until a slot frees. Default 4 (ideation is cloud-bound, not CPU-bound like
+    # execution, so a higher cap than execution's 2 is fine).
+    ideation_global_concurrency: int = Field(default=4, ge=1, le=32)
     # Max queue wait when the cap is full. 0 = wait forever; otherwise
     # the run emits a 503-shaped SSE error and bails. Default 1800s
     # matches scheduler_job_timeout so a queued run can't outlive the

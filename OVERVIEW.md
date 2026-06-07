@@ -21984,6 +21984,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.442 Stress-test follow-ups — ideation concurrency cap, reaper margin, openapi-snapshot tooling (2026-06-07)
+
+The three deferred §17.441 findings the operator chose to fix.
+
+- **#4 — ideation concurrency cap.** `/ideas` + `/ideate` had no concurrency bound (the §17.441 stress fired 6 concurrent /ideate; all hit the cloud at once, latency 33→81 s). Added `ideation_global_concurrency` (default 4) + a module-level `asyncio.Semaphore` in `ideation_workflow.py` (mirrors `execution_agent`'s `_execution_slot_sem`), acquired at the **router layer** in both handlers. Router-layer (not in-function) is deliberate: `/ideate`→`analyze_and_confirm`→`refine_idea` would double-acquire and deadlock; wrapping the request also means the job isn't created until a slot frees. Bursts now queue.
+- **Reaper margin.** `node_timeout_seconds=86400` (24h) **equalled** `stale_threshold_minutes*60` (1440 min = 24h) on this host — both pinned at their old Field cap — so a job running a single ~24h node raced the reaper (`config_timeout_reaper_overlap` warning). Fix: raised the Field caps `1440 → 2880` on **all three** reaper thresholds (`stale_threshold_minutes`, `planning_stale_minutes`, `long_phase_stale_minutes`) and set this host's `.env` to **1560 (26h)** for each — a 2h margin over the 24h node_timeout. **All three move in lockstep** because `tests/test_cleanup.py` enforces the invariant `cleanup_interval ≤ stale ≤ {long_phase, planning}` — caught (correctly) when an initial single-field bump to `stale=1560` left the other two at 1440. (Field-cap raise is committed; the 1560 values live in the gitignored `.env`, this host only. Defaults unchanged at 30/45/60.)
+- **#6 — `make openapi-snapshot` corrupted under `OTEL_ENABLED`.** App-import logs `otel_fastapi_instrumented` (+ config-validator warnings) to **stdout**, which the `> docs/openapi.json` redirect captured as the file's first line (§17.441 worked around it by hand). Fix: `scripts/openapi_snapshot.py` redirects `sys.stdout → sys.stderr` for the duration of generation, so the logging StreamHandler binds to stderr and only the spec reaches stdout. `make openapi-snapshot` now writes clean `{`-first output unaided; `make openapi-check` green.
+
+**Verification.** 6 new tests in `tests/test_stress_followups_17442.py` (semaphore sizing/reset, a behavioral cap-bounds-concurrency check, reaper Field-cap + overlap-warning gone / still-fires-when-equal). Full offline suite run surfaced exactly the one reaper-invariant regression (now fixed); all 47 reaper-config-sensitive tests + the schema/openapi gates green. **Noted (pre-existing, NOT introduced here):** `test_main.py::test_schedule_awaits_require_valid_models` is order-sensitive — fails under some local subset orderings, passes in isolation and in the full-suite CI order (proven by reverting only the §17.442 app changes — it still fails). A latent test-isolation fragility for a future cleanup.
+
+---
+
 ### §17.441 Stress-test hardening — RecursionError→422 + max_length on LLM-feeding fields (2026-06-07)
 
 Aggressive operator stress test of the live API/concurrency/pipeline/resource surface. The system held up well under load (100 concurrent /health all 200; auth solid; 2 MB body cap enforced; open-webui flat at 74%/512 MiB under concurrent chats — no OOM; no crashes/restarts), but five issues surfaced. Two were fixed here; the rest noted.

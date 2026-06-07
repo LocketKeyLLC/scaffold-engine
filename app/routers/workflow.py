@@ -35,7 +35,11 @@ from app.modules.execution_agent import (
 )
 from app.modules.execution_handler import execution_status
 from app.modules.idea_refinement import refine_idea
-from app.modules.ideation_workflow import analyze_and_confirm, research_and_compile
+from app.modules.ideation_workflow import (
+    analyze_and_confirm,
+    get_ideation_slot_sem,
+    research_and_compile,
+)
 from app.modules.prompt_optimizer import optimize_prompt
 from app.schemas import (
     ConfirmInput,
@@ -57,7 +61,10 @@ router = APIRouter()
 async def submit_idea(body: IdeaInput, db=Depends(get_db)):
     """Step 10: Submit new idea → trigger refinement."""
     await _require_valid_models(body.model_overrides)
-    result = await refine_idea(body.idea, db, model=body.model, domain=body.domain, model_overrides=body.model_overrides)
+    # §17.442 — bound concurrent ideation requests (router-layer so the job
+    # isn't even created until a slot frees). See ideation_global_concurrency.
+    async with get_ideation_slot_sem():
+        result = await refine_idea(body.idea, db, model=body.model, domain=body.domain, model_overrides=body.model_overrides)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
             status_code=result.get("http_status", 500),
@@ -70,7 +77,9 @@ async def submit_idea(body: IdeaInput, db=Depends(get_db)):
 async def ideate_endpoint(body: IdeaInput, db=Depends(get_db)):
     """Phase 1: Analyze idea, assess feasibility, halt for confirmation."""
     await _require_valid_models(body.model_overrides)
-    result = await analyze_and_confirm(body.idea, db, model=body.model, domain=body.domain, model_overrides=body.model_overrides)
+    # §17.442 — bound concurrent ideation requests (see ideation_global_concurrency).
+    async with get_ideation_slot_sem():
+        result = await analyze_and_confirm(body.idea, db, model=body.model, domain=body.domain, model_overrides=body.model_overrides)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
             status_code=result.get("http_status", 500),
