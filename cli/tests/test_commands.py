@@ -1683,3 +1683,47 @@ def test_errors_resolve_orchestrator_404_exits_nonzero(runner):
         res = runner.invoke(cli, ["errors", "resolve", eid])
     assert res.exit_code == 1
     assert "(404)" in res.output
+
+
+def test_errors_list_renders_rows(runner):
+    """§17.446 (B4) — `scaffold errors list` tables the error_logs rows."""
+    rows = [
+        {"id": "e1111111-aaaa", "error_type": "RecursionError", "job_id": "j1234567-bb",
+         "error_message": "maximum recursion depth", "resolved": False},
+        {"id": "e2222222-cccc", "error_type": "TimeoutError", "job_id": None,
+         "error_message": "upstream timed out", "resolved": True},
+    ]
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = rows
+        res = runner.invoke(cli, ["errors", "list", "--unresolved"])
+    assert res.exit_code == 0
+    assert "RecursionError" in res.output and "maximum recursion" in res.output
+    args, kwargs = get.call_args
+    assert args[0] == "/observability/errors"
+    assert kwargs["params"].get("resolved") == "false"
+
+
+def test_errors_list_empty(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = []
+        res = runner.invoke(cli, ["errors", "list"])
+    assert res.exit_code == 0
+    assert "no error_logs rows" in res.output
+
+
+def test_alerts_list_renders_rows(runner):
+    """§17.446 (B4) — `scaffold alerts list` tables system_alerts rows."""
+    rows = [
+        {"id": "a1111111-aaaa", "severity": "warning", "kind": "oncall.errors_unresolved",
+         "message": "2 unresolved error_logs rows"},
+    ]
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        get = ClientCls.return_value.__enter__.return_value.get
+        get.return_value = rows
+        res = runner.invoke(cli, ["alerts", "list", "--kind", "oncall.errors_unresolved"])
+    assert res.exit_code == 0
+    assert "oncall.errors_unresolved" in res.output and "unresolved error_logs" in res.output
+    args, kwargs = get.call_args
+    assert args[0] == "/observability/alerts"
+    assert kwargs["params"].get("kind") == "oncall.errors_unresolved"

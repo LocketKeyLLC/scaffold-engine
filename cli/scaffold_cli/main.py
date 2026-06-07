@@ -3502,5 +3502,88 @@ def errors_resolve(
         click.echo(f"  note: {data['resolution']}")
 
 
+@errors.command("list", help="List recent error_logs rows (oncall view).")
+@click.option("--resolved/--unresolved", "resolved", default=None,
+              help="Filter by resolved flag. Default shows all; "
+                   "--unresolved = what's still broken.")
+@click.option("--since", type=int, default=None, metavar="MIN",
+              help="Only rows from the last MIN minutes.")
+@click.option("--limit", type=int, default=50, show_default=True)
+@click.pass_context
+def errors_list(ctx, resolved, since, limit):
+    """§17.446 (Phase B / B4) — read the error_logs the orchestrator records.
+
+    Closes the gap where `scaffold errors resolve` needed a UUID the CLI
+    couldn't list. Maps to ``GET /observability/errors``.
+    """
+    cfg = ctx.obj["cfg"]
+    params: dict[str, Any] = {"limit": limit}
+    if resolved is not None:
+        params["resolved"] = str(resolved).lower()
+    if since is not None:
+        params["since_minutes"] = since
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/observability/errors", params=params)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    rows = data if isinstance(data, list) else (data.get("errors") or data.get("rows") or [])
+    if not rows:
+        click.echo("no error_logs rows match.")
+        return
+    click.echo(f"{'id':<10}{'type':<22}{'job':<10}{'res':<5}message")
+    click.echo("-" * 92)
+    for r in rows:
+        eid = str(r.get("id", ""))[:8]
+        etype = str(r.get("error_type", "") or "")[:21]
+        job = str(r.get("job_id", "") or "")[:8]
+        res = "yes" if r.get("resolved") else "no"
+        msg = str(r.get("error_message", "") or "").replace("\n", " ")[:48]
+        click.secho(f"{eid:<10}{etype:<22}{job:<10}{res:<5}{msg}",
+                    fg=None if r.get("resolved") else "yellow")
+
+
+@cli.group(help="Read system alerts (oncall view).")
+def alerts() -> None:
+    pass
+
+
+@alerts.command("list", help="List recent system_alerts rows.")
+@click.option("--kind", default=None, help="Filter by alert kind (exact match).")
+@click.option("--since", type=int, default=None, metavar="MIN",
+              help="Only alerts from the last MIN minutes.")
+@click.option("--limit", type=int, default=100, show_default=True)
+@click.pass_context
+def alerts_list(ctx, kind, since, limit):
+    """§17.446 (Phase B / B4) — read system_alerts. Maps to
+    ``GET /observability/alerts`` (previously had no CLI reader)."""
+    cfg = ctx.obj["cfg"]
+    params: dict[str, Any] = {"limit": limit}
+    if kind:
+        params["kind"] = kind
+    if since is not None:
+        params["since_minutes"] = since
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/observability/alerts", params=params)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    rows = data if isinstance(data, list) else (data.get("alerts") or data.get("rows") or [])
+    if not rows:
+        click.echo("no alerts match.")
+        return
+    _sev_color = {"critical": "red", "warning": "yellow", "info": None}
+    click.echo(f"{'id':<10}{'severity':<10}{'kind':<34}message")
+    click.echo("-" * 92)
+    for r in rows:
+        aid = str(r.get("id", ""))[:8]
+        sev = str(r.get("severity", "") or "")
+        knd = str(r.get("kind", "") or "")[:33]
+        msg = str(r.get("message", "") or "").replace("\n", " ")[:44]
+        click.secho(f"{aid:<10}{sev:<10}{knd:<34}{msg}", fg=_sev_color.get(sev))
+
+
 if __name__ == "__main__":
     cli()
