@@ -21984,6 +21984,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.451 Phase C (start) — information-gain clarification on the triage Gaps engine (2026-06-07)
+
+First Phase-C item (the deepest roadmap tier). The triage Gaps engine — the audits' standout assistive asset — asked a fixed 4-bucket set every turn and required ALL FOUR `✓ covered` before offering `/go`, dragging users through low-value questions. Upgraded it toward the SOTA (Active Task Disambiguation, ICLR 2025 arXiv 2502.04485; SAGE-Agent EVPI, arXiv 2511.08798 — "1.5–2.7× fewer questions") via a prompt change (the pragmatic black-box form — no structured Bayesian model needed).
+
+- **INFORMATION VALUE rule** added to `TRIAGE_SYSTEM_PROMPT`: judge each open bucket as LOAD-BEARING (its answer materially changes plan/architecture/tooling) vs LOW-VALUE (a safe default exists); lead with the single highest-value gap; mark a low-value gap `(can default: <value>)` so the user can skip it.
+- **Early-close rule**: STOP asking once every load-bearing gap is covered (even with low-value buckets still open) — emit the scope summary, state the defaults to assume, and offer `/go` early. Was: require all four `✓ covered`. The 4-section template (the asset) is preserved intact.
+- **Verified live** on qwen3.5: (1) a clear-but-incomplete idea → led with the one load-bearing gap (output mode) and recommended a default; (2) a fully-specified idea → **stopped asking, stated its assumed defaults (`~/.todo.json`, argparse, mark-complete-not-delete), and offered `/go`** — exactly the fewer-questions behavior. 3 prompt-content guard tests + full scaffold_router pipeline suite (180) pass. Pipeline-only; **go-live: `docker restart open-webui-pipelines`.** **Phase C remaining: CoVe self-verification (truthful).**
+
+---
+
 ### §17.450 Phase B — B3 web error surface + a CRITICAL web-UI deadlock fix it uncovered (2026-06-07)
 
 The deferred B3 web-layer pass — which surfaced a far bigger latent bug than B3 itself.
