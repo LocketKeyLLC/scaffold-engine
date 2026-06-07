@@ -66,6 +66,10 @@ class ResearchState:
     outline_facets: list = field(default_factory=list)
     covered_facets: set = field(default_factory=set)
     gap_queries: list = field(default_factory=list)
+    # §17.448 (Phase B / B1) — faithfulness score of the generated summary vs
+    # the collected sources, stamped by _generate_summary when the check is
+    # enabled. None = not scored. Surfaced on the research_complete payload.
+    faithfulness: dict | None = None
 
     @property
     def max_iterations(self) -> int:

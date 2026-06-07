@@ -391,6 +391,12 @@ class Settings(BaseSettings):
     research_fetch_concurrency: int = Field(default=5, ge=1, le=100)
     research_fetch_timeout: int = Field(default=15, ge=1, le=300)
     research_url_fetch_timeout: int = Field(default=30, ge=1, le=300)
+    # §17.448 (Phase B / B1) — RAGAS-inspired faithfulness scoring of research
+    # summaries against the collected sources. Default-OFF: it adds one LLM
+    # tool-call per research run (cost), and is fail-soft so flag-off = unchanged
+    # behaviour. faithfulness_model_role picks which role scores it.
+    faithfulness_check_enabled: bool = False
+    faithfulness_model_role: str = "model_verifier"
     # §17.406 — bound the CPU-bound pypdf/pdfplumber extract so a corrupt or
     # adversarially large PDF can't hang the research session indefinitely.
     # wait_for cancels the awaiting coroutine on timeout (the off-loop thread

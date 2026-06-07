@@ -818,6 +818,37 @@ def _attach_sources_block(summary: str, state: "ResearchState") -> str:
     return f"{summary}\n\n**Sources** ({len(srcs)}):\n{lines}{more}"
 
 
+async def _maybe_score_faithfulness(
+    summary_text: str, state: "ResearchState", overrides: dict | None,
+) -> dict | None:
+    """§17.448 (B1) — gate + run the faithfulness check. Default-off, fail-soft."""
+    if not settings.faithfulness_check_enabled or not state.all_entries:
+        return None
+    try:
+        from app.modules.faithfulness import score_faithfulness
+        return await score_faithfulness(
+            summary_text,
+            _build_summary_prompt_body(state),  # the same source content the summary was built from
+            role=settings.faithfulness_model_role,
+            overrides=overrides,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("faithfulness_wire_error: %s", exc)
+        return None
+
+
+def _finalize_summary_text(summary_text: str, state: "ResearchState") -> str:
+    """Attach the Sources block (A2) + a one-line faithfulness note (B1)."""
+    out = _attach_sources_block(summary_text, state)
+    f = getattr(state, "faithfulness", None)
+    if f:
+        out += (
+            f"\n\n_Faithfulness: {f['score']:.2f} — "
+            f"{f['supported']}/{f['total']} summary claims grounded in the collected sources._"
+        )
+    return out
+
+
 def _build_summary_prompt_body(state: "ResearchState") -> str:
     """Pack as many ``[facet] content`` lines as fit under the char budget.
 
@@ -878,7 +909,13 @@ async def _generate_summary(
         )
 
     if resp.success:
-        return _attach_sources_block(resp.text.strip(), state)
+        summary_text = resp.text.strip()
+        # §17.448 (Phase B / B1) — score the generated summary against the
+        # collected sources (default-off, fail-soft → None when disabled/erroring).
+        state.faithfulness = await _maybe_score_faithfulness(
+            summary_text, state, overrides,
+        )
+        return _finalize_summary_text(summary_text, state)
     return _attach_sources_block(
         f"Research collected {len(state.all_entries)} entries on '{state.topic}'.",
         state,
@@ -918,6 +955,9 @@ def _build_research_complete_payload(
         "total_queries": len(state.search_history),
         # §17.445 (A2) — post-hoc source attribution for any consumer.
         "sources": _build_sources_list(state),
+        # §17.448 (B1) — faithfulness of the summary vs sources (None if the
+        # check is disabled or didn't run). Structured for programmatic readers.
+        "faithfulness": getattr(state, "faithfulness", None),
     }
     if summary is not None:
         payload["summary"] = summary

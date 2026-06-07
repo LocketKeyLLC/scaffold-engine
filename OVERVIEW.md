@@ -21984,6 +21984,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.448 Phase B — B1 RAGAS-inspired faithfulness scoring of research summaries (2026-06-07)
+
+The Phase-B truthfulness centerpiece. Research summaries had no automated groundedness check — a synthesis could drift from its sources unflagged.
+
+- **`app/modules/faithfulness.py::score_faithfulness(answer, context)`** — a single **black-box** LLM tool-call (RAGAS faithfulness, arXiv 2309.15217): extract the answer's factual claims, judge each as supported/unsupported by the context, return `{score, supported, total, unsupported_claims}` (score = supported/total). Black-box (no hidden-state access) **because the white-box methods MIRAGE/SABER/FRANQ don't apply to this Ollama/cloud stack** — exactly the caveat the §17.443 roadmap flagged. **Default-OFF** (`faithfulness_check_enabled=False`) + **fail-soft**: every error/timeout/empty path returns `None`, so flag-off = unchanged behaviour and an erroring check never breaks a research run.
+- **Wire-in (all research paths via `_generate_summary`):** on a successful summary, `_maybe_score_faithfulness` scores it against `_build_summary_prompt_body(state)` (the same source content the summary was built from), stamps `state.faithfulness` (new `ResearchState` field), appends a one-line note (`_Faithfulness: 0.85 — 17/20 summary claims grounded…_`), and `_build_research_complete_payload` carries a structured `faithfulness` field for programmatic readers. Timeout/failure fallback summaries (no real synthesis) are not scored.
+- **Verification.** New `tests/test_faithfulness_17448.py` (score ratio + every fail-soft path + the off-by-default/enabled wire-in + the payload field). Full offline suite **3412 passed**; `openapi-check` + `check-schemas` green (config + SSE-payload change, no response-model touched). `.env.example` documents `FAITHFULNESS_CHECK_ENABLED` / `FAITHFULNESS_MODEL_ROLE`. **Go-live:** rebuild prod (default-off — no behaviour change until the valve is flipped). **Phase B remaining: B3 web error banner (dedicated web-layer pass).**
+
+---
+
 ### §17.447 Phase B — B2 confidence provenance labels + stress-test error_logs cleanup (2026-06-07)
 
 - **B2 — confidence provenance labels.** Raw `0.82`s were shown from three different sources with no label, so a user couldn't tell a retrieval relevance score from a verifier judgement. Now: `/rag` hits show `confidence=0.82 (retrieval)` (cosine/rerank score, not correctness); the `/logs` table column (pipeline + CLI `scaffold logs`) is relabeled `Verify`/`verify` to mark it as the verifier's confidence in each node's output. Render-string changes only — no schema/openapi impact.
