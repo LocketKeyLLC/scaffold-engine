@@ -17,6 +17,7 @@ import asyncio
 import logging
 
 from app import model_router
+from app.providers.base import Tool
 from app.utils.tool_call_args import read_tool_args
 
 logger = logging.getLogger("scaffold.faithfulness")
@@ -31,32 +32,29 @@ _FAITHFULNESS_SYSTEM = (
     "unsupported. Report every claim via the tool."
 )
 
-_FAITHFULNESS_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "report_faithfulness",
-        "description": "Report per-claim groundedness of the answer against the context.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "claims": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "claim": {"type": "string",
-                                      "description": "One atomic factual claim from the answer."},
-                            "supported": {"type": "boolean",
-                                          "description": "True iff the context supports it."},
-                        },
-                        "required": ["claim", "supported"],
+_FAITHFULNESS_TOOL = Tool(
+    name="report_faithfulness",
+    description="Report per-claim groundedness of the answer against the context.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "claim": {"type": "string",
+                                  "description": "One atomic factual claim from the answer."},
+                        "supported": {"type": "boolean",
+                                      "description": "True iff the context supports it."},
                     },
+                    "required": ["claim", "supported"],
                 },
             },
-            "required": ["claims"],
         },
+        "required": ["claims"],
     },
-}
+)
 
 _MAX_CONTEXT_CHARS = 24_000
 _TIMEOUT_S = 90
