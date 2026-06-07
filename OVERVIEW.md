@@ -21984,6 +21984,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.453 Fix §17.452 — CoVe reliability on a thinking model (token budget + retry) (2026-06-07)
+
+The §17.452 post-merge live smoke (again — per the §17.449 lesson) caught that CoVe returned `None` ~half the time. Root cause: **qwen3.5 is a thinking model and spends `num_predict` on reasoning FIRST**, so a too-tight budget (the revise step at 2048/4096) left `success=True` but **empty content** → fail-soft `None`. Instrumenting each step pinpointed the **revise step** as the worst.
+
+- **Fix:** raised the free-text steps to **8192** `num_predict` (live-tuned — revise reliably produced output there), step timeout 90 → 120 s, and added a **single retry-on-empty** (`_generate_nonempty` — a second independent draw of the thinking variance usually lands). Reliability went 0/2 → **4/5** on the previously-failing case; the rest fail-soft to the original summary (harmless, default-off).
+- The Ollama provider has no `think:false` passthrough (would be a core-provider change), so generous budget + retry is the bounded fix. 13 `test_cove_17452` tests pass (retry only fires on empty, so the mocked unit tests are unaffected). **Lesson: thinking models can return success+empty when reasoning overruns `num_predict` — give free-text generations generous budget and retry on empty.** See [[thinking-model-empty-content]].
+
+---
+
 ### §17.452 Phase C (complete) — Chain-of-Verification revision of research summaries (2026-06-07)
 
 The final roadmap item. Where B1 faithfulness (§17.448) *scores* a research summary's groundedness, **CoVe corrects it**.

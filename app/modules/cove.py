@@ -58,7 +58,32 @@ _REVISE_SYSTEM = (
 
 _MAX_CONTEXT_CHARS = 24_000
 _MAX_QUESTIONS = 8
-_STEP_TIMEOUT_S = 90
+_STEP_TIMEOUT_S = 120
+# §17.453 — qwen3.5 (and other thinking models) spend num_predict on reasoning
+# FIRST; too tight a budget leaves the actual answer empty (success=True,
+# content=""), which fail-soft'd CoVe to None ~half the time (the revise step
+# was worst). Give the free-text steps generous room for thinking + output.
+# Live-tuned: revise needed 8192 to reliably produce output on this stack.
+_QUESTION_TOKENS = 2048
+_ANSWER_TOKENS = 8192
+_REVISE_TOKENS = 8192
+
+
+async def _generate_nonempty(prompt, *, role, overrides, system, temperature, max_tokens):
+    """§17.453 — generate() with ONE retry. Thinking models intermittently
+    return success=True but empty content when reasoning overruns num_predict;
+    a second independent draw usually lands. Returns stripped text or None."""
+    for _attempt in (1, 2):
+        resp = await asyncio.wait_for(
+            model_router.generate(
+                prompt, role=role, overrides=overrides, system=system,
+                temperature=temperature, max_tokens=max_tokens,
+            ),
+            timeout=_STEP_TIMEOUT_S,
+        )
+        if getattr(resp, "success", False) and (resp.text or "").strip():
+            return resp.text.strip()
+    return None
 
 
 async def cove_revise(
@@ -81,7 +106,7 @@ async def cove_revise(
                     {"role": "user", "content": f"ANSWER:\n{answer}"},
                 ],
                 tools=[_QUESTIONS_TOOL], role=role, overrides=overrides,
-                temperature=0.0, max_tokens=1024,
+                temperature=0.0, max_tokens=_QUESTION_TOKENS,
             ),
             timeout=_STEP_TIMEOUT_S,
         )
@@ -94,33 +119,25 @@ async def cove_revise(
         # Step 2 — answer them INDEPENDENTLY from the context (the draft is NOT
         # in this prompt — that independence is what makes CoVe work).
         q_block = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(questions))
-        a_resp = await asyncio.wait_for(
-            model_router.generate(
-                f"CONTEXT:\n{ctx}\n\nQUESTIONS:\n{q_block}\n\n"
-                "Answer each question using ONLY the context.",
-                role=role, overrides=overrides, system=_ANSWER_SYSTEM,
-                temperature=0.0, max_tokens=1536,
-            ),
-            timeout=_STEP_TIMEOUT_S,
+        verified = await _generate_nonempty(
+            f"CONTEXT:\n{ctx}\n\nQUESTIONS:\n{q_block}\n\n"
+            "Answer each question using ONLY the context.",
+            role=role, overrides=overrides, system=_ANSWER_SYSTEM,
+            temperature=0.0, max_tokens=_ANSWER_TOKENS,
         )
-        if not getattr(a_resp, "success", False) or not (a_resp.text or "").strip():
+        if not verified:
             return None
-        verified = a_resp.text.strip()
 
         # Step 3 — revise the draft to align with the verified answers.
-        r_resp = await asyncio.wait_for(
-            model_router.generate(
-                f"ORIGINAL:\n{answer}\n\nVERIFICATION (context-grounded Q&A):\n{verified}\n\n"
-                "Rewrite the ORIGINAL so every claim is consistent with the verification. "
-                "Remove or correct any claim the verification marks unsupported.",
-                role=role, overrides=overrides, system=_REVISE_SYSTEM,
-                temperature=0.2, max_tokens=2048,
-            ),
-            timeout=_STEP_TIMEOUT_S,
+        revised = await _generate_nonempty(
+            f"ORIGINAL:\n{answer}\n\nVERIFICATION (context-grounded Q&A):\n{verified}\n\n"
+            "Rewrite the ORIGINAL so every claim is consistent with the verification. "
+            "Remove or correct any claim the verification marks unsupported.",
+            role=role, overrides=overrides, system=_REVISE_SYSTEM,
+            temperature=0.2, max_tokens=_REVISE_TOKENS,
         )
-        if not getattr(r_resp, "success", False) or not (r_resp.text or "").strip():
+        if not revised:
             return None
-        revised = r_resp.text.strip()
     except asyncio.TimeoutError:
         logger.warning("cove_timeout: budget_s=%d", _STEP_TIMEOUT_S)
         return None
