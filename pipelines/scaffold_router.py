@@ -4432,14 +4432,25 @@ class Pipeline:
             return header + "\n\n_(no DAG nodes — job may not have been planned yet)_"
         lines = [header, "", "| Key | Status | Conf | Tool | Output preview |",
                  "|---|---|---:|---|---|"]
+        failures = []
         for n in nodes:
             key = str(n.get("node_key", ""))[:10]
             st = str(n.get("status", ""))[:10]
             conf = n.get("confidence")
             conf_s = f"{conf:.2f}" if isinstance(conf, (int, float)) else "—"
             tool = str(n.get("tool", ""))[:10]
-            preview = (n.get("output_text") or "").replace("\n", " ").replace("|", "\\|")[:60]
+            # §17.445 — API field is `output_preview` (was reading the absent
+            # `output_text`, so the preview column was always blank).
+            preview = (n.get("output_preview") or "").replace("\n", " ").replace("|", "\\|")[:60]
             lines.append(f"| `{key}` | {st} | {conf_s} | {tool} | {preview} |")
+            # §17.445 (Phase A / A1) — collect the "why" for failed/blocked nodes.
+            reason = n.get("failure_reason")
+            if reason and n.get("status") in ("failed", "blocked"):
+                failures.append((n.get("node_key", "?"), str(reason)))
+        if failures:
+            lines.append("\n**Why these failed/blocked:**")
+            for k, reason in failures:
+                lines.append(f"- `{k}` — {reason[:240]}")
         return "\n".join(lines)
 
     def _handle_health(self) -> str:

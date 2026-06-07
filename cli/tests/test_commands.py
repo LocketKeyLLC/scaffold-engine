@@ -1240,9 +1240,10 @@ def test_logs_renders_per_node_table(runner):
         "node_count": 2,
         "nodes": [
             {"node_key": "T1", "status": "done", "confidence": 0.92,
-             "tool": "LLM", "output_text": "Plan: refactor modules A, B, C"},
+             "tool": "LLM", "output_preview": "Plan: refactor modules A, B, C"},
             {"node_key": "T2", "status": "failed", "confidence": 0.41,
-             "tool": "LLM", "output_text": "verifier rejected — too vague"},
+             "tool": "LLM", "output_preview": "",
+             "failure_reason": "verifier rejected — too vague"},
         ],
     }
     with patch("scaffold_cli.main.Client") as ClientCls:
@@ -1252,6 +1253,7 @@ def test_logs_renders_per_node_table(runner):
     assert res.exit_code == 0
     assert "T1" in res.output and "T2" in res.output
     assert "Plan: refactor" in res.output
+    # §17.445 (A1) — failed node's reason now renders on a "why" line.
     assert "verifier rejected" in res.output
     args, kwargs = get.call_args
     assert args[0] == "/logs/abc-123"

@@ -21984,6 +21984,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.445 Phase A UX quick-wins, app-side — A2 research attribution + A1 per-node failure reason (2026-06-07)
+
+Second tranche of the §17.443 roadmap's Phase A (the orchestrator/CLI items; completes the 5-item Phase A with §17.444's pipeline trio).
+
+- **A2 — research source attribution (post-hoc citation).** Research summaries were an un-attributed synthesis: per-entry `source` URLs live in `state.all_entries` but were stripped before the summarizer (`research_agent.py:_build_summary_prompt_body`) and absent from the complete payload. Added `_build_sources_list` (dedup by URL, confidence-ranked) + `_attach_sources_block` (a deterministic `**Sources**` markdown block appended to every summary) + `sources[]` in `_build_research_complete_payload`. Chose post-hoc citation (SOTA-preferred for synthesis: arXiv 2509.21557) over making the LLM cite inline — no change to summary generation, so zero quality risk.
+- **A1 — per-node failure reason surfaced.** `dag_nodes.last_verification_reason` (mig 026, written on failure `execution_agent.py:884`) was exposed by **no** read API — a failed job showed no "why" without grepping Postgres. Added `failure_reason` to the `/logs` `NodeLog` schema + SELECT (`status.py`), rendered it in `scaffold logs` (CLI) and the OWUI `/logs` command (pipeline) as a "Why these failed/blocked" section. Also fixed a **latent bug** found en route: both the CLI and the pipeline `/logs` renderer read `output_text`, but the API field is `output_preview` — the preview column was always blank; corrected to `output_preview`.
+- **Deferred (honest scope):** the web job-detail per-node reason + `error_summary` banner. The web detail renders inline in `app/web/routes.py` (not the Jinja `job_detail.html` the audit referenced) and its nodes come from `/exec/status` (which would need its own SELECT change) — a separate, careful pass rather than a Phase-A quick win.
+- **Verification.** New `tests/test_phase_a_appside_17445.py` (A2 dedup/rank/attach/payload + A1 NodeLog field). Full offline app suite **3396 passed**; CLI tests pass; pipeline tests **102 passed**. Updated `test_status_logs.py` (mock row default for the new column) + two render tests that fed the wrong `output_text` field. `make openapi-snapshot` regenerated clean (NodeLog gained `failure_reason`); `openapi-check` + `check-schemas` green. **Go-live:** rebuild prod image (app) + `docker restart open-webui-pipelines` (pipeline).
+
+---
+
 ### §17.444 Phase A UX quick-wins, pipeline-side — A3 RAG uncertainty + A4 /help + A5 /go gate (2026-06-07)
 
 First tranche of the §17.443 roadmap's Phase A (the OWUI-pipeline items; app-side A1/A2 follow separately). All in `pipelines/scaffold_router.py`.

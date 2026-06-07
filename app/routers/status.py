@@ -84,6 +84,10 @@ class NodeLog(BaseModel):
     output_preview: Optional[str] = None
     confidence: Optional[float] = None
     updated_at: Optional[str] = None
+    # §17.445 (Phase A / A1) — surface WHY a node failed. dag_nodes.last_
+    # verification_reason (mig 026) was written on failure but never exposed by
+    # any read API, so a failed job showed no "why" without grepping Postgres.
+    failure_reason: Optional[str] = None
 
 
 class LogsResponse(BaseModel):
@@ -202,7 +206,8 @@ async def get_logs(
     nodes_result = await db.execute(
         text("""
             SELECT node_key, title, tool, status, domain,
-                   output_text, confidence, updated_at
+                   output_text, confidence, updated_at,
+                   last_verification_reason
             FROM dag_nodes
             WHERE job_id = :job_id
             ORDER BY node_key
@@ -232,6 +237,7 @@ async def get_logs(
                 output_preview=preview,
                 confidence=row.confidence,
                 updated_at=row.updated_at.isoformat() if row.updated_at else None,
+                failure_reason=row.last_verification_reason,
             )
         )
 
