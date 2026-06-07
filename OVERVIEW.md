@@ -21984,6 +21984,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.443 UX research roadmap — helpful / truthful / assistive (planning artifact) (2026-06-07)
+
+Operator-requested research into the best means/implementations/additions to drastically improve UX across three axes. Method: four parallel read-only internal audits (OWUI chat, agentic output truthfulness, assist mode, operator tooling) cross-referenced against an adversarially-verified external best-practices survey (25/25 claims confirmed). Output is **`docs/ux_roadmap.md`** — a roadmap only, no code.
+
+- **Organizing insight (all four audits converged):** the engine already COMPUTES rich trust/guidance signals (per-node `last_verification_reason`, RAG `below_threshold`/`skipped_rerank` flags, research source URLs, brief `ambiguities`, assist `divergence`, friction notes, `error_summary`) but does NOT surface them to chat/web/CLI. Highest-leverage wins are plumbing, not new ML. Second: the triage Gaps engine is a standout asset; the weakness is everything downstream of triage stops asking and stops gating.
+- **Phase A (5 quick wins):** surface per-node failure reason; attribute research summaries (sources stripped before the summarizer, `research_agent.py:771-788`); show RAG below-threshold/reranker-skipped caveats; fix `/help` (add `/cancel`+`/assist`, drop the fabricated "22 commands"); add a `/go` correction gate before auto-chain launch.
+- **SOTA mapped:** CoVe (arXiv 2309.11495), RAGAS faithfulness (2309.15217), post-hoc vs generation-time citation (2509.21557), info-gain clarification / Active Task Disambiguation (2502.04485) + SAGE-Agent EVPI (2511.08798), CollabLLM (2502.00640). **Load-bearing caveat:** MIRAGE/SABER/FRANQ need white-box model internals — NOT available with Ollama cloud/quantized local; use black-box proxies (CoVe, LLM-judge faithfulness, post-hoc citation).
+- Deliverable shape was "roadmap to review first" — no implementation in this entry; sequencing (Phase A→B→C) and per-item file:line + effort live in the doc.
+
+---
+
 ### §17.442 Stress-test follow-ups — ideation concurrency cap, reaper margin, openapi-snapshot tooling (2026-06-07)
 
 The three deferred §17.441 findings the operator chose to fix.
