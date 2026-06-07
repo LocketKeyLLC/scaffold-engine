@@ -1066,6 +1066,11 @@ class HealthCheckResponse(BaseModel):
     checks: dict[str, Any]
     timestamp: str
     auth_enabled: bool
+    # §17.446 (Phase B / B5) — advisory conditions that do NOT degrade the
+    # top-level status (Redis/cache down, sidecar down, OOM events in window)
+    # but that an operator skimming only `status` would otherwise miss. Empty
+    # list = nothing notable. Never affects the healthy/degraded/unhealthy gate.
+    warnings: list[str] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="allow")
 

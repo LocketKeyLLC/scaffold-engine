@@ -1001,8 +1001,32 @@ async def health():
     else:
         status = "unhealthy"
 
+    # §17.446 (Phase B / B5) — advisory warnings. These do NOT change `status`
+    # (the gate stays pg+ollama+milvus), but surface conditions an operator
+    # reading only the top-level field would otherwise miss: a wedged cache,
+    # a down sidecar, or recent OOM kills.
+    warnings: list[str] = []
+    if redis_info.get("status") != "up":
+        warnings.append("redis is down — caching and session memory are degraded")
+    if reranker.get("status") not in ("up", "skipped"):
+        warnings.append(f"reranker is {reranker.get('status')} — RAG falls back to RRF-only ranking")
+    for _name in ("ngspice", "verilator", "symbiyosys"):
+        if checks.get(_name, {}).get("status") not in ("up", None):
+            warnings.append(f"{_name} sidecar is {checks[_name].get('status')} — EDA jobs will fail")
+    if (oom_alerts.get("total") or 0) > 0:
+        warnings.append(
+            f"{oom_alerts['total']} container OOM event(s) in the last "
+            f"{oom_alerts.get('window_hours')}h — check mem_limits"
+        )
+    if (host_oom_alerts.get("total") or 0) > 0:
+        warnings.append(
+            f"{host_oom_alerts['total']} host OOM event(s) in the last "
+            f"{host_oom_alerts.get('window_hours')}h — host-wide memory pressure"
+        )
+
     return {
         "status": status,
+        "warnings": warnings,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "checks": checks,
         # §17.96 — surface the auth posture so operators (and `make doctor`)

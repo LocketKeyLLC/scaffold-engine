@@ -833,3 +833,25 @@ class TestHealthHostOomAlertsBlock:
         result = _call_health_with_oom(host_rows=[("postgres", 3, ts)])
         assert result["checks"]["oom_alerts"]["total"] == 0
         assert result["checks"]["host_oom_alerts"]["total"] == 3
+
+
+@pytest.mark.smoke
+class TestHealthWarnings:
+    """§17.446 (Phase B / B5) — advisory warnings[] that never change status."""
+
+    def test_warnings_is_a_list(self):
+        result = _call_health()
+        assert isinstance(result.get("warnings"), list)
+
+    def test_no_false_warning_for_up_subsystems(self):
+        # pg/ollama/milvus/redis/reranker are all mocked up → none of them
+        # should appear in warnings (sidecars may, since the unit env has none).
+        result = _call_health()
+        joined = " ".join(result["warnings"])
+        assert "redis is down" not in joined
+        assert "reranker is" not in joined
+
+    def test_warnings_do_not_change_status(self):
+        result = _call_health()
+        # warnings can be non-empty (no sidecars in test env) yet status healthy.
+        assert result["status"] == "healthy"

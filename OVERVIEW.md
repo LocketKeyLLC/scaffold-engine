@@ -21984,6 +21984,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.446 Phase B (start) — operator-surface plumbing: /health warnings + alerts/errors CLI (2026-06-07)
+
+First tranche of the §17.443 roadmap's Phase B (operator-surface plumbing; the truthfulness-display items B1 faithfulness, B2 confidence labels, and B3 web error banner follow).
+
+- **B5 — `/health warnings[]`.** Top-level `status` keys only on pg+ollama+milvus, so Redis/cache down, a down EDA sidecar, or recent OOM kills all left `status:"healthy"` — an operator skimming the headline was misled. Added a `warnings: list[str]` field to `HealthCheckResponse` + a computation in `health()` that surfaces these advisory conditions **without changing the healthy/degraded/unhealthy gate**. Empty list = nothing notable.
+- **B4 — read alerts/errors from the CLI.** The `/observability/alerts` and `/observability/errors` endpoints existed but had no CLI reader, so `scaffold errors resolve` needed a UUID the CLI couldn't list. Added `scaffold errors list [--resolved/--unresolved] [--since] [--limit]` (to the existing `errors` group) and a new `scaffold alerts list [--kind] [--since] [--limit]` group, both colour-coding by severity/resolved.
+- **Verification.** New B5 tests (`test_health_cleanup.py::TestHealthWarnings` — field is a list, up-subsystems never false-warn, warnings never change status) + B4 CLI tests (`errors_list`/`alerts_list` render + params). Full offline suite **3399 passed**; full CLI suite 164; `HealthCheckResponse` change synced (`make sync-schemas` + `make openapi-snapshot`, `warnings` in spec); `check-schemas` + `openapi-check` green.
+- **Deferred within Phase B:** B3 web error banner + per-node reason (the web layer renders inline in `routes.py` and sources nodes from `/exec/status` which lacks the field — needs a dedicated web-layer pass, not a quick win); B2 confidence provenance labels; B1 RAGAS-style faithfulness gate (adds LLM calls — default-off valve, separate change). **Go-live:** rebuild prod image.
+
+---
+
 ### §17.445 Phase A UX quick-wins, app-side — A2 research attribution + A1 per-node failure reason (2026-06-07)
 
 Second tranche of the §17.443 roadmap's Phase A (the orchestrator/CLI items; completes the 5-item Phase A with §17.444's pipeline trio).
