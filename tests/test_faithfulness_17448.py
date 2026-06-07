@@ -105,3 +105,12 @@ def test_complete_payload_faithfulness_none_when_unscored():
     payload = RA._build_research_complete_payload(
         state, "sess", mode="topic", duration_ms=1, summary="s")
     assert payload["faithfulness"] is None
+
+
+def test_faithfulness_tool_is_proper_Tool_instance():
+    """§17.449 regression — model_router.tool_call expects Tool objects, not
+    raw OpenAI dicts. A dict gets past the mocked unit tests but fails live
+    ('dict' has no attribute 'name'); this guard fails fast on a dict."""
+    from app.providers.base import Tool
+    assert isinstance(F._FAITHFULNESS_TOOL, Tool)
+    assert F._FAITHFULNESS_TOOL.name == "report_faithfulness"

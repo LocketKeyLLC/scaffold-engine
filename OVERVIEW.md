@@ -21984,6 +21984,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.449 Fix §17.448 — faithfulness tool must be a Tool object, not a raw dict (2026-06-07)
+
+The §17.448 live smoke (post-merge) caught a real integration bug the unit tests couldn't: `_FAITHFULNESS_TOOL` was a raw OpenAI-format `dict`, but `model_router.tool_call` expects `app.providers.base.Tool` objects → live call failed with `'dict' object has no attribute 'name'` and `score_faithfulness` returned `None` every time (silently — it's fail-soft). The mocked unit tests passed because they patch `tool_call` entirely, bypassing the tool-shape handling.
+
+- **Fix:** build `_FAITHFULNESS_TOOL = Tool(name=…, description=…, input_schema=…)` (matching `REFINE_BRIEF_TOOL` et al.).
+- **Regression guard:** `test_faithfulness_tool_is_proper_Tool_instance` asserts it's a `Tool` (a future raw-dict regression now fails fast in unit tests, not silently at runtime).
+- **Live-verified end-to-end:** `score_faithfulness("…Eiffel Tower… built in 1850", "Eiffel Tower … in Paris")` → `{score: 0.5, supported: 1, total: 2, unsupported_claims: ["…built in 1850"]}` — the model correctly grounded "in Paris" and flagged the fabricated date. **Lesson: default-off + fail-soft features need a live smoke, not just mocked unit tests — the mock hid a 100%-failure integration bug.**
+
+---
+
 ### §17.448 Phase B — B1 RAGAS-inspired faithfulness scoring of research summaries (2026-06-07)
 
 The Phase-B truthfulness centerpiece. Research summaries had no automated groundedness check — a synthesis could drift from its sources unflagged.
