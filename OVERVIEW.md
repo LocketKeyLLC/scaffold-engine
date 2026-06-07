@@ -21984,6 +21984,22 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.436 BM25 hybrid ACTIVATED on the live toon_v2 + before/after measurement (2026-06-06)
+
+Operator activation of §17.431. Migrated the live `toon_v2`, flipped `RAG_BM25_ENABLED=true`, recreated the orchestrator, and measured before/after.
+
+- **Pre-flight data-safety check (caught before any mutation).** `row_count=469` but the per-domain dump captured 462; a domain-agnostic `query_iterator` *also* returned exactly 462 with the same distribution (eng 96 / llm 253 / rag 53 / eng_design 38 / prompt 21 / spec 1). So there are **zero live rows outside `VALID_DOMAINS`** — the 7-row gap is Milvus `row_count` over-counting **deleted-but-uncompacted tombstones** (dedup/supersede), not data. The migration's 462-row capture is complete. A 6.5 MB host-side JSON backup (`toon_v2_pre_bm25.backup.json`, dumped via stdout since the container `/tmp` is tmpfs) was taken first as insurance.
+- **Migration.** `scripts/migrate_toon_v2_bm25.py --apply`: dump → recreate with the BM25 schema → re-insert 462 rows (dense vectors preserved, sparse auto-generated). Post: `row_count=462` (tombstones gone), `collection_has_bm25=True`.
+- **Flag.** `RAG_BM25_ENABLED=true` appended to `.env`; orchestrator recreated with `docker compose ... up -d --no-deps scaffold-orchestrator` (`--no-deps` so the shared-`.env` change did NOT recreate Postgres/Milvus/Redis). Verified live: `rag_bm25_enabled=True`, healthy.
+- **Curated eval gate (§17.430) — no regression:** before AND after both **mean hit@5 = nDCG@10 = MRR = 1.000** (the 7 curated queries are saturated by dense+rerank, so the gate is a regression guard here, not a lift-demonstrator).
+- **Keyword-leg lift (where BM25 actually differs) — clear improvement.** The old `LIKE` scan scored by raw match-count (no IDF), so common words dominated and distinctive terms failed to surface their docs; BM25 fixes it:
+  - `"Sallen-Key filter"` (eng_design): LIKE → RC/LC/CR filters @ 0.333, **no Sallen-Key doc**; BM25 → **Sallen-Key low-pass (12.95) + high-pass (11.34)** at top.
+  - `"quantization reduce model size"` (llm): LIKE → Faiss/anthropic-cookbook @ 0.250, **quantization doc absent**; BM25 → **Quantization (signal processing) (9.83)** at top.
+  - `"Johnson ring counter"` (eng_design): LIKE → Johnson (1.0) then 0.333 ties; BM25 → **Johnson (23.19) + Ring counter (13.88)** properly ranked.
+- **Rollback (if ever needed):** `RAG_BM25_ENABLED=false` + recreate orchestrator falls back to the LIKE path immediately (the migrated collection still has `canonical_text`); or restore from the backup via `migrate_toon_v2_bm25.py --from-backup`. **Follow-up:** the curated eval set can't quantify BM25's lift (saturated) — a keyword-gap golden set would let the §17.430 gate measure it numerically.
+
+---
+
 ### §17.435 LLM observability — gen_ai.* spans on the existing OTel + Arize Phoenix backend (#5) (2026-06-06)
 
 The #5 OSS-research pick and the last item of the arc. The OTel plumbing has been wired since Sprint X.26 but **dormant** (`otel_enabled`/`otel_otlp_endpoint` both default off, no backend), and the only LLM signal was generic httpx spans ("POST :11434"). This (a) makes every LLM call an **LLM-semantic span**, and (b) deploys a backend that renders them.
