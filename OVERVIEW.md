@@ -21984,6 +21984,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.452 Phase C (complete) — Chain-of-Verification revision of research summaries (2026-06-07)
+
+The final roadmap item. Where B1 faithfulness (§17.448) *scores* a research summary's groundedness, **CoVe corrects it**.
+
+- **`app/modules/cove.py::cove_revise(answer, context)`** — Chain-of-Verification (Dhuliawala/Meta, arXiv 2309.11495): (1) plan verification questions about the draft's claims (tool-call), (2) answer them **independently from the context — the draft is NOT in that prompt**, which is the property that prevents self-confirmation, (3) revise the draft to align with the verified answers, dropping/correcting unsupported claims. Black-box (1 tool-call + 2 generate); **default-OFF** (`cove_check_enabled`); **fail-soft** (None on any step failure → caller keeps the original). Applied the §17.449 lesson: the questions tool is a `Tool` object (not a dict), and I **live-smoked the real 3-call path**.
+- **Wire-in (all research paths via `_generate_summary`):** when enabled, CoVe revises the summary **before** B1 scores it (so the faithfulness score reflects the revision); stamps `state.cove` (new `ResearchState` field), appends a note when it changed something, and adds a structured `cove` field to the research_complete payload.
+- **Live-verified** on qwen3.5: a draft "Python was invented by **Albert Einstein**" against a context naming Guido van Rossum → CoVe revised it to "invented by **Guido van Rossum**" (`changed=True`, 19 s). New `tests/test_cove_17452.py` (3-step flow + every fail-soft path + Tool-instance guard + wire-in/payload). Full offline suite **3431 passed**; `openapi-check` + `check-schemas` green. `.env.example` documents `COVE_CHECK_ENABLED`/`COVE_MODEL_ROLE`. **Go-live:** rebuild prod (default-off).
+
+**This completes the §17.443 UX roadmap end to end: Phase A (5) + Phase B (5) + Phase C (info-gain clarification + CoVe).**
+
+---
+
 ### §17.451 Phase C (start) — information-gain clarification on the triage Gaps engine (2026-06-07)
 
 First Phase-C item (the deepest roadmap tier). The triage Gaps engine — the audits' standout assistive asset — asked a fixed 4-bucket set every turn and required ALL FOUR `✓ covered` before offering `/go`, dragging users through low-value questions. Upgraded it toward the SOTA (Active Task Disambiguation, ICLR 2025 arXiv 2502.04485; SAGE-Agent EVPI, arXiv 2511.08798 — "1.5–2.7× fewer questions") via a prompt change (the pragmatic black-box form — no structured Bayesian model needed).

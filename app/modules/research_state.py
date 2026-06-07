@@ -70,6 +70,9 @@ class ResearchState:
     # the collected sources, stamped by _generate_summary when the check is
     # enabled. None = not scored. Surfaced on the research_complete payload.
     faithfulness: dict | None = None
+    # §17.452 (Phase C) — CoVe revision metadata ({changed, questions}) stamped
+    # by _generate_summary when the check is enabled. None = not run.
+    cove: dict | None = None
 
     @property
     def max_iterations(self) -> int:
