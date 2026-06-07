@@ -1681,3 +1681,26 @@ class TestLogsFailureReason:
             mock_http.get.return_value = resp
             out = pipe._handle_logs(["/logs", "abc12345-0000-0000-0000-000000000000"])
         assert "Why these failed" not in out
+
+
+class TestB2ConfidenceLabels:
+    """§17.447 (Phase B / B2) — confidence provenance labels."""
+
+    def test_rag_confidence_labeled_retrieval(self, pipe):
+        r = _make_response(200, {
+            "results": [{"text": "x", "source_type": "tech_docs", "confidence_score": 0.82}],
+            "metadata": {"below_threshold": False, "skipped_rerank": False},
+        })
+        out = pipe._render_rag_results(r, query="foo")
+        assert "confidence=0.82 (retrieval)" in out
+
+    def test_logs_confidence_column_labeled_verify(self, pipe):
+        resp = _make_response(200, {
+            "job_id": "abc12345", "job_status": "completed", "node_count": 1,
+            "nodes": [{"node_key": "T1", "status": "done", "tool": "LLM",
+                       "confidence": 0.9, "output_preview": "ok"}],
+        })
+        with patch.object(_mod, "_HTTP_SESSION") as mock_http:
+            mock_http.get.return_value = resp
+            out = pipe._handle_logs(["/logs", "abc12345-0000-0000-0000-000000000000"])
+        assert "Verify" in out and "Conf |" not in out

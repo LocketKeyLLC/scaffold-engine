@@ -3383,7 +3383,10 @@ class Pipeline:
             if source_type:
                 meta_parts.append(f"source_type={source_type}")
             if isinstance(confidence, (int, float)):
-                meta_parts.append(f"confidence={confidence:.2f}")
+                # §17.447 (Phase B / B2) — label provenance: this is the
+                # RETRIEVAL relevance score (cosine/rerank), not a
+                # factual-correctness or verifier judgement.
+                meta_parts.append(f"confidence={confidence:.2f} (retrieval)")
             meta = (" · " + " · ".join(meta_parts)) if meta_parts else ""
             # Header line per result; matches the spec format
             # `· source_type=tech_docs · confidence=0.82`.
@@ -4430,7 +4433,9 @@ class Pipeline:
                   f"({len(nodes)}/{total} nodes)")
         if not nodes:
             return header + "\n\n_(no DAG nodes — job may not have been planned yet)_"
-        lines = [header, "", "| Key | Status | Conf | Tool | Output preview |",
+        # §17.447 (Phase B / B2) — "Verify" labels the column as the verifier's
+        # confidence in each node's output (vs a retrieval or feasibility score).
+        lines = [header, "", "| Key | Status | Verify | Tool | Output preview |",
                  "|---|---|---:|---|---|"]
         failures = []
         for n in nodes:

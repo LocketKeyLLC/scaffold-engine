@@ -21984,6 +21984,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.447 Phase B — B2 confidence provenance labels + stress-test error_logs cleanup (2026-06-07)
+
+- **B2 — confidence provenance labels.** Raw `0.82`s were shown from three different sources with no label, so a user couldn't tell a retrieval relevance score from a verifier judgement. Now: `/rag` hits show `confidence=0.82 (retrieval)` (cosine/rerank score, not correctness); the `/logs` table column (pipeline + CLI `scaffold logs`) is relabeled `Verify`/`verify` to mark it as the verifier's confidence in each node's output. Render-string changes only — no schema/openapi impact.
+- **Cleanup.** Resolved 6 `error_logs` rows (`error_type=unrecoverable`, "maximum recursion depth exceeded") that were artifacts of the §17.441 depth-bomb stress test, with `resolution='stress-test artifact (§17.441 depth-bomb)'` — quieting the `oncall.errors_unresolved` watchdog. Surfaced by the new §17.446 `scaffold errors list`/`alerts list` readers (a nice end-to-end proof they work).
+- **Verification.** New B2 tests (pipeline `/rag` retrieval label + `/logs` Verify header; CLI logs verify column); full scaffold_router pipeline suite 159 passed, full CLI suite 165. **Go-live:** rebuild prod (baked CLI) + `docker restart open-webui-pipelines` (chat labels). **Phase B remaining: B1 RAGAS-style faithfulness gate (default-off valve), B3 web error banner (dedicated web-layer pass).**
+
+---
+
 ### §17.446 Phase B (start) — operator-surface plumbing: /health warnings + alerts/errors CLI (2026-06-07)
 
 First tranche of the §17.443 roadmap's Phase B (operator-surface plumbing; the truthfulness-display items B1 faithfulness, B2 confidence labels, and B3 web error banner follow).

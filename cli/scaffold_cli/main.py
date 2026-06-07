@@ -3239,7 +3239,9 @@ def logs(
         click.echo("(no DAG nodes — job may not have been planned yet)")
         return
 
-    click.echo(f"{'key':<10} {'status':<10} {'conf':>5}  {'tool':<10} preview")
+    # §17.447 (Phase B / B2) — "verify" labels the column as the verifier's
+    # confidence in each node's output (not a retrieval/feasibility score).
+    click.echo(f"{'key':<10} {'status':<10} {'verify':>6} {'tool':<10} preview")
     click.echo("-" * 100)
     for n in nodes:
         key = str(n.get("node_key", ""))[:9]
