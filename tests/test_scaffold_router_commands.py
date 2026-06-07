@@ -491,9 +491,11 @@ class TestModelCommand:
         result = pipe._handle_model("/model reset")
         assert "Reset to defaults" in result
         assert "general" in result
-        assert pipe.valves.model_general == "qwen3-vl:235b-instruct-cloud"
-        # §17.346: model_verifier default flipped qwen2.5:7b → cloud
-        assert pipe.valves.model_verifier == "qwen3-vl:235b-instruct-cloud"
+        assert pipe.valves.model_general == "qwen3.5:397b-cloud"
+        # §17.346: model_verifier default flipped qwen2.5:7b → cloud;
+        # §17.440: cloud model migrated qwen3-vl:235b-instruct-cloud → qwen3.5:397b-cloud
+        # (instruct variant retires 2026-06-16)
+        assert pipe.valves.model_verifier == "qwen3.5:397b-cloud"
 
     @patch("scaffold_router._HTTP_SESSION.get")
     def test_model_available(self, mock_get, pipe):

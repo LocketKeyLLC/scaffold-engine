@@ -215,11 +215,11 @@ class Settings(BaseSettings):
     # model_fallback stays local on purpose — fallback should be DIFFERENT from
     # primary to actually help when primary fails (cloud → cloud fallback gives
     # no failure-mode diversity).
-    model_router: str = "qwen3-vl:235b-instruct-cloud"
+    model_router: str = "qwen3.5:397b-cloud"
     model_embedder_pipeline: str = "nomic-embed-text"
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-    model_coder: str = "qwen3-vl:235b-instruct-cloud"
-    model_general: str = "qwen3-vl:235b-instruct-cloud"
+    model_coder: str = "qwen3.5:397b-cloud"
+    model_general: str = "qwen3.5:397b-cloud"
     # Ideation phase model role (Apr 26 2026): which ROLE_FIELDS entry to
     # use for analyze/distill/compile. "model_router" = local 4b (audit
     # #6.1 default, slower on CPU). "model_general" = cloud 235b (faster,
@@ -239,8 +239,8 @@ class Settings(BaseSettings):
     # one refinement → safety net, without making a non-convergent
     # design wait for an expensive 10-iter futile loop.
     device_sizing_max_iterations: int = Field(default=3, ge=1, le=10)
-    model_verifier: str = "qwen3-vl:235b-instruct-cloud"
-    model_cloud_heavy: str = "qwen3-vl:235b-instruct-cloud"
+    model_verifier: str = "qwen3.5:397b-cloud"
+    model_cloud_heavy: str = "qwen3.5:397b-cloud"
     model_cloud_alt: str = "qwen3.5:397b-cloud"
     model_fallback: str = "qwen3.5:latest"
 
