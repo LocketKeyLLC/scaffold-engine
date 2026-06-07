@@ -21984,6 +21984,23 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.441 Stress-test hardening — RecursionError→422 + max_length on LLM-feeding fields (2026-06-07)
+
+Aggressive operator stress test of the live API/concurrency/pipeline/resource surface. The system held up well under load (100 concurrent /health all 200; auth solid; 2 MB body cap enforced; open-webui flat at 74%/512 MiB under concurrent chats — no OOM; no crashes/restarts), but five issues surfaced. Two were fixed here; the rest noted.
+
+**Fixed:**
+- **#2 — `RecursionError` → HTTP 500 on deeply-nested JSON (systemic).** A ~10 KB body of thousands of nested arrays exceeded Python's recursion limit during parsing; FastAPI converts `JSONDecodeError`→422 but **not** `RecursionError`, so it fell through `ErrorLoggingMiddleware`'s catch-all as a **500** on EVERY JSON POST endpoint (/ideate, /research, /dag, /rag, /design all confirmed), and wrote an `"unrecoverable"` `error_logs` row each time (tripping the unresolved-errors alert watchdog — observed firing mid-test). Post-auth only (no key → 401). Fix: `@app.exception_handler(RecursionError)` in `app/main.py` (catches it in Starlette's inner ExceptionMiddleware, **before** ErrorLoggingMiddleware → clean 422, no error_logs row). Verified: depth bomb → 422 on /ideate + /research.
+- **#3 — No `max_length` on free-text fields feeding cloud LLMs.** `idea` had no upper bound → a **1 MB `idea` was accepted (200) and forwarded to a billed model** (48 s); only the 2 MB body cap backstopped it. Fix: `max_length` on the 9 LLM/network-feeding fields (`schemas.py`): `MAX_LLM_TEXT_LEN=50000` for prose (idea/prompt/feedback/reply), `MAX_QUERY_LEN=10000` for topics/queries (research/schedule/gt topic, rag/gt query). Mirrors the existing `DesignCreateInput.brief` (max_length=10000). Verified: 1 MB idea → 422 in 17 ms, `"String should have at most 50000 characters"`.
+
+**Noted (not fixed):**
+- **#1 — stranded job** `dd98a301` in `executing` ~20 h (node pending, no executor); the orphan sweep only resets `running` nodes and the 24 h job-reaper (`STALE_THRESHOLD=1440`) hadn't fired. **Manually cancelled** during cleanup. Related: snapshot regen surfaced a config warning `node_timeout_seconds(86400) >= stale_threshold_minutes*60(86400)` — the reaper window equals the node timeout, so a legitimately-long job can be reaped mid-run. Latent, deferred.
+- **#4 — ideation concurrency uncapped** (6 concurrent /ideate all ran, latency 33→81 s; no cap=2 equivalent). **#5 — concurrent OWUI chat latency** up to 162 s for a one-line reply under 4-way load (likely cloud session limits). Both "works, degrades."
+- **#6 (tooling) — `make openapi-snapshot` is corrupted when `OTEL_ENABLED=true`** (§17.438): app-import emits an `otel_fastapi_instrumented` log line to **stdout**, which the `> docs/openapi.json` redirect captures as the file's first line. Worked around by stripping leading non-`{` lines when regenerating; the committed snapshot is clean and `make openapi-check` passes. The Makefile target should filter stdout or route app logs to stderr — deferred.
+
+**Verification.** 14 new tests in `tests/test_input_validation_17441.py` (RecursionError→422 across endpoints + max_length bounds + "generous enough for real input" guard) pass; 950 passed across the 49 affected test files (3:45), 0 failures. `make check-schemas` + `make openapi-check` green (SDK vendor + snapshot regenerated). **Rollback:** revert `app/main.py` handler + `app/schemas.py` field bounds + regenerate snapshot.
+
+---
+
 ### §17.440 Cloud model migration qwen3-vl:235b-instruct-cloud → qwen3.5:397b-cloud (instruct retires 2026-06-16) (2026-06-07)
 
 Follow-on to the §17.439 operator audit. Testing triage in the WebUI surfaced an Ollama Cloud **403 `subscription payment past due`** — root-caused to the `ollama serve` daemon being signed into a **past-due account** (the daemon's cloud identity is the `ollama`-system-user ed25519 key in `/usr/share/ollama/.ollama/`, NOT the `aedefruscio` CLI key; no `ollama whoami` exists — match the pubkey at ollama.com/settings/keys). `/health` could not catch this — it lists loaded models but never *invokes* one, so billing/auth failures are invisible there. Operator fixed it via `ollama signout`/`ollama signin` to the billing-current paid account (same daemon key re-registered); cloud calls then 200 and triage passed.

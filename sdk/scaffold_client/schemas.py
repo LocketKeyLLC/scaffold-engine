@@ -350,9 +350,19 @@ class BlockerRead(BlockerBase):
 # Step 14: Prompt Optimizer
 # ---------------------------------------------------------------------------
 
+# §17.441 — upper bounds on free-text fields that feed cloud LLM calls / network
+# fetches. Without these a single authenticated request could push megabytes of
+# text straight into a billed LLM (only the 2 MB BodySizeLimitMiddleware stood
+# between a 1 MB `idea` and the model). Generous enough never to reject realistic
+# input; mirrors DesignCreateInput.brief (max_length=10000). Surfaced by the
+# §17.441 stress test.
+MAX_LLM_TEXT_LEN = 50_000   # long free-form prose (idea, prompt, feedback, reply)
+MAX_QUERY_LEN = 10_000      # topics + search queries
+
+
 class PromptOptimizeInput(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
-    prompt: str
+    prompt: str = Field(max_length=MAX_LLM_TEXT_LEN)
     model_optimizer: str | None = None
     model_verifier: str | None = None
     skip_verify: bool = False
@@ -434,7 +444,7 @@ class ExecutionResult(BaseModel):
 
 class ResearchInput(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
-    topic: str
+    topic: str = Field(max_length=MAX_QUERY_LEN)
     depth: ResearchDepth = "medium"
     domain: str | None = None
     model_overrides: dict | None = None
@@ -443,13 +453,13 @@ class ResearchInput(BaseModel):
 class ResearchReplyInput(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     session_id: str
-    reply: str
+    reply: str = Field(max_length=MAX_LLM_TEXT_LEN)
     model_overrides: dict | None = None
 # ---------------- Scheduled research jobs ----------------
 
 class ScheduleCreate(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
-    topic: str
+    topic: str = Field(max_length=MAX_QUERY_LEN)
     cron_expression: str  # e.g. "0 9 * * 1" = Mondays at 09:00 in `timezone`
     depth: ResearchDepth = "medium"
     timezone: str = "UTC"  # IANA tz name, e.g. "America/New_York"
@@ -479,7 +489,7 @@ class ScheduleResponse(BaseModel):
 
 class IdeaInput(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
-    idea: str
+    idea: str = Field(max_length=MAX_LLM_TEXT_LEN)
     domain: str | None = None
     model: str | None = None
     model_overrides: dict | None = None
@@ -488,7 +498,7 @@ class IdeaInput(BaseModel):
 class ConfirmInput(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     job_id: str
-    feedback: str | None = None
+    feedback: str | None = Field(default=None, max_length=MAX_LLM_TEXT_LEN)
     push_to_github: bool = False
     model_overrides: dict | None = None
 
@@ -507,7 +517,7 @@ class RagInput(BaseModel):
     # top-3 matches with HTTP 200 instead of an error. min_length catches ""
     # on the raw value; the _validate_query validator below strips and re-checks
     # so whitespace-only ("   ") is caught too.
-    query: str = Field(min_length=1)
+    query: str = Field(min_length=1, max_length=MAX_QUERY_LEN)
     top_k: int = Field(default=10, ge=1, le=100)
     confidence_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
     skip_rerank: bool = False
@@ -550,7 +560,7 @@ class RagInput(BaseModel):
 
 class GtInput(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
-    topic: str
+    topic: str = Field(max_length=MAX_QUERY_LEN)
     queries: list[str] | None = None
     push_to_github: bool = False
     target_file: str | None = None
@@ -561,7 +571,7 @@ class GtInput(BaseModel):
 
 class GtSearchInput(BaseModel):
     domain: str | None = None
-    query: str
+    query: str = Field(max_length=MAX_QUERY_LEN)
     top_k: int = 10
     include_history: bool = False
 

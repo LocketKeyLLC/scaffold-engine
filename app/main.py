@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -523,6 +523,28 @@ if settings.otel_enabled:
         instrument_fastapi(app)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning('event="otel_fastapi_instrument_failed" error=%s', exc)
+
+
+# §17.441 — a pathologically deep JSON body (e.g. thousands of nested arrays)
+# makes Starlette/Pydantic exceed Python's recursion limit while parsing. FastAPI
+# converts JSONDecodeError → 422 but NOT RecursionError, so it fell through
+# ErrorLoggingMiddleware's catch-all as a 500 — wrong status for malformed input,
+# and worse, it wrote an "unrecoverable" error_logs row on every probe (tripping
+# the unresolved-errors alert watchdog). Registering a handler here catches it in
+# Starlette's inner ExceptionMiddleware, BEFORE ErrorLoggingMiddleware sees it, so
+# no error_logs row is written. Surfaced by the §17.441 stress test (deeply-nested
+# body 500'd on every JSON POST endpoint: /ideate, /research, /dag, /rag, /design).
+@app.exception_handler(RecursionError)
+async def _recursion_error_handler(request: Request, exc: RecursionError):
+    logger.warning('event="recursion_error_rejected" path=%s', request.url.path)
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "RecursionError",
+            "message": "request body is too deeply nested",
+            "path": request.url.path,
+        },
+    )
 
 app.include_router(status_router)
 app.include_router(assist_router)

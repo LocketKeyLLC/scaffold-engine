@@ -276,6 +276,7 @@
           "feedback": {
             "anyOf": [
               {
+                "maxLength": 50000,
                 "type": "string"
               },
               {
@@ -1194,6 +1195,7 @@
             "title": "Target File"
           },
           "topic": {
+            "maxLength": 10000,
             "title": "Topic",
             "type": "string"
           }
@@ -1223,6 +1225,7 @@
             "type": "boolean"
           },
           "query": {
+            "maxLength": 10000,
             "title": "Query",
             "type": "string"
           },
@@ -1295,6 +1298,7 @@
             "title": "Domain"
           },
           "idea": {
+            "maxLength": 50000,
             "title": "Idea",
             "type": "string"
           },
@@ -1729,6 +1733,7 @@
             "title": "Model Verifier"
           },
           "prompt": {
+            "maxLength": 50000,
             "title": "Prompt",
             "type": "string"
           },
@@ -1884,6 +1889,7 @@
             "title": "Max Candidates"
           },
           "query": {
+            "maxLength": 10000,
             "minLength": 1,
             "title": "Query",
             "type": "string"
@@ -1953,6 +1959,7 @@
             "title": "Model Overrides"
           },
           "topic": {
+            "maxLength": 10000,
             "title": "Topic",
             "type": "string"
           }
@@ -1977,6 +1984,7 @@
             "title": "Model Overrides"
           },
           "reply": {
+            "maxLength": 50000,
             "title": "Reply",
             "type": "string"
           },
@@ -2161,6 +2169,7 @@
             "type": "string"
           },
           "topic": {
+            "maxLength": 10000,
             "title": "Topic",
             "type": "string"
           }
