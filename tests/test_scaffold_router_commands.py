@@ -397,8 +397,10 @@ class TestSynthesisFallbackWarning:
         combined = "".join(chunks)
         assert "Couldn't synthesize" in combined
         assert "raw messages" in combined
-        # The launch still proceeds — warning doesn't block.
-        assert "Launching with" in combined
+        # §17.444 (A5) — the §17.200 warning fires, then the correction gate
+        # shows the brief and STOPS (no launch until `/go confirm`).
+        assert "Proposed launch brief" in combined
+        assert "Launching with" not in combined
 
     def test_no_warning_when_synthesis_succeeded(self, pipe):
         """``_synthesize_idea`` returns ``(text, False)`` on success;
@@ -423,7 +425,76 @@ class TestSynthesisFallbackWarning:
             chunks = list(pipe.pipe("/go", "test-model", messages, body))
         combined = "".join(chunks)
         assert "Couldn't synthesize" not in combined
+        # §17.444 (A5) — happy path also gates: brief shown, launch deferred.
+        assert "Proposed launch brief" in combined
+        assert "Launching with" not in combined
+
+
+class TestGoCorrectionGate:
+    """§17.444 (Phase A / A5) — `/go` shows the brief and stops; `/go confirm`
+    launches the EXACT brief recovered from chat history."""
+
+    def test_go_gates_and_does_not_launch(self, pipe):
+        messages = [
+            {"role": "user", "content": "Build a thing"},
+            {"role": "user", "content": "/go"},
+        ]
+        with patch.object(
+            pipe, "_synthesize_idea", return_value=("A synthesized plan", False),
+        ), patch.object(_mod, "_HTTP_SESSION") as mock_requests:
+            chunks = list(pipe.pipe("/go", "test-model", messages, {}))
+        combined = "".join(chunks)
+        assert "Proposed launch brief" in combined
+        assert "A synthesized plan" in combined
+        assert "/go confirm" in combined
+        # Gated: the orchestrator was never hit.
+        mock_requests.post.assert_not_called()
+
+    def test_go_confirm_launches_brief_from_history(self, pipe):
+        # Prior assistant turn carries the gated brief marker; user confirms.
+        messages = [
+            {"role": "user", "content": "Build a thing"},
+            {"role": "user", "content": "/go"},
+            {"role": "assistant",
+             "content": "📋 **Proposed launch brief:**\n\nBuild a widget tool\n\n---\n\nType `/go confirm` ..."},
+            {"role": "user", "content": "/go confirm"},
+        ]
+        with patch.object(_mod, "_HTTP_SESSION") as mock_requests:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "job_id": "j1", "status": "awaiting_confirmation",
+                "confidence": 0.9, "risks": [], "clarifications": [],
+            }
+            mock_requests.post.return_value = mock_resp
+            chunks = list(pipe.pipe("/go confirm", "test-model", messages, {}))
+        combined = "".join(chunks)
+        # Launches the EXACT brief from history (no re-synthesis drift).
         assert "Launching with" in combined
+        assert "Build a widget tool" in combined
+        mock_requests.post.assert_called()
+
+    def test_go_respects_disabled_valve(self, pipe):
+        pipe.valves.confirm_before_launch = False
+        messages = [
+            {"role": "user", "content": "Build a thing"},
+            {"role": "user", "content": "/go"},
+        ]
+        with patch.object(
+            pipe, "_synthesize_idea", return_value=("A full launch plan", False),
+        ), patch.object(_mod, "_HTTP_SESSION") as mock_requests:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "job_id": "j1", "status": "awaiting_confirmation",
+                "confidence": 0.9, "risks": [], "clarifications": [],
+            }
+            mock_requests.post.return_value = mock_resp
+            chunks = list(pipe.pipe("/go", "test-model", messages, {}))
+        combined = "".join(chunks)
+        # Valve off → one-shot launch, no gate.
+        assert "Launching with" in combined
+        assert "Proposed launch brief" not in combined
 
 
 # ===================================================================
@@ -1535,3 +1606,44 @@ class TestSyncActionJsonGuards:
         assert "⚠️" in out and "non-JSON" in out, \
             f"expected non-JSON warning; got: {out!r}"
 
+
+
+class TestPhaseAUxPolish:
+    """§17.444 (Phase A) — A3 RAG uncertainty surfacing + A4 /help refresh."""
+
+    def test_rag_low_confidence_banner(self, pipe):
+        r = _make_response(200, {
+            "results": [{"text": "x", "source_type": "tech_docs", "confidence_score": 0.5}],
+            "metadata": {"below_threshold": True, "fell_back_to_top3": True,
+                         "confidence_threshold": 0.8, "skipped_rerank": False},
+        })
+        out = pipe._render_rag_results(r, query="foo")
+        assert "Low confidence" in out and "0.80" in out
+
+    def test_rag_rrf_only_banner(self, pipe):
+        r = _make_response(200, {
+            "results": [{"text": "x", "confidence_score": 0.9}],
+            "metadata": {"skipped_rerank": True, "below_threshold": False},
+        })
+        out = pipe._render_rag_results(r, query="foo")
+        assert "RRF-only" in out
+
+    def test_rag_high_confidence_no_banner(self, pipe):
+        r = _make_response(200, {
+            "results": [{"text": "x", "confidence_score": 0.95}],
+            "metadata": {"below_threshold": False, "skipped_rerank": False},
+        })
+        out = pipe._render_rag_results(r, query="foo")
+        assert "Low confidence" not in out and "RRF-only" not in out
+
+    def test_rag_empty_suggests_research(self, pipe):
+        r = _make_response(200, {"results": [], "metadata": {}})
+        out = pipe._render_rag_results(r, query="kafka tuning")
+        assert "/research kafka tuning" in out
+
+    def test_help_includes_cancel_and_assist(self, pipe):
+        out = pipe._help()
+        assert "/cancel" in out and "/assist" in out
+
+    def test_welcome_drops_fabricated_count(self, pipe):
+        assert "22 commands" not in pipe._WELCOME_PREAMBLE

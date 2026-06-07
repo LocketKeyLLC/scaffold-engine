@@ -513,6 +513,12 @@ class Pipeline:
         # preamble per chat — subsequent turns are unaffected.
         show_welcome_on_first_turn: bool = True
 
+        # §17.444 (Phase A / A5) — when true, `/go` shows the synthesized brief
+        # and STOPS, requiring `/go confirm` to actually launch. Prevents
+        # committing a 10–25 min CPU run to a bad synthesis before the user can
+        # correct it. Set false to restore one-shot `/go` launch.
+        confirm_before_launch: bool = True
+
         # §17.307 — active-job chat memory (pilot). When true, /idea
         # success caches `chat_id → job_id` in-pipeline; `/results`
         # and `/cost` invoked with NO args fall back to that cached
@@ -818,7 +824,7 @@ class Pipeline:
         "- `/research kubernetes best practices` — autonomous web "
         "research + ingest\n"
         "- `/jobs` — see what's already running\n"
-        "- `/help` — full command surface (22 commands)\n\n"
+        "- `/help` — the full command reference\n\n"
         "---\n\n"
     )
 
@@ -1193,7 +1199,38 @@ class Pipeline:
     # Generator command handlers
     # ------------------------------------------------------------------
 
+    # §17.444 (Phase A / A5) — marker that lets `/go confirm` recover the EXACT
+    # brief shown on the prior `/go` turn from chat history (stateless, no
+    # re-synthesis drift between what was shown and what launches).
+    _PENDING_BRIEF_MARKER = "📋 **Proposed launch brief:**"
+
+    def _extract_pending_brief(self, messages: List[dict]) -> str | None:
+        """Recover the most recent gated brief from a prior assistant turn."""
+        for m in reversed(messages):
+            if m.get("role") != "assistant":
+                continue
+            content = m.get("content", "")
+            if isinstance(content, str) and self._PENDING_BRIEF_MARKER in content:
+                after = content.split(self._PENDING_BRIEF_MARKER, 1)[1]
+                brief = after.split("\n---", 1)[0].strip()
+                if brief:
+                    return brief
+        return None
+
     def _handle_go(self, msg: str, messages: List[dict]) -> Generator[str, None, None]:
+        tokens = msg.split()
+        is_confirm = len(tokens) >= 2 and tokens[1].lower() == "confirm"
+
+        # `/go confirm` — launch the exact brief shown on the previous `/go`.
+        if is_confirm:
+            pending = self._extract_pending_brief(messages)
+            if pending:
+                yield f"> **Launching with:** {pending}\n\n---\n\n"
+                yield from self._auto_chain(pending)
+                return
+            yield ("_(No pending brief found — re-synthesizing from the "
+                   "conversation and launching.)_\n\n")
+
         chat_history = [
             m for m in messages
             if not (
@@ -1233,6 +1270,19 @@ class Pipeline:
                    "(triage LLM failed); using your raw messages instead. "
                    "Consider rephrasing in a single message if the launch "
                    "doesn't match your intent.\n\n")
+
+        # §17.444 (Phase A / A5) — correction gate. Show the brief and stop;
+        # the user reviews it and types `/go confirm` to commit the long run,
+        # or keeps chatting to refine. Skipped when this turn IS the confirm
+        # (re-synthesis fallback above) or the valve is disabled.
+        if self.valves.confirm_before_launch and not is_confirm:
+            yield (
+                f"{self._PENDING_BRIEF_MARKER}\n\n{synthesized}\n\n---\n\n"
+                "Type `/go confirm` to launch this (≈10–25 min on this host), "
+                "or keep chatting to refine it first."
+            )
+            return
+
         yield f"> **Launching with:** {synthesized}\n\n---\n\n"
         yield from self._auto_chain(synthesized)
 
@@ -3287,8 +3337,14 @@ class Pipeline:
 
         results = data.get("results")
         if not isinstance(results, list) or not results:
-            # Empty hit list: explicit message rather than empty JSON.
-            return f"No matches for `{query}`."
+            # Empty hit list: explicit message + escalation path rather than a
+            # dead end (§17.444 / A3) — nothing in the KB means the user should
+            # be pointed at the one command that can fix that.
+            return (
+                f"No matches in the knowledge base for `{query}`.\n\n"
+                f"💡 Nothing ingested on this yet — `/research {query}` to fetch "
+                "and ingest it, then re-run your search."
+            )
 
         # All results need the dict shape; otherwise fall back to raw
         # JSON to avoid masking server-side changes.
@@ -3296,6 +3352,24 @@ class Pipeline:
             return self._fmt(r)
 
         lines = [f"**RAG results for `{query}`** ({len(results)} hit(s)):\n"]
+        # §17.444 (Phase A / A3) — surface retrieval uncertainty the pipeline
+        # already computes but the renderer used to drop. A top-N fallback below
+        # the confidence threshold, or an RRF-only ranking when the reranker is
+        # unavailable, otherwise looks identical to a high-confidence hit.
+        meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        if meta.get("below_threshold") or meta.get("fell_back_to_top3"):
+            thr = meta.get("confidence_threshold")
+            thr_txt = f" (< {thr:.2f})" if isinstance(thr, (int, float)) else ""
+            lines.append(
+                f"> ⚠️ **Low confidence{thr_txt}** — nothing cleared the threshold, "
+                "so these are a best-effort top-N fallback. Treat them as weak matches "
+                f"(`/research {query}` to fetch better sources).\n"
+            )
+        if meta.get("skipped_rerank"):
+            lines.append(
+                "> ⚠️ **Ranking: RRF-only** — the reranker was unavailable, so these "
+                "weren't relevance-checked by the cross-encoder.\n"
+            )
         for i, hit in enumerate(results, start=1):
             text_field = (
                 hit.get("text")
@@ -4588,6 +4662,8 @@ class Pipeline:
 |---|---|
 | `/execute <job_id>` | Run all pending DAG nodes (resume after cancel or stall). |
 | `/skip <job_id> [<node_key>]` | Skip a node; bare `/skip <job_id>` lists candidates. |
+| `/cancel <job_id>` | Cancel a running or queued job. |
+| `/assist <sub>` | Human-in-the-loop step-through of a job's DAG. `/assist help` for the full session flow. |
 | `/results <job_id>` | View output, in-flight progress, or failure detail + recovery hints. |
 | `/status` | List active jobs grouped by state. |
 

@@ -21984,6 +21984,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.444 Phase A UX quick-wins, pipeline-side — A3 RAG uncertainty + A4 /help + A5 /go gate (2026-06-07)
+
+First tranche of the §17.443 roadmap's Phase A (the OWUI-pipeline items; app-side A1/A2 follow separately). All in `pipelines/scaffold_router.py`.
+
+- **A4 — `/help` honesty + discoverability.** Dropped the fabricated "**22 commands**" count from the welcome preamble; added `/cancel` and the `/assist` family (both previously undiscoverable — handled by the dispatcher but absent from `/help`) to the command reference.
+- **A3 — RAG uncertainty surfacing.** `_render_rag_results` now reads the `metadata` the pipeline already computes (`below_threshold`/`fell_back_to_top3`/`skipped_rerank`/`confidence_threshold`) and prepends a caveat banner: "⚠️ Low confidence (< 0.80) — best-effort fallback" and/or "⚠️ Ranking: RRF-only (reranker unavailable)". A below-threshold top-N fallback no longer looks identical to a high-confidence hit. Empty results now escalate ("`/research <query>` to fetch and ingest it") instead of dead-ending.
+- **A5 — `/go` correction gate.** New valve `confirm_before_launch` (default **True**): `/go` now shows the synthesized brief and **stops**, requiring `/go confirm` to commit the 10–25 min run — preventing a bad synthesis from launching before the user can correct it. Stateless: `/go confirm` recovers the EXACT brief from the prior assistant turn via the `📋 **Proposed launch brief:**` marker (no re-synthesis drift); falls back to re-synthesis if not found. Valve off restores one-shot launch.
+- **Verification.** 173 pipeline tests pass (`--noconftest`), incl. new `TestGoCorrectionGate` (gate stops / `/go confirm` launches the history brief / disabled-valve one-shot) and `TestPhaseAUxPolish` (RAG banners, empty→/research, /help has /cancel+/assist, welcome drops the count). Two pre-existing `/go` tests updated for the gated default. **Go-live:** `docker restart open-webui-pipelines` (bind-mounted; reload on restart).
+
+---
+
 ### §17.443 UX research roadmap — helpful / truthful / assistive (planning artifact) (2026-06-07)
 
 Operator-requested research into the best means/implementations/additions to drastically improve UX across three axes. Method: four parallel read-only internal audits (OWUI chat, agentic output truthfulness, assist mode, operator tooling) cross-referenced against an adversarially-verified external best-practices survey (25/25 claims confirmed). Output is **`docs/ux_roadmap.md`** — a roadmap only, no code.
