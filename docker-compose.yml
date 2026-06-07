@@ -558,11 +558,14 @@ services:
     networks:
       - ai-network
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import urllib.request,sys;sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:6006/\",timeout=2).status<500 else 1)'"]
+      # §17.438 — Phoenix is a DISTROLESS image (no /bin/sh), so CMD-SHELL
+      # can't run at all (the original §17.435 check left it perpetually
+      # "unhealthy"). Use CMD exec-form + the dedicated /healthz endpoint.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:6006/healthz',timeout=2).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 30s
 
 networks:
   ai-network:

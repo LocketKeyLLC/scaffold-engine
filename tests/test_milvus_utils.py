@@ -28,13 +28,16 @@ def _bypass_schema_assert():
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
 def test_build_toon_v2_schema_has_16_fields():
-    schema = milvus_utils.build_toon_v2_schema()
+    # §17.438 — pin bm25=False so this asserts the canonical base schema
+    # deterministically, independent of the runtime RAG_BM25_ENABLED flag
+    # (which is True in a BM25-activated deployment → 17 fields).
+    schema = milvus_utils.build_toon_v2_schema(bm25=False)
     assert len(schema.fields) == 16
 
 
 @pytest.mark.smoke
 def test_build_toon_v2_schema_has_vector_and_partition_key():
-    schema = milvus_utils.build_toon_v2_schema()
+    schema = milvus_utils.build_toon_v2_schema(bm25=False)
     names = {f.name for f in schema.fields}
     assert "dense_vector" in names
     assert "domain" in names

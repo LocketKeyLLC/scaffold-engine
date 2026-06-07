@@ -510,6 +510,20 @@ app.add_middleware(RequestIdMiddleware)
 # wrap the final response right before client send. Set-here-only semantics
 # (uses setdefault) so a future per-endpoint header override still wins.
 app.add_middleware(SecurityHeadersMiddleware)
+
+# §17.438 — OTel FastAPI instrumentation MUST attach at app-build time, not in
+# lifespan: it adds a middleware, and Starlette forbids that once the app has
+# started ("Cannot add middleware after an application has started" — what
+# aborted OTel init when §17.435's Phoenix backend was first activated). The
+# TracerProvider + OTLP exporter + httpx/asyncpg wiring stay in lifespan's
+# init_tracing(). No-op unless otel_enabled.
+if settings.otel_enabled:
+    try:
+        from app.observability.otel import instrument_fastapi
+        instrument_fastapi(app)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning('event="otel_fastapi_instrument_failed" error=%s', exc)
+
 app.include_router(status_router)
 app.include_router(assist_router)
 app.include_router(observability_router)

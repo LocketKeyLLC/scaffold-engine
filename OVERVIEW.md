@@ -21984,6 +21984,22 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.438 Phoenix observability ACTIVATED — and two activation bugs fixed (OTel-in-lifespan + distroless healthcheck) (2026-06-06)
+
+Operator activation of §17.435 (the last of the three). Bringing it up surfaced **two real bugs that were latent because OTel had never been enabled** — exactly what activation-with-verification exists to catch.
+
+- **Bug 1 (load-bearing): OTel init aborted in lifespan.** `init_tracing(app)` runs at lifespan, but `FastAPIInstrumentor.instrument_app` adds a Starlette middleware, which raises **"Cannot add middleware after an application has started"** → the whole `init_tracing` returned False → `_initialized=False` → `record_llm_span` no-op'd → **nothing reached Phoenix**. Fix: split the FastAPI middleware instrumentation into `otel.instrument_fastapi(app)`, called at **app-BUILD time** from `main.py` (after middleware registration, before startup); the TracerProvider + OTLP exporter + httpx/asyncpg wiring stay in lifespan's `init_tracing`. (The middleware reads the provider at request time, so build-time attach + lifespan-time provider is correct.)
+- **Bug 2: Phoenix healthcheck could never pass.** The §17.435 healthcheck used `CMD-SHELL`, but the Phoenix image is **distroless (no `/bin/sh`)** → the check errored every time → container perpetually "unhealthy" (cosmetic — nothing `depends_on` it, but wrong). Fix: `CMD` exec-form (no shell) hitting the dedicated `/healthz` endpoint via the image's `python`.
+- **Activation:** `docker compose --profile observability up -d scaffold-phoenix` (pinned digest, healthy after the fix); `.env`: `OTEL_ENABLED=true` + `OTEL_OTLP_ENDPOINT=http://scaffold-phoenix:6006/v1/traces`; orchestrator recreated + restarted to load the fixed code.
+- **Verified end-to-end:** server logs `otel_fastapi_instrumented` + `otel_initialized service=scaffold-engine endpoint=…`; a request span flowed and **Phoenix logged `POST /v1/traces → 200`**. gen_ai LLM spans (§17.435) now export on every real LLM call (is_initialized true).
+- **Files:** `app/main.py` (build-time `instrument_fastapi` call), `app/observability/otel.py` (`instrument_fastapi()` + removed the doomed lifespan FastAPI-instrument), `docker-compose.yml` (Phoenix healthcheck), `tests/test_milvus_utils.py` (pin `build_toon_v2_schema(bm25=False)` — the §17.431 test was env-fragile: it asserted 16 fields via the default, which a BM25-activated deployment makes 17; surfaced running the regression suite in the now-activated container). Default-off preserved: all new code is guarded on `otel_enabled`, so the OTEL-off path (tests/CI) is unchanged.
+- **Verification.** Offline suite (`pytest -k "not integration"`, OTEL off): 3358 passed + the one env-fragile test, now fixed and re-verified (milvus+bm25 suites 26 passed under the activated `RAG_BM25_ENABLED=true` env). Live: server `otel_initialized` + Phoenix `POST /v1/traces → 200`.
+- **Rollback:** `OTEL_ENABLED=false` + restart (init no-ops); `docker compose --profile observability stop scaffold-phoenix`.
+
+**All three operator activations are now DONE: BM25 (§17.436), code sandbox (§17.437), Phoenix observability (§17.438).**
+
+---
+
 ### §17.437 Code sandbox ACTIVATED — exec-smoke gate live in the CodeGen verifier (2026-06-06)
 
 Operator activation of §17.433/§17.434. The CodeGen verification stack is now fully live end-to-end: **§17.428 ast.parse → §17.434 sandbox exec-smoke → §17.429 LLM reviewer**.
