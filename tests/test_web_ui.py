@@ -328,58 +328,70 @@ class TestNewIdeaForm:
 
 @pytest.mark.smoke
 class TestPostIdeate:
-    """POST /web/ideate kicks off Phase 1 in a BackgroundTask + redirects."""
+    """§17.454 — POST /web/ideate calls /ideate/start and redirects to the
+    LIVE job-detail page (was: BackgroundTask + redirect to refining filter)."""
 
-    def test_redirects_to_refining_filter(self, client, fake_long_client):
+    def test_redirects_to_job_detail(self, client, fake_client):
+        fake_client.ideate_start.return_value = {
+            "job_id": "job-xyz", "status": "refining",
+        }
         resp = client.post(
             "/web/ideate",
             data={"idea": "Build a homelab dashboard", "domain": ""},
         )
-        # 302 to the refining-filter view.
+        # 302 straight to the new job's detail page — no more hunting in a list.
         assert resp.status_code == 302
-        assert resp.headers["location"] == "/web/jobs?status=refining"
+        assert resp.headers["location"] == "/web/jobs/job-xyz"
 
-    def test_calls_long_client_ideate_after_response(self, client, fake_long_client):
-        """BackgroundTasks fire after the response is sent. With
-        TestClient's blocking semantics they fire before .post()
-        returns control, so we can assert immediately."""
+    def test_calls_ideate_start_with_form_values(self, client, fake_client):
+        fake_client.ideate_start.return_value = {"job_id": "j1"}
         client.post(
             "/web/ideate",
             data={"idea": "Some idea", "domain": "rag"},
         )
-        # ideate was called with the form values.
-        fake_long_client.ideate.assert_called_once()
-        kwargs = fake_long_client.ideate.call_args.kwargs
+        fake_client.ideate_start.assert_called_once()
+        kwargs = fake_client.ideate_start.call_args.kwargs
         assert kwargs.get("idea") == "Some idea"
         assert kwargs.get("domain") == "rag"
 
-    def test_empty_idea_re_renders_form_with_422(self, client, fake_long_client):
+    def test_empty_idea_re_renders_form_with_422(self, client, fake_client):
         resp = client.post(
             "/web/ideate", data={"idea": "   ", "domain": ""},
         )
         assert resp.status_code == 422
         assert "Idea is required" in resp.text
         # SDK was NOT called.
-        fake_long_client.ideate.assert_not_called()
+        fake_client.ideate_start.assert_not_called()
 
-    def test_invalid_domain_re_renders_form_with_422(self, client, fake_long_client):
+    def test_invalid_domain_re_renders_form_with_422(self, client, fake_client):
         resp = client.post(
             "/web/ideate",
             data={"idea": "Valid idea", "domain": "not-a-domain"},
         )
         assert resp.status_code == 422
         assert "Invalid domain" in resp.text
-        fake_long_client.ideate.assert_not_called()
+        fake_client.ideate_start.assert_not_called()
 
-    def test_blank_domain_passes_none_to_sdk(self, client, fake_long_client):
+    def test_blank_domain_passes_none_to_sdk(self, client, fake_client):
         """The form's auto-detect option (value="") should resolve to
         domain=None at the SDK call site so the orchestrator infers."""
+        fake_client.ideate_start.return_value = {"job_id": "j2"}
         client.post(
             "/web/ideate",
             data={"idea": "Auto-detect this", "domain": ""},
         )
-        kwargs = fake_long_client.ideate.call_args.kwargs
+        kwargs = fake_client.ideate_start.call_args.kwargs
         assert kwargs.get("domain") is None
+
+    def test_missing_job_id_renders_error(self, client, fake_client):
+        """If /ideate/start returns no job_id, surface a 502 error page
+        rather than redirecting into a broken /web/jobs/None."""
+        fake_client.ideate_start.return_value = {"status": "refining"}
+        resp = client.post(
+            "/web/ideate", data={"idea": "No id back", "domain": ""},
+        )
+        assert resp.status_code == 502
+        assert "Could not submit idea" in resp.text
 
 
 @pytest.mark.smoke

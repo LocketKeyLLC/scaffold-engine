@@ -21984,6 +21984,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.454 Web UX — async ideate kickoff so submit lands on the live job page (2026-06-07)
+
+UX review of the native web UI surfaced a broken primary flow: `POST /web/ideate` fired the synchronous `/ideate` (100-547 s) as a background task and redirected to `/web/jobs?status=refining`, so the user had to **hunt for their own just-submitted job** in a filtered list — the job_id wasn't known at redirect time. Root cause: the job row is created at the *start* of `refine_idea` but the HTTP call doesn't return the id until the full Phase 1 LLM pass finishes.
+
+- **New endpoint `POST /ideate/start`** (`app/routers/workflow.py`): creates the row via the new `create_ideation_job` (idea_refinement.py — INSERT-only, returns id) and returns `{job_id, status:"refining"}` in **~18 ms**, then runs Phase 1 in an orchestrator-side background task (`spawn_phase1_background` → `run_phase1_in_background`, ideation_workflow.py). The task uses its **own** `async_session` (the request session is gone post-return), is held by a strong-ref set so it can't be GC'd mid-flight (mirrors `assist_replan._BACKGROUND_TASKS`), honours the §17.442 ideation concurrency cap, and marks the job `failed` with a reason on any unhandled error (no silent strand in `refining`).
+- `refine_idea` / `analyze_and_confirm` gained an optional `job_id` param: when supplied they **reuse** the pre-created row instead of INSERTing (logged `job_reused`), so there's no double-insert. The synchronous chat path (`/ideate`, `/ideas`) passes `job_id=None` and is byte-for-byte unchanged.
+- **Web:** `post_ideate` is now `def` (§17.450 single-worker loopback sync-def rule) and calls `client.ideate_start` via the short read client, redirecting to `/web/jobs/{job_id}` — the user lands on their **own job's live detail page**. SDK gained `ideate_start` on both sync + async clients.
+- **Verified live:** `/ideate/start` → 200 in 18 ms with a real job_id; exactly 1 row created (`job_reused` confirms no dup); background Phase 1 ran to `phase1_complete: feasible=True` and the job transitioned `refining → awaiting_confirmation`; detail page 200 throughout. Tests: `test_web_ui` + `test_idea_refinement` + `test_ideation_workflow_phase1` = 63 passed; SDK 142 passed; `openapi-snapshot` regenerated (new endpoint) and `openapi-check` OK.
+- First slice of a phased web-UX overhaul (review identified: live-updating detail page, web auto-chain parity with the chat `/confirm` macro, pipeline stepper, markdown output, vendored assets). Items 2–3 (SSE-live detail, confirm auto-chain) are the next slices.
+
+---
+
 ### §17.453 Fix §17.452 — CoVe reliability on a thinking model (token budget + retry) (2026-06-07)
 
 The §17.452 post-merge live smoke (again — per the §17.449 lesson) caught that CoVe returned `None` ~half the time. Root cause: **qwen3.5 is a thinking model and spends `num_predict` on reasoning FIRST**, so a too-tight budget (the revise step at 2048/4096) left `success=True` but **empty content** → fail-soft `None`. Instrumenting each step pinpointed the **revise step** as the worst.

@@ -4417,6 +4417,48 @@
         "summary": "Ideate Confirm Endpoint"
       }
     },
+    "/ideate/start": {
+      "post": {
+        "description": "§17.454 — Async kickoff for Phase 1. Creates the job row and returns its\n``job_id`` immediately, then runs the 100-547s refinement in a background task.\n\nLets the native web UI redirect straight to the live job-detail page on submit\ninstead of the old hunt-for-your-job-in-a-filtered-list flow. The chat pipeline\nkeeps using the synchronous ``POST /ideate``, which returns the full refined\nbrief + feasibility in one shot. The model-validation gate runs here so a bad\noverride 422s before any row is created.",
+        "operationId": "ideate_start_endpoint_ideate_start_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdeaInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Ideate Start Endpoint"
+      }
+    },
     "/jobs": {
       "get": {
         "description": "Paginated job list with optional status filter and title search.\n\nSprint X.9 — ``synthesized`` filter complements the X.6 per-job opt-in:\n``?synthesized=true`` lists only jobs whose ``compiled_output`` was\nLLM-synthesized (W.7 narrative pass); ``?synthesized=false`` lists\neverything else (heuristic compile, unsynthesized, or not-yet-compiled).\nOmit the param to see all jobs.",

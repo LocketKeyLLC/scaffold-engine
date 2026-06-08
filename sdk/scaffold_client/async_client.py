@@ -127,6 +127,19 @@ class AsyncClient:
         body = _drop_none({"idea": idea, "domain": domain, "model": model})
         return await self.request("POST", "/ideate", json=body)
 
+    async def ideate_start(
+        self,
+        idea: str,
+        *,
+        domain: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """``POST /ideate/start`` — async kickoff: returns ``{job_id, status}``
+        immediately, runs Phase 1 in the background. See the sync client for
+        the rationale vs :meth:`ideate`."""
+        body = _drop_none({"idea": idea, "domain": domain, "model": model})
+        return await self.request("POST", "/ideate/start", json=body)
+
     async def confirm(
         self,
         job_id: str,

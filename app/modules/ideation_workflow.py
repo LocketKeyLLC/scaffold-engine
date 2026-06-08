@@ -37,7 +37,7 @@ from app.modules.gt_extractor import (
     push_to_github as gt_push_to_github,
     search_searxng,
 )
-from app.modules.idea_refinement import refine_idea
+from app.modules.idea_refinement import create_ideation_job, refine_idea
 from app.modules.rag_pipeline import ingest_entries
 from app.utils.job_utils import fail_job as _fail_job
 from app.utils.llm_parsing import parse_json_array, parse_json_object
@@ -66,6 +66,68 @@ def _reset_ideation_slot_sem() -> None:
     """Test hook — drop the cached semaphore so the next call re-reads settings."""
     global _ideation_slot_sem
     _ideation_slot_sem = None
+
+
+# §17.454 — strong refs to in-flight async-kickoff Phase 1 tasks. asyncio.create_task
+# only holds a weak ref, so without this the GC could collect a task mid-refinement
+# and silently strand its job in 'refining'. Mirrors assist_replan._BACKGROUND_TASKS.
+_PHASE1_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+async def run_phase1_in_background(
+    job_id: str,
+    idea_text: str,
+    *,
+    model: str | None = None,
+    domain: str | None = None,
+    model_overrides: dict | None = None,
+) -> None:
+    """§17.454 — Run Phase 1 (``analyze_and_confirm``) against a pre-created job row
+    on its OWN db session.
+
+    The request session that created the row (in ``create_ideation_job``) is torn
+    down once ``/ideate/start`` returns, so this opens a fresh session. Any
+    unhandled error marks the job ``failed`` with a reason — otherwise the row
+    would sit in ``refining`` forever and the detail page could not explain why.
+    The ideation concurrency cap is honoured here too (§17.442).
+    """
+    async with async_session() as db:
+        try:
+            async with get_ideation_slot_sem():
+                await analyze_and_confirm(
+                    idea_text, db,
+                    model=model, domain=domain,
+                    model_overrides=model_overrides, job_id=job_id,
+                )
+        except Exception as e:
+            logger.exception("phase1_background_failed: job=%s", job_id)
+            try:
+                await _fail_job(db, job_id, f"Phase 1 background error: {e}")
+            except Exception:
+                logger.exception(
+                    "phase1_background_fail_mark_failed: job=%s", job_id,
+                )
+
+
+def spawn_phase1_background(
+    job_id: str,
+    idea_text: str,
+    *,
+    model: str | None = None,
+    domain: str | None = None,
+    model_overrides: dict | None = None,
+) -> asyncio.Task:
+    """§17.454 — Fire-and-forget the Phase 1 background task with a strong ref so it
+    survives GC, plus a done-callback to release the ref on completion."""
+    task = asyncio.create_task(
+        run_phase1_in_background(
+            job_id, idea_text,
+            model=model, domain=domain, model_overrides=model_overrides,
+        )
+    )
+    _PHASE1_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_PHASE1_BACKGROUND_TASKS.discard)
+    return task
 
 
 FEASIBILITY_SYSTEM = (
@@ -109,6 +171,7 @@ async def analyze_and_confirm(
     model: str | None = None,
     domain: str | None = None,
     model_overrides: dict | None = None,
+    job_id: str | None = None,
 ) -> dict:
     """Phase 1: refine an idea, assess feasibility, halt at ``awaiting_confirmation``.
 
@@ -137,6 +200,7 @@ async def analyze_and_confirm(
         domain=domain,
         model_overrides=model_overrides,
         target_status="awaiting_confirmation",
+        job_id=job_id,
     )
     if refine_result["status"] == "failed":
         logger.warning(

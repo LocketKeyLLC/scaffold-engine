@@ -223,24 +223,28 @@ async def new_idea_form(request: Request):
 
 
 @router.post("/ideate", dependencies=[])
-async def post_ideate(
+def post_ideate(
     request: Request,
-    background_tasks: BackgroundTasks,
     idea: str = Form(...),
     domain: str | None = Form(None),
-    long_client=Depends(get_sdk_long_client),
+    client=Depends(get_sdk_client),
 ):
-    """Sprint J.2.b — kick off Phase 1 ideate as a background task.
+    """Sprint J.2.b / §17.454 — submit Phase 1 and redirect to the LIVE job page.
 
-    Phase 1 takes 100-547s per the perf table; we can't block the
-    browser request that long. Background-task pattern: queue the SDK
-    call, redirect the browser to ``/web/jobs?status=refining`` so the
-    user can watch the new job appear in the list.
+    Pre-§17.454 this fired ``/ideate`` (synchronous, 100-547s) as a background
+    task and redirected to ``/web/jobs?status=refining`` — the user then had to
+    hunt for their own just-submitted job in a filtered list because the job_id
+    wasn't known at redirect time. Now we call ``/ideate/start``, which creates
+    the row and returns its ``job_id`` in milliseconds while running the
+    refinement in an orchestrator-side background task. We redirect straight to
+    ``/web/jobs/{job_id}`` so the user lands on their own job's detail page and
+    watches it progress.
 
-    The job_id is *not* known at redirect time — the orchestrator's
-    /ideate endpoint creates the row and runs the LLM in one synchronous
-    call. The user clicks into the job from the filtered list once it
-    appears.
+    §17.450 — ``def`` (not ``async def``): the body makes a BLOCKING sync loopback
+    call via the SDK Client. On the single-worker event loop an ``async def`` here
+    deadlocks (handler blocks the loop waiting on its own loopback). FastAPI runs
+    ``def`` routes in a threadpool, so the sync call no longer blocks the loop.
+    The call is fast now (INSERT + task spawn), so the short read client suffices.
     """
     idea_text = (idea or "").strip()
     if not idea_text:
@@ -267,18 +271,28 @@ async def post_ideate(
             status_code=422,
         )
 
-    def _kick_off():
-        try:
-            long_client.ideate(idea=idea_text, domain=domain_clean)
-        except Exception as exc:
-            logger.exception(
-                "web_ideate_background_failed: error=%s", exc,
-            )
+    try:
+        result = client.ideate_start(idea=idea_text, domain=domain_clean)
+    except Exception as exc:
+        logger.exception("web_ideate_start_failed: error=%s", exc)
+        return templates.TemplateResponse(
+            request, "web/error.html",
+            {"error": str(exc), "title": "Could not submit idea"},
+            status_code=502,
+        )
 
-    background_tasks.add_task(_kick_off)
-    # Redirect to the refining filter so the user sees the new job
-    # appear once the orchestrator inserts it.
-    return RedirectResponse(url="/web/jobs?status=refining", status_code=302)
+    job_id = result.get("job_id") if isinstance(result, dict) else None
+    if not job_id:
+        return templates.TemplateResponse(
+            request, "web/error.html",
+            {
+                "error": "Orchestrator did not return a job id.",
+                "title": "Could not submit idea",
+            },
+            status_code=502,
+        )
+    # Land the user on their own job's live detail page.
+    return RedirectResponse(url=f"/web/jobs/{job_id}", status_code=302)
 
 
 @router.post("/jobs/{job_id}/confirm", dependencies=[])
