@@ -6,24 +6,25 @@ Non-HTML responses (JSON API, SSE streams, /metrics, /health) are
 left alone — CSP only meaningfully constrains how a BROWSER renders
 a response, so attaching it to API responses is noise.
 
-The policy is intentionally permissive enough to keep the current
-HTMX-based UI functional without per-template changes:
-  * ``script-src 'self' 'unsafe-inline'`` — §17.459: HTMX + the SSE
-    extension are now self-hosted under ``/static/vendor/`` (was
-    unpkg.com), so the external origin is dropped from script-src.
-    'unsafe-inline' covers any future inline ``<script>`` blocks
-    so a strict CSP can't break the UI without a code change.
-  * ``style-src 'self' 'unsafe-inline'`` — HTMX templates use
-    inline ``style=`` attributes in places.
+The policy is strict — no ``'unsafe-inline'`` anywhere:
+  * ``script-src 'self' 'nonce-<n>'`` — §17.459 self-hosted HTMX + the
+    SSE extension under ``/static/vendor/`` (was unpkg.com); §17.460
+    replaced 'unsafe-inline' with a per-request nonce. Inline ``<script>``
+    elements must carry ``nonce="{{ request.state.csp_nonce }}"``.
+  * ``style-src 'self' 'nonce-<n>'`` — external CSS (web.css) + nonce'd
+    inline ``<style>`` elements only. Inline ``style=`` attributes are NOT
+    permitted (a nonce can't cover an attribute) — use classes instead.
+    HTMX's auto-injected indicator ``<style>`` is disabled via the
+    ``htmx-config`` meta in _layout.html so it doesn't trip the policy.
   * ``img-src 'self' data:`` — data URIs for embedded SVG icons.
   * ``object-src 'none'`` — kills Flash/embed/object surface.
   * ``frame-ancestors 'none'`` — clickjacking defense; the UI
     is operator-only and never legitimately embedded.
   * ``base-uri 'self'`` — prevents ``<base href>`` redirects.
 
-Operators tightening this further should drop 'unsafe-inline' next
-(audit + nonce-ize inline scripts/styles). unpkg.com was removed in
-§17.459 by self-hosting HTMX under /static/vendor/.
+The nonce is minted per request by this middleware (``request.state.
+csp_nonce``) and must match the value the template stamps on its inline
+elements — see ``_build_csp`` + the dispatch method below.
 
 A trivially-related header is also set:
   * ``X-Content-Type-Options: nosniff`` — defense against MIME
@@ -33,23 +34,52 @@ A trivially-related header is also set:
 """
 from __future__ import annotations
 
+import secrets
+from contextvars import ContextVar
+
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 
 _HTML_PREFIXES = ("/web/", "/research/pdf")
 
-_CSP = "; ".join((
+# §17.460 — per-request CSP nonce carried in a ContextVar. Set in dispatch
+# BEFORE call_next, so anyio copies it into the endpoint's task context and the
+# template (via the Jinja `csp_nonce` global → current_csp_nonce) reads the same
+# value the header advertises. request.state does NOT survive the
+# BaseHTTPMiddleware → endpoint hop here (scope snapshot), but a contextvar set
+# pre-call_next does — same mechanism the request_id middleware relies on.
+_CSP_NONCE: ContextVar[str] = ContextVar("csp_nonce", default="")
+
+
+def current_csp_nonce() -> str:
+    """Return the current request's CSP nonce ("" outside an HTML request).
+
+    Registered as the Jinja `csp_nonce` global so templates can stamp inline
+    ``<script>``/``<style>`` elements with ``nonce="{{ csp_nonce() }}"``.
+    """
+    return _CSP_NONCE.get()
+
+# §17.460 — CSP directives. script-src/style-src carry a per-request
+# 'nonce-{nonce}' instead of 'unsafe-inline': only inline <script>/<style>
+# ELEMENTS stamped with the matching nonce are admitted (inline style=/on*=
+# ATTRIBUTES are never allowed — templates must use classes/external files).
+_CSP_DIRECTIVES = (
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline'",
-    "style-src 'self' 'unsafe-inline'",
+    "script-src 'self' 'nonce-{nonce}'",
+    "style-src 'self' 'nonce-{nonce}'",
     "img-src 'self' data:",
     "connect-src 'self'",
     "font-src 'self' data:",
     "object-src 'none'",
     "frame-ancestors 'none'",
     "base-uri 'self'",
-))
+)
+
+
+def _build_csp(nonce: str) -> str:
+    """Render the CSP header value for a given per-request nonce."""
+    return "; ".join(d.format(nonce=nonce) for d in _CSP_DIRECTIVES)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -58,10 +88,20 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint,
     ) -> Response:
-        response = await call_next(request)
-        path = request.url.path
-        if path.startswith(_HTML_PREFIXES) or path == "/research/pdf":
-            response.headers.setdefault("Content-Security-Policy", _CSP)
-            response.headers.setdefault("X-Content-Type-Options", "nosniff")
-            response.headers.setdefault("Referrer-Policy", "same-origin")
-        return response
+        is_html = request.url.path.startswith(_HTML_PREFIXES)
+        # Set the nonce BEFORE call_next so the endpoint's template sees it via
+        # the copied task context (see _CSP_NONCE note above). Reset in finally
+        # so the value never leaks into an unrelated request on this worker.
+        token = _CSP_NONCE.set(secrets.token_urlsafe(16)) if is_html else None
+        try:
+            response = await call_next(request)
+            if is_html:
+                response.headers.setdefault(
+                    "Content-Security-Policy", _build_csp(_CSP_NONCE.get()),
+                )
+                response.headers.setdefault("X-Content-Type-Options", "nosniff")
+                response.headers.setdefault("Referrer-Policy", "same-origin")
+            return response
+        finally:
+            if token is not None:
+                _CSP_NONCE.reset(token)

@@ -3,6 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {# §17.460 — disable htmx's auto-injected indicator <style> (we don't use
+     .htmx-indicator); otherwise it would be an un-nonced inline <style> blocked
+     by the strict CSP (style-src has no 'unsafe-inline'). #}
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false}'>
   <title>{% block title %}Scaffold Engine{% endblock %}</title>
   <link rel="stylesheet" href="/static/web.css">
   {# §17.459 — vendored locally (was unpkg.com). Drops the runtime CDN dep so the

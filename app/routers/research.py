@@ -45,6 +45,11 @@ router = APIRouter()
 # uses is research_pdf_upload.html. Moving to a shared location is
 # fine but doesn't help anyone today.
 templates = Jinja2Templates(directory="app/templates")
+# §17.460 — expose the per-request CSP nonce to templates so inline
+# <script>/<style> in research_pdf_upload.html can be nonce'd under the
+# strict (no 'unsafe-inline') CSP.
+from app.middleware.security_headers import current_csp_nonce as _current_csp_nonce
+templates.env.globals["csp_nonce"] = _current_csp_nonce
 
 
 @router.post("/research", tags=["Research"])
