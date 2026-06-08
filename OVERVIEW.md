@@ -21984,6 +21984,42 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.456 Web UX — confirm auto-chains into execution (chat-macro parity) (2026-06-07)
+
+Third slice of the web-UX overhaul. The chat `/confirm` macro chains Phase 2 → DAG → execute; the web `confirm` only ran Phase 2 and left the job in `planning` for a manual "Run all nodes" click. Now the web flow runs to completion on its own.
+
+- **Mechanism:** `post_confirm` redirects to `/web/jobs/{id}?run=1` (was `/web/jobs/{id}`). The `run=1` flag is threaded through §17.455's live poll (`job_detail` + `/fragment` take a `run` query param → `autorun` context; the root re-emits `?run=1` in its poll `hx-get` so the flag survives the `researching` wait). When the job reaches `planning`, the body renders the §17.450 SSE streaming section directly (auto-connects) **instead of** the manual button. End-to-end: confirm → watch `researching` live → at `planning` execution auto-starts → per-node SSE feed.
+- **No separate `/dag` step** (unlike the chat macro): `POST /execute/all` already "auto-generates DAG if none exists", and the web run-stream proxies it — so the existing plumbing covers planning→execute.
+- **Scoped to the confirm action:** auto-start fires only for `planning` + `autorun`. Viewing an old `planning` job (no `run=1`), or an already-`executing`/`blocked` job, keeps the explicit button — so `/execute/all` is never re-kicked on a running job. Polling is already off in `planning` (§17.455), so the single auto-connect can't double-fire.
+- **Verified:** 5 new tests; full `test_web_ui` = **57 passed**; `ci-tier-0` green. Live-smoked (post-`docker restart`): `?run=1` threads through the full page + poll fragment while `refining`; a fabricated `planning` job renders the auto-connecting `sse-connect=.../run/stream` under `?run=1` and the manual "Run all nodes" button without it. No OpenAPI change.
+- Remaining web-UX slices: pipeline stepper, markdown-rendered compiled output, vendored CDN assets, a11y pass.
+
+---
+
+### §17.455 Web UX — live job-detail page (htmx self-poll in transient states) (2026-06-07)
+
+Second slice of the web-UX overhaul (§17.454 was the first). After §17.454 the user lands on their own job-detail page in `refining`, but the page was static — they had to manually refresh to watch Phase 1 (`refining → awaiting_confirmation`) and Phase 2 (`researching → planning`) progress. Now the detail page **self-polls** and updates in place.
+
+- **Template restructure:** the detail body moved to `_job_detail_body.html`; a new `_job_detail_root.html` wraps it in `<section id="job-detail-root">` and `job_detail.html` just includes the root. New route **`GET /web/jobs/{id}/fragment`** (`def`, §17.450 loopback rule; `include_in_schema=False`) returns the bare root so htmx can `hx-swap="outerHTML"` it.
+- **Poll only in pure-wait states:** the root emits `hx-get=.../fragment hx-trigger="every 3s"` **only** when `job_status ∈ {pending, refining, researching}`. It is deliberately OFF in interactive/streaming states — `awaiting_confirmation` (polling would wipe in-progress confirm-form feedback) and `planning/executing/blocked` (the "Run all nodes" button swaps in the §17.450 SSE run stream, which a poll would clobber). When the job transitions, the swapped-in fragment lacks the trigger, so **htmx stops polling on its own**. Fetch errors return a bare non-polling section (halts the loop instead of hammering a broken backend every 3s).
+- A small pulsing "● Live — updates automatically" indicator (CSS `live-pulse`, `prefers-reduced-motion`-aware) gives the perceived-performance cue the review called for.
+- **Verified:** 6 new live-poll tests; full `test_web_ui` = **52 passed**; `ci-tier-0` green. Live-smoked (after `docker restart` — bind-mounted route needs a process reload, §17.438 lesson): `/web/jobs/{id}/fragment` → 200 with `hx-trigger="every 3s"` + full body while `refining`. No OpenAPI change (web routes are `include_in_schema=False`).
+- Remaining web-UX slices: web `/confirm` auto-chain parity with the chat macro (Phase 2 → DAG → execute), pipeline stepper, markdown-rendered output, vendored CDN assets.
+
+---
+
+### §17.454 Web UX — async ideate kickoff so submit lands on the live job page (2026-06-07)
+
+UX review of the native web UI surfaced a broken primary flow: `POST /web/ideate` fired the synchronous `/ideate` (100-547 s) as a background task and redirected to `/web/jobs?status=refining`, so the user had to **hunt for their own just-submitted job** in a filtered list — the job_id wasn't known at redirect time. Root cause: the job row is created at the *start* of `refine_idea` but the HTTP call doesn't return the id until the full Phase 1 LLM pass finishes.
+
+- **New endpoint `POST /ideate/start`** (`app/routers/workflow.py`): creates the row via the new `create_ideation_job` (idea_refinement.py — INSERT-only, returns id) and returns `{job_id, status:"refining"}` in **~18 ms**, then runs Phase 1 in an orchestrator-side background task (`spawn_phase1_background` → `run_phase1_in_background`, ideation_workflow.py). The task uses its **own** `async_session` (the request session is gone post-return), is held by a strong-ref set so it can't be GC'd mid-flight (mirrors `assist_replan._BACKGROUND_TASKS`), honours the §17.442 ideation concurrency cap, and marks the job `failed` with a reason on any unhandled error (no silent strand in `refining`).
+- `refine_idea` / `analyze_and_confirm` gained an optional `job_id` param: when supplied they **reuse** the pre-created row instead of INSERTing (logged `job_reused`), so there's no double-insert. The synchronous chat path (`/ideate`, `/ideas`) passes `job_id=None` and is byte-for-byte unchanged.
+- **Web:** `post_ideate` is now `def` (§17.450 single-worker loopback sync-def rule) and calls `client.ideate_start` via the short read client, redirecting to `/web/jobs/{job_id}` — the user lands on their **own job's live detail page**. SDK gained `ideate_start` on both sync + async clients.
+- **Verified live:** `/ideate/start` → 200 in 18 ms with a real job_id; exactly 1 row created (`job_reused` confirms no dup); background Phase 1 ran to `phase1_complete: feasible=True` and the job transitioned `refining → awaiting_confirmation`; detail page 200 throughout. Tests: `test_web_ui` + `test_idea_refinement` + `test_ideation_workflow_phase1` = 63 passed; SDK 142 passed; `openapi-snapshot` regenerated (new endpoint) and `openapi-check` OK.
+- First slice of a phased web-UX overhaul (review identified: live-updating detail page, web auto-chain parity with the chat `/confirm` macro, pipeline stepper, markdown output, vendored assets). Items 2–3 (SSE-live detail, confirm auto-chain) are the next slices.
+
+---
+
 ### §17.453 Fix §17.452 — CoVe reliability on a thinking model (token budget + retry) (2026-06-07)
 
 The §17.452 post-merge live smoke (again — per the §17.449 lesson) caught that CoVe returned `None` ~half the time. Root cause: **qwen3.5 is a thinking model and spends `num_predict` on reasoning FIRST**, so a too-tight budget (the revise step at 2048/4096) left `success=True` but **empty content** → fail-soft `None`. Instrumenting each step pinpointed the **revise step** as the worst.

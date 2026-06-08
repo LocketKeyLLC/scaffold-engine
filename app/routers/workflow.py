@@ -34,11 +34,12 @@ from app.modules.execution_agent import (
     execute_all_nodes,
 )
 from app.modules.execution_handler import execution_status
-from app.modules.idea_refinement import refine_idea
+from app.modules.idea_refinement import create_ideation_job, refine_idea
 from app.modules.ideation_workflow import (
     analyze_and_confirm,
     get_ideation_slot_sem,
     research_and_compile,
+    spawn_phase1_background,
 )
 from app.modules.prompt_optimizer import optimize_prompt
 from app.schemas import (
@@ -86,6 +87,26 @@ async def ideate_endpoint(body: IdeaInput, db=Depends(get_db)):
             detail=result["error"],
         )
     return result
+
+
+@router.post("/ideate/start")
+async def ideate_start_endpoint(body: IdeaInput, db=Depends(get_db)):
+    """§17.454 — Async kickoff for Phase 1. Creates the job row and returns its
+    ``job_id`` immediately, then runs the 100-547s refinement in a background task.
+
+    Lets the native web UI redirect straight to the live job-detail page on submit
+    instead of the old hunt-for-your-job-in-a-filtered-list flow. The chat pipeline
+    keeps using the synchronous ``POST /ideate``, which returns the full refined
+    brief + feasibility in one shot. The model-validation gate runs here so a bad
+    override 422s before any row is created."""
+    await _require_valid_models(body.model_overrides)
+    job_id = await create_ideation_job(body.idea, db, domain=body.domain)
+    spawn_phase1_background(
+        job_id, body.idea,
+        model=body.model, domain=body.domain,
+        model_overrides=body.model_overrides,
+    )
+    return {"job_id": job_id, "status": "refining"}
 
 
 @router.post("/ideate/confirm")

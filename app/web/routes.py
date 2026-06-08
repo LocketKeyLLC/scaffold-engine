@@ -169,12 +169,18 @@ def jobs_list(
 def job_detail(
     request: Request,
     job_id: str,
+    run: int = 0,
     client=Depends(get_sdk_client),
 ):
     """Per-job detail: status, nodes, compiled_output, synthesis flags.
 
     §17.450 — `def` (not `async def`): same single-worker loopback-deadlock fix
     as jobs_list. The body's only I/O is the blocking sync `client.jobs.status`.
+
+    §17.456 — ``?run=1`` (set by the confirm redirect) carries auto-run intent:
+    when the job reaches `planning`, the page auto-starts the SSE execution
+    stream instead of showing the manual "Run all nodes" button. The flag is
+    threaded through §17.455's poll so it survives the `researching` wait.
     """
     try:
         payload = client.jobs.status(job_id)
@@ -198,7 +204,51 @@ def job_detail(
 
     return templates.TemplateResponse(
         request, "web/job_detail.html",
-        {"job": payload, "job_id": job_id},
+        {"job": payload, "job_id": job_id, "autorun": bool(run)},
+    )
+
+
+@router.get(
+    "/jobs/{job_id}/fragment", response_class=HTMLResponse, dependencies=[],
+)
+def job_detail_fragment(
+    request: Request,
+    job_id: str,
+    run: int = 0,
+    client=Depends(get_sdk_client),
+):
+    """§17.455 — htmx poll target for the live job-detail page.
+
+    Returns just the job-detail root (``_job_detail_root.html`` — the same wrapper
+    + body the full page renders), so a poll can ``hx-swap="outerHTML"`` it in
+    place. The root re-emits its own polling trigger only while the job stays in a
+    transient state (pending/refining/researching); once it transitions, the
+    swapped-in markup omits the trigger and htmx stops polling.
+
+    §17.450 — ``def`` (not ``async def``): blocking sync loopback call, same
+    single-worker deadlock fix as ``job_detail``.
+
+    On any fetch error we return a bare, non-polling section so the poll loop
+    halts gracefully instead of hammering a broken backend every 3s.
+    """
+    try:
+        payload = client.jobs.status(job_id)
+    except Exception as exc:
+        logger.exception(
+            "web_job_fragment_failed: job=%s error=%s", job_id, exc,
+        )
+        payload = None
+
+    if not isinstance(payload, dict) or "error" in payload:
+        return HTMLResponse(
+            '<section class="job-detail" id="job-detail-root">'
+            '<p class="job-error-banner">⚠ Lost contact with this job — '
+            '<a href="/web/jobs/' + job_id + '">reload</a>.</p></section>'
+        )
+
+    return templates.TemplateResponse(
+        request, "web/_job_detail_root.html",
+        {"job": payload, "job_id": job_id, "autorun": bool(run)},
     )
 
 
@@ -223,24 +273,28 @@ async def new_idea_form(request: Request):
 
 
 @router.post("/ideate", dependencies=[])
-async def post_ideate(
+def post_ideate(
     request: Request,
-    background_tasks: BackgroundTasks,
     idea: str = Form(...),
     domain: str | None = Form(None),
-    long_client=Depends(get_sdk_long_client),
+    client=Depends(get_sdk_client),
 ):
-    """Sprint J.2.b — kick off Phase 1 ideate as a background task.
+    """Sprint J.2.b / §17.454 — submit Phase 1 and redirect to the LIVE job page.
 
-    Phase 1 takes 100-547s per the perf table; we can't block the
-    browser request that long. Background-task pattern: queue the SDK
-    call, redirect the browser to ``/web/jobs?status=refining`` so the
-    user can watch the new job appear in the list.
+    Pre-§17.454 this fired ``/ideate`` (synchronous, 100-547s) as a background
+    task and redirected to ``/web/jobs?status=refining`` — the user then had to
+    hunt for their own just-submitted job in a filtered list because the job_id
+    wasn't known at redirect time. Now we call ``/ideate/start``, which creates
+    the row and returns its ``job_id`` in milliseconds while running the
+    refinement in an orchestrator-side background task. We redirect straight to
+    ``/web/jobs/{job_id}`` so the user lands on their own job's detail page and
+    watches it progress.
 
-    The job_id is *not* known at redirect time — the orchestrator's
-    /ideate endpoint creates the row and runs the LLM in one synchronous
-    call. The user clicks into the job from the filtered list once it
-    appears.
+    §17.450 — ``def`` (not ``async def``): the body makes a BLOCKING sync loopback
+    call via the SDK Client. On the single-worker event loop an ``async def`` here
+    deadlocks (handler blocks the loop waiting on its own loopback). FastAPI runs
+    ``def`` routes in a threadpool, so the sync call no longer blocks the loop.
+    The call is fast now (INSERT + task spawn), so the short read client suffices.
     """
     idea_text = (idea or "").strip()
     if not idea_text:
@@ -267,18 +321,28 @@ async def post_ideate(
             status_code=422,
         )
 
-    def _kick_off():
-        try:
-            long_client.ideate(idea=idea_text, domain=domain_clean)
-        except Exception as exc:
-            logger.exception(
-                "web_ideate_background_failed: error=%s", exc,
-            )
+    try:
+        result = client.ideate_start(idea=idea_text, domain=domain_clean)
+    except Exception as exc:
+        logger.exception("web_ideate_start_failed: error=%s", exc)
+        return templates.TemplateResponse(
+            request, "web/error.html",
+            {"error": str(exc), "title": "Could not submit idea"},
+            status_code=502,
+        )
 
-    background_tasks.add_task(_kick_off)
-    # Redirect to the refining filter so the user sees the new job
-    # appear once the orchestrator inserts it.
-    return RedirectResponse(url="/web/jobs?status=refining", status_code=302)
+    job_id = result.get("job_id") if isinstance(result, dict) else None
+    if not job_id:
+        return templates.TemplateResponse(
+            request, "web/error.html",
+            {
+                "error": "Orchestrator did not return a job id.",
+                "title": "Could not submit idea",
+            },
+            status_code=502,
+        )
+    # Land the user on their own job's live detail page.
+    return RedirectResponse(url=f"/web/jobs/{job_id}", status_code=302)
 
 
 @router.post("/jobs/{job_id}/confirm", dependencies=[])
@@ -289,13 +353,17 @@ async def post_confirm(
     feedback: str | None = Form(None),
     long_client=Depends(get_sdk_long_client),
 ):
-    """Sprint J.2.b — kick off Phase 2 (research → ingest → compile) as
-    a background task.
+    """Sprint J.2.b / §17.456 — kick off Phase 2 (research → ingest → compile)
+    as a background task, then auto-chain into execution (parity with the chat
+    `/confirm` macro).
 
-    Phase 2 takes 512-1450s. Same background-task pattern as ideate:
-    queue the SDK call, redirect to the job-detail page so the user
-    can watch the status transition `awaiting_confirmation` →
-    `researching` → `planning` via page refresh.
+    Phase 2 takes 512-1450s, so it stays a background task. We redirect to the
+    detail page with ``?run=1``: §17.455's live poll watches the
+    `awaiting_confirmation → researching → planning` transition, and the ``run=1``
+    flag (carried through the poll) makes the page auto-start the SSE execution
+    stream the moment the job reaches `planning` — no manual "Run all nodes"
+    click. ``/execute/all`` auto-generates the DAG if missing, so (unlike the chat
+    macro) no separate `/dag` step is needed.
     """
     feedback_clean = (feedback or "").strip() or None
 
@@ -310,7 +378,7 @@ async def post_confirm(
 
     background_tasks.add_task(_kick_off)
     return RedirectResponse(
-        url=f"/web/jobs/{job_id}", status_code=302,
+        url=f"/web/jobs/{job_id}?run=1", status_code=302,
     )
 
 

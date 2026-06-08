@@ -1,0 +1,23 @@
+{# §17.455 — job-detail root. Rendered both inside job_detail.html (full page)
+   and returned bare by GET /web/jobs/{id}/fragment (htmx poll target).
+
+   While the job is in a TRANSIENT wait state (pending/refining/researching) the
+   root polls itself every 3s and swaps outerHTML, so the user watches Phase 1
+   (refining → awaiting_confirmation) and Phase 2 (researching → planning)
+   progress with no manual refresh. Polling is deliberately OFF in interactive /
+   streaming states — awaiting_confirmation (confirm form would be wiped mid-type)
+   and planning/executing/blocked (the run button swaps in an SSE stream that a
+   poll would clobber). When the swapped-in content lacks the trigger, htmx stops
+   polling automatically. #}
+{% set _transient = job.job_status in ["pending", "refining", "researching"] %}
+{% set _autorun = autorun|default(false) %}
+<section class="job-detail" id="job-detail-root"
+  {% if _transient %}hx-get="/web/jobs/{{ job_id }}/fragment{% if _autorun %}?run=1{% endif %}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  {% if _transient %}
+  <p class="live-indicator" aria-live="polite">
+    <span class="live-dot" aria-hidden="true"></span>
+    Live — this page updates automatically while the job is <code>{{ job.job_status }}</code>.
+  </p>
+  {% endif %}
+  {% include "web/_job_detail_body.html" %}
+</section>

@@ -124,25 +124,24 @@ def _truncate_title(text_in: str, max_chars: int = 80) -> str:
         cut = cut[:space]
     return cut.rstrip(" ,;:.-") + "…"
 
-async def refine_idea(
+async def create_ideation_job(
     idea_text: str,
     db: AsyncSession,
-    model: str | None = None,
     domain: str | None = None,
-    model_overrides: dict | None = None,
-    target_status: str = "awaiting_confirmation",
-) -> dict:
-    """Refine raw idea text into a structured brief and persist as a job.
+) -> str:
+    """§17.454 — Insert the job row in ``refining`` and return its id immediately,
+    BEFORE the 100-547s Phase 1 LLM pass runs.
 
-    Returns dict with job_id, status, and refined_brief.
+    The async-kickoff endpoint (``POST /ideate/start``) returns this id so the
+    native web UI can redirect straight to the live job-detail page instead of
+    making the user hunt for their just-submitted job in a filtered list. The
+    actual refinement runs afterwards in a background task that re-attaches to
+    this same row via ``refine_idea(..., job_id=...)``.
     """
-    # 0. Validate domain override if supplied
     if domain is not None and domain not in ALLOWED_DOMAINS:
         raise ValueError(
             f"invalid domain override {domain!r}; allowed: {sorted(ALLOWED_DOMAINS)}"
         )
-
-    # 1. Create job directly in 'refining' state (single INSERT, single commit)
     result = await db.execute(
         text("""
             INSERT INTO jobs (title, input_text, status)
@@ -153,7 +152,50 @@ async def refine_idea(
     )
     job_id = result.scalar_one()
     await db.commit()
-    logger.info("job_created: job=%s status=refining", job_id)
+    logger.info("ideation_job_created_async: job=%s status=refining", job_id)
+    return str(job_id)
+
+
+async def refine_idea(
+    idea_text: str,
+    db: AsyncSession,
+    model: str | None = None,
+    domain: str | None = None,
+    model_overrides: dict | None = None,
+    target_status: str = "awaiting_confirmation",
+    job_id: str | None = None,
+) -> dict:
+    """Refine raw idea text into a structured brief and persist as a job.
+
+    Returns dict with job_id, status, and refined_brief.
+
+    §17.454 — when ``job_id`` is supplied the INSERT is skipped and the existing
+    ``refining`` row (pre-created by :func:`create_ideation_job`) is reused. This
+    is the async-kickoff path; the synchronous callers (``/ideas``, ``/ideate``,
+    chat pipeline) pass ``job_id=None`` and create the row here as before.
+    """
+    # 0. Validate domain override if supplied
+    if domain is not None and domain not in ALLOWED_DOMAINS:
+        raise ValueError(
+            f"invalid domain override {domain!r}; allowed: {sorted(ALLOWED_DOMAINS)}"
+        )
+
+    # 1. Create job directly in 'refining' state (single INSERT, single commit),
+    #    OR reuse a row pre-created by create_ideation_job (async-kickoff path).
+    if job_id is None:
+        result = await db.execute(
+            text("""
+                INSERT INTO jobs (title, input_text, status)
+                VALUES (:title, :input_text, 'refining')
+                RETURNING id
+            """),
+            {"title": _truncate_title(idea_text), "input_text": idea_text},
+        )
+        job_id = result.scalar_one()
+        await db.commit()
+        logger.info("job_created: job=%s status=refining", job_id)
+    else:
+        logger.info("job_reused: job=%s status=refining", job_id)
 
     # 2. Call LLM for structured brief via native tool-call (Sprint X.11)
     prompt = REFINE_PROMPT.format(idea=idea_text)

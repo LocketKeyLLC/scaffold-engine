@@ -272,6 +272,127 @@ class TestJobDetailPage:
 
 
 @pytest.mark.smoke
+class TestJobDetailLivePoll:
+    """§17.455 — the detail page auto-polls only in transient wait states, and
+    the fragment route re-emits / drops the trigger so polling self-stops."""
+
+    @staticmethod
+    def _payload(status):
+        return {
+            "job_id": "jp", "job_title": "Live job", "job_status": status,
+            "compiled_output": None, "synthesized": False,
+            "synthesis_override": None, "counts": {}, "total_nodes": 0,
+            "next_node": None, "next_actions": [], "nodes": [],
+        }
+
+    def test_full_page_polls_in_transient_state(self, client, fake_client):
+        fake_client.jobs.status.return_value = self._payload("refining")
+        body = client.get("/web/jobs/jp").text
+        assert 'id="job-detail-root"' in body
+        assert 'hx-get="/web/jobs/jp/fragment"' in body
+        assert 'hx-trigger="every 3s"' in body
+        assert "live-indicator" in body
+
+    def test_full_page_does_not_poll_in_interactive_state(self, client, fake_client):
+        """awaiting_confirmation shows the confirm form — polling would wipe
+        the user's in-progress feedback, so it must be OFF."""
+        fake_client.jobs.status.return_value = self._payload("awaiting_confirmation")
+        body = client.get("/web/jobs/jp").text
+        assert 'id="job-detail-root"' in body
+        assert "hx-trigger" not in body
+        assert "live-indicator" not in body
+        # The interactive element is present.
+        assert "confirm-form" in body
+
+    def test_fragment_route_returns_root_with_trigger_when_transient(
+        self, client, fake_client,
+    ):
+        fake_client.jobs.status.return_value = self._payload("researching")
+        resp = client.get("/web/jobs/jp/fragment")
+        assert resp.status_code == 200
+        body = resp.text
+        assert 'id="job-detail-root"' in body
+        assert 'hx-trigger="every 3s"' in body
+        # Fragment carries the body too (not just the wrapper).
+        assert "Node counts" in body
+
+    def test_fragment_route_drops_trigger_at_terminal_state(self, client, fake_client):
+        """When the job reaches completed, the swapped-in fragment has no
+        trigger, so htmx stops polling on its own."""
+        fake_client.jobs.status.return_value = self._payload("completed")
+        body = client.get("/web/jobs/jp/fragment").text
+        assert 'id="job-detail-root"' in body
+        assert "hx-trigger" not in body
+
+    def test_fragment_route_halts_on_error(self, client, fake_client):
+        """A fetch error returns a bare non-polling section so the poll loop
+        stops instead of hammering a broken backend every 3s."""
+        fake_client.jobs.status.side_effect = ConnectionError("down")
+        resp = client.get("/web/jobs/jp/fragment")
+        assert resp.status_code == 200
+        body = resp.text
+        assert "hx-trigger" not in body
+        assert "Lost contact" in body
+
+    def test_fragment_route_halts_on_missing_job(self, client, fake_client):
+        fake_client.jobs.status.return_value = {"error": "not found"}
+        body = client.get("/web/jobs/jp/fragment").text
+        assert "hx-trigger" not in body
+        assert "Lost contact" in body
+
+
+@pytest.mark.smoke
+class TestJobDetailAutoRun:
+    """§17.456 — ?run=1 auto-chains into execution at planning (chat-macro parity)."""
+
+    @staticmethod
+    def _payload(status):
+        return {
+            "job_id": "jp", "job_title": "Run job", "job_status": status,
+            "compiled_output": None, "synthesized": False,
+            "synthesis_override": None, "counts": {}, "total_nodes": 0,
+            "next_node": None, "next_actions": [], "nodes": [],
+        }
+
+    def test_planning_with_run_auto_starts_stream(self, client, fake_client):
+        fake_client.jobs.status.return_value = self._payload("planning")
+        body = client.get("/web/jobs/jp?run=1").text
+        # SSE stream auto-connects; the manual button is gone.
+        assert 'sse-connect="/web/jobs/jp/run/stream"' in body
+        assert "Run all nodes" not in body
+
+    def test_planning_without_run_shows_manual_button(self, client, fake_client):
+        fake_client.jobs.status.return_value = self._payload("planning")
+        body = client.get("/web/jobs/jp").text
+        assert "Run all nodes" in body
+        assert 'sse-connect="/web/jobs/jp/run/stream"' not in body
+
+    def test_executing_with_run_does_not_rekick(self, client, fake_client):
+        """Auto-start is scoped to `planning`. An already-executing job keeps
+        the manual button so we never re-POST /execute/all on a running job."""
+        fake_client.jobs.status.return_value = self._payload("executing")
+        body = client.get("/web/jobs/jp?run=1").text
+        assert "Run all nodes" in body
+        assert 'sse-connect="/web/jobs/jp/run/stream"' not in body
+
+    def test_run_flag_survives_poll_while_researching(self, client, fake_client):
+        """The poll target keeps ?run=1 so the flag isn't lost during the
+        researching wait before planning is reached."""
+        fake_client.jobs.status.return_value = self._payload("researching")
+        body = client.get("/web/jobs/jp/fragment?run=1").text
+        assert 'hx-get="/web/jobs/jp/fragment?run=1"' in body
+        assert 'hx-trigger="every 3s"' in body
+
+    def test_fragment_auto_starts_when_poll_lands_on_planning(self, client, fake_client):
+        """The poll that catches the researching→planning transition swaps in a
+        fragment that auto-connects the stream (polling has stopped by then)."""
+        fake_client.jobs.status.return_value = self._payload("planning")
+        body = client.get("/web/jobs/jp/fragment?run=1").text
+        assert 'sse-connect="/web/jobs/jp/run/stream"' in body
+        assert "hx-trigger" not in body  # planning is not transient → poll stops
+
+
+@pytest.mark.smoke
 class TestStaticAssets:
     """The /static mount serves the web CSS without auth."""
 
@@ -328,70 +449,84 @@ class TestNewIdeaForm:
 
 @pytest.mark.smoke
 class TestPostIdeate:
-    """POST /web/ideate kicks off Phase 1 in a BackgroundTask + redirects."""
+    """§17.454 — POST /web/ideate calls /ideate/start and redirects to the
+    LIVE job-detail page (was: BackgroundTask + redirect to refining filter)."""
 
-    def test_redirects_to_refining_filter(self, client, fake_long_client):
+    def test_redirects_to_job_detail(self, client, fake_client):
+        fake_client.ideate_start.return_value = {
+            "job_id": "job-xyz", "status": "refining",
+        }
         resp = client.post(
             "/web/ideate",
             data={"idea": "Build a homelab dashboard", "domain": ""},
         )
-        # 302 to the refining-filter view.
+        # 302 straight to the new job's detail page — no more hunting in a list.
         assert resp.status_code == 302
-        assert resp.headers["location"] == "/web/jobs?status=refining"
+        assert resp.headers["location"] == "/web/jobs/job-xyz"
 
-    def test_calls_long_client_ideate_after_response(self, client, fake_long_client):
-        """BackgroundTasks fire after the response is sent. With
-        TestClient's blocking semantics they fire before .post()
-        returns control, so we can assert immediately."""
+    def test_calls_ideate_start_with_form_values(self, client, fake_client):
+        fake_client.ideate_start.return_value = {"job_id": "j1"}
         client.post(
             "/web/ideate",
             data={"idea": "Some idea", "domain": "rag"},
         )
-        # ideate was called with the form values.
-        fake_long_client.ideate.assert_called_once()
-        kwargs = fake_long_client.ideate.call_args.kwargs
+        fake_client.ideate_start.assert_called_once()
+        kwargs = fake_client.ideate_start.call_args.kwargs
         assert kwargs.get("idea") == "Some idea"
         assert kwargs.get("domain") == "rag"
 
-    def test_empty_idea_re_renders_form_with_422(self, client, fake_long_client):
+    def test_empty_idea_re_renders_form_with_422(self, client, fake_client):
         resp = client.post(
             "/web/ideate", data={"idea": "   ", "domain": ""},
         )
         assert resp.status_code == 422
         assert "Idea is required" in resp.text
         # SDK was NOT called.
-        fake_long_client.ideate.assert_not_called()
+        fake_client.ideate_start.assert_not_called()
 
-    def test_invalid_domain_re_renders_form_with_422(self, client, fake_long_client):
+    def test_invalid_domain_re_renders_form_with_422(self, client, fake_client):
         resp = client.post(
             "/web/ideate",
             data={"idea": "Valid idea", "domain": "not-a-domain"},
         )
         assert resp.status_code == 422
         assert "Invalid domain" in resp.text
-        fake_long_client.ideate.assert_not_called()
+        fake_client.ideate_start.assert_not_called()
 
-    def test_blank_domain_passes_none_to_sdk(self, client, fake_long_client):
+    def test_blank_domain_passes_none_to_sdk(self, client, fake_client):
         """The form's auto-detect option (value="") should resolve to
         domain=None at the SDK call site so the orchestrator infers."""
+        fake_client.ideate_start.return_value = {"job_id": "j2"}
         client.post(
             "/web/ideate",
             data={"idea": "Auto-detect this", "domain": ""},
         )
-        kwargs = fake_long_client.ideate.call_args.kwargs
+        kwargs = fake_client.ideate_start.call_args.kwargs
         assert kwargs.get("domain") is None
+
+    def test_missing_job_id_renders_error(self, client, fake_client):
+        """If /ideate/start returns no job_id, surface a 502 error page
+        rather than redirecting into a broken /web/jobs/None."""
+        fake_client.ideate_start.return_value = {"status": "refining"}
+        resp = client.post(
+            "/web/ideate", data={"idea": "No id back", "domain": ""},
+        )
+        assert resp.status_code == 502
+        assert "Could not submit idea" in resp.text
 
 
 @pytest.mark.smoke
 class TestPostConfirm:
     """POST /web/jobs/{id}/confirm kicks off Phase 2 in a BackgroundTask."""
 
-    def test_redirects_to_job_detail(self, client, fake_long_client):
+    def test_redirects_to_job_detail_with_autorun(self, client, fake_long_client):
+        """§17.456 — redirect carries ?run=1 so the page auto-starts execution
+        once Phase 2 reaches planning (chat /confirm macro parity)."""
         resp = client.post(
             "/web/jobs/job-abc/confirm", data={"feedback": ""},
         )
         assert resp.status_code == 302
-        assert resp.headers["location"] == "/web/jobs/job-abc"
+        assert resp.headers["location"] == "/web/jobs/job-abc?run=1"
 
     def test_calls_long_client_confirm_with_feedback(self, client, fake_long_client):
         client.post(

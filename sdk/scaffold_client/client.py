@@ -135,6 +135,20 @@ class Client:
         body = _drop_none({"idea": idea, "domain": domain, "model": model})
         return self.request("POST", "/ideate", json=body)
 
+    def ideate_start(
+        self,
+        idea: str,
+        *,
+        domain: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """``POST /ideate/start`` — async kickoff: returns ``{job_id, status}``
+        immediately and runs Phase 1 refinement in the background. Use when you
+        want the job id up front (e.g. to redirect to a detail/status view)
+        rather than blocking for the full refined brief like :meth:`ideate`."""
+        body = _drop_none({"idea": idea, "domain": domain, "model": model})
+        return self.request("POST", "/ideate/start", json=body)
+
     def confirm(
         self,
         job_id: str,
