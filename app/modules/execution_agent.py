@@ -991,6 +991,17 @@ async def execute_next_node(
                     model_overrides=model_overrides,
                 )
                 exec_prompt = opt_result.optimized_prompt
+                # §17.462 — never execute a node with an empty prompt. optimize_prompt
+                # now guards this at the source, but keep a belt-and-suspenders check
+                # on the critical path: a blank optimized prompt (thinking-model empty
+                # content, §17.453) would send the model only the system block, which
+                # it rightly rejects → node fails → blocks the job. Fall back to raw.
+                if not (exec_prompt or "").strip():
+                    logger.warning(
+                        "prompt_optimize_empty: blank optimized prompt; using raw "
+                        "(node=%s job=%s)", node_key, job_id,
+                    )
+                    exec_prompt = raw_prompt
                 logger.info("Prompt optimized: %d -> %d tokens", opt_result.token_count_before, opt_result.token_count_after)
             except Exception as e:
                 logger.warning("Prompt optimization failed, using raw: %s", e)

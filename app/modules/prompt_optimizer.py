@@ -299,6 +299,21 @@ async def optimize_prompt(
     logger.info("Running LLM optimize pass with %s", opt_model)
     optimized = await _llm_optimize(pre_cleaned, overrides=opt_overrides)
 
+    # §17.462 — never let optimization ERASE the prompt. The optimizer role
+    # (model_general) is a thinking model since the §17.440 cloud migration; it
+    # can return success + empty content (the §17.453 failure mode) or output
+    # that's entirely <think> tags stripped to "". An empty "optimized" prompt
+    # silently blanks the user message for every downstream caller (e.g. node
+    # execution sent an empty prompt → the model complained it had no task →
+    # the node failed and blocked the job). Fall back to the deterministically
+    # stripped text, which is non-empty and intent-preserving.
+    if not optimized.strip():
+        logger.warning(
+            "llm_optimize_empty: optimizer returned blank; falling back to "
+            "deterministically-stripped prompt (model=%s)", opt_model,
+        )
+        optimized = pre_cleaned if pre_cleaned.strip() else prompt
+
     intent_preserved = True
     if not skip_verify:
         logger.info("Running verifier with %s", ver_model)
