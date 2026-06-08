@@ -1865,15 +1865,15 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (refreshed post-§17.426, 2026-06-05 — both CI + local)
+### 14.1 Test counts (refreshed post-§17.462, 2026-06-08 — both CI + local)
 
-**Current CI-verified baseline (`test.yml` unit-tests, the `-k "not integration"` subset):** **3265 passed, 14 skipped, 72 deselected (the integration tests), 16 warnings in 13:41** — latest green full-suite run `27047591331` (§17.426). This is the authoritative current count; it grew from the §17.393 local `make test` figure below via the §17.394→§17.426 work (formal-verify §17.414–417, the §17.418–424 deep-review fixes, etc.).
+**Current CI-verified baseline (`test.yml` unit-tests, the `-k "not integration"` subset):** **3452 passed, 14 skipped, 80 deselected (the integration tests), 16 warnings in 16:58** — latest green main run `27167977378` (§17.462, sha `79622aa`). This is the authoritative current count; it grew from the post-§17.426 figure (3265) via the §17.427→§17.462 work (output-quality arc §17.427–435, BM25 §17.431, code-exec sandbox §17.433/434, faithfulness/CoVe §17.448–453, the web-UX overhaul §17.454–461, and the §17.462 empty-prompt-optimization fix).
 
-Local rolling baseline — all three suites in the dev image, **re-measured 2026-06-05 (post-§17.426)** on this host:
+Local rolling baseline — all three suites in the dev image, **re-measured 2026-06-08 (post-§17.462)** on this host:
 
-- **Orchestrator (`make test`)**: **3351 passed, 0 failed, 0 skipped** in 9:08. `make test` runs the *full* suite (no `-k` filter) in the dev image where live sidecars are reachable, so it differs in scope from the CI `not integration` subset above — the 3351 reconciles exactly: 3265 (CI passed) + 72 (integration, deselected in CI but run live here) + 14 (skipped in CI without services). Prior baseline was §17.393's 3301/0/0; the +50 net is the §17.394→§17.426 work (formal-verify §17.414–417 + the §17.418–424 deep-review tests).
-- **SDK (`make test-sdk`)**: **142 passed** in 1.9s (was 138 @ §17.393; +4 from the §17.421 stream-error-translation regression tests).
-- **CLI (`make test-cli`)**: **161 passed** in 1.0s (was 157 @ §17.393; +4 from the §17.420 walked-.env provenance tests).
+- **Orchestrator (`make test`)**: **3545 passed, 0 failed, 1 skipped** in 27:42. `make test` runs the *full* suite (no `-k` filter) in the dev image where live sidecars are reachable, so it differs in scope from the CI `not integration` subset above — it reconciles exactly: 3452 (CI passed) + 14 (service-needing, skipped in CI but pass live here) + 80 (integration, deselected in CI; run live as 79 pass + 1 skip) = 3546 collected = 3545 passed + 1 skipped. **The 1 skip is `tests/integration/test_topology_select_db.py` self-skipping on a transient live-LLM 409 (empty topology-select response) — NOT a code regression.** Prior baseline was §17.426's 3351/0/0 in 9:08; the +194 net spans §17.427→§17.462 (incl. the web-UX overhaul §17.454–461 + ~35 tests from that session). The longer wall-clock (27:42 vs 9:08) is live cloud-model latency on the integration tests, not a regression (0 failures).
+- **SDK (`make test-sdk`)**: **142 passed** in 2.1s (unchanged since §17.421 — §17.454 added `ideate_start` to the client but its coverage rides the orchestrator unit suite).
+- **CLI (`make test-cli`)**: **165 passed** in 1.2s (was 161 @ §17.426; +4 from §17.427→§17.462 work).
 
 The CI figure is the rolling snapshot refreshed each run; the local figures are refreshed by a `make test` sweep. Per-commit deltas live in the §-log below. The static-parity subset (schemas / sse-events / next-actions vendor byte-equality + the SSE-inventory and SDK-schema scans) now also runs at push time via the §17.393 `ci-tier-0` pre-push hook (`make hooks-install` to activate per clone).
 
