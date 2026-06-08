@@ -125,6 +125,23 @@ async def test_optimize_prompt_skip_verify_sets_verifier_used_to_skipped():
 
 
 @pytest.mark.smoke
+async def test_optimize_prompt_falls_back_when_llm_returns_empty():
+    """§17.462 — a thinking model (model_general post-§17.440) can return
+    success + empty content. optimize_prompt must NEVER hand back a blank
+    optimized prompt (that blanked node-execution prompts → blocked jobs).
+    It falls back to the deterministically-stripped, non-empty text."""
+    for empty in ("", "   ", "\n\t "):
+        with patch.object(po, "_llm_optimize", AsyncMock(return_value=empty)):
+            result = await po.optimize_prompt(
+                "Build a CLI to-do manager with JSON persistence.",
+                skip_verify=True,
+            )
+        assert result.optimized_prompt.strip(), f"blank optimized for input {empty!r}"
+        # Falls back to a stripped form of the original intent, not garbage.
+        assert "to-do" in result.optimized_prompt.lower()
+
+
+@pytest.mark.smoke
 async def test_optimize_prompt_populates_all_result_fields():
     with patch.object(po, "_llm_optimize", AsyncMock(return_value="tight output")), \
          patch.object(po, "_llm_verify", AsyncMock(return_value=(True, "ok"))):

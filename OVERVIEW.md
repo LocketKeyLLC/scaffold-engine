@@ -21984,6 +21984,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.462 Fix — prompt optimization could blank a node's prompt → blocked jobs (2026-06-08)
+
+Found via a real prod-image end-to-end run (the §17.454–461 web overhaul rendered every state, but no multi-node job would *complete*). Root cause traced through the live job: the **first DAG node executed with an empty user prompt**, so the model rightly refused ("No task brief… only the system instruction block"), the verifier rejected it, retries re-hit the same path, the node failed, and its 5 downstream nodes blocked.
+
+- **Chain:** `_build_prompt` produced a good prompt (terse template + `Context: <brief.description>`), but the prompt-optimization step at `execution_agent.py` did `exec_prompt = opt_result.optimized_prompt` **unconditionally** — its fallback to `raw_prompt` fired only on an *exception*, not on an empty-but-"successful" result. The optimizer (`prompt_optimizer._llm_optimize`, `role="model_general"` = **`qwen3.5:397b-cloud`**, a *thinking* model since §17.440) returned `strip_think_tags(resp.text or "").strip()` = **`""`** — the §17.453 [[thinking-model-empty-content]] failure mode, here in the optimizer path §17.453 never guarded. Empty `optimized_prompt` → blank user message.
+- **Fix (two layers):** (1) `optimize_prompt` never returns a blank optimized prompt — falls back to the deterministically-stripped (`pre_cleaned`) text when the model yields empty (root cause, fixes all callers); (2) `execution_agent` keeps a belt-and-suspenders guard: a blank `exec_prompt` after optimization falls back to `raw_prompt`.
+- **Verified:** new `test_optimize_prompt_falls_back_when_llm_returns_empty` + suite = 25 passed (dev image). Rebuilt the **prod image** with the fix and re-ran the *same* idea that previously blocked at T1: now T1 (and T2–T5) all execute and verify, `pipeline_complete` → **`completed`**, compiled_output 7,477 chars of real CLI code + tests + README — rendered in the web UI (stepper all ✓, markdown output). This is the canonical "thinking models can return success+empty → guard every consumer" lesson (see [[thinking-model-empty-content]]) applied to the execution optimizer path.
+
+---
+
 ### §17.461 Web UX — a11y pass (keyboard focus, skip link, responsive tables) (2026-06-07)
 
 Accessibility polish on the now-feature-complete web UI.
