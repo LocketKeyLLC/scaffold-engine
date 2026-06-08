@@ -8,8 +8,9 @@ a response, so attaching it to API responses is noise.
 
 The policy is intentionally permissive enough to keep the current
 HTMX-based UI functional without per-template changes:
-  * ``script-src 'self' https://unpkg.com 'unsafe-inline'`` —
-    HTMX is loaded from unpkg.com (templates/web/_layout.html);
+  * ``script-src 'self' 'unsafe-inline'`` — §17.459: HTMX + the SSE
+    extension are now self-hosted under ``/static/vendor/`` (was
+    unpkg.com), so the external origin is dropped from script-src.
     'unsafe-inline' covers any future inline ``<script>`` blocks
     so a strict CSP can't break the UI without a code change.
   * ``style-src 'self' 'unsafe-inline'`` — HTMX templates use
@@ -20,10 +21,9 @@ HTMX-based UI functional without per-template changes:
     is operator-only and never legitimately embedded.
   * ``base-uri 'self'`` — prevents ``<base href>`` redirects.
 
-Operators tightening this should drop 'unsafe-inline' first
-(audit + nonce-ize inline scripts/styles) before considering
-removing unpkg.com (the right move is to self-host HTMX under
-/static/).
+Operators tightening this further should drop 'unsafe-inline' next
+(audit + nonce-ize inline scripts/styles). unpkg.com was removed in
+§17.459 by self-hosting HTMX under /static/vendor/.
 
 A trivially-related header is also set:
   * ``X-Content-Type-Options: nosniff`` — defense against MIME
@@ -41,7 +41,7 @@ _HTML_PREFIXES = ("/web/", "/research/pdf")
 
 _CSP = "; ".join((
     "default-src 'self'",
-    "script-src 'self' https://unpkg.com 'unsafe-inline'",
+    "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
     "connect-src 'self'",

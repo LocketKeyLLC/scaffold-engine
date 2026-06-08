@@ -92,10 +92,11 @@ class TestSecurityHeaders:
         assert "object-src 'none'" in _CSP
         assert "frame-ancestors 'none'" in _CSP
 
-    def test_csp_allows_htmx_cdn(self):
-        """script-src must include unpkg.com so the current templates
-        (which load HTMX from there) keep working under CSP."""
-        assert "https://unpkg.com" in _CSP
+    def test_csp_self_hosts_scripts_no_external_cdn(self):
+        """§17.459 — HTMX is vendored under /static/vendor/, so script-src is
+        'self' only; the unpkg.com origin must be gone (airgap + tighter CSP)."""
+        assert "https://unpkg.com" not in _CSP
+        assert "script-src 'self'" in _CSP
 
 
 # ---------------------------------------------------------------------------
