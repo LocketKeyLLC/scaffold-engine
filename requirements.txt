@@ -27,6 +27,10 @@ psycopg2-binary==2.9.9
 pypdf==5.1.0
 pdfplumber==0.11.4
 python-multipart==0.0.17
+# §17.458 — server-side markdown rendering for the web UI's compiled_output.
+# Already present transitively via rich; pinned explicitly now that app code is
+# a direct consumer. Used with html=False (raw HTML escaped) — see app/web/routes.py.
+markdown-it-py==4.2.0
 
 # --- OpenAPI ingestion (4.5d) ---
 openapi-spec-validator==0.7.1

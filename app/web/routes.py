@@ -20,6 +20,8 @@ import logging
 
 import html as _html_lib
 
+from markdown_it import MarkdownIt
+
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
@@ -169,15 +171,33 @@ def _pipeline_steps(status: str, *, has_nodes: bool) -> list[dict]:
     return out
 
 
+# §17.458 — server-side markdown renderer for the web UI's compiled_output.
+# "commonmark" preset for spec-faithful parsing, but html=False so any raw HTML
+# in the (LLM/pipeline-generated) output is ESCAPED rather than passed through —
+# this is the XSS guard. linkify=False keeps bare URLs as plain text. The
+# built-in validateLink also drops javascript:/vbscript:/file:/data: hrefs, so a
+# `[x](javascript:...)` never becomes a live link. Output is marked |safe in the
+# template only because of these settings — do NOT flip html to True.
+_MD = MarkdownIt("commonmark", {"html": False, "linkify": False})
+
+
+def _render_markdown(text: str | None) -> str:
+    """Render compiled_output markdown → safe HTML (empty string for falsy input)."""
+    if not text:
+        return ""
+    return _MD.render(text)
+
+
 def _job_context(payload: dict, job_id: str, *, autorun: bool = False) -> dict:
     """Shared template context for the detail page + poll fragment (so the
-    stepper and autorun flag stay in sync across both render paths)."""
+    stepper, autorun flag, and rendered output stay in sync across both paths)."""
     has_nodes = bool(payload.get("nodes")) or bool(payload.get("total_nodes"))
     return {
         "job": payload,
         "job_id": job_id,
         "autorun": autorun,
         "steps": _pipeline_steps(payload.get("job_status", ""), has_nodes=has_nodes),
+        "compiled_output_html": _render_markdown(payload.get("compiled_output")),
     }
 
 
