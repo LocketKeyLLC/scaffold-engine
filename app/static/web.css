@@ -253,6 +253,66 @@ tr.next-node { background: #eff6ff; }
 .event-error { color: var(--status-failed); }
 .event-verified { color: var(--status-completed); }
 
+/* §17.457 — lifecycle stepper on the job-detail page */
+.pipeline-stepper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 0;
+  list-style: none;
+  margin: 12px 0 16px;
+  padding: 0;
+  counter-reset: step;
+}
+.pipeline-stepper .step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 0;
+  min-width: 120px;
+  position: relative;
+  padding: 4px 0;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+/* connector line to the next step */
+.pipeline-stepper .step:not(:last-child)::after {
+  content: "";
+  flex: 1;
+  height: 2px;
+  margin: 0 8px;
+  background: var(--border);
+}
+.pipeline-stepper .step-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--bg-panel);
+  font-size: 12px;
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+.step-done .step-marker {
+  border-color: var(--status-completed);
+  background: var(--status-completed);
+  color: #fff;
+}
+.step-done { color: var(--fg); }
+.step-done:not(:last-child)::after { background: var(--status-completed); }
+.step-current .step-marker {
+  border-color: var(--status-running);
+  color: var(--status-running);
+}
+.step-current { color: var(--status-running); font-weight: 600; }
+.step-error .step-marker {
+  border-color: var(--status-failed);
+  background: var(--status-failed);
+  color: #fff;
+}
+.step-error { color: var(--status-failed); font-weight: 600; }
+
 /* §17.455 — live-poll indicator on the job-detail page (transient states) */
 .live-indicator {
   display: flex; align-items: center; gap: 8px;

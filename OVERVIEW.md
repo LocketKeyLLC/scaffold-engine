@@ -21984,6 +21984,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.457 Web UX — lifecycle stepper on the job-detail page (2026-06-07)
+
+Fourth slice of the web-UX overhaul. Slices §17.454–456 made the page *live*; this makes the **journey visible**. The 9-state machine (`pending → refining → awaiting_confirmation → researching → planning → executing → running → completed | failed | cancelled | blocked`) is collapsed into a six-phase stepper — **Refine · Review · Research · Plan · Execute · Done** — with the current phase highlighted, passed phases checked, and future phases dimmed. Closes review findings #4 (pipeline stepper) and #6 (no "where am I").
+
+- **Pure helper `_pipeline_steps(status, has_nodes)`** (routes.py) returns `[{label, state}]` with state ∈ `done | current | upcoming | error`; driven only by status (+ DAG presence) so it recomputes correctly on every §17.455 poll. New `_job_context()` shares the stepper + autorun flag across the full-page and fragment render paths so they can't drift.
+- **Terminal-error mapping is honest about its heuristic:** failed/cancelled/blocked don't record which phase died, so the error marker is best-effort — `blocked` or a job that reached a DAG (`has_nodes`) marks **Execute**; an early failure marks **Refine**. The precise reason is always in the §17.450 error banner regardless of marker placement.
+- **a11y baked in:** state is conveyed by marker glyph (✓ / number / ✕) **and** label, never colour alone (WCAG 1.4.1), with `aria-current="step"` on the live phase and an `aria-label` on the `<ol>`. Stepper is responsive (flex-wrap). No new deps — template + CSS + a small helper.
+- **Verified:** 8 new tests (6 helper-mapping + 2 render); full `test_web_ui` = **65 passed**; `ci-tier-0` green. Live-smoked (post-restart): a live `refining` job → Refine current; a fabricated `planning` job → Refine/Review/Research done + Plan current; a fabricated `failed` (no DAG) job → Refine error. No OpenAPI change.
+- Remaining web-UX slices: markdown-rendered compiled output, vendored CDN assets (drop `unpkg.com` runtime dep), fuller a11y pass (focus styles, responsive tables).
+
+---
+
 ### §17.456 Web UX — confirm auto-chains into execution (chat-macro parity) (2026-06-07)
 
 Third slice of the web-UX overhaul. The chat `/confirm` macro chains Phase 2 → DAG → execute; the web `confirm` only ran Phase 2 and left the job in `planning` for a manual "Run all nodes" click. Now the web flow runs to completion on its own.
