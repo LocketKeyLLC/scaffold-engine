@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from app.auth import require_api_key
 from app.main import app
 from app.web.routes import (
+    _pipeline_steps,
     get_sdk_async_long_client,
     get_sdk_client,
     get_sdk_long_client,
@@ -390,6 +391,72 @@ class TestJobDetailAutoRun:
         body = client.get("/web/jobs/jp/fragment?run=1").text
         assert 'sse-connect="/web/jobs/jp/run/stream"' in body
         assert "hx-trigger" not in body  # planning is not transient → poll stops
+
+
+@pytest.mark.smoke
+class TestPipelineStepper:
+    """§17.457 — lifecycle stepper mapping + render."""
+
+    def _states(self, status, *, has_nodes=False):
+        return {s["label"]: s["state"]
+                for s in _pipeline_steps(status, has_nodes=has_nodes)}
+
+    def test_refining_marks_first_step_current(self):
+        st = self._states("refining")
+        assert st["Refine"] == "current"
+        assert st["Review"] == "upcoming"
+        assert st["Done"] == "upcoming"
+
+    def test_researching_marks_prior_done_and_research_current(self):
+        st = self._states("researching")
+        assert st["Refine"] == "done"
+        assert st["Review"] == "done"
+        assert st["Research"] == "current"
+        assert st["Plan"] == "upcoming"
+
+    def test_completed_marks_all_done(self):
+        st = self._states("completed")
+        assert set(st.values()) == {"done"}
+
+    def test_failed_with_dag_errors_at_execute(self):
+        st = self._states("failed", has_nodes=True)
+        assert st["Execute"] == "error"
+        assert st["Plan"] == "done"
+        assert st["Done"] == "upcoming"
+
+    def test_failed_without_dag_errors_early(self):
+        st = self._states("failed", has_nodes=False)
+        assert st["Refine"] == "error"
+        assert st["Execute"] == "upcoming"
+
+    def test_blocked_always_errors_at_execute(self):
+        # blocked is an execution-phase state regardless of node presence.
+        assert self._states("blocked", has_nodes=False)["Execute"] == "error"
+
+    def test_rendered_page_shows_stepper_with_aria_current(self, client, fake_client):
+        fake_client.jobs.status.return_value = {
+            "job_id": "js", "job_title": "Stepper job", "job_status": "researching",
+            "compiled_output": None, "synthesized": False, "synthesis_override": None,
+            "counts": {}, "total_nodes": 0, "next_node": None, "next_actions": [],
+            "nodes": [],
+        }
+        body = client.get("/web/jobs/js").text
+        assert "pipeline-stepper" in body
+        assert 'aria-current="step"' in body
+        # Research is the current phase label.
+        assert "Research" in body
+
+    def test_stepper_updates_via_poll_fragment(self, client, fake_client):
+        """The stepper recomputes on the §17.455 poll, so the fragment carries
+        it too (not just the full page)."""
+        fake_client.jobs.status.return_value = {
+            "job_id": "js", "job_title": "x", "job_status": "refining",
+            "compiled_output": None, "synthesized": False, "synthesis_override": None,
+            "counts": {}, "total_nodes": 0, "next_node": None, "next_actions": [],
+            "nodes": [],
+        }
+        body = client.get("/web/jobs/js/fragment").text
+        assert "pipeline-stepper" in body
 
 
 @pytest.mark.smoke

@@ -10,6 +10,21 @@
     </p>
   </header>
 
+  {# §17.457 — lifecycle stepper. State is conveyed by marker glyph (✓ / number /
+     ✕) AND label, not colour alone (a11y), with aria-current on the live step. #}
+  {% if steps %}
+  <ol class="pipeline-stepper" aria-label="Job progress">
+    {% for step in steps %}
+    <li class="step step-{{ step.state }}"{% if step.state == "current" %} aria-current="step"{% endif %}>
+      <span class="step-marker" aria-hidden="true">
+        {%- if step.state == "done" %}✓{% elif step.state == "error" %}✕{% else %}{{ loop.index }}{% endif -%}
+      </span>
+      <span class="step-label">{{ step.label }}</span>
+    </li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+
   {# §17.450 (Phase B / B3) — job-level failure reason. error_summary is in the
      /exec/status payload but was never shown, so a failed job looked identical
      to a stalled one. #}

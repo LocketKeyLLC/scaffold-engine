@@ -115,6 +115,73 @@ def get_sdk_async_long_client():
 
 
 # ---------------------------------------------------------------------------
+# §17.457 — lifecycle stepper
+# ---------------------------------------------------------------------------
+
+# The user-facing pipeline collapses the internal 9-state machine into the six
+# phases people actually care about. Each entry maps a phase label to the raw
+# job statuses that live under it.
+_PIPELINE_STEPS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("Refine", frozenset({"pending", "refining"})),
+    ("Review", frozenset({"awaiting_confirmation"})),
+    ("Research", frozenset({"researching"})),
+    ("Plan", frozenset({"planning"})),
+    ("Execute", frozenset({"executing", "running"})),
+    ("Done", frozenset({"completed"})),
+)
+_TERMINAL_ERROR_STATUSES = frozenset({"failed", "cancelled", "blocked"})
+
+
+def _pipeline_steps(status: str, *, has_nodes: bool) -> list[dict]:
+    """Build the lifecycle stepper for a job status.
+
+    Returns one dict per phase: ``{"label": str, "state": str}`` where state is
+    ``done`` | ``current`` | ``upcoming`` | ``error``. Driven purely by the job
+    status (+ whether a DAG exists) so it recomputes correctly on every §17.455
+    poll.
+
+    Terminal-error states (failed/cancelled/blocked) don't record which phase
+    they died in, so the errored step is a best-effort heuristic: a job that
+    reached a DAG (``has_nodes``) failed at Execute; otherwise it failed early,
+    marked at Refine. The precise reason is always carried by the §17.450
+    error banner regardless of where the marker lands.
+    """
+    if status == "completed":
+        return [{"label": label, "state": "done"} for label, _ in _PIPELINE_STEPS]
+
+    if status in _TERMINAL_ERROR_STATUSES:
+        err_idx = 4 if (status == "blocked" or has_nodes) else 0
+        out = []
+        for i, (label, _) in enumerate(_PIPELINE_STEPS):
+            state = "done" if i < err_idx else "error" if i == err_idx else "upcoming"
+            out.append({"label": label, "state": state})
+        return out
+
+    current = 0
+    for i, (_, statuses) in enumerate(_PIPELINE_STEPS):
+        if status in statuses:
+            current = i
+            break
+    out = []
+    for i, (label, _) in enumerate(_PIPELINE_STEPS):
+        state = "done" if i < current else "current" if i == current else "upcoming"
+        out.append({"label": label, "state": state})
+    return out
+
+
+def _job_context(payload: dict, job_id: str, *, autorun: bool = False) -> dict:
+    """Shared template context for the detail page + poll fragment (so the
+    stepper and autorun flag stay in sync across both render paths)."""
+    has_nodes = bool(payload.get("nodes")) or bool(payload.get("total_nodes"))
+    return {
+        "job": payload,
+        "job_id": job_id,
+        "autorun": autorun,
+        "steps": _pipeline_steps(payload.get("job_status", ""), has_nodes=has_nodes),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -204,7 +271,7 @@ def job_detail(
 
     return templates.TemplateResponse(
         request, "web/job_detail.html",
-        {"job": payload, "job_id": job_id, "autorun": bool(run)},
+        _job_context(payload, job_id, autorun=bool(run)),
     )
 
 
@@ -248,7 +315,7 @@ def job_detail_fragment(
 
     return templates.TemplateResponse(
         request, "web/_job_detail_root.html",
-        {"job": payload, "job_id": job_id, "autorun": bool(run)},
+        _job_context(payload, job_id, autorun=bool(run)),
     )
 
 
