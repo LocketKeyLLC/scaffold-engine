@@ -281,6 +281,48 @@ Return ONLY the JSON object. No preamble, no markdown."""
 # Sprint W.3 — Validator-driven retry loop
 # ---------------------------------------------------------------------------
 
+async def _generate_dag_json(
+    prompt: str, route_kwargs: dict, *, draws: int = 3,
+) -> tuple:
+    """§17.463 — generate the DAG JSON, re-drawing on a success+empty/unparseable
+    response.
+
+    The default generator role (``qwen3.5:397b-cloud`` since §17.440) is a
+    *thinking* model that can spend its whole budget on reasoning and return
+    ``success=True`` with EMPTY content — ``parse_json_object`` then yields None.
+    Pre-§17.463 that hard-failed the entire DAG on attempt 1 (surfaced to the
+    user as "DAG must have at least 2 tasks"), even though a fresh draw almost
+    always lands (the §17.453 / §17.462 thinking-model-empty-content lesson).
+    Gives the model 8192-token headroom (was 4096) and up to ``draws``
+    independent re-draws. A hard failure (``success=False``) is surfaced
+    immediately — only an empty/unparseable *successful* response is retried.
+
+    Returns ``(last_resp, parsed_or_None, summed_duration_ms)``.
+    """
+    total_ms = 0
+    resp = None
+    for d in range(draws):
+        resp = await model_router.generate(
+            prompt,
+            system=DAG_SYSTEM,
+            temperature=0.3,
+            max_tokens=8192,
+            **route_kwargs,
+        )
+        total_ms += getattr(resp, "total_duration_ms", 0) or 0
+        if not resp.success:
+            return resp, None, total_ms
+        parsed = parse_json_object(resp.text)
+        if parsed is not None:
+            return resp, parsed, total_ms
+        logger.warning(
+            "dag_generate_redraw_on_empty: draw=%d/%d text_len=%d "
+            "(thinking-model empty content, §17.463)",
+            d + 1, draws, len(resp.text or ""),
+        )
+    return resp, None, total_ms
+
+
 async def _generate_dag_with_validator(
     brief_data: dict,
     route_kwargs: dict,
@@ -325,16 +367,12 @@ async def _generate_dag_with_validator(
         prompt_body = DAG_PROMPT.format(brief=json.dumps(brief_data, indent=2))
         prompt = (corrections_block + "\n\n" + prompt_body) if corrections_block else prompt_body
 
-        resp = await model_router.generate(
-            prompt,
-            system=DAG_SYSTEM,
-            temperature=0.3,
-            max_tokens=4096,
-            **route_kwargs,
-        )
+        # §17.463 — retry-on-empty around the generator call (thinking-model
+        # empty-content guard). 8192-token headroom + up to 3 re-draws.
+        resp, parsed, draw_ms = await _generate_dag_json(prompt, route_kwargs)
         last_text = resp.text or ""
         last_model = resp.model
-        total_duration_ms += getattr(resp, "total_duration_ms", 0) or 0
+        total_duration_ms += draw_ms
 
         if not resp.success:
             if attempt == 1:
@@ -346,7 +384,6 @@ async def _generate_dag_with_validator(
             warnings.append(f"validator_retry_call_failed_attempt_{attempt}: {resp.error}")
             break
 
-        parsed = parse_json_object(resp.text)
         if parsed is None:
             if attempt == 1:
                 return {
