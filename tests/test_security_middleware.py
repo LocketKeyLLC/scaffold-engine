@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from app.middleware.body_size_limit import BodySizeLimitMiddleware
 from app.middleware.security_headers import (
     SecurityHeadersMiddleware,
-    _CSP,
+    _build_csp,
 )
 
 
@@ -69,14 +69,15 @@ class TestSecurityHeaders:
     def test_web_route_gets_csp(self, client):
         r = client.get("/web/jobs")
         assert r.status_code == 200
-        assert r.headers.get("Content-Security-Policy") == _CSP
+        csp = r.headers.get("Content-Security-Policy")
+        assert csp and "script-src 'self' 'nonce-" in csp
         assert r.headers.get("X-Content-Type-Options") == "nosniff"
         assert r.headers.get("Referrer-Policy") == "same-origin"
 
     def test_pdf_page_gets_csp(self, client):
         r = client.get("/research/pdf")
         assert r.status_code == 200
-        assert r.headers.get("Content-Security-Policy") == _CSP
+        assert "nonce-" in r.headers.get("Content-Security-Policy", "")
         assert r.headers.get("X-Content-Type-Options") == "nosniff"
 
     def test_api_route_does_not_get_csp(self, client):
@@ -89,14 +90,33 @@ class TestSecurityHeaders:
     def test_csp_disallows_object_and_frame_ancestors(self):
         """Lock contract: object-src 'none' kills Flash/embed surface;
         frame-ancestors 'none' is clickjacking defense."""
-        assert "object-src 'none'" in _CSP
-        assert "frame-ancestors 'none'" in _CSP
+        csp = _build_csp("nonce123")
+        assert "object-src 'none'" in csp
+        assert "frame-ancestors 'none'" in csp
 
     def test_csp_self_hosts_scripts_no_external_cdn(self):
         """§17.459 — HTMX is vendored under /static/vendor/, so script-src is
-        'self' only; the unpkg.com origin must be gone (airgap + tighter CSP)."""
-        assert "https://unpkg.com" not in _CSP
-        assert "script-src 'self'" in _CSP
+        'self'; the unpkg.com origin must be gone (airgap + tighter CSP)."""
+        csp = _build_csp("nonce123")
+        assert "https://unpkg.com" not in csp
+        assert "script-src 'self'" in csp
+
+    def test_csp_is_nonce_based_no_unsafe_inline(self):
+        """§17.460 — 'unsafe-inline' is gone from script-src AND style-src;
+        both carry the per-request nonce instead."""
+        csp = _build_csp("abc123")
+        assert "'unsafe-inline'" not in csp
+        assert "script-src 'self' 'nonce-abc123'" in csp
+        assert "style-src 'self' 'nonce-abc123'" in csp
+
+    def test_csp_nonce_is_per_request(self, client):
+        """Each response carries a fresh nonce (replay/guessing defense)."""
+        import re
+        c1 = client.get("/web/jobs").headers["Content-Security-Policy"]
+        c2 = client.get("/web/jobs").headers["Content-Security-Policy"]
+        n1 = re.search(r"nonce-([\w-]+)", c1).group(1)
+        n2 = re.search(r"nonce-([\w-]+)", c2).group(1)
+        assert n1 and n2 and n1 != n2
 
 
 # ---------------------------------------------------------------------------

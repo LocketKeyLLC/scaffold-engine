@@ -39,6 +39,10 @@ router = APIRouter(prefix="/web", tags=["web-ui"], include_in_schema=False)
 # instantiate our own here so the web routes don't import from main
 # (which would make main → web → main a circular dependency).
 templates = Jinja2Templates(directory="app/templates")
+# §17.460 — expose the per-request CSP nonce to web templates (parity with the
+# research router) so any future inline <script>/<style> can be nonce'd.
+from app.middleware.security_headers import current_csp_nonce as _current_csp_nonce
+templates.env.globals["csp_nonce"] = _current_csp_nonce
 
 
 # ---------------------------------------------------------------------------

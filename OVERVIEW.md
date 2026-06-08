@@ -21984,6 +21984,29 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.461 Web UX — a11y pass (keyboard focus, skip link, responsive tables) (2026-06-07)
+
+Accessibility polish on the now-feature-complete web UI.
+
+- **Visible keyboard focus:** a global `:focus-visible` outline (keyboard-only, so mouse users don't see it) on every interactive element — previously there was no focus indicator at all.
+- **Skip link:** a "Skip to content" link as the first focusable element (off-screen until focused) jumps keyboard users past the nav to `<main id="main" tabindex="-1">`. Nav got `aria-label="Primary"`.
+- **Responsive tables:** the jobs + nodes tables are wrapped in `.table-scroll` (`overflow-x:auto`) so they scroll horizontally on narrow viewports instead of overflowing the layout.
+- Complements existing a11y already in place (stepper glyph+label+`aria-current` §17.457, reduced-motion guards §17.455/457, form labels, status-by-text). **Verified:** 3 new tests; `test_web_ui` = **77 passed**; `ci-tier-0` green. Live: skip-link + `main#main` + nav `aria-label` + `.table-scroll` all render; CSS rules served. No OpenAPI change.
+- **Web-UX overhaul slices 1–8 (§17.454–461) complete** — submit→live page · live status · auto-chain · stepper · markdown output · vendored assets · strict nonce CSP · a11y. The native web UI is a self-hosted, airgap-capable, accessible control surface at parity with the chat.
+
+---
+
+### §17.460 Web hardening — nonce-based CSP, drop 'unsafe-inline' (2026-06-07)
+
+§17.459 dropped unpkg from `script-src` but left `'unsafe-inline'` on both `script-src` and `style-src`. This removes it entirely via a per-request nonce — the strongest practical CSP for a server-rendered UI.
+
+- **Per-request nonce:** `SecurityHeadersMiddleware` mints `secrets.token_urlsafe(16)` per HTML request; CSP becomes `script-src 'self' 'nonce-<n>'` / `style-src 'self' 'nonce-<n>'` (no `'unsafe-inline'`). Templates stamp the same nonce on inline `<script>`/`<style>` via the new `csp_nonce()` Jinja global.
+- **Propagation gotcha (verified the hard way):** `request.state` set in a `BaseHTTPMiddleware` does **NOT** reach the endpoint here (scope snapshot) — the first attempt rendered an empty `nonce=""`. Switched to a **`ContextVar` set before `call_next`**, which anyio copies into the endpoint task (the same mechanism `request_id` uses). Live-verified the header nonce now **matches** the rendered inline nonce.
+- **Inline content handled:** `/web/*` templates have zero inline `<script>`/`<style>`/`style=` (htmx is `/static/vendor/` = `'self'`); htmx's auto-injected indicator `<style>` is disabled via a `<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>` so it can't trip the policy. The only inline-heavy page, `research_pdf_upload.html` (`/research/pdf`), got `nonce="{{ csp_nonce() }}"` on its `<style>`/`<script>` and its lone `style="margin-top:1rem"` attribute moved to a `.controls` class (a nonce can't cover an *attribute*).
+- **Verified:** updated `_CSP`→`_build_csp` tests + new per-request-nonce + no-`unsafe-inline` tests; `test_security_middleware` + `test_web_ui` = **86 passed**; `ci-tier-0` green. Live (post-restart, authenticated): `/research/pdf` header nonce == its inline `<style>`/`<script>` nonce, 0 `style=` attrs, 0 `unsafe-inline`; `/web/jobs` + job detail are fully inline-free under the strict CSP. No OpenAPI change.
+
+---
+
 ### §17.459 Web UX — vendor htmx locally + tighten CSP (drop unpkg.com) (2026-06-07)
 
 Sixth slice of the web-UX overhaul. The web UI loaded htmx + the SSE extension from `unpkg.com` at runtime — which breaks `/web/*` on an airgapped box and is inconsistent with the project's pin-everything-by-digest posture (§15). The `security_headers.py` docstring already named the fix: "self-host HTMX under /static/". Done.

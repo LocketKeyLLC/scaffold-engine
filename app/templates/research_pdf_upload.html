@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Scaffold Engine — PDF Research Upload</title>
-<style>
+<style nonce="{{ csp_nonce() }}">
   body { font-family: -apple-system, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; background: #111; color: #eee; }
   h1 { font-size: 1.4rem; }
   .drop { border: 2px dashed #555; border-radius: 8px; padding: 3rem 1rem; text-align: center; cursor: pointer; transition: all 0.2s; }
@@ -12,13 +12,14 @@
   button:disabled { background: #555; cursor: not-allowed; }
   #log { background: #000; color: #0f0; padding: 1rem; margin-top: 1rem; height: 400px; overflow-y: scroll; white-space: pre-wrap; font-family: monospace; font-size: 12px; border-radius: 4px; }
   label { font-size: 0.9rem; }
+  .controls { margin-top: 1rem; }  /* §17.460 — was an inline style= attribute (CSP) */
 </style></head>
 <body>
 <h1>📄 Scaffold Engine — PDF Research</h1>
 <p>Drop a PDF to extract, chunk, and ingest into the knowledge base.</p>
 <div id="drop" class="drop">Drop PDF here, or click to choose file</div>
 <input type="file" id="fileinput" accept="application/pdf">
-<div style="margin-top: 1rem;">
+<div class="controls">
   <label>Extractor:
     <select id="extractor">
       <option value="auto">auto (pypdf → plumber fallback)</option>
@@ -40,7 +41,7 @@
   <button id="upload" disabled>Upload & Ingest</button>
 </div>
 <pre id="log"></pre>
-<script>
+<script nonce="{{ csp_nonce() }}">
 const drop = document.getElementById('drop');
 const inp = document.getElementById('fileinput');
 const btn = document.getElementById('upload');
