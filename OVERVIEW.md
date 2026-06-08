@@ -21984,6 +21984,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.459 Web UX — vendor htmx locally + tighten CSP (drop unpkg.com) (2026-06-07)
+
+Sixth slice of the web-UX overhaul. The web UI loaded htmx + the SSE extension from `unpkg.com` at runtime — which breaks `/web/*` on an airgapped box and is inconsistent with the project's pin-everything-by-digest posture (§15). The `security_headers.py` docstring already named the fix: "self-host HTMX under /static/". Done.
+
+- **Vendored** `htmx@2.0.4` (`/dist/htmx.min.js`, 50,917 B) and `htmx-ext-sse@2.2.2` (`/sse.js`, 8,896 B — the canonical bundle is unminified) into `app/static/vendor/`, byte-identical to what the bare unpkg URLs resolved to (301), so behaviour is unchanged. `_layout.html` now loads `/static/vendor/...`. New `app/static/vendor/VENDOR.md` records versions + **SHA256** + source + an update procedure (the integrity "pin", analogous to image digests).
+- **CSP tightened:** `script-src` dropped `https://unpkg.com` → now `'self' 'unsafe-inline'`. The external script origin is gone entirely (next hardening step, per the docstring, is nonce-izing to drop `'unsafe-inline'`).
+- **Verified:** inverted the old `test_csp_allows_htmx_cdn` (now asserts unpkg is absent + `script-src 'self'`); 3 new vendored-asset tests; `test_web_ui` + `test_security_middleware` = **84 passed**; `ci-tier-0` green. Live-smoked (post-restart): both files serve 200 as `text/javascript`; `/web/jobs` references only the two local paths (no unpkg); response CSP header is `script-src 'self' 'unsafe-inline'`. No OpenAPI change.
+- **Web-UX overhaul slices 1–6 (§17.454–459) complete.** The native web UI is now a self-hosted, airgap-capable control surface at parity with the chat: submit → live page → visible stepper → live status → auto-run → live execution → markdown output. Optional future polish: fuller a11y pass (focus styles, responsive tables), nonce-based CSP.
+
+---
+
 ### §17.458 Web UX — compiled output rendered as markdown (XSS-safe) (2026-06-07)
 
 Fifth slice of the web-UX overhaul. `compiled_output` is the product the user came for, but the web UI dumped it in a raw `<pre>` (review finding #5 — "looks like a log file"). Now it renders as markdown — headings, lists, fenced code, tables, links.

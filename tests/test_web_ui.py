@@ -519,6 +519,32 @@ class TestStaticAssets:
 
 
 @pytest.mark.smoke
+class TestVendoredAssets:
+    """§17.459 — front-end libs are self-hosted, not loaded from a CDN."""
+
+    def test_layout_references_local_vendor_not_cdn(self, client, fake_client):
+        fake_client.jobs.list.return_value = {
+            "jobs": [], "total": 0, "limit": 25, "offset": 0,
+        }
+        body = client.get("/web/jobs").text
+        assert "/static/vendor/htmx-2.0.4.min.js" in body
+        assert "/static/vendor/htmx-ext-sse-2.2.2.js" in body
+        assert "unpkg.com" not in body
+
+    def test_vendored_htmx_served_as_javascript(self, client):
+        resp = client.get("/static/vendor/htmx-2.0.4.min.js")
+        assert resp.status_code == 200
+        assert "javascript" in resp.headers["content-type"]
+        assert "htmx" in resp.text  # real lib, not an error page
+
+    def test_vendored_sse_ext_served(self, client):
+        resp = client.get("/static/vendor/htmx-ext-sse-2.2.2.js")
+        assert resp.status_code == 200
+        assert "javascript" in resp.headers["content-type"]
+        assert "sse" in resp.text.lower()
+
+
+@pytest.mark.smoke
 class TestAuthBypass:
     """Web routes don't require an API key — they're meant to be browsed
     directly. The SDK Client carries the key for the loopback call."""

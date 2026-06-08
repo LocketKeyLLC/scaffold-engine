@@ -5,8 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}Scaffold Engine{% endblock %}</title>
   <link rel="stylesheet" href="/static/web.css">
-  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
-  <script src="https://unpkg.com/htmx-ext-sse@2.2.2" defer></script>
+  {# §17.459 — vendored locally (was unpkg.com). Drops the runtime CDN dep so the
+     UI works airgapped + matches the project's pin-everything posture. To update:
+     re-download the pinned versions into app/static/vendor/ and refresh
+     app/static/vendor/VENDOR.md (versions + sha256). #}
+  <script src="/static/vendor/htmx-2.0.4.min.js" defer></script>
+  <script src="/static/vendor/htmx-ext-sse-2.2.2.js" defer></script>
 </head>
 <body>
   <header class="top-nav">
