@@ -21984,6 +21984,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.458 Web UX — compiled output rendered as markdown (XSS-safe) (2026-06-07)
+
+Fifth slice of the web-UX overhaul. `compiled_output` is the product the user came for, but the web UI dumped it in a raw `<pre>` (review finding #5 — "looks like a log file"). Now it renders as markdown — headings, lists, fenced code, tables, links.
+
+- **Renderer:** module-level `_MD = MarkdownIt("commonmark", {"html": False, "linkify": False})` + `_render_markdown()` in routes.py, plumbed via `_job_context` as `compiled_output_html` (so it's consistent across the full page and the §17.455 poll fragment). `_job_detail_body.html` swaps the `<pre>` for `<div class="markdown-body">{{ compiled_output_html | safe }}</div>` + matching CSS.
+- **XSS guard is the config, not post-sanitization:** `html=False` makes markdown-it **escape** raw HTML in the (LLM/pipeline-generated) output instead of passing it through, and the built-in `validateLink` drops `javascript:`/`vbscript:`/`file:`/`data:` hrefs. `|safe` in the template is sound *only* because of these settings — flipping `html` to True would reintroduce stored XSS. Verified live: a `compiled_output` carrying `<script>` + `[evil](javascript:…)` rendered with **0 live `<script>` tags, 0 `javascript:` hrefs, 1 escaped-inert `&lt;script&gt;`**, alongside correctly rendered `<h1>`/`<strong>`/list.
+- **Dependency:** `markdown-it-py==4.2.0` was already present transitively (via `rich`); now that app code is a direct consumer it's pinned in **`requirements.txt`** AND **`requirements-ci.txt`** (the new module-level import must resolve in the cloud unit-test env, or it's the §17.432 ModuleNotFoundError class). Pure-Python, only pulls `mdurl`; the running image already had it so no rebuild was needed to smoke it.
+- **Verified:** 6 new tests (render + the three XSS guarantees + |safe-in-page) and the renamed compiled-output test; full `test_web_ui` = **71 passed**; `ci-tier-0` green. No OpenAPI change.
+- Remaining web-UX slices: vendored CDN assets (drop the `unpkg.com` runtime dep), fuller a11y pass (focus styles, responsive tables).
+
+---
+
 ### §17.457 Web UX — lifecycle stepper on the job-detail page (2026-06-07)
 
 Fourth slice of the web-UX overhaul. Slices §17.454–456 made the page *live*; this makes the **journey visible**. The 9-state machine (`pending → refining → awaiting_confirmation → researching → planning → executing → running → completed | failed | cancelled | blocked`) is collapsed into a six-phase stepper — **Refine · Review · Research · Plan · Execute · Done** — with the current phase highlighted, passed phases checked, and future phases dimmed. Closes review findings #4 (pipeline stepper) and #6 (no "where am I").

@@ -151,7 +151,9 @@
   {% if job.compiled_output %}
   <section class="compiled-output">
     <h2>Compiled output</h2>
-    <pre class="output-body">{{ job.compiled_output }}</pre>
+    {# §17.458 — rendered as markdown (was a raw <pre> dump). compiled_output_html
+       is produced by _render_markdown with html=False, so |safe is XSS-safe. #}
+    <div class="markdown-body">{{ compiled_output_html | safe }}</div>
   </section>
   {% else %}
   <section class="compiled-output empty">

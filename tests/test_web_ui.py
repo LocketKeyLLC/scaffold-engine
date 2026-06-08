@@ -24,6 +24,7 @@ from app.auth import require_api_key
 from app.main import app
 from app.web.routes import (
     _pipeline_steps,
+    _render_markdown,
     get_sdk_async_long_client,
     get_sdk_client,
     get_sdk_long_client,
@@ -235,7 +236,8 @@ class TestJobDetailPage:
         # error banner absent (no job-level error_summary)
         assert "job-error-banner" not in body
 
-    def test_compiled_output_rendered_in_pre_block(self, client, fake_client):
+    def test_compiled_output_rendered_as_markdown(self, client, fake_client):
+        """§17.458 — compiled_output renders as markdown (was a raw <pre> dump)."""
         fake_client.jobs.status.return_value = {
             "job_id": "j2",
             "job_title": "Wire up RAG",
@@ -252,9 +254,11 @@ class TestJobDetailPage:
         resp = client.get("/web/jobs/j2")
         assert resp.status_code == 200
         body = resp.text
-        # Output rendered (HTML-escaped — `#` becomes `#`, line breaks preserved in <pre>).
-        assert "Step one" in body
-        assert "Step two" in body
+        # Rendered, not dumped: heading + ordered list, inside .markdown-body.
+        assert "markdown-body" in body
+        assert "<h1>Project plan</h1>" in body
+        assert "<li>Step one</li>" in body
+        assert "<pre class=\"output-body\">" not in body
         # Synthesis flags surfaced.
         assert "Synthesis: forced on" in body
         assert "Last compile: synthesized" in body
@@ -457,6 +461,49 @@ class TestPipelineStepper:
         }
         body = client.get("/web/jobs/js/fragment").text
         assert "pipeline-stepper" in body
+
+
+@pytest.mark.smoke
+class TestMarkdownOutput:
+    """§17.458 — server-side markdown rendering of compiled_output, XSS-safe."""
+
+    def test_renders_common_markdown(self):
+        html = _render_markdown("# H\n\n- a\n- b\n\n**bold** `code` [l](https://x.com)")
+        assert "<h1>H</h1>" in html
+        assert "<li>a</li>" in html
+        assert "<strong>bold</strong>" in html
+        assert "<code>code</code>" in html
+        assert '<a href="https://x.com">l</a>' in html
+
+    def test_fenced_code_block(self):
+        html = _render_markdown("```python\nprint('hi')\n```")
+        assert "<pre>" in html and "<code" in html and "print('hi')" in html
+
+    def test_empty_and_none(self):
+        assert _render_markdown(None) == ""
+        assert _render_markdown("") == ""
+
+    def test_raw_html_is_escaped_not_executed(self):
+        html = _render_markdown("hi <script>alert(1)</script> <img src=x onerror=alert(1)>")
+        assert "<script>" not in html
+        assert "<img" not in html
+        assert "&lt;script&gt;" in html  # escaped to inert text
+
+    def test_javascript_link_is_neutralised(self):
+        html = _render_markdown("[click](javascript:alert(1))")
+        assert 'href="javascript:' not in html
+
+    def test_rendered_output_marked_safe_in_page(self, client, fake_client):
+        """The page must emit real tags (|safe), not escaped &lt;h1&gt;."""
+        fake_client.jobs.status.return_value = {
+            "job_id": "jm", "job_title": "x", "job_status": "completed",
+            "compiled_output": "## Result\n\nDone.", "synthesized": False,
+            "synthesis_override": None, "counts": {}, "total_nodes": 0,
+            "next_node": None, "next_actions": [], "nodes": [],
+        }
+        body = client.get("/web/jobs/jm").text
+        assert "<h2>Result</h2>" in body
+        assert "&lt;h2&gt;" not in body
 
 
 @pytest.mark.smoke
