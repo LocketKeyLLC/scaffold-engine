@@ -21984,6 +21984,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.456 Web UX — confirm auto-chains into execution (chat-macro parity) (2026-06-07)
+
+Third slice of the web-UX overhaul. The chat `/confirm` macro chains Phase 2 → DAG → execute; the web `confirm` only ran Phase 2 and left the job in `planning` for a manual "Run all nodes" click. Now the web flow runs to completion on its own.
+
+- **Mechanism:** `post_confirm` redirects to `/web/jobs/{id}?run=1` (was `/web/jobs/{id}`). The `run=1` flag is threaded through §17.455's live poll (`job_detail` + `/fragment` take a `run` query param → `autorun` context; the root re-emits `?run=1` in its poll `hx-get` so the flag survives the `researching` wait). When the job reaches `planning`, the body renders the §17.450 SSE streaming section directly (auto-connects) **instead of** the manual button. End-to-end: confirm → watch `researching` live → at `planning` execution auto-starts → per-node SSE feed.
+- **No separate `/dag` step** (unlike the chat macro): `POST /execute/all` already "auto-generates DAG if none exists", and the web run-stream proxies it — so the existing plumbing covers planning→execute.
+- **Scoped to the confirm action:** auto-start fires only for `planning` + `autorun`. Viewing an old `planning` job (no `run=1`), or an already-`executing`/`blocked` job, keeps the explicit button — so `/execute/all` is never re-kicked on a running job. Polling is already off in `planning` (§17.455), so the single auto-connect can't double-fire.
+- **Verified:** 5 new tests; full `test_web_ui` = **57 passed**; `ci-tier-0` green. Live-smoked (post-`docker restart`): `?run=1` threads through the full page + poll fragment while `refining`; a fabricated `planning` job renders the auto-connecting `sse-connect=.../run/stream` under `?run=1` and the manual "Run all nodes" button without it. No OpenAPI change.
+- Remaining web-UX slices: pipeline stepper, markdown-rendered compiled output, vendored CDN assets, a11y pass.
+
+---
+
 ### §17.455 Web UX — live job-detail page (htmx self-poll in transient states) (2026-06-07)
 
 Second slice of the web-UX overhaul (§17.454 was the first). After §17.454 the user lands on their own job-detail page in `refining`, but the page was static — they had to manually refresh to watch Phase 1 (`refining → awaiting_confirmation`) and Phase 2 (`researching → planning`) progress. Now the detail page **self-polls** and updates in place.

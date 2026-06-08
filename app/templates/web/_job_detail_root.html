@@ -10,8 +10,9 @@
    poll would clobber). When the swapped-in content lacks the trigger, htmx stops
    polling automatically. #}
 {% set _transient = job.job_status in ["pending", "refining", "researching"] %}
+{% set _autorun = autorun|default(false) %}
 <section class="job-detail" id="job-detail-root"
-  {% if _transient %}hx-get="/web/jobs/{{ job_id }}/fragment" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  {% if _transient %}hx-get="/web/jobs/{{ job_id }}/fragment{% if _autorun %}?run=1{% endif %}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
   {% if _transient %}
   <p class="live-indicator" aria-live="polite">
     <span class="live-dot" aria-hidden="true"></span>

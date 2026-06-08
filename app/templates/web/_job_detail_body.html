@@ -33,6 +33,15 @@
   {% endif %}
 
   {% if job.job_status in ("planning", "executing", "blocked") %}
+  {# §17.456 — auto-chain parity with the chat /confirm macro: when the user
+     arrived via "Confirm and run" (autorun) and the job has just reached
+     `planning`, start the SSE execution stream automatically instead of waiting
+     on a manual click. Other entry points (viewing an old planning job, an
+     already-executing/blocked job) keep the explicit button so we never
+     re-kick /execute/all unexpectedly. #}
+  {% if autorun|default(false) and job.job_status == "planning" %}
+  {% include "web/_run_section_streaming.html" %}
+  {% else %}
   <section class="run-flow" id="run-section">
     <h2>Execute</h2>
     <p class="meta">
@@ -44,6 +53,7 @@
             hx-target="#run-section"
             class="btn btn-primary">Run all nodes</button>
   </section>
+  {% endif %}
   {% endif %}
 
   {% if job.job_status == "awaiting_confirmation" %}

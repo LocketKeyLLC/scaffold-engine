@@ -342,6 +342,57 @@ class TestJobDetailLivePoll:
 
 
 @pytest.mark.smoke
+class TestJobDetailAutoRun:
+    """§17.456 — ?run=1 auto-chains into execution at planning (chat-macro parity)."""
+
+    @staticmethod
+    def _payload(status):
+        return {
+            "job_id": "jp", "job_title": "Run job", "job_status": status,
+            "compiled_output": None, "synthesized": False,
+            "synthesis_override": None, "counts": {}, "total_nodes": 0,
+            "next_node": None, "next_actions": [], "nodes": [],
+        }
+
+    def test_planning_with_run_auto_starts_stream(self, client, fake_client):
+        fake_client.jobs.status.return_value = self._payload("planning")
+        body = client.get("/web/jobs/jp?run=1").text
+        # SSE stream auto-connects; the manual button is gone.
+        assert 'sse-connect="/web/jobs/jp/run/stream"' in body
+        assert "Run all nodes" not in body
+
+    def test_planning_without_run_shows_manual_button(self, client, fake_client):
+        fake_client.jobs.status.return_value = self._payload("planning")
+        body = client.get("/web/jobs/jp").text
+        assert "Run all nodes" in body
+        assert 'sse-connect="/web/jobs/jp/run/stream"' not in body
+
+    def test_executing_with_run_does_not_rekick(self, client, fake_client):
+        """Auto-start is scoped to `planning`. An already-executing job keeps
+        the manual button so we never re-POST /execute/all on a running job."""
+        fake_client.jobs.status.return_value = self._payload("executing")
+        body = client.get("/web/jobs/jp?run=1").text
+        assert "Run all nodes" in body
+        assert 'sse-connect="/web/jobs/jp/run/stream"' not in body
+
+    def test_run_flag_survives_poll_while_researching(self, client, fake_client):
+        """The poll target keeps ?run=1 so the flag isn't lost during the
+        researching wait before planning is reached."""
+        fake_client.jobs.status.return_value = self._payload("researching")
+        body = client.get("/web/jobs/jp/fragment?run=1").text
+        assert 'hx-get="/web/jobs/jp/fragment?run=1"' in body
+        assert 'hx-trigger="every 3s"' in body
+
+    def test_fragment_auto_starts_when_poll_lands_on_planning(self, client, fake_client):
+        """The poll that catches the researching→planning transition swaps in a
+        fragment that auto-connects the stream (polling has stopped by then)."""
+        fake_client.jobs.status.return_value = self._payload("planning")
+        body = client.get("/web/jobs/jp/fragment?run=1").text
+        assert 'sse-connect="/web/jobs/jp/run/stream"' in body
+        assert "hx-trigger" not in body  # planning is not transient → poll stops
+
+
+@pytest.mark.smoke
 class TestStaticAssets:
     """The /static mount serves the web CSS without auth."""
 
@@ -468,12 +519,14 @@ class TestPostIdeate:
 class TestPostConfirm:
     """POST /web/jobs/{id}/confirm kicks off Phase 2 in a BackgroundTask."""
 
-    def test_redirects_to_job_detail(self, client, fake_long_client):
+    def test_redirects_to_job_detail_with_autorun(self, client, fake_long_client):
+        """§17.456 — redirect carries ?run=1 so the page auto-starts execution
+        once Phase 2 reaches planning (chat /confirm macro parity)."""
         resp = client.post(
             "/web/jobs/job-abc/confirm", data={"feedback": ""},
         )
         assert resp.status_code == 302
-        assert resp.headers["location"] == "/web/jobs/job-abc"
+        assert resp.headers["location"] == "/web/jobs/job-abc?run=1"
 
     def test_calls_long_client_confirm_with_feedback(self, client, fake_long_client):
         client.post(

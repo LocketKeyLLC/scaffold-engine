@@ -169,12 +169,18 @@ def jobs_list(
 def job_detail(
     request: Request,
     job_id: str,
+    run: int = 0,
     client=Depends(get_sdk_client),
 ):
     """Per-job detail: status, nodes, compiled_output, synthesis flags.
 
     §17.450 — `def` (not `async def`): same single-worker loopback-deadlock fix
     as jobs_list. The body's only I/O is the blocking sync `client.jobs.status`.
+
+    §17.456 — ``?run=1`` (set by the confirm redirect) carries auto-run intent:
+    when the job reaches `planning`, the page auto-starts the SSE execution
+    stream instead of showing the manual "Run all nodes" button. The flag is
+    threaded through §17.455's poll so it survives the `researching` wait.
     """
     try:
         payload = client.jobs.status(job_id)
@@ -198,7 +204,7 @@ def job_detail(
 
     return templates.TemplateResponse(
         request, "web/job_detail.html",
-        {"job": payload, "job_id": job_id},
+        {"job": payload, "job_id": job_id, "autorun": bool(run)},
     )
 
 
@@ -208,6 +214,7 @@ def job_detail(
 def job_detail_fragment(
     request: Request,
     job_id: str,
+    run: int = 0,
     client=Depends(get_sdk_client),
 ):
     """§17.455 — htmx poll target for the live job-detail page.
@@ -241,7 +248,7 @@ def job_detail_fragment(
 
     return templates.TemplateResponse(
         request, "web/_job_detail_root.html",
-        {"job": payload, "job_id": job_id},
+        {"job": payload, "job_id": job_id, "autorun": bool(run)},
     )
 
 
@@ -346,13 +353,17 @@ async def post_confirm(
     feedback: str | None = Form(None),
     long_client=Depends(get_sdk_long_client),
 ):
-    """Sprint J.2.b — kick off Phase 2 (research → ingest → compile) as
-    a background task.
+    """Sprint J.2.b / §17.456 — kick off Phase 2 (research → ingest → compile)
+    as a background task, then auto-chain into execution (parity with the chat
+    `/confirm` macro).
 
-    Phase 2 takes 512-1450s. Same background-task pattern as ideate:
-    queue the SDK call, redirect to the job-detail page so the user
-    can watch the status transition `awaiting_confirmation` →
-    `researching` → `planning` via page refresh.
+    Phase 2 takes 512-1450s, so it stays a background task. We redirect to the
+    detail page with ``?run=1``: §17.455's live poll watches the
+    `awaiting_confirmation → researching → planning` transition, and the ``run=1``
+    flag (carried through the poll) makes the page auto-start the SSE execution
+    stream the moment the job reaches `planning` — no manual "Run all nodes"
+    click. ``/execute/all`` auto-generates the DAG if missing, so (unlike the chat
+    macro) no separate `/dag` step is needed.
     """
     feedback_clean = (feedback or "").strip() or None
 
@@ -367,7 +378,7 @@ async def post_confirm(
 
     background_tasks.add_task(_kick_off)
     return RedirectResponse(
-        url=f"/web/jobs/{job_id}", status_code=302,
+        url=f"/web/jobs/{job_id}?run=1", status_code=302,
     )
 
 
