@@ -253,6 +253,30 @@ tr.next-node { background: #eff6ff; }
 .event-error { color: var(--status-failed); }
 .event-verified { color: var(--status-completed); }
 
+/* §17.455 — live-poll indicator on the job-detail page (transient states) */
+.live-indicator {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 12px;
+  padding: 6px 12px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 4px;
+  color: var(--status-running);
+  font-size: 13px;
+}
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--status-running);
+  animation: live-pulse 1.4s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: .35; transform: scale(.7); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-dot { animation: none; }
+}
+
 /* §17.450 (Phase B / B3) — job-level failure banner + per-node "why" row */
 .job-error-banner {
   margin: .75rem 0;

@@ -21984,6 +21984,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.455 Web UX — live job-detail page (htmx self-poll in transient states) (2026-06-07)
+
+Second slice of the web-UX overhaul (§17.454 was the first). After §17.454 the user lands on their own job-detail page in `refining`, but the page was static — they had to manually refresh to watch Phase 1 (`refining → awaiting_confirmation`) and Phase 2 (`researching → planning`) progress. Now the detail page **self-polls** and updates in place.
+
+- **Template restructure:** the detail body moved to `_job_detail_body.html`; a new `_job_detail_root.html` wraps it in `<section id="job-detail-root">` and `job_detail.html` just includes the root. New route **`GET /web/jobs/{id}/fragment`** (`def`, §17.450 loopback rule; `include_in_schema=False`) returns the bare root so htmx can `hx-swap="outerHTML"` it.
+- **Poll only in pure-wait states:** the root emits `hx-get=.../fragment hx-trigger="every 3s"` **only** when `job_status ∈ {pending, refining, researching}`. It is deliberately OFF in interactive/streaming states — `awaiting_confirmation` (polling would wipe in-progress confirm-form feedback) and `planning/executing/blocked` (the "Run all nodes" button swaps in the §17.450 SSE run stream, which a poll would clobber). When the job transitions, the swapped-in fragment lacks the trigger, so **htmx stops polling on its own**. Fetch errors return a bare non-polling section (halts the loop instead of hammering a broken backend every 3s).
+- A small pulsing "● Live — updates automatically" indicator (CSS `live-pulse`, `prefers-reduced-motion`-aware) gives the perceived-performance cue the review called for.
+- **Verified:** 6 new live-poll tests; full `test_web_ui` = **52 passed**; `ci-tier-0` green. Live-smoked (after `docker restart` — bind-mounted route needs a process reload, §17.438 lesson): `/web/jobs/{id}/fragment` → 200 with `hx-trigger="every 3s"` + full body while `refining`. No OpenAPI change (web routes are `include_in_schema=False`).
+- Remaining web-UX slices: web `/confirm` auto-chain parity with the chat macro (Phase 2 → DAG → execute), pipeline stepper, markdown-rendered output, vendored CDN assets.
+
+---
+
 ### §17.454 Web UX — async ideate kickoff so submit lands on the live job page (2026-06-07)
 
 UX review of the native web UI surfaced a broken primary flow: `POST /web/ideate` fired the synchronous `/ideate` (100-547 s) as a background task and redirected to `/web/jobs?status=refining`, so the user had to **hunt for their own just-submitted job** in a filtered list — the job_id wasn't known at redirect time. Root cause: the job row is created at the *start* of `refine_idea` but the HTTP call doesn't return the id until the full Phase 1 LLM pass finishes.

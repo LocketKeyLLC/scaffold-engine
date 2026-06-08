@@ -272,6 +272,76 @@ class TestJobDetailPage:
 
 
 @pytest.mark.smoke
+class TestJobDetailLivePoll:
+    """§17.455 — the detail page auto-polls only in transient wait states, and
+    the fragment route re-emits / drops the trigger so polling self-stops."""
+
+    @staticmethod
+    def _payload(status):
+        return {
+            "job_id": "jp", "job_title": "Live job", "job_status": status,
+            "compiled_output": None, "synthesized": False,
+            "synthesis_override": None, "counts": {}, "total_nodes": 0,
+            "next_node": None, "next_actions": [], "nodes": [],
+        }
+
+    def test_full_page_polls_in_transient_state(self, client, fake_client):
+        fake_client.jobs.status.return_value = self._payload("refining")
+        body = client.get("/web/jobs/jp").text
+        assert 'id="job-detail-root"' in body
+        assert 'hx-get="/web/jobs/jp/fragment"' in body
+        assert 'hx-trigger="every 3s"' in body
+        assert "live-indicator" in body
+
+    def test_full_page_does_not_poll_in_interactive_state(self, client, fake_client):
+        """awaiting_confirmation shows the confirm form — polling would wipe
+        the user's in-progress feedback, so it must be OFF."""
+        fake_client.jobs.status.return_value = self._payload("awaiting_confirmation")
+        body = client.get("/web/jobs/jp").text
+        assert 'id="job-detail-root"' in body
+        assert "hx-trigger" not in body
+        assert "live-indicator" not in body
+        # The interactive element is present.
+        assert "confirm-form" in body
+
+    def test_fragment_route_returns_root_with_trigger_when_transient(
+        self, client, fake_client,
+    ):
+        fake_client.jobs.status.return_value = self._payload("researching")
+        resp = client.get("/web/jobs/jp/fragment")
+        assert resp.status_code == 200
+        body = resp.text
+        assert 'id="job-detail-root"' in body
+        assert 'hx-trigger="every 3s"' in body
+        # Fragment carries the body too (not just the wrapper).
+        assert "Node counts" in body
+
+    def test_fragment_route_drops_trigger_at_terminal_state(self, client, fake_client):
+        """When the job reaches completed, the swapped-in fragment has no
+        trigger, so htmx stops polling on its own."""
+        fake_client.jobs.status.return_value = self._payload("completed")
+        body = client.get("/web/jobs/jp/fragment").text
+        assert 'id="job-detail-root"' in body
+        assert "hx-trigger" not in body
+
+    def test_fragment_route_halts_on_error(self, client, fake_client):
+        """A fetch error returns a bare non-polling section so the poll loop
+        stops instead of hammering a broken backend every 3s."""
+        fake_client.jobs.status.side_effect = ConnectionError("down")
+        resp = client.get("/web/jobs/jp/fragment")
+        assert resp.status_code == 200
+        body = resp.text
+        assert "hx-trigger" not in body
+        assert "Lost contact" in body
+
+    def test_fragment_route_halts_on_missing_job(self, client, fake_client):
+        fake_client.jobs.status.return_value = {"error": "not found"}
+        body = client.get("/web/jobs/jp/fragment").text
+        assert "hx-trigger" not in body
+        assert "Lost contact" in body
+
+
+@pytest.mark.smoke
 class TestStaticAssets:
     """The /static mount serves the web CSS without auth."""
 

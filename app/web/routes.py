@@ -202,6 +202,49 @@ def job_detail(
     )
 
 
+@router.get(
+    "/jobs/{job_id}/fragment", response_class=HTMLResponse, dependencies=[],
+)
+def job_detail_fragment(
+    request: Request,
+    job_id: str,
+    client=Depends(get_sdk_client),
+):
+    """§17.455 — htmx poll target for the live job-detail page.
+
+    Returns just the job-detail root (``_job_detail_root.html`` — the same wrapper
+    + body the full page renders), so a poll can ``hx-swap="outerHTML"`` it in
+    place. The root re-emits its own polling trigger only while the job stays in a
+    transient state (pending/refining/researching); once it transitions, the
+    swapped-in markup omits the trigger and htmx stops polling.
+
+    §17.450 — ``def`` (not ``async def``): blocking sync loopback call, same
+    single-worker deadlock fix as ``job_detail``.
+
+    On any fetch error we return a bare, non-polling section so the poll loop
+    halts gracefully instead of hammering a broken backend every 3s.
+    """
+    try:
+        payload = client.jobs.status(job_id)
+    except Exception as exc:
+        logger.exception(
+            "web_job_fragment_failed: job=%s error=%s", job_id, exc,
+        )
+        payload = None
+
+    if not isinstance(payload, dict) or "error" in payload:
+        return HTMLResponse(
+            '<section class="job-detail" id="job-detail-root">'
+            '<p class="job-error-banner">⚠ Lost contact with this job — '
+            '<a href="/web/jobs/' + job_id + '">reload</a>.</p></section>'
+        )
+
+    return templates.TemplateResponse(
+        request, "web/_job_detail_root.html",
+        {"job": payload, "job_id": job_id},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Submit flow (J.2.b)
 # ---------------------------------------------------------------------------
