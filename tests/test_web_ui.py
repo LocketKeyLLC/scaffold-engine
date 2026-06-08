@@ -519,6 +519,40 @@ class TestStaticAssets:
 
 
 @pytest.mark.smoke
+class TestAccessibility:
+    """§17.461 — keyboard/skip-link/landmark/responsive-table a11y."""
+
+    def test_skip_link_and_main_landmark(self, client, fake_client):
+        fake_client.jobs.list.return_value = {
+            "jobs": [], "total": 0, "limit": 25, "offset": 0,
+        }
+        body = client.get("/web/jobs").text
+        assert 'class="skip-link" href="#main"' in body
+        assert 'id="main"' in body
+        assert 'aria-label="Primary"' in body  # nav landmark
+
+    def test_jobs_table_wrapped_for_responsive_scroll(self, client, fake_client):
+        fake_client.jobs.list.return_value = {
+            "jobs": [{"id": "j1", "title": "t", "status": "completed",
+                      "node_count": 1, "updated_at": "2026-06-08"}],
+            "total": 1, "limit": 25, "offset": 0,
+        }
+        body = client.get("/web/jobs").text
+        assert "table-scroll" in body
+
+    def test_nodes_table_wrapped_for_responsive_scroll(self, client, fake_client):
+        fake_client.jobs.status.return_value = {
+            "job_id": "j1", "job_title": "x", "job_status": "running",
+            "compiled_output": None, "synthesized": False, "synthesis_override": None,
+            "counts": {}, "total_nodes": 1, "next_node": None, "next_actions": [],
+            "nodes": [{"node_key": "T1", "title": "n", "status": "done",
+                       "execution_order": 1, "actionable": False}],
+        }
+        body = client.get("/web/jobs/j1").text
+        assert "table-scroll" in body
+
+
+@pytest.mark.smoke
 class TestVendoredAssets:
     """§17.459 — front-end libs are self-hosted, not loaded from a CDN."""
 

@@ -21,6 +21,33 @@
 
 * { box-sizing: border-box; }
 
+/* §17.461 — a11y: visible keyboard focus on every interactive element.
+   :focus-visible only fires for keyboard nav, so mouse users don't see it. */
+:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* §17.461 — skip-to-content link: off-screen until focused, then visible. */
+.skip-link {
+  position: absolute;
+  left: 8px;
+  top: -48px;
+  z-index: 100;
+  background: var(--link);
+  color: #fff;
+  padding: 8px 14px;
+  border-radius: 4px;
+  text-decoration: none;
+  transition: top 0.15s ease;
+}
+.skip-link:focus { top: 8px; }
+
+/* §17.461 — let wide tables scroll horizontally on narrow viewports instead
+   of overflowing the layout. Wrapper is in the templates (.table-scroll). */
+.table-scroll { overflow-x: auto; }
+
 body {
   margin: 0;
   font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;

@@ -21984,6 +21984,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.461 Web UX — a11y pass (keyboard focus, skip link, responsive tables) (2026-06-07)
+
+Accessibility polish on the now-feature-complete web UI.
+
+- **Visible keyboard focus:** a global `:focus-visible` outline (keyboard-only, so mouse users don't see it) on every interactive element — previously there was no focus indicator at all.
+- **Skip link:** a "Skip to content" link as the first focusable element (off-screen until focused) jumps keyboard users past the nav to `<main id="main" tabindex="-1">`. Nav got `aria-label="Primary"`.
+- **Responsive tables:** the jobs + nodes tables are wrapped in `.table-scroll` (`overflow-x:auto`) so they scroll horizontally on narrow viewports instead of overflowing the layout.
+- Complements existing a11y already in place (stepper glyph+label+`aria-current` §17.457, reduced-motion guards §17.455/457, form labels, status-by-text). **Verified:** 3 new tests; `test_web_ui` = **77 passed**; `ci-tier-0` green. Live: skip-link + `main#main` + nav `aria-label` + `.table-scroll` all render; CSS rules served. No OpenAPI change.
+- **Web-UX overhaul slices 1–8 (§17.454–461) complete** — submit→live page · live status · auto-chain · stepper · markdown output · vendored assets · strict nonce CSP · a11y. The native web UI is a self-hosted, airgap-capable, accessible control surface at parity with the chat.
+
+---
+
 ### §17.460 Web hardening — nonce-based CSP, drop 'unsafe-inline' (2026-06-07)
 
 §17.459 dropped unpkg from `script-src` but left `'unsafe-inline'` on both `script-src` and `style-src`. This removes it entirely via a per-request nonce — the strongest practical CSP for a server-rendered UI.

@@ -17,14 +17,17 @@
   <script src="/static/vendor/htmx-ext-sse-2.2.2.js" defer></script>
 </head>
 <body>
+  {# §17.461 — a11y: skip link (first focusable element) jumps keyboard users
+     past the nav straight to content. #}
+  <a class="skip-link" href="#main">Skip to content</a>
   <header class="top-nav">
     <a href="/web/jobs" class="brand">Scaffold Engine</a>
-    <nav>
+    <nav aria-label="Primary">
       <a href="/web/jobs">Jobs</a>
       <a href="/web/new" class="nav-cta">+ New idea</a>
     </nav>
   </header>
-  <main>
+  <main id="main" tabindex="-1">
     {% block content %}{% endblock %}
   </main>
 </body>

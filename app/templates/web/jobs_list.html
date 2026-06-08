@@ -25,6 +25,7 @@
   </p>
 
   {% if jobs %}
+  <div class="table-scroll">
   <table class="jobs-table">
     <thead>
       <tr>
@@ -45,6 +46,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
   <p class="empty-state">No jobs match this filter. Try clearing the search or status.</p>
   {% endif %}
