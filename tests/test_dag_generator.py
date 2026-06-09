@@ -608,12 +608,17 @@ class TestValidatorLoop:
         assert result["validator_calls"] == 0
 
     async def test_first_attempt_parse_failure_returns_error(self):
-        """LLM emits non-JSON on attempt 1 → caller can fail the job."""
+        """§17.463 — non-JSON on EVERY re-draw of attempt 1 → after the
+        retry-on-empty loop exhausts, caller can fail the job."""
         from app.modules import dag_generator
         from app import model_router as _mr
 
+        # All 3 draws unparseable → the §17.463 redraw loop exhausts, then the
+        # attempt-1 parse-failure contract returns the error.
         mock = AsyncMock(side_effect=[
             _llm_response("not actually JSON {{{"),
+            _llm_response("still not JSON"),
+            _llm_response(""),  # thinking-model empty
         ])
         with patch.object(_mr, "generate", new=mock):
             result = await dag_generator._generate_dag_with_validator(
@@ -623,6 +628,31 @@ class TestValidatorLoop:
         assert result["dag_data"] is None
         assert result["error"] == "LLM output was not valid JSON"
         assert result["attempts"] == 1
+        assert mock.call_count == 3  # retried on empty/unparseable, not hard-failed
+
+    async def test_empty_first_draw_redraws_and_succeeds(self):
+        """§17.463 — the reported bug: the thinking model returns success+EMPTY on
+        the first draw (parse → None). Pre-fix this hard-failed the whole DAG
+        ('DAG must have at least 2 tasks'). Now a fresh draw lands a valid DAG and
+        generation succeeds."""
+        from app.modules import dag_generator
+        from app import model_router as _mr
+
+        mock = AsyncMock(side_effect=[
+            _llm_response(""),                 # gen draw 1 — empty (thinking-model)
+            _llm_response(_dag_json()),        # gen draw 2 — valid DAG
+            _llm_response(_issues([])),        # validator pass — clean
+        ])
+        with patch.object(_mr, "generate", new=mock):
+            result = await dag_generator._generate_dag_with_validator(
+                {"brief": "test"}, {"role": "model_general"},
+            )
+
+        assert result["dag_data"] is not None
+        assert result["error"] is None
+        assert result["attempts"] == 1
+        assert result["validator_calls"] == 1
+        assert mock.call_count == 3  # 2 gen draws (1 empty + 1 valid) + 1 validator
 
     async def test_validator_failed_open_ships_current_dag(self):
         """Validator JSON parse fails → ship current DAG with a warning."""

@@ -21984,6 +21984,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.463 Fix — DAG generation hard-failed on an empty thinking-model draw → "DAG must have at least 2 tasks" (2026-06-08)
+
+Operator-reported: "research completed but the DAG failed to generate." Reproduced from the logs — a real job ("Multi-Purpose HomeLab…") failed with `error_summary = "DAG must have at least 2 tasks"`, and `scaffold.dag_validator` logged `dag_validator_json_parse_failed: raw=''` (empty content). Same thinking-model-empty-content class as §17.453/§17.462, now in the DAG-generation path.
+
+- **Root cause:** `dag_generator._generate_dag_with_validator` called `model_router.generate(..., max_tokens=4096)` and, on **attempt 1**, an empty/unparseable response (`parse_json_object("") → None`) **hard-returned** `"LLM output was not valid JSON"` — no retry. The validator-driven retry loop only helps *subsequent* attempts. So when the generator role (`qwen3.5:397b-cloud`, a *thinking* model since §17.440) spent its budget on reasoning and returned `success=True` + empty content, the whole DAG died → `len(tasks) < 2` → the "DAG must have at least 2 tasks" the operator saw. (The validator's own empty draw is already fail-open, so it's non-fatal.)
+- **Fix:** new `_generate_dag_json` helper wraps the generator call with retry-on-empty — **8192-token headroom** (was 4096) + up to **3 independent re-draws** on a success-but-unparseable response; a hard failure (`success=False`) still surfaces immediately, preserving the existing failure contract. Mirrors §17.453's `_generate_nonempty`.
+- **Verified:** `test_dag_generator` + validator + parse-diag = **67 passed**, incl. two new cases — `test_empty_first_draw_redraws_and_succeeds` (empty draw 1 → valid draw 2 → DAG generated, the reported bug) and the updated `test_first_attempt_parse_failure_returns_error` (all 3 draws unparseable → fails after retries, `call_count == 3`). Live on the rebuilt prod image: `POST /dag` generated a valid **6-task DAG** (T1–T6 persisted) on the real `qwen3.5:397b-cloud` — happy path + 8192-token budget confirmed (the intermittent empty case didn't trigger this run, so the deterministic proof is the unit tests). The "guard EVERY consumer of LLM output for empty" lesson (see [[thinking-model-empty-content]]), now extended to DAG generation.
+
+---
+
 ### §17.462 Fix — prompt optimization could blank a node's prompt → blocked jobs (2026-06-08)
 
 Found via a real prod-image end-to-end run (the §17.454–461 web overhaul rendered every state, but no multi-node job would *complete*). Root cause traced through the live job: the **first DAG node executed with an empty user prompt**, so the model rightly refused ("No task brief… only the system instruction block"), the verifier rejected it, retries re-hit the same path, the node failed, and its 5 downstream nodes blocked.
