@@ -21984,6 +21984,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.464 Sweep — shared empty-guard for LLM-output consumers; fix latent Phase-2 compile hard-fail (2026-06-08)
+
+After the same thinking-model-empty-content root cause surfaced **three** times in different paths (§17.453 CoVe, §17.462 prompt-optimizer, §17.463 DAG-gen), swept every `model_router.generate/.chat` consumer to get ahead of the 4th.
+
+- **Findings:** one genuine latent **hard-failure** — `ideation_workflow` Phase 2 **compile** (`parse_json_object("")→None → _fail_job`), i.e. *"research completed but compile failed"*, the twin of the §17.463 DAG bug one step earlier. Three **fail-soft** sites (distill → 0 entries; research summary → fallback text; `regenerate_subgraph` → no-op replan). The rest already guarded (feasibility fail-soft, CoVe §17.453, dag_validator fail-open, dag-gen §17.463, optimizer §17.462, node-exec verifier+retry).
+- **Systemic fix:** new `app/utils/llm_retry.py::generate_until_nonempty(generate, prompt, route_kwargs, *, system, temperature, max_tokens, draws=3, label)` — re-draws on a success+empty response, surfaces hard failures (`success=False`) immediately. **`generate` is dependency-injected**, not imported internally: callers commonly `MagicMock`-replace `model_router` at *their* module level, which a helper-internal `from app import model_router` would miss (this broke 5 tests until injected).
+- **Applied** to compile (critical) + distill, both with 8192-token headroom (was 4096). summary + `regenerate_subgraph` left as documented fail-soft (have working fallbacks); the helper is the recommended guard for any new consumer.
+- **Verified:** 5 helper unit tests + 21 ideation/compile tests pass. Live on the rebuilt prod image: a fresh job ran research → distill → compile → **`planning`** (compile OK through the helper on the real `qwen3.5:397b-cloud`; 0 redraws this run — intermittent, so unit tests are the deterministic proof). **Lesson institutionalised: every new LLM-output consumer routes through `generate_until_nonempty` (or an equivalent guard).** See [[thinking-model-empty-content]].
+
+---
+
 ### §17.463 Fix — DAG generation hard-failed on an empty thinking-model draw → "DAG must have at least 2 tasks" (2026-06-08)
 
 Operator-reported: "research completed but the DAG failed to generate." Reproduced from the logs — a real job ("Multi-Purpose HomeLab…") failed with `error_summary = "DAG must have at least 2 tasks"`, and `scaffold.dag_validator` logged `dag_validator_json_parse_failed: raw=''` (empty content). Same thinking-model-empty-content class as §17.453/§17.462, now in the DAG-generation path.
