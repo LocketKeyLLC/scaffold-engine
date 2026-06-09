@@ -67,6 +67,7 @@ from app.modules.prompt_assembly import (  # noqa: F401  re-exported for callers
 )
 from app.modules.rag_pipeline import query_rag
 from app.utils.cost_tracking import current_job_id, current_node_id
+from app.utils.llm_retry import chat_until_nonempty  # §17.465
 
 logger = logging.getLogger(__name__)
 
@@ -1039,8 +1040,23 @@ async def execute_next_node(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": exec_prompt},
             ]
-            resp = await model_router.chat(
-                messages=messages, role=exec_role, overrides=exec_overrides,
+            # §17.465 — route through the shared empty-guard with a generous
+            # token budget. The bare model_router.chat() default (max_tokens=4096)
+            # starves a thinking model: num_predict is a shared reasoning+content
+            # budget, so a long chain of thought returns empty/truncated content
+            # that the verifier rejects — and the W.1 retry loop re-runs at the
+            # same 4096 cap, so it can never recover (this blocked job 4e3b8f01's
+            # T3/T5). node_generation_max_tokens (8192) gives both room to
+            # coexist; chat_until_nonempty re-draws the occasional empty draw
+            # here, before spending a verifier call or a retry_count slot.
+            resp = await chat_until_nonempty(
+                model_router.chat,
+                messages,
+                {"role": exec_role, "overrides": exec_overrides},
+                temperature=0.7,
+                max_tokens=settings.node_generation_max_tokens,
+                draws=settings.node_generation_max_draws,
+                label=f"node-exec {node_key}",
             )
             if not resp.success:
                 raise RuntimeError(resp.error or "Model returned failure")
