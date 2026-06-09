@@ -40,6 +40,7 @@ from app.modules.gt_extractor import (
 from app.modules.idea_refinement import create_ideation_job, refine_idea
 from app.modules.rag_pipeline import ingest_entries
 from app.utils.job_utils import fail_job as _fail_job
+from app.utils.llm_retry import generate_until_nonempty
 from app.utils.llm_parsing import parse_json_array, parse_json_object
 from app.utils.topic_detection import detect_topic_id
 
@@ -384,12 +385,17 @@ async def research_and_compile(
                 {"model": model} if model
                 else {"role": settings.ideation_model_role, "overrides": model_overrides}
             )
-            resp = await model_router.generate(
+            # §17.464 — retry-on-empty (thinking-model guard). An empty distill
+            # draw silently dropped a whole research round's entries (fail-soft
+            # `or []`); re-draw with 8192-token headroom first.
+            resp = await generate_until_nonempty(
+                model_router.generate,
                 DISTILL_PROMPT.format(topic=topic_str, results=results_text),
+                distill_route,
                 system=DISTILL_SYSTEM,
                 temperature=0.2,
-                max_tokens=4096,
-                **distill_route,
+                max_tokens=8192,
+                label="phase2_distill",
             )
             if resp.success:
                 raw_entries = parse_json_array(resp.text) or []
@@ -444,14 +450,20 @@ async def research_and_compile(
             {"model": model} if model
             else {"role": settings.ideation_model_role, "overrides": model_overrides}
         )
-        resp = await model_router.generate(
+        # §17.464 — retry-on-empty (thinking-model guard). This is the critical
+        # one: an empty compile draw made parse_json_object → None → _fail_job,
+        # i.e. "research completed but compile failed" — the twin of the §17.463
+        # DAG bug, one step earlier. Re-draw with 8192-token headroom first.
+        resp = await generate_until_nonempty(
+            model_router.generate,
             "Compile an execution plan from this context:\n"
             + compile_context
             + feedback_section,
+            compile_route,
             system=COMPILE_SYSTEM,
             temperature=0.3,
-            max_tokens=4096,
-            **compile_route,
+            max_tokens=8192,
+            label="phase2_compile",
         )
 
         workflow = parse_json_object(resp.text) if resp.success else None
