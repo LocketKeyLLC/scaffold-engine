@@ -21984,6 +21984,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.465 Fix — node-exec generation starved by 4096-token budget → thinking-model empty/truncated content blocked a job (the §17.464 "4th occurrence") (2026-06-09)
+
+The §17.464 sweep classified **"node-exec verifier+retry"** as already-guarded. It was not — and it was the next occurrence. Job `4e3b8f01-145c-4c54-a0f6-5639101ee1ca` ("Secure Proxmox HomeLab") went **`blocked`**: nodes T3 (Configure SAS storage pools) and T5 (Enable host GPU passthrough) each exhausted all 3 retries. The verifier rejections in `execution_logs.details` told the story — mostly *"No output provided / completely empty"*, some *"cuts off at step 2"* / *"only lists prerequisites and inputs"* (truncation).
+
+- **Root cause:** `execution_agent._run_inference` called `model_router.chat()` at the bare default **`max_tokens=4096`**. For the cloud thinking model (`qwen3.5:397b-cloud`, default since §17.440) `num_predict` is a **shared reasoning+content budget**. Reproduced live against the daemon: a heavy passthrough prompt at `num_predict=1500` returned `done_reason=length`, `thinking_len=5448`, **`content_len=0`** (the empty rejection); at 4096 the same prompt landed `eval_count=3996/4096` — one notch from truncation (the "cuts off" rejections). The verifier was **correct**; generation was starved. Worse, the W.1 retry loop re-ran each attempt at the **same 4096 cap**, so a budget problem could never recover → all retries burned → job blocked. This is exactly the failure mode §17.464 swept for, mis-tagged as covered because "there's a retry loop."
+- **Fix 1 (budget):** new `node_generation_max_tokens` (default **8192**, `ge=512 le=16384`) + `node_generation_max_draws` (default 3) in `config.py`. The same heavy prompt at 8192 completes at `eval_count=4287` with full content. Mirrors the CoVe `_ANSWER_TOKENS=8192` live-tuning (§17.453).
+- **Fix 2 (redraw):** new `app/utils/llm_retry.py::chat_until_nonempty(chat, messages, route_kwargs, *, temperature, max_tokens, draws, label)` — the messages-shaped sibling of §17.464's `generate_until_nonempty` (kept the executor on `/api/chat` rather than switching to `/api/generate` to fit the existing helper). `_run_inference` now routes through it: a success+empty draw re-draws **at the generation layer**, before spending a verifier call or a `retry_count` slot. Same dependency-injected `chat`, same fail-fast on `success=False`, same return-last-empty semantics.
+- **Verified:** 13 targeted tests pass (6 new `chat_until_nonempty` unit tests + 2 new node-exec wiring tests asserting redraw-on-empty and the 8192 budget passthrough, in `tests/test_execution_agent_empty_redraw.py`; + the 5 pre-existing `generate_until_nonempty` tests). 93 `test_execution_agent_*` regression tests green; config loads (`max_tokens=8192 draws=3`). **Lesson reinforced: "has a retry loop" ≠ "guarded against empty content" — a retry that re-runs at the same starved budget cannot recover.** See [[thinking-model-empty-content]].
+
+---
+
 ### §17.464 Sweep — shared empty-guard for LLM-output consumers; fix latent Phase-2 compile hard-fail (2026-06-08)
 
 After the same thinking-model-empty-content root cause surfaced **three** times in different paths (§17.453 CoVe, §17.462 prompt-optimizer, §17.463 DAG-gen), swept every `model_router.generate/.chat` consumer to get ahead of the 4th.

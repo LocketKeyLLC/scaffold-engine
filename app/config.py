@@ -491,6 +491,23 @@ class Settings(BaseSettings):
 
     # Execution agent tuning
     node_timeout_seconds: int = Field(default=600, ge=1, le=86400)
+    # §17.465 — token budget for a node's generation call. The default
+    # model_router.chat() cap is 4096; for a thinking model (qwen3.5:397b-cloud,
+    # the cloud default since §17.440) num_predict is a SHARED budget for
+    # reasoning + visible content. Reasoning alone routinely runs 5k-8k tokens,
+    # so a 4096 cap leaves the answer empty (done_reason=length, content="") or
+    # truncated mid-step — which the verifier rightly rejects, burning every
+    # W.1 retry on a budget problem the prompt-layer retry cannot fix (this is
+    # what blocked job 4e3b8f01 nodes T3/T5). 8192 gives reasoning + a full
+    # answer room to coexist; live-measured a heavy passthrough/ZFS node lands
+    # at ~4.3k completion tokens with content present. Mirrors the CoVe
+    # _ANSWER_TOKENS=8192 live-tuning (§17.453).
+    node_generation_max_tokens: int = Field(default=8192, ge=512, le=16384)
+    # §17.465 — generation-layer redraws on a success+empty draw, BEFORE the
+    # verifier/W.1 retry. Thinking-model emptiness is sampling variance: a fresh
+    # draw almost always lands non-empty. Cheaper than a full node retry
+    # (re-optimize + re-verify) and it does not consume a retry_count slot.
+    node_generation_max_draws: int = Field(default=3, ge=1, le=5)
     max_upstream_chars: int = Field(default=8000, ge=100, le=200000)
     rag_cosine_floor: float = Field(default=0.3, ge=0.0, le=1.0)
     verifier_top_k: int = Field(default=5, ge=1, le=50)
