@@ -235,6 +235,14 @@ async def execute_all_endpoint(body: ExecuteNextInput):
     Auto-generates DAG if none exists.  Failed nodes are skipped;
     downstream nodes blocked by failures are reported at the end.
     """
+    # §17.470 — validate the id BEFORE streaming, mirroring exec_status above.
+    # Without this, a non-UUID job_id reaches the first asyncpg query inside
+    # execute_all_nodes and its raw DataError ("invalid input for query argument
+    # $1: ...") leaks to the client as an execution_failed SSE event.
+    try:
+        UUID(body.job_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
     await _require_valid_models(body.model_overrides)
     return StreamingResponse(
         execute_all_nodes(body.job_id, model_overrides=body.model_overrides),

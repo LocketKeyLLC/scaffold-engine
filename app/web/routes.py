@@ -192,6 +192,24 @@ def _render_markdown(text: str | None) -> str:
     return _MD.render(text)
 
 
+def _is_not_found(exc: BaseException) -> bool:
+    """True if ``exc`` is the SDK's 404 ``NotFoundError``.
+
+    §17.470 — lets a read route map a genuinely-missing job to HTTP 404 instead
+    of the generic 502 "could not load" (the SDK *raises* on 404, so a bare
+    ``except Exception`` would otherwise swallow not-found into a gateway error).
+
+    Lazy import mirrors the local-import discipline in ``_build_client``: the SDK
+    may be absent in some test environments, so a missing SDK degrades to
+    'not a 404' rather than breaking this module's import.
+    """
+    try:
+        from scaffold_client import NotFoundError
+    except Exception:
+        return False
+    return isinstance(exc, NotFoundError)
+
+
 def _job_context(payload: dict, job_id: str, *, autorun: bool = False) -> dict:
     """Shared template context for the detail page + poll fragment (so the
     stepper, autorun flag, and rendered output stay in sync across both paths)."""
@@ -276,6 +294,12 @@ def job_detail(
     try:
         payload = client.jobs.status(job_id)
     except Exception as exc:
+        if _is_not_found(exc):  # §17.470 — missing job is 404, not a 502 gateway error
+            return templates.TemplateResponse(
+                request, "web/error.html",
+                {"error": "Job not found", "title": f"Job {job_id}"},
+                status_code=404,
+            )
         logger.exception("web_job_detail_failed: job=%s error=%s", job_id, exc)
         return templates.TemplateResponse(
             request, "web/error.html",
@@ -331,10 +355,17 @@ def job_detail_fragment(
         payload = None
 
     if not isinstance(payload, dict) or "error" in payload:
+        # §17.470 — escape job_id: this is the one error path that builds raw HTML
+        # by string concat instead of a Jinja-autoescaped template, so an
+        # attacker-supplied path segment (e.g. ``"><img onerror=...>``) would
+        # otherwise be reflected unescaped. quote=True also escapes ``"`` so the
+        # value stays inside the href attribute. (CSP blocks inline script, but
+        # this restores the escaping discipline documented at _MD above.)
+        safe_id = _html_lib.escape(job_id, quote=True)
         return HTMLResponse(
             '<section class="job-detail" id="job-detail-root">'
             '<p class="job-error-banner">⚠ Lost contact with this job — '
-            '<a href="/web/jobs/' + job_id + '">reload</a>.</p></section>'
+            '<a href="/web/jobs/' + safe_id + '">reload</a>.</p></section>'
         )
 
     return templates.TemplateResponse(

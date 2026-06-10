@@ -334,6 +334,16 @@ class TestJobDetailPage:
         assert resp.status_code == 502
         assert "Could not load job j1" in resp.text
 
+    def test_not_found_error_renders_404(self, client, fake_client):
+        """§17.470 — the SDK *raises* NotFoundError on a 404, so a genuinely
+        missing job must map to 404, not the generic 502 'could not load'."""
+        from scaffold_client import NotFoundError
+        fake_client.jobs.status.side_effect = NotFoundError("Resource not found (404)")
+        resp = client.get("/web/jobs/j-gone")
+        assert resp.status_code == 404
+        assert "not found" in resp.text.lower()
+        assert "Could not load" not in resp.text
+
 
 @pytest.mark.smoke
 class TestJobDetailLivePoll:
@@ -403,6 +413,17 @@ class TestJobDetailLivePoll:
         body = client.get("/web/jobs/jp/fragment").text
         assert "hx-trigger" not in body
         assert "Lost contact" in body
+
+    def test_fragment_escapes_malicious_job_id(self, client, fake_client):
+        """§17.470 — the fragment 'Lost contact' banner is the only error path
+        that builds raw HTML by string concat, so the path-supplied job_id must
+        be escaped or it reflects as live markup (HTML/content injection)."""
+        from urllib.parse import quote
+        fake_client.jobs.status.return_value = {"error": "x"}
+        payload = '"><img src=x onerror=alert(1)>'
+        body = client.get(f"/web/jobs/{quote(payload, safe='')}/fragment").text
+        assert "<img" not in body          # not reflected as live markup
+        assert "&lt;img" in body           # reflected escaped instead
 
 
 @pytest.mark.smoke
@@ -1003,3 +1024,40 @@ class TestSseExtensionLoaded:
         fake_client.jobs.status.return_value = _job_status_response("planning")
         resp = client.get("/web/jobs/j-run")
         assert "htmx-ext-sse" in resp.text
+
+
+@pytest.mark.smoke
+class TestExecuteAllJobIdGuard:
+    """§17.470 — /execute/all must reject a non-UUID job_id with a clean 400
+    *before* streaming. Without the guard the id reaches the first asyncpg query
+    inside execute_all_nodes and its raw DataError leaks to the client as an
+    execution_failed SSE event (info disclosure). Mirrors exec_status's guard."""
+
+    def test_rejects_non_uuid(self, client):
+        resp = client.post("/execute/all", json={"job_id": "not-a-uuid"})
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Invalid job_id format"
+
+    def test_well_formed_uuid_passes_guard(self, client, monkeypatch):
+        """A syntactically-valid UUID clears the guard and reaches streaming.
+
+        Both downstream dependencies are stubbed so this asserts the guard in
+        isolation with NO live services: ``_require_valid_models`` (which would
+        otherwise 503 against an unreachable Ollama — CI has none) and the
+        executor generator itself."""
+        async def _models_ok(overrides=None):
+            return None  # no-op: the endpoint ignores the return, only the raise matters
+        async def _fake_gen(job_id, model_overrides=None):
+            yield 'event: pipeline_complete\ndata: {}\n\n'
+        monkeypatch.setattr(
+            "app.routers.workflow._require_valid_models", _models_ok,
+        )
+        monkeypatch.setattr(
+            "app.routers.workflow.execute_all_nodes", _fake_gen,
+        )
+        resp = client.post(
+            "/execute/all",
+            json={"job_id": "00000000-0000-0000-0000-000000000000"},
+        )
+        assert resp.status_code == 200
+        assert "pipeline_complete" in resp.text
