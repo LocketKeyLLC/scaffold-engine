@@ -124,6 +124,30 @@ class TestJobsListPage:
         assert "status-completed" in body
         assert "status-running" in body
 
+    def test_completed_column_shows_time_and_placeholder(self, client, fake_client):
+        """§17.468 — the list table has a Completed column: terminal jobs show the
+        trimmed timestamp, non-terminal jobs show the em-dash placeholder."""
+        fake_client.jobs.list.return_value = {
+            "jobs": [
+                {"id": "j1", "title": "Done one", "status": "completed",
+                 "node_count": 5, "created_at": "2026-06-09T21:22:07+00:00",
+                 "updated_at": "2026-06-09T23:15:28+00:00",
+                 "completed_at": "2026-06-09T23:15:28.534588+00:00"},
+                {"id": "j2", "title": "Still running", "status": "running",
+                 "node_count": 3, "created_at": "2026-06-09T22:00:00+00:00",
+                 "updated_at": "2026-06-09T22:30:00+00:00",
+                 "completed_at": None},
+            ],
+            "total": 2, "limit": 25, "offset": 0,
+        }
+        body = client.get("/web/jobs").text
+        assert "<th>Completed</th>" in body
+        # Terminal job: trimmed to second precision, no microseconds/offset.
+        assert "2026-06-09 23:15:28" in body
+        assert "534588" not in body
+        # Non-terminal job: em-dash placeholder present.
+        assert "ts-empty" in body
+
     def test_passes_status_filter_to_sdk(self, client, fake_client):
         fake_client.jobs.list.return_value = {
             "jobs": [], "total": 0, "limit": 25, "offset": 0,
