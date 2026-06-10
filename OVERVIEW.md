@@ -21984,6 +21984,12 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.468 Polish — render `completed_at` as a column on the jobs *list* page (closes the §17.467 deferred item) (2026-06-10)
+
+§17.467 surfaced `completed_at` on the job-detail page + APIs but explicitly deferred the list-page table column. Closed here: `jobs_list.html` gains a **Completed** column — the trimmed timestamp (`[:19]|replace("T"," ")` + " UTC"-less in the dense table, matching the detail page's second precision) for terminal jobs, and a `ts-empty` em-dash placeholder otherwise so the column stays aligned. **Template-only + 1 test — no Python/schema change:** the `/jobs` list item already carries `completed_at` (§17.467's `JobSummary` field), and the web list route passes the SDK JSON dict straight through, so `job.completed_at` resolves in Jinja with nothing else to wire. 1 new web-render test (`test_completed_column_shows_time_and_placeholder` in `test_web_ui.py`). Verified live: `/web/jobs` renders `<th>Completed</th>` + the recovered job's `2026-06-09 23:15:28` + `ts-empty` placeholders for in-flight jobs (template hot-reloaded, no restart). **The `completed_at` thread (§17.466 data → §17.467 detail+API → §17.468 list) is now complete across every surface.**
+
+---
+
 ### §17.467 Surface — expose `jobs.completed_at` in the API + web UI (§17.466 made it correct; nothing read it) (2026-06-09)
 
 §17.466 fixed the data layer, but verification showed `completed_at` was surfaced **nowhere**: `JobRead` (the only schema carrying it) is defined but unused; the `/jobs` list item (`JobSummary`) omitted it; `/exec/status` (what the web detail page + SDK consume via `execution_status()`) didn't select it; and `job_detail.html` never rendered it. So a user looking at the API or UI still couldn't see a finish time.

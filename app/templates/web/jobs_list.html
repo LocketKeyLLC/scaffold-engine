@@ -33,6 +33,7 @@
         <th>Status</th>
         <th>Nodes</th>
         <th>Updated</th>
+        <th>Completed</th>
       </tr>
     </thead>
     <tbody>
@@ -42,6 +43,10 @@
         <td><span class="status-badge status-{{ job.status }}">{{ job.status }}</span></td>
         <td class="num">{{ job.node_count }}</td>
         <td class="ts">{{ job.updated_at }}</td>
+        {# §17.468 — completion time (jobs.completed_at). Present only once the job
+           reaches a terminal state; em-dash placeholder otherwise so the column
+           stays aligned. ISO trimmed to second precision, matching the detail page. #}
+        <td class="ts">{% if job.completed_at %}{{ job.completed_at[:19]|replace("T", " ") }}{% else %}<span class="ts-empty">—</span>{% endif %}</td>
       </tr>
       {% endfor %}
     </tbody>
