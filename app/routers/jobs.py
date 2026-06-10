@@ -226,6 +226,7 @@ async def list_jobs(
     params["offset"] = offset
     rows = await db.execute(text(f"""
         SELECT j.id, j.title, j.status, j.created_at, j.updated_at,
+               j.completed_at,
                COALESCE(n.cnt, 0) AS node_count
         FROM jobs j
         LEFT JOIN (SELECT job_id, COUNT(*) AS cnt FROM dag_nodes GROUP BY job_id) n
@@ -242,6 +243,7 @@ async def list_jobs(
             node_count=r.node_count,
             created_at=r.created_at.isoformat(),
             updated_at=r.updated_at.isoformat(),
+            completed_at=r.completed_at.isoformat() if r.completed_at else None,
         )
         for r in rows.fetchall()
     ]
@@ -276,7 +278,7 @@ async def rename_job(job_id: str, body: JobRenameInput, db: AsyncSession = Depen
     r = await db.execute(text("""
         UPDATE jobs SET title = :title, updated_at = NOW()
         WHERE id = :id
-        RETURNING id, title, status, created_at, updated_at,
+        RETURNING id, title, status, created_at, updated_at, completed_at,
                   (SELECT COUNT(*) FROM dag_nodes WHERE job_id = :id) AS node_count
     """), {"id": job_id, "title": body.title})
     row = r.fetchone()
@@ -288,6 +290,7 @@ async def rename_job(job_id: str, body: JobRenameInput, db: AsyncSession = Depen
         node_count=row.node_count or 0,
         created_at=row.created_at.isoformat(),
         updated_at=row.updated_at.isoformat(),
+        completed_at=row.completed_at.isoformat() if row.completed_at else None,
     )
 
 

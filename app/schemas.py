@@ -727,6 +727,11 @@ class JobSummary(BaseModel):
     node_count: int = 0
     created_at: str
     updated_at: str
+    # §17.467 — finish time, None until the job reaches a terminal state
+    # (the §17.466 trg_jobs_completed_at invariant). Optional/defaulted so the
+    # PATCH /jobs/{id} response (also JobSummary) and any older client stay
+    # compatible.
+    completed_at: str | None = None
 
 
 class JobListResponse(BaseModel):

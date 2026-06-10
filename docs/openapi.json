@@ -2719,6 +2719,17 @@
       },
       "app__schemas__JobSummary": {
         "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
           "created_at": {
             "title": "Created At",
             "type": "string"

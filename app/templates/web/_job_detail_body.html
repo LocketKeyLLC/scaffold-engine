@@ -7,6 +7,12 @@
     <p class="meta">
       <span class="status-badge status-{{ job.job_status }}">{{ job.job_status }}</span>
       <code class="job-id">{{ job_id }}</code>
+      {# §17.467 — finish time (jobs.completed_at, stamped by the §17.466
+         trg_jobs_completed_at trigger). Present only once the job reaches a
+         terminal state; ISO string trimmed to second precision for display. #}
+      {% if job.completed_at %}
+      <span class="meta-completed">Completed {{ job.completed_at[:19]|replace("T", " ") }} UTC</span>
+      {% endif %}
     </p>
   </header>
 
