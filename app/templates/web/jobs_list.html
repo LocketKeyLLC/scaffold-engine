@@ -42,7 +42,9 @@
         <td><a href="/web/jobs/{{ job.id }}">{{ job.title or "(untitled)" }}</a></td>
         <td><span class="status-badge status-{{ job.status }}">{{ job.status }}</span></td>
         <td class="num">{{ job.node_count }}</td>
-        <td class="ts">{{ job.updated_at }}</td>
+        {# §17.469 — trim Updated to second precision (T→space, drop µs/offset) to
+           match the §17.468 Completed column; updated_at is NOT NULL so no guard. #}
+        <td class="ts">{{ job.updated_at[:19]|replace("T", " ") }}</td>
         {# §17.468 — completion time (jobs.completed_at). Present only once the job
            reaches a terminal state; em-dash placeholder otherwise so the column
            stays aligned. ISO trimmed to second precision, matching the detail page. #}

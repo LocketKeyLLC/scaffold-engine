@@ -123,6 +123,10 @@ class TestJobsListPage:
         # Status badges rendered with the correct status class.
         assert "status-completed" in body
         assert "status-running" in body
+        # §17.469 — Updated column trimmed to second precision (T→space), not
+        # the raw ISO string.
+        assert "2026-05-08 01:00:00" in body
+        assert "2026-05-08T01:00:00" not in body
 
     def test_completed_column_shows_time_and_placeholder(self, client, fake_client):
         """§17.468 — the list table has a Completed column: terminal jobs show the
