@@ -1039,10 +1039,19 @@ class TestExecuteAllJobIdGuard:
         assert resp.json()["detail"] == "Invalid job_id format"
 
     def test_well_formed_uuid_passes_guard(self, client, monkeypatch):
-        """A syntactically-valid UUID clears the guard and reaches streaming
-        (stubbed here so we assert the guard alone, not the executor)."""
+        """A syntactically-valid UUID clears the guard and reaches streaming.
+
+        Both downstream dependencies are stubbed so this asserts the guard in
+        isolation with NO live services: ``_require_valid_models`` (which would
+        otherwise 503 against an unreachable Ollama — CI has none) and the
+        executor generator itself."""
+        async def _models_ok(overrides=None):
+            return None  # no-op: the endpoint ignores the return, only the raise matters
         async def _fake_gen(job_id, model_overrides=None):
             yield 'event: pipeline_complete\ndata: {}\n\n'
+        monkeypatch.setattr(
+            "app.routers.workflow._require_valid_models", _models_ok,
+        )
         monkeypatch.setattr(
             "app.routers.workflow.execute_all_nodes", _fake_gen,
         )
