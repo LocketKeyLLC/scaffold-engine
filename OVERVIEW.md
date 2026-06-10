@@ -21984,6 +21984,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.467 Surface — expose `jobs.completed_at` in the API + web UI (§17.466 made it correct; nothing read it) (2026-06-09)
+
+§17.466 fixed the data layer, but verification showed `completed_at` was surfaced **nowhere**: `JobRead` (the only schema carrying it) is defined but unused; the `/jobs` list item (`JobSummary`) omitted it; `/exec/status` (what the web detail page + SDK consume via `execution_status()`) didn't select it; and `job_detail.html` never rendered it. So a user looking at the API or UI still couldn't see a finish time.
+
+- **Three read-path additions:** (1) `execution_handler.execution_status()` now selects `completed_at` and returns it ISO-8601 (None until terminal) — flows to the web detail page + SDK/CLI. (2) `JobSummary` gains optional `completed_at` (default None — keeps the PATCH `/jobs/{id}` response and older clients compatible); the `/jobs` list query + the rename handler both populate it. (3) `_job_detail_body.html` renders a `Completed <ts> UTC` span in the header meta (ISO trimmed to second precision via `[:19]|replace("T"," ")`), shown only when terminal.
+- **Schema gate:** the `app/schemas.py` change required BOTH `make sync-schemas` (vendored `sdk/scaffold_client/schemas.py`) AND `make openapi-snapshot` (`docs/openapi.json` — `app__schemas__JobSummary.completed_at`, snapshot clean / no OTEL-stdout pollution per §17.442).
+- **Verified live** (orchestrator restarted — module changes need a reload, §17.438) on the recovered job `4e3b8f01`: `/exec/status` → `completed_at: 2026-06-09T23:15:28…`; `/jobs` list item carries it; `/web/jobs/{id}` HTML renders `Completed 2026-06-09 23:15:28 UTC`. 5 new tests (2 web-render in `test_web_ui.py` + 3 live-PG in `tests/integration/test_completed_at_api_db.py`) + the 8 §17.466 trigger tests pass. **Closes the §17.466 → §17.467 arc: the column is correct AND visible end-to-end.** (The jobs *list page* table doesn't render the new column yet — data is in the list API; left as optional polish.)
+
+---
+
 ### §17.466 Fix — `jobs.completed_at` never stamped by the mainline completion path; DB trigger + historical backfill (2026-06-09)
 
 Surfaced while confirming the §17.465-recovered job couldn't be stranded by the reaper (it can't — the reaper is status-whitelisted to non-terminal states): the recovered job was `completed` but `completed_at` was NULL. Investigation found this is **systemic — 0 of 176 terminal jobs had `completed_at` set**.

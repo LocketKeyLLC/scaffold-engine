@@ -236,6 +236,37 @@ class TestJobDetailPage:
         # error banner absent (no job-level error_summary)
         assert "job-error-banner" not in body
 
+    def test_completed_at_shown_when_terminal(self, client, fake_client):
+        """§17.467 — a terminal job surfaces its completion time (jobs.completed_at,
+        stamped by the §17.466 trigger), trimmed to second precision."""
+        fake_client.jobs.status.return_value = {
+            "job_id": "jc", "job_title": "Done job", "job_status": "completed",
+            "compiled_output": None, "synthesized": False, "synthesis_override": None,
+            "counts": {"done": 1}, "total_nodes": 1, "next_node": None,
+            "next_actions": [], "error_summary": None,
+            "completed_at": "2026-06-09T23:15:28.534588+00:00",
+            "nodes": [{"node_key": "T1", "title": "x", "status": "done",
+                       "execution_order": 1, "actionable": False}],
+        }
+        body = client.get("/web/jobs/jc").text
+        assert "meta-completed" in body
+        # Trimmed to second precision, 'T' replaced with a space.
+        assert "Completed 2026-06-09 23:15:28 UTC" in body
+        assert "534588" not in body  # microseconds/offset trimmed off
+
+    def test_completed_at_absent_when_non_terminal(self, client, fake_client):
+        """§17.467 — a running job (completed_at None) shows no completion row."""
+        fake_client.jobs.status.return_value = {
+            "job_id": "jr", "job_title": "Running job", "job_status": "running",
+            "compiled_output": None, "synthesized": False, "synthesis_override": None,
+            "counts": {"running": 1}, "total_nodes": 1, "next_node": None,
+            "next_actions": [], "error_summary": None, "completed_at": None,
+            "nodes": [{"node_key": "T1", "title": "x", "status": "running",
+                       "execution_order": 1, "actionable": False}],
+        }
+        body = client.get("/web/jobs/jr").text
+        assert "meta-completed" not in body
+
     def test_compiled_output_rendered_as_markdown(self, client, fake_client):
         """§17.458 — compiled_output renders as markdown (was a raw <pre> dump)."""
         fake_client.jobs.status.return_value = {

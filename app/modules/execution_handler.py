@@ -31,7 +31,7 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
             "SELECT id, title, status, compiled_output, "
             "       compiled_output_synthesized, "
             "       compile_synthesis_override, "
-            "       error_summary "
+            "       error_summary, completed_at "
             "FROM jobs WHERE id = :job_id"
         ),
         {"job_id": str(job_id)}
@@ -127,6 +127,17 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         "job_title": job.title,
         "job_status": job.status,
         "error_summary": getattr(job, "error_summary", None),
+        # §17.467 — surface the §17.466 completion timestamp to the web detail
+        # page + SDK/CLI. None until the job reaches a terminal state (the
+        # trg_jobs_completed_at invariant); ISO-8601 string when set. getattr
+        # (not job.completed_at) mirrors the error_summary access above so a
+        # SimpleNamespace mock row that omits the column degrades to None
+        # instead of AttributeError.
+        "completed_at": (
+            _completed_at.isoformat()
+            if (_completed_at := getattr(job, "completed_at", None))
+            else None
+        ),
         "compiled_output": job.compiled_output,
         "synthesized": bool(job.compiled_output_synthesized),
         "synthesis_override": job.compile_synthesis_override,
