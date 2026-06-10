@@ -1865,13 +1865,13 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (refreshed post-§17.464, 2026-06-09 — both CI + local)
+### 14.1 Test counts (refreshed post-§17.465, 2026-06-09 — both CI + local)
 
-**Current CI-verified baseline (`test.yml` unit-tests, the `-k "not integration"` subset):** **3458 passed, 14 skipped, 80 deselected (the integration tests), 16 warnings in 17:41** — latest green main run `27177022619` (§17.464, sha `bdf0c84`). This is the authoritative current count; it grew from the post-§17.462 figure (3452) via §17.463 (+1 DAG-gen empty-draw test) and §17.464 (+5 `llm_retry` tests). (Note: the §17.463 intermediate main run `27175438547` red-flaked on the known cold-cache HF reranker-download issue — §17.423/§17.426 — not a regression; the DAG tests passed in it and both the §17.463 PR run and this HEAD run are green.)
+**Current CI-verified baseline (`test.yml` unit-tests, the `-k "not integration"` subset):** **3466 passed, 14 skipped, 80 deselected (the integration tests), 14 warnings in 17:44** — green run `27243284406` (§17.465, PR #42, squash-merged to main as sha `b2429f9`; the post-merge main run is the same tree fast-forwarded). This is the authoritative current count; it grew from the post-§17.464 figure (3458) via §17.465 (+8: 6 `chat_until_nonempty` unit tests + 2 node-exec empty-redraw wiring tests).
 
-Local rolling baseline — all three suites in the dev image, **re-measured 2026-06-09 (post-§17.464)** on this host:
+Local rolling baseline — all three suites in the dev image, **re-measured 2026-06-09 (post-§17.465)** on this host:
 
-- **Orchestrator (`make test`)**: **3551 passed, 0 failed, 1 skipped** in 27:27. `make test` runs the *full* suite (no `-k` filter) in the dev image where live sidecars are reachable, so it differs in scope from the CI `not integration` subset above — it reconciles exactly: 3458 (CI passed) + 14 (service-needing, skipped in CI but pass live here) + 80 (integration, deselected in CI; run live as 79 pass + 1 skip) = 3552 collected = 3551 passed + 1 skipped. **The 1 skip is `tests/integration/test_topology_select_db.py` self-skipping on a transient live-LLM 409 (empty topology-select response) — NOT a code regression.** Prior baseline was §17.462's 3545/0/1 in 27:42; the +6 is §17.463 (+1) + §17.464 (+5). Wall-clock dominated by live cloud-model latency on the integration tests (0 failures).
+- **Orchestrator (`make test`)**: **3559 passed, 0 failed, 1 skipped** in 26:31. `make test` runs the *full* suite (no `-k` filter) in the dev image where live sidecars are reachable, so it differs in scope from the CI `not integration` subset above — it reconciles exactly: 3466 (CI passed) + 14 (service-needing, skipped in CI but pass live here) + 80 (integration, deselected in CI; run live as 79 pass + 1 skip) = 3560 collected = 3559 passed + 1 skipped. **The 1 skip is `tests/integration/test_topology_select_db.py` self-skipping on a transient live-LLM 409 (empty topology-select response) — NOT a code regression.** Prior baseline was §17.464's 3551/0/1 in 27:27; the +8 is §17.465 (6 `llm_retry` + 2 node-exec). Wall-clock dominated by live cloud-model latency on the integration tests (0 failures).
 - **SDK (`make test-sdk`)**: **142 passed** in 2.2s (unchanged since §17.421).
 - **CLI (`make test-cli`)**: **165 passed** in 1.2s (unchanged since §17.427→§17.462).
 
