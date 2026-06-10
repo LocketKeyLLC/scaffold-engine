@@ -21984,6 +21984,12 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.469 Polish — trim the jobs-list `Updated` column to match `Completed` (2026-06-10)
+
+Browser-verifying §17.468 (headless Chromium screenshot of `/web/jobs`) surfaced a side-by-side inconsistency: the new `Completed` column rendered second-precision (`2026-06-09 23:15:28`) while the existing `Updated` column still showed the raw ISO string (`2026-06-09T23:15:28.534588+00:00` — `T`, microseconds, offset). Trimmed `Updated` to the same `[:19]|replace("T"," ")` form in `jobs_list.html` (`updated_at` is NOT NULL → no guard needed). Template-only + 1 assertion added to `test_renders_jobs_table`. Re-rendered in headless Chromium: both columns now show the clean trimmed form. **Tooling note:** no browser existed on this host, so the visual check used a throwaway Playwright+Chromium install in an isolated venv (`/tmp/pwenv`) + `~/.cache/ms-playwright`, both removed after (~797 MB) — system Python untouched (PEP-668 blocked any `--user` install). **The `completed_at` thread (§17.466 data → §17.467 detail+API → §17.468 list → §17.469 list-format polish) is now fully closed.**
+
+---
+
 ### §17.468 Polish — render `completed_at` as a column on the jobs *list* page (closes the §17.467 deferred item) (2026-06-10)
 
 §17.467 surfaced `completed_at` on the job-detail page + APIs but explicitly deferred the list-page table column. Closed here: `jobs_list.html` gains a **Completed** column — the trimmed timestamp (`[:19]|replace("T"," ")` + " UTC"-less in the dense table, matching the detail page's second precision) for terminal jobs, and a `ts-empty` em-dash placeholder otherwise so the column stays aligned. **Template-only + 1 test — no Python/schema change:** the `/jobs` list item already carries `completed_at` (§17.467's `JobSummary` field), and the web list route passes the SDK JSON dict straight through, so `job.completed_at` resolves in Jinja with nothing else to wire. 1 new web-render test (`test_completed_column_shows_time_and_placeholder` in `test_web_ui.py`). Verified live: `/web/jobs` renders `<th>Completed</th>` + the recovered job's `2026-06-09 23:15:28` + `ts-empty` placeholders for in-flight jobs (template hot-reloaded, no restart). **The `completed_at` thread (§17.466 data → §17.467 detail+API → §17.468 list) is now complete across every surface.**
