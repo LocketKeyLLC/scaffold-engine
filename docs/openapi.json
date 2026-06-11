@@ -3872,6 +3872,49 @@
         ]
       }
     },
+    "/exec/nodes/{job_id}": {
+      "get": {
+        "description": "§17.471 — per-node output text (T1..Tn) for a job.\n\nDistinct from ``/exec/status``, which is summary-only (counts + node\nstatuses, no output bodies). Backs the scaffold_router\n``/results <job_id> nodes`` view so operators can pull up every\nnode's full work product, not just the compiled deliverable — which\n``execution_compile`` Strategy 0 limits to the ``is_output_node`` DAG\nleaves, dropping every interior node from a multi-leaf job.",
+        "operationId": "exec_nodes_exec_nodes__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Exec Nodes"
+      }
+    },
     "/exec/retry": {
       "post": {
         "description": "Reset a failed node to pending for retry.",
