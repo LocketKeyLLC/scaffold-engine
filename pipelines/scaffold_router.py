@@ -548,7 +548,17 @@ class Pipeline:
         model_general: str = "qwen3.5:397b-cloud"
         model_verifier: str = "qwen3.5:397b-cloud"
         model_coder: str = "qwen3.5:397b-cloud"
-        model_embedder: str = "qwen3-embedding:8b"
+        # §17.472 — synced to the orchestrator's real embedder. §17.83
+        # switched the live embedder to nomic-embed-text (qwen3-embedding:8b
+        # wedged deterministically on this host's Ollama --ollama-engine
+        # path); app/config.py:model_embedder_pipeline followed, but this
+        # pipeline default was missed and still read qwen3-embedding:8b. It's
+        # cosmetic — model_embedder is in _SINGLETON_ROLES so _model_overrides
+        # never sends it to the orchestrator — but it drove a misleading
+        # `_probe_embedder_dim` startup log (`qwen3-embedding:8b native
+        # dim=4096`) and the `/model list` display. nomic-embed-text probes at
+        # native dim 768, truncated to 512 via MRL (same _EMBEDDER_EXPECTED_DIM).
+        model_embedder: str = "nomic-embed-text"
         model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
         model_router: str = "qwen3.5:397b-cloud"
         model_fallback: str = "qwen3.5:latest"
