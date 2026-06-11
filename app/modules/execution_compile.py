@@ -346,6 +346,101 @@ def _prepend_skipped_banner(text: str | None, skipped_count: int, total: int) ->
     return banner + text
 
 
+# §17.473 — dominant-leaf preference for Strategy 0. dag_generator marks
+# EVERY structural leaf (a node nothing depends on) is_output_node, so a DAG
+# with a dead-end side-branch — e.g. a "configure Tailscale exit node" node
+# that nothing downstream consumes — flags that branch as a co-deliverable
+# alongside the real convergence/synthesis node. Concatenating both buries
+# the synthesis under an orphan branch. A non-primary leaf is treated as a
+# dead-end and dropped only when a *dominant* leaf both (a) already covers
+# that leaf's entire upstream and (b) has a closure at least this many times
+# larger. Co-equal / disjoint leaves (genuine multi-deliverable, "config +
+# README") have no dominant leaf, so all survive — the prior concat behavior.
+_DOMINANT_LEAF_FACTOR = 2
+
+
+def _dependency_closure(key: str, deps_by_key: dict[str, list[str]]) -> set[str]:
+    """Transitive dependency closure of ``key`` (inclusive of ``key``).
+
+    Iterative + visited-guarded so a malformed cyclic ``depends_on`` can't
+    recurse forever (DAGs are acyclic by construction, but compile must not
+    assume it — a bad graph should degrade, not hang)."""
+    seen: set[str] = set()
+    stack = [key]
+    while stack:
+        k = stack.pop()
+        if k in seen:
+            continue
+        seen.add(k)
+        for dep in deps_by_key.get(k, ()) or ():
+            if dep not in seen:
+                stack.append(dep)
+    return seen
+
+
+def _select_dominant_leaves(explicit: list, all_nodes: list) -> tuple[list, list[str]]:
+    """§17.473 — drop dead-end-branch leaves dominated by a larger leaf.
+
+    ``explicit`` is the done is_output_node leaves (in execution order).
+    Returns ``(survivors, dropped_keys)``:
+
+      - ``primary`` = the leaf with the largest dependency closure (ties →
+        latest in execution order, i.e. last in ``explicit``).
+      - a non-primary leaf ``L`` is dropped iff ``L`` is **not** a CodeGen
+        leaf AND ``primary`` covers all of ``L``'s upstream
+        (``closure(L) - {L} ⊆ closure(primary)``) AND ``primary``'s closure
+        is ≥ ``_DOMINANT_LEAF_FACTOR`` × ``L``'s. The conditions matter: the
+        CodeGen guard protects executable-code deliverables (a doc/summary
+        leaf otherwise subsumes its siblings); the subset test ensures ``L``
+        adds nothing but itself; the size factor protects co-equal
+        deliverables that merely share a common base node.
+
+    Survivors keep their original execution order. Never empty (``primary``
+    always survives)."""
+    deps_by_key = {
+        n["node_key"]: list(n.get("depends_on") or []) for n in all_nodes
+    }
+    closures = {
+        n["node_key"]: _dependency_closure(n["node_key"], deps_by_key)
+        for n in explicit
+    }
+    # Largest closure wins; on a tie the later (higher execution_order) leaf
+    # wins — index in `explicit` is the execution-order rank.
+    primary = max(
+        enumerate(explicit),
+        key=lambda iv: (len(closures[iv[1]["node_key"]]), iv[0]),
+    )[1]
+    pkey = primary["node_key"]
+    pclosure = closures[pkey]
+
+    dropped: list[str] = []
+    for n in explicit:
+        nkey = n["node_key"]
+        if nkey == pkey:
+            continue
+        # §17.473 (refinement) — never drop a CodeGen leaf. Its output is
+        # executable code, a deliverable by definition (cf. Strategy 2,
+        # "last CodeGen node IS the deliverable", and the CodeGen-verbatim
+        # multi-leaf path below). A documentation/summary leaf naturally
+        # accretes a closure that subsumes its siblings', so without this
+        # guard the dominance test drops genuine sibling code artifacts —
+        # observed on an mdsplit job whose "write parser unit tests"
+        # (CodeGen) leaf was dropped for a "document usage" (LLM) leaf.
+        # Shell stays droppable: a Shell leaf is a runbook (instructions),
+        # the dead-end-branch case the original rule targets (Proxmox's
+        # "configure Tailscale exit node").
+        if n.get("tool") == "CodeGen":
+            continue
+        nclosure = closures[nkey]
+        deps_only = nclosure - {nkey}
+        if deps_only <= pclosure and len(pclosure) >= _DOMINANT_LEAF_FACTOR * len(nclosure):
+            dropped.append(nkey)
+
+    dropped_set = set(dropped)
+    survivors = [n for n in explicit if n["node_key"] not in dropped_set]
+    return survivors, dropped
+
+
 async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
     """Compile node outputs into a single deliverable.
 
@@ -363,7 +458,7 @@ async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
     """
     rows = await db.execute(
         text(
-            "SELECT node_key, title, tool, status, output_text, "
+            "SELECT node_key, title, tool, status, output_text, depends_on, "
             "       COALESCE(is_output_node, FALSE) AS is_output_node "
             "FROM dag_nodes WHERE job_id = :jid ORDER BY execution_order"
         ),
@@ -390,6 +485,21 @@ async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
         if n.get("is_output_node") and n["status"] == "done" and n["output_text"]
     ]
     if explicit:
+        # §17.473 — collapse dead-end-branch leaves into the dominant leaf
+        # before deciding single- vs multi-leaf. dag_generator marks every
+        # structural leaf is_output_node, so a graph with an orphan side
+        # branch had two "deliverables" (the branch + the real synthesis);
+        # this drops the branch when a dominant leaf subsumes it.
+        if len(explicit) > 1:
+            explicit, dropped = _select_dominant_leaves(explicit, nodes)
+            if dropped:
+                logger.info(
+                    "compile_dominant_leaf: job=%s kept=%s dropped=%s "
+                    "(dead-end branches subsumed by a dominant leaf)",
+                    job_id,
+                    [n["node_key"] for n in explicit],
+                    dropped,
+                )
         if len(explicit) == 1:
             heuristic = explicit[0]["output_text"]
             text_value, was_syn = await _maybe_synthesize(
