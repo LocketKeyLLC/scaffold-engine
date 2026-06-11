@@ -355,6 +355,170 @@ class TestCompileOutputExplicitMarker:
         assert "---" in result
 
 
+@pytest.mark.smoke
+class TestCompileOutputDominantLeaf:
+    """§17.473 — dominant-leaf preference. dag_generator marks EVERY
+    structural leaf is_output_node, so a DAG with a dead-end side branch
+    (nothing consumes it) marks that branch as a co-deliverable alongside
+    the real convergence node. Strategy 0 now drops a dead-end leaf when a
+    dominant leaf both covers its upstream and is _DOMINANT_LEAF_FACTOR×
+    larger — but preserves genuinely co-equal deliverables."""
+
+    async def test_dead_end_branch_dropped_for_dominant_leaf(self):
+        # MAIN's closure (MAIN,M3,M2,M1,B = 5) dominates D's (D,B = 2); D's
+        # only unique contribution is itself → dead-end branch, dropped. One
+        # survivor → single-leaf path emits its raw output (no section header).
+        db = make_mock_db([
+            {"node_key": "B", "title": "Base", "tool": "LLM", "status": "done",
+             "output_text": "base", "is_output_node": False, "depends_on": []},
+            {"node_key": "M1", "title": "Mid 1", "tool": "LLM", "status": "done",
+             "output_text": "m1", "is_output_node": False, "depends_on": ["B"]},
+            {"node_key": "M2", "title": "Mid 2", "tool": "LLM", "status": "done",
+             "output_text": "m2", "is_output_node": False, "depends_on": ["M1"]},
+            {"node_key": "M3", "title": "Mid 3", "tool": "LLM", "status": "done",
+             "output_text": "m3", "is_output_node": False, "depends_on": ["M2"]},
+            {"node_key": "D", "title": "Dead-end branch", "tool": "LLM",
+             "status": "done", "output_text": "DEAD_END_BRANCH",
+             "is_output_node": True, "depends_on": ["B"]},
+            {"node_key": "MAIN", "title": "Synthesis", "tool": "LLM",
+             "status": "done", "output_text": "REAL_DELIVERABLE",
+             "is_output_node": True, "depends_on": ["M3"]},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result, _was_syn = await _compile_output("job-1", db)
+        assert result == "REAL_DELIVERABLE"
+        assert "DEAD_END_BRANCH" not in result
+
+    async def test_coequal_leaves_both_kept(self):
+        # config + README: equal closures ({CFG,B} / {DOC,B}) sharing a base;
+        # neither is _DOMINANT_LEAF_FACTOR× the other → both preserved.
+        db = make_mock_db([
+            {"node_key": "B", "title": "Build", "tool": "LLM", "status": "done",
+             "output_text": "build", "is_output_node": False, "depends_on": []},
+            {"node_key": "CFG", "title": "Config", "tool": "LLM", "status": "done",
+             "output_text": "CONFIG_OUT", "is_output_node": True, "depends_on": ["B"]},
+            {"node_key": "DOC", "title": "README", "tool": "LLM", "status": "done",
+             "output_text": "README_OUT", "is_output_node": True, "depends_on": ["B"]},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result, _was_syn = await _compile_output("job-1", db)
+        assert "CONFIG_OUT" in result
+        assert "README_OUT" in result
+        assert "---" in result
+
+    async def test_no_depends_on_preserves_legacy_concat(self):
+        # Backward-compat: leaves with no depends_on (closure size 1 each)
+        # have no dominant leaf → legacy multi-leaf join is unchanged.
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Part A", "tool": "LLM", "status": "done",
+             "output_text": "alpha", "is_output_node": True},
+            {"node_key": "T2", "title": "Part B", "tool": "LLM", "status": "done",
+             "output_text": "beta", "is_output_node": True},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result, _was_syn = await _compile_output("job-1", db)
+        assert "alpha" in result and "beta" in result and "---" in result
+
+    async def test_codegen_leaf_not_dropped_by_dominant_doc_leaf(self):
+        # §17.473 refinement — a CodeGen "write tests" leaf is structurally
+        # dominated by a "document everything" LLM leaf (closure 4 ≥ 2×2),
+        # but CodeGen is a code deliverable and must survive → both joined.
+        # Mirrors the real mdsplit job (CodeGen unit-tests vs LLM usage-docs).
+        db = make_mock_db([
+            {"node_key": "B", "title": "Base", "tool": "LLM", "status": "done",
+             "output_text": "base", "is_output_node": False, "depends_on": []},
+            {"node_key": "M1", "title": "Mid 1", "tool": "LLM", "status": "done",
+             "output_text": "m1", "is_output_node": False, "depends_on": ["B"]},
+            {"node_key": "M2", "title": "Mid 2", "tool": "LLM", "status": "done",
+             "output_text": "m2", "is_output_node": False, "depends_on": ["M1"]},
+            {"node_key": "TESTS", "title": "Write unit tests", "tool": "CodeGen",
+             "status": "done", "output_text": "def test_x(): assert True",
+             "is_output_node": True, "depends_on": ["B"]},
+            {"node_key": "DOCS", "title": "Document usage", "tool": "LLM",
+             "status": "done", "output_text": "usage docs",
+             "is_output_node": True, "depends_on": ["M2"]},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result, _was_syn = await _compile_output("job-1", db)
+        assert "def test_x()" in result      # CodeGen deliverable preserved
+        assert "usage docs" in result
+
+
+@pytest.mark.smoke
+class TestDominantLeafHelpers:
+    """§17.473 — pure-function coverage for the closure + selection logic."""
+
+    def test_dependency_closure_transitive(self):
+        from app.modules.execution_compile import _dependency_closure
+        deps = {"C": ["B"], "B": ["A"], "A": []}
+        assert _dependency_closure("C", deps) == {"C", "B", "A"}
+
+    def test_dependency_closure_cycle_safe(self):
+        from app.modules.execution_compile import _dependency_closure
+        deps = {"A": ["B"], "B": ["A"]}  # malformed cycle must not hang
+        assert _dependency_closure("A", deps) == {"A", "B"}
+
+    def test_select_dominant_leaves_drops_dead_end(self):
+        from app.modules.execution_compile import _select_dominant_leaves
+        all_nodes = [
+            {"node_key": "B", "depends_on": []},
+            {"node_key": "M1", "depends_on": ["B"]},
+            {"node_key": "M2", "depends_on": ["M1"]},
+            {"node_key": "M3", "depends_on": ["M2"]},
+            {"node_key": "D", "depends_on": ["B"]},
+            {"node_key": "MAIN", "depends_on": ["M3"]},
+        ]
+        explicit = [n for n in all_nodes if n["node_key"] in ("D", "MAIN")]
+        survivors, dropped = _select_dominant_leaves(explicit, all_nodes)
+        assert [n["node_key"] for n in survivors] == ["MAIN"]
+        assert dropped == ["D"]
+
+    def test_select_dominant_leaves_keeps_coequal(self):
+        from app.modules.execution_compile import _select_dominant_leaves
+        all_nodes = [
+            {"node_key": "B", "depends_on": []},
+            {"node_key": "CFG", "depends_on": ["B"]},
+            {"node_key": "DOC", "depends_on": ["B"]},
+        ]
+        explicit = [n for n in all_nodes if n["node_key"] in ("CFG", "DOC")]
+        survivors, dropped = _select_dominant_leaves(explicit, all_nodes)
+        assert {n["node_key"] for n in survivors} == {"CFG", "DOC"}
+        assert dropped == []
+
+    def test_select_dominant_leaves_protects_codegen(self):
+        # §17.473 refinement — a dominated CodeGen leaf is NOT dropped.
+        from app.modules.execution_compile import _select_dominant_leaves
+        all_nodes = [
+            {"node_key": "B", "depends_on": [], "tool": "LLM"},
+            {"node_key": "M1", "depends_on": ["B"], "tool": "LLM"},
+            {"node_key": "M2", "depends_on": ["M1"], "tool": "LLM"},
+            {"node_key": "M3", "depends_on": ["M2"], "tool": "LLM"},
+            {"node_key": "CODE", "depends_on": ["B"], "tool": "CodeGen"},
+            {"node_key": "DOC", "depends_on": ["M3"], "tool": "LLM"},
+        ]
+        explicit = [n for n in all_nodes if n["node_key"] in ("CODE", "DOC")]
+        survivors, dropped = _select_dominant_leaves(explicit, all_nodes)
+        assert dropped == []
+        assert {n["node_key"] for n in survivors} == {"CODE", "DOC"}
+
+    def test_select_dominant_leaves_drops_shell_dead_end(self):
+        # Contrast: a Shell runbook leaf (Proxmox's Tailscale shape) stays
+        # droppable — only CodeGen is protected.
+        from app.modules.execution_compile import _select_dominant_leaves
+        all_nodes = [
+            {"node_key": "B", "depends_on": [], "tool": "LLM"},
+            {"node_key": "M1", "depends_on": ["B"], "tool": "LLM"},
+            {"node_key": "M2", "depends_on": ["M1"], "tool": "LLM"},
+            {"node_key": "M3", "depends_on": ["M2"], "tool": "LLM"},
+            {"node_key": "SH", "depends_on": ["B"], "tool": "Shell"},
+            {"node_key": "MAIN", "depends_on": ["M3"], "tool": "LLM"},
+        ]
+        explicit = [n for n in all_nodes if n["node_key"] in ("SH", "MAIN")]
+        survivors, dropped = _select_dominant_leaves(explicit, all_nodes)
+        assert dropped == ["SH"]
+        assert [n["node_key"] for n in survivors] == ["MAIN"]
+
+
 # ---------------------------------------------------------------------------
 # Sprint W.7 — opt-in LLM synthesis pass
 # ---------------------------------------------------------------------------
