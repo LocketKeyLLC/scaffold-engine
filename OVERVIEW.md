@@ -21984,6 +21984,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.472 Cleanup — sync the stale `scaffold_router` embedder valve default to `nomic-embed-text` (2026-06-11)
+
+Surfaced while verifying an unrelated embedder question during §17.471: the `open-webui-pipelines` container logged `Embedder probe OK: qwen3-embedding:8b native dim=4096, will truncate to 512` at startup, contradicting the orchestrator's real embedder (`nomic-embed-text`). Root cause: `pipelines/scaffold_router.py`'s `Valves.model_embedder` default still read `"qwen3-embedding:8b"` — a value **§17.83 retired** (qwen3-embedding:8b wedged deterministically on this host's Ollama `--ollama-engine` path; the live embedder + `app/config.py:model_embedder_pipeline` both moved to `nomic-embed-text`, but this pipeline default was missed despite the "keep in sync with app/config.py" comment two lines above it).
+
+**Purely cosmetic, not functional:** `model_embedder` is in `_SINGLETON_ROLES`, so `_model_overrides()` filters it out — the pipeline **never** sends an embedder to the orchestrator (the embedder is config-only / non-overridable per-request, and embedding dim is locked at 512). The stale default only drove (a) the misleading `_probe_embedder_dim` startup log and (b) the `/model list` display. No RAG ingest/retrieval path was ever affected.
+
+**Fix:** one-line default `"qwen3-embedding:8b"` → `"nomic-embed-text"` (+ a comment recording the §17.83 lineage and the cosmetic-only nature). No template change needed (`valves.template.json` carries no `model_embedder` key; the live `valves.json` has none either, so the class default is what's used).
+
+**Verification.** Restarted `open-webui-pipelines`; latest startup now logs `Embedder probe OK: nomic-embed-text native dim=768, will truncate to 512` (768 ≥ the `_EMBEDDER_EXPECTED_DIM = 512` floor, so the probe stays green — same as the orchestrator's `nomic-embed-text-mrl512`). Direct in-container instantiation confirms class default + live valve + probe all read `nomic-embed-text`. `pytest --noconftest tests/test_model_valves.py tests/test_scaffold_router_structure.py tests/test_embedder_drift.py` — **32 passed** (no test pinned the old default; `test_model_valves.py:173` exercises the orchestrator `get_model` override path with an arbitrary value, unrelated).
+
+---
+
 ### §17.471 Surface — `/results <job_id> nodes` per-node output view; the compiled deliverable was dropping every interior node (2026-06-11)
 
 A user reported that pulling up a previous job's T1–T10 in OWUI "did not pull them all up." **Reproduced live** against the completed 10-node job `4e3b8f01` ("Secure Proxmox HomeLab"): all 10 nodes are `done` with real output (2k–11k chars each), but the only retrievable artifact was `compiled_output` — **5,700 chars containing just T4 + T10**. Root cause is structural, not a data corruption: `execution_compile` **Strategy 0** assembles the deliverable from the DAG's `is_output_node` leaves, and the `dag_generator` flags **every** structural leaf. This job's leaf-set is `{T4, T10}` (nothing depends on either), so the eight interior nodes (T1, T2, T3, T5–T9) never appear. Worse, **T4 ("Configure Tailscale VPN exit node") is a dead-end branch** — semantically a mid-graph step, not a deliverable — yet it's a co-equal leaf alongside the genuine terminal node T10 ("Validate and document setup"). There was **no chat path** to the per-node bodies: `/results` returns the compiled deliverable, and `/exec status` renders a status *table* with no output text (and `/exec/status` doesn't even SELECT `output_text` or `is_output_node`).
