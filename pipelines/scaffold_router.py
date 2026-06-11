@@ -3731,6 +3731,17 @@ class Pipeline:
             )
         job_id = parts[1].strip()
 
+        # §17.471 — `/results <job_id> nodes` (aliases: full / all / detail)
+        # routes to the per-node output view. The default `/results` body
+        # returns only the compiled deliverable, which Strategy 0 limits to
+        # the DAG's is_output_node leaves — so on a multi-leaf job most node
+        # outputs (T1..Tn interior) never appear. This subcommand pulls up
+        # every node's full work product.
+        if len(parts) >= 3 and parts[2].strip().lower() in (
+            "nodes", "full", "all", "detail",
+        ):
+            return self._handle_node_outputs(job_id)
+
         try:
             r = _HTTP_SESSION.get(
                 f"{self.valves.orchestrator_url}/exec/status/{job_id}",
@@ -3761,9 +3772,23 @@ class Pipeline:
 
         if status in ("completed", "done"):
             compiled = data.get("compiled_output", "")
+            # §17.471 — the compiled deliverable is assembled from the DAG's
+            # is_output_node leaves only (execution_compile Strategy 0), so
+            # interior nodes' work is not shown here. Point operators at the
+            # per-node view so they can pull up every node T1..Tn.
+            total = data.get("total_nodes") or 0
+            nodes_hint = (
+                f"\n\n---\n_Showing the compiled deliverable. To see every "
+                f"node's full output ({total} nodes), run "
+                f"`/results {job_id} nodes`._"
+                if total else ""
+            )
             if compiled:
-                return compiled
-            return f"✅ Job `{job_id}` completed, but no compiled output is available."
+                return compiled + nodes_hint
+            return (
+                f"✅ Job `{job_id}` completed, but no compiled output is "
+                f"available.{nodes_hint}"
+            )
 
         if status in ("running", "executing", "planning", "researching", "refining"):
             total = data.get("total_nodes") or data.get("task_count") or 0
@@ -3841,6 +3866,92 @@ class Pipeline:
         head = f"Status: **{status}**"
         actions_block = self._render_next_actions(data)
         return head + (actions_block if actions_block else " (no further details available)")
+
+    # ------------------------------------------------------------------
+    # §17.471 — per-node output view (`/results <job_id> nodes`)
+    # ------------------------------------------------------------------
+
+    # Per-node body cap. Generous enough to show real work product, but
+    # bounded so a 10-node job doesn't emit a 50k-char chat message. The
+    # untruncated text lives in the DB / web detail page.
+    _NODE_OUTPUT_PREVIEW_CHARS = 3000
+
+    def _handle_node_outputs(self, job_id: str) -> str:
+        """Render every node's output for a completed/in-progress job.
+
+        Backs `/results <job_id> nodes`. Calls `GET /exec/nodes/{job_id}`
+        (which returns full `output_text` per node) and renders each node
+        T1..Tn with its status, output-node marker, and a capped body.
+        """
+        try:
+            r = _HTTP_SESSION.get(
+                f"{self.valves.orchestrator_url}/exec/nodes/{job_id}",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.Timeout:
+            return "⚠️ Request timed out."
+        except requests.exceptions.ConnectionError:
+            return (
+                f"⚠️ Cannot reach orchestrator at {self.valves.orchestrator_url}.\n\n"
+                f"💡 Try `/health` to probe each subsystem (Postgres + Ollama + Milvus + Redis)."
+            )
+
+        if r.status_code == 404:
+            return (
+                f"Job not found: `{job_id}`.\n\n"
+                f"💡 Use `/jobs` to list active jobs and copy a real job_id."
+            )
+        if r.status_code >= 400:
+            return f"⚠️ Error {r.status_code}: {r.text[:200]}"
+        try:
+            data = r.json()
+        except ValueError:
+            return "⚠️ Unexpected response from orchestrator."
+
+        nodes = data.get("nodes") or []
+        if not nodes:
+            return (
+                f"Job `{job_id}` has no DAG nodes yet.\n\n"
+                f"💡 If it's still planning, re-run `/results {job_id}` shortly."
+            )
+
+        title = data.get("job_title") or job_id
+        jstatus = data.get("job_status") or "unknown"
+        out_keys = [
+            n.get("node_key", "?") for n in nodes if n.get("is_output_node")
+        ]
+        lines = [
+            f"## Node outputs — {title}",
+            f"_Job status: **{jstatus}** · {len(nodes)} nodes_",
+        ]
+        if out_keys:
+            # Make explicit which nodes fed the compiled deliverable so the
+            # gap (interior nodes omitted from `/results`) is legible.
+            lines.append(
+                f"_Compiled deliverable is built from: "
+                f"{', '.join('`' + k + '`' for k in out_keys)}._"
+            )
+        lines.append("")
+
+        cap = self._NODE_OUTPUT_PREVIEW_CHARS
+        for n in nodes:
+            nk = n.get("node_key", "?")
+            n_status = n.get("status", "unknown")
+            icon = STATUS_ICONS.get(n_status, "")
+            marker = " ⭐" if n.get("is_output_node") else ""
+            lines.append(f"### {nk} — {n.get('title', '')} · {icon} {n_status}{marker}")
+            body = n.get("output_text") or ""
+            if not body:
+                lines.append("_(no output)_\n")
+                continue
+            total = len(body)
+            if total > cap:
+                body = body[:cap] + f"\n\n… [{total - cap} more chars — see /web/jobs/{job_id}]"
+            lines.append(body)
+            lines.append("")
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Formatter

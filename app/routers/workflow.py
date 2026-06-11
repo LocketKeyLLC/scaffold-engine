@@ -12,6 +12,7 @@ Routes:
   GET  /dag/{job_id}       — get_dag (Step 18)
   POST /dag                — generate_dag_endpoint (Step 11)
   GET  /exec/status/{job_id} — exec_status
+  GET  /exec/nodes/{job_id}  — exec_nodes (§17.471 — per-node output bodies)
   POST /exec/retry         — exec_retry
   POST /optimize           — optimize_endpoint (Step 14)
   POST /execute            — execute_next (Step 15)
@@ -33,7 +34,7 @@ from app.modules.execution_agent import (
     retry_failed_node,
     execute_all_nodes,
 )
-from app.modules.execution_handler import execution_status
+from app.modules.execution_handler import execution_status, node_outputs
 from app.modules.idea_refinement import create_ideation_job, refine_idea
 from app.modules.ideation_workflow import (
     analyze_and_confirm,
@@ -170,6 +171,26 @@ async def exec_status(job_id: str, db: AsyncSession = Depends(get_db)):
     """Get execution state for a job."""
     try:
         result = await execution_status(UUID(job_id), db)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        return result
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
+
+
+@router.get("/exec/nodes/{job_id}")
+async def exec_nodes(job_id: str, db: AsyncSession = Depends(get_db)):
+    """§17.471 — per-node output text (T1..Tn) for a job.
+
+    Distinct from ``/exec/status``, which is summary-only (counts + node
+    statuses, no output bodies). Backs the scaffold_router
+    ``/results <job_id> nodes`` view so operators can pull up every
+    node's full work product, not just the compiled deliverable — which
+    ``execution_compile`` Strategy 0 limits to the ``is_output_node`` DAG
+    leaves, dropping every interior node from a multi-leaf job.
+    """
+    try:
+        result = await node_outputs(UUID(job_id), db)
         if "error" in result:
             raise HTTPException(status_code=404, detail=result["error"])
         return result

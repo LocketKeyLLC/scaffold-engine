@@ -165,6 +165,59 @@ async def test_next_actions_for_completed_renders_view_output():
     assert actions[0]["action"] == "view_output"
 
 
+# ---------------------------------------------------------------------------
+# §17.471 — node_outputs() — per-node output bodies (/exec/nodes/{job_id})
+# ---------------------------------------------------------------------------
+
+
+async def test_node_outputs_returns_error_when_job_missing():
+    job_result = MagicMock()
+    job_result.fetchone.return_value = None
+    db = AsyncMock()
+    db.execute.return_value = job_result
+    result = await execution_handler.node_outputs(uuid4(), db)
+    assert "error" in result
+
+
+async def test_node_outputs_returns_every_node_with_body_and_flag():
+    """The view must surface ALL nodes' output_text + is_output_node, not
+    just the DAG leaves — that's the whole point (the compiled deliverable
+    already drops interior nodes)."""
+    job = SimpleNamespace(id="j1", title="Proxmox", status="completed")
+    nodes = [
+        SimpleNamespace(node_key="T1", title="plan", status="done",
+                        execution_order=0, is_output_node=False,
+                        output_text="storage plan body"),
+        SimpleNamespace(node_key="T2", title="install", status="done",
+                        execution_order=1, is_output_node=True,
+                        output_text="install body"),
+    ]
+    db = _mock_db(job, nodes)
+    result = await execution_handler.node_outputs(uuid4(), db)
+    assert result["job_status"] == "completed"
+    assert result["total_nodes"] == 2
+    assert [n["node_key"] for n in result["nodes"]] == ["T1", "T2"]
+    # Interior node's body is present (the gap this endpoint closes).
+    assert result["nodes"][0]["output_text"] == "storage plan body"
+    assert result["nodes"][0]["is_output_node"] is False
+    assert result["nodes"][0]["output_len"] == len("storage plan body")
+    # Leaf is flagged so the renderer can mark which fed the deliverable.
+    assert result["nodes"][1]["is_output_node"] is True
+
+
+async def test_node_outputs_null_body_normalizes_to_empty():
+    job = SimpleNamespace(id="j1", title="t", status="running")
+    nodes = [
+        SimpleNamespace(node_key="T1", title="", status="pending",
+                        execution_order=0, is_output_node=False,
+                        output_text=None),
+    ]
+    db = _mock_db(job, nodes)
+    result = await execution_handler.node_outputs(uuid4(), db)
+    assert result["nodes"][0]["output_text"] == ""
+    assert result["nodes"][0]["output_len"] == 0
+
+
 async def test_next_actions_blocked_node_picks_correct_node_key():
     """Pending node whose deps aren't met → blocked_node_key surfaces in
     skip suggestions for in-flight jobs."""

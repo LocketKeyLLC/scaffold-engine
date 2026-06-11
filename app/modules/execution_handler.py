@@ -150,6 +150,66 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
     }
 
 
+async def node_outputs(job_id: UUID, db: AsyncSession) -> dict:
+    """Per-node output text for a job — backs ``GET /exec/nodes/{job_id}``.
+
+    §17.471 — ``/exec/status`` is deliberately summary-only (the hot
+    status path: counts + node statuses, no output bodies), and the
+    compiled deliverable can omit most nodes: ``execution_compile``
+    Strategy 0 joins only the ``is_output_node`` DAG leaves, so a 10-node
+    job whose leaf-set is ``{T4, T10}`` produces a ``compiled_output``
+    containing just those two. Operators who wanted every node's full
+    work product (T1..Tn) had no way to retrieve it from chat — neither
+    ``/results`` (compiled deliverable) nor ``/exec status`` (status
+    table, no bodies) surfaced it.
+
+    This returns each node's ``output_text`` verbatim plus its
+    ``is_output_node`` flag (which ``/exec/status`` also omits) so the
+    ``scaffold_router`` ``/results <job_id> nodes`` view can render each
+    node individually and mark which ones fed the compiled deliverable.
+    """
+    job_result = await db.execute(
+        text("SELECT id, title, status FROM jobs WHERE id = :job_id"),
+        {"job_id": str(job_id)},
+    )
+    job = job_result.fetchone()
+    if not job:
+        return {"error": f"Job {job_id} not found"}
+
+    nodes_result = await db.execute(
+        text("""
+            SELECT node_key, title, status, execution_order,
+                   is_output_node, output_text
+            FROM dag_nodes
+            WHERE job_id = :job_id
+            ORDER BY execution_order, node_key
+        """),
+        {"job_id": str(job_id)},
+    )
+    rows = nodes_result.fetchall()
+
+    nodes = []
+    for r in rows:
+        out = r.output_text or ""
+        nodes.append({
+            "node_key": r.node_key,
+            "title": r.title,
+            "status": r.status,
+            "execution_order": r.execution_order,
+            "is_output_node": bool(r.is_output_node),
+            "output_text": out,
+            "output_len": len(out),
+        })
+
+    return {
+        "job_id": str(job_id),
+        "job_title": job.title,
+        "job_status": job.status,
+        "total_nodes": len(nodes),
+        "nodes": nodes,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Resume — cancelled → executing
 # ---------------------------------------------------------------------------
