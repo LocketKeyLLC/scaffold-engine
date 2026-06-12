@@ -328,9 +328,9 @@ async def lifespan(app: FastAPI):
     # §17.484 — Replay persisted per-role model overrides onto the live
     # settings singleton. Must run AFTER migrations (needs the model_overrides
     # table). Fail-soft: a DB hiccup logs but doesn't block startup — the
-    # roles just keep their env/config defaults.
+    # roles just keep their env/config defaults. Uses the module-level
+    # async_session (imported at L36) — no function-local import (§17.164).
     try:
-        from app.database import async_session
         from app.modules.model_overrides import load_overrides_into_settings
         async with async_session() as _mo_db:
             n_overrides = await load_overrides_into_settings(_mo_db)
@@ -345,9 +345,8 @@ async def lifespan(app: FastAPI):
     # does not crash startup; the drift just goes unnoticed until next
     # boot.
     try:
-        from app.database import async_session
         from app.utils.embedder_drift import check_embedder_drift
-        async with async_session() as _drift_db:
+        async with async_session() as _drift_db:  # §17.484 — module-level async_session (was a redundant local import)
             drift_result = await check_embedder_drift(_drift_db)
         if drift_result.get("outcome") == "drift":
             logger.critical(
