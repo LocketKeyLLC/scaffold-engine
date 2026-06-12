@@ -437,15 +437,85 @@ def web_model(request: Request):
 
 @router.get("/research", response_class=HTMLResponse, dependencies=[])
 async def web_research(request: Request, db=Depends(get_db)):
-    """Browse recent research sessions (read-only)."""
+    """Browse recent research sessions + launch form (§17.481)."""
     from sqlalchemy import text as _sql
     rows = (await db.execute(_sql(
         "SELECT id, topic, status, created_at, updated_at "
         "FROM research_sessions ORDER BY created_at DESC LIMIT 25"
     ))).mappings().all()
     return templates.TemplateResponse(
-        request, "web/research.html", {"sessions": [dict(r) for r in rows]},
+        request, "web/research.html",
+        {"sessions": [dict(r) for r in rows], "depths": ["shallow", "medium", "deep"]},
     )
+
+
+@router.post("/research", dependencies=[])
+async def web_research_launch(
+    request: Request, topic: str = Form(...), depth: str = Form("medium"),
+):
+    """§17.481 — fire-and-forget autonomous research, then redirect to the list
+    where the new running session appears. Research (20-60 min) runs server-side
+    regardless of the browser (spawn_research_background, the §17.454 pattern)."""
+    topic_clean = (topic or "").strip()
+    if not topic_clean:
+        return RedirectResponse("/web/research", status_code=302)
+    depth_clean = depth if depth in ("shallow", "medium", "deep") else "medium"
+    from app.modules.research_agent import spawn_research_background
+    spawn_research_background(topic_clean, depth=depth_clean)
+    logger.info("web_research_launched topic=%s depth=%s", topic_clean[:80], depth_clean)
+    return RedirectResponse("/web/research", status_code=302)
+
+
+def _research_session_context(payload: dict | None, session_id: str) -> dict:
+    return {
+        "s": payload, "session_id": session_id,
+        "summary_html": _render_markdown((payload or {}).get("summary")),
+    }
+
+
+async def _research_detail(request: Request, session_id: str, db, *, root_only: bool):
+    from uuid import UUID
+    from sqlalchemy import text as _sql
+    try:
+        UUID(session_id)
+    except (ValueError, TypeError):
+        return templates.TemplateResponse(
+            request, "web/error.html",
+            {"error": "Invalid session id", "title": "Research"}, status_code=400,
+        )
+    row = (await db.execute(_sql(
+        "SELECT id, topic, depth, domain, status, summary, error_message, "
+        "       iterations_completed, total_entries_extracted, total_entries_ingested, "
+        "       total_entries_rejected, total_urls_searched, total_queries, "
+        "       coverage_pct, duration_ms, created_at, completed_at "
+        "FROM research_sessions WHERE id = :id"
+    ), {"id": session_id})).mappings().first()
+    if not row:
+        return templates.TemplateResponse(
+            request, "web/error.html",
+            {"error": "Research session not found", "title": "Research"},
+            status_code=404,
+        )
+    tmpl = "web/_research_detail_root.html" if root_only else "web/research_detail.html"
+    return templates.TemplateResponse(
+        request, tmpl, _research_session_context(dict(row), session_id),
+    )
+
+
+@router.get("/research/{session_id}", response_class=HTMLResponse, dependencies=[])
+async def web_research_detail(request: Request, session_id: str, db=Depends(get_db)):
+    """§17.481 — research session detail (stats + summary + live poll)."""
+    return await _research_detail(request, session_id, db, root_only=False)
+
+
+@router.get(
+    "/research/{session_id}/fragment", response_class=HTMLResponse, dependencies=[],
+)
+async def web_research_detail_fragment(
+    request: Request, session_id: str, db=Depends(get_db),
+):
+    """§17.481 — htmx poll target; re-emits its own poll only while running."""
+    return await _research_detail(request, session_id, db, root_only=True)
 
 
 @router.post("/ideate", dependencies=[])

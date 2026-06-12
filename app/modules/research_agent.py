@@ -2143,3 +2143,52 @@ async def run_research_pdf(
         session_id, _pdf_inner, t0, filename,
     ):
         yield evt
+
+
+# ---------------------------------------------------------------------------
+# §17.481 — background research kickoff (web launcher / fire-and-forget)
+# ---------------------------------------------------------------------------
+
+# Strong refs to in-flight background research tasks. asyncio.create_task only
+# holds a weak ref, so without this the GC could collect a task mid-research
+# and strand its session in 'running'. Mirrors §17.454's Phase-1 pattern.
+_RESEARCH_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+async def run_research_in_background(
+    topic: str,
+    depth: str = "medium",
+    domain: str | None = None,
+    model_overrides: dict | None = None,
+) -> None:
+    """§17.481 — drain ``run_research`` to completion off the request path so a
+    web/CLI caller can fire-and-forget. ``run_research`` owns its session
+    lifecycle (``_run_with_session_lifecycle`` finalizes the row on success,
+    error, or cancellation), so we just consume the generator; any unexpected
+    error is logged."""
+    try:
+        async for _ in run_research(
+            topic=topic, depth=depth, domain=domain,
+            model_overrides=model_overrides,
+        ):
+            pass
+    except Exception:
+        logger.exception("research_background_failed: topic=%s", (topic or "")[:80])
+
+
+def spawn_research_background(
+    topic: str,
+    depth: str = "medium",
+    domain: str | None = None,
+    model_overrides: dict | None = None,
+) -> asyncio.Task:
+    """§17.481 — fire-and-forget background research with a strong ref so it
+    survives GC, plus a done-callback to release the ref on completion."""
+    task = asyncio.create_task(
+        run_research_in_background(
+            topic, depth=depth, domain=domain, model_overrides=model_overrides,
+        )
+    )
+    _RESEARCH_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_RESEARCH_BACKGROUND_TASKS.discard)
+    return task
