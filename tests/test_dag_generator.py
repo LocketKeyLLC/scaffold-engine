@@ -674,3 +674,41 @@ class TestValidatorLoop:
         assert result["validator_calls"] == 1
         assert any("validator_failed_open" in w for w in result["warnings"])
 
+
+
+# ===========================================================================
+# §17.475 — is_deliverable (explicit deliverable marker)
+# ===========================================================================
+
+@pytest.mark.smoke
+class TestIsDeliverable:
+    """§17.475 — _normalize_tasks parses the model-asserted deliverable flag."""
+
+    def test_is_deliverable_parsed(self):
+        tasks = [
+            {"id": "T1", "name": "Plan the work", "type": "action",
+             "tool": "LLM", "depends_on": []},
+            {"id": "T2", "name": "Write final output", "type": "output",
+             "tool": "LLM", "depends_on": ["T1"], "is_deliverable": True},
+        ]
+        normalized, errors, _w = _dag_gen._normalize_tasks(tasks)
+        assert not errors
+        by_id = {n["id"]: n for n in normalized}
+        assert by_id["T2"]["is_deliverable"] is True
+        assert by_id["T1"]["is_deliverable"] is False
+
+    def test_is_deliverable_defaults_false(self):
+        tasks = [
+            {"id": "T1", "name": "Single step here", "type": "output",
+             "tool": "LLM", "depends_on": []},
+        ]
+        normalized, _e, _w = _dag_gen._normalize_tasks(tasks)
+        assert normalized[0]["is_deliverable"] is False
+
+    def test_is_deliverable_truthy_coerced(self):
+        tasks = [
+            {"id": "T1", "name": "Emit the artifact", "type": "output",
+             "tool": "LLM", "depends_on": [], "is_deliverable": "yes"},
+        ]
+        normalized, _e, _w = _dag_gen._normalize_tasks(tasks)
+        assert normalized[0]["is_deliverable"] is True

@@ -459,7 +459,8 @@ async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
     rows = await db.execute(
         text(
             "SELECT node_key, title, tool, status, output_text, depends_on, "
-            "       COALESCE(is_output_node, FALSE) AS is_output_node "
+            "       COALESCE(is_output_node, FALSE) AS is_output_node, "
+            "       COALESCE(is_deliverable, FALSE) AS is_deliverable "
             "FROM dag_nodes WHERE job_id = :jid ORDER BY execution_order"
         ),
         {"jid": job_id},
@@ -479,17 +480,26 @@ async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
             was_synthesized,
         )
 
-    # Strategy 0 (#97): explicit is_output_node marker wins over heuristics.
-    explicit = [
+    # Strategy 0 — explicit DELIVERABLE marker (§17.475) is the primary
+    # signal: the DAG generator named exactly which node(s) produce the
+    # user-facing artifact. Trust those verbatim — no topological collapse,
+    # and the deliverable need NOT be a topological leaf (e.g. a CodeGen
+    # node with downstream docs/validation).
+    deliverable = [
         n for n in nodes
-        if n.get("is_output_node") and n["status"] == "done" and n["output_text"]
+        if n.get("is_deliverable") and n["status"] == "done" and n["output_text"]
     ]
-    if explicit:
-        # §17.473 — collapse dead-end-branch leaves into the dominant leaf
-        # before deciding single- vs multi-leaf. dag_generator marks every
-        # structural leaf is_output_node, so a graph with an orphan side
-        # branch had two "deliverables" (the branch + the real synthesis);
-        # this drops the branch when a dominant leaf subsumes it.
+    if deliverable:
+        explicit = deliverable
+    else:
+        # §17.475 legacy fallback — pre-048 jobs (is_deliverable all FALSE)
+        # or a draw where the model marked nothing: fall back to the
+        # topological is_output_node leaves + §17.473 dominant-leaf, which
+        # drops dead-end branches. Retained, not deleted.
+        explicit = [
+            n for n in nodes
+            if n.get("is_output_node") and n["status"] == "done" and n["output_text"]
+        ]
         if len(explicit) > 1:
             explicit, dropped = _select_dominant_leaves(explicit, nodes)
             if dropped:
@@ -500,6 +510,7 @@ async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
                     [n["node_key"] for n in explicit],
                     dropped,
                 )
+    if explicit:
         if len(explicit) == 1:
             heuristic = explicit[0]["output_text"]
             text_value, was_syn = await _maybe_synthesize(

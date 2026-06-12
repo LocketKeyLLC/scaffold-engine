@@ -144,3 +144,19 @@ class TestCompletedResultsHint:
             out = pipe._handle_results(["/results", "job-1"])
         assert "body only" in out
         assert "nodes`._" not in out
+
+
+@pytest.mark.smoke
+def test_node_view_prefers_is_deliverable_over_leaves(pipe):
+    """§17.475 — when is_deliverable is set, the ⭐ + 'built from' line use it,
+    not the is_output_node leaves (which are only the fallback)."""
+    nodes = [
+        _node("T1", is_output=True, body="leaf but not deliverable", order=0),
+        _node("T3", is_output=False, body="the real deliverable", order=2),
+    ]
+    nodes[1]["is_deliverable"] = True  # T3 is the marked deliverable (non-leaf)
+    with patch("scaffold_router._HTTP_SESSION.get") as mg:
+        mg.return_value = _nodes_response(nodes)
+        out = pipe._handle_results(["/results", "job-1", "nodes"])
+    assert "built from: `T3`" in out      # deliverable marker drives the line
+    assert "`T1`" not in out.split("built from:")[1].split("._")[0]  # not the leaf
