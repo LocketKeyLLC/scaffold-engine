@@ -358,6 +358,21 @@ def _prepend_skipped_banner(text: str | None, skipped_count: int, total: int) ->
 # README") have no dominant leaf, so all survive — the prior concat behavior.
 _DOMINANT_LEAF_FACTOR = 2
 
+# §17.482 — leaf tools whose output is a genuine user-facing artifact and is
+# therefore NEVER dropped by the dominance test, even when a larger leaf
+# subsumes its upstream. CodeGen (executable code) and LLM (the reasoning /
+# summary / validation / document text that is usually the actual deliverable)
+# both qualify. Only "action" tools whose leaf output is an intermediate side
+# effect — Shell runbooks (Proxmox's dead-end "configure Tailscale exit node"),
+# filesystem writes, raw retrieval dumps — stay droppable. Rationale: a wrong
+# DROP loses a real deliverable (a true mis-fire); a wrong KEEP merely appends
+# a harmless dead-end branch to the concat. With LLM-vs-LLM the size factor
+# alone could not tell a parallel deliverable ("validate directory structure",
+# "set up network security node") from a dead-end, so it mis-fired both ways —
+# protecting LLM makes the heuristic err toward keeping, eliminating the
+# false-drops while still collapsing Shell/FS dead-end branches.
+_PROTECTED_LEAF_TOOLS = frozenset({"CodeGen", "LLM"})
+
 
 def _dependency_closure(key: str, deps_by_key: dict[str, list[str]]) -> set[str]:
     """Transitive dependency closure of ``key`` (inclusive of ``key``).
@@ -386,14 +401,15 @@ def _select_dominant_leaves(explicit: list, all_nodes: list) -> tuple[list, list
 
       - ``primary`` = the leaf with the largest dependency closure (ties →
         latest in execution order, i.e. last in ``explicit``).
-      - a non-primary leaf ``L`` is dropped iff ``L`` is **not** a CodeGen
-        leaf AND ``primary`` covers all of ``L``'s upstream
-        (``closure(L) - {L} ⊆ closure(primary)``) AND ``primary``'s closure
-        is ≥ ``_DOMINANT_LEAF_FACTOR`` × ``L``'s. The conditions matter: the
-        CodeGen guard protects executable-code deliverables (a doc/summary
-        leaf otherwise subsumes its siblings); the subset test ensures ``L``
-        adds nothing but itself; the size factor protects co-equal
-        deliverables that merely share a common base node.
+      - a non-primary leaf ``L`` is dropped iff ``L``'s tool is **not** in
+        ``_PROTECTED_LEAF_TOOLS`` (CodeGen/LLM) AND ``primary`` covers all of
+        ``L``'s upstream (``closure(L) - {L} ⊆ closure(primary)``) AND
+        ``primary``'s closure is ≥ ``_DOMINANT_LEAF_FACTOR`` × ``L``'s. The
+        conditions matter: the protected-tool guard (§17.482) keeps
+        executable-code and LLM-text deliverables — the only droppable leaves
+        are action-tool dead-ends (Shell runbooks, FS writes); the subset test
+        ensures ``L`` adds nothing but itself; the size factor protects
+        co-equal deliverables that merely share a common base node.
 
     Survivors keep their original execution order. Never empty (``primary``
     always survives)."""
@@ -418,18 +434,19 @@ def _select_dominant_leaves(explicit: list, all_nodes: list) -> tuple[list, list
         nkey = n["node_key"]
         if nkey == pkey:
             continue
-        # §17.473 (refinement) — never drop a CodeGen leaf. Its output is
-        # executable code, a deliverable by definition (cf. Strategy 2,
-        # "last CodeGen node IS the deliverable", and the CodeGen-verbatim
-        # multi-leaf path below). A documentation/summary leaf naturally
-        # accretes a closure that subsumes its siblings', so without this
-        # guard the dominance test drops genuine sibling code artifacts —
-        # observed on an mdsplit job whose "write parser unit tests"
-        # (CodeGen) leaf was dropped for a "document usage" (LLM) leaf.
-        # Shell stays droppable: a Shell leaf is a runbook (instructions),
-        # the dead-end-branch case the original rule targets (Proxmox's
-        # "configure Tailscale exit node").
-        if n.get("tool") == "CodeGen":
+        # §17.482 — never drop a protected-tool leaf (CodeGen or LLM). CodeGen
+        # output is executable code, a deliverable by definition (cf. Strategy
+        # 2, "last CodeGen node IS the deliverable"); LLM output is the
+        # reasoning / summary / validation / document text that is usually the
+        # real deliverable. The original §17.473 rule guarded only CodeGen, so
+        # an LLM leaf whose closure another LLM leaf merely subsumed got
+        # dropped even when it was a parallel deliverable — observed dropping
+        # "validate directory structure" (Homelab) and "set up network
+        # security node" (AI-Research). Only action-tool leaves stay droppable:
+        # Shell runbooks (Proxmox's dead-end "configure Tailscale exit node"),
+        # FS writes, raw retrieval dumps — where a dead-end side-branch is the
+        # case the rule actually targets.
+        if n.get("tool") in _PROTECTED_LEAF_TOOLS:
             continue
         nclosure = closures[nkey]
         deps_only = nclosure - {nkey}

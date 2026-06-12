@@ -21984,6 +21984,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.482 Fix — dominant-leaf heuristic: protect LLM leaves + repair the backfill gate (2026-06-12)
+
+The §17.473 dominant-leaf rule (`_select_dominant_leaves`, `execution_compile.py`) drops a non-primary `is_output_node` leaf when a larger leaf subsumes its upstream. §17.473 guarded only **CodeGen** leaves; an LLM leaf dominated by another LLM leaf was still droppable — and structure alone cannot tell a parallel deliverable from a dead-end (Proxmox's dropped T4 is *structurally identical* to the leaves the rule wrongly collapsed). Observed mis-fires: **Homelab** dropped T3 "Validate directory structure" (LLM, closure 2) under T5 "Save DAG file" (FileSystem, closure 4); **AI-Research** dropped T5 "Set up Network Security Node" (LLM, closure 2) under T4 "Deploy workers" (LLM, closure 4). Both were genuine co-deliverables.
+
+**Fix.** Promote the guard from `{CodeGen}` to `_PROTECTED_LEAF_TOOLS = {CodeGen, LLM}` — the only droppable leaves are now action-tool dead-ends (Shell runbooks like Proxmox's Tailscale node, FS writes, raw retrieval dumps). Rationale: a wrong **drop** loses a real deliverable (a true mis-fire); a wrong **keep** merely appends a harmless dead-end branch to the concat. Protecting LLM makes the heuristic err toward keeping, eliminating the false-drops while still collapsing the Shell/FS dead-ends the rule was built for.
+
+**Backfill-gate bug (same root).** `scripts/recompile_deliverables.py`'s pre-screen SELECT omitted the `tool` column, so its `_select_dominant_leaves` call saw every node as tool-less → the CodeGen/LLM guard never fired in the gate, and it over-reported drops the live `_compile_output` (which *does* SELECT `tool`) never makes. Added `tool` to the SELECT so the backfill gate matches production compile exactly.
+
+**Verification.** `_select_dominant_leaves` directly verified: Proxmox shape (Shell T4) → still drops T4, keeps LLM T10; new `test_select_dominant_leaves_protects_llm_dead_end` (the exact mis-fire topology, closure-4-dominates-2) → drops nothing. `test_dead_end_branch_dropped_for_dominant_leaf` retargeted from an LLM dead-end to Shell (the real Proxmox tool). Live backfill dry-run with the fix: Homelab + AI-Research now **0 changed / unchanged** (were 13262→7103 / 30676→11046 "dropped"); full scan **0 changed, 5 unchanged** — the refined rule collapses nothing wrongly across the entire job history, so the backfill is a clean no-op (Proxmox's legitimate Shell drop was already applied in §17.474 and remains stable). 19/19 targeted compile tests pass. No schema / migration / API / SSE change. **Full `make test`: 3678 passed, 1 skipped, 0 failed in 27:11** (+1 over §17.481's 3677 — the new LLM-protection test; the dead-end test was retargeted, not added; the 1 skip is the known transient `test_topology_select_db.py` live-LLM 409).
+
+---
+
 ### §17.481 Feature — web research launch + session detail (the §17.480 follow-up) (2026-06-12)
 
 §17.480's `/web/research` only listed sessions; launching stayed chat/CLI. This adds a launch form + a live session-detail page, mirroring the §17.454 ideate-kickoff pattern.
