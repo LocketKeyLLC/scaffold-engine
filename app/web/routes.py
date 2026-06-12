@@ -418,21 +418,76 @@ async def web_rag(request: Request, q: str | None = None):
     )
 
 
+# §17.483 — (field, label, locked) for every role, ordered for display. The
+# two locked roles (embedder/reranker) are config-only singletons; the other
+# seven are runtime-switchable via POST /web/model (see config.set_runtime_model).
+_MODEL_ROLE_ROWS = [
+    ("model_general", "general", False),
+    ("model_router", "router", False),
+    ("model_coder", "coder", False),
+    ("model_verifier", "verifier", False),
+    ("model_fallback", "fallback", False),
+    ("model_cloud_heavy", "cloud_heavy", False),
+    ("model_cloud_alt", "cloud_alt", False),
+    ("model_embedder_pipeline", "embedder (pipeline)", True),
+    ("model_reranker", "reranker", True),
+]
+
+
 @router.get("/model", response_class=HTMLResponse, dependencies=[])
-def web_model(request: Request):
-    """Read-only view of the configured model per role (sync — no I/O)."""
+def web_model(request: Request, set: str = "", error: str = ""):
+    """View + set the model per role (§17.483). Sync — reads the settings
+    singleton; `set`/`error` are PRG flash params from POST /web/model."""
     roles = [
-        ("general", settings.model_general),
-        ("router", settings.model_router),
-        ("coder", settings.model_coder),
-        ("verifier", settings.model_verifier),
-        ("fallback", settings.model_fallback),
-        ("embedder (pipeline)", settings.model_embedder_pipeline),
-        ("reranker", settings.model_reranker),
+        {"field": f, "label": label, "model": getattr(settings, f), "locked": locked}
+        for f, label, locked in _MODEL_ROLE_ROWS
     ]
     return templates.TemplateResponse(
-        request, "web/model.html", {"roles": roles},
+        request, "web/model.html",
+        {"roles": roles, "flash_set": set, "flash_error": error},
     )
+
+
+async def _ollama_tag_exists(model: str) -> bool | None:
+    """True/False if `model` is/ isn't a pulled Ollama tag; None if the tag
+    list is unreachable (so the caller can fail-soft and allow the set)."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags")
+            r.raise_for_status()
+            names = {m.get("name", "") for m in (r.json().get("models") or [])}
+        return model in names
+    except Exception as exc:  # connection / timeout / parse — don't block the set
+        logger.warning("web_model ollama tag-check unreachable: %s", exc)
+        return None
+
+
+@router.post("/model", dependencies=[])
+async def web_model_set(role: str = Form(...), model: str = Form(...)):
+    """§17.483 — re-point a switchable role at `model` on the live settings
+    singleton (ephemeral; reverts to env on restart). Validates the role
+    (config.set_runtime_model) and that the tag is pulled on Ollama (fail-soft
+    if Ollama is unreachable). PRG redirect back to the page with a flash."""
+    from urllib.parse import quote
+    from app.config import set_runtime_model
+
+    model_clean = (model or "").strip()
+    exists = await _ollama_tag_exists(model_clean) if model_clean else False
+    if exists is False:
+        return RedirectResponse(
+            f"/web/model?error={quote(f'model {model_clean!r} is not a pulled Ollama tag')}",
+            status_code=302,
+        )
+    # exists is True (validated) or None (Ollama unreachable → allow).
+    try:
+        set_runtime_model(role, model_clean)
+    except ValueError as exc:
+        return RedirectResponse(
+            f"/web/model?error={quote(str(exc))}", status_code=302,
+        )
+    logger.info("web_model_set role=%s model=%s (runtime-only)", role, model_clean)
+    return RedirectResponse(f"/web/model?set={quote(role)}", status_code=302)
 
 
 @router.get("/research", response_class=HTMLResponse, dependencies=[])

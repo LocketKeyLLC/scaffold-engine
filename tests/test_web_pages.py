@@ -37,6 +37,86 @@ def test_web_model_page(web):
 
 
 @pytest.mark.smoke
+def test_web_model_page_set_forms_and_locked(web):
+    # §17.483 — page now exposes set forms for switchable roles (incl. the
+    # previously-missing cloud_heavy/cloud_alt) and a config-locked marker for
+    # the embedder/reranker singletons.
+    resp = web.get("/web/model")
+    assert resp.status_code == 200
+    body = resp.text
+    assert 'name="role" value="model_general"' in body
+    assert "cloud_heavy" in body and "cloud_alt" in body
+    assert "config-locked" in body  # embedder/reranker not settable
+    assert 'action="/web/model"' in body  # POST form present
+
+
+@pytest.mark.smoke
+def test_web_model_set_success(web):
+    # Valid role + a tag Ollama confirms → mutates settings, PRG-redirects.
+    from app.config import settings
+    original = settings.model_general
+    try:
+        with patch("app.web.routes._ollama_tag_exists",
+                   new=AsyncMock(return_value=True)):
+            resp = web.post("/web/model",
+                            data={"role": "model_general", "model": "newmodel:7b"})
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/web/model?set=model_general"
+        assert settings.model_general == "newmodel:7b"
+    finally:
+        settings.model_general = original
+
+
+@pytest.mark.smoke
+def test_web_model_set_rejects_unknown_tag(web):
+    # Ollama reachable but the tag isn't pulled → reject, settings untouched.
+    from app.config import settings
+    original = settings.model_coder
+    try:
+        with patch("app.web.routes._ollama_tag_exists",
+                   new=AsyncMock(return_value=False)):
+            resp = web.post("/web/model",
+                            data={"role": "model_coder", "model": "ghost:1b"})
+        assert resp.status_code == 302
+        assert "error=" in resp.headers["location"]
+        assert settings.model_coder == original  # unchanged
+    finally:
+        settings.model_coder = original
+
+
+@pytest.mark.smoke
+def test_web_model_set_rejects_locked_role(web):
+    # A config-locked singleton (reranker) is rejected by set_runtime_model
+    # even when the tag validates. Tag-check is allowed (None=unreachable).
+    from app.config import settings
+    original = settings.model_reranker
+    with patch("app.web.routes._ollama_tag_exists",
+               new=AsyncMock(return_value=None)):
+        resp = web.post("/web/model",
+                        data={"role": "model_reranker", "model": "x:1b"})
+    assert resp.status_code == 302
+    assert "error=" in resp.headers["location"]
+    assert settings.model_reranker == original
+
+
+@pytest.mark.smoke
+def test_web_model_set_failsoft_when_ollama_unreachable(web):
+    # Ollama unreachable (tag-check None) → allow the set rather than block.
+    from app.config import settings
+    original = settings.model_fallback
+    try:
+        with patch("app.web.routes._ollama_tag_exists",
+                   new=AsyncMock(return_value=None)):
+            resp = web.post("/web/model",
+                            data={"role": "model_fallback", "model": "offline:9b"})
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/web/model?set=model_fallback"
+        assert settings.model_fallback == "offline:9b"
+    finally:
+        settings.model_fallback = original
+
+
+@pytest.mark.smoke
 def test_web_research_page_empty(web):
     resp = web.get("/web/research")
     assert resp.status_code == 200
