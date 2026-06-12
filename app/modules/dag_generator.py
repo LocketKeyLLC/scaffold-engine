@@ -338,6 +338,135 @@ async def _generate_dag_json(
     return resp, None, total_ms
 
 
+# ---------------------------------------------------------------------------
+# §17.476 (Phase 2) — dependency-completeness / dead-end detection
+# ---------------------------------------------------------------------------
+
+def _reachable(start: str, adj: dict[str, list[str]]) -> set[str]:
+    """Transitive reachable set from ``start`` over adjacency ``adj``
+    (inclusive of ``start``). Iterative + visited-guarded so a malformed
+    cyclic graph degrades instead of recursing forever."""
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        k = stack.pop()
+        if k in seen:
+            continue
+        seen.add(k)
+        for nxt in adj.get(k, ()) or ():
+            if nxt not in seen:
+                stack.append(nxt)
+    return seen
+
+
+def _deliverable_ids(tasks: list[dict]) -> set[str]:
+    """The deliverable set: explicitly-marked is_deliverable nodes, else the
+    topological leaves (same fallback compile + persist use)."""
+    ids = {t["id"] for t in tasks if t.get("id")}
+    explicit = {t["id"] for t in tasks if t.get("is_deliverable") and t.get("id")}
+    if explicit:
+        return explicit
+    referenced = {
+        d for t in tasks for d in (t.get("depends_on") or []) if d in ids
+    }
+    return {i for i in ids if i not in referenced}
+
+
+def detect_dead_ends(tasks: list[dict]) -> list[str]:
+    """§17.476 — orphan / dead-end node ids (in task order).
+
+    An orphan is a node that neither FEEDS a deliverable (in its transitive
+    upstream closure) nor is FED BY one (a deliverable's descendant). This
+    excludes legitimate downstream validation/docs nodes that consume the
+    deliverable, and catches the Proxmox-style sibling branch ("configure
+    Tailscale") that hangs off the trunk but flows into nothing.
+
+    deliverable set = is_deliverable, else topological leaves (fallback).
+    """
+    ids = {t["id"] for t in tasks if t.get("id")}
+    if not ids:
+        return []
+    fwd = {
+        t["id"]: [d for d in (t.get("depends_on") or []) if d in ids]
+        for t in tasks
+    }
+    rev: dict[str, list[str]] = {i: [] for i in ids}
+    for t in tasks:
+        for d in fwd[t["id"]]:
+            rev[d].append(t["id"])
+
+    deliverables = _deliverable_ids(tasks)
+    covered: set[str] = set()
+    for d in deliverables:
+        covered |= _reachable(d, fwd)   # nodes that FEED the deliverable
+        covered |= _reachable(d, rev)   # nodes FED BY the deliverable
+    return [t["id"] for t in tasks if t.get("id") and t["id"] not in covered]
+
+
+def auto_link_dead_ends(tasks: list[dict], orphans: list[str]) -> str | None:
+    """Last resort — wire each orphan into the primary deliverable's
+    depends_on so the persisted graph is connected. Cycle-safe by
+    construction: an orphan is not a deliverable descendant, so it cannot
+    transitively depend on the deliverable. Returns the chosen primary
+    deliverable id, or None if there is nothing to link to.
+
+    Primary = the deliverable with the largest upstream closure (the most
+    synthesis-like), tie → earliest in task order.
+    """
+    if not orphans:
+        return None
+    ids = {t["id"] for t in tasks if t.get("id")}
+    fwd = {
+        t["id"]: [d for d in (t.get("depends_on") or []) if d in ids]
+        for t in tasks
+    }
+    deliverables = _deliverable_ids(tasks)
+    if not deliverables:
+        return None
+    order = {t["id"]: i for i, t in enumerate(tasks) if t.get("id")}
+    primary = max(
+        deliverables,
+        key=lambda d: (len(_reachable(d, fwd)), -order.get(d, 0)),
+    )
+    by_id = {t["id"]: t for t in tasks if t.get("id")}
+    ptask = by_id[primary]
+    deps = list(ptask.get("depends_on") or [])
+    orphan_set = set(orphans)
+    for o in orphans:
+        if o != primary and o not in deps and o in by_id:
+            deps.append(o)
+    ptask["depends_on"] = deps
+    return primary
+
+
+def render_dead_end_corrections(
+    tasks: list[dict], orphans: list[str], next_attempt: int,
+) -> str:
+    """Correction block fed back to the generator so it re-decomposes a graph
+    where every node flows into a deliverable."""
+    by_id = {t["id"]: t for t in tasks if t.get("id")}
+    lines = [
+        f"## Dependency-completeness corrections needed (attempt {next_attempt})",
+        "",
+        "These nodes produce output that NO deliverable (is_deliverable) node "
+        "consumes, even transitively — they are dead-end branches that hang off "
+        "the graph and flow into nothing:",
+        "",
+    ]
+    for o in orphans:
+        name = (by_id.get(o) or {}).get("name", "?")
+        lines.append(f"- {o} ({name})")
+    lines.append("")
+    lines.append(
+        "Re-decompose so EVERY node feeds the final deliverable (directly or "
+        "through the chain): either make a deliverable depend on the orphan's "
+        "output, fold the orphan's work into a node the deliverable already "
+        "uses, or remove it if it is genuinely unnecessary. Do not leave any "
+        "node disconnected from the deliverable."
+    )
+    return "\n".join(lines)
+
+
 async def _generate_dag_with_validator(
     brief_data: dict,
     route_kwargs: dict,
@@ -434,7 +563,17 @@ async def _generate_dag_with_validator(
                 "error": None, "attempts": attempt, "validator_calls": attempt,
             }
 
-        if not outcome.issues:
+        # §17.476 — dependency-completeness check alongside the tool-pick
+        # validator. An orphan node (feeds / is fed by no deliverable) is the
+        # §17.471-474 defect; flag-and-retry so the model re-decomposes. Any
+        # survivor is auto-linked in generate_dag as a deterministic last
+        # resort. Same retry budget as the tool-pick validator.
+        dead_ends = (
+            detect_dead_ends(dag_data.get("tasks", []))
+            if settings.dag_dead_end_check_enabled else []
+        )
+
+        if not outcome.issues and not dead_ends:
             if attempt > 1:
                 warnings.append(f"validator_clean_after_retry_attempt_{attempt}")
             return {
@@ -443,26 +582,34 @@ async def _generate_dag_with_validator(
                 "error": None, "attempts": attempt, "validator_calls": attempt,
             }
 
-        # Issues present.
+        # Something to fix (tool-pick issues and/or dead-ends).
         if attempt == max_attempts:
-            warnings.append(
-                f"validator_retries_exhausted: {len(outcome.issues)} issue(s) "
-                f"remain after {attempt} attempts: " + "; ".join(
-                    f"{i.node_id}:{i.current_tool}->{i.proposed_tool}"
-                    for i in outcome.issues
+            if outcome.issues:
+                warnings.append(
+                    f"validator_retries_exhausted: {len(outcome.issues)} issue(s) "
+                    f"remain after {attempt} attempts: " + "; ".join(
+                        f"{i.node_id}:{i.current_tool}->{i.proposed_tool}"
+                        for i in outcome.issues
+                    )
                 )
-            )
+            if dead_ends:
+                warnings.append(
+                    f"dead_end_retries_exhausted: {len(dead_ends)} orphan node(s) "
+                    f"remain after {attempt} attempts: " + ", ".join(dead_ends)
+                    + " (auto-link fallback will connect them)"
+                )
             return {
                 "dag_data": dag_data, "raw_text": last_text, "model": last_model,
                 "duration_ms": total_duration_ms, "warnings": warnings,
                 "error": None, "attempts": attempt, "validator_calls": attempt,
             }
 
-        sig = issue_set_signature(outcome.issues)
+        sig = (issue_set_signature(outcome.issues), tuple(sorted(dead_ends)))
         if sig == last_issue_signature:
             warnings.append(
-                f"validator_circuit_break_attempt_{attempt}: identical "
-                f"{len(outcome.issues)} issue(s) — regenerator not converging"
+                f"validator_circuit_break_attempt_{attempt}: identical issue "
+                f"set ({len(outcome.issues)} tool-pick, {len(dead_ends)} "
+                f"dead-end) — regenerator not converging"
             )
             return {
                 "dag_data": dag_data, "raw_text": last_text, "model": last_model,
@@ -471,14 +618,29 @@ async def _generate_dag_with_validator(
             }
         last_issue_signature = sig
 
-        warnings.append(
-            f"validator_found_{len(outcome.issues)}_issues_attempt_{attempt}: "
-            + "; ".join(
-                f"{i.node_id}:{i.current_tool}->{i.proposed_tool}"
-                for i in outcome.issues
+        correction_parts: list[str] = []
+        if outcome.issues:
+            warnings.append(
+                f"validator_found_{len(outcome.issues)}_issues_attempt_{attempt}: "
+                + "; ".join(
+                    f"{i.node_id}:{i.current_tool}->{i.proposed_tool}"
+                    for i in outcome.issues
+                )
             )
-        )
-        corrections_block = render_corrections_block(outcome.issues, attempt + 1)
+            correction_parts.append(
+                render_corrections_block(outcome.issues, attempt + 1)
+            )
+        if dead_ends:
+            warnings.append(
+                f"dead_end_found_{len(dead_ends)}_attempt_{attempt}: "
+                + ", ".join(dead_ends)
+            )
+            correction_parts.append(
+                render_dead_end_corrections(
+                    dag_data.get("tasks", []), dead_ends, attempt + 1,
+                )
+            )
+        corrections_block = "\n\n".join(correction_parts)
 
     # Reached only when the loop broke mid-flight after attempt 1 (e.g., a
     # retry call/parse failed). dag_data here is the most recent successful parse.
@@ -662,6 +824,25 @@ async def generate_dag(
     if len(tasks) < 2:
         await _fail_job(db, uid, "DAG must have at least 2 tasks")
         return {"job_id": job_id, "status": "failed", "error": "Less than 2 tasks generated"}
+
+    # §17.476 (Phase 2) — dead-end auto-link, last resort. The validator loop
+    # already flagged orphans and retried; any survivor is wired into the
+    # primary deliverable's depends_on here so the persisted graph is connected
+    # (cycle-safe — an orphan can't transitively depend on the deliverable).
+    if settings.dag_dead_end_check_enabled:
+        orphans = detect_dead_ends(tasks)
+        if orphans:
+            primary = auto_link_dead_ends(tasks, orphans)
+            if primary:
+                validator_warnings.append(
+                    f"dead_end_auto_linked: {len(orphans)} orphan node(s) "
+                    f"({', '.join(orphans)}) wired into deliverable {primary} "
+                    f"after the generator did not connect them"
+                )
+                logger.warning(
+                    "dag_dead_end_auto_linked: job=%s orphans=%s primary=%s",
+                    job_id, orphans, primary,
+                )
 
     # 3b-4b. Node-count enforcement + normalize + semantic validation
     # (single try/except so any ValueError from these steps fails the job cleanly)

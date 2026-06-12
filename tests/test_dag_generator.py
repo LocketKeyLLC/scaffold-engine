@@ -712,3 +712,158 @@ class TestIsDeliverable:
         ]
         normalized, _e, _w = _dag_gen._normalize_tasks(tasks)
         assert normalized[0]["is_deliverable"] is True
+
+
+# ===========================================================================
+# §17.476 — dead-end / dependency-completeness detection
+# ===========================================================================
+
+@pytest.mark.smoke
+class TestDeadEndDetection:
+    """§17.476 — an orphan node neither feeds nor is fed by a deliverable."""
+
+    def test_sibling_branch_is_dead_end(self):
+        # Proxmox shape: TS ("configure Tailscale") hangs off the trunk (T2)
+        # but nothing consumes it and it is not the deliverable.
+        tasks = [
+            {"id": "T1", "name": "Install host", "type": "action", "depends_on": []},
+            {"id": "T2", "name": "Base config", "type": "action", "depends_on": ["T1"]},
+            {"id": "TS", "name": "Configure Tailscale", "type": "action", "depends_on": ["T2"]},
+            {"id": "T3", "name": "Deploy services", "type": "action", "depends_on": ["T2"]},
+            {"id": "TD", "name": "Validate and document", "type": "output",
+             "depends_on": ["T3"], "is_deliverable": True},
+        ]
+        assert _dag_gen.detect_dead_ends(tasks) == ["TS"]
+
+    def test_downstream_validation_not_dead_end(self):
+        # Word-count shape: the CodeGen node TC is the deliverable; TV validates
+        # it downstream. TV consumes the deliverable → NOT an orphan.
+        tasks = [
+            {"id": "T1", "name": "Plan", "type": "decision", "depends_on": []},
+            {"id": "TC", "name": "Write the script", "type": "action",
+             "depends_on": ["T1"], "is_deliverable": True},
+            {"id": "TV", "name": "Validate end to end", "type": "validation",
+             "depends_on": ["TC"]},
+        ]
+        assert _dag_gen.detect_dead_ends(tasks) == []
+
+    def test_multi_deliverable_no_orphans(self):
+        # Library + README, both deliverables, sharing a base. Neither is an
+        # orphan and the shared base feeds both.
+        tasks = [
+            {"id": "B", "name": "Build core", "type": "action", "depends_on": []},
+            {"id": "CFG", "name": "Emit library", "type": "action",
+             "depends_on": ["B"], "is_deliverable": True},
+            {"id": "DOC", "name": "Write README", "type": "output",
+             "depends_on": ["B"], "is_deliverable": True},
+        ]
+        assert _dag_gen.detect_dead_ends(tasks) == []
+
+    def test_leaf_fallback_no_orphans_when_unmarked(self):
+        # No is_deliverable anywhere → leaves are the deliverable set; every
+        # node feeds a leaf, so nothing is orphaned (permissive fallback).
+        tasks = [
+            {"id": "T1", "name": "Step one", "type": "action", "depends_on": []},
+            {"id": "T2", "name": "Step two", "type": "action", "depends_on": ["T1"]},
+            {"id": "T3", "name": "Step three", "type": "output", "depends_on": ["T2"]},
+        ]
+        assert _dag_gen.detect_dead_ends(tasks) == []
+
+
+@pytest.mark.smoke
+class TestAutoLinkDeadEnds:
+    """§17.476 — last-resort wiring of orphans into the primary deliverable."""
+
+    def test_auto_link_connects_orphan(self):
+        tasks = [
+            {"id": "T1", "name": "Install host", "type": "action", "depends_on": []},
+            {"id": "T2", "name": "Base config", "type": "action", "depends_on": ["T1"]},
+            {"id": "TS", "name": "Configure Tailscale", "type": "action", "depends_on": ["T2"]},
+            {"id": "T3", "name": "Deploy services", "type": "action", "depends_on": ["T2"]},
+            {"id": "TD", "name": "Validate and document", "type": "output",
+             "depends_on": ["T3"], "is_deliverable": True},
+        ]
+        orphans = _dag_gen.detect_dead_ends(tasks)
+        primary = _dag_gen.auto_link_dead_ends(tasks, orphans)
+        assert primary == "TD"
+        td = next(t for t in tasks if t["id"] == "TD")
+        assert "TS" in td["depends_on"]
+        # And it is now connected — no orphans remain, no cycle introduced.
+        assert _dag_gen.detect_dead_ends(tasks) == []
+
+    def test_auto_link_picks_largest_closure_deliverable(self):
+        # Two deliverables; the orphan attaches to the one with the larger
+        # upstream closure (the synthesis), not the small one.
+        tasks = [
+            {"id": "A", "name": "Base a", "type": "action", "depends_on": []},
+            {"id": "B", "name": "Mid b", "type": "action", "depends_on": ["A"]},
+            {"id": "BIG", "name": "Big synth", "type": "output",
+             "depends_on": ["B"], "is_deliverable": True},     # closure {BIG,B,A}=3
+            {"id": "SMALL", "name": "Small art", "type": "output",
+             "depends_on": [], "is_deliverable": True},        # closure {SMALL}=1
+            {"id": "ORPH", "name": "Orphan branch", "type": "action", "depends_on": ["A"]},
+        ]
+        primary = _dag_gen.auto_link_dead_ends(tasks, _dag_gen.detect_dead_ends(tasks))
+        assert primary == "BIG"
+
+    def test_auto_link_noop_without_orphans(self):
+        tasks = [
+            {"id": "T1", "name": "Only", "type": "output", "depends_on": [],
+             "is_deliverable": True},
+        ]
+        assert _dag_gen.auto_link_dead_ends(tasks, []) is None
+
+
+def _dag_json_with_dead_end():
+    """A DAG whose deliverable is T1 (code) with downstream docs T2, plus an
+    orphan sibling TS that nothing consumes and is not the deliverable."""
+    import json
+    tasks = [
+        {"id": "T1", "name": "Write the script", "type": "action", "inputs": [],
+         "outputs": ["code"], "depends_on": [], "tool": "CodeGen", "domain": None,
+         "assigned_model": None, "notes": "code", "is_deliverable": True},
+        {"id": "T2", "name": "Document usage", "type": "action", "inputs": ["code"],
+         "outputs": ["docs"], "depends_on": ["T1"], "tool": "LLM", "domain": None,
+         "assigned_model": None, "notes": "docs"},
+        {"id": "TS", "name": "Configure unrelated thing", "type": "action",
+         "inputs": [], "outputs": ["side"], "depends_on": [], "tool": "Shell",
+         "domain": None, "assigned_model": None, "notes": "orphan branch"},
+    ]
+    return json.dumps({"strategy": "hybrid", "tasks": tasks})
+
+
+@pytest.mark.smoke
+class TestDeadEndRetryLoop:
+    """§17.476 — the validator loop flags dead-ends and retries; the flag
+    gates the whole behavior."""
+
+    async def test_dead_end_triggers_retry(self):
+        from app.modules import dag_generator
+        from app import model_router as _mr
+        mock = AsyncMock(side_effect=[
+            _llm_response(_dag_json_with_dead_end()),  # gen 1 — orphan TS
+            _llm_response(_issues([])),                # val 1 — tool-picks clean
+            _llm_response(_dag_json()),                # gen 2 — clean (no orphan)
+            _llm_response(_issues([])),                # val 2 — clean
+        ])
+        with patch.object(_mr, "generate", new=mock):
+            result = await dag_generator._generate_dag_with_validator(
+                {"brief": "x"}, {"role": "model_general"},
+            )
+        assert result["attempts"] == 2
+        assert any("dead_end_found" in w for w in result["warnings"])
+
+    async def test_dead_end_check_disabled_ships_attempt_1(self):
+        from app.modules import dag_generator
+        from app import model_router as _mr
+        mock = AsyncMock(side_effect=[
+            _llm_response(_dag_json_with_dead_end()),  # gen 1
+            _llm_response(_issues([])),                # val 1 — clean
+        ])
+        with patch.object(dag_generator.settings, "dag_dead_end_check_enabled", False), \
+             patch.object(_mr, "generate", new=mock):
+            result = await dag_generator._generate_dag_with_validator(
+                {"brief": "x"}, {"role": "model_general"},
+            )
+        assert result["attempts"] == 1
+        assert not any("dead_end" in w for w in result["warnings"])
