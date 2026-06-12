@@ -368,6 +368,9 @@ class TestCompileOutputDominantLeaf:
         # MAIN's closure (MAIN,M3,M2,M1,B = 5) dominates D's (D,B = 2); D's
         # only unique contribution is itself → dead-end branch, dropped. One
         # survivor → single-leaf path emits its raw output (no section header).
+        # D is a Shell runbook (Proxmox's Tailscale shape) — §17.482 only drops
+        # action-tool dead-ends; an LLM dead-end would now be kept (see
+        # test_select_dominant_leaves_protects_llm_dead_end).
         db = make_mock_db([
             {"node_key": "B", "title": "Base", "tool": "LLM", "status": "done",
              "output_text": "base", "is_output_node": False, "depends_on": []},
@@ -377,7 +380,7 @@ class TestCompileOutputDominantLeaf:
              "output_text": "m2", "is_output_node": False, "depends_on": ["M1"]},
             {"node_key": "M3", "title": "Mid 3", "tool": "LLM", "status": "done",
              "output_text": "m3", "is_output_node": False, "depends_on": ["M2"]},
-            {"node_key": "D", "title": "Dead-end branch", "tool": "LLM",
+            {"node_key": "D", "title": "Dead-end branch", "tool": "Shell",
              "status": "done", "output_text": "DEAD_END_BRANCH",
              "is_output_node": True, "depends_on": ["B"]},
             {"node_key": "MAIN", "title": "Synthesis", "tool": "LLM",
@@ -503,7 +506,7 @@ class TestDominantLeafHelpers:
 
     def test_select_dominant_leaves_drops_shell_dead_end(self):
         # Contrast: a Shell runbook leaf (Proxmox's Tailscale shape) stays
-        # droppable — only CodeGen is protected.
+        # droppable — only action-tool leaves are; CodeGen/LLM are protected.
         from app.modules.execution_compile import _select_dominant_leaves
         all_nodes = [
             {"node_key": "B", "depends_on": [], "tool": "LLM"},
@@ -517,6 +520,28 @@ class TestDominantLeafHelpers:
         survivors, dropped = _select_dominant_leaves(explicit, all_nodes)
         assert dropped == ["SH"]
         assert [n["node_key"] for n in survivors] == ["MAIN"]
+
+    def test_select_dominant_leaves_protects_llm_dead_end(self):
+        # §17.482 — an LLM leaf structurally dominated by a larger LLM leaf is
+        # NOT dropped. This is the exact mis-fire shape the §17.473 rule hit:
+        # closure(SUB)=2, closure(MAIN)=4 (≥ 2×), SUB's only unique node is
+        # itself — so the size+subset test would drop it, but SUB is LLM text
+        # (a parallel deliverable: Homelab's "validate directory structure",
+        # AI-Research's "set up network security node"), so it must survive.
+        # Same topology as drops_shell, but the dead-end tool is LLM not Shell.
+        from app.modules.execution_compile import _select_dominant_leaves
+        all_nodes = [
+            {"node_key": "B", "depends_on": [], "tool": "LLM"},
+            {"node_key": "M1", "depends_on": ["B"], "tool": "LLM"},
+            {"node_key": "M2", "depends_on": ["M1"], "tool": "LLM"},
+            {"node_key": "M3", "depends_on": ["M2"], "tool": "LLM"},
+            {"node_key": "SUB", "depends_on": ["B"], "tool": "LLM"},
+            {"node_key": "MAIN", "depends_on": ["M3"], "tool": "LLM"},
+        ]
+        explicit = [n for n in all_nodes if n["node_key"] in ("SUB", "MAIN")]
+        survivors, dropped = _select_dominant_leaves(explicit, all_nodes)
+        assert dropped == []
+        assert {n["node_key"] for n in survivors} == {"SUB", "MAIN"}
 
 
 # ---------------------------------------------------------------------------

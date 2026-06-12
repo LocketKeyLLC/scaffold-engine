@@ -107,9 +107,15 @@ async def main(apply: bool, statuses: list[str], only_job: str | None = None) ->
             # whose recompile differs for any *other* reason (older compile
             # code, truncation drift) must not be silently rewritten under
             # this backfill's banner.
+            # `tool` is required: _select_dominant_leaves protects CodeGen/LLM
+            # leaves (§17.473/§17.482) via n.get("tool"), so omitting it here
+            # made every node look tool-less and silently bypassed the guard —
+            # this gate then over-reported drops that the live _compile_output
+            # (which does SELECT tool) never makes, mis-flagging LLM-vs-LLM
+            # jobs (Homelab T3, AI-Research T5) as changed.
             nrows = await db.execute(
                 text(
-                    "SELECT node_key, status, depends_on, "
+                    "SELECT node_key, status, depends_on, tool, "
                     "       COALESCE(is_output_node, FALSE) AS is_output_node, "
                     "       output_text "
                     "FROM dag_nodes WHERE job_id = :j ORDER BY execution_order"
