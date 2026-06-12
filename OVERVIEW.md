@@ -21984,6 +21984,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.477 Feature — confidence-aware upstream context (Phase 3 of the node overhaul); annotate + confidence-weight the upstream-output budget (2026-06-12)
+
+Phase 3, in the execution path. Node execution injects upstream nodes' outputs as "MANDATORY CONTEXT", but `_fetch_upstream_outputs` returned only text and the injection blind-concatenated all of it, truncating purely by length when over `max_upstream_chars` (8 KB) — a low-quality upstream got the same weight as a high-confidence one, and the model had no relevance signal. The verifier already scores each node 0..1 (`dag_nodes.confidence`), but it was isolated.
+
+- **`_fetch_upstream_outputs`** (`execution_agent.py`) now returns `{node_key: (output_text, confidence)}` (SELECT gains `confidence`; NULL for un-verified / skipped-verify nodes).
+- **`_format_upstream_block`** (new, extracted from the inline injection so it's unit-testable) renders the block: each section header is annotated `### T7 (confidence: 0.98)` (omitted when NULL), and when the total exceeds the cap it allocates each node's surviving char budget by **`confidence × length`** (NULL = 0.5, neutral) instead of length alone — high-confidence upstream keeps more — preserving the `compile_output_min_chunk` floor. Defensive: accepts a bare `str` value so existing mocks (which return `{}` or strings) need no changes.
+- **Setting** `upstream_confidence_ranking_enabled` (default true, `config.py`) gates only the budget weighting; the annotation ships unconditionally. Off → legacy proportional-by-length. Confidence stays in-prompt/ephemeral — no new DB column.
+
+**Verification.** **Live on real data:** for Proxmox `4e3b8f01` node T10 (depends on T7/T8/T9), `_fetch_upstream_outputs` returned real confidences (T7 0.98, T8 0.98, T9 0.95) and `_format_upstream_block` annotated each header; the 25.8 KB total exceeded the 8 KB cap so confidence-weighted truncation fired cleanly. Tests: new `tests/test_execution_agent_upstream_context.py` — `_format_upstream_block` ×6 (empty / annotation present+omitted / defensive-bare-string / ranking-favors-high-confidence / ranking-disabled-proportional / NULL-confidence-neutral) + `_fetch_upstream_outputs` ×2 (returns confidence / empty-deps). The 3 files that mock `_fetch_upstream_outputs` (all return `{}`) unaffected; full `-k execution_agent` set **196 passed**. `make ci-tier-0` + `make openapi-check` green (config-only — no schema/SDK/openapi change). **Full `make test`: 3626 passed, 1 skipped, 0 failed in 30:32** (+8 over §17.476's 3618; the 1 skip is the known transient `test_topology_select_db.py` live-LLM 409).
+
+---
+
 ### §17.476 Feature — dependency-completeness / dead-end detection (Phase 2 of the node overhaul); the generator flags orphan branches and auto-links survivors (2026-06-12)
 
 Phase 2, building on §17.475's `is_deliverable`. A **dead-end / orphan** node is one that neither *feeds* a deliverable (in its transitive upstream closure) nor is *fed by* one (a deliverable's descendant) — the structural defect behind §17.471–474, where Proxmox's "configure Tailscale" sibling hung off the trunk and flowed into nothing. The upstream-OR-downstream definition is deliberate: it excludes legitimate downstream validation/docs nodes that consume the deliverable (Phase 1's word-count T4-validate is *not* an orphan), and catches only true disconnected branches.

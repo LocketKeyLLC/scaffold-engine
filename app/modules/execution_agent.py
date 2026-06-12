@@ -435,18 +435,99 @@ def _truncate_output(content: str, max_chars: int) -> str:
 
 async def _fetch_upstream_outputs(
     db, job_id: str, depends_on: list[str]
-) -> dict[str, str]:
-    """Fetch output_text for upstream nodes by node_key."""
+) -> dict[str, tuple[str, float | None]]:
+    """Fetch (output_text, confidence) for upstream nodes by node_key.
+
+    §17.477 — confidence is the verifier's 0..1 score (NULL for un-verified
+    or skipped-verify nodes). The caller annotates each upstream section with
+    it and, when over the size cap, weights the truncation budget by it.
+    """
     if not depends_on:
         return {}
     rows = await db.execute(
         text(
-            "SELECT node_key, output_text FROM dag_nodes "
+            "SELECT node_key, output_text, confidence FROM dag_nodes "
             "WHERE job_id = :jid AND node_key = ANY(:keys) AND status = 'done'"
         ),
         {"jid": job_id, "keys": depends_on},
     )
-    return {r.node_key: (r.output_text or "") for r in rows.fetchall()}
+    return {
+        r.node_key: (r.output_text or "", r.confidence)
+        for r in rows.fetchall()
+    }
+
+
+def _format_upstream_block(upstream_outputs: dict, node_key: str = "") -> str:
+    """§17.477 — render the MANDATORY-CONTEXT upstream block from
+    ``{node_key: (text, confidence)}`` items.
+
+    - Annotates each section header with the upstream node's verifier
+      confidence (omitted for NULL / un-verified nodes).
+    - When the total exceeds ``settings.max_upstream_chars``, allocates each
+      node's surviving char budget by ``confidence × length`` (NULL = 0.5,
+      neutral) when ``settings.upstream_confidence_ranking_enabled``, else by
+      length alone (legacy). Keeps the ``compile_output_min_chunk`` floor.
+
+    Returns ``""`` for empty input. The result is a PREFIX ending in the YOUR
+    TASK header — prepend it to the raw prompt. Accepts a bare ``str`` value
+    defensively (degrades to no confidence) so mocks need not return tuples.
+    """
+    if not upstream_outputs:
+        return ""
+    texts: dict[str, str] = {}
+    confs: dict[str, float | None] = {}
+    for nk, val in upstream_outputs.items():
+        if isinstance(val, tuple):
+            txt, conf = val
+        else:
+            txt, conf = val, None
+        texts[nk] = txt
+        confs[nk] = conf
+
+    total_chars = sum(len(v) for v in texts.values())
+    truncated_keys: list[str] = []
+    if total_chars > settings.max_upstream_chars:
+        if settings.upstream_confidence_ranking_enabled:
+            weights = {
+                nk: (confs[nk] if confs[nk] is not None else 0.5) * len(texts[nk])
+                for nk in texts
+            }
+            denom = sum(weights.values()) or 1.0
+        else:
+            weights = {nk: float(len(texts[nk])) for nk in texts}
+            denom = float(total_chars) or 1.0
+        for nk in texts:
+            orig_len = len(texts[nk])
+            share = max(
+                settings.compile_output_min_chunk,
+                int(settings.max_upstream_chars * weights[nk] / denom),
+            )
+            if orig_len > share:
+                texts[nk] = _truncate_output(texts[nk], share)
+                truncated_keys.append(nk)
+        logger.info(
+            "upstream_truncated",
+            extra=dict(
+                event="upstream_truncated",
+                node_key=node_key,
+                original_chars=total_chars,
+                truncated_chars=sum(len(v) for v in texts.values()),
+                upstream_nodes=truncated_keys,
+                confidence_weighted=settings.upstream_confidence_ranking_enabled,
+            ),
+        )
+
+    parts = []
+    for nk in texts:
+        c = confs[nk]
+        suffix = f" (confidence: {c:.2f})" if c is not None else ""
+        parts.append(f"### {nk}{suffix}\n{texts[nk]}")
+    return (
+        "## Upstream Node Outputs (MANDATORY CONTEXT — your output MUST build on and be consistent with this work)\n"
+        + "\n\n".join(parts)
+        + "\n\n---\n\n## YOUR TASK (build on the upstream outputs above — do NOT rewrite or contradict them):\n"
+    )
+
 
 async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = None) -> str:
     """Query RAG pipeline and format results as grounding context."""
@@ -951,34 +1032,10 @@ async def execute_next_node(
                 raw_prompt = f"{raw_prompt}\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}"
                 logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
 
-        # Inject upstream outputs (size-managed).
-        if upstream_outputs:
-            total_chars = sum(len(v) for v in upstream_outputs.values())
-            truncated_keys = []
-            if total_chars > settings.max_upstream_chars:
-                for nk in upstream_outputs:
-                    orig_len = len(upstream_outputs[nk])
-                    share = max(settings.compile_output_min_chunk, int(settings.max_upstream_chars * orig_len / total_chars))
-                    if orig_len > share:
-                        upstream_outputs[nk] = _truncate_output(upstream_outputs[nk], share)
-                        truncated_keys.append(nk)
-                logger.info(
-                    "upstream_truncated",
-                    extra=dict(
-                        event="upstream_truncated",
-                        node_key=node_key,
-                        original_chars=total_chars,
-                        truncated_chars=sum(len(v) for v in upstream_outputs.values()),
-                        upstream_nodes=truncated_keys,
-                    ),
-                )
-            parts = [f"### {nk}\n{upstream_text}" for nk, upstream_text in upstream_outputs.items()]
-            raw_prompt = (
-                "## Upstream Node Outputs (MANDATORY CONTEXT — your output MUST build on and be consistent with this work)\n"
-                + "\n\n".join(parts)
-                + "\n\n---\n\n## YOUR TASK (build on the upstream outputs above — do NOT rewrite or contradict them):\n"
-                + raw_prompt
-            )
+        # Inject upstream outputs (size-managed + confidence-weighted, §17.477).
+        _upstream_block = _format_upstream_block(upstream_outputs, node_key)
+        if _upstream_block:
+            raw_prompt = _upstream_block + raw_prompt
 
         # Optimize prompt (now sees grounded content). The inner try/except
         # below is intentionally narrower than the outer W.4 wrap — optimizer

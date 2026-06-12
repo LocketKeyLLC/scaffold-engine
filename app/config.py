@@ -509,6 +509,14 @@ class Settings(BaseSettings):
     # (re-optimize + re-verify) and it does not consume a retry_count slot.
     node_generation_max_draws: int = Field(default=3, ge=1, le=5)
     max_upstream_chars: int = Field(default=8000, ge=100, le=200000)
+    # §17.477 (Phase 3) — when over max_upstream_chars, allocate each upstream
+    # node's surviving char budget by (verifier confidence × length) instead of
+    # length alone, so higher-confidence upstream context is preserved. NULL
+    # confidence (un-verified / skipped-verify nodes) is treated as 0.5. The
+    # per-node confidence annotation on section headers ships unconditionally;
+    # this flag only gates the truncation-budget weighting. Disable to fall
+    # back to plain proportional-by-length truncation.
+    upstream_confidence_ranking_enabled: bool = True
     rag_cosine_floor: float = Field(default=0.3, ge=0.0, le=1.0)
     verifier_top_k: int = Field(default=5, ge=1, le=50)
     # §17.188 — cap for ``_lookup_superseded`` so a brief-flood scenario
