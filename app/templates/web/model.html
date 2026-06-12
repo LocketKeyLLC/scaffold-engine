@@ -4,16 +4,20 @@
 <section class="model-config">
   <header class="page-header">
     <h1>Model configuration</h1>
-    <p class="meta">The model routed for each role. Setting a model here is
-      <strong>runtime-only</strong> — it takes effect immediately for
-      orchestrator-initiated work (web / API / research) but reverts to
-      <code>.env</code> on container restart. Chat-launched jobs use their own
-      pipeline valves (<code>/model set</code> in chat). Embedder and reranker
-      are config-locked singletons (set the env var and restart).</p>
+    <p class="meta">The model routed for each role. Setting a model here
+      <strong>persists across restarts</strong> (saved server-side) and takes
+      effect immediately for orchestrator-initiated work (web / API / research).
+      An overridden role shows its <code>.env</code> default — use <em>Reset</em>
+      to revert. Chat-launched jobs use their own pipeline valves
+      (<code>/model set</code> in chat). Embedder and reranker are config-locked
+      singletons (set the env var and restart).</p>
   </header>
 
   {% if flash_set %}
-  <p class="flash-ok">✓ <code>{{ flash_set }}</code> updated (runtime-only).</p>
+  <p class="flash-ok">✓ <code>{{ flash_set }}</code> updated and saved.</p>
+  {% endif %}
+  {% if flash_reset %}
+  <p class="flash-ok">✓ <code>{{ flash_reset }}</code> reset to its <code>.env</code> default.</p>
   {% endif %}
   {% if flash_error %}
   <p class="form-error">{{ flash_error }}</p>
@@ -25,16 +29,30 @@
       {% for r in roles %}
       <tr>
         <td>{{ r.label }}</td>
-        <td><code>{{ r.model }}</code></td>
+        <td>
+          <code>{{ r.model }}</code>
+          {% if r.overridden %}
+          <span class="override-badge" title="Overridden — .env default is {{ r.env_default }}">override</span>
+          <span class="muted">default: <code>{{ r.env_default }}</code></span>
+          {% endif %}
+        </td>
         <td>
           {% if r.locked %}
           <span class="muted">config-locked</span>
           {% else %}
-          <form method="post" action="/web/model" class="model-set-form">
-            <input type="hidden" name="role" value="{{ r.field }}">
-            <input name="model" value="{{ r.model }}" aria-label="{{ r.label }} model" required>
-            <button class="btn btn-primary" type="submit">Set</button>
-          </form>
+          <div class="model-set-cell">
+            <form method="post" action="/web/model" class="model-set-form">
+              <input type="hidden" name="role" value="{{ r.field }}">
+              <input name="model" value="{{ r.model }}" aria-label="{{ r.label }} model" required>
+              <button class="btn btn-primary" type="submit">Set</button>
+            </form>
+            {% if r.overridden %}
+            <form method="post" action="/web/model/reset" class="model-reset-form">
+              <input type="hidden" name="role" value="{{ r.field }}">
+              <button class="btn btn-small" type="submit" title="Revert to .env default">Reset</button>
+            </form>
+            {% endif %}
+          </div>
           {% endif %}
         </td>
       </tr>

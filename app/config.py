@@ -832,6 +832,38 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
+# §17.484 — snapshot the env/config-seeded model tag for every switchable role
+# BEFORE any runtime override is applied. `set_runtime_model` mutates the live
+# settings singleton (and §17.484 persists the choice to the model_overrides
+# table, reloaded at startup), so the original .env value would otherwise be
+# unrecoverable. `clear_runtime_model` / the web "reset to env" path restore
+# from this snapshot. Captured here, at module load, when settings.<role> still
+# holds the pristine env value.
+_ENV_MODEL_DEFAULTS = {role: getattr(settings, role) for role in SWITCHABLE_ROLE_FIELDS}
+
+
+def env_default_model(role: str) -> str:
+    """The env/config-seeded model tag for ``role`` (pre-override), used to
+    show "vs default" in the UI and to revert on reset. Raises on a
+    non-switchable role."""
+    if role not in _ENV_MODEL_DEFAULTS:
+        raise ValueError(
+            f"unknown switchable role {role!r}; must be one of "
+            f"{sorted(SWITCHABLE_ROLE_FIELDS)}"
+        )
+    return _ENV_MODEL_DEFAULTS[role]
+
+
+def clear_runtime_model(role: str) -> None:
+    """§17.484 — revert a switchable role to its env/config default (the
+    inverse of ``set_runtime_model``). Raises on a non-switchable role."""
+    if role not in _ENV_MODEL_DEFAULTS:
+        raise ValueError(
+            f"unknown switchable role {role!r}; must be one of "
+            f"{sorted(SWITCHABLE_ROLE_FIELDS)}"
+        )
+    setattr(settings, role, _ENV_MODEL_DEFAULTS[role])
+
 
 def get_model(role: str, overrides: dict | None = None) -> str:
     """Return model tag: override > env var > default.

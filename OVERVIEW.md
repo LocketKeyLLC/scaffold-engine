@@ -21984,6 +21984,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.484 Feature — persistent per-role model overrides (web set-model survives restart) (2026-06-12)
+
+§17.483 made `/web/model` interactive but **ephemeral** — a set mutated the live `settings` singleton and reverted to `.env` on restart, and the new POST route only registered after a manual container restart. This makes the override **durable** and the page a proper control surface.
+
+**Storage + load path.** New `model_overrides` table (migration `050`, single `CREATE TABLE`, `role` PK). `app/modules/model_overrides.py`: `set_override` validates via `config.set_runtime_model` (role/blank guard) → UPSERTs the row → mutates `settings`; `clear_override` deletes the row → reverts `settings` to the env default; `load_overrides_into_settings` replays stored rows onto `settings` at lifespan startup (wired in `main.py` right after the migration runner, fail-soft, mirrors the embedder-drift hook). **`get_model` stays a pure attribute read** — no request-path DB hit; the DB is consulted only on set/clear/startup. Verified live: set `model_fallback`→`qwen3:4b`, **restart**, role still `qwen3:4b` (`model_overrides_loaded count=1` in the startup log); reset → row deleted, reverts to `qwen3.5:latest`.
+
+**Env-default snapshot.** `config._ENV_MODEL_DEFAULTS` captures each switchable role's `.env`/config value at module load (before any override) + `env_default_model()` / `clear_runtime_model()`. The page compares live `settings.<role>` to this snapshot to flag an **override** (badge + shown `.env` default + a **Reset** form) with no DB read in the GET — so a persisted override is always visible and one-click revertible, never a hidden shadow of `.env`.
+
+**Surface.** `POST /web/model` now persists (async, `db=Depends`); new `POST /web/model/reset` clears. Template gains the override badge / default / reset-to-env form + a "persists across restarts" banner (supersedes §17.483's "runtime-only"). Routes stay `include_in_schema=False` (no OpenAPI change).
+
+**Verification.** `test_model_overrides.py` ×5 (set persists+mutates / locked-role no-write / clear reverts+deletes / list / load applies+skips-invalid), `test_model_valves.py` +4 (`env_default_model` + `clear_runtime_model`), `test_web_pages.py` +3 (override badge+reset rendered / reset reverts / reset rejects locked). 30 targeted pass; `make ci-tier-0` green; migration tests 12 pass. **Live end-to-end across a real restart confirmed** (set→persist→restart→survive→reset→revert→clean). **Full `make test`: PENDING — baseline to follow.**
+
+---
+
 ### §17.483 Feature — web set-model: make `/web/model` interactive (2026-06-12)
 
 `/web/model` was read-only (§17.480) — it listed the model per role but the only way to change one was chat `/model set` (which writes the OWUI pipeline valve, a *different* process the orchestrator-hosted web layer can't reach). This makes the page interactive.
