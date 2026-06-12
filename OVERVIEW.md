@@ -21984,6 +21984,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.478 Feature — interactive node control / CRUD API (Phase 4 of the node overhaul); edit · insert · delete · reorder · reset dag_nodes (2026-06-12)
+
+Phase 4 (final phase). Until now the DAG was immutable after generation save for `/skip` and `/exec retry` (FAILED-only). This adds a full node-editing API so an operator can correct the graph directly — fix a prompt/tool, repair a dependency, insert a missed step, delete or reorder, or re-run any node.
+
+- **Migration `049_dag_node_edits.sql`** — `dag_nodes.edit_version INT DEFAULT 0` (optimistic lock — there was **no** concurrency guard to reuse) + an append-only `dag_node_edits` audit table (mirrors `prompt_revisions` mig-022: op + before/after JSONB + edited_by). Single `DO` block (§17.140); additive, no backfill.
+- **`app/modules/node_editor.py`** (new) — `edit_node` / `insert_node` / `delete_node` / `reorder_nodes` / `reset_node`. Every mutation: validates the post-edit graph is acyclic with valid `depends_on` refs (local Kahn's `_validate_graph`), renumbers `execution_order`, honors `edit_version` (stale → 409; omitted → lenient last-write-wins), writes a `dag_node_edits` row, and **cascade-resets** invalidated nodes. **Output-invalidation rule:** an edit to an INVALIDATING field (`optimized_prompt`/`tool`/`depends_on`) of an already-run node, a delete (rewired dependents), or a reset, resets the affected node + its transitive downstream to pending and re-opens a terminal job. `reset_node` **generalizes `retry_failed_node` beyond FAILED** — resets ANY status, no `retry_count` bump (a deliberate re-run, not a retry). Metadata edits (`title`/`description`/`is_deliverable`) never invalidate output.
+- **`app/routers/nodes.py`** (new, registered in `main.py`) — `PATCH /nodes/{job}/{key}`, `POST /nodes/{job}`, `DELETE /nodes/{job}/{key}`, `POST /nodes/{job}/reorder`, `POST /nodes/{job}/{key}/reset`. Validates job_id (400) and maps the module's `{error, http_status}` to the matching HTTPException. Schemas `NodeEditInput/NodeInsertInput/NodeReorderInput/NodeResetInput` (`make sync-schemas` + `make openapi-snapshot`).
+
+**Scope:** this PR is the **backend API + module** (usable now via SDK/curl). The user-facing **surfaces — chat `/node` commands + web action buttons** (the read-only job-detail table → interactive) — are deferred to a §17.479 follow-up.
+
+**Verification.** Migration applied live (`edit_version` column + `dag_node_edits` table present). **Full live smoke on a real 4-node DAG** drove every operation end-to-end: edit (title+tool, version 0→1, no reset on a pending node); a stale `expected_version` → **409**; a cycle-creating `depends_on` → **400**; reset of a done node → cascade-reset of it + downstream (`["T2","T3","T4"]`); insert; delete with dependent-rewire + cascade reset; reorder renumbering `execution_order`; and the `dag_node_edits` audit trail recorded all five ops. Tests: new `tests/test_node_editor.py` — **26 cases** (graph helpers ×5; edit ×7 incl. version-conflict / cycle / invalidation-reset / metadata-no-reset; insert ×4; delete ×3; reorder ×2; reset ×2; router dispatch ×3). `make ci-tier-0` + `make openapi-check` green. **Full `make test`: 3652 passed, 1 skipped, 0 failed in 25:18** (+26 over §17.477's 3626; the 1 skip is the known transient `test_topology_select_db.py` live-LLM 409).
+
+---
+
 ### §17.477 Feature — confidence-aware upstream context (Phase 3 of the node overhaul); annotate + confidence-weight the upstream-output budget (2026-06-12)
 
 Phase 3, in the execution path. Node execution injects upstream nodes' outputs as "MANDATORY CONTEXT", but `_fetch_upstream_outputs` returned only text and the injection blind-concatenated all of it, truncating purely by length when over `max_upstream_chars` (8 KB) — a low-quality upstream got the same weight as a high-confidence one, and the model had no relevance signal. The verifier already scores each node 0..1 (`dag_nodes.confidence`), but it was isolated.
