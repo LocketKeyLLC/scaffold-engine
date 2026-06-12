@@ -102,6 +102,9 @@ KNOWN_COMMANDS: tuple = (
     # §17.322 — operator-driven job cancel (the corollary to /go and
     # /confirm; replaces the SQL-only drain §17.321 had to use).
     "/cancel",
+    # §17.479 — interactive node control (Phase 5 surfaces for the §17.478
+    # /nodes CRUD API).
+    "/node",
 )
 
 KNOWN_SUBCOMMANDS: dict = {
@@ -113,6 +116,8 @@ KNOWN_SUBCOMMANDS: dict = {
     "/assist": ("next", "submit", "skip", "handoff", "pause", "resume",
                 "done", "friction", "help"),
     "/exec": ("retry", "help"),
+    # §17.479 — node-control subcommands.
+    "/node": ("reset", "del", "delete", "remove", "edit", "reorder", "help"),
 }
 
 _PLACEHOLDER_RE = re.compile(r"^[<\[(].+[>\])]$")
@@ -2651,6 +2656,10 @@ class Pipeline:
                 # confirmation-friction recall model (closes the §17.307
                 # cohort: /skip is the 6th and final id-taker).
                 return self._handle_skip(parts, chat_id=chat_id)
+            if cmd == "/node":
+                # §17.479 — interactive node control (reset/del/edit/reorder)
+                # over the §17.478 /nodes CRUD API.
+                return self._handle_node(parts, chat_id=chat_id)
             if cmd == "/cancel":
                 # §17.322 — operator-driven job cancel. Mirrors §17.314
                 # /execute's confirmation-friction pattern: state-
@@ -3531,6 +3540,136 @@ class Pipeline:
             f"💡 Reversible: `POST /jobs/{job_id}/resume` to restart from "
             f"the last pending node."
         )
+
+    # ------------------------------------------------------------------
+    # §17.479 — interactive node control (Phase 5 surface for /nodes CRUD)
+    # ------------------------------------------------------------------
+
+    def _node_help(self) -> str:
+        return (
+            "**`/node` — interactive node control**\n\n"
+            "| Command | Effect |\n|---|---|\n"
+            "| `/node reset <job_id> <node_key>` | Re-run a node + its downstream (any status) |\n"
+            "| `/node del <job_id> <node_key>` | Delete a node (dependents rewired) |\n"
+            "| `/node edit <job_id> <node_key> <field> <value>` | Edit `title` / `tool` / `deliverable` |\n"
+            "| `/node reorder <job_id> T1,T2,T3` | Renumber execution order |\n"
+            "| `/node help` | This list |\n\n"
+            "💡 The `job_id` can be omitted to use the active job from this "
+            "chat. Insert + `depends_on` edits: use the `/nodes` API directly."
+        )
+
+    def _resolve_job_node(
+        self, rest: list, chat_id: str | None,
+    ) -> tuple:
+        """Return (job_id, node_key, hint, error). Supports
+        `<job_id> <node_key>` (explicit) and `<node_key>` (recall job_id)."""
+        if not rest:
+            return None, None, "", (
+                "Usage: `/node <reset|del|edit|reorder> ...` — see `/node help`."
+            )
+        if len(rest) >= 2 and self._JOB_ID_TOKEN_RE.match(rest[0]):
+            return rest[0], rest[1], "", None
+        node_key = rest[0]
+        recalled = self._active_job_recall(chat_id)
+        if not recalled or not recalled.get("job_id"):
+            return None, None, "", (
+                f"❌ No active job in chat memory. Pass an explicit id: "
+                f"`/node <op> <job_id> {node_key}` (use `/jobs` to find one)."
+            )
+        rid = recalled["job_id"]
+        return rid, node_key, self._active_job_hint(rid, recalled.get("title")), None
+
+    def _handle_node(self, parts: list, *, chat_id: str | None = None) -> str:
+        if len(parts) < 2:
+            return self._node_help()
+        sub = parts[1].lower()
+        rest = parts[2:]
+        url = self.valves.orchestrator_url
+        if sub == "help":
+            return self._node_help()
+        if sub == "reset":
+            job_id, node_key, hint, err = self._resolve_job_node(rest, chat_id)
+            if err:
+                return err
+            r = _HTTP_SESSION.post(
+                f"{url}/nodes/{job_id}/{node_key}/reset", json={},
+                headers=self._auth_headers(), timeout=self.valves.request_timeout,
+            )
+            return hint + self._fmt(r)
+        if sub in ("del", "delete", "remove"):
+            job_id, node_key, hint, err = self._resolve_job_node(rest, chat_id)
+            if err:
+                return err
+            r = _HTTP_SESSION.delete(
+                f"{url}/nodes/{job_id}/{node_key}",
+                headers=self._auth_headers(), timeout=self.valves.request_timeout,
+            )
+            return hint + self._fmt(r)
+        if sub == "edit":
+            return self._handle_node_edit(rest, chat_id)
+        if sub == "reorder":
+            return self._handle_node_reorder(rest, chat_id)
+        return self._node_help()
+
+    def _handle_node_edit(self, rest: list, chat_id: str | None) -> str:
+        hint = ""
+        if rest and self._JOB_ID_TOKEN_RE.match(rest[0]):
+            if len(rest) < 4:
+                return ("Usage: `/node edit <job_id> <node_key> <field> <value>` "
+                        "(field: title | tool | deliverable)")
+            job_id, node_key, field, value = (
+                rest[0], rest[1], rest[2].lower(), " ".join(rest[3:]),
+            )
+        else:
+            recalled = self._active_job_recall(chat_id)
+            if not recalled or not recalled.get("job_id"):
+                return ("❌ No active job in chat memory. Use "
+                        "`/node edit <job_id> <node_key> <field> <value>`.")
+            if len(rest) < 3:
+                return ("Usage: `/node edit <node_key> <field> <value>` "
+                        "(field: title | tool | deliverable)")
+            job_id = recalled["job_id"]
+            hint = self._active_job_hint(job_id, recalled.get("title"))
+            node_key, field, value = rest[0], rest[1].lower(), " ".join(rest[2:])
+        body: dict = {}
+        if field == "title":
+            body["title"] = value
+        elif field == "tool":
+            body["tool"] = value
+        elif field in ("deliverable", "is_deliverable"):
+            body["is_deliverable"] = value.strip().lower() in ("true", "yes", "1", "on")
+        else:
+            return (f"Unknown field `{field}`. Editable via chat: "
+                    f"title | tool | deliverable. (depends_on / insert: use the API.)")
+        r = _HTTP_SESSION.patch(
+            f"{self.valves.orchestrator_url}/nodes/{job_id}/{node_key}",
+            json=body, headers=self._auth_headers(),
+            timeout=self.valves.request_timeout,
+        )
+        return hint + self._fmt(r)
+
+    def _handle_node_reorder(self, rest: list, chat_id: str | None) -> str:
+        hint = ""
+        if rest and self._JOB_ID_TOKEN_RE.match(rest[0]):
+            if len(rest) < 2:
+                return "Usage: `/node reorder <job_id> T1,T2,T3`"
+            job_id, keys_str = rest[0], rest[1]
+        else:
+            recalled = self._active_job_recall(chat_id)
+            if not recalled or not recalled.get("job_id"):
+                return "❌ No active job in chat memory. Use `/node reorder <job_id> T1,T2,T3`."
+            if not rest:
+                return "Usage: `/node reorder T1,T2,T3`"
+            job_id = recalled["job_id"]
+            hint = self._active_job_hint(job_id, recalled.get("title"))
+            keys_str = rest[0]
+        ordered = [k.strip() for k in keys_str.split(",") if k.strip()]
+        r = _HTTP_SESSION.post(
+            f"{self.valves.orchestrator_url}/nodes/{job_id}/reorder",
+            json={"ordered_keys": ordered}, headers=self._auth_headers(),
+            timeout=self.valves.request_timeout,
+        )
+        return hint + self._fmt(r)
 
     def _handle_skip(
         self, parts: list, *, chat_id: str | None = None,
@@ -4816,6 +4955,7 @@ class Pipeline:
 |---|---|
 | `/execute <job_id>` | Run all pending DAG nodes (resume after cancel or stall). |
 | `/skip <job_id> [<node_key>]` | Skip a node; bare `/skip <job_id>` lists candidates. |
+| `/node <sub> <job_id> <node_key>` | Edit a node: `reset` (re-run + downstream), `del`, `edit`, `reorder`. `/node help`. |
 | `/cancel <job_id>` | Cancel a running or queued job. |
 | `/assist <sub>` | Human-in-the-loop step-through of a job's DAG. `/assist help` for the full session flow. |
 | `/results <job_id>` | View output, in-flight progress, or failure detail + recovery hints. |

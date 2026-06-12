@@ -21984,6 +21984,19 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.479 Feature — node-control surfaces (Phase 5); `/node` chat commands + web action buttons over the §17.478 CRUD API (2026-06-12)
+
+Phase 5 — the user-facing surfaces for §17.478's `/nodes` API. The DAG was only inspectable from chat/web; now it's editable.
+
+- **Chat `/node` commands** (`scaffold_router.py`) — `/node reset|del|edit|reorder` + `/node help`, registered in `KNOWN_COMMANDS`/`KNOWN_SUBCOMMANDS` and routed alongside `/skip`. Each calls the matching `/nodes` endpoint (`_HTTP_SESSION.post/patch/delete`) with the same **tiered job_id recall** (`_resolve_job_node`: explicit `<job_id> <node_key>` or `<node_key>` + active-job recall). `edit` covers `title`/`tool`/`deliverable` (depends_on / insert stay API-only — awkward to parse in chat). Added to the main `/help` table.
+- **Web action buttons** (`_job_detail_body.html` + `app/web/routes.py`) — the read-only nodes table gains an **Actions** column with **↻ reset** and **✕ delete** (htmx `hx-post` → `hx-swap=outerHTML` on `#job-detail-root`; delete carries `hx-confirm`). The two new routes are **`async def` and call `node_editor` + `execution_status` DIRECTLY in-process** (async DB session) — crucially **no SDK loopback**, side-stepping the §17.450 single-worker-deadlock rule that forces the *read* routes to be sync `def` — then re-render the job-detail root fragment. A module-layer error (404/400) is logged and the current state re-rendered (no 500).
+
+**Verification.** **Both surfaces live, end-to-end.** Chat: through the real `scaffold_router.Pipeline` in `open-webui-pipelines`, `/node reset T2` cascade-reset T2+T3, `/node edit T1 title` updated the title. Web: `POST /web/jobs/{id}/nodes/T2/reset` returned the re-rendered fragment (`id="job-detail-root"` + action buttons) and the DB showed T2+downstream pending; `POST .../T3/delete` rewired T4's deps and the `dag_node_edits` audit recorded both with `edited_by='web'`. Tests: `tests/test_scaffold_router_node_commands.py` (10 — dispatch / explicit + recall / edit field coercion / reorder CSV / unknown-field) + `tests/test_web_node_actions.py` (3 — reset renders fragment / delete calls editor / editor-error still 200). No OpenAPI or schema change (web routes are `include_in_schema=False`; chat is pipeline-side). `make ci-tier-0` + `make openapi-check` green; web-UI suite 87 passed, help/structure/command suite 197 passed. **Full `make test`: 3665 passed, 1 skipped, 0 failed in 30:52** (+13 over §17.478's 3652; the 1 skip is the known transient `test_topology_select_db.py` live-LLM 409).
+
+**Node overhaul complete (§17.475–479):** explicit deliverable → dead-end detection → confidence-aware context → CRUD API → surfaces.
+
+---
+
 ### §17.478 Feature — interactive node control / CRUD API (Phase 4 of the node overhaul); edit · insert · delete · reorder · reset dag_nodes (2026-06-12)
 
 Phase 4 (final phase). Until now the DAG was immutable after generation save for `/skip` and `/exec retry` (FAILED-only). This adds a full node-editing API so an operator can correct the graph directly — fix a prompt/tool, repair a dependency, insert a missed step, delete or reorder, or re-run any node.

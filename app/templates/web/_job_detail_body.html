@@ -130,6 +130,7 @@
           <th>Title</th>
           <th>Status</th>
           <th>Actionable</th>
+          <th>Actions</th>{# §17.479 — interactive node control #}
         </tr>
       </thead>
       <tbody>
@@ -140,13 +141,24 @@
           <td>{{ node.title or "(untitled)" }}</td>
           <td><span class="status-badge status-{{ node.status }}">{{ node.status }}</span></td>
           <td>{% if node.actionable %}✓{% endif %}</td>
+          {# §17.479 — reset re-runs the node + downstream; delete rewires
+             dependents. htmx swaps the re-rendered job-detail root. #}
+          <td class="node-actions">
+            <button hx-post="/web/jobs/{{ job_id }}/nodes/{{ node.node_key }}/reset"
+                    hx-target="#job-detail-root" hx-swap="outerHTML"
+                    class="btn btn-small" title="Re-run this node and its downstream">↻</button>
+            <button hx-post="/web/jobs/{{ job_id }}/nodes/{{ node.node_key }}/delete"
+                    hx-target="#job-detail-root" hx-swap="outerHTML"
+                    hx-confirm="Delete {{ node.node_key }}? Dependents will be rewired."
+                    class="btn btn-small btn-danger" title="Delete this node">✕</button>
+          </td>
         </tr>
         {# §17.450 (B3) — per-node "why" for failed/blocked nodes
            (dag_nodes.last_verification_reason, plumbed through /exec/status). #}
         {% if node.failure_reason and node.status in ("failed", "blocked") %}
         <tr class="node-reason-row">
           <td></td>
-          <td colspan="4" class="node-reason">↳ {{ node.failure_reason }}</td>
+          <td colspan="5" class="node-reason">↳ {{ node.failure_reason }}</td>
         </tr>
         {% endif %}
         {% endfor %}

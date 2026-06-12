@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from app.config import settings
+from app.database import get_db  # §17.479 — node-action routes call node_editor in-process
 
 logger = logging.getLogger("scaffold.web")
 
@@ -507,6 +508,62 @@ async def post_confirm(
 # ---------------------------------------------------------------------------
 # Execute SSE flow (J.2.c)
 # ---------------------------------------------------------------------------
+
+
+# §17.479 (Phase 5) — interactive node actions from the job-detail page.
+# Unlike the read routes (sync ``def`` + blocking SDK loopback per §17.450),
+# these are ``async def`` and call node_editor + execution_status DIRECTLY
+# in-process (async DB session) — no loopback, so no single-worker deadlock —
+# then re-render the job-detail root for an htmx ``outerHTML`` swap.
+async def _node_action_response(request: Request, job_id: str, db):
+    from uuid import UUID
+    from app.modules.execution_handler import execution_status
+    try:
+        payload = await execution_status(UUID(job_id), db)
+    except (ValueError, TypeError):
+        payload = {"error": "Invalid job_id"}
+    if not isinstance(payload, dict) or "error" in payload:
+        safe_id = _html_lib.escape(job_id, quote=True)
+        return HTMLResponse(
+            '<section class="job-detail" id="job-detail-root">'
+            '<p class="job-error-banner">⚠ Lost contact with this job — '
+            '<a href="/web/jobs/' + safe_id + '">reload</a>.</p></section>'
+        )
+    return templates.TemplateResponse(
+        request, "web/_job_detail_root.html", _job_context(payload, job_id),
+    )
+
+
+@router.post(
+    "/jobs/{job_id}/nodes/{node_key}/reset",
+    response_class=HTMLResponse, dependencies=[],
+)
+async def web_node_reset(
+    request: Request, job_id: str, node_key: str, db=Depends(get_db),
+):
+    """Re-run a node + its downstream from the web UI."""
+    from app.modules import node_editor
+    result = await node_editor.reset_node(job_id, node_key, edited_by="web", db=db)
+    if isinstance(result, dict) and "error" in result:
+        logger.info("web_node_reset_noop job=%s node=%s err=%s",
+                    job_id, node_key, result.get("error"))
+    return await _node_action_response(request, job_id, db)
+
+
+@router.post(
+    "/jobs/{job_id}/nodes/{node_key}/delete",
+    response_class=HTMLResponse, dependencies=[],
+)
+async def web_node_delete(
+    request: Request, job_id: str, node_key: str, db=Depends(get_db),
+):
+    """Delete a node (dependents rewired) from the web UI."""
+    from app.modules import node_editor
+    result = await node_editor.delete_node(job_id, node_key, edited_by="web", db=db)
+    if isinstance(result, dict) and "error" in result:
+        logger.info("web_node_delete_noop job=%s node=%s err=%s",
+                    job_id, node_key, result.get("error"))
+    return await _node_action_response(request, job_id, db)
 
 
 @router.post("/jobs/{job_id}/run", response_class=HTMLResponse, dependencies=[])
