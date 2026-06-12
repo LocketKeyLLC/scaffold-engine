@@ -37,6 +37,45 @@ ROLE_FIELDS = frozenset({
     "model_fallback",
 })
 
+# §17.483 — roles whose model can be re-pointed at runtime. The embedder and
+# reranker are excluded: the embedding dim is locked at 512 (probed at startup)
+# and the reranker is a CrossEncoder singleton — both are config-only and a
+# live swap would corrupt indexing / break the loaded model. Everything else
+# resolves through get_model() per request, so mutating settings.<role> takes
+# effect immediately for orchestrator-initiated work.
+_MODEL_SINGLETON_ROLES = frozenset({"model_embedder_pipeline", "model_reranker"})
+SWITCHABLE_ROLE_FIELDS = ROLE_FIELDS - _MODEL_SINGLETON_ROLES
+
+
+def set_runtime_model(role: str, model: str) -> None:
+    """§17.483 — re-point a switchable role's model on the live settings
+    singleton (ephemeral; a container restart reverts to env/.env).
+
+    Mutates ``settings.<role>`` in-process. The orchestrator runs a single
+    uvicorn worker, so the change is globally effective for any subsequent
+    ``get_model(role)`` resolution that doesn't carry an explicit per-request
+    override. Does NOT propagate to the OWUI pipeline valves (a separate
+    process) — chat-launched jobs ship their own ``model_overrides``.
+
+    Raises ``ValueError`` on a non-switchable role (singletons are config-only)
+    or an empty/blank tag. The caller is responsible for validating the tag
+    exists on the provider; this only guards the role + non-emptiness.
+    """
+    if role not in SWITCHABLE_ROLE_FIELDS:
+        if role in _MODEL_SINGLETON_ROLES:
+            raise ValueError(
+                f"role {role!r} is config-only (embedder/reranker are "
+                f"singletons) — set the env var and restart"
+            )
+        raise ValueError(
+            f"unknown role {role!r}; must be one of "
+            f"{sorted(SWITCHABLE_ROLE_FIELDS)}"
+        )
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("model tag must be a non-empty string")
+    setattr(settings, role, model.strip())
+
+
 # ---------------------------------------------------------------------------
 # TTL policy by source_type (seconds)
 # ---------------------------------------------------------------------------

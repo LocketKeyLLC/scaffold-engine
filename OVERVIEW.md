@@ -21984,6 +21984,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.483 Feature — web set-model: make `/web/model` interactive (2026-06-12)
+
+`/web/model` was read-only (§17.480) — it listed the model per role but the only way to change one was chat `/model set` (which writes the OWUI pipeline valve, a *different* process the orchestrator-hosted web layer can't reach). This makes the page interactive.
+
+**Mechanism (ephemeral, by design).** There is no orchestrator-side model store — `get_model(role, overrides)` resolves `per-request override > settings.<role> (env) > default` and persists nothing. So set-model mutates the live `settings` singleton in-process: new `config.set_runtime_model(role, model)` does `setattr(settings, role, model)` after validating the role. The orchestrator runs a single uvicorn worker, so the change is globally effective for any subsequent `get_model` that carries no explicit override — i.e. **web / API / research-initiated work**. It does **not** touch the OWUI valves, so chat-launched jobs (which always ship their own `model_overrides`) are unaffected; and it **reverts to `.env` on restart**, matching the existing `/model set` "session-only" semantics and keeping `.env` as the source of truth. No DB / migration.
+
+**Switchable vs locked.** `config.SWITCHABLE_ROLE_FIELDS = ROLE_FIELDS − {embedder_pipeline, reranker}` — the embedder (dim locked at 512, probed at startup) and reranker (CrossEncoder singleton) are config-only and `set_runtime_model` raises on them. The page now also surfaces `cloud_heavy` + `cloud_alt`, which the §17.480 read-only view omitted (5 → all 7 switchable roles shown).
+
+**Surface.** `POST /web/model` (`async def`, no loopback — in-process settings mutation): validates the tag is a pulled Ollama tag via `GET {ollama_base_url}/api/tags` (**fail-soft** — allows the set if Ollama is unreachable, rejects only a confirmed-absent tag), then `set_runtime_model`, then a PRG redirect back with a `set=`/`error=` flash. Template gains a per-row set form for switchable roles (plain POST, no inline JS — CSP-safe), a `config-locked` marker for the two singletons, and a banner stating the runtime-only / restart-reverts / chat-uses-valves semantics. All web routes stay `include_in_schema=False` (no OpenAPI change).
+
+**Verification.** `test_web_pages.py` +5 (set forms + cloud roles + locked marker rendered; set success mutates `settings` + redirects `?set=`; confirmed-absent tag rejected, settings untouched; locked-role rejected; Ollama-unreachable fail-soft allows). `test_model_valves.py` +5 direct `set_runtime_model` unit tests (switchable / strip / singleton-reject / unknown-reject / blank-reject). `make ci-tier-0` green; `test_web_ui.py`+`test_web_pages.py`+`test_web_node_actions.py` 104 passed. **Full `make test`: 3687 passed, 1 skipped, 0 failed in 27:07** (+10 over §17.481's 3677; the 1 skip is the known transient `test_topology_select_db.py` live-LLM 409).
+
+---
+
 ### §17.482 Fix — dominant-leaf heuristic: protect LLM leaves + repair the backfill gate (2026-06-12)
 
 The §17.473 dominant-leaf rule (`_select_dominant_leaves`, `execution_compile.py`) drops a non-primary `is_output_node` leaf when a larger leaf subsumes its upstream. §17.473 guarded only **CodeGen** leaves; an LLM leaf dominated by another LLM leaf was still droppable — and structure alone cannot tell a parallel deliverable from a dead-end (Proxmox's dropped T4 is *structurally identical* to the leaves the rule wrongly collapsed). Observed mis-fires: **Homelab** dropped T3 "Validate directory structure" (LLM, closure 2) under T5 "Save DAG file" (FileSystem, closure 4); **AI-Research** dropped T5 "Set up Network Security Node" (LLM, closure 2) under T4 "Deploy workers" (LLM, closure 4). Both were genuine co-deliverables.

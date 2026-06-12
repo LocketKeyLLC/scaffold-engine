@@ -4,13 +4,40 @@
 <section class="model-config">
   <header class="page-header">
     <h1>Model configuration</h1>
-    <p class="meta">The model routed for each role (read-only — change via <code>/model set</code> in chat or the pipeline valves).</p>
+    <p class="meta">The model routed for each role. Setting a model here is
+      <strong>runtime-only</strong> — it takes effect immediately for
+      orchestrator-initiated work (web / API / research) but reverts to
+      <code>.env</code> on container restart. Chat-launched jobs use their own
+      pipeline valves (<code>/model set</code> in chat). Embedder and reranker
+      are config-locked singletons (set the env var and restart).</p>
   </header>
+
+  {% if flash_set %}
+  <p class="flash-ok">✓ <code>{{ flash_set }}</code> updated (runtime-only).</p>
+  {% endif %}
+  {% if flash_error %}
+  <p class="form-error">{{ flash_error }}</p>
+  {% endif %}
+
   <table class="nodes-table">
-    <thead><tr><th>Role</th><th>Model</th></tr></thead>
+    <thead><tr><th>Role</th><th>Model</th><th>Set</th></tr></thead>
     <tbody>
-      {% for role, model in roles %}
-      <tr><td>{{ role }}</td><td><code>{{ model }}</code></td></tr>
+      {% for r in roles %}
+      <tr>
+        <td>{{ r.label }}</td>
+        <td><code>{{ r.model }}</code></td>
+        <td>
+          {% if r.locked %}
+          <span class="muted">config-locked</span>
+          {% else %}
+          <form method="post" action="/web/model" class="model-set-form">
+            <input type="hidden" name="role" value="{{ r.field }}">
+            <input name="model" value="{{ r.model }}" aria-label="{{ r.label }} model" required>
+            <button class="btn btn-primary" type="submit">Set</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
       {% endfor %}
     </tbody>
   </table>

@@ -47,6 +47,7 @@ with patch.dict(sys.modules, {"pydantic_settings": _stub_base}):
     _config_spec.loader.exec_module(_config_mod)
 
 get_model = _config_mod.get_model
+set_runtime_model = _config_mod.set_runtime_model
 settings = _config_mod.settings
 
 # ---------------------------------------------------------------------------
@@ -172,6 +173,46 @@ class TestGetModel:
         # is that the override path doesn't touch the settings object.
         result = get_model("model_embedder_pipeline", {"model_embedder_pipeline": "qwen3-embedding:8b"})
         assert result == "qwen3-embedding:8b"
+
+
+@pytest.mark.smoke
+class TestSetRuntimeModel:
+    """§17.483 — set_runtime_model mutates the settings singleton for a
+    switchable role (ephemeral) and rejects singletons / blanks."""
+
+    def test_sets_switchable_role(self):
+        original = settings.model_general
+        try:
+            set_runtime_model("model_general", "runtime:7b")
+            assert settings.model_general == "runtime:7b"
+            # get_model now resolves the runtime value (no override).
+            assert get_model("model_general", None) == "runtime:7b"
+        finally:
+            settings.model_general = original
+
+    def test_strips_whitespace(self):
+        original = settings.model_coder
+        try:
+            set_runtime_model("model_coder", "  spaced:3b  ")
+            assert settings.model_coder == "spaced:3b"
+        finally:
+            settings.model_coder = original
+
+    def test_rejects_singleton_role(self):
+        original = settings.model_reranker
+        with pytest.raises(ValueError, match="config-only"):
+            set_runtime_model("model_reranker", "x:1b")
+        assert settings.model_reranker == original  # untouched
+
+    def test_rejects_unknown_role(self):
+        with pytest.raises(ValueError, match="unknown role"):
+            set_runtime_model("model_nonexistent", "x:1b")
+
+    def test_rejects_blank_tag(self):
+        original = settings.model_fallback
+        with pytest.raises(ValueError, match="non-empty"):
+            set_runtime_model("model_fallback", "   ")
+        assert settings.model_fallback == original
 
 
 # ===================================================================

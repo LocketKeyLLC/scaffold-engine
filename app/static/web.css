@@ -491,3 +491,15 @@ details.add-node summary { cursor: pointer; font-size: 0.9rem; color: #4338ca; }
 .research-launch input[name="topic"] { flex: 1; min-width: 260px; padding: 6px 10px; }
 .research-launch select { padding: 6px 8px; }
 .research-detail .counts-list { display: flex; gap: 1.2rem; flex-wrap: wrap; }
+
+/* §17.483 — web set-model */
+.flash-ok {
+  background: #dcfce7;
+  color: var(--status-completed, #166534);
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin: 12px 0;
+  font-weight: 500;
+}
+.model-set-form { display: flex; gap: 6px; }
+.model-set-form input[name="model"] { flex: 1; min-width: 200px; padding: 4px 8px; }
