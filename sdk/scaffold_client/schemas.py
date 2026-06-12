@@ -584,6 +584,47 @@ class PromptUpdateInput(BaseModel):
     prompt: str
 
 
+# §17.478 (Phase 4) — interactive node control (CRUD) request bodies.
+class NodeEditInput(BaseModel):
+    """Body for PATCH /nodes/{job_id}/{node_key}. All edit fields optional;
+    only provided ones change. expected_version drives the optimistic lock
+    (omit for last-write-wins)."""
+    title: str | None = None
+    description: str | None = None
+    optimized_prompt: str | None = None
+    tool: str | None = None
+    depends_on: list[str] | None = None
+    assigned_model: str | None = None
+    is_deliverable: bool | None = None
+    expected_version: int | None = None
+    edited_by: str | None = None
+
+
+class NodeInsertInput(BaseModel):
+    """Body for POST /nodes/{job_id}."""
+    node_key: str
+    title: str
+    description: str | None = None
+    node_type: str = "task"
+    depends_on: list[str] = Field(default_factory=list)
+    tool: str = "LLM"
+    prompt_template: str | None = None
+    assigned_model: str | None = None
+    is_deliverable: bool = False
+    edited_by: str | None = None
+
+
+class NodeReorderInput(BaseModel):
+    """Body for POST /nodes/{job_id}/reorder."""
+    ordered_keys: list[str]
+    edited_by: str | None = None
+
+
+class NodeResetInput(BaseModel):
+    """Body for POST /nodes/{job_id}/{node_key}/reset."""
+    edited_by: str | None = None
+
+
 class ExecRetryInput(BaseModel):
     """Body for POST /exec/retry — fix-list #14.
 
