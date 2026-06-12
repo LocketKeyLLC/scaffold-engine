@@ -21984,6 +21984,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.480 Feature — web-UX overhaul: richer job detail + web node-editing + new browser surfaces (RAG / model / research) (2026-06-12)
+
+The native web UI (the §J.2 / §17.454-470 surface) lagged the chat surface and the §17.475–479 node overhaul. This is a three-slice overhaul in one PR. Web routes that mutate or query continue the §17.479 pattern — **`async def` calling app modules directly in-process** (no SDK loopback → no §17.450 single-worker deadlock); read routes stay sync `def` + SDK loopback.
+
+- **Slice 1 — richer job-detail page.** `execution_status` node rows now also SELECT `is_deliverable` (§17.475), `confidence` (§17.477), and `tool`; the detail template gains a ⭐ deliverable marker, a Conf column (number-safe so hand-built test payloads without it still render), a tool badge, a **Cost & latency** panel (the `costs` block was already on the payload), and a **lazy per-node output** expander (▸ → `GET /web/jobs/{id}/nodes/{key}/output` reads `output_text` in-process so large bodies aren't carried in every poll).
+- **Slice 2 — web node-editing parity** (reset/delete shipped §17.479). New routes call `node_editor` in-process: inline **edit** form (✎ → `GET …/edit` renders a Jinja-escaped form; `POST …/edit` → `edit_node` with the optimistic `expected_version`, covering title/tool/deliverable/depends_on/**optimized_prompt** — the prompt editor), **insert** (`POST …/nodes` + an "Add node" `<details>` form), **move** up/down (`POST …/move?dir=` swaps neighbours → `reorder_nodes`), and a CSP-safe Cancel (htmx clears the slot, no inline JS).
+- **Slice 3 — new browser surfaces** + nav links. `GET /web/rag` (in-process `query_rag`, form + results), `GET /web/model` (read-only role→model from settings), `GET /web/research` (recent `research_sessions`, read-only). New templates `rag.html` / `model.html` / `research.html` + `_node_edit_form.html`; `web.css` extended for all the new elements.
+
+**Note / deferred:** the model page is read-only (set via `/model set` in chat) and the research page lists sessions (launching stays chat/CLI — a web SSE-launch is a thin follow-up). All web routes are `include_in_schema=False`, so **no OpenAPI/schema change**.
+
+**Verification.** Every route live-verified end-to-end: enriched detail page renders the Conf column / cost panel / tool badge / per-node output (T10's markdown); web edit (title+tool+deliverable, v0→1) / insert (T9) / move all mutate the DB + write `dag_node_edits` `edited_by='web'`; `/web/model`, `/web/research`, and a real `/web/rag?q=filter` KB search all 200 with content; nav links present. Tests: `test_web_node_actions.py` +4 (edit/insert/move/cancel), new `test_web_pages.py` ×4 (model/research/rag×2); the §17.480 `execution_status` field additions required defaulting `is_deliverable`/`confidence`/`tool` in `test_execution_handler_module.py::_row` and the `test_web_node_actions` `_PAYLOAD`. `test_web_ui.py` 84 passed (the number-safe Conf cell keeps the old payloads rendering). `make ci-tier-0` + `make openapi-check` green. **Full `make test`: 3673 passed, 1 skipped, 0 failed in 30:27** (+8 over §17.479's 3665; the 1 skip is the known transient `test_topology_select_db.py` live-LLM 409).
+
+---
+
 ### §17.479 Feature — node-control surfaces (Phase 5); `/node` chat commands + web action buttons over the §17.478 CRUD API (2026-06-12)
 
 Phase 5 — the user-facing surfaces for §17.478's `/nodes` API. The DAG was only inspectable from chat/web; now it's editable.

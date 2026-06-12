@@ -395,6 +395,59 @@ async def new_idea_form(request: Request):
     )
 
 
+# §17.480 (Slice 3) — new browser surfaces: RAG search, model config, research.
+@router.get("/rag", response_class=HTMLResponse, dependencies=[])
+async def web_rag(request: Request, q: str | None = None):
+    """KB / RAG search. async def + in-process query_rag (no loopback)."""
+    results, error = [], None
+    query = (q or "").strip()
+    if query:
+        try:
+            from app.modules.rag_pipeline import query_rag
+            resp = await query_rag(query, top_k=8)
+            if resp.get("status") == "ok":
+                results = resp.get("results") or []
+            else:
+                error = resp.get("error") or "search failed"
+        except Exception as exc:  # fail-soft — render the page with an error
+            logger.exception("web_rag_failed: q=%s error=%s", query, exc)
+            error = str(exc)
+    return templates.TemplateResponse(
+        request, "web/rag.html",
+        {"query": query, "results": results, "error": error},
+    )
+
+
+@router.get("/model", response_class=HTMLResponse, dependencies=[])
+def web_model(request: Request):
+    """Read-only view of the configured model per role (sync — no I/O)."""
+    roles = [
+        ("general", settings.model_general),
+        ("router", settings.model_router),
+        ("coder", settings.model_coder),
+        ("verifier", settings.model_verifier),
+        ("fallback", settings.model_fallback),
+        ("embedder (pipeline)", settings.model_embedder_pipeline),
+        ("reranker", settings.model_reranker),
+    ]
+    return templates.TemplateResponse(
+        request, "web/model.html", {"roles": roles},
+    )
+
+
+@router.get("/research", response_class=HTMLResponse, dependencies=[])
+async def web_research(request: Request, db=Depends(get_db)):
+    """Browse recent research sessions (read-only)."""
+    from sqlalchemy import text as _sql
+    rows = (await db.execute(_sql(
+        "SELECT id, topic, status, created_at, updated_at "
+        "FROM research_sessions ORDER BY created_at DESC LIMIT 25"
+    ))).mappings().all()
+    return templates.TemplateResponse(
+        request, "web/research.html", {"sessions": [dict(r) for r in rows]},
+    )
+
+
 @router.post("/ideate", dependencies=[])
 def post_ideate(
     request: Request,
@@ -563,6 +616,143 @@ async def web_node_delete(
     if isinstance(result, dict) and "error" in result:
         logger.info("web_node_delete_noop job=%s node=%s err=%s",
                     job_id, node_key, result.get("error"))
+    return await _node_action_response(request, job_id, db)
+
+
+@router.get(
+    "/jobs/{job_id}/nodes/{node_key}/output",
+    response_class=HTMLResponse, dependencies=[],
+)
+async def web_node_output(
+    request: Request, job_id: str, node_key: str, db=Depends(get_db),
+):
+    """§17.480 — lazy-loaded per-node output (htmx hx-get target). Direct
+    in-process read so a large output_text isn't carried in every poll."""
+    from uuid import UUID
+    from sqlalchemy import text as _sql
+    try:
+        UUID(job_id)
+    except (ValueError, TypeError):
+        return HTMLResponse('<div class="node-output empty">(invalid job)</div>')
+    row = (await db.execute(
+        _sql("SELECT output_text FROM dag_nodes "
+             "WHERE job_id = :j AND node_key = :k"),
+        {"j": job_id, "k": node_key},
+    )).first()
+    out = (row[0] if row else None) or ""
+    if not out:
+        return HTMLResponse('<div class="node-output empty">(no output yet)</div>')
+    return HTMLResponse(
+        '<div class="node-output markdown-body">' + _render_markdown(out) + "</div>"
+    )
+
+
+# §17.480 (Slice 2) — web node editing parity (edit / insert / reorder).
+@router.get(
+    "/jobs/{job_id}/nodes/{node_key}/edit",
+    response_class=HTMLResponse, dependencies=[],
+)
+async def web_node_edit_form(
+    request: Request, job_id: str, node_key: str, db=Depends(get_db),
+):
+    """Return the inline edit form for a node (htmx loads it into a slot)."""
+    from uuid import UUID
+    from sqlalchemy import text as _sql
+    try:
+        UUID(job_id)
+    except (ValueError, TypeError):
+        return HTMLResponse('<div class="node-output empty">(invalid job)</div>')
+    row = (await db.execute(
+        _sql("SELECT title, tool, COALESCE(is_deliverable, FALSE) AS is_deliverable, "
+             "depends_on, COALESCE(optimized_prompt, prompt_template, '') AS prompt, "
+             "edit_version FROM dag_nodes WHERE job_id = :j AND node_key = :k"),
+        {"j": job_id, "k": node_key},
+    )).mappings().first()
+    if not row:
+        return HTMLResponse('<div class="node-output empty">(node not found)</div>')
+    return templates.TemplateResponse(
+        request, "web/_node_edit_form.html",
+        {"job_id": job_id, "node_key": node_key, "node": dict(row),
+         "depends_on_csv": ",".join(row["depends_on"] or [])},
+    )
+
+
+@router.post(
+    "/jobs/{job_id}/nodes/{node_key}/edit",
+    response_class=HTMLResponse, dependencies=[],
+)
+async def web_node_edit(
+    request: Request, job_id: str, node_key: str,
+    title: str = Form(""), tool: str = Form(""),
+    depends_on: str = Form(""), optimized_prompt: str = Form(""),
+    is_deliverable: str = Form(""), expected_version: int = Form(None),
+    db=Depends(get_db),
+):
+    from app.modules import node_editor
+    fields = {
+        "title": title.strip(),
+        "tool": tool.strip(),
+        "optimized_prompt": optimized_prompt,
+        "depends_on": [d.strip() for d in depends_on.split(",") if d.strip()],
+        "is_deliverable": is_deliverable == "on",
+    }
+    result = await node_editor.edit_node(
+        job_id, node_key, fields,
+        expected_version=expected_version, edited_by="web", db=db,
+    )
+    if isinstance(result, dict) and "error" in result:
+        logger.info("web_node_edit_noop job=%s node=%s err=%s",
+                    job_id, node_key, result.get("error"))
+    return await _node_action_response(request, job_id, db)
+
+
+@router.get(
+    "/jobs/{job_id}/nodes/{node_key}/edit/cancel",
+    response_class=HTMLResponse, dependencies=[],
+)
+async def web_node_edit_cancel(job_id: str, node_key: str):
+    """Clear the inline edit slot (htmx swaps in an empty string)."""
+    return HTMLResponse("")
+
+
+@router.post("/jobs/{job_id}/nodes", response_class=HTMLResponse, dependencies=[])
+async def web_node_insert(
+    request: Request, job_id: str,
+    node_key: str = Form(...), title: str = Form(...),
+    tool: str = Form("LLM"), depends_on: str = Form(""),
+    db=Depends(get_db),
+):
+    from app.modules import node_editor
+    spec = {
+        "node_key": node_key.strip(), "title": title.strip(), "tool": tool.strip() or "LLM",
+        "depends_on": [d.strip() for d in depends_on.split(",") if d.strip()],
+    }
+    result = await node_editor.insert_node(job_id, spec, edited_by="web", db=db)
+    if isinstance(result, dict) and "error" in result:
+        logger.info("web_node_insert_noop job=%s key=%s err=%s",
+                    job_id, node_key, result.get("error"))
+    return await _node_action_response(request, job_id, db)
+
+
+@router.post(
+    "/jobs/{job_id}/nodes/{node_key}/move",
+    response_class=HTMLResponse, dependencies=[],
+)
+async def web_node_move(
+    request: Request, job_id: str, node_key: str,
+    dir: str = "down", db=Depends(get_db),
+):
+    """Move a node up/down one slot by swapping it with its neighbour in the
+    execution_order, then reorder."""
+    from app.modules import node_editor
+    nodes = await node_editor._load_nodes(db, job_id)
+    keys = [n["node_key"] for n in nodes]
+    if node_key in keys:
+        i = keys.index(node_key)
+        j = i - 1 if dir == "up" else i + 1
+        if 0 <= j < len(keys):
+            keys[i], keys[j] = keys[j], keys[i]
+            await node_editor.reorder_nodes(job_id, keys, edited_by="web", db=db)
     return await _node_action_response(request, job_id, db)
 
 

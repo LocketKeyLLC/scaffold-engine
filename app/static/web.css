@@ -426,3 +426,62 @@ tr.next-node { background: #eff6ff; }
   font-size: .9em;
   white-space: pre-wrap;
 }
+
+/* §17.479/§17.480 — interactive node control + richer detail page */
+.btn-small {
+  padding: 2px 8px;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  margin-right: 2px;
+}
+.btn-danger { background: #fee2e2; color: var(--status-failed, #b91c1c); border-color: #fecaca; }
+.node-actions { white-space: nowrap; }
+.muted { color: #9ca3af; }
+.deliverable-star { font-size: 0.85rem; }
+.tool-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-left: 4px;
+  font-size: 0.7rem;
+  border-radius: 4px;
+  background: #eef2ff;
+  color: #4338ca;
+  vertical-align: middle;
+}
+.nodes-table td.conf { text-align: right; font-variant-numeric: tabular-nums; }
+.node-output-row td { padding: 0; border: none; }
+.node-output-slot:empty { display: none; }
+.node-output {
+  margin: 0 0 8px 0;
+  padding: 10px 14px;
+  background: #f9fafb;
+  border-left: 3px solid #c7d2fe;
+  border-radius: 0 6px 6px 0;
+  font-size: 0.85rem;
+  max-height: 360px;
+  overflow: auto;
+}
+.node-output.empty { color: #9ca3af; font-style: italic; }
+.costs .counts-list { display: flex; gap: 1.5rem; flex-wrap: wrap; }
+
+/* §17.480 (Slice 2) — node edit / insert forms */
+.node-edit-form { margin: 4px 0 10px; padding: 10px 14px; background: #f9fafb; border-left: 3px solid #c7d2fe; border-radius: 0 6px 6px 0; }
+.node-edit-form .edit-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+.node-edit-form label { display: flex; flex-direction: column; font-size: 0.8rem; color: #4b5563; gap: 2px; }
+.node-edit-form label.check { flex-direction: row; align-items: center; gap: 4px; }
+.node-edit-form input, .node-edit-form textarea { font-size: 0.85rem; padding: 3px 6px; }
+.node-edit-form textarea { width: 100%; font-family: ui-monospace, monospace; }
+.node-edit-form .prompt-label { display: flex; flex-direction: column; gap: 2px; font-size: 0.8rem; color: #4b5563; }
+.node-edit-form .edit-actions { margin-top: 8px; }
+details.add-node { margin-top: 10px; }
+details.add-node summary { cursor: pointer; font-size: 0.9rem; color: #4338ca; }
+.node-edit-row td, .node-edit-slot:empty { padding: 0; }
+.node-edit-slot:empty { display: none; }
+
+/* §17.480 (Slice 3) — RAG search / model / research pages */
+.rag-form { display: flex; gap: 8px; margin: 12px 0 18px; }
+.rag-form input { flex: 1; padding: 6px 10px; font-size: 0.95rem; }
+.rag-results { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.rag-result { padding: 12px 16px; background: #f9fafb; border-left: 3px solid #c7d2fe; border-radius: 0 6px 6px 0; }
+.rag-result-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
+.rag-result-body { margin: 4px 0; font-size: 0.88rem; color: #374151; }
