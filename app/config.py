@@ -546,6 +546,13 @@ class Settings(BaseSettings):
     dag_validator_enabled: bool = True
     dag_validator_max_retries: int = Field(default=2, ge=0, le=5)
     dag_validator_max_tokens: int = Field(default=1024, ge=256, le=8192)
+    # §17.476 (Phase 2) — dependency-completeness / dead-end detection. A
+    # substantive node whose output neither feeds nor is fed by any
+    # is_deliverable node is an orphan branch (the §17.471-474 defect). When
+    # enabled, the generator flags orphans in the validator retry loop so the
+    # model re-decomposes; any survivors are auto-linked to the primary
+    # deliverable as a deterministic last resort. Disable to skip the check.
+    dag_dead_end_check_enabled: bool = True
     execution_global_retry_cap: int = Field(default=20, ge=0, le=1000)
     # Sprint X.24 — process-wide cap on concurrent execute_all_nodes runs.
     # Each run drives its own inference loop and holds short-lived DB
