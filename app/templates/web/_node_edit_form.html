@@ -1,0 +1,23 @@
+{# §17.480 (Slice 2) — inline node edit form, loaded into the per-node edit
+   slot by the ✎ button. Jinja auto-escapes all node values (XSS guard). On
+   Save the whole job-detail root re-renders. #}
+<form class="node-edit-form"
+      hx-post="/web/jobs/{{ job_id }}/nodes/{{ node_key }}/edit"
+      hx-target="#job-detail-root" hx-swap="outerHTML">
+  <input type="hidden" name="expected_version" value="{{ node.edit_version }}">
+  <div class="edit-row">
+    <label>Title <input name="title" value="{{ node.title }}"></label>
+    <label>Tool <input name="tool" value="{{ node.tool or 'LLM' }}"></label>
+    <label>Depends on <input name="depends_on" value="{{ depends_on_csv }}" placeholder="T1,T2"></label>
+    <label class="check"><input type="checkbox" name="is_deliverable" {% if node.is_deliverable %}checked{% endif %}> Deliverable</label>
+  </div>
+  <label class="prompt-label">Prompt
+    <textarea name="optimized_prompt" rows="4">{{ node.prompt }}</textarea>
+  </label>
+  <div class="edit-actions">
+    <button type="submit" class="btn btn-small btn-primary">Save</button>
+    <button type="button" class="btn btn-small"
+            hx-get="/web/jobs/{{ job_id }}/nodes/{{ node_key }}/edit/cancel"
+            hx-target="#edit-{{ node_key }}" hx-swap="innerHTML">Cancel</button>
+  </div>
+</form>

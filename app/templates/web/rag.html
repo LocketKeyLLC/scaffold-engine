@@ -1,0 +1,31 @@
+{% extends "web/_layout.html" %}
+{% block title %}KB search · Scaffold Engine{% endblock %}
+{% block content %}
+<section class="rag-search">
+  <header class="page-header">
+    <h1>Knowledge base search</h1>
+    <p class="meta">Semantic search over the Milvus knowledge base (§17.480).</p>
+  </header>
+  <form method="get" action="/web/rag" class="rag-form">
+    <input name="q" value="{{ query }}" placeholder="Search the knowledge base…" autofocus>
+    <button class="btn btn-primary" type="submit">Search</button>
+  </form>
+  {% if error %}<div class="form-error">{{ error }}</div>{% endif %}
+  {% if query and not results and not error %}<p class="muted">No matches.</p>{% endif %}
+  {% if results %}
+  <ul class="rag-results">
+    {% for r in results %}
+    <li class="rag-result">
+      <div class="rag-result-head">
+        <strong>{{ r.title or "(untitled)" }}</strong>
+        {% if r.domain %}<span class="tool-badge">{{ r.domain }}</span>{% endif %}
+        {% if r.confidence_score is not none %}<span class="muted">score {{ '%.3f'|format(r.confidence_score) }}</span>{% endif %}
+      </div>
+      <p class="rag-result-body">{{ (r.content or "")[:400] }}{% if (r.content or "")|length > 400 %}…{% endif %}</p>
+      {% if r.source_url %}<a href="{{ r.source_url }}" class="muted" rel="noopener noreferrer">{{ r.source_url }}</a>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}

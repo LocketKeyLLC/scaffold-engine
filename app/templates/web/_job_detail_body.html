@@ -118,6 +118,20 @@
     </ul>
   </section>
 
+  {# §17.480 — cost + latency rollup (already on the /exec/status payload). #}
+  {% if job.costs and (job.costs.call_count or 0) > 0 %}
+  <section class="costs">
+    <h2>Cost &amp; latency</h2>
+    <ul class="counts-list">
+      <li>Cost: <strong>${{ '%.4f'|format(job.costs.total_cost_usd or 0) }}</strong></li>
+      <li>Tokens: <strong>{{ (job.costs.total_prompt_tokens or 0) + (job.costs.total_completion_tokens or 0) }}</strong>
+        <span class="muted">({{ job.costs.total_prompt_tokens or 0 }} in / {{ job.costs.total_completion_tokens or 0 }} out)</span></li>
+      <li>Latency: <strong>{{ ((job.costs.total_latency_ms or 0) / 1000)|round(1) }}s</strong></li>
+      <li>LLM calls: <strong>{{ job.costs.call_count or 0 }}</strong></li>
+    </ul>
+  </section>
+  {% endif %}
+
   {% if job.nodes %}
   <section class="nodes">
     <h2>Nodes</h2>
@@ -128,6 +142,7 @@
           <th>#</th>
           <th>Key</th>
           <th>Title</th>
+          <th>Conf</th>{# §17.480 — verifier confidence (§17.477) #}
           <th>Status</th>
           <th>Actionable</th>
           <th>Actions</th>{# §17.479 — interactive node control #}
@@ -137,13 +152,26 @@
         {% for node in job.nodes %}
         <tr {% if node.node_key == (job.next_node or {}).get("node_key") %}class="next-node"{% endif %}>
           <td class="num">{{ node.execution_order }}</td>
-          <td><code>{{ node.node_key }}</code></td>
-          <td>{{ node.title or "(untitled)" }}</td>
+          {# §17.480 — ⭐ marks the model-asserted deliverable (§17.475). #}
+          <td><code>{{ node.node_key }}</code>{% if node.is_deliverable %} <span class="deliverable-star" title="Final deliverable">⭐</span>{% endif %}</td>
+          <td>{{ node.title or "(untitled)" }}{% if node.tool %} <span class="tool-badge">{{ node.tool }}</span>{% endif %}</td>
+          <td class="conf">{% if node.confidence is not none and node.confidence is number %}{{ '%.2f'|format(node.confidence) }}{% else %}<span class="muted">—</span>{% endif %}</td>
           <td><span class="status-badge status-{{ node.status }}">{{ node.status }}</span></td>
           <td>{% if node.actionable %}✓{% endif %}</td>
-          {# §17.479 — reset re-runs the node + downstream; delete rewires
-             dependents. htmx swaps the re-rendered job-detail root. #}
+          {# §17.479 reset/delete + §17.480 output/edit/move. #}
           <td class="node-actions">
+            <button hx-get="/web/jobs/{{ job_id }}/nodes/{{ node.node_key }}/output"
+                    hx-target="#out-{{ node.node_key }}" hx-swap="innerHTML"
+                    class="btn btn-small" title="Show this node's output">▸</button>
+            <button hx-get="/web/jobs/{{ job_id }}/nodes/{{ node.node_key }}/edit"
+                    hx-target="#edit-{{ node.node_key }}" hx-swap="innerHTML"
+                    class="btn btn-small" title="Edit this node">✎</button>
+            <button hx-post="/web/jobs/{{ job_id }}/nodes/{{ node.node_key }}/move?dir=up"
+                    hx-target="#job-detail-root" hx-swap="outerHTML"
+                    class="btn btn-small" title="Move up">⬆</button>
+            <button hx-post="/web/jobs/{{ job_id }}/nodes/{{ node.node_key }}/move?dir=down"
+                    hx-target="#job-detail-root" hx-swap="outerHTML"
+                    class="btn btn-small" title="Move down">⬇</button>
             <button hx-post="/web/jobs/{{ job_id }}/nodes/{{ node.node_key }}/reset"
                     hx-target="#job-detail-root" hx-swap="outerHTML"
                     class="btn btn-small" title="Re-run this node and its downstream">↻</button>
@@ -153,18 +181,35 @@
                     class="btn btn-small btn-danger" title="Delete this node">✕</button>
           </td>
         </tr>
+        {# §17.480 — lazy per-node output slot (▸) + inline edit slot (✎). #}
+        <tr class="node-output-row"><td></td><td colspan="6"><div id="out-{{ node.node_key }}" class="node-output-slot"></div></td></tr>
+        <tr class="node-edit-row"><td></td><td colspan="6"><div id="edit-{{ node.node_key }}" class="node-edit-slot"></div></td></tr>
         {# §17.450 (B3) — per-node "why" for failed/blocked nodes
            (dag_nodes.last_verification_reason, plumbed through /exec/status). #}
         {% if node.failure_reason and node.status in ("failed", "blocked") %}
         <tr class="node-reason-row">
           <td></td>
-          <td colspan="5" class="node-reason">↳ {{ node.failure_reason }}</td>
+          <td colspan="6" class="node-reason">↳ {{ node.failure_reason }}</td>
         </tr>
         {% endif %}
         {% endfor %}
       </tbody>
     </table>
     </div>
+    {# §17.480 (Slice 2) — add a node. #}
+    <details class="add-node">
+      <summary>+ Add node</summary>
+      <form class="node-edit-form" hx-post="/web/jobs/{{ job_id }}/nodes"
+            hx-target="#job-detail-root" hx-swap="outerHTML">
+        <div class="edit-row">
+          <label>Key <input name="node_key" placeholder="T9" required></label>
+          <label>Title <input name="title" placeholder="Do the thing" required></label>
+          <label>Tool <input name="tool" value="LLM"></label>
+          <label>Depends on <input name="depends_on" placeholder="T1,T2"></label>
+        </div>
+        <button type="submit" class="btn btn-small btn-primary">Add node</button>
+      </form>
+    </details>
   </section>
   {% endif %}
 

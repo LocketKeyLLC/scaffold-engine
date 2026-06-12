@@ -1,0 +1,18 @@
+{% extends "web/_layout.html" %}
+{% block title %}Models · Scaffold Engine{% endblock %}
+{% block content %}
+<section class="model-config">
+  <header class="page-header">
+    <h1>Model configuration</h1>
+    <p class="meta">The model routed for each role (read-only — change via <code>/model set</code> in chat or the pipeline valves).</p>
+  </header>
+  <table class="nodes-table">
+    <thead><tr><th>Role</th><th>Model</th></tr></thead>
+    <tbody>
+      {% for role, model in roles %}
+      <tr><td>{{ role }}</td><td><code>{{ model }}</code></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
