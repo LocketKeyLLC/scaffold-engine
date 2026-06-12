@@ -1,0 +1,40 @@
+{# §17.481 — research session detail root. Re-emits its own htmx poll only
+   while the session is non-terminal, so polling stops once it finishes. #}
+<section class="research-detail" id="research-detail-root"
+  {% if s.status not in ("completed", "failed", "cancelled") %}
+  hx-get="/web/research/{{ session_id }}/fragment"
+  hx-trigger="every 4s" hx-swap="outerHTML"
+  {% endif %}>
+  <header class="page-header">
+    <p class="breadcrumb"><a href="/web/research">← Research</a></p>
+    <h1>{{ s.topic }}</h1>
+    <p>
+      <span class="status-badge status-{{ s.status }}">{{ s.status }}</span>
+      {% if s.depth %}<span class="tool-badge">{{ s.depth }}</span>{% endif %}
+      {% if s.domain %}<span class="tool-badge">{{ s.domain }}</span>{% endif %}
+    </p>
+  </header>
+
+  {% if s.error_message %}<div class="form-error">{{ s.error_message }}</div>{% endif %}
+
+  <section class="counts">
+    <h2>Progress</h2>
+    <ul class="counts-list">
+      <li>Iterations: <strong>{{ s.iterations_completed or 0 }}</strong></li>
+      <li>URLs searched: <strong>{{ s.total_urls_searched or 0 }}</strong></li>
+      <li>Queries: <strong>{{ s.total_queries or 0 }}</strong></li>
+      <li>Extracted: <strong>{{ s.total_entries_extracted or 0 }}</strong></li>
+      <li>Ingested: <strong>{{ s.total_entries_ingested or 0 }}</strong></li>
+      <li>Rejected: <strong>{{ s.total_entries_rejected or 0 }}</strong></li>
+      {% if s.coverage_pct is not none %}<li>Coverage: <strong>{{ s.coverage_pct }}%</strong></li>{% endif %}
+      {% if s.duration_ms %}<li>Duration: <strong>{{ (s.duration_ms / 1000)|round(1) }}s</strong></li>{% endif %}
+    </ul>
+  </section>
+
+  {% if summary_html %}
+  <section class="compiled-output">
+    <h2>Summary</h2>
+    <div class="markdown-body">{{ summary_html | safe }}</div>
+  </section>
+  {% endif %}
+</section>

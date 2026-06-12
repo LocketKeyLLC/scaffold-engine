@@ -21984,6 +21984,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.481 Feature — web research launch + session detail (the §17.480 follow-up) (2026-06-12)
+
+§17.480's `/web/research` only listed sessions; launching stayed chat/CLI. This adds a launch form + a live session-detail page, mirroring the §17.454 ideate-kickoff pattern.
+
+- **`spawn_research_background`** (`research_agent.py`) — fire-and-forget background research with the §17.454 strong-ref-set + done-callback (so the asyncio task survives GC) over `run_research_in_background`, which simply drains the `run_research(...)` generator to completion. `run_research` already owns its session lifecycle (`_run_with_session_lifecycle` finalizes the row on success / error / cancel), so the wrapper just consumes it; research runs server-side regardless of the browser.
+- **`POST /web/research`** (async — `create_task` needs the loop) — validates a non-empty topic, picks a valid depth (`shallow|medium|deep`), `spawn_research_background`, and redirects to the list where the new running session appears. A URL / `github:` / `openapi:` topic dispatches to the same direct modes `run_research` already handles.
+- **`GET /web/research/{id}`** + **`/fragment`** — session detail: status + depth/domain badges, a Progress panel (iterations / URLs / queries / extracted / ingested / rejected / coverage / duration), and the markdown-rendered summary. The root re-emits its own htmx poll (`every 4s`) only while non-terminal, so polling stops on completed/failed/cancelled (the §17.455 job-detail poll pattern). UUID-guarded (400) + not-found (404). New templates `research_detail.html` / `_research_detail_root.html`; the list rows now link to the detail page.
+
+**Verification.** GET pages live-verified (launch form + depth select; an existing session's detail rendered 200 with the Progress panel + poll root). The empty-topic guard live-verified (302 + **no** session created: count 130→130). The full launch→research run was **deliberately not triggered live** — it's a 20–60 min KB-mutating job — so the kickoff is unit-verified instead: `test_web_pages.py` +4 (launch spawns with topic+depth / empty-topic no-op / detail renders / bad-uuid 400), `spawn_research_background` being a thin wrapper over the production-proven `run_research`. `make ci-tier-0` + `make openapi-check` green (web routes `include_in_schema=False`; no schema/API change). **Full `make test`: 3677 passed, 1 skipped, 0 failed in 26:39** (+4 over §17.480's 3673; the 1 skip is the known transient `test_topology_select_db.py` live-LLM 409).
+
+**Deferred:** a live token-by-token SSE stream of the research run (the page polls session stats instead) — a follow-up if the polling granularity proves too coarse.
+
+---
+
 ### §17.480 Feature — web-UX overhaul: richer job detail + web node-editing + new browser surfaces (RAG / model / research) (2026-06-12)
 
 The native web UI (the §J.2 / §17.454-470 surface) lagged the chat surface and the §17.475–479 node overhaul. This is a three-slice overhaul in one PR. Web routes that mutate or query continue the §17.479 pattern — **`async def` calling app modules directly in-process** (no SDK loopback → no §17.450 single-worker deadlock); read routes stay sync `def` + SDK loopback.

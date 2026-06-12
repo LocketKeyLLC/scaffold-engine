@@ -3,9 +3,19 @@
 {% block content %}
 <section class="research-list">
   <header class="page-header">
-    <h1>Research sessions</h1>
-    <p class="meta">Recent autonomous-research sessions (§17.480). Launch new research via <code>/research &lt;topic&gt;</code> in chat or the CLI.</p>
+    <h1>Research</h1>
+    <p class="meta">Autonomous research: decompose → search → extract → ingest → iterate. Runs server-side (20–60 min on CPU); this page lists recent sessions.</p>
   </header>
+
+  {# §17.481 — launch form. Fire-and-forget; redirects to this list. #}
+  <form method="post" action="/web/research" class="research-launch">
+    <input name="topic" placeholder="Research a topic, or a url / github:owner/repo / openapi:url" required>
+    <select name="depth" aria-label="Depth">
+      {% for d in depths %}<option value="{{ d }}" {% if d == 'medium' %}selected{% endif %}>{{ d }}</option>{% endfor %}
+    </select>
+    <button class="btn btn-primary" type="submit">Launch</button>
+  </form>
+
   {% if sessions %}
   <div class="table-scroll">
   <table class="nodes-table">
@@ -13,7 +23,7 @@
     <tbody>
       {% for s in sessions %}
       <tr>
-        <td>{{ s.topic or "(untitled)" }}</td>
+        <td><a href="/web/research/{{ s.id }}">{{ s.topic or "(untitled)" }}</a></td>
         <td><span class="status-badge status-{{ s.status }}">{{ s.status }}</span></td>
         <td class="muted">{{ s.created_at }}</td>
       </tr>
@@ -22,7 +32,7 @@
   </table>
   </div>
   {% else %}
-  <p class="muted">No research sessions yet.</p>
+  <p class="muted">No research sessions yet — launch one above.</p>
   {% endif %}
 </section>
 {% endblock %}

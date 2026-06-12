@@ -40,7 +40,7 @@ def test_web_model_page(web):
 def test_web_research_page_empty(web):
     resp = web.get("/web/research")
     assert resp.status_code == 200
-    assert "Research sessions" in resp.text
+    assert "research-launch" in resp.text  # §17.481 launch form present
 
 
 @pytest.mark.smoke
@@ -60,3 +60,63 @@ def test_web_rag_page_with_results(web):
         resp = web.get("/web/rag?q=filter")
     assert resp.status_code == 200
     assert "RC filter" in resp.text and "rag-result" in resp.text
+
+
+# §17.481 — web research launch + detail.
+def _db_with_row(row):
+    res = MagicMock()
+    res.mappings.return_value.first.return_value = row
+    res.mappings.return_value.all.return_value = [row] if row else []
+    res.first.return_value = row
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=res)
+    return db
+
+
+_SESSION = {
+    "id": "01ab243e-1234-5678-9abc-def012345678", "topic": "Quantum ECC",
+    "depth": "deep", "domain": None, "status": "running", "summary": None,
+    "error_message": None, "iterations_completed": 2,
+    "total_entries_extracted": 5, "total_entries_ingested": 4,
+    "total_entries_rejected": 1, "total_urls_searched": 7, "total_queries": 3,
+    "coverage_pct": 40, "duration_ms": 12000,
+    "created_at": "2026-06-12", "completed_at": None,
+}
+
+
+@pytest.mark.smoke
+def test_web_research_launch_spawns(web):
+    with patch("app.modules.research_agent.spawn_research_background") as sp:
+        resp = web.post("/web/research",
+                        data={"topic": "quantum error correction", "depth": "deep"})
+    assert resp.status_code == 302
+    sp.assert_called_once()
+    assert sp.call_args.args[0] == "quantum error correction"
+    assert sp.call_args.kwargs.get("depth") == "deep"
+
+
+@pytest.mark.smoke
+def test_web_research_launch_empty_noop(web):
+    with patch("app.modules.research_agent.spawn_research_background") as sp:
+        resp = web.post("/web/research", data={"topic": "   ", "depth": "medium"})
+    assert resp.status_code == 302
+    sp.assert_not_called()
+
+
+@pytest.mark.smoke
+def test_web_research_detail_renders():
+    app.dependency_overrides[get_db] = lambda: _db_with_row(_SESSION)
+    try:
+        with TestClient(app, follow_redirects=False) as tc:
+            resp = tc.get("/web/research/" + _SESSION["id"])
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+    assert resp.status_code == 200
+    assert "research-detail-root" in resp.text and "Progress" in resp.text
+    assert "Quantum ECC" in resp.text
+
+
+@pytest.mark.smoke
+def test_web_research_detail_bad_uuid_400(web):
+    resp = web.get("/web/research/not-a-uuid")
+    assert resp.status_code == 400
