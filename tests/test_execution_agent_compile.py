@@ -1061,3 +1061,64 @@ class TestSkippedVerifyBanner:
         text_value, was_syn = await _compile_output("job-1", db)
         assert text_value is None
         assert was_syn is False
+
+
+@pytest.mark.smoke
+class TestCompileExplicitDeliverable:
+    """§17.475 — is_deliverable is the PRIMARY Strategy-0 signal; the
+    is_output_node + dominant-leaf path is demoted to the no-marker fallback."""
+
+    async def test_explicit_deliverable_picked_over_leaves(self):
+        # The deliverable (T3, a NON-leaf CodeGen node) is marked; the two
+        # is_output_node leaves (T4 docs, T5 validation) are NOT. Compile must
+        # pick T3 verbatim and ignore the leaves / dominant-leaf entirely —
+        # the exact mdsplit shape that the old leaf logic got wrong.
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Plan", "tool": "LLM", "status": "done",
+             "output_text": "plan", "is_output_node": False,
+             "is_deliverable": False, "depends_on": []},
+            {"node_key": "T3", "title": "Write CLI", "tool": "CodeGen",
+             "status": "done", "output_text": "def main(): return 0",
+             "is_output_node": False, "is_deliverable": True, "depends_on": ["T1"]},
+            {"node_key": "T4", "title": "Docs", "tool": "LLM", "status": "done",
+             "output_text": "usage docs", "is_output_node": True,
+             "is_deliverable": False, "depends_on": ["T3"]},
+            {"node_key": "T5", "title": "Validate", "tool": "LLM", "status": "done",
+             "output_text": "validation report", "is_output_node": True,
+             "is_deliverable": False, "depends_on": ["T3"]},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result, _was_syn = await _compile_output("job-1", db)
+        assert result == "def main(): return 0"      # CodeGen deliverable, raw
+        assert "usage docs" not in result
+        assert "validation report" not in result
+
+    async def test_multiple_deliverables_joined(self):
+        # Two genuine artifacts (library + README) both marked → both rendered.
+        db = make_mock_db([
+            {"node_key": "T1", "title": "Library", "tool": "CodeGen",
+             "status": "done", "output_text": "LIB_CODE", "is_output_node": True,
+             "is_deliverable": True, "depends_on": []},
+            {"node_key": "T2", "title": "README", "tool": "LLM", "status": "done",
+             "output_text": "README_TEXT", "is_output_node": True,
+             "is_deliverable": True, "depends_on": []},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result, _was_syn = await _compile_output("job-1", db)
+        assert "LIB_CODE" in result and "README_TEXT" in result
+
+    async def test_no_marker_falls_back_to_is_output_node(self):
+        # No is_deliverable anywhere (pre-§17.475 job) → fallback to
+        # is_output_node + dominant-leaf, identical to prior behavior. Two
+        # co-equal leaves (closure size 1) → both joined.
+        db = make_mock_db([
+            {"node_key": "T1", "title": "A", "tool": "LLM", "status": "done",
+             "output_text": "alpha", "is_output_node": True,
+             "is_deliverable": False},
+            {"node_key": "T2", "title": "B", "tool": "LLM", "status": "done",
+             "output_text": "beta", "is_output_node": True,
+             "is_deliverable": False},
+        ])
+        from app.modules.execution_agent import _compile_output
+        result, _was_syn = await _compile_output("job-1", db)
+        assert "alpha" in result and "beta" in result and "---" in result

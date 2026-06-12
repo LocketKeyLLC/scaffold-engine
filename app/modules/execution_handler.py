@@ -179,7 +179,8 @@ async def node_outputs(job_id: UUID, db: AsyncSession) -> dict:
     nodes_result = await db.execute(
         text("""
             SELECT node_key, title, status, execution_order,
-                   is_output_node, output_text
+                   is_output_node, COALESCE(is_deliverable, FALSE) AS is_deliverable,
+                   output_text
             FROM dag_nodes
             WHERE job_id = :job_id
             ORDER BY execution_order, node_key
@@ -197,6 +198,9 @@ async def node_outputs(job_id: UUID, db: AsyncSession) -> dict:
             "status": r.status,
             "execution_order": r.execution_order,
             "is_output_node": bool(r.is_output_node),
+            # §17.475 — the model-asserted deliverable marker; lets the
+            # /results <id> nodes view distinguish THE deliverable from leaves.
+            "is_deliverable": bool(r.is_deliverable),
             "output_text": out,
             "output_len": len(out),
         })

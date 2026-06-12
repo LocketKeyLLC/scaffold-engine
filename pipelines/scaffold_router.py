@@ -3928,9 +3928,15 @@ class Pipeline:
 
         title = data.get("job_title") or job_id
         jstatus = data.get("job_status") or "unknown"
+        # §17.475 — prefer the explicit deliverable marker; fall back to the
+        # is_output_node leaves for pre-§17.475 jobs (matching compile
+        # Strategy 0's own fallback).
         out_keys = [
+            n.get("node_key", "?") for n in nodes if n.get("is_deliverable")
+        ] or [
             n.get("node_key", "?") for n in nodes if n.get("is_output_node")
         ]
+        out_set = set(out_keys)
         lines = [
             f"## Node outputs — {title}",
             f"_Job status: **{jstatus}** · {len(nodes)} nodes_",
@@ -3949,7 +3955,7 @@ class Pipeline:
             nk = n.get("node_key", "?")
             n_status = n.get("status", "unknown")
             icon = STATUS_ICONS.get(n_status, "")
-            marker = " ⭐" if n.get("is_output_node") else ""
+            marker = " ⭐" if n.get("node_key") in out_set else ""
             lines.append(f"### {nk} — {n.get('title', '')} · {icon} {n_status}{marker}")
             body = n.get("output_text") or ""
             if not body:

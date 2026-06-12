@@ -187,10 +187,10 @@ async def test_node_outputs_returns_every_node_with_body_and_flag():
     nodes = [
         SimpleNamespace(node_key="T1", title="plan", status="done",
                         execution_order=0, is_output_node=False,
-                        output_text="storage plan body"),
+                        is_deliverable=False, output_text="storage plan body"),
         SimpleNamespace(node_key="T2", title="install", status="done",
                         execution_order=1, is_output_node=True,
-                        output_text="install body"),
+                        is_deliverable=True, output_text="install body"),
     ]
     db = _mock_db(job, nodes)
     result = await execution_handler.node_outputs(uuid4(), db)
@@ -203,6 +203,9 @@ async def test_node_outputs_returns_every_node_with_body_and_flag():
     assert result["nodes"][0]["output_len"] == len("storage plan body")
     # Leaf is flagged so the renderer can mark which fed the deliverable.
     assert result["nodes"][1]["is_output_node"] is True
+    # §17.475 — is_deliverable is surfaced per node.
+    assert result["nodes"][0]["is_deliverable"] is False
+    assert result["nodes"][1]["is_deliverable"] is True
 
 
 async def test_node_outputs_null_body_normalizes_to_empty():
@@ -210,7 +213,7 @@ async def test_node_outputs_null_body_normalizes_to_empty():
     nodes = [
         SimpleNamespace(node_key="T1", title="", status="pending",
                         execution_order=0, is_output_node=False,
-                        output_text=None),
+                        is_deliverable=False, output_text=None),
     ]
     db = _mock_db(job, nodes)
     result = await execution_handler.node_outputs(uuid4(), db)

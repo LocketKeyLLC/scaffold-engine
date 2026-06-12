@@ -65,7 +65,8 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
       "tool": "LLM | SearXNG | Milvus | CodeGen | Shell",
       "domain": "prompt | rag | eng | llm | spec | null",
       "assigned_model": "model name or null",
-      "notes": "optional execution hint"
+      "notes": "optional execution hint",
+      "is_deliverable": false
     }
   ]
 }
@@ -77,6 +78,20 @@ Rules:
 - No circular dependencies
 - First task(s) must have empty depends_on
 - Last task(s) must be type "output" or "validation"
+- Deliverable marker (§17.475): set "is_deliverable": true on EXACTLY the
+  node(s) that produce the user-facing final artifact the brief asked for.
+  Every other node sets "is_deliverable": false (or omits it). This is about
+  the ARTIFACT, not topology:
+  * For research / synthesis / docs briefs it is usually the terminal
+    synthesize / document / final-output node.
+  * For code briefs it is the node that EMITS THE CODE (the CodeGen node),
+    even when validation or documentation nodes run AFTER it. The code is the
+    deliverable; the docs/validation are supporting.
+  * A mid-graph setup step (e.g. "Configure Tailscale", "Install Proxmox") is
+    NEVER the deliverable, even if nothing depends on it — that is a dead-end
+    branch, not the output.
+  If two independent artifacts are genuinely the deliverable (e.g. a library
+  AND its README), mark both. Never mark zero nodes.
 - Keep task names to max 5 words
 - Tool guide:
   * Milvus = ALWAYS use when the task involves the knowledge base, KB, internal docs, TOON files, or domain-specific lookup. Any mention of "knowledge base", "KB", "look up from", "retrieve from", or stored/internal knowledge MUST use Milvus, NEVER SearXNG.
@@ -237,7 +252,7 @@ EXAMPLE (4-node DAG for "Research the history of solar panels and summarize find
     {"id": "T1", "name": "Search solar panel history", "type": "research", "inputs": ["solar panel history query"], "outputs": ["raw search results"], "depends_on": [], "tool": "SearXNG", "domain": null, "assigned_model": null, "notes": "Broad web search for timeline and key milestones"},
     {"id": "T2", "name": "Retrieve internal KB context", "type": "research", "inputs": ["solar panel keywords"], "outputs": ["KB matches"], "depends_on": ["T1"], "tool": "Milvus", "domain": "eng", "assigned_model": null, "notes": "Check knowledge base for any stored solar energy references"},
     {"id": "T3", "name": "Synthesize and summarize", "type": "action", "inputs": ["raw search results", "KB matches"], "outputs": ["summary draft"], "depends_on": ["T1", "T2"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Combine sources into a coherent summary"},
-    {"id": "T4", "name": "Format final output", "type": "output", "inputs": ["summary draft"], "outputs": ["final summary document"], "depends_on": ["T3"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Write final summary to file"}
+    {"id": "T4", "name": "Format final output", "type": "output", "inputs": ["summary draft"], "outputs": ["final summary document"], "depends_on": ["T3"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Write final summary to file", "is_deliverable": true}
   ]
 }
 
@@ -252,7 +267,7 @@ EXAMPLE (8-node DAG for "Install Proxmox VE, set up Jellyfin + Ollama in contain
     {"id": "T5", "name": "Deploy Ollama with GPU", "type": "action", "inputs": ["four empty running LXCs"], "outputs": ["Ollama LXC serving llama3"], "depends_on": ["T3"], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "Starts from T3 — the Ollama LXC already exists. Adds GPU passthrough lines + installs Ollama. Does NOT touch the other 3 LXCs."},
     {"id": "T6", "name": "Enable Tailscale + DNS policy", "type": "action", "inputs": ["all service LXCs"], "outputs": ["one exit node + AdGuard as DNS"], "depends_on": ["T4", "T5"], "tool": "Shell", "domain": null, "assigned_model": null, "notes": "ONE exit node, not four. AdGuard configured as resolver for the other LXCs (not Cloudflare directly)."},
     {"id": "T7", "name": "Validate the build", "type": "validation", "inputs": ["all upstream runbooks"], "outputs": ["validation report"], "depends_on": ["T6"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Read upstream outputs and check coherence. No installs, no config edits."},
-    {"id": "T8", "name": "Document the setup", "type": "output", "inputs": ["all upstream runbooks"], "outputs": ["README.md"], "depends_on": ["T7"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Documentation about the setup is text — LLM, not Shell."}
+    {"id": "T8", "name": "Document the setup", "type": "output", "inputs": ["all upstream runbooks"], "outputs": ["README.md"], "depends_on": ["T7"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Documentation about the setup is text — LLM, not Shell.", "is_deliverable": true}
   ]
 }
 
@@ -262,7 +277,7 @@ EXAMPLE (5-node DAG for "Build a CLI tool that converts screenshots to a searcha
   "tasks": [
     {"id": "T1", "name": "Decide library stack", "type": "decision", "inputs": ["project goals"], "outputs": ["chosen libraries and why"], "depends_on": [], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Pick OCR + PDF libs (e.g., pytesseract, pypdf) — text decision, NOT code"},
     {"id": "T2", "name": "List supported file types", "type": "decision", "inputs": ["chosen libraries"], "outputs": ["list of extensions"], "depends_on": ["T1"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Plain list of extensions like .png .jpg — LLM not CodeGen"},
-    {"id": "T3", "name": "Write the CLI script", "type": "action", "inputs": ["library stack", "file types"], "outputs": ["working Python script"], "depends_on": ["T1", "T2"], "tool": "CodeGen", "domain": null, "assigned_model": null, "notes": "Real code is the deliverable — CodeGen"},
+    {"id": "T3", "name": "Write the CLI script", "type": "action", "inputs": ["library stack", "file types"], "outputs": ["working Python script"], "depends_on": ["T1", "T2"], "tool": "CodeGen", "domain": null, "assigned_model": null, "notes": "Real code is the deliverable — CodeGen", "is_deliverable": true},
     {"id": "T4", "name": "Document usage", "type": "action", "inputs": ["working Python script"], "outputs": ["README content"], "depends_on": ["T3"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Documentation about code is LLM, not CodeGen"},
     {"id": "T5", "name": "Validate end-to-end", "type": "validation", "inputs": ["working Python script", "README content"], "outputs": ["validation report"], "depends_on": ["T3", "T4"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Validation is reasoning, not code"}
   ]
@@ -684,6 +699,14 @@ async def generate_dag(
             referenced.add(dep)
     leaf_keys = {t["id"] for t in normalized if t["id"] not in referenced}
 
+    # §17.475: deliverable fallback. If the model marked no node as the
+    # deliverable (old prompt, omission, or a non-conforming draw), fall back
+    # to the topological leaves so compile's primary (explicit) path still
+    # fires. When the model DID mark deliverable(s), honor exactly those.
+    if not any(t.get("is_deliverable") for t in normalized):
+        for t in normalized:
+            t["is_deliverable"] = t["id"] in leaf_keys
+
     try:
         for i, task in enumerate(normalized):
             await db.execute(
@@ -691,11 +714,13 @@ async def generate_dag(
                     INSERT INTO dag_nodes
                         (job_id, node_key, title, node_type, status,
                          depends_on, assigned_model, prompt_template,
-                         execution_order, tool, domain, is_output_node)
+                         execution_order, tool, domain, is_output_node,
+                         is_deliverable)
                     VALUES
                         (:job_id, :node_key, :title, :node_type, 'pending',
                          :depends_on, :assigned_model, :prompt_template,
-                         :execution_order, :tool, :domain, :is_output_node)
+                         :execution_order, :tool, :domain, :is_output_node,
+                         :is_deliverable)
                 """),
                 {
                     "job_id": uid,
@@ -709,6 +734,7 @@ async def generate_dag(
                     "tool": task.get("tool", "LLM"),
                     "domain": task.get("domain"),
                     "is_output_node": task["id"] in leaf_keys,
+                    "is_deliverable": bool(task.get("is_deliverable", False)),
                 },
             )
 
@@ -877,6 +903,11 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str], list[str
         # ignored the no-markdown-fences instruction the cloud model honored).
         if raw.get("notes"):
             task["notes"] = str(raw["notes"]).strip()
+
+        # §17.475: model-asserted deliverable marker. Truthy-coerce; default
+        # False. A persist-time leaf fallback (in generate_dag) fills this when
+        # the model marks no node, so old prompts / omissions still compile.
+        task["is_deliverable"] = bool(raw.get("is_deliverable", False))
 
         # #25: Milvus nodes require a domain; warn if missing or dropped as invalid
         if task.get("tool") == "Milvus" and not task.get("domain"):

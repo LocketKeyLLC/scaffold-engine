@@ -135,6 +135,9 @@ class DagNodeBase(BaseModel):
     domain: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     is_output_node: bool = False
+    # §17.475 — model-asserted final-deliverable marker. Primary signal for
+    # compile Strategy 0; is_output_node is the topological-leaf fallback.
+    is_deliverable: bool = False
 
 
 class DagNodeCreate(DagNodeBase):
