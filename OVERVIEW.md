@@ -1865,9 +1865,9 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (refreshed post-§17.489, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
+### 14.1 Test counts (refreshed post-§17.490, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
 
-**Current local baseline (`make test`, full dev-image suite):** **3769 passed, 0 failed, 0 skipped in 26:06** — measured 2026-06-13 after §17.489. **Fully clean — 0 skips for the first time:** both chronic live-LLM stragglers now pass, because §17.488 (spec extractor) and §17.489 (topology-select) route their LLM calls through `chat_until_nonempty`, so an empty draw redraws instead of failing/self-skipping. Per-§ measured lineage: §17.484 **3700** → §17.486 **3734** → §17.487 **3764** (+30 Tier-1 assist tests) → §17.488 **3766** (+2 spec redraw tests) → §17.489 **3769** (+2 topology redraw tests + the `test_topology_select_db` live test flipping skip→pass). Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
+**Current local baseline (`make test`, full dev-image suite):** **3779 passed, 0 failed, 0 skipped in 25:21** — measured 2026-06-13 after §17.490, fully clean (0 skips). Per-§ measured lineage: §17.486 **3734** → §17.487 **3764** (+30 Tier-1 assist tests) → §17.488 **3766** (+2 spec redraw tests) → §17.489 **3769** (+2 topology redraw tests + the `test_topology_select_db` live test flipping skip→pass) → §17.490 **3779** (+10 auto-learn-substitutions tests). Both chronic live-LLM stragglers stay green via the §17.488/§17.489 `chat_until_nonempty` guards. Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
 
 **CI baseline (`test.yml`, the `-k "not integration"` subset):** **~3596 passed (projected), 14 skipped, 91 deselected (the integration tests)** — **no fresh CI run this cycle: GitHub Actions is org-billing-blocked**, so `main` merges (#64/#65/#66) are gated by local `make test` + `make ci-tier-0` instead. Projected from the local measure via the standing reconciliation: 3701 collected − 14 (service-needing, skipped in CI but pass live here) − 91 (integration, deselected in CI) = 3596. Last CI-measured green run was `27311904558` (§17.470, 3473 passed); the §17.472–484 additions are all non-integration unit/web tests, so `deselected` is carried at 91.
 
@@ -21980,6 +21980,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **Verification.** Full SDK suite — **142 passed** (4 new: sync + async `follow_redirects is False`, stream connect→`ConnectionError`, stream timeout→`TimeoutError` — the missing regression for S2). ci-tier-0 green (no vendored file touched). Coverage honesty: deep-read the 6 core modules + scanned resource wrappers; did not exhaustively read the thin resource method bodies.
 
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
+### §17.490 Feature — Assist Mode auto-learns substitutions from evidence (2026-06-13)
+
+§17.487 added `/assist env` (manual environment capture → concrete commands). This makes it automatic: when a step is submitted, the engine learns the concrete values the operator actually used and folds them into the session environment, so later walkthroughs are concrete without the operator re-typing `/assist env`.
+
+**How.** On a committed `submit` (gated by `assist_learn_substitutions`, default on), the submit endpoint calls `assist_agent.learn_from_submit`: read the step's cached walkthrough, scan it for `<PLACEHOLDER>` slots (`assist_guide.find_placeholders`), and — only if any exist — run `assist_guide.extract_substitutions` (one `report_values` tool_call that fills the placeholders it can read from the evidence; omits the rest, never guesses). Newly-learned keys merge into `metadata.environment.substitutions` **only-add-new** (an operator-set or previously-learned value always wins over a re-read). Surfaced in the submit reply as `📌 Learned for later steps: HOST_IP=…`.
+
+**Cost/safety.** Zero LLM call when the walkthrough emitted no placeholders (the cheap gate). Fully fail-soft — wrapped in try/except in the endpoint so a learn failure never disturbs the submit. Runs after the commit, so it can't block it.
+
+**Verification.** `tests/test_assist_guide.py` +5 (find_placeholders; extract: no-placeholder-skips-LLM / fills-from-evidence / filters-unknown-keys+empty+brackets / fail-soft), `tests/test_assist_agent_guidance.py` +3 (no-cached-guidance / only-adds-new-keys / nothing-new-skips-write), `tests/test_scaffold_router_assist_guide.py` +2 (learned banner shown / absent). **Live smoke (real model):** guidance with `<HOST_IP>`/`<APP_DIR>` + the operator's SSH/cd output → learned `{HOST_IP: 192.168.4.20, APP_DIR: /opt/myapp}`. Full `make test`: **3779 passed, 0 failed, 0 skipped** — see §14.1.
 
 ---
 

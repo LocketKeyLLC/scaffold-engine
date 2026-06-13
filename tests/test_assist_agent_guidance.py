@@ -219,3 +219,55 @@ async def test_run_step_fix_empty_error_raises():
     db = AsyncMock()
     with pytest.raises(ValueError, match="empty"):
         await assist_agent.run_step_fix(session_id="s", error="  ", db=db)
+
+
+# ── §17.490: learn_from_submit ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_learn_from_submit_no_cached_guidance_returns_empty():
+    db = AsyncMock()
+    with patch("app.modules.assist_guide.read_cached_guidance",
+               new=AsyncMock(return_value=None)), \
+         patch("app.modules.assist_guide.extract_substitutions", new=AsyncMock()) as ex:
+        out = await assist_agent.learn_from_submit(
+            session_id="s", node_key="T2", evidence="x", db=db,
+        )
+    assert out == {}
+    ex.assert_not_called()  # nothing to learn without guidance
+
+
+@pytest.mark.asyncio
+async def test_learn_from_submit_only_adds_new_keys():
+    db = AsyncMock()
+    with patch("app.modules.assist_guide.read_cached_guidance",
+               new=AsyncMock(return_value={"guidance": "ssh <HOST_IP>; <PORT>"})), \
+         patch("app.modules.assist_guide.extract_substitutions",
+               new=AsyncMock(return_value={"HOST_IP": "10.0.0.9", "PORT": "8080"})), \
+         patch.object(assist_agent, "get_environment",
+                      new=AsyncMock(return_value={"profile": "", "substitutions": {"HOST_IP": "10.0.0.5"}})), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+        out = await assist_agent.learn_from_submit(
+            session_id="s", node_key="T2", evidence="...", db=db,
+        )
+    # HOST_IP already set by the operator → not overwritten; only PORT is new.
+    assert out == {"PORT": "8080"}
+    _, kwargs = setenv.call_args
+    assert kwargs["substitutions"] == {"PORT": "8080"}
+
+
+@pytest.mark.asyncio
+async def test_learn_from_submit_nothing_new_skips_write():
+    db = AsyncMock()
+    with patch("app.modules.assist_guide.read_cached_guidance",
+               new=AsyncMock(return_value={"guidance": "<HOST_IP>"})), \
+         patch("app.modules.assist_guide.extract_substitutions",
+               new=AsyncMock(return_value={"HOST_IP": "10.0.0.5"})), \
+         patch.object(assist_agent, "get_environment",
+                      new=AsyncMock(return_value={"profile": "", "substitutions": {"HOST_IP": "10.0.0.5"}})), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+        out = await assist_agent.learn_from_submit(
+            session_id="s", node_key="T2", evidence="...", db=db,
+        )
+    assert out == {}
+    setenv.assert_not_called()  # no new keys → no write

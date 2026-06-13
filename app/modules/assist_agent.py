@@ -552,6 +552,44 @@ async def set_environment(
     return current
 
 
+async def learn_from_submit(
+    *, session_id: str, node_key: str, evidence: str, db,
+) -> dict:
+    """§17.490 — fold concrete values from a submit into the session environment.
+
+    Reads the step's cached walkthrough; if it emitted ``<PLACEHOLDER>`` slots,
+    extracts the values the operator actually used from their evidence and
+    merges the **new** ones into ``metadata.environment.substitutions`` (never
+    overwriting an operator-set or previously-learned value). Returns the dict
+    of newly-learned values (for the caller to surface). Best-effort: any
+    failure returns ``{}`` and never disturbs the submit.
+    """
+    from app.modules import assist_guide
+
+    cached = await assist_guide.read_cached_guidance(
+        session_id=session_id, node_key=node_key, db=db,
+    )
+    if not cached or not cached.get("guidance"):
+        return {}
+    extracted = await assist_guide.extract_substitutions(
+        guidance_text=cached["guidance"], evidence=evidence,
+    )
+    if not extracted:
+        return {}
+    current = await get_environment(session_id=session_id, db=db) or {}
+    existing = current.get("substitutions") or {}
+    # Only-add-new: an operator-set or already-learned key wins over a re-read.
+    new = {k: v for k, v in extracted.items() if k not in existing}
+    if not new:
+        return {}
+    await set_environment(session_id=session_id, substitutions=new, db=db)
+    logger.info(
+        "assist_learned_substitutions session_id=%s node_key=%s keys=%s",
+        session_id, node_key, ",".join(new.keys()),
+    )
+    return new
+
+
 # ── Submit / commit human evidence ───────────────────────────────────────
 
 

@@ -656,6 +656,12 @@ def assist_submit(
     elif (outcome == "unclear" and verdict.get("reason")
           and verdict["reason"] != "verification unavailable"):
         msg += f"\n\n_Couldn't confirm success: {verdict['reason']}_"
+    # §17.490 — concrete values learned from this step's evidence; surfaced so
+    # the operator sees later steps will use them instead of placeholders.
+    learned = d.get("learned_substitutions") or {}
+    if learned:
+        pairs = ", ".join(f"`{k}`=`{v}`" for k, v in learned.items())
+        msg += f"\n\n📌 Learned for later steps: {pairs}"
     yield msg
 
 

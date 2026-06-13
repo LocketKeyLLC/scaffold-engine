@@ -555,6 +555,15 @@ class Settings(BaseSettings):
     # user can act on it regardless.
     assist_verify_on_submit: bool = True
     assist_block_on_failed_verify: bool = False
+    # §17.490 — after a submit, extract the concrete values the operator
+    # actually used (the IP/path/name they filled into a <PLACEHOLDER> the
+    # walkthrough emitted) from their evidence and fold them into the session
+    # environment, so later steps' walkthroughs are concrete instead of
+    # re-emitting the same placeholder. Only fires when the step's cached
+    # guidance actually contained placeholders (no LLM call otherwise);
+    # fail-soft; only-add-new (never overwrites a value the operator set or a
+    # previously-learned one).
+    assist_learn_substitutions: bool = True
     # #2 — orphan detection: dag_nodes stuck in 'running' past this threshold
     # are treated as orphaned (executor died) and reset to 'pending' for
     # automatic re-execution. Sprint X.1 tightened 60→30 min: the audit

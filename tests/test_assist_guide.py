@@ -442,3 +442,74 @@ async def test_generate_fix_failsoft_empty():
         )
     assert res["status"] == "failed"
     assert res["fix"] == ""
+
+
+# ── §17.490: auto-learn substitutions ──────────────────────────────────────
+
+
+def test_find_placeholders_distinct_and_skips_single_char():
+    text = "ssh root@<HOST_IP>; set <HOST_IP>; cp <SRC_PATH> /x; junk <a>"
+    assert assist_guide.find_placeholders(text) == ["HOST_IP", "SRC_PATH"]
+
+
+def _values_resp(values, success=True):
+    r = MagicMock()
+    r.success = success
+    if success:
+        call = MagicMock()
+        call.arguments = {"values": values}
+        r.tool_calls = [call]
+    else:
+        r.tool_calls = []
+    return r
+
+
+@pytest.mark.asyncio
+async def test_extract_substitutions_no_placeholders_skips_llm():
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()) as tc:
+        out = await assist_guide.extract_substitutions(
+            guidance_text="no slots here, just text", evidence="HOST_IP=10.0.0.5",
+        )
+    assert out == {}
+    tc.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_extract_substitutions_fills_from_evidence():
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_values_resp(
+                          {"HOST_IP": "10.0.0.5", "SRC_PATH": "/etc/app"}))):
+        out = await assist_guide.extract_substitutions(
+            guidance_text="ssh root@<HOST_IP>; cp <SRC_PATH> .",
+            evidence="connected to 10.0.0.5, copied /etc/app",
+        )
+    assert out == {"HOST_IP": "10.0.0.5", "SRC_PATH": "/etc/app"}
+
+
+@pytest.mark.asyncio
+async def test_extract_substitutions_filters_unknown_keys_and_empty_and_brackets():
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_values_resp(
+                          {"<HOST_IP>": "10.0.0.5", "NOPE": "x", "SRC_PATH": "  "}))):
+        out = await assist_guide.extract_substitutions(
+            guidance_text="<HOST_IP> and <SRC_PATH>", evidence="...",
+        )
+    # bracket stripped → HOST_IP kept; NOPE not a placeholder → dropped;
+    # SRC_PATH empty value → dropped.
+    assert out == {"HOST_IP": "10.0.0.5"}
+
+
+@pytest.mark.asyncio
+async def test_extract_substitutions_failsoft():
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_values_resp({}, success=False))):
+        out = await assist_guide.extract_substitutions(
+            guidance_text="<HOST_IP>", evidence="x",
+        )
+    assert out == {}
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(side_effect=RuntimeError("boom"))):
+        out2 = await assist_guide.extract_substitutions(
+            guidance_text="<HOST_IP>", evidence="x",
+        )
+    assert out2 == {}

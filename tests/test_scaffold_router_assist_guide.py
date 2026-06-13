@@ -265,3 +265,30 @@ class TestSubmitVerdictRender:
             out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
         assert "committed" in out
         assert "may have failed" not in out
+
+
+# ── §17.490: learned-substitutions surfacing on submit ──────────────────────
+
+
+class TestSubmitLearnedSubstitutions:
+
+    def _post_session(self, body):
+        sess = MagicMock()
+        sess.post.return_value = _make_response(200, body)
+        return sess
+
+    def test_submit_surfaces_learned_values(self, pipe):
+        body = {"status": "committed", "no_op": False, "next_node_key": "T3",
+                "mirror_divergence": False,
+                "learned_substitutions": {"HOST_IP": "10.0.0.5"}}
+        with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
+        assert "Learned for later steps" in out
+        assert "HOST_IP" in out and "10.0.0.5" in out
+
+    def test_submit_no_learned_no_banner(self, pipe):
+        body = {"status": "committed", "no_op": False, "next_node_key": "T3",
+                "mirror_divergence": False}
+        with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
+        assert "Learned for later steps" not in out

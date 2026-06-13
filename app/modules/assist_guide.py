@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -382,6 +383,97 @@ async def verify_step_success(
         "reason": (args.get("reason") or "").strip(),
         "suggestion": (args.get("suggestion") or "").strip(),
     }
+
+
+# ── Auto-learn substitutions (§17.490 — concrete values from evidence) ─────
+
+# A walkthrough emits operator-supplied slots as <SCREAMING_SNAKE> (or
+# <kebab>) placeholders (prompt_assembly §17.361). 2+ chars to avoid matching
+# stray "<x>" in pasted output.
+_PLACEHOLDER_RE = re.compile(r"<([A-Za-z][A-Za-z0-9_-]{1,})>")
+
+_LEARN_SUBS_TOOL = model_router.Tool(
+    name="report_values",
+    description=(
+        "Report the concrete value the operator actually used for each named "
+        "placeholder, read from their pasted command output / evidence. Include "
+        "a placeholder ONLY if its value is clearly present in the evidence; "
+        "omit any you cannot determine with confidence. Do NOT guess."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "values": {
+                "type": "object",
+                "description": "Map of PLACEHOLDER name (no angle brackets) → concrete value.",
+                "additionalProperties": {"type": "string"},
+            }
+        },
+        "required": ["values"],
+    },
+)
+
+
+def find_placeholders(text: str) -> list[str]:
+    """Distinct placeholder names (no brackets) in a walkthrough, order-preserved."""
+    seen: dict[str, None] = {}
+    for m in _PLACEHOLDER_RE.findall(text or ""):
+        seen.setdefault(m, None)
+    return list(seen.keys())
+
+
+async def extract_substitutions(
+    *, guidance_text: str, evidence: str, role: str | None = None,
+) -> dict:
+    """Learn concrete values the operator used for the walkthrough's placeholders.
+
+    Cheap gate: if the guidance emitted no placeholders, return {} WITHOUT an
+    LLM call. Otherwise a single tool_call fills the placeholders it can read
+    from the evidence. Fail-soft → {}.
+    """
+    placeholders = find_placeholders(guidance_text)
+    if not placeholders:
+        return {}
+    role = role or settings.assist_guide_model_role
+    try:
+        resp = await model_router.tool_call(
+            [
+                {"role": "system", "content": (
+                    "You extract the concrete values an operator used, from the "
+                    "command output they pasted. Only report a value you can see "
+                    "in the evidence; omit the rest. Never guess."
+                )},
+                {"role": "user", "content": (
+                    f"Placeholders to fill (omit any you can't determine): "
+                    f"{', '.join(placeholders)}\n\n"
+                    f"Operator evidence:\n{evidence[:6000]}\n\n"
+                    "Call report_values."
+                )},
+            ],
+            [_LEARN_SUBS_TOOL],
+            role=role,
+            temperature=0.0,
+            max_tokens=1024,
+            tool_choice="auto",
+        )
+    except Exception as exc:
+        logger.warning("assist_learn_extract_failed: %s", exc)
+        return {}
+    if not resp.success or not resp.tool_calls:
+        return {}
+    raw = (resp.tool_calls[0].arguments or {}).get("values") or {}
+    if not isinstance(raw, dict):
+        return {}
+    # Keep only placeholders we actually asked about, with non-empty string
+    # values; strip stray angle brackets the model may echo.
+    allowed = set(placeholders)
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        key = str(k).strip().strip("<>")
+        val = str(v).strip()
+        if key in allowed and val:
+            out[key] = val
+    return out
 
 
 # ── Generation ───────────────────────────────────────────────────────────

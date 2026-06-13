@@ -284,6 +284,20 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
         )
         if verdict is not None and isinstance(result, dict):
             result["success_verdict"] = verdict
+        # §17.490 — learn the concrete values the operator used for this step's
+        # placeholders so later walkthroughs are concrete. Best-effort; only
+        # fires on a real commit and when the step's guidance had placeholders.
+        if (settings.assist_learn_substitutions and body.action == "submit"
+                and isinstance(result, dict) and result.get("status") == "committed"):
+            try:
+                learned = await assist_agent.learn_from_submit(
+                    session_id=session_id, node_key=body.node_key,
+                    evidence=body.output, db=db,
+                )
+                if learned:
+                    result["learned_substitutions"] = learned
+            except Exception:  # never fail a submit on the learn step
+                pass
         return result
     except ValueError as exc:
         msg = str(exc)
