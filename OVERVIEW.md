@@ -21983,6 +21983,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.495 Tooling — model A/B harness for CodeGen-role comparison (2026-06-13)
+
+All six cloud roles point at one generalist (`qwen3.5:397b-cloud`); the catalog has moved on (deepseek-v4, kimi-k2.7-code, glm-5.1, qwen3-coder-next, …) and `model_coder` is the clearest upgrade candidate. The §17.344/346 A/Bs that chose the current models were ad-hoc (code comments). This makes the comparison repeatable and objective.
+
+**`scripts/model_ab.py`** — runs the CodeGen goldens (`tests/fixtures/codegen_goldens.json`, 8) through each `--models` candidate and scores with the SAME deterministic gates the executor uses: structural goldens (`tests/_codegen_golden_checks.check_golden` — ast.parse / must_define / must_not_contain) + the sandbox exec-smoke (`app/sandbox/codegen_check.codegen_exec_smoke`), plus per-trial wall-clock. Emits a side-by-side table + JSONL. Flags: `--models`, `--repeat` (average over stochasticity), `--limit` (quick probe), `--dry-run`. Runs in-container (`docker exec scaffold-orchestrator python scripts/model_ab.py …`).
+
+**Critical correctness property:** `model_router.generate` ALWAYS computes a smart-fallback (`fallback or _smart_fallback(...)`), so an unavailable candidate silently runs on the fallback model. The harness **rejects any fallback / resolved-model mismatch** (`resp.fallback_used` or `resp.model != requested`) and reports the candidate as *unavailable* rather than scoring the fallback as if it were the candidate — without this, every A/B against a not-pulled model would be a lie. (Caught live: `qwen3-coder:480b-cloud` 404'd → fell back to `qwen3.5:397b-cloud` → now correctly reported unavailable, not a false 1/1 pass.)
+
+**Baseline established:** `qwen3.5:397b-cloud` = **8/8 goldens pass, avg 24.5s/trial** (range 2–66s; the thinking-model reasoning gap dominates the slow ones). `ttft_ms`/`tokens_per_sec` come back 0 on the cloud non-stream path, so `wall_s` is the latency metric.
+
+**Verification.** `tests/test_model_ab.py` (10): pure scoring (structural+exec → pass; empty/structural/exec-fail block; exec-skip doesn't), `_summarize`/`_avg` aggregation, and the **fallback-rejection property** (fallback_used → unavailable; model-mismatch → unavailable; matching model → scored). `make ci-tier-0` green. Live baseline + multi-model probe run clean. **Next:** confirm exact pullable candidate tags (the account 404'd `qwen3-coder:480b-cloud`) + A/B a real coder model vs the baseline.
+
+---
+
 ### §17.494 Fix — empty-draw guard for the 3 remaining sim-pipeline LLM stages (2026-06-13)
 
 Closes out the §17.465 empty-content straggler class. An audit (grep for bare `model_router.chat(...)`/`generate(...)` consumers) found the last three unguarded stages — all in the sim pipeline, all using `spec_extractor_model_role` (the cloud thinking model) at a bare `max_tokens=4096`, then returning `"empty response"` on a bad draw with no retry, identical to the spec-extractor (§17.488) and topology-select (§17.489) bugs:
