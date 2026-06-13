@@ -31,6 +31,18 @@ logger = logging.getLogger("scaffold")
 _IMPORT_MISS = ("ModuleNotFoundError", "ImportError")
 
 
+def _is_cli_args_required(stderr: str, exit_code: int) -> bool:
+    """§17.497 — a CLI entry-point invoked with no argv exits 2 via argparse
+    ("the following arguments are required"). The sandbox runs `python
+    solution.py` with no args, so a *correct* required-arg CLI exits 2 — that's
+    "can't run standalone without args", NOT a code defect. Detect argparse's
+    signature (usage:/error: + exit 2) so it classifies as skip, same spirit as
+    the import-miss skip. Mirror for both the executor verify gate and the model
+    A/B harness."""
+    low = (stderr or "").lower()
+    return exit_code == 2 and "usage:" in low and "error:" in low
+
+
 @dataclass
 class ExecCheckResult:
     verdict: str  # "pass" | "skip" | "fail"
@@ -72,4 +84,6 @@ async def codegen_exec_smoke(output: str, *, timeout_s: float = 20.0) -> ExecChe
     stderr = res.stderr or ""
     if any(m in stderr for m in _IMPORT_MISS):
         return ExecCheckResult("skip", "unresolved import — sibling module not present in the sandbox")
+    if _is_cli_args_required(stderr, res.exit_code):
+        return ExecCheckResult("skip", "CLI entry-point requires arguments — can't run standalone in the sandbox")
     return ExecCheckResult("fail", _format_fail(stderr, res.exit_code))

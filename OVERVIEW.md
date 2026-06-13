@@ -1865,9 +1865,9 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (refreshed post-§17.494, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
+### 14.1 Test counts (refreshed post-§17.497, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
 
-**Current local baseline (`make test`, full dev-image suite):** **3810 passed, 0 failed, 0 skipped in 25:19** — measured 2026-06-13 after §17.494, fully clean (0 skips). Per-§ measured lineage: §17.488 **3766** → §17.489 **3769** → §17.490 **3779** (+10 auto-learn) → §17.491 **3787** (+8 sandbox-verify) → §17.492 **3795** (+8 destructive-gate) → §17.493 **3807** (+12 streaming) → §17.494 **3810** (+3 sim-stage empty-draw redraw tests). Both chronic live-LLM stragglers stay green via the §17.488/§17.489 `chat_until_nonempty` guards. Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
+**Current local baseline (`make test`, full dev-image suite):** **3825 passed, 0 failed, 0 skipped in 24:33** — measured 2026-06-13 after §17.497, fully clean (0 skips). Lineage from §17.494 **3810** → §17.495/496 model A/B harness (+13 `test_model_ab.py`, scripts-only) → §17.497 codegen exec-gate fix (+2 `test_codegen_exec_smoke.py`) = **3825**. Earlier per-§ lineage: §17.487 **3764** → §17.488 **3766** → §17.489 **3769** → §17.490 **3779** → §17.491 **3787** → §17.492 **3795** → §17.493 **3807** → §17.494 **3810**. Per-§ measured lineage: §17.488 **3766** → §17.489 **3769** → §17.490 **3779** (+10 auto-learn) → §17.491 **3787** (+8 sandbox-verify) → §17.492 **3795** (+8 destructive-gate) → §17.493 **3807** (+12 streaming) → §17.494 **3810** (+3 sim-stage empty-draw redraw tests). Both chronic live-LLM stragglers stay green via the §17.488/§17.489 `chat_until_nonempty` guards. Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
 
 **CI baseline (`test.yml`, the `-k "not integration"` subset):** **~3596 passed (projected), 14 skipped, 91 deselected (the integration tests)** — **no fresh CI run this cycle: GitHub Actions is org-billing-blocked**, so `main` merges (#64/#65/#66) are gated by local `make test` + `make ci-tier-0` instead. Projected from the local measure via the standing reconciliation: 3701 collected − 14 (service-needing, skipped in CI but pass live here) − 91 (integration, deselected in CI) = 3596. Last CI-measured green run was `27311904558` (§17.470, 3473 passed); the §17.472–484 additions are all non-integration unit/web tests, so `deselected` is carried at 91.
 
@@ -21980,6 +21980,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **Verification.** Full SDK suite — **142 passed** (4 new: sync + async `follow_redirects is False`, stream connect→`ConnectionError`, stream timeout→`TimeoutError` — the missing regression for S2). ci-tier-0 green (no vendored file touched). Coverage honesty: deep-read the 6 core modules + scanned resource wrappers; did not exhaustively read the thin resource method bodies.
 
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
+### §17.497 Fix — codegen exec-gate: required-arg CLI exit-2 is skip, not fail (2026-06-13)
+
+Inspecting the §17.496 A/B `cli-entrypoint` "failure" (qwen3-coder-next 14/16) found it was a **scoring artifact in the shared §17.434 gate**, not a model defect — and a latent **production** bug. `codegen_exec_smoke` runs `python solution.py` with **no argv**, so ANY correct CLI with required args hits argparse → `SystemExit(2)` ("the following arguments are required") → classified `fail`. Whether a model escaped was pure luck: the baseline (`qwen3.5:397b`) used a sibling import (`from filename_generator import …`) that `ModuleNotFoundError`'d *first* → `skip`; the coder model **inlined** the helper → reached argparse → exit 2 → `fail`. In the autonomous executor this would falsely-fail a legitimate self-contained required-arg CLI node and burn retries.
+
+**Fix.** `app/sandbox/codegen_check._is_cli_args_required(stderr, exit_code)` — argparse's signature (`exit 2` + `usage:` + `error:`) classifies as **skip** ("CLI requires arguments — can't run standalone in the sandbox"), same spirit as the import-miss skip. Narrow: a real error that merely exits 2 without argparse's usage/error lines still `fail`s. Fixes both the executor verify gate and the model A/B harness (which reuses the gate).
+
+**Corrected A/B read.** Re-run with the fix: cli-entrypoint → `skip` for both models. So **`qwen3-coder-next:cloud` is effectively 16/16 with fair scoring** (the two "fails" were the artifact), at **~17× the speed** of the generalist baseline. The remaining real signal from §17.496 stands: qwen3-coder-next over-elaborates by parroting the verbose CODEGEN system-prompt examples (`LANG_EXT`, `--lang/--index`) rather than the terse brief — a judgment call the goldens' structural checks don't capture. **`model_coder` still not swapped** — pending a decision on that over-elaboration tendency (or an A/B of `kimi-k2.7-code:cloud`).
+
+**Verification.** `tests/test_codegen_exec_smoke.py` +2 (required-arg CLI exit-2 → skip; non-argparse exit-2 → still fail); 8 pass. Live re-run confirmed cli-entrypoint now skips for both models. Full `make test`: see §14.1.
 
 ---
 
