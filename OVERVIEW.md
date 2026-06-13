@@ -21983,6 +21983,23 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.496 Tooling+Finding — model_ab pre-flight + first coder A/B result (2026-06-13)
+
+**Pre-flight (`scripts/model_ab.py`).** The §17.495 probe timed out because a not-pulled candidate still burned a 30-60s fallback generation per trial (generate()'s smart-fallback masks the 404). Added `_is_available(model)` — an Ollama `/api/show` check run once per model before the trial loop; a definite 404 skips the model instantly (reported "not pulled — ollama pull required"), any 200/transient-error proceeds (never false-skips). `+3 tests` (200→available / 404→unavailable / transient-error→available); 13 model_ab tests total.
+
+**First real A/B — `qwen3.5:397b-cloud` vs `qwen3-coder-next:cloud`** (8 CodeGen goldens ×2, after `ollama pull qwen3-coder-next:cloud`):
+
+| model | pass | avg wall_s | notes |
+|---|---|---|---|
+| qwen3.5:397b-cloud (baseline) | **16/16** | **31.0s** | thinking model — wildly variable (2.3s–172.9s; the reasoning gap dominates) |
+| qwen3-coder-next:cloud | **14/16** | **1.8s** | non-thinking coder — ~17× faster, tight 0.75–4.6s; **but fails `cli-entrypoint`** |
+
+**Reading:** qwen3-coder-next is **dramatically faster and far more predictable** (no reasoning gap) and nails 6/8 golden shapes, but it **reproducibly fails the `cli-entrypoint` golden** — `structural_failures: []` (parses + defines the right symbols) yet `exec_verdict: fail`: the produced CLI **crashes at runtime** in the sandbox (both draws). The sandbox grounding (§17.491) is exactly what caught it. So it's NOT a clean swap: a 17× latency win on most CodeGen, with a real correctness gap on the runnable-CLI shape. **Recommended next step before swapping `model_coder`:** inspect the cli-entrypoint runtime error (real model weakness vs prompt/harness artifact), and consider a hybrid (coder model for module/decision shapes, keep the generalist for entrypoints) or a larger coder tag. Not yet adopted — this is decision data, not a config change.
+
+**Note:** both §17.495 and §17.496 are scripts-only (no app-code path); the app test baseline stays §17.494's 3810 (model_ab tests add 13). `make ci-tier-0` green.
+
+---
+
 ### §17.495 Tooling — model A/B harness for CodeGen-role comparison (2026-06-13)
 
 All six cloud roles point at one generalist (`qwen3.5:397b-cloud`); the catalog has moved on (deepseek-v4, kimi-k2.7-code, glm-5.1, qwen3-coder-next, …) and `model_coder` is the clearest upgrade candidate. The §17.344/346 A/Bs that chose the current models were ad-hoc (code comments). This makes the comparison repeatable and objective.

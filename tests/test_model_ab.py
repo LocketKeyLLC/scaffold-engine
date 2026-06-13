@@ -129,3 +129,55 @@ async def test_run_one_scores_matching_model(monkeypatch):
                        system="s", temperature=0.2, max_tokens=512)
     assert r["ok"] is True and r["passed"] is True
     assert r["resolved_model"] == "qwen3.5:397b-cloud"
+
+
+# ── §17.496 — pre-flight availability check ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_is_available_true_on_200(monkeypatch):
+    import httpx
+    from scripts.model_ab import _is_available
+
+    class _Resp:
+        status_code = 200
+
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k): return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _Client())
+    assert await _is_available("qwen3.5:397b-cloud", "http://x:11434") is True
+
+
+@pytest.mark.asyncio
+async def test_is_available_false_only_on_404(monkeypatch):
+    import httpx
+    from scripts.model_ab import _is_available
+
+    class _Resp:
+        status_code = 404
+
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k): return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _Client())
+    assert await _is_available("nope:cloud", "http://x:11434") is False
+
+
+@pytest.mark.asyncio
+async def test_is_available_true_on_transient_error(monkeypatch):
+    """A network hiccup must NOT false-skip a possibly-usable model."""
+    import httpx
+    from scripts.model_ab import _is_available
+
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k): raise RuntimeError("conn refused")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _Client())
+    assert await _is_available("maybe:cloud", "http://x:11434") is True

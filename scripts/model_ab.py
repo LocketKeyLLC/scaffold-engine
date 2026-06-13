@@ -63,6 +63,22 @@ def score_codegen(golden: dict, output: str, exec_verdict: str) -> dict:
     }
 
 
+async def _is_available(model: str, base_url: str) -> bool:
+    """§17.496 — pre-flight: is `model` pulled/registered (Ollama /api/show)?
+
+    Only a definite 404 means unavailable; a 200 or any transient error returns
+    True so we never false-skip a usable model. This avoids the 30-60s wasted
+    fallback generation a not-pulled candidate would otherwise burn (the
+    generate() smart-fallback masks 404s, §17.495)."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(f"{base_url.rstrip('/')}/api/show", json={"name": model})
+        return r.status_code != 404
+    except Exception:
+        return True
+
+
 async def _run_one(model: str, golden: dict, *, system: str, temperature: float,
                    max_tokens: int) -> dict:
     """One (model, golden) trial: generate, sandbox-check, score, time it."""
@@ -191,8 +207,21 @@ async def main() -> int:
     from app.utils.http_clients import init_clients
     init_clients()
 
+    # §17.496 — pre-flight availability check: skip not-pulled models instantly
+    # instead of burning a 30-60s fallback generation per trial (the timeout
+    # that the first probe hit). Only a definite /api/show 404 skips.
+    available: dict[str, bool] = {}
+    for model in args.models:
+        available[model] = await _is_available(model, settings.ollama_base_url)
+        if not available[model]:
+            print(f"  ⚠ {model}: not pulled — skipping (run: ollama pull {model})")
+
     rows: list[dict] = []
     for model in args.models:
+        if not available[model]:
+            rows.append({"model": model, "golden": "(preflight)", "ok": False,
+                         "passed": False, "error": "not pulled — ollama pull required"})
+            continue
         for golden in goldens:
             for i in range(args.repeat):
                 r = await _run_one(
