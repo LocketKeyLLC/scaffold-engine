@@ -284,6 +284,13 @@ class Settings(BaseSettings):
     # Its own budget/draw knobs since its prompts run larger than the extractor's.
     topology_select_max_tokens: int = Field(default=8192, ge=512, le=16384)
     topology_select_max_draws: int = Field(default=3, ge=1, le=6)
+    # §17.494 — the remaining sim-pipeline LLM stages (formal_verify,
+    # device_sizing, digital_sizing) reuse spec_extractor_model_role (the cloud
+    # thinking model) at a bare 4096 cap — the same §17.465 empty-content
+    # straggler class. Shared budget + retry-on-empty draws via
+    # chat_until_nonempty (these three feed sim feedback to one judgment call).
+    sim_stage_max_tokens: int = Field(default=8192, ge=512, le=16384)
+    sim_stage_max_draws: int = Field(default=3, ge=1, le=6)
     # §17.147 — Closed-loop device-sizing budget. The stage proposes
     # parameters, runs ngspice, feeds the measurement gap back to the
     # LLM, and repeats until convergence or the budget is exhausted.

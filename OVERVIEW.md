@@ -1865,9 +1865,9 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (refreshed post-§17.493, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
+### 14.1 Test counts (refreshed post-§17.494, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
 
-**Current local baseline (`make test`, full dev-image suite):** **3807 passed, 0 failed, 0 skipped in 24:41** — measured 2026-06-13 after §17.493, fully clean (0 skips). Per-§ measured lineage: §17.487 **3764** → §17.488 **3766** → §17.489 **3769** → §17.490 **3779** (+10 auto-learn) → §17.491 **3787** (+8 sandbox-verify) → §17.492 **3795** (+8 destructive-gate) → §17.493 **3807** (+12 streaming-generation tests across model_router/assist_guide/assist_agent/pipeline). Both chronic live-LLM stragglers stay green via the §17.488/§17.489 `chat_until_nonempty` guards. Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
+**Current local baseline (`make test`, full dev-image suite):** **3810 passed, 0 failed, 0 skipped in 25:19** — measured 2026-06-13 after §17.494, fully clean (0 skips). Per-§ measured lineage: §17.488 **3766** → §17.489 **3769** → §17.490 **3779** (+10 auto-learn) → §17.491 **3787** (+8 sandbox-verify) → §17.492 **3795** (+8 destructive-gate) → §17.493 **3807** (+12 streaming) → §17.494 **3810** (+3 sim-stage empty-draw redraw tests). Both chronic live-LLM stragglers stay green via the §17.488/§17.489 `chat_until_nonempty` guards. Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
 
 **CI baseline (`test.yml`, the `-k "not integration"` subset):** **~3596 passed (projected), 14 skipped, 91 deselected (the integration tests)** — **no fresh CI run this cycle: GitHub Actions is org-billing-blocked**, so `main` merges (#64/#65/#66) are gated by local `make test` + `make ci-tier-0` instead. Projected from the local measure via the standing reconciliation: 3701 collected − 14 (service-needing, skipped in CI but pass live here) − 91 (integration, deselected in CI) = 3596. Last CI-measured green run was `27311904558` (§17.470, 3473 passed); the §17.472–484 additions are all non-integration unit/web tests, so `deselected` is carried at 91.
 
@@ -21980,6 +21980,21 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **Verification.** Full SDK suite — **142 passed** (4 new: sync + async `follow_redirects is False`, stream connect→`ConnectionError`, stream timeout→`TimeoutError` — the missing regression for S2). ci-tier-0 green (no vendored file touched). Coverage honesty: deep-read the 6 core modules + scanned resource wrappers; did not exhaustively read the thin resource method bodies.
 
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
+### §17.494 Fix — empty-draw guard for the 3 remaining sim-pipeline LLM stages (2026-06-13)
+
+Closes out the §17.465 empty-content straggler class. An audit (grep for bare `model_router.chat(...)`/`generate(...)` consumers) found the last three unguarded stages — all in the sim pipeline, all using `spec_extractor_model_role` (the cloud thinking model) at a bare `max_tokens=4096`, then returning `"empty response"` on a bad draw with no retry, identical to the spec-extractor (§17.488) and topology-select (§17.489) bugs:
+
+- `app/sim/formal_verify.py` — single-shot (highest risk, same shape as spec-extractor).
+- `app/sim/device_sizing.py`, `app/sim/digital_sizing.py` — the LLM call inside each closed-loop sizing iteration (an empty draw wasted a whole propose→simulate→feedback cycle).
+
+**Fix.** Route all three through `chat_until_nonempty` (re-draw on success-but-empty; a true `success=False` returns immediately) with a shared budget: `sim_stage_max_tokens` (default 8192) + `sim_stage_max_draws` (default 3), new in `config.py`. The closed loops are unaffected — the re-draw happens *within* one iteration, orthogonal to the sizing-iteration budget. No behavior change on the success paths.
+
+**Other consumers verified already-guarded** (the §17.453/462/463/464 sweep): `cove`, `prompt_optimizer`, `ideation_workflow` compile, `dag_generator`/`dag_validator` (via `_generate_dag_json`), `research_agent` (fail-soft by design). So §17.488/489/494 close the last of the class — **every LLM free-text/JSON consumer now routes through an empty-guard** (the §17.464 policy fully holds).
+
+**Verification.** +3 tests (one redraw test per stage: empty `success=True` draw → re-draws within the iteration → ok=True, `chat.await_count==2`); 42 sim-stage tests pass. `make ci-tier-0` green. Full `make test`: **3810 passed, 0 failed, 0 skipped** — see §14.1.
 
 ---
 

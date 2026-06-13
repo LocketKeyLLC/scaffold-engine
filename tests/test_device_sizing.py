@@ -479,3 +479,26 @@ def test_check_constraints_skips_unmeasured_non_required():
     }
     gaps = _check_constraints(spec, {})
     assert gaps == []
+
+
+# ---------------------------------------------------------------------------
+# §17.494 — empty-draw guard (chat_until_nonempty)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.smoke
+async def test_size_device_redraws_past_empty_llm_draw(monkeypatch):
+    """An empty (success=True) draw re-draws within the iteration (§17.465)."""
+    _patch_topology_fetch(monkeypatch)
+    _patch_require_confirmed(monkeypatch, _spec_row())
+    chat = _patch_chat(monkeypatch, [
+        ModelResponse(text="", model="m", success=True),   # empty draw
+        _llm_proposal({"R1": "1k", "C1": "159.155n"}),     # valid redraw
+    ])
+    _patch_ngspice(monkeypatch, [_ngspice_ok({"fc_3db": 1000.0})])
+    _patch_insert(monkeypatch)
+    db = make_mock_db()
+
+    result = await size_device(SEL_ID, db=db)
+    assert result.ok is True
+    assert result.converged is True
+    assert chat.await_count == 2  # re-drew past the empty draw
