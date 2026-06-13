@@ -584,3 +584,66 @@ async def test_verify_codegen_sandbox_disabled_skips(monkeypatch):
             title="t", task_prompt="p", tool="codegen", evidence="print(1)",
         )
     sb.assert_not_called()  # gated off → no sandbox call
+
+
+# ── §17.492: destructive-command safety gate ────────────────────────────────
+
+
+def test_scan_destructive_flags_high_confidence():
+    text = (
+        "## Run this\n"
+        "```bash\n"
+        "$ rm -rf /var/lib/old\n"
+        "sudo dd if=/dev/zero of=/dev/sda bs=4M\n"
+        "mkfs.ext4 /dev/sdb1\n"
+        "git push --force origin main\n"
+        "```\n"
+        "Then in psql:\n"
+        "```sql\nDROP TABLE users;\nDELETE FROM logs;\n```\n"
+    )
+    found = assist_guide.scan_destructive(text)
+    whys = " ".join(f["why"] for f in found)
+    assert any("rm -rf" in f["line"] for f in found)
+    assert "raw disk write" in whys
+    assert "format filesystem" in whys
+    assert "force push" in whys
+    assert "DROP/TRUNCATE" in whys
+    assert "no WHERE" in whys
+
+
+def test_scan_destructive_no_false_positive_on_prose():
+    text = (
+        "This step will perform the migration and address the schema.\n"
+        "Use `git add` and commit your work; the form renders fine.\n"
+        "Run `ls -la` and `cat README.md` to inspect.\n"
+        "DELETE FROM logs WHERE id < 100;  -- bounded, has WHERE\n"
+    )
+    assert assist_guide.scan_destructive(text) == []
+
+
+def test_scan_destructive_dedups_by_line():
+    text = "rm -rf /tmp/x\nrm -rf /tmp/x\n"
+    assert len(assist_guide.scan_destructive(text)) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_guidance_attaches_destructive(monkeypatch):
+    monkeypatch.setattr(assist_guide.settings, "assist_destructive_scan", True)
+    with patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(return_value=_resp("## Run this\n```\nrm -rf /opt/old\n```"))):
+        res = await assist_guide.generate_guidance(
+            ctx=_ctx("shell"), research=False, node_key="T3",
+        )
+    dest = res["guidance_meta"]["destructive"]
+    assert dest and "rm -rf" in dest[0]["line"]
+
+
+@pytest.mark.asyncio
+async def test_generate_guidance_destructive_scan_disabled(monkeypatch):
+    monkeypatch.setattr(assist_guide.settings, "assist_destructive_scan", False)
+    with patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(return_value=_resp("rm -rf /opt/old"))):
+        res = await assist_guide.generate_guidance(
+            ctx=_ctx("shell"), research=False, node_key="T3",
+        )
+    assert res["guidance_meta"]["destructive"] == []

@@ -1865,9 +1865,9 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (refreshed post-§17.491, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
+### 14.1 Test counts (refreshed post-§17.492, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
 
-**Current local baseline (`make test`, full dev-image suite):** **3787 passed, 0 failed, 0 skipped in 25:05** — measured 2026-06-13 after §17.491, fully clean (0 skips). Per-§ measured lineage: §17.486 **3734** → §17.487 **3764** (+30 Tier-1 assist tests) → §17.488 **3766** (+2 spec redraw tests) → §17.489 **3769** (+2 topology redraw tests + the `test_topology_select_db` live test flipping skip→pass) → §17.490 **3779** (+10 auto-learn-substitutions tests) → §17.491 **3787** (+8 sandbox-grounded codegen-verify tests). Both chronic live-LLM stragglers stay green via the §17.488/§17.489 `chat_until_nonempty` guards. Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
+**Current local baseline (`make test`, full dev-image suite):** **3795 passed, 0 failed, 0 skipped in 26:14** — measured 2026-06-13 after §17.492, fully clean (0 skips). Per-§ measured lineage: §17.486 **3734** → §17.487 **3764** (+30 Tier-1 assist tests) → §17.488 **3766** (+2 spec redraw tests) → §17.489 **3769** (+2 topology redraw tests + the `test_topology_select_db` live test flipping skip→pass) → §17.490 **3779** (+10 auto-learn-substitutions tests) → §17.491 **3787** (+8 sandbox-grounded codegen-verify tests) → §17.492 **3795** (+8 destructive-command-gate tests). Both chronic live-LLM stragglers stay green via the §17.488/§17.489 `chat_until_nonempty` guards. Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
 
 **CI baseline (`test.yml`, the `-k "not integration"` subset):** **~3596 passed (projected), 14 skipped, 91 deselected (the integration tests)** — **no fresh CI run this cycle: GitHub Actions is org-billing-blocked**, so `main` merges (#64/#65/#66) are gated by local `make test` + `make ci-tier-0` instead. Projected from the local measure via the standing reconciliation: 3701 collected − 14 (service-needing, skipped in CI but pass live here) − 91 (integration, deselected in CI) = 3596. Last CI-measured green run was `27311904558` (§17.470, 3473 passed); the §17.472–484 additions are all non-integration unit/web tests, so `deselected` is carried at 91.
 
@@ -21980,6 +21980,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **Verification.** Full SDK suite — **142 passed** (4 new: sync + async `follow_redirects is False`, stream connect→`ConnectionError`, stream timeout→`TimeoutError` — the missing regression for S2). ci-tier-0 green (no vendored file touched). Coverage honesty: deep-read the 6 core modules + scanned resource wrappers; did not exhaustively read the thin resource method bodies.
 
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
+### §17.492 Feature — Assist Mode destructive-command safety gate (2026-06-13)
+
+The RUNBOOK system prompt *asks* for a `## Risk` section but nothing enforced it. This adds a deterministic backstop: generated walkthroughs and `/assist fix` output are scanned for high-confidence destructive commands, and matches are surfaced as a prominent "review before you run anything" banner ahead of the steps.
+
+**How.** `assist_guide.scan_destructive(text)` — no LLM — matches command-context-anchored patterns (`rm -rf`, `dd if=/of=`, `mkfs`, `wipefs`, `shred`, `fdisk/parted`, `> /dev/sdX`, `chmod -R 777`, destructive `git` (hard reset / force push / clean -f), `docker prune/volume rm`, `kubectl delete`, `DROP/TRUNCATE`, unfiltered `DELETE FROM` (no WHERE), fork bomb). Anchored so a destructive *verb in prose* doesn't trip it ("address"/"perform"/"form" don't match; `DELETE … WHERE` is allowed). Matches are stored in `guidance_meta.destructive` by `generate_guidance` + `generate_fix` (gated by `assist_destructive_scan`, default on); the pipeline `render_destructive_banner` prepends the warning to `render_guidance`/`render_fix`. **Informs, does not block** — the operator is the executor; the banner lists the exact lines + why and reminds them to check paths/placeholders and back up first. Conservative by design (a prereq line naming a destructive tool is flagged too — better over-warn than miss).
+
+**Verification.** `tests/test_assist_guide.py` +5 (flags rm/dd/mkfs/force-push/DROP/DELETE-no-WHERE; no false positive on prose or `DELETE … WHERE`; dedup; attached to meta; disabled→empty), `tests/test_scaffold_router_assist_guide.py` +3 (banner prepended to guidance/fix; absent when clean). **Live smoke (real model):** "wipe and reformat /dev/sdb" → walkthrough with `shred`/`wipefs -a`/`mkfs.ext4 -F` → all flagged. No new routes/migration. Full `make test`: **3795 passed, 0 failed, 0 skipped** — see §14.1.
 
 ---
 

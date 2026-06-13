@@ -332,3 +332,39 @@ class TestSubmitSandboxVerdictRender:
             out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "code", chat_id=None))
         assert "Ran your code in the sandbox" in out
         assert "not marked done" in out
+
+
+# ── §17.492: destructive-command banner ─────────────────────────────────────
+
+
+class TestDestructiveBanner:
+
+    def test_guidance_prepends_banner(self):
+        out = _vendor.render_guidance({
+            "node_key": "T2", "status": "ready",
+            "guidance": "## Run this\nrm -rf /opt/old",
+            "guidance_meta": {"destructive": [
+                {"line": "rm -rf /opt/old", "why": "recursive/forced file deletion (rm -rf)"}]},
+            "cached": False,
+        })
+        assert "Destructive commands detected" in out
+        # banner comes before the walkthrough body
+        assert out.index("Destructive commands detected") < out.index("How to do this step")
+        assert "back up anything important" in out
+
+    def test_guidance_no_banner_when_clean(self):
+        out = _vendor.render_guidance({
+            "node_key": "T2", "status": "ready", "guidance": "ls -la",
+            "guidance_meta": {"destructive": []}, "cached": False,
+        })
+        assert "Destructive commands detected" not in out
+
+    def test_fix_prepends_banner(self):
+        out = _vendor.render_fix({
+            "node_key": "T2", "status": "ready",
+            "fix": "## Fix\nmkfs.ext4 /dev/sdb1",
+            "guidance_meta": {"destructive": [
+                {"line": "mkfs.ext4 /dev/sdb1", "why": "format filesystem (mkfs)"}]},
+        })
+        assert "Destructive commands detected" in out
+        assert out.index("Destructive commands detected") < out.index("Troubleshooting")

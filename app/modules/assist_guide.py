@@ -522,6 +522,55 @@ async def extract_substitutions(
     return out
 
 
+# ── Destructive-command safety gate (§17.492) ──────────────────────────────
+
+# High-confidence, command-context-anchored patterns only — a destructive
+# verb in prose ("this removes the file") must NOT trip the gate; only an
+# actual command form does. (compiled regex, human-readable why).
+_DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\brm\s+(-[a-zA-Z]*\s+)*-?[a-zA-Z]*[rf]"), "recursive/forced file deletion (rm -rf)"),
+    (re.compile(r"--no-preserve-root"), "rm targeting / (--no-preserve-root)"),
+    (re.compile(r"\bdd\b\s+(if|of)="), "raw disk write (dd)"),
+    (re.compile(r"\bmkfs(\.\w+)?\b"), "format filesystem (mkfs)"),
+    (re.compile(r"\bwipefs\b"), "wipe filesystem signatures (wipefs)"),
+    (re.compile(r"\bshred\b"), "secure file wipe (shred)"),
+    (re.compile(r"\b(fdisk|parted|sgdisk)\b"), "partition-table edit"),
+    (re.compile(r">\s*/dev/(sd|nvme|vd|hd|mmcblk)"), "overwrite a block device"),
+    (re.compile(r"\bchmod\s+-R\s+0?777\b"), "world-writable recursive chmod"),
+    (re.compile(r"\bgit\s+(reset\s+--hard|clean\s+-[a-zA-Z]*f|push\s+(-f|--force))"),
+     "destructive git (hard reset / force push / clean -f)"),
+    (re.compile(r"\bdocker\s+(system\s+prune|volume\s+(rm|prune)|rm\s+-f)"), "docker resource removal"),
+    (re.compile(r"\bkubectl\s+delete\b"), "kubectl delete"),
+    (re.compile(r"\b(DROP\s+(TABLE|DATABASE|SCHEMA)|TRUNCATE(\s+TABLE)?)\b", re.IGNORECASE),
+     "destructive SQL (DROP/TRUNCATE)"),
+    (re.compile(r"\bDELETE\s+FROM\b(?!.*\bWHERE\b)", re.IGNORECASE), "unfiltered SQL DELETE (no WHERE)"),
+    (re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"), "fork bomb"),
+]
+
+
+def scan_destructive(text: str) -> list[dict]:
+    """Deterministic scan for high-confidence destructive commands.
+
+    Returns ``[{line, why}]`` (deduped by line; line truncated). Strips leading
+    prompt/fence chars so ``$ rm -rf x`` matches. No LLM. Best-effort — this
+    informs the operator, it does not block.
+    """
+    if not text:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip().lstrip("$#>` ").strip()
+        if not line or line in seen:
+            continue
+        for rx, why in _DESTRUCTIVE_PATTERNS:
+            if rx.search(line):
+                out.append({"line": line[:200], "why": why})
+                seen.add(line)
+                break
+    return out
+
+
 # ── Generation ───────────────────────────────────────────────────────────
 
 
@@ -612,6 +661,8 @@ async def generate_guidance(
         "refine_hint": refine_hint,
         "status": status,
         "generated_at": _utcnow_iso(),
+        # §17.492 — destructive-command safety gate.
+        "destructive": scan_destructive(text_out) if settings.assist_destructive_scan else [],
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"
@@ -682,6 +733,8 @@ async def generate_fix(
         "research_sources": [{"query": s["query"], "kind": s["kind"]} for s in sources],
         "status": status,
         "generated_at": _utcnow_iso(),
+        # §17.492 — destructive-command safety gate (fixes can carry rm/dd too).
+        "destructive": scan_destructive(text_out) if settings.assist_destructive_scan else [],
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"

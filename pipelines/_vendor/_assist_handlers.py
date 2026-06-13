@@ -202,6 +202,28 @@ def render_step(step: dict) -> str:
     )
 
 
+def render_destructive_banner(meta: dict | None) -> str:
+    """§17.492 — a prominent 'review before running' block listing the
+    destructive commands the safety gate flagged. Empty string when none."""
+    items = (meta or {}).get("destructive") or []
+    if not items:
+        return ""
+    lines = [
+        "> ⚠️ **Destructive commands detected — review before you run anything:**",
+        ">",
+    ]
+    for it in items[:8]:
+        lines.append(f"> - `{it.get('line', '')}` — {it.get('why', '')}")
+    if len(items) > 8:
+        lines.append(f"> - …and {len(items) - 8} more")
+    lines.append(">")
+    lines.append(
+        "> Double-check paths and `<PLACEHOLDER>` values, and back up anything "
+        "important first."
+    )
+    return "\n".join(lines) + "\n\n"
+
+
 def render_guidance(d: dict) -> str:
     """§17.486 — format a /assist/{sid}/guide response as the human walkthrough.
 
@@ -215,7 +237,7 @@ def render_guidance(d: dict) -> str:
         )
     meta = d.get("guidance_meta") or {}
     sources = meta.get("research_sources") or []
-    out = f"## 🧭 How to do this step\n\n{d['guidance']}\n"
+    out = render_destructive_banner(meta) + f"## 🧭 How to do this step\n\n{d['guidance']}\n"
     if sources:
         cites = ", ".join(
             f"`{s.get('kind')}`: {s.get('query')}" for s in sources
@@ -234,7 +256,7 @@ def render_fix(d: dict) -> str:
             f"⚠️ Couldn't generate a fix for `{node_key}` right now. "
             f"Try `/assist research <the error>` for raw sources, or rephrase."
         )
-    out = f"## 🔧 Troubleshooting `{node_key}`\n\n{d['fix']}\n"
+    out = render_destructive_banner(d.get("guidance_meta")) + f"## 🔧 Troubleshooting `{node_key}`\n\n{d['fix']}\n"
     meta = d.get("guidance_meta") or {}
     sources = meta.get("research_sources") or []
     if sources:

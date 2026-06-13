@@ -564,6 +564,12 @@ class Settings(BaseSettings):
     # fail-soft; only-add-new (never overwrites a value the operator set or a
     # previously-learned one).
     assist_learn_substitutions: bool = True
+    # §17.492 — deterministic scan of generated walkthroughs / fixes for
+    # high-confidence destructive commands (rm -rf, dd, mkfs, DROP TABLE, force
+    # push, …); matches are surfaced as a prominent "review before running"
+    # banner ahead of the steps. No LLM, no blocking — the operator is the
+    # executor; this informs. Default on.
+    assist_destructive_scan: bool = True
     # #2 — orphan detection: dag_nodes stuck in 'running' past this threshold
     # are treated as orphaned (executor died) and reset to 'pending' for
     # automatic re-execution. Sprint X.1 tightened 60→30 min: the audit
