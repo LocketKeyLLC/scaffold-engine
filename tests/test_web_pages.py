@@ -117,6 +117,48 @@ def test_web_model_set_failsoft_when_ollama_unreachable(web):
 
 
 @pytest.mark.smoke
+def test_web_model_page_shows_override_and_reset(web):
+    # §17.484 — a role whose live value differs from its env default renders
+    # the override badge, the .env default, and a reset form.
+    from app.config import settings, env_default_model
+    original = settings.model_coder
+    settings.model_coder = "overridden:1b"
+    try:
+        resp = web.get("/web/model")
+        assert resp.status_code == 200
+        assert "override" in resp.text
+        assert 'action="/web/model/reset"' in resp.text
+        assert env_default_model("model_coder") in resp.text  # default shown
+    finally:
+        settings.model_coder = original
+
+
+@pytest.mark.smoke
+def test_web_model_reset_reverts_to_env_default(web):
+    # §17.484 — reset clears the override; settings revert to the env default.
+    from app.config import settings, env_default_model
+    env_def = env_default_model("model_general")
+    settings.model_general = "temp:9b"
+    try:
+        resp = web.post("/web/model/reset", data={"role": "model_general"})
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/web/model?reset=model_general"
+        assert settings.model_general == env_def
+    finally:
+        settings.model_general = env_def
+
+
+@pytest.mark.smoke
+def test_web_model_reset_rejects_locked_role(web):
+    from app.config import settings
+    original = settings.model_reranker
+    resp = web.post("/web/model/reset", data={"role": "model_reranker"})
+    assert resp.status_code == 302
+    assert "error=" in resp.headers["location"]
+    assert settings.model_reranker == original
+
+
+@pytest.mark.smoke
 def test_web_research_page_empty(web):
     resp = web.get("/web/research")
     assert resp.status_code == 200

@@ -501,5 +501,11 @@ details.add-node summary { cursor: pointer; font-size: 0.9rem; color: #4338ca; }
   margin: 12px 0;
   font-weight: 500;
 }
-.model-set-form { display: flex; gap: 6px; }
+.model-set-cell { display: flex; gap: 8px; align-items: center; }
+.model-set-form { display: flex; gap: 6px; flex: 1; }
 .model-set-form input[name="model"] { flex: 1; min-width: 200px; padding: 4px 8px; }
+/* §17.484 — persistent override badge + reset */
+.override-badge {
+  display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 10px;
+  font-size: 11px; font-weight: 600; background: #dbeafe; color: var(--status-running);
+}

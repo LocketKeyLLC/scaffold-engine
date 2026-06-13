@@ -418,9 +418,10 @@ async def web_rag(request: Request, q: str | None = None):
     )
 
 
-# §17.483 — (field, label, locked) for every role, ordered for display. The
-# two locked roles (embedder/reranker) are config-only singletons; the other
-# seven are runtime-switchable via POST /web/model (see config.set_runtime_model).
+# §17.483/§17.484 — (field, label, locked) for every role, ordered for display.
+# The two locked roles (embedder/reranker) are config-only singletons; the other
+# seven are runtime-switchable via POST /web/model and PERSISTED to the
+# model_overrides table (§17.484), reloaded onto settings at startup.
 _MODEL_ROLE_ROWS = [
     ("model_general", "general", False),
     ("model_router", "router", False),
@@ -435,16 +436,23 @@ _MODEL_ROLE_ROWS = [
 
 
 @router.get("/model", response_class=HTMLResponse, dependencies=[])
-def web_model(request: Request, set: str = "", error: str = ""):
-    """View + set the model per role (§17.483). Sync — reads the settings
-    singleton; `set`/`error` are PRG flash params from POST /web/model."""
-    roles = [
-        {"field": f, "label": label, "model": getattr(settings, f), "locked": locked}
-        for f, label, locked in _MODEL_ROLE_ROWS
-    ]
+def web_model(request: Request, set: str = "", reset: str = "", error: str = ""):
+    """View + set the model per role (§17.483/§17.484). Sync — reads the live
+    settings singleton and compares each switchable role to its env/config
+    default (`config.env_default_model`) to flag/active overrides without a DB
+    read. `set`/`reset`/`error` are PRG flash params from the POST routes."""
+    from app.config import env_default_model
+    roles = []
+    for f, label, locked in _MODEL_ROLE_ROWS:
+        current = getattr(settings, f)
+        env_def = current if locked else env_default_model(f)
+        roles.append({
+            "field": f, "label": label, "model": current, "locked": locked,
+            "env_default": env_def, "overridden": (not locked and current != env_def),
+        })
     return templates.TemplateResponse(
         request, "web/model.html",
-        {"roles": roles, "flash_set": set, "flash_error": error},
+        {"roles": roles, "flash_set": set, "flash_reset": reset, "flash_error": error},
     )
 
 
@@ -464,13 +472,13 @@ async def _ollama_tag_exists(model: str) -> bool | None:
 
 
 @router.post("/model", dependencies=[])
-async def web_model_set(role: str = Form(...), model: str = Form(...)):
-    """§17.483 — re-point a switchable role at `model` on the live settings
-    singleton (ephemeral; reverts to env on restart). Validates the role
-    (config.set_runtime_model) and that the tag is pulled on Ollama (fail-soft
-    if Ollama is unreachable). PRG redirect back to the page with a flash."""
+async def web_model_set(role: str = Form(...), model: str = Form(...), db=Depends(get_db)):
+    """§17.484 — re-point a switchable role at `model`, applied to the live
+    settings singleton AND persisted to model_overrides (survives restart).
+    Validates the role (set_override → set_runtime_model) and that the tag is
+    pulled on Ollama (fail-soft if Ollama is unreachable). PRG flash redirect."""
     from urllib.parse import quote
-    from app.config import set_runtime_model
+    from app.modules.model_overrides import set_override
 
     model_clean = (model or "").strip()
     exists = await _ollama_tag_exists(model_clean) if model_clean else False
@@ -481,13 +489,27 @@ async def web_model_set(role: str = Form(...), model: str = Form(...)):
         )
     # exists is True (validated) or None (Ollama unreachable → allow).
     try:
-        set_runtime_model(role, model_clean)
+        await set_override(role, model_clean, db)
     except ValueError as exc:
         return RedirectResponse(
             f"/web/model?error={quote(str(exc))}", status_code=302,
         )
-    logger.info("web_model_set role=%s model=%s (runtime-only)", role, model_clean)
     return RedirectResponse(f"/web/model?set={quote(role)}", status_code=302)
+
+
+@router.post("/model/reset", dependencies=[])
+async def web_model_reset(role: str = Form(...), db=Depends(get_db)):
+    """§17.484 — clear a role's persisted override and revert it to the
+    env/config default (deletes the model_overrides row + restores settings)."""
+    from urllib.parse import quote
+    from app.modules.model_overrides import clear_override
+    try:
+        await clear_override(role, db)
+    except ValueError as exc:
+        return RedirectResponse(
+            f"/web/model?error={quote(str(exc))}", status_code=302,
+        )
+    return RedirectResponse(f"/web/model?reset={quote(role)}", status_code=302)
 
 
 @router.get("/research", response_class=HTMLResponse, dependencies=[])

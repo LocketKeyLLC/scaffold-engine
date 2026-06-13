@@ -215,6 +215,35 @@ class TestSetRuntimeModel:
         assert settings.model_fallback == original
 
 
+@pytest.mark.smoke
+class TestClearRuntimeModel:
+    """§17.484 — env-default snapshot + clear (revert) for switchable roles."""
+
+    def test_clear_reverts_to_env_default(self):
+        env_def = _config_mod.env_default_model("model_general")
+        set_runtime_model("model_general", "temp:9b")
+        assert settings.model_general == "temp:9b"
+        _config_mod.clear_runtime_model("model_general")
+        assert settings.model_general == env_def
+
+    def test_env_default_is_pristine_after_override(self):
+        # The snapshot must reflect the ORIGINAL value even once overridden.
+        env_def = _config_mod.env_default_model("model_coder")
+        set_runtime_model("model_coder", "drifted:1b")
+        try:
+            assert _config_mod.env_default_model("model_coder") == env_def
+        finally:
+            _config_mod.clear_runtime_model("model_coder")
+
+    def test_env_default_rejects_unknown_role(self):
+        with pytest.raises(ValueError, match="unknown switchable role"):
+            _config_mod.env_default_model("model_nope")
+
+    def test_clear_rejects_singleton(self):
+        with pytest.raises(ValueError, match="unknown switchable role"):
+            _config_mod.clear_runtime_model("model_reranker")
+
+
 # ===================================================================
 # STEP 2: _model_overrides() — valve-to-dict mapping
 # ===================================================================
