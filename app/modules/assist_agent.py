@@ -375,6 +375,63 @@ async def generate_step_guidance(
     }
 
 
+async def generate_step_guidance_stream(
+    *,
+    session_id: str,
+    node_key: str | None = None,
+    refine: str | None = None,
+    research: bool | None = None,
+    force: bool = False,
+    db,
+):
+    """Streaming sibling of ``generate_step_guidance`` (§17.493).
+
+    Resolves session/node/env (raises ``ValueError`` for a bad session/node so
+    the endpoint can map it to HTTP **before** opening the SSE stream), then
+    yields the event dicts from ``assist_guide.generate_guidance_stream``.
+    """
+    from app.config import settings
+    from app.modules import assist_guide
+
+    sess = (await db.execute(
+        text("""
+            SELECT id, job_id, status, current_node_key, metadata
+              FROM assist_sessions WHERE id = :sid
+        """),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    if sess["status"] not in ("active", "paused"):
+        raise ValueError(f"session status {sess['status']!r} cannot generate guidance")
+    job_id = str(sess["job_id"])
+    nk = node_key or sess["current_node_key"]
+    if not nk:
+        raise ValueError(
+            "no node_key supplied and session has no current step; "
+            "claim one with /assist next first"
+        )
+    if research is None:
+        research = settings.assist_guide_research
+
+    environment = _environment_from_metadata(sess.get("metadata"))
+    node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
+
+    async for ev in assist_guide.generate_guidance_stream(
+        session_id=session_id,
+        node_key=nk,
+        ctx=ctx,
+        node_description=node_row.get("description"),
+        research=research,
+        refine_hint=refine,
+        force=force,
+        domain=node_row.get("domain"),
+        environment=environment,
+        db=db,
+    ):
+        yield ev
+
+
 async def run_step_research(
     *,
     session_id: str,

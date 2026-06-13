@@ -184,6 +184,52 @@ async def assist_guide(session_id: str, body: AssistGuideInput, db=Depends(get_d
         raise HTTPException(status_code=409, detail=msg)
 
 
+@router.post("/assist/{session_id}/guide/stream")
+async def assist_guide_stream(
+    session_id: str, body: AssistGuideInput, request: Request, db=Depends(get_db),
+):
+    """§17.493 — streaming variant of `/guide`. SSE: one `assist_guide_delta`
+    per content chunk, then a single `assist_guide_done` with status +
+    guidance_meta. A cache hit streams the cached text as one delta + done.
+    Validates the session up front so bad input is an HTTP error, not a
+    half-open stream (mirrors `/handoff`)."""
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    if sess["status"] not in ("active", "paused"):
+        raise HTTPException(status_code=409, detail=f"session status {sess['status']!r} cannot generate guidance")
+    nk = body.node_key or sess.get("current_node_key")
+    if not nk:
+        raise HTTPException(status_code=409, detail="no node_key supplied and session has no current step")
+
+    from app.main import _sse_with_disconnect_watch
+    from app.sse_events import ASSIST_GUIDE_DELTA, ASSIST_GUIDE_DONE
+
+    async def _gen():
+        try:
+            async for ev in assist_agent.generate_step_guidance_stream(
+                session_id=session_id, node_key=body.node_key, refine=body.refine,
+                research=body.research, force=body.force, db=db,
+            ):
+                if ev.get("type") == "delta":
+                    yield assist_agent._sse(ASSIST_GUIDE_DELTA, {"text": ev["text"]})
+                else:
+                    yield assist_agent._sse(ASSIST_GUIDE_DONE, {
+                        "status": ev.get("status"),
+                        "node_key": nk,
+                        "guidance_meta": ev.get("guidance_meta") or {},
+                        "cached": ev.get("cached", False),
+                    })
+        except Exception as exc:  # surface mid-stream errors as an SSE error frame
+            yield assist_agent._sse("error", {"detail": str(exc)})
+
+    return StreamingResponse(
+        _sse_with_disconnect_watch(request, _gen()),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no"},
+    )
+
+
 @router.post("/assist/{session_id}/research")
 async def assist_research(session_id: str, body: AssistResearchInput, db=Depends(get_db)):
     """Confirm an operator-supplied question via SearXNG/Milvus + a short

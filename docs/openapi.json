@@ -3724,6 +3724,62 @@
         ]
       }
     },
+    "/assist/{session_id}/guide/stream": {
+      "post": {
+        "description": "§17.493 — streaming variant of `/guide`. SSE: one `assist_guide_delta`\nper content chunk, then a single `assist_guide_done` with status +\nguidance_meta. A cache hit streams the cached text as one delta + done.\nValidates the session up front so bad input is an HTTP error, not a\nhalf-open stream (mirrors `/handoff`).",
+        "operationId": "assist_guide_stream_assist__session_id__guide_stream_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistGuideInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Guide Stream",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
     "/assist/{session_id}/handoff": {
       "post": {
         "operationId": "assist_handoff_assist__session_id__handoff_post",

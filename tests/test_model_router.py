@@ -839,3 +839,31 @@ async def test_record_call_swallows_import_error_and_logs(caplog):
         "record_call_import_failed" in r.message
         for r in caplog.records
     ), "missing cost_tracking should produce a distinct WARNING"
+
+
+# ── §17.493: stream_chat (role-routed streaming) ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_role_delegates_to_provider():
+    """stream_chat resolves role→provider and yields the provider's deltas."""
+    async def _provider_stream(model, messages, *, temperature, max_tokens):
+        assert model == "resolved-model"
+        for c in ["alpha ", "beta"]:
+            yield c
+
+    fake_provider = SimpleNamespace(stream_chat=_provider_stream)
+    with patch.object(model_router, "_resolve_role",
+                      return_value=("resolved-model", fake_provider)):
+        out = [c async for c in model_router.stream_chat(
+            [{"role": "user", "content": "x"}], role="model_general",
+            temperature=0.3, max_tokens=8192)]
+    assert out == ["alpha ", "beta"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_rejects_role_and_model_together():
+    with pytest.raises(ValueError):
+        async for _ in model_router.stream_chat(
+            [{"role": "user", "content": "x"}], role="model_general", model="m"):
+            pass

@@ -451,7 +451,9 @@ def dispatch_assist_sub(
         refine = fenced or (" ".join(rest).strip() if rest else None)
         recalled = assist_recall(pipe, chat_id)
         node_key = (recalled or {}).get("last_node_key")
-        yield from assist_guide_cmd(
+        _cmd = (assist_guide_stream_cmd
+                if getattr(pipe.valves, "assist_stream", True) else assist_guide_cmd)
+        yield from _cmd(
             pipe, sid, node_key=node_key, refine=refine,
             research=pipe.valves.assist_guide_research, force=True,
             chat_id=chat_id,
@@ -574,8 +576,11 @@ def assist_next(
     # Separate POST so the slow LLM call doesn't block the fast /next claim;
     # force=False hits the cache when this step was already guided.
     if step.get("node_key") and getattr(pipe.valves, "assist_auto_guide", True):
-        yield "\n_Generating walkthrough…_\n\n"
-        yield from assist_guide_cmd(
+        _cmd = (assist_guide_stream_cmd
+                if getattr(pipe.valves, "assist_stream", True) else assist_guide_cmd)
+        if _cmd is assist_guide_cmd:
+            yield "\n_Generating walkthrough…_\n\n"
+        yield from _cmd(
             pipe, session_id, node_key=step["node_key"],
             research=getattr(pipe.valves, "assist_guide_research", True),
             force=False, chat_id=chat_id,
@@ -856,6 +861,93 @@ def assist_guide_cmd(
     if not isinstance(d, dict):
         yield f"❌ Assist guide: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
     yield render_guidance(d)
+
+
+def assist_guide_stream_cmd(
+    pipe, session_id: str, *, node_key: str | None = None,
+    refine: str | None = None, research: bool | None = None,
+    force: bool = True, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.493 — stream the walkthrough from /assist/{sid}/guide/stream.
+
+    Consumes the SSE stream (assist_guide_delta* → assist_guide_done) on the
+    same thread/queue/keepalive skeleton as the handoff consumer. Yields the
+    content live; the destructive banner + sources footnote are appended on
+    `done` (trailing — we don't know them until generation completes). A cache
+    hit arrives as one delta + done(cached) and renders instantly."""
+    url = f"{pipe.valves.orchestrator_url}/assist/{session_id}/guide/stream"
+    body = {"node_key": node_key, "refine": refine, "research": research, "force": force}
+    q: _q.Queue = _q.Queue()
+    stop_event = _th.Event()
+    r_holder: list = []
+    reader = _th.Thread(
+        target=pipe._stream_sse_to_queue,
+        args=(url, body, q),
+        kwargs={"stop_event": stop_event, "r_holder": r_holder},
+        daemon=True,
+    )
+    reader.start()
+    sse_const = _sse_events_const()
+    started = False
+    got_text = False
+    try:
+        while True:
+            try:
+                msg_type, f1, f2 = q.get(timeout=pipe.valves.keepalive_interval)
+            except _q.Empty:
+                yield "​"; continue
+            if msg_type == "connected":
+                continue
+            if msg_type == "heartbeat":
+                yield "​"; continue
+            if msg_type == "http_error":
+                yield f"❌ HTTP {f1}: {(f2 or '')[:200]}"; return
+            if msg_type == "error":
+                yield f"\n❌ Connection error: {f1}"; return
+            if msg_type == "done":
+                break
+            event_type, data = f1, f2
+            try:
+                payload = json.loads(data)
+            except Exception:
+                continue
+            if event_type == sse_const.ASSIST_GUIDE_DELTA:
+                if not started:
+                    yield "## 🧭 How to do this step\n\n"
+                    started = True
+                txt = payload.get("text", "")
+                if txt:
+                    got_text = True
+                    yield txt
+            elif event_type == sse_const.ASSIST_GUIDE_DONE:
+                meta = payload.get("guidance_meta") or {}
+                if payload.get("status") != "ready" and not got_text:
+                    yield (
+                        "⚠️ Couldn't generate a walkthrough right now. Work from "
+                        "the raw task prompt above, or retry with `/assist guide`."
+                    ); return
+                banner = render_destructive_banner(meta)
+                if banner:
+                    yield "\n\n" + banner
+                sources = meta.get("research_sources") or []
+                if sources:
+                    cites = ", ".join(
+                        f"`{s.get('kind')}`: {s.get('query')}" for s in sources
+                    )
+                    yield f"\n_Confirmed via research — {cites}._\n"
+                if payload.get("cached"):
+                    yield "\n_(cached walkthrough — run `/assist guide` to regenerate)_\n"
+                return
+            elif event_type == sse_const.ERROR:
+                yield f"\n❌ {payload.get('detail') or payload}\n"; return
+    finally:
+        stop_event.set()
+        if r_holder:
+            try:
+                r_holder[0].close()
+            except Exception:
+                pass
+        reader.join(timeout=5)
 
 
 def assist_research_cmd(

@@ -481,6 +481,37 @@ async def chat(
     return await _record_call(resp)
 
 
+async def stream_chat(
+    messages: list[dict[str, str]],
+    *,
+    role: str | None = None,
+    overrides: dict | None = None,
+    model: str | None = None,
+    temperature: float = 0.7,
+    max_tokens: int = 4096,
+):
+    """Role-routed streaming chat — yields content-delta ``str`` chunks.
+
+    Delegates to the resolved provider's ``stream_chat`` (the unified Sprint I.1
+    contract: content-only, reasoning/thinking deltas filtered). First real
+    consumer of that path. Pass ``role=`` (provider-routed, the assist path) or
+    ``model=`` (legacy direct). NOTE: unlike ``chat``, the stream path does NOT
+    ``_record_call`` (token usage isn't available mid-stream); callers that need
+    cost tracking use the non-stream ``chat`` fallback.
+    """
+    _reject_role_model_collision(role, model)
+    if role:
+        resolved_model, provider = _resolve_role(role, overrides)
+    else:
+        from app.providers import get_provider
+        resolved_model = model or settings.model_general
+        provider = get_provider(settings.model_general_provider)
+    async for chunk in provider.stream_chat(
+        resolved_model, messages, temperature=temperature, max_tokens=max_tokens,
+    ):
+        yield chunk
+
+
 async def tool_call(
     messages: list[dict[str, str]],
     tools: list[Tool],

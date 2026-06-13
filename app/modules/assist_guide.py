@@ -847,6 +847,112 @@ async def ensure_guidance(
     return res
 
 
+# ── Streaming generation (§17.493) ─────────────────────────────────────────
+
+
+async def generate_guidance_stream(
+    *,
+    session_id: str,
+    node_key: str,
+    ctx: StepContext,
+    node_description: Optional[str] = None,
+    research: bool,
+    refine_hint: Optional[str] = None,
+    force: bool = False,
+    domain: Optional[str] = None,
+    environment: Optional[dict] = None,
+    db,
+):
+    """Stream a walkthrough as it generates. Yields event dicts:
+
+      ``{"type": "delta", "text": ...}``  — one per content chunk
+      ``{"type": "done", "status": ..., "guidance_meta": {...}, "cached": bool}``
+
+    - Cache hit (``force=False``) → a single delta + a ``done(cached=True)``, no
+      model stream (re-views stay instant).
+    - Empty stream → falls back to the non-streamed ``chat_until_nonempty`` so
+      streaming cannot regress the §17.465 thinking-model empty-content guard.
+    - Persists the full accumulated text + meta (destructive scan, sources)
+      before the ``done`` event — same record a non-streamed generate produces.
+    """
+    role = settings.assist_guide_model_role
+
+    # (a) cache short-circuit — no stream.
+    if not force:
+        cached = await read_cached_guidance(
+            session_id=session_id, node_key=node_key, db=db,
+        )
+        if cached:
+            yield {"type": "delta", "text": cached["guidance"]}
+            yield {"type": "done", "status": "ready",
+                   "guidance_meta": cached.get("guidance_meta") or {}, "cached": True}
+            return
+
+    # (b) research pre-pass (awaited, non-streamed).
+    sources: list[dict] = []
+    if research:
+        sources = await _research_prepass(
+            task_text=ctx.base_prompt, tool=ctx.tool, role=role,
+            max_queries=settings.assist_guide_max_research_queries,
+            node_key=node_key, domain=domain,
+        )
+
+    system = guide_system_for_tool(ctx.tool)
+    user = _build_guide_user_prompt(
+        ctx, node_description, sources, refine_hint, environment=environment,
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+    # (c) stream content deltas.
+    chunks: list[str] = []
+    model_used = role
+    try:
+        async for delta in model_router.stream_chat(
+            messages, role=role, temperature=0.3,
+            max_tokens=settings.assist_guide_max_tokens,
+        ):
+            if delta:
+                chunks.append(delta)
+                yield {"type": "delta", "text": delta}
+    except Exception as exc:
+        logger.warning("assist_guide_stream_failed: %s", exc)
+
+    text_out = "".join(chunks).strip()
+
+    # (d) empty-guard fallback — preserve §17.465 (stream yielded nothing).
+    if not text_out:
+        resp = await chat_until_nonempty(
+            model_router.chat, messages, {"role": role},
+            temperature=0.3, max_tokens=settings.assist_guide_max_tokens,
+            draws=3, label="assist_guide_stream_fallback",
+        )
+        text_out = (resp.text or "").strip() if (resp and resp.success) else ""
+        model_used = getattr(resp, "model", role) if resp else role
+        if text_out:
+            yield {"type": "delta", "text": text_out}
+
+    status = "ready" if text_out else "failed"
+    meta: dict[str, Any] = {
+        "model": model_used,
+        "tool": ctx.tool,
+        "research_sources": [{"query": s["query"], "kind": s["kind"]} for s in sources],
+        "refine_hint": refine_hint,
+        "status": status,
+        "generated_at": _utcnow_iso(),
+        "destructive": scan_destructive(text_out) if settings.assist_destructive_scan else [],
+    }
+    if status == "failed":
+        meta["error"] = "empty model output"
+    await persist_guidance(
+        session_id=session_id, node_key=node_key, guidance=text_out,
+        guidance_meta=meta, status=status, db=db,
+    )
+    yield {"type": "done", "status": status, "guidance_meta": meta, "cached": False}
+
+
 # ── Explicit one-off research (/assist research <question>) ───────────────
 
 

@@ -647,3 +647,73 @@ async def test_generate_guidance_destructive_scan_disabled(monkeypatch):
             ctx=_ctx("shell"), research=False, node_key="T3",
         )
     assert res["guidance_meta"]["destructive"] == []
+
+
+# ── §17.493: streaming generation ──────────────────────────────────────────
+
+
+def _astream(chunks):
+    async def _agen(*a, **k):
+        for c in chunks:
+            yield c
+    return _agen
+
+
+@pytest.mark.asyncio
+async def test_generate_guidance_stream_streams_then_done_and_persists():
+    db = AsyncMock()
+    with patch("app.modules.assist_guide.read_cached_guidance", new=AsyncMock(return_value=None)), \
+         patch.object(assist_guide.model_router, "stream_chat", new=_astream(["## Run\n", "1. go"])), \
+         patch.object(assist_guide, "persist_guidance", new=AsyncMock()) as persist:
+        events = [ev async for ev in assist_guide.generate_guidance_stream(
+            session_id="s", node_key="T3", ctx=_ctx("shell"), research=False, force=True, db=db)]
+    deltas = [e["text"] for e in events if e["type"] == "delta"]
+    done = [e for e in events if e["type"] == "done"][0]
+    assert "".join(deltas) == "## Run\n1. go"
+    assert done["status"] == "ready" and done["cached"] is False
+    persist.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_generate_guidance_stream_cache_hit_no_model_call():
+    db = AsyncMock()
+    with patch("app.modules.assist_guide.read_cached_guidance",
+               new=AsyncMock(return_value={"guidance": "cached walk", "guidance_meta": {"x": 1}})), \
+         patch.object(assist_guide.model_router, "stream_chat") as stream, \
+         patch.object(assist_guide, "persist_guidance", new=AsyncMock()) as persist:
+        events = [ev async for ev in assist_guide.generate_guidance_stream(
+            session_id="s", node_key="T3", ctx=_ctx("shell"), research=False, force=False, db=db)]
+    assert events[0] == {"type": "delta", "text": "cached walk"}
+    assert events[-1]["type"] == "done" and events[-1]["cached"] is True
+    stream.assert_not_called()   # cache hit → no model stream
+    persist.assert_not_called()  # nothing new to persist
+
+
+@pytest.mark.asyncio
+async def test_generate_guidance_stream_empty_falls_back_to_nonstream():
+    db = AsyncMock()
+    empty = _astream([])  # stream yields nothing (thinking-model empty draw)
+    with patch("app.modules.assist_guide.read_cached_guidance", new=AsyncMock(return_value=None)), \
+         patch.object(assist_guide.model_router, "stream_chat", new=empty), \
+         patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(return_value=_resp("fallback body"))) as chat, \
+         patch.object(assist_guide, "persist_guidance", new=AsyncMock()):
+        events = [ev async for ev in assist_guide.generate_guidance_stream(
+            session_id="s", node_key="T3", ctx=_ctx("shell"), research=False, force=True, db=db)]
+    deltas = "".join(e["text"] for e in events if e["type"] == "delta")
+    assert "fallback body" in deltas
+    chat.assert_awaited()  # §17.465 empty-guard preserved under streaming
+    assert [e for e in events if e["type"] == "done"][0]["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_generate_guidance_stream_done_meta_has_destructive(monkeypatch):
+    monkeypatch.setattr(assist_guide.settings, "assist_destructive_scan", True)
+    db = AsyncMock()
+    with patch("app.modules.assist_guide.read_cached_guidance", new=AsyncMock(return_value=None)), \
+         patch.object(assist_guide.model_router, "stream_chat", new=_astream(["rm -rf /opt/old"])), \
+         patch.object(assist_guide, "persist_guidance", new=AsyncMock()):
+        events = [ev async for ev in assist_guide.generate_guidance_stream(
+            session_id="s", node_key="T3", ctx=_ctx("shell"), research=False, force=True, db=db)]
+    done = [e for e in events if e["type"] == "done"][0]
+    assert done["guidance_meta"]["destructive"]

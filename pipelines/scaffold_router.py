@@ -531,6 +531,9 @@ class Pipeline:
         assist_auto_guide: bool = True
         assist_guide_research: bool = True
         assist_guide_timeout: int = 180
+        # §17.493 — stream the walkthrough token-by-token (SSE) instead of a
+        # blocking POST + full result. Off → the §17.486 non-streamed path.
+        assist_stream: bool = True
 
         # §17.300 — first-turn welcome preamble. When a brand-new chat
         # receives a natural-language message, the pipeline prepends a

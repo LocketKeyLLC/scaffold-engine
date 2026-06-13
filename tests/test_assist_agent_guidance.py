@@ -271,3 +271,33 @@ async def test_learn_from_submit_nothing_new_skips_write():
         )
     assert out == {}
     setenv.assert_not_called()  # no new keys → no write
+
+
+# ── §17.493: generate_step_guidance_stream ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_generate_step_guidance_stream_resolves_and_delegates():
+    sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T3",
+            "metadata": {}}
+    db = _db_with_session(sess)
+
+    async def _fake_stream(**kwargs):
+        yield {"type": "delta", "text": "hi"}
+        yield {"type": "done", "status": "ready", "guidance_meta": {}, "cached": False}
+
+    with patch.object(assist_agent, "_assemble_ctx_for_node",
+                      new=AsyncMock(return_value=({"description": "d", "domain": "net"}, _ctx()))), \
+         patch("app.modules.assist_guide.generate_guidance_stream", new=_fake_stream):
+        events = [ev async for ev in assist_agent.generate_step_guidance_stream(
+            session_id="s", research=False, force=False, db=db)]
+    assert events[0]["text"] == "hi"
+    assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_generate_step_guidance_stream_missing_session_raises():
+    db = _db_with_session(None)
+    with pytest.raises(ValueError, match="not found"):
+        # the raise fires when iteration starts
+        [ev async for ev in assist_agent.generate_step_guidance_stream(session_id="s", db=db)]

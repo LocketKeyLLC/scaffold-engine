@@ -36,7 +36,8 @@ class TestGuideResearchDispatch:
             calls.append({"sid": sid, "refine": refine, "force": force})
             yield "STUB_GUIDE"
 
-        with patch.object(_vendor, "assist_guide_cmd", side_effect=_stub):
+        # §17.493 — assist_stream defaults on → /assist guide routes to the stream cmd.
+        with patch.object(_vendor, "assist_guide_stream_cmd", side_effect=_stub):
             out = _drive(pipe, f"/assist guide {_SID} redo for macOS")
         assert "STUB_GUIDE" in out
         assert len(calls) == 1
@@ -73,22 +74,45 @@ class TestAutoGuideTrigger:
         sess.get.return_value = _make_response(200, step_body)
         return sess
 
-    def test_next_triggers_guide_when_enabled(self, pipe):
+    def test_next_streams_guide_by_default(self, pipe):
+        # §17.493 — assist_stream defaults on → auto-guide uses the stream cmd.
         pipe.valves.assist_auto_guide = True
+        pipe.valves.assist_stream = True
         step = {"session_id": _SID, "node_key": "T2", "title": "x",
                 "tool": "LLM", "domain": "eng", "depends_on": [], "base_prompt": "bp"}
-        guide_calls = []
+        calls = []
+
+        def _stub_stream(pipe_arg, sid, *, node_key=None, research=None,
+                         force=True, chat_id=None):
+            calls.append({"node_key": node_key, "force": force})
+            yield "STREAMED"
+
+        with patch.object(_vendor, "_ss", return_value=self._stub_next_session(step)), \
+             patch.object(_vendor, "assist_guide_stream_cmd", side_effect=_stub_stream), \
+             patch.object(_vendor, "assist_guide_cmd", side_effect=AssertionError):
+            out = "".join(_vendor.assist_next(pipe, _SID, chat_id=None))
+        assert "STREAMED" in out
+        assert calls == [{"node_key": "T2", "force": False}]  # cache-aware
+
+    def test_next_uses_nonstream_when_assist_stream_off(self, pipe):
+        pipe.valves.assist_auto_guide = True
+        pipe.valves.assist_stream = False
+        step = {"session_id": _SID, "node_key": "T2", "title": "x",
+                "tool": "LLM", "domain": "eng", "depends_on": [], "base_prompt": "bp"}
+        calls = []
 
         def _stub_guide(pipe_arg, sid, *, node_key=None, research=None,
                         force=True, chat_id=None):
-            guide_calls.append({"node_key": node_key, "force": force})
+            calls.append({"node_key": node_key, "force": force})
             yield "WALKTHROUGH"
 
         with patch.object(_vendor, "_ss", return_value=self._stub_next_session(step)), \
-             patch.object(_vendor, "assist_guide_cmd", side_effect=_stub_guide):
+             patch.object(_vendor, "assist_guide_cmd", side_effect=_stub_guide), \
+             patch.object(_vendor, "assist_guide_stream_cmd", side_effect=AssertionError):
             out = "".join(_vendor.assist_next(pipe, _SID, chat_id=None))
         assert "WALKTHROUGH" in out
-        assert guide_calls == [{"node_key": "T2", "force": False}]  # cache-aware
+        assert "Generating walkthrough" in out  # placeholder only on the non-stream path
+        assert calls == [{"node_key": "T2", "force": False}]
 
     def test_next_skips_guide_when_disabled(self, pipe):
         pipe.valves.assist_auto_guide = False
@@ -96,6 +120,7 @@ class TestAutoGuideTrigger:
                 "tool": "LLM", "domain": "eng", "depends_on": [], "base_prompt": "bp"}
 
         with patch.object(_vendor, "_ss", return_value=self._stub_next_session(step)), \
+             patch.object(_vendor, "assist_guide_stream_cmd", side_effect=AssertionError), \
              patch.object(_vendor, "assist_guide_cmd", side_effect=AssertionError):
             out = "".join(_vendor.assist_next(pipe, _SID, chat_id=None))
         assert "T2" in out  # step still rendered, just no walkthrough
@@ -368,3 +393,60 @@ class TestDestructiveBanner:
         })
         assert "Destructive commands detected" in out
         assert out.index("Destructive commands detected") < out.index("Troubleshooting")
+
+
+# ── §17.493: streaming consumer (assist_guide_stream_cmd) ────────────────────
+
+
+class TestGuideStreamConsumer:
+
+    def _fake_queue_filler(self, frames):
+        """Return a _stream_sse_to_queue replacement that pushes `frames`
+        (list of 3-tuples) then a done sentinel."""
+        def _fill(url, body, q, *, stop_event=None, r_holder=None):
+            for fr in frames:
+                q.put(fr)
+            q.put(("done", None, None))
+        return _fill
+
+    def test_streams_deltas_then_banner_and_sources(self, pipe):
+        import json as _json
+        frames = [
+            ("connected", None, None),
+            ("event", "assist_guide_delta", _json.dumps({"text": "## body line\n"})),
+            ("event", "assist_guide_delta", _json.dumps({"text": "more body\n"})),
+            ("event", "assist_guide_done", _json.dumps({
+                "status": "ready",
+                "guidance_meta": {
+                    "destructive": [{"line": "rm -rf x", "why": "recursive deletion"}],
+                    "research_sources": [{"kind": "searxng", "query": "nginx"}],
+                },
+                "cached": False,
+            })),
+        ]
+        pipe._stream_sse_to_queue = self._fake_queue_filler(frames)
+        out = "".join(_vendor.assist_guide_stream_cmd(pipe, _SID, force=True))
+        assert "How to do this step" in out          # header emitted on first delta
+        assert "## body line" in out and "more body" in out
+        assert "Destructive commands detected" in out  # trailing banner
+        assert "Confirmed via research" in out         # trailing sources
+
+    def test_cache_hit_marks_cached(self, pipe):
+        import json as _json
+        frames = [
+            ("connected", None, None),
+            ("event", "assist_guide_delta", _json.dumps({"text": "cached walk"})),
+            ("event", "assist_guide_done", _json.dumps({
+                "status": "ready", "guidance_meta": {}, "cached": True})),
+        ]
+        pipe._stream_sse_to_queue = self._fake_queue_filler(frames)
+        out = "".join(_vendor.assist_guide_stream_cmd(pipe, _SID, force=False))
+        assert "cached walk" in out
+        assert "cached" in out.lower()
+
+    def test_http_error_surfaced(self, pipe):
+        def _fill(url, body, q, *, stop_event=None, r_holder=None):
+            q.put(("http_error", 409, "session not active"))
+        pipe._stream_sse_to_queue = _fill
+        out = "".join(_vendor.assist_guide_stream_cmd(pipe, _SID, force=True))
+        assert "HTTP 409" in out
