@@ -21983,6 +21983,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.485 Ops — prod-image rebuild to §17.484 + baseline/branch housekeeping (2026-06-12)
+
+Operational close-out of the §17.480–484 web/compile arc; **no app-code change**.
+
+**Prod image rebuilt.** `scaffold-engine:local` was 4 days stale (predated §17.471). Rebuilt via `docker compose build` from current `main` so the prod runtime bakes the §17.471–484 work — verified the §17.484 artifacts are in the image itself (not bind-mounted): `app/modules/model_overrides.py`, `db/migrations/050_model_overrides.sql`, the `main.py` override-loader. Switched the live orchestrator onto it (`make build`) and confirmed end-to-end on the **prod** runtime (no `tests/` in image; `POST /web/model` registered; set→persist→reset round-trip; migration 050 idempotent-skip; health 200), then switched back to the dev image (`make build-dev`) to keep the bind-mount + `make test` workflow. depends_on (postgres/milvus/redis) did not cascade-recreate either way (their config was unchanged — cf. [[project_compose_depends_on_cascade]]).
+
+**§14.1 baseline refreshed (PR #67).** Brought §14.1 current to the §17.484 measure — local `make test` **3700 passed, 0 failed, 1 skipped** (§17.482 3678 → §17.483 3687 → §17.484 3700). **Closed PR #52** (the long-open `docs(§14.1)` post-§17.470 refresh): it carried 3473 CI / 3577 local, now *behind* both the §17.471 baseline already on `main` and the §17.484 measure, so merging it would have **regressed** the doc. CI subset projected (~3596), not measured — GitHub Actions is org-billing-blocked, so `main` merges (#64/#65/#66/#67) were gated by local `make test` + `make ci-tier-0`.
+
+**Branch cleanup.** Pruned `fix/schema-middleware-reaper-drift` (fully merged), `docs/baseline-17.470` (#52's branch), and `feat/17.430-infinity-rerank-sidecar` (the shelved Infinity-reranker dead-end, §17.430). Kept `backup/origin-main-before-force-push` (insurance — 4 commits not in `main`). Local branches now reduce to `main` + that backup.
+
+---
+
 ### §17.484 Feature — persistent per-role model overrides (web set-model survives restart) (2026-06-12)
 
 §17.483 made `/web/model` interactive but **ephemeral** — a set mutated the live `settings` singleton and reverted to `.env` on restart, and the new POST route only registered after a manual container restart. This makes the override **durable** and the page a proper control surface.
