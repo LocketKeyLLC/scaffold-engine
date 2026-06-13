@@ -244,11 +244,15 @@ class Settings(BaseSettings):
     # §17.346 — model_router / model_coder / model_verifier defaults flipped
     # to the same cloud model that §17.344 chose for triage. Justified per-role:
     #   model_router: same model + same arg as §17.344 — cloud 287× faster + better discipline
-    #   model_coder:  verified A/B on a CodeGen-shape task (line-count CLI) —
-    #                 cloud 21× faster (2.4s vs 50.8s on this CPU) AND followed
-    #                 the "no markdown fences" instruction that the specialized
-    #                 qwen2.5-coder:7b ignored. The specialized-coder advantage
-    #                 didn't materialize on this workload shape.
+    #   model_coder:  §17.498 — A/B'd (scripts/model_ab.py) vs the generalist on
+    #                 the 8 CodeGen goldens ×2 AFTER the §17.497 fair-scoring fix:
+    #                 kimi-k2.7-code:cloud = 16/16, avg 2.9s (vs generalist 16/16,
+    #                 avg 15.6s — ~5× faster, tight 1.5-5.9s, no thinking-model
+    #                 latency outliers) AND followed the terse brief faithfully
+    #                 (qwen3-coder-next was equally fast but OVER-elaborated by
+    #                 parroting the CODEGEN prompt examples — rejected). So the
+    #                 coder role now runs a coding-specialized model; the other
+    #                 roles stay on the qwen3.5 generalist.
     #   model_verifier: §17.344 reasoning extends — judgment-heavy ("is X correct?"),
     #                   larger model wins, latency benefits identical.
     # model_fallback stays local on purpose — fallback should be DIFFERENT from
@@ -257,7 +261,7 @@ class Settings(BaseSettings):
     model_router: str = "qwen3.5:397b-cloud"
     model_embedder_pipeline: str = "nomic-embed-text"
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-    model_coder: str = "qwen3.5:397b-cloud"
+    model_coder: str = "kimi-k2.7-code:cloud"
     model_general: str = "qwen3.5:397b-cloud"
     # Ideation phase model role (Apr 26 2026): which ROLE_FIELDS entry to
     # use for analyze/distill/compile. "model_router" = local 4b (audit

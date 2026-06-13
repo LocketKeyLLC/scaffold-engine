@@ -254,7 +254,7 @@ services:
       # Defaults below match the §17.346 Settings defaults so a deploy with
       # no overrides gets the cloud-flipped routing layer out of the box.
       MODEL_ROUTER: ${MODEL_ROUTER:-qwen3.5:397b-cloud}
-      MODEL_CODER: ${MODEL_CODER:-qwen3.5:397b-cloud}
+      MODEL_CODER: ${MODEL_CODER:-kimi-k2.7-code:cloud}  # §17.498 — A/B'd coder-specialized model
       MODEL_VERIFIER: ${MODEL_VERIFIER:-qwen3.5:397b-cloud}
       MODEL_GENERAL: ${MODEL_GENERAL:-qwen3.5:397b-cloud}
       MODEL_CLOUD_ALT: ${MODEL_CLOUD_ALT:-qwen3.5:397b-cloud}

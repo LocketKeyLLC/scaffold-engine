@@ -1865,9 +1865,9 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (refreshed post-§17.497, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
+### 14.1 Test counts (refreshed post-§17.498, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
 
-**Current local baseline (`make test`, full dev-image suite):** **3825 passed, 0 failed, 0 skipped in 24:33** — measured 2026-06-13 after §17.497, fully clean (0 skips). Lineage from §17.494 **3810** → §17.495/496 model A/B harness (+13 `test_model_ab.py`, scripts-only) → §17.497 codegen exec-gate fix (+2 `test_codegen_exec_smoke.py`) = **3825**. Earlier per-§ lineage: §17.487 **3764** → §17.488 **3766** → §17.489 **3769** → §17.490 **3779** → §17.491 **3787** → §17.492 **3795** → §17.493 **3807** → §17.494 **3810**. Per-§ measured lineage: §17.488 **3766** → §17.489 **3769** → §17.490 **3779** (+10 auto-learn) → §17.491 **3787** (+8 sandbox-verify) → §17.492 **3795** (+8 destructive-gate) → §17.493 **3807** (+12 streaming) → §17.494 **3810** (+3 sim-stage empty-draw redraw tests). Both chronic live-LLM stragglers stay green via the §17.488/§17.489 `chat_until_nonempty` guards. Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
+**Current local baseline (`make test`, full dev-image suite):** **3825 passed, 0 failed, 0 skipped in 21:15** — measured 2026-06-13 after §17.498 (the `model_coder` swap is a config change, no test delta; value-referencing model tests follow `settings.model_coder` dynamically so they stayed green). Same 3825 as §17.497. Lineage from §17.494 **3810** → §17.495/496 model A/B harness (+13 `test_model_ab.py`, scripts-only) → §17.497 codegen exec-gate fix (+2 `test_codegen_exec_smoke.py`) = **3825**. Earlier per-§ lineage: §17.487 **3764** → §17.488 **3766** → §17.489 **3769** → §17.490 **3779** → §17.491 **3787** → §17.492 **3795** → §17.493 **3807** → §17.494 **3810**. Per-§ measured lineage: §17.488 **3766** → §17.489 **3769** → §17.490 **3779** (+10 auto-learn) → §17.491 **3787** (+8 sandbox-verify) → §17.492 **3795** (+8 destructive-gate) → §17.493 **3807** (+12 streaming) → §17.494 **3810** (+3 sim-stage empty-draw redraw tests). Both chronic live-LLM stragglers stay green via the §17.488/§17.489 `chat_until_nonempty` guards. Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
 
 **CI baseline (`test.yml`, the `-k "not integration"` subset):** **~3596 passed (projected), 14 skipped, 91 deselected (the integration tests)** — **no fresh CI run this cycle: GitHub Actions is org-billing-blocked**, so `main` merges (#64/#65/#66) are gated by local `make test` + `make ci-tier-0` instead. Projected from the local measure via the standing reconciliation: 3701 collected − 14 (service-needing, skipped in CI but pass live here) − 91 (integration, deselected in CI) = 3596. Last CI-measured green run was `27311904558` (§17.470, 3473 passed); the §17.472–484 additions are all non-integration unit/web tests, so `deselected` is carried at 91.
 
@@ -21980,6 +21980,24 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **Verification.** Full SDK suite — **142 passed** (4 new: sync + async `follow_redirects is False`, stream connect→`ConnectionError`, stream timeout→`TimeoutError` — the missing regression for S2). ci-tier-0 green (no vendored file touched). Coverage honesty: deep-read the 6 core modules + scanned resource wrappers; did not exhaustively read the thin resource method bodies.
 
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
+### §17.498 Change — model_coder → kimi-k2.7-code:cloud (A/B-backed) (2026-06-13)
+
+The first role swap chosen by the §17.495 harness rather than ad-hoc. 3-way A/B (`scripts/model_ab.py`, 8 CodeGen goldens ×2, with §17.497 fair scoring):
+
+| role candidate | goldens | avg wall_s | brief-fidelity |
+|---|---|---|---|
+| qwen3.5:397b-cloud (was) | 16/16 | 15.6s (2.5–58.8s, thinking-model outliers) | faithful |
+| qwen3-coder-next:cloud | 16/16 | 2.2s | **over-elaborates** (parrots CODEGEN prompt examples — `LANG_EXT`/`--lang`) → rejected |
+| **kimi-k2.7-code:cloud** | **16/16** | **2.9s** (1.5–5.9s, tight) | **faithful to the terse brief** ✓ |
+
+kimi matches the generalist's instruction-discipline at ~5× the speed with no latency outliers, so `model_coder` now runs a coding-specialized model; the other roles (router/general/verifier/cloud_*) stay on the qwen3.5 generalist. **Three aligned default sites** updated (the §17.346 multi-site pattern): `app/config.py` default, `docker-compose.yml` `MODEL_CODER` default, and the `scaffold_router.py` pipeline Valves mirror. `MODEL_CODER_PROVIDER=ollama` unchanged (kimi cloud = ollama provider). Applied live by recreating the orchestrator (`up -d --no-deps` — compose env change needs a recreate, not a restart). Reversible: revert the three defaults + recreate.
+
+**Caveat:** the quality read (brief-fidelity) rests on the cli-entrypoint case + clean golden passes across 8 shapes — strong but not an exhaustive judgment probe. The goldens score structure + executability, not deep reasoning quality; watch real CodeGen-node output after the swap. kimi pulled on the account 2026-06-13.
+
+**Verification.** No test pins `model_coder`'s value (value-referencing tests use `settings.model_coder` dynamically — they follow the change). Live: `get_model('model_coder')` → kimi after recreate + a CodeGen smoke. Full `make test`: see §14.1.
 
 ---
 

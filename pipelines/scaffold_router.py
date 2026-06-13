@@ -567,7 +567,7 @@ class Pipeline:
         # app/config.py Settings defaults; the per-role rationale lives there.
         model_general: str = "qwen3.5:397b-cloud"
         model_verifier: str = "qwen3.5:397b-cloud"
-        model_coder: str = "qwen3.5:397b-cloud"
+        model_coder: str = "kimi-k2.7-code:cloud"  # §17.498 — A/B'd coder-specialized model
         # §17.472 — synced to the orchestrator's real embedder. §17.83
         # switched the live embedder to nomic-embed-text (qwen3-embedding:8b
         # wedged deterministically on this host's Ollama --ollama-engine
