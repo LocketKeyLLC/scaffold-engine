@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
 from app.config import settings
+from app.utils.llm_retry import chat_until_nonempty
 from app.modules.rag_pipeline import query_rag
 from app.sim.spec_store import (
     SpecNotConfirmedError,
@@ -319,11 +320,18 @@ async def select_topologies(
             ),
         },
     ]
-    resp = await model_router.chat(
-        messages=messages,
-        role=role,
+    # §17.489 — retry-on-empty. The cloud thinking model spends num_predict on
+    # reasoning first; a tight cap or unlucky draw returns success=True + empty
+    # content. chat_until_nonempty re-draws before we treat it as a hard
+    # failure; a true hard failure (success=False) returns immediately.
+    resp = await chat_until_nonempty(
+        model_router.chat,
+        messages,
+        {"role": role},
         temperature=0.0,
-        max_tokens=4096,
+        max_tokens=settings.topology_select_max_tokens,
+        draws=settings.topology_select_max_draws,
+        label="topology_select",
     )
 
     if not resp.success or not (resp.text or "").strip():

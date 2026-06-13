@@ -278,6 +278,12 @@ class Settings(BaseSettings):
     # retry-on-empty draws via chat_until_nonempty.
     spec_extractor_max_tokens: int = Field(default=8192, ge=512, le=16384)
     spec_extractor_max_draws: int = Field(default=3, ge=1, le=6)
+    # §17.489 — topology-select reuses spec_extractor_model_role (the cloud
+    # thinking model) and feeds it large RAG-chunk prompts, so it hit the same
+    # §17.465 empty-content failure mode (the test_topology_select_db live skip).
+    # Its own budget/draw knobs since its prompts run larger than the extractor's.
+    topology_select_max_tokens: int = Field(default=8192, ge=512, le=16384)
+    topology_select_max_draws: int = Field(default=3, ge=1, le=6)
     # §17.147 — Closed-loop device-sizing budget. The stage proposes
     # parameters, runs ngspice, feeds the measurement gap back to the
     # LLM, and repeats until convergence or the budget is exhausted.

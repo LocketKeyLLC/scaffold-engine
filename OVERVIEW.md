@@ -1865,9 +1865,9 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (refreshed post-§17.488, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
+### 14.1 Test counts (refreshed post-§17.489, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
 
-**Current local baseline (`make test`, full dev-image suite):** **3766 passed, 0 failed, 1 skipped in 22:44** — measured 2026-06-13 after §17.488, fully clean (the formerly-flaky `test_spec_extractor_live` passed deterministically now that §17.488 routes the extractor through `chat_until_nonempty`). Per-§ measured lineage: §17.483 **3687** → §17.484 **3700** → §17.486 **3734** → §17.487 **3764** (+30 Tier-1 assist tests) → §17.488 **3766** (+2 spec-extractor redraw tests). **The 1 skip is `tests/integration/test_topology_select_db.py` self-skipping on a transient live-LLM 409 (empty topology-select response) — NOT a code regression** (a different live path that still does a bare LLM call; candidate for the same `chat_until_nonempty` guard). Wall-clock dominated by live cloud-model latency on the integration tests.
+**Current local baseline (`make test`, full dev-image suite):** **3769 passed, 0 failed, 0 skipped in 26:06** — measured 2026-06-13 after §17.489. **Fully clean — 0 skips for the first time:** both chronic live-LLM stragglers now pass, because §17.488 (spec extractor) and §17.489 (topology-select) route their LLM calls through `chat_until_nonempty`, so an empty draw redraws instead of failing/self-skipping. Per-§ measured lineage: §17.484 **3700** → §17.486 **3734** → §17.487 **3764** (+30 Tier-1 assist tests) → §17.488 **3766** (+2 spec redraw tests) → §17.489 **3769** (+2 topology redraw tests + the `test_topology_select_db` live test flipping skip→pass). Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
 
 **CI baseline (`test.yml`, the `-k "not integration"` subset):** **~3596 passed (projected), 14 skipped, 91 deselected (the integration tests)** — **no fresh CI run this cycle: GitHub Actions is org-billing-blocked**, so `main` merges (#64/#65/#66) are gated by local `make test` + `make ci-tier-0` instead. Projected from the local measure via the standing reconciliation: 3701 collected − 14 (service-needing, skipped in CI but pass live here) − 91 (integration, deselected in CI) = 3596. Last CI-measured green run was `27311904558` (§17.470, 3473 passed); the §17.472–484 additions are all non-integration unit/web tests, so `deselected` is carried at 91.
 
@@ -21980,6 +21980,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **Verification.** Full SDK suite — **142 passed** (4 new: sync + async `follow_redirects is False`, stream connect→`ConnectionError`, stream timeout→`TimeoutError` — the missing regression for S2). ci-tier-0 green (no vendored file touched). Coverage honesty: deep-read the 6 core modules + scanned resource wrappers; did not exhaustively read the thin resource method bodies.
 
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
+### §17.489 Fix — topology-select empty-draw guard (chat_until_nonempty) (2026-06-13)
+
+The §17.488 sibling for the next straggler §14.1 named: `topology_select.select_topologies` made a bare `model_router.chat(..., max_tokens=4096)` call, and it reuses `spec_extractor_model_role` (the cloud thinking model) while feeding it *larger* prompts (the full RAG-chunk set). Same §17.465 failure: `success=True` + empty content → `LLM call failed: empty response` → the live `test_topology_select_db.py` had been chronically **self-skipping** on the resulting 409.
+
+**Fix.** Route through `chat_until_nonempty` (re-draw on success-but-empty; true `success=False` returns immediately). Budget 4096 → `topology_select_max_tokens` (default 8192) with `topology_select_max_draws` (default 3) — its own knobs (not the spec-extractor's) since its prompts run larger. No behavior change on the success/citation/coverage paths.
+
+**Verification.** `tests/test_topology_select.py` +2 (empty→empty→valid re-draws to ok=True with one persisted row; all-empty → ok=False, no INSERT, no raise) — 15 pass. **The live `test_topology_select_db.py` now PASSES instead of skipping** (after an orchestrator restart so the running server picks up the change — the live test hits the HTTP API, not bind-mounted pytest imports). Full `make test`: **3769 passed, 0 failed, 0 skipped** — fully clean, 0 skips for the first time (see §14.1). **This clears both §14.1 stragglers (§17.488 spec extractor + §17.489 topology-select); the policy (§17.464 — every LLM free-text consumer routes through the empty-guard) now holds across the sim pipeline too.** See [[thinking_model_empty_content]].
 
 ---
 
