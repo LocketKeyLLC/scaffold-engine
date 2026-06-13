@@ -351,6 +351,7 @@ async def generate_step_guidance(
         research = settings.assist_guide_research
 
     environment = _environment_from_metadata(sess.get("metadata"))
+    verbosity = _verbosity_from_metadata(sess.get("metadata"))
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
 
     res = await assist_guide.ensure_guidance(
@@ -363,6 +364,7 @@ async def generate_step_guidance(
         force=force,
         domain=node_row.get("domain"),
         environment=environment,
+        verbosity=verbosity,
         db=db,
     )
     return {
@@ -415,6 +417,7 @@ async def generate_step_guidance_stream(
         research = settings.assist_guide_research
 
     environment = _environment_from_metadata(sess.get("metadata"))
+    verbosity = _verbosity_from_metadata(sess.get("metadata"))
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
 
     async for ev in assist_guide.generate_guidance_stream(
@@ -427,6 +430,7 @@ async def generate_step_guidance_stream(
         force=force,
         domain=node_row.get("domain"),
         environment=environment,
+        verbosity=verbosity,
         db=db,
     ):
         yield ev
@@ -512,6 +516,7 @@ async def run_step_fix(
         research = settings.assist_guide_research
 
     environment = _environment_from_metadata(sess.get("metadata"))
+    verbosity = _verbosity_from_metadata(sess.get("metadata"))
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
 
     res = await assist_guide.generate_fix(
@@ -521,6 +526,7 @@ async def run_step_fix(
         environment=environment,
         node_key=nk,
         domain=node_row.get("domain"),
+        verbosity=verbosity,
     )
     # Capture the blocker on the friction trail (best-effort).
     try:
@@ -557,15 +563,31 @@ def _environment_from_metadata(metadata: Any) -> dict:
     }
 
 
+_VERBOSITY_LEVELS = ("terse", "normal", "detailed")
+
+
+def _verbosity_from_metadata(metadata: Any) -> str:
+    """§17.499 — the session's walkthrough verbosity (default 'normal')."""
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (ValueError, TypeError):
+            metadata = {}
+    v = (metadata or {}).get("verbosity") if isinstance(metadata, dict) else None
+    return v if v in _VERBOSITY_LEVELS else "normal"
+
+
 async def get_environment(*, session_id: str, db) -> Optional[dict]:
-    """Return the session's environment profile + substitutions. None if no session."""
+    """Return the session's environment profile + substitutions + verbosity. None if no session."""
     sess = (await db.execute(
         text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
         {"sid": session_id},
     )).mappings().first()
     if not sess:
         return None
-    return _environment_from_metadata(sess.get("metadata"))
+    env = _environment_from_metadata(sess.get("metadata"))
+    env["verbosity"] = _verbosity_from_metadata(sess.get("metadata"))
+    return env
 
 
 async def set_environment(
@@ -573,15 +595,18 @@ async def set_environment(
     session_id: str,
     profile: str | None = None,
     substitutions: dict | None = None,
+    verbosity: str | None = None,
     db,
 ) -> dict:
-    """Merge environment facts into `assist_sessions.metadata.environment`.
+    """Merge environment facts into `assist_sessions.metadata`.
 
     `profile` replaces the free-text profile when provided. `substitutions`
     are merged key-by-key (so `/assist env KEY=value` adds one without
-    clobbering the rest). Read-modify-write under the row so we never drop
-    other `metadata` keys.
+    clobbering the rest). `verbosity` (§17.499) sets metadata.verbosity. Read-
+    modify-write under the row so we never drop other `metadata` keys.
     """
+    if verbosity is not None and verbosity not in _VERBOSITY_LEVELS:
+        raise ValueError(f"verbosity must be one of {_VERBOSITY_LEVELS}, got {verbosity!r}")
     sess = (await db.execute(
         text("SELECT metadata FROM assist_sessions WHERE id = :sid FOR UPDATE"),
         {"sid": session_id},
@@ -595,17 +620,21 @@ async def set_environment(
         merged = dict(current.get("substitutions") or {})
         merged.update(substitutions)
         current["substitutions"] = merged
+    # Single jsonb merge patch — environment always, verbosity when given.
+    patch: dict[str, Any] = {"environment": current}
+    if verbosity is not None:
+        patch["verbosity"] = verbosity
     await db.execute(
         text("""
             UPDATE assist_sessions
-               SET metadata = COALESCE(metadata, '{}'::jsonb)
-                            || jsonb_build_object('environment', CAST(:env AS jsonb)),
+               SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb),
                    updated_at = NOW()
              WHERE id = :sid
         """),
-        {"sid": session_id, "env": json.dumps(current)},
+        {"sid": session_id, "patch": json.dumps(patch)},
     )
     await db.commit()
+    current["verbosity"] = verbosity or _verbosity_from_metadata(sess.get("metadata"))
     return current
 
 

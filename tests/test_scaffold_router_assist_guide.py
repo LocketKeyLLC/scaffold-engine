@@ -450,3 +450,31 @@ class TestGuideStreamConsumer:
         pipe._stream_sse_to_queue = _fill
         out = "".join(_vendor.assist_guide_stream_cmd(pipe, _SID, force=True))
         assert "HTTP 409" in out
+
+
+# ── §17.499 — verbosity dispatch + render ───────────────────────────────────
+
+
+class TestVerbosity:
+
+    def test_verbose_routes_to_env_cmd(self, pipe):
+        calls = []
+
+        def _stub(pipe_arg, sid, *, profile=None, substitutions=None,
+                  verbosity=None, show=False, chat_id=None):
+            calls.append({"verbosity": verbosity}); yield "VERB_SET"
+
+        with patch.object(_vendor, "assist_env_cmd", side_effect=_stub):
+            out = _drive(pipe, f"/assist verbose {_SID} detailed")
+        assert "VERB_SET" in out
+        assert calls[0]["verbosity"] == "detailed"
+
+    def test_verbose_rejects_bad_level(self, pipe):
+        with patch.object(_vendor, "assist_env_cmd", side_effect=AssertionError):
+            out = _drive(pipe, f"/assist verbose {_SID} loud")
+        assert "Usage:" in out
+
+    def test_render_environment_shows_verbosity(self):
+        out = _vendor.render_environment(
+            {"profile": "Ubuntu", "substitutions": {}, "verbosity": "terse"})
+        assert "Verbosity" in out and "terse" in out

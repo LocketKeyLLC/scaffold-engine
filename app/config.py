@@ -575,6 +575,11 @@ class Settings(BaseSettings):
     # fail-soft; only-add-new (never overwrites a value the operator set or a
     # previously-learned one).
     assist_learn_substitutions: bool = True
+    # §17.499 — default walkthrough verbosity (terse | normal | detailed).
+    # Per-session override via /assist verbose. terse = commands + one-line
+    # whys (expert); detailed = explain why each step matters + what to watch
+    # for (novice); normal = current behavior (no directive).
+    assist_default_verbosity: str = "normal"
     # §17.492 — deterministic scan of generated walkthroughs / fixes for
     # high-confidence destructive commands (rm -rf, dd, mkfs, DROP TABLE, force
     # push, …); matches are surfaced as a prominent "review before running"

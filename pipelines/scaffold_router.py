@@ -1669,6 +1669,7 @@ class Pipeline:
         "| `/assist research [<session_id>] <question>` | Look up + confirm a fact (versions, flags, package names). |\n"
         "| `/assist env [<session_id>] [<text> / KEY=value]` | Set your OS/shell/tools (or concrete values) so commands are real, not placeholders. No args shows current. |\n"
         "| `/assist fix [<session_id>] <error>` | Hit an error? Get a diagnosis + corrected copy-paste commands. |\n"
+        "| `/assist verbose [<session_id>] terse\\|normal\\|detailed` | Tune walkthrough detail — terse for experts, detailed for step-by-step. |\n"
         "| `` /assist submit [<session_id>] [<node_key>]\\n```evidence``` `` | Submit human evidence. Both args optional after `/assist next`. |\n"
         "| `/assist skip [<session_id>] [<node_key>]` | Skip a node. |\n"
         "| `/assist handoff [<session_id>] <node_key> [single\\|all]` | Hand a node back to autonomous executor. |\n"

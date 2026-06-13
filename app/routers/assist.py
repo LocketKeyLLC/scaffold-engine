@@ -86,6 +86,9 @@ class AssistEnvInput(BaseModel):
     substitutions: dict = Field(
         default_factory=dict, description="Concrete value map, e.g. {HOST_IP: 10.0.0.5}."
     )
+    verbosity: Optional[str] = Field(
+        default=None, description="Walkthrough verbosity: terse | normal | detailed."
+    )
 
 
 # ── Per-chat session map ─────────────────────────────────────────────
@@ -273,10 +276,14 @@ async def assist_set_env(session_id: str, body: AssistEnvInput, db=Depends(get_d
             session_id=session_id,
             profile=body.profile,
             substitutions=body.substitutions,
+            verbosity=body.verbosity,
             db=db,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        # not-found → 404; invalid verbosity → 409
+        if "not found" in str(exc):
+            raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=409, detail=str(exc))
     return {"session_id": session_id, "environment": env}
 
 

@@ -43,6 +43,18 @@
             "description": "Concrete value map, e.g. {HOST_IP: 10.0.0.5}.",
             "title": "Substitutions",
             "type": "object"
+          },
+          "verbosity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Walkthrough verbosity: terse | normal | detailed.",
+            "title": "Verbosity"
           }
         },
         "title": "AssistEnvInput",

@@ -138,6 +138,29 @@ _RESEARCH_SYNTH_SYSTEM = (
 )
 
 
+# §17.499 — verbosity / skill-level directives appended to the system prompt.
+VERBOSITY_LEVELS = ("terse", "normal", "detailed")
+_VERBOSITY_DIRECTIVE = {
+    "terse": (
+        "\n\nVERBOSITY: TERSE — output only the commands/steps and a one-line "
+        "reason each. Omit background, rationale, and prose. Assume an expert "
+        "operator who just wants the actions."
+    ),
+    "detailed": (
+        "\n\nVERBOSITY: DETAILED — assume a less-experienced operator: briefly "
+        "explain WHY each step matters and what to watch for, and expand the "
+        "verification. Stay concrete and copy-paste-ready — explanation in "
+        "addition to the commands, never instead of them."
+    ),
+}
+
+
+def apply_verbosity(system: str, verbosity: str | None) -> str:
+    """Append the verbosity directive to a system prompt. `normal`/unknown → no
+    change (current behavior)."""
+    return system + _VERBOSITY_DIRECTIVE.get(verbosity or "normal", "")
+
+
 def guide_system_for_tool(tool: str) -> str:
     """Pick the human-facing system prompt for a node's tool type.
 
@@ -613,6 +636,7 @@ async def generate_guidance(
     node_key: str,
     domain: Optional[str] = None,
     environment: Optional[dict] = None,
+    verbosity: str = "normal",
 ) -> dict:
     """Generate (do not persist) the human walkthrough for one step.
 
@@ -634,7 +658,7 @@ async def generate_guidance(
             domain=domain,
         )
 
-    system = guide_system_for_tool(ctx.tool)
+    system = apply_verbosity(guide_system_for_tool(ctx.tool), verbosity)
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
     )
@@ -681,6 +705,7 @@ async def generate_fix(
     environment: Optional[dict] = None,
     node_key: str,
     domain: Optional[str] = None,
+    verbosity: str = "normal",
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
 
@@ -716,7 +741,7 @@ async def generate_fix(
     resp = await chat_until_nonempty(
         model_router.chat,
         [
-            {"role": "system", "content": GUIDE_SYSTEM_FIX},
+            {"role": "system", "content": apply_verbosity(GUIDE_SYSTEM_FIX, verbosity)},
             {"role": "user", "content": user},
         ],
         {"role": role},
@@ -812,6 +837,7 @@ async def ensure_guidance(
     force: bool = False,
     domain: Optional[str] = None,
     environment: Optional[dict] = None,
+    verbosity: str = "normal",
     db,
 ) -> dict:
     """Return guidance, generating + persisting only when needed.
@@ -834,6 +860,7 @@ async def ensure_guidance(
         node_key=node_key,
         domain=domain,
         environment=environment,
+        verbosity=verbosity,
     )
     await persist_guidance(
         session_id=session_id,
@@ -861,6 +888,7 @@ async def generate_guidance_stream(
     force: bool = False,
     domain: Optional[str] = None,
     environment: Optional[dict] = None,
+    verbosity: str = "normal",
     db,
 ):
     """Stream a walkthrough as it generates. Yields event dicts:
@@ -897,7 +925,7 @@ async def generate_guidance_stream(
             node_key=node_key, domain=domain,
         )
 
-    system = guide_system_for_tool(ctx.tool)
+    system = apply_verbosity(guide_system_for_tool(ctx.tool), verbosity)
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
     )

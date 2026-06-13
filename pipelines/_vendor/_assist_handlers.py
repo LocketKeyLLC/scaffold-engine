@@ -266,20 +266,23 @@ def render_fix(d: dict) -> str:
 
 
 def render_environment(env: dict | None) -> str:
-    """§17.487 — show the session's operator environment."""
+    """§17.487 — show the session's operator environment (+ §17.499 verbosity)."""
     env = env or {}
     profile = (env.get("profile") or "").strip()
     subs = env.get("substitutions") or {}
-    if not profile and not subs:
+    verbosity = env.get("verbosity") or "normal"
+    if not profile and not subs and verbosity == "normal":
         return (
             "_No environment set._ Set one so walkthroughs use concrete commands:\n"
-            "`/assist env Ubuntu 24.04, apt, bash` or `/assist env HOST_IP=10.0.0.5`."
+            "`/assist env Ubuntu 24.04, apt, bash` or `/assist env HOST_IP=10.0.0.5`.\n"
+            "_Verbosity:_ `normal` (change with `/assist verbose terse|detailed`)."
         )
     out = "**Operator environment**\n\n"
     if profile:
         out += f"- Profile: {profile}\n"
     for k, v in subs.items():
         out += f"- `{k}` = `{v}`\n"
+    out += f"- Verbosity: `{verbosity}`\n"
     return out
 
 
@@ -330,7 +333,7 @@ def handle_assist(
         arg1 = parts[1]
         # /assist <subcommand> ... — route to subcommand handler
         if arg1 in ("next", "submit", "skip", "handoff", "pause", "resume",
-                    "done", "friction", "guide", "research", "env", "fix"):
+                    "done", "friction", "guide", "research", "env", "fix", "verbose"):
             yield from dispatch_assist_sub(
                 pipe, arg1, parts[2:], fenced,
                 chat_id=chat_id, raw_head=head,
@@ -483,6 +486,13 @@ def dispatch_assist_sub(
             pipe, sid, profile=profile_text, substitutions=subs or None,
             chat_id=chat_id,
         ); return
+    if sub == "verbose":
+        if not sid:
+            yield no_session_msg("verbose"); return
+        level = (rest[0].lower() if rest else "").strip()
+        if level not in ("terse", "normal", "detailed"):
+            yield "Usage: `/assist verbose [<session_id>] terse|normal|detailed`"; return
+        yield from assist_env_cmd(pipe, sid, verbosity=level, chat_id=chat_id); return
     if sub == "fix":
         if not sid:
             yield no_session_msg("fix"); return
@@ -977,10 +987,10 @@ def assist_research_cmd(
 
 def assist_env_cmd(
     pipe, session_id: str, *, profile: str | None = None,
-    substitutions: dict | None = None, show: bool = False,
-    chat_id: str | None = None,
+    substitutions: dict | None = None, verbosity: str | None = None,
+    show: bool = False, chat_id: str | None = None,
 ) -> Generator[str, None, None]:
-    """§17.487 — GET/PUT the session's operator environment."""
+    """§17.487 — GET/PUT the session's operator environment (+ §17.499 verbosity)."""
     base = f"{pipe.valves.orchestrator_url}/assist/{session_id}/env"
     try:
         if show:
@@ -989,7 +999,8 @@ def assist_env_cmd(
         else:
             r = _ss().put(
                 base,
-                json={"profile": profile, "substitutions": substitutions or {}},
+                json={"profile": profile, "substitutions": substitutions or {},
+                      "verbosity": verbosity},
                 headers=pipe._auth_headers(),
                 timeout=pipe.valves.request_timeout,
             )

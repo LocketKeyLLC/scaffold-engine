@@ -717,3 +717,45 @@ async def test_generate_guidance_stream_done_meta_has_destructive(monkeypatch):
             session_id="s", node_key="T3", ctx=_ctx("shell"), research=False, force=True, db=db)]
     done = [e for e in events if e["type"] == "done"][0]
     assert done["guidance_meta"]["destructive"]
+
+
+# ── §17.499 — verbosity / skill-level control ───────────────────────────────
+
+
+def test_apply_verbosity_terse_and_detailed_and_normal():
+    assert "TERSE" in assist_guide.apply_verbosity("SYS", "terse")
+    assert "DETAILED" in assist_guide.apply_verbosity("SYS", "detailed")
+    assert assist_guide.apply_verbosity("SYS", "normal") == "SYS"   # no change
+    assert assist_guide.apply_verbosity("SYS", None) == "SYS"
+    assert assist_guide.apply_verbosity("SYS", "bogus") == "SYS"    # unknown → no change
+
+
+@pytest.mark.asyncio
+async def test_generate_guidance_threads_verbosity_into_system():
+    captured = {}
+
+    async def _capture_chat(messages, **kw):
+        captured["system"] = messages[0]["content"]
+        return _resp("walk")
+
+    with patch.object(assist_guide.model_router, "chat", new=_capture_chat):
+        await assist_guide.generate_guidance(
+            ctx=_ctx("shell"), research=False, node_key="T3", verbosity="terse",
+        )
+    assert "TERSE" in captured["system"]
+
+
+@pytest.mark.asyncio
+async def test_generate_fix_threads_verbosity_into_system():
+    captured = {}
+
+    async def _capture_chat(messages, **kw):
+        captured["system"] = messages[0]["content"]
+        return _resp("## Fix\nx")
+
+    with patch.object(assist_guide.model_router, "chat", new=_capture_chat):
+        await assist_guide.generate_fix(
+            ctx=_ctx("shell"), error_text="boom", research=False,
+            node_key="T3", verbosity="detailed",
+        )
+    assert "DETAILED" in captured["system"]

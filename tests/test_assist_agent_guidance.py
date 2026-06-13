@@ -152,7 +152,7 @@ async def test_get_environment_returns_shape():
         _result({"metadata": {"environment": {"profile": "P", "substitutions": {}}}}),
     ])
     out = await assist_agent.get_environment(session_id="s", db=db)
-    assert out == {"profile": "P", "substitutions": {}}
+    assert out == {"profile": "P", "substitutions": {}, "verbosity": "normal"}
 
 
 # ── §17.487: verify_submit_outcome ─────────────────────────────────────────
@@ -301,3 +301,49 @@ async def test_generate_step_guidance_stream_missing_session_raises():
     with pytest.raises(ValueError, match="not found"):
         # the raise fires when iteration starts
         [ev async for ev in assist_agent.generate_step_guidance_stream(session_id="s", db=db)]
+
+
+# ── §17.499 — verbosity ─────────────────────────────────────────────────────
+
+
+def test_verbosity_from_metadata():
+    assert assist_agent._verbosity_from_metadata(None) == "normal"
+    assert assist_agent._verbosity_from_metadata({"verbosity": "terse"}) == "terse"
+    assert assist_agent._verbosity_from_metadata({"verbosity": "bogus"}) == "normal"
+    assert assist_agent._verbosity_from_metadata('{"verbosity": "detailed"}') == "detailed"
+
+
+@pytest.mark.asyncio
+async def test_set_environment_sets_verbosity():
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result({"metadata": {}}),  # FOR UPDATE read
+        _result(None),              # UPDATE
+    ])
+    db.commit = AsyncMock()
+    out = await assist_agent.set_environment(session_id="s", verbosity="detailed", db=db)
+    assert out["verbosity"] == "detailed"
+    # the merge patch carries verbosity
+    patch_arg = db.execute.await_args_list[1].args[1]["patch"]
+    assert '"verbosity": "detailed"' in patch_arg
+
+
+@pytest.mark.asyncio
+async def test_set_environment_rejects_bad_verbosity():
+    db = AsyncMock()
+    with pytest.raises(ValueError, match="verbosity must be"):
+        await assist_agent.set_environment(session_id="s", verbosity="loud", db=db)
+
+
+@pytest.mark.asyncio
+async def test_generate_step_guidance_threads_verbosity():
+    sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T3",
+            "metadata": {"verbosity": "terse"}}
+    db = _db_with_session(sess)
+    with patch.object(assist_agent, "_assemble_ctx_for_node",
+                      new=AsyncMock(return_value=({"description": "d", "domain": None}, _ctx()))), \
+         patch("app.modules.assist_guide.ensure_guidance",
+               new=AsyncMock(return_value={"guidance": "w", "status": "ready",
+                                           "cached": False, "guidance_meta": {}})) as ensure:
+        await assist_agent.generate_step_guidance(session_id="s", research=False, db=db)
+    assert ensure.call_args.kwargs["verbosity"] == "terse"
