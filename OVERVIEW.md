@@ -1865,9 +1865,9 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (refreshed post-§17.487, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
+### 14.1 Test counts (refreshed post-§17.488, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
 
-**Current local baseline (`make test`, full dev-image suite):** **3764 passed, 0 deterministic failures, 1 skipped in 25:42** — measured 2026-06-13 after §17.487. The full run reported 3763 passed + 1 *transient* live-LLM flake (`tests/integration/test_spec_extractor_live.py::test_extract_spec_live_unambiguous_brief`, `LLM call failed: empty response` — the cloud model returned empty; **passed on isolated re-run**, so 3764 effective). Per-§ measured lineage: §17.483 **3687** → §17.484 **3700** → §17.486 **3734** → §17.487 **3764** (+30 over §17.486: the Tier-1 env/verify/fix tests across the three assist test files). **The 1 skip is `tests/integration/test_topology_select_db.py` self-skipping on a transient live-LLM 409 (empty topology-select response) — NOT a code regression.** Wall-clock dominated by live cloud-model latency on the integration tests. (The spec-extractor live test is the §17.465-class empty-draw flake — it took 3 isolated attempts to draw non-empty this run; the cloud model was returning empty for that brief intermittently.)
+**Current local baseline (`make test`, full dev-image suite):** **3766 passed, 0 failed, 1 skipped in 22:44** — measured 2026-06-13 after §17.488, fully clean (the formerly-flaky `test_spec_extractor_live` passed deterministically now that §17.488 routes the extractor through `chat_until_nonempty`). Per-§ measured lineage: §17.483 **3687** → §17.484 **3700** → §17.486 **3734** → §17.487 **3764** (+30 Tier-1 assist tests) → §17.488 **3766** (+2 spec-extractor redraw tests). **The 1 skip is `tests/integration/test_topology_select_db.py` self-skipping on a transient live-LLM 409 (empty topology-select response) — NOT a code regression** (a different live path that still does a bare LLM call; candidate for the same `chat_until_nonempty` guard). Wall-clock dominated by live cloud-model latency on the integration tests.
 
 **CI baseline (`test.yml`, the `-k "not integration"` subset):** **~3596 passed (projected), 14 skipped, 91 deselected (the integration tests)** — **no fresh CI run this cycle: GitHub Actions is org-billing-blocked**, so `main` merges (#64/#65/#66) are gated by local `make test` + `make ci-tier-0` instead. Projected from the local measure via the standing reconciliation: 3701 collected − 14 (service-needing, skipped in CI but pass live here) − 91 (integration, deselected in CI) = 3596. Last CI-measured green run was `27311904558` (§17.470, 3473 passed); the §17.472–484 additions are all non-integration unit/web tests, so `deselected` is carried at 91.
 
@@ -21980,6 +21980,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **Verification.** Full SDK suite — **142 passed** (4 new: sync + async `follow_redirects is False`, stream connect→`ConnectionError`, stream timeout→`TimeoutError` — the missing regression for S2). ci-tier-0 green (no vendored file touched). Coverage honesty: deep-read the 6 core modules + scanned resource wrappers; did not exhaustively read the thin resource method bodies.
 
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
+### §17.488 Fix — spec extractor empty-draw guard (chat_until_nonempty) (2026-06-13)
+
+The §17.487 full-suite run surfaced `test_spec_extractor_live::test_extract_spec_live_unambiguous_brief` failing with `LLM call failed: empty response` (`llm_raw_text=''`) — it took 3 isolated re-runs to draw non-empty. Root cause is the §17.465 class: `spec_extractor.extract_spec` called `model_router.chat(..., max_tokens=4096)` once, and `spec_extractor_model_role=model_general` is the cloud thinking model (`qwen3.5:397b-cloud`) whose `num_predict` is a shared reasoning+content budget — a long chain of thought (or an unlucky draw) returns `success=True` with empty content, which the extractor treated as a hard failure on the first try.
+
+**Fix.** Route the call through `app/utils/llm_retry.py::chat_until_nonempty` (the same guard §17.465 gave the node executor): re-draw on success-but-empty before failing; a true hard failure (`success=False`) still returns immediately. Budget raised 4096 → `spec_extractor_max_tokens` (default 8192) with `spec_extractor_max_draws` (default 3), both new in `config.py`. No behavior change on the success/ambiguity/validation paths.
+
+**Verification.** `tests/test_spec_extractor.py` +2 (empty→empty→valid re-draws to ok=True with one persisted row; all-empty → ok=False, no DB write, no raise) — 16 pass. The live test now passes (the redraw absorbs the empty draw). Full `make test`: **3766 passed, 0 failed, 1 skipped** (+2 over §17.487; the formerly-flaky live test was green this run — see §14.1). **POLICY reminder (§17.464): every consumer of LLM free-text output routes through `chat_until_nonempty`/`generate_until_nonempty` — this was a straggler.** See [[thinking_model_empty_content]].
 
 ---
 

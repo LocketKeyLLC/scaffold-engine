@@ -270,6 +270,14 @@ class Settings(BaseSettings):
     # local models tend to drift. Operators with strict offline
     # requirements can override to model_router or model_verifier.
     spec_extractor_model_role: str = "model_general"
+    # §17.487 — the extractor runs a cloud thinking model (model_general =
+    # qwen3.5:397b-cloud) whose num_predict is a shared reasoning+content
+    # budget; the old 4096 cap starved long reasoning → success=True + empty
+    # content (the §17.465 failure mode, observed live as the
+    # test_spec_extractor_live empty-draw flake). Generous budget + a few
+    # retry-on-empty draws via chat_until_nonempty.
+    spec_extractor_max_tokens: int = Field(default=8192, ge=512, le=16384)
+    spec_extractor_max_draws: int = Field(default=3, ge=1, le=6)
     # §17.147 — Closed-loop device-sizing budget. The stage proposes
     # parameters, runs ngspice, feeds the measurement gap back to the
     # LLM, and repeats until convergence or the budget is exhausted.
