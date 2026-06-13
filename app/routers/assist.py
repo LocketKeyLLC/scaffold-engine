@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
+from app.config import settings
 from app.database import get_db
 from app.modules import assist_agent, assist_session_map
 
@@ -71,6 +72,20 @@ class AssistGuideInput(BaseModel):
 class AssistResearchInput(BaseModel):
     question: str
     node_key: Optional[str] = None
+
+
+class AssistFixInput(BaseModel):
+    error: str = Field(description="The error / what went wrong while doing the step.")
+    node_key: Optional[str] = None
+
+
+class AssistEnvInput(BaseModel):
+    profile: Optional[str] = Field(
+        default=None, description="Free-text environment profile (OS, shell, package manager)."
+    )
+    substitutions: dict = Field(
+        default_factory=dict, description="Concrete value map, e.g. {HOST_IP: 10.0.0.5}."
+    )
 
 
 # ── Per-chat session map ─────────────────────────────────────────────
@@ -187,10 +202,77 @@ async def assist_research(session_id: str, body: AssistResearchInput, db=Depends
         raise HTTPException(status_code=409, detail=msg)
 
 
+@router.post("/assist/{session_id}/fix")
+async def assist_fix(session_id: str, body: AssistFixInput, db=Depends(get_db)):
+    """Diagnose an operator-reported error on a step and return corrected steps."""
+    try:
+        return await assist_agent.run_step_fix(
+            session_id=session_id,
+            node_key=body.node_key,
+            error=body.error,
+            db=db,
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=409, detail=msg)
+
+
+@router.put("/assist/{session_id}/env")
+async def assist_set_env(session_id: str, body: AssistEnvInput, db=Depends(get_db)):
+    """Set the operator's environment so walkthroughs use concrete commands."""
+    try:
+        env = await assist_agent.set_environment(
+            session_id=session_id,
+            profile=body.profile,
+            substitutions=body.substitutions,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"session_id": session_id, "environment": env}
+
+
+@router.get("/assist/{session_id}/env")
+async def assist_get_env(session_id: str, db=Depends(get_db)):
+    env = await assist_agent.get_environment(session_id=session_id, db=db)
+    if env is None:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    return {"session_id": session_id, "environment": env}
+
+
 @router.post("/assist/{session_id}/submit")
 async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get_db)):
+    # §17.487 — success verification. Runs BEFORE submit_step (so the slow LLM
+    # call never holds submit_step's row lock, and submit_step stays pure).
+    # Only for action='submit'; verify_submit_outcome returns None unless the
+    # step is genuinely claimable ('presented').
+    verdict = None
+    if body.action == "submit" and settings.assist_verify_on_submit:
+        verdict = await assist_agent.verify_submit_outcome(
+            session_id=session_id, node_key=body.node_key, evidence=body.output, db=db,
+        )
+        if (verdict and verdict.get("outcome") == "failed"
+                and settings.assist_block_on_failed_verify):
+            # Hard-block: do NOT commit — the step stays 'presented' (claimable)
+            # for a clean re-submit. Log the blocker to the friction trail.
+            await assist_agent.record_friction(
+                session_id=session_id, node_key=body.node_key,
+                note=f"verify-blocked: {verdict.get('reason', '')}", db=db,
+            )
+            return {
+                "session_id": session_id,
+                "node_key": body.node_key,
+                "status": "verification_failed",
+                "committed": False,
+                "no_op": False,
+                "next_node_key": None,
+                "success_verdict": verdict,
+                "mirror_divergence": False,
+            }
     try:
-        return await assist_agent.submit_step(
+        result = await assist_agent.submit_step(
             session_id=session_id,
             node_key=body.node_key,
             evidence=body.output,
@@ -200,6 +282,9 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
             friction_note=body.friction_note,
             db=db,
         )
+        if verdict is not None and isinstance(result, dict):
+            result["success_verdict"] = verdict
+        return result
     except ValueError as exc:
         msg = str(exc)
         if "not found" in msg:

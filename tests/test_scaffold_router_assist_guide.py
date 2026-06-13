@@ -150,3 +150,118 @@ class TestRenderResearch:
     def test_no_sources(self):
         out = _vendor.render_research({"question": "obscure", "sources": []})
         assert "No results found" in out
+
+
+# ── §17.487: env + fix dispatch ─────────────────────────────────────────────
+
+
+class TestEnvFixDispatch:
+
+    def test_env_no_args_shows_current(self, pipe):
+        calls = []
+
+        def _stub(pipe_arg, sid, *, profile=None, substitutions=None, show=False, chat_id=None):
+            calls.append({"show": show}); yield "ENV_SHOW"
+
+        with patch.object(_vendor, "assist_env_cmd", side_effect=_stub):
+            out = _drive(pipe, f"/assist env {_SID}")
+        assert "ENV_SHOW" in out
+        assert calls[0]["show"] is True
+
+    def test_env_parses_profile_and_substitution(self, pipe):
+        calls = []
+
+        def _stub(pipe_arg, sid, *, profile=None, substitutions=None, show=False, chat_id=None):
+            calls.append({"profile": profile, "subs": substitutions}); yield "ENV_SET"
+
+        with patch.object(_vendor, "assist_env_cmd", side_effect=_stub):
+            out = _drive(pipe, f"/assist env {_SID} Ubuntu 24.04 HOST_IP=10.0.0.5")
+        assert "ENV_SET" in out
+        assert calls[0]["subs"] == {"HOST_IP": "10.0.0.5"}
+        assert "Ubuntu 24.04" in calls[0]["profile"]
+        assert "HOST_IP" not in calls[0]["profile"]  # pair stripped from profile text
+
+    def test_fix_routes_with_error_text(self, pipe):
+        calls = []
+
+        def _stub(pipe_arg, sid, error_text, *, node_key=None, chat_id=None):
+            calls.append(error_text); yield "FIX_OUT"
+
+        with patch.object(_vendor, "assist_fix_cmd", side_effect=_stub):
+            out = _drive(pipe, f"/assist fix {_SID} bash: nginx: command not found")
+        assert "FIX_OUT" in out
+        assert calls[0] == "bash: nginx: command not found"
+
+    def test_fix_empty_shows_usage(self, pipe):
+        with patch.object(_vendor, "assist_fix_cmd", side_effect=AssertionError):
+            out = _drive(pipe, f"/assist fix {_SID}")
+        assert "Usage:" in out
+
+
+# ── §17.487: render_fix + render_environment ────────────────────────────────
+
+
+class TestRenderFixEnv:
+
+    def test_render_fix_ready(self):
+        out = _vendor.render_fix({
+            "node_key": "T2", "status": "ready",
+            "fix": "## Diagnosis\nmissing pkg\n## Fix\napt install nginx",
+            "guidance_meta": {"research_sources": [{"kind": "searxng", "query": "nginx 404"}]},
+        })
+        assert "Troubleshooting" in out
+        assert "apt install nginx" in out
+        assert "Confirmed via research" in out
+
+    def test_render_fix_failed(self):
+        out = _vendor.render_fix({"node_key": "T2", "status": "failed", "fix": ""})
+        assert "Couldn't generate a fix" in out
+
+    def test_render_environment_empty_nudges(self):
+        out = _vendor.render_environment({"profile": "", "substitutions": {}})
+        assert "No environment set" in out
+
+    def test_render_environment_shows_values(self):
+        out = _vendor.render_environment({"profile": "Ubuntu", "substitutions": {"HOST_IP": "10.0.0.5"}})
+        assert "Ubuntu" in out
+        assert "HOST_IP" in out and "10.0.0.5" in out
+
+
+# ── §17.487: submit verdict rendering ───────────────────────────────────────
+
+
+class TestSubmitVerdictRender:
+
+    def _post_session(self, body):
+        sess = MagicMock()
+        sess.post.return_value = _make_response(200, body)
+        return sess
+
+    def test_submit_warns_on_failed_verdict(self, pipe):
+        body = {"status": "committed", "no_op": False, "next_node_key": "T3",
+                "mirror_divergence": False,
+                "success_verdict": {"outcome": "failed", "reason": "Traceback present"}}
+        with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "boom", chat_id=None))
+        assert "committed" in out                  # still advanced (warn mode)
+        assert "may have failed" in out
+        assert "Traceback present" in out
+
+    def test_submit_block_path_not_advanced(self, pipe):
+        body = {"status": "verification_failed", "no_op": False, "committed": False,
+                "next_node_key": None,
+                "success_verdict": {"outcome": "failed", "reason": "exit 1", "suggestion": "retry"}}
+        with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "boom", chat_id=None))
+        assert "not marked done" in out
+        assert "exit 1" in out
+        assert "/assist fix" in out
+
+    def test_submit_quiet_on_success_verdict(self, pipe):
+        body = {"status": "committed", "no_op": False, "next_node_key": "T3",
+                "mirror_divergence": False,
+                "success_verdict": {"outcome": "succeeded", "reason": "ok"}}
+        with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
+        assert "committed" in out
+        assert "may have failed" not in out

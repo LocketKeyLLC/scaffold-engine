@@ -25,6 +25,54 @@
         "title": "AssistChatMapInput",
         "type": "object"
       },
+      "AssistEnvInput": {
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Free-text environment profile (OS, shell, package manager).",
+            "title": "Profile"
+          },
+          "substitutions": {
+            "description": "Concrete value map, e.g. {HOST_IP: 10.0.0.5}.",
+            "title": "Substitutions",
+            "type": "object"
+          }
+        },
+        "title": "AssistEnvInput",
+        "type": "object"
+      },
+      "AssistFixInput": {
+        "properties": {
+          "error": {
+            "description": "The error / what went wrong while doing the step.",
+            "title": "Error",
+            "type": "string"
+          },
+          "node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Key"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "AssistFixInput",
+        "type": "object"
+      },
       "AssistFrictionInput": {
         "properties": {
           "node_key": {
@@ -3362,6 +3410,161 @@
           }
         ],
         "summary": "Assist Get Session",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/env": {
+      "get": {
+        "operationId": "assist_get_env_assist__session_id__env_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Get Env",
+        "tags": [
+          "Assist"
+        ]
+      },
+      "put": {
+        "description": "Set the operator's environment so walkthroughs use concrete commands.",
+        "operationId": "assist_set_env_assist__session_id__env_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistEnvInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Set Env",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/fix": {
+      "post": {
+        "description": "Diagnose an operator-reported error on a step and return corrected steps.",
+        "operationId": "assist_fix_assist__session_id__fix_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistFixInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Fix",
         "tags": [
           "Assist"
         ]

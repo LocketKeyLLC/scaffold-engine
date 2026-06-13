@@ -1,4 +1,7 @@
--- Migration 025: Assist Mode guidance cache (§17.486)
+-- Migration 051: Assist Mode guidance cache (§17.486)
+-- (Renumbered from 025 in §17.487 — 025 collided with the pre-existing
+--  025_drop_dead_error_types.sql; migrations run to 050. Already applied to
+--  the live DB under the old name; the runner re-applies this idempotently.)
 --
 -- Assist Mode now generates a human-facing walkthrough per step (copy-paste
 -- terminal commands for shell/codegen work, step-by-step instructions for

@@ -330,7 +330,7 @@ async def generate_step_guidance(
 
     sess = (await db.execute(
         text("""
-            SELECT id, job_id, status, current_node_key
+            SELECT id, job_id, status, current_node_key, metadata
               FROM assist_sessions WHERE id = :sid
         """),
         {"sid": session_id},
@@ -350,6 +350,7 @@ async def generate_step_guidance(
     if research is None:
         research = settings.assist_guide_research
 
+    environment = _environment_from_metadata(sess.get("metadata"))
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
 
     res = await assist_guide.ensure_guidance(
@@ -361,6 +362,7 @@ async def generate_step_guidance(
         refine_hint=refine,
         force=force,
         domain=node_row.get("domain"),
+        environment=environment,
         db=db,
     )
     return {
@@ -412,7 +414,180 @@ async def run_step_research(
     return {"session_id": session_id, "node_key": nk, **res}
 
 
+async def run_step_fix(
+    *,
+    session_id: str,
+    node_key: str | None = None,
+    error: str,
+    research: bool | None = None,
+    db,
+) -> dict:
+    """Diagnose an operator-reported error on a step and return corrected steps.
+
+    Resolves the node from ``current_node_key`` when omitted, threads the
+    session environment, and auto-records the error to the friction log so
+    real blockers are captured for the post-mortem.
+    """
+    from app.config import settings
+    from app.modules import assist_guide
+
+    if not (error or "").strip():
+        raise ValueError("error text is empty")
+    sess = (await db.execute(
+        text("""
+            SELECT id, job_id, status, current_node_key, metadata
+              FROM assist_sessions WHERE id = :sid
+        """),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    if sess["status"] not in ("active", "paused"):
+        raise ValueError(f"session status {sess['status']!r} cannot run fix")
+    job_id = str(sess["job_id"])
+    nk = node_key or sess["current_node_key"]
+    if not nk:
+        raise ValueError(
+            "no node_key supplied and session has no current step; "
+            "claim one with /assist next first"
+        )
+    if research is None:
+        research = settings.assist_guide_research
+
+    environment = _environment_from_metadata(sess.get("metadata"))
+    node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
+
+    res = await assist_guide.generate_fix(
+        ctx=ctx,
+        error_text=error,
+        research=research,
+        environment=environment,
+        node_key=nk,
+        domain=node_row.get("domain"),
+    )
+    # Capture the blocker on the friction trail (best-effort).
+    try:
+        await record_friction(
+            session_id=session_id, node_key=nk,
+            note=f"hit error: {error.strip()[:200]}", db=db,
+        )
+    except Exception as exc:  # never fail the fix on a friction-log hiccup
+        logger.warning("assist_fix_friction_record_failed: %s", exc)
+    return {"session_id": session_id, "node_key": nk, "title": ctx.title, **res}
+
+
+# ── Environment capture (§17.487 — concrete commands, not placeholders) ────
+
+
+def _environment_from_metadata(metadata: Any) -> dict:
+    """Pull the `environment` sub-object out of a session's metadata JSONB.
+
+    Tolerates None / str (asyncpg usually hands back a dict for jsonb, but a
+    string body is decoded defensively) and always returns a dict with the
+    `profile`/`substitutions` shape so callers don't branch.
+    """
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (ValueError, TypeError):
+            metadata = {}
+    env = (metadata or {}).get("environment") if isinstance(metadata, dict) else None
+    if not isinstance(env, dict):
+        return {"profile": "", "substitutions": {}}
+    return {
+        "profile": env.get("profile") or "",
+        "substitutions": env.get("substitutions") or {},
+    }
+
+
+async def get_environment(*, session_id: str, db) -> Optional[dict]:
+    """Return the session's environment profile + substitutions. None if no session."""
+    sess = (await db.execute(
+        text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        return None
+    return _environment_from_metadata(sess.get("metadata"))
+
+
+async def set_environment(
+    *,
+    session_id: str,
+    profile: str | None = None,
+    substitutions: dict | None = None,
+    db,
+) -> dict:
+    """Merge environment facts into `assist_sessions.metadata.environment`.
+
+    `profile` replaces the free-text profile when provided. `substitutions`
+    are merged key-by-key (so `/assist env KEY=value` adds one without
+    clobbering the rest). Read-modify-write under the row so we never drop
+    other `metadata` keys.
+    """
+    sess = (await db.execute(
+        text("SELECT metadata FROM assist_sessions WHERE id = :sid FOR UPDATE"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    current = _environment_from_metadata(sess.get("metadata"))
+    if profile is not None:
+        current["profile"] = profile
+    if substitutions:
+        merged = dict(current.get("substitutions") or {})
+        merged.update(substitutions)
+        current["substitutions"] = merged
+    await db.execute(
+        text("""
+            UPDATE assist_sessions
+               SET metadata = COALESCE(metadata, '{}'::jsonb)
+                            || jsonb_build_object('environment', CAST(:env AS jsonb)),
+                   updated_at = NOW()
+             WHERE id = :sid
+        """),
+        {"sid": session_id, "env": json.dumps(current)},
+    )
+    await db.commit()
+    return current
+
+
 # ── Submit / commit human evidence ───────────────────────────────────────
+
+
+async def verify_submit_outcome(
+    *, session_id: str, node_key: str, evidence: str, db,
+) -> Optional[dict]:
+    """Judge whether the pasted evidence shows the step succeeded.
+
+    Called by the submit endpoint BEFORE ``submit_step`` so the slow LLM call
+    never holds the submit transaction's row lock, and so ``submit_step`` stays
+    pure. Reads node + env in a single non-locking query. Returns None when the
+    step isn't claimable ('presented') — the endpoint then just calls
+    ``submit_step``, which surfaces the real must-claim / no-op path — or a
+    verdict dict otherwise. Fail-soft (the underlying verifier never raises).
+    """
+    row = (await db.execute(
+        text("""
+            SELECT s.status, ss.metadata,
+                   d.title, d.prompt_template, d.tool
+              FROM assist_steps s
+              JOIN assist_sessions ss ON ss.id = s.session_id
+              JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+             WHERE s.session_id = :sid AND s.node_key = :nk
+        """),
+        {"sid": session_id, "nk": node_key},
+    )).mappings().first()
+    if not row or row["status"] != "presented":
+        return None
+    from app.modules import assist_guide
+    return await assist_guide.verify_step_success(
+        title=row["title"] or node_key,
+        task_prompt=row["prompt_template"] or "",
+        tool=row["tool"] or "LLM",
+        evidence=evidence,
+        environment=_environment_from_metadata(row["metadata"]),
+    )
 
 
 async def submit_step(

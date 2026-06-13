@@ -102,3 +102,120 @@ async def test_run_step_research_empty_question_raises():
     db = AsyncMock()
     with pytest.raises(ValueError, match="empty"):
         await assist_agent.run_step_research(session_id="s", question="  ", db=db)
+
+
+# ── §17.487: environment ───────────────────────────────────────────────────
+
+
+def test_environment_from_metadata_variants():
+    assert assist_agent._environment_from_metadata(None) == {"profile": "", "substitutions": {}}
+    assert assist_agent._environment_from_metadata({"other": 1}) == {"profile": "", "substitutions": {}}
+    got = assist_agent._environment_from_metadata(
+        {"environment": {"profile": "Ubuntu", "substitutions": {"A": "1"}}}
+    )
+    assert got == {"profile": "Ubuntu", "substitutions": {"A": "1"}}
+    # tolerates a JSON string body
+    got2 = assist_agent._environment_from_metadata('{"environment": {"profile": "X"}}')
+    assert got2["profile"] == "X"
+
+
+@pytest.mark.asyncio
+async def test_set_environment_merges_substitutions():
+    # First execute = SELECT metadata FOR UPDATE (existing profile + one sub),
+    # second = UPDATE.
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result({"metadata": {"environment": {"profile": "Ubuntu", "substitutions": {"A": "1"}}}}),
+        _result(None),
+    ])
+    db.commit = AsyncMock()
+    out = await assist_agent.set_environment(
+        session_id="s", substitutions={"B": "2"}, db=db,
+    )
+    assert out["profile"] == "Ubuntu"            # untouched
+    assert out["substitutions"] == {"A": "1", "B": "2"}  # merged, not clobbered
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_set_environment_missing_session_raises():
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[_result(None)])
+    with pytest.raises(ValueError, match="not found"):
+        await assist_agent.set_environment(session_id="s", profile="x", db=db)
+
+
+@pytest.mark.asyncio
+async def test_get_environment_returns_shape():
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result({"metadata": {"environment": {"profile": "P", "substitutions": {}}}}),
+    ])
+    out = await assist_agent.get_environment(session_id="s", db=db)
+    assert out == {"profile": "P", "substitutions": {}}
+
+
+# ── §17.487: verify_submit_outcome ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_verify_submit_outcome_presented_returns_verdict():
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result({"status": "presented", "metadata": {}, "title": "t",
+                 "prompt_template": "p", "tool": "shell"}),
+    ])
+    with patch("app.modules.assist_guide.verify_step_success",
+               new=AsyncMock(return_value={"outcome": "failed", "reason": "err", "suggestion": "s"})):
+        v = await assist_agent.verify_submit_outcome(
+            session_id="s", node_key="T2", evidence="boom", db=db,
+        )
+    assert v["outcome"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_verify_submit_outcome_not_presented_returns_none():
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result({"status": "committed", "metadata": {}, "title": "t",
+                 "prompt_template": "p", "tool": "shell"}),
+    ])
+    with patch("app.modules.assist_guide.verify_step_success", new=AsyncMock()) as vs:
+        v = await assist_agent.verify_submit_outcome(
+            session_id="s", node_key="T2", evidence="x", db=db,
+        )
+    assert v is None
+    vs.assert_not_called()  # no LLM call when the step isn't claimable
+
+
+# ── §17.487: run_step_fix ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_step_fix_resolves_node_and_records_friction():
+    sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T3",
+            "metadata": {"environment": {"profile": "Ubuntu", "substitutions": {}}}}
+    db = _db_with_session(sess)
+    node_row = {"description": "d", "domain": "net"}
+    with patch.object(assist_agent, "_assemble_ctx_for_node",
+                      new=AsyncMock(return_value=(node_row, _ctx()))), \
+         patch("app.modules.assist_guide.generate_fix",
+               new=AsyncMock(return_value={"fix": "## Diagnosis\nx", "status": "ready",
+                                           "guidance_meta": {}})) as gen, \
+         patch.object(assist_agent, "record_friction", new=AsyncMock()) as fric:
+        res = await assist_agent.run_step_fix(
+            session_id="s", error="command not found", research=False, db=db,
+        )
+    assert res["status"] == "ready"
+    assert res["node_key"] == "T3"
+    _, kwargs = gen.call_args
+    assert kwargs["error_text"] == "command not found"
+    assert kwargs["environment"]["profile"] == "Ubuntu"
+    fric.assert_awaited_once()  # blocker captured on the friction trail
+
+
+@pytest.mark.asyncio
+async def test_run_step_fix_empty_error_raises():
+    db = AsyncMock()
+    with pytest.raises(ValueError, match="empty"):
+        await assist_agent.run_step_fix(session_id="s", error="  ", db=db)

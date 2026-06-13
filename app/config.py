@@ -531,6 +531,16 @@ class Settings(BaseSettings):
     assist_guide_model_role: str = "model_general"
     assist_guide_max_tokens: int = Field(default=8192, ge=512, le=16384)
     assist_guide_max_research_queries: int = Field(default=3, ge=0, le=8)
+    # §17.487 — Tier 1 "close the loop". On /assist submit, judge whether the
+    # pasted evidence shows the step actually succeeded (catches a pasted
+    # error/traceback being recorded as success). Adds one sync tool_call per
+    # submit; disable to skip it. When assist_block_on_failed_verify is also
+    # true, a 'failed' verdict does NOT mark the node done — the step stays
+    # claimable until a clean re-submit. Default off (a false-negative verdict
+    # could wrongly hold a real success); the verdict is always surfaced so the
+    # user can act on it regardless.
+    assist_verify_on_submit: bool = True
+    assist_block_on_failed_verify: bool = False
     # #2 — orphan detection: dag_nodes stuck in 'running' past this threshold
     # are treated as orphaned (executor died) and reset to 'pending' for
     # automatic re-execution. Sprint X.1 tightened 60→30 min: the audit

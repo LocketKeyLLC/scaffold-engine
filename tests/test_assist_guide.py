@@ -295,3 +295,150 @@ async def test_research_one_no_sources_no_synthesis():
     assert res["sources"] == []
     assert res["answer"] is None
     chat.assert_not_called()  # nothing to synthesize from
+
+
+# ── §17.487: environment block ─────────────────────────────────────────────
+
+
+def test_render_environment_block_empty():
+    assert assist_guide.render_environment_block(None) == ""
+    assert assist_guide.render_environment_block({"profile": "", "substitutions": {}}) == ""
+
+
+def test_render_environment_block_profile_and_subs():
+    out = assist_guide.render_environment_block(
+        {"profile": "Ubuntu 24.04, apt, bash", "substitutions": {"HOST_IP": "10.0.0.5"}}
+    )
+    assert "Operator environment" in out
+    assert "Ubuntu 24.04" in out
+    assert "HOST_IP = 10.0.0.5" in out
+
+
+@pytest.mark.asyncio
+async def test_guidance_injects_environment():
+    captured = {}
+
+    async def _capture_chat(messages, **kw):
+        captured["user"] = messages[1]["content"]
+        return _resp("walk")
+
+    with patch.object(assist_guide.model_router, "chat", new=_capture_chat):
+        await assist_guide.generate_guidance(
+            ctx=_ctx("shell"), research=False, node_key="T3",
+            environment={"profile": "Ubuntu 24.04", "substitutions": {"HOST_IP": "10.0.0.5"}},
+        )
+    assert "Operator environment" in captured["user"]
+    assert "HOST_IP = 10.0.0.5" in captured["user"]
+
+
+# ── §17.487: success verification ──────────────────────────────────────────
+
+
+def _verdict_resp(outcome, reason="r", suggestion="s", success=True):
+    r = MagicMock()
+    r.success = success
+    if success:
+        call = MagicMock()
+        call.arguments = {"outcome": outcome, "reason": reason, "suggestion": suggestion}
+        r.tool_calls = [call]
+    else:
+        r.tool_calls = []
+    return r
+
+
+@pytest.mark.asyncio
+async def test_verify_step_success_succeeded():
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_verdict_resp("succeeded"))):
+        v = await assist_guide.verify_step_success(
+            title="t", task_prompt="p", tool="shell", evidence="ok, done",
+        )
+    assert v["outcome"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_verify_step_success_failed_carries_reason():
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_verdict_resp("failed", reason="ModuleNotFoundError", suggestion="pip install x"))):
+        v = await assist_guide.verify_step_success(
+            title="t", task_prompt="p", tool="shell", evidence="Traceback ...",
+        )
+    assert v["outcome"] == "failed"
+    assert "ModuleNotFoundError" in v["reason"]
+    assert v["suggestion"] == "pip install x"
+
+
+@pytest.mark.asyncio
+async def test_verify_step_success_failsoft_on_no_tool_call():
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_verdict_resp("failed", success=False))):
+        v = await assist_guide.verify_step_success(
+            title="t", task_prompt="p", tool="shell", evidence="x",
+        )
+    assert v["outcome"] == "unclear"
+    assert v["reason"] == "verification unavailable"
+
+
+@pytest.mark.asyncio
+async def test_verify_step_success_failsoft_on_exception():
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(side_effect=RuntimeError("boom"))):
+        v = await assist_guide.verify_step_success(
+            title="t", task_prompt="p", tool="shell", evidence="x",
+        )
+    assert v["outcome"] == "unclear"
+
+
+@pytest.mark.asyncio
+async def test_verify_step_success_invalid_outcome_coerced_to_unclear():
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_verdict_resp("maybe"))):
+        v = await assist_guide.verify_step_success(
+            title="t", task_prompt="p", tool="shell", evidence="x",
+        )
+    assert v["outcome"] == "unclear"
+
+
+# ── §17.487: generate_fix ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_generate_fix_ready():
+    with patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(return_value=_resp("## Diagnosis\nmissing pkg\n## Fix\napt install x"))):
+        res = await assist_guide.generate_fix(
+            ctx=_ctx("shell"), error_text="command not found: x",
+            research=False, node_key="T3",
+        )
+    assert res["status"] == "ready"
+    assert "## Fix" in res["fix"]
+
+
+@pytest.mark.asyncio
+async def test_generate_fix_includes_error_and_env_in_prompt():
+    captured = {}
+
+    async def _capture_chat(messages, **kw):
+        captured["user"] = messages[1]["content"]
+        return _resp("fixed steps")
+
+    with patch.object(assist_guide.model_router, "chat", new=_capture_chat):
+        await assist_guide.generate_fix(
+            ctx=_ctx("shell"), error_text="permission denied",
+            research=False, node_key="T3",
+            environment={"profile": "Ubuntu", "substitutions": {}},
+        )
+    assert "permission denied" in captured["user"]
+    assert "Error the operator hit" in captured["user"]
+    assert "Operator environment" in captured["user"]
+
+
+@pytest.mark.asyncio
+async def test_generate_fix_failsoft_empty():
+    with patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(return_value=_resp(""))):
+        res = await assist_guide.generate_fix(
+            ctx=_ctx("LLM"), error_text="x", research=False, node_key="T3",
+        )
+    assert res["status"] == "failed"
+    assert res["fix"] == ""

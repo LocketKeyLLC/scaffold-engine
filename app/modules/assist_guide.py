@@ -96,6 +96,31 @@ Hard rules:
 
 Produce the walkthrough for THIS step only. Nothing more."""
 
+GUIDE_SYSTEM_FIX = """You are a hands-on co-pilot helping a human operator who hit a problem while performing ONE step of a larger plan. They will paste the error / what went wrong; you diagnose it and give them the exact commands to recover and finish the step.
+
+Output structure (in this order, omit sections that don't apply):
+- ## Diagnosis — what the error means and the most likely cause, in 1-3 sentences. Be concrete; name the actual failing thing.
+- ## Fix — numbered, copy-paste-ready commands or edits that resolve it. Use fenced code blocks. If there are multiple plausible causes, lead with the most likely and label the alternatives.
+- ## Then — what to run to confirm it's fixed and how to complete the original step.
+- ## If that fails — the next thing to check or try, so the operator isn't stuck.
+
+Hard rules:
+- Address THIS error and THIS task. Don't restate the whole step from scratch unless the fix requires it.
+- Never write past-tense narration ("Fixed it", "Ran it and it worked"). The operator runs your commands.
+- Never invent concrete values (versions, paths, package names, ports) absent from the task, the error, the environment, or the research block — use a <PLACEHOLDER>.
+- If a confirmed-research block is provided, treat those facts as authoritative (correct package name, current flag, known-bug workaround).
+- If the error text is too vague to diagnose, say exactly what additional output you need (e.g. "paste the full traceback" / "run `<cmd>` and share the output") instead of guessing.
+- No emoji, no filler closers, no completion checkmarks.
+
+Produce the troubleshooting help for THIS error only. Nothing more."""
+
+_FIX_USER_TRAILER = (
+    "---\n\n"
+    "The operator performed the step above and hit the error shown. Diagnose it "
+    "and give the copy-paste commands to recover and complete the step, following "
+    "the output structure and hard rules in your system instructions exactly."
+)
+
 _GUIDE_USER_TRAILER = (
     "---\n\n"
     "Using the task and any upstream/research context above, write the "
@@ -263,6 +288,102 @@ def _render_research_block(sources: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def render_environment_block(environment: dict | None) -> str:
+    """§17.487 — the operator's environment so the model emits concrete commands.
+
+    ``environment`` = ``{"profile": str, "substitutions": {KEY: value}}`` (stored on
+    ``assist_sessions.metadata.environment``). Returns "" when empty so callers no-op.
+    """
+    if not environment:
+        return ""
+    profile = (environment.get("profile") or "").strip()
+    subs = environment.get("substitutions") or {}
+    if not profile and not subs:
+        return ""
+    parts = [
+        "## Operator environment (use these concrete values; emit a <PLACEHOLDER> "
+        "ONLY for values not given here)"
+    ]
+    if profile:
+        parts.append(profile)
+    if subs:
+        parts.append("\n".join(f"- {k} = {v}" for k, v in subs.items()))
+    return "\n\n".join(parts)
+
+
+# ── Success verification (§17.487 — did the submitted step actually work?) ─
+
+_JUDGE_OUTCOME_TOOL = model_router.Tool(
+    name="judge_step_outcome",
+    description=(
+        "Judge whether the operator's pasted evidence shows the step SUCCEEDED. "
+        "Look for failure signals: error messages, tracebacks, non-zero exit "
+        "codes, 'command not found', 'permission denied', 'No such file', empty "
+        "output where output was expected. Be conservative — only 'failed' on a "
+        "clear failure signal; 'unclear' when ambiguous or there's not enough to tell."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "outcome": {"type": "string", "enum": ["succeeded", "failed", "unclear"]},
+            "reason": {"type": "string", "description": "One sentence, citing the signal."},
+            "suggestion": {"type": "string", "description": "If failed: the likely next move."},
+        },
+        "required": ["outcome", "reason"],
+    },
+)
+
+
+async def verify_step_success(
+    *, title: str, task_prompt: str, tool: str, evidence: str,
+    environment: Optional[dict] = None,
+) -> dict:
+    """Judge whether pasted evidence indicates the step worked. Fail-soft.
+
+    Returns ``{outcome, reason, suggestion}``. On any model/parse failure
+    returns ``outcome='unclear'`` so verification never blocks a submit it
+    couldn't assess.
+    """
+    role = settings.assist_guide_model_role
+    env_block = render_environment_block(environment)
+    user = (
+        f"Task: {title}\n\n{task_prompt}\n\n"
+        + (f"{env_block}\n\n" if env_block else "")
+        + f"Operator's pasted evidence / output for this step:\n{evidence[:6000]}\n\n"
+        "Call judge_step_outcome."
+    )
+    try:
+        resp = await model_router.tool_call(
+            [
+                {"role": "system", "content": (
+                    "You verify whether a human operator's step succeeded, from the "
+                    "output they pasted. Conservative: 'failed' only on a clear "
+                    "failure signal, 'unclear' when you can't tell."
+                )},
+                {"role": "user", "content": user},
+            ],
+            [_JUDGE_OUTCOME_TOOL],
+            role=role,
+            temperature=0.1,
+            max_tokens=1024,
+            tool_choice="auto",
+        )
+    except Exception as exc:
+        logger.warning("assist_verify_step_failed: %s", exc)
+        return {"outcome": "unclear", "reason": "verification unavailable", "suggestion": ""}
+    if not resp.success or not resp.tool_calls:
+        return {"outcome": "unclear", "reason": "verification unavailable", "suggestion": ""}
+    args = resp.tool_calls[0].arguments or {}
+    outcome = args.get("outcome")
+    if outcome not in ("succeeded", "failed", "unclear"):
+        outcome = "unclear"
+    return {
+        "outcome": outcome,
+        "reason": (args.get("reason") or "").strip(),
+        "suggestion": (args.get("suggestion") or "").strip(),
+    }
+
+
 # ── Generation ───────────────────────────────────────────────────────────
 
 
@@ -273,13 +394,18 @@ def _utcnow_iso() -> str:
 def _build_guide_user_prompt(
     ctx: StepContext, node_description: Optional[str],
     sources: list[dict], refine_hint: Optional[str],
+    environment: Optional[dict] = None,
 ) -> str:
     """Compose the user message: the same upstream-last task the executor
-    would see, plus a confirmed-research block and a human-walkthrough trailer.
+    would see, plus the operator environment, a confirmed-research block, and
+    a human-walkthrough trailer.
     """
     parts: list[str] = [ctx.assembled_prompt]
     if node_description and node_description.strip() and node_description.strip() not in ctx.assembled_prompt:
         parts.append(f"Task description: {node_description.strip()}")
+    env_block = render_environment_block(environment)
+    if env_block:
+        parts.append(env_block)
     research_block = _render_research_block(sources)
     if research_block:
         parts.append(research_block)
@@ -299,6 +425,7 @@ async def generate_guidance(
     refine_hint: Optional[str] = None,
     node_key: str,
     domain: Optional[str] = None,
+    environment: Optional[dict] = None,
 ) -> dict:
     """Generate (do not persist) the human walkthrough for one step.
 
@@ -321,7 +448,9 @@ async def generate_guidance(
         )
 
     system = guide_system_for_tool(ctx.tool)
-    user = _build_guide_user_prompt(ctx, node_description, sources, refine_hint)
+    user = _build_guide_user_prompt(
+        ctx, node_description, sources, refine_hint, environment=environment,
+    )
 
     resp = await chat_until_nonempty(
         model_router.chat,
@@ -353,6 +482,72 @@ async def generate_guidance(
             node_key, ctx.tool, meta["error"],
         )
     return {"guidance": text_out, "guidance_meta": meta, "status": status}
+
+
+async def generate_fix(
+    *,
+    ctx: StepContext,
+    error_text: str,
+    research: bool,
+    environment: Optional[dict] = None,
+    node_key: str,
+    domain: Optional[str] = None,
+) -> dict:
+    """Diagnose an operator-reported error on a step and produce corrected steps.
+
+    Conversational (not persisted). Reuses the research pre-pass with the error
+    folded into the task text so unknown-detection surfaces error-specific
+    lookups. Returns ``{"fix": str, "guidance_meta": dict, "status": str}``
+    (``fix`` key so it can't be confused with persisted guidance). Fail-soft.
+    """
+    role = settings.assist_guide_model_role
+
+    sources: list[dict] = []
+    if research:
+        sources = await _research_prepass(
+            task_text=f"{ctx.base_prompt}\n\nOperator hit this error:\n{error_text}",
+            tool=ctx.tool,
+            role=role,
+            max_queries=settings.assist_guide_max_research_queries,
+            node_key=node_key,
+            domain=domain,
+        )
+
+    parts = [ctx.assembled_prompt]
+    env_block = render_environment_block(environment)
+    if env_block:
+        parts.append(env_block)
+    parts.append(f"## Error the operator hit\n{error_text.strip()}")
+    research_block = _render_research_block(sources)
+    if research_block:
+        parts.append(research_block)
+    parts.append(_FIX_USER_TRAILER)
+    user = "\n\n".join(parts)
+
+    resp = await chat_until_nonempty(
+        model_router.chat,
+        [
+            {"role": "system", "content": GUIDE_SYSTEM_FIX},
+            {"role": "user", "content": user},
+        ],
+        {"role": role},
+        temperature=0.3,
+        max_tokens=settings.assist_guide_max_tokens,
+        draws=3,
+        label="assist_fix",
+    )
+    text_out = (resp.text or "").strip() if (resp and resp.success) else ""
+    status = "ready" if text_out else "failed"
+    meta: dict[str, Any] = {
+        "model": getattr(resp, "model", "") if resp else "",
+        "tool": ctx.tool,
+        "research_sources": [{"query": s["query"], "kind": s["kind"]} for s in sources],
+        "status": status,
+        "generated_at": _utcnow_iso(),
+    }
+    if status == "failed":
+        meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"
+    return {"fix": text_out, "guidance_meta": meta, "status": status}
 
 
 # ── Persistence (cache write + idempotent read) ──────────────────────────
@@ -425,6 +620,7 @@ async def ensure_guidance(
     refine_hint: Optional[str] = None,
     force: bool = False,
     domain: Optional[str] = None,
+    environment: Optional[dict] = None,
     db,
 ) -> dict:
     """Return guidance, generating + persisting only when needed.
@@ -446,6 +642,7 @@ async def ensure_guidance(
         refine_hint=refine_hint,
         node_key=node_key,
         domain=domain,
+        environment=environment,
     )
     await persist_guidance(
         session_id=session_id,

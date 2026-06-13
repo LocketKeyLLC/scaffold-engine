@@ -1664,6 +1664,8 @@ class Pipeline:
         "| `/assist next [<session_id>]` | Fetch the next pending step (auto-generates a walkthrough). |\n"
         "| `/assist guide [<session_id>] [refine…]` | (Re)generate the step's walkthrough; add a hint like `redo for macOS`. |\n"
         "| `/assist research [<session_id>] <question>` | Look up + confirm a fact (versions, flags, package names). |\n"
+        "| `/assist env [<session_id>] [<text> / KEY=value]` | Set your OS/shell/tools (or concrete values) so commands are real, not placeholders. No args shows current. |\n"
+        "| `/assist fix [<session_id>] <error>` | Hit an error? Get a diagnosis + corrected copy-paste commands. |\n"
         "| `` /assist submit [<session_id>] [<node_key>]\\n```evidence``` `` | Submit human evidence. Both args optional after `/assist next`. |\n"
         "| `/assist skip [<session_id>] [<node_key>]` | Skip a node. |\n"
         "| `/assist handoff [<session_id>] <node_key> [single\\|all]` | Hand a node back to autonomous executor. |\n"
@@ -1855,6 +1857,24 @@ class Pipeline:
     ) -> Generator[str, None, None]:
         yield from _assist.assist_research_cmd(
             self, session_id, question, node_key=node_key, chat_id=chat_id,
+        )
+
+    def _assist_env(
+        self, session_id: str, *, profile: str | None = None,
+        substitutions: dict | None = None, show: bool = False,
+        chat_id: str | None = None,
+    ) -> Generator[str, None, None]:
+        yield from _assist.assist_env_cmd(
+            self, session_id, profile=profile, substitutions=substitutions,
+            show=show, chat_id=chat_id,
+        )
+
+    def _assist_fix(
+        self, session_id: str, error_text: str, *,
+        node_key: str | None = None, chat_id: str | None = None,
+    ) -> Generator[str, None, None]:
+        yield from _assist.assist_fix_cmd(
+            self, session_id, error_text, node_key=node_key, chat_id=chat_id,
         )
 
     # ------------------------------------------------------------------

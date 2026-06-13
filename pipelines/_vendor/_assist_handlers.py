@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import queue as _q
+import re
 import sys
 import threading as _th
 from typing import Generator
@@ -225,6 +226,41 @@ def render_guidance(d: dict) -> str:
     return out
 
 
+def render_fix(d: dict) -> str:
+    """§17.487 — format a /assist/{sid}/fix response (diagnosis + corrected steps)."""
+    node_key = d.get("node_key", "?")
+    if d.get("status") != "ready" or not d.get("fix"):
+        return (
+            f"⚠️ Couldn't generate a fix for `{node_key}` right now. "
+            f"Try `/assist research <the error>` for raw sources, or rephrase."
+        )
+    out = f"## 🔧 Troubleshooting `{node_key}`\n\n{d['fix']}\n"
+    meta = d.get("guidance_meta") or {}
+    sources = meta.get("research_sources") or []
+    if sources:
+        cites = ", ".join(f"`{s.get('kind')}`: {s.get('query')}" for s in sources)
+        out += f"\n_Confirmed via research — {cites}._\n"
+    return out
+
+
+def render_environment(env: dict | None) -> str:
+    """§17.487 — show the session's operator environment."""
+    env = env or {}
+    profile = (env.get("profile") or "").strip()
+    subs = env.get("substitutions") or {}
+    if not profile and not subs:
+        return (
+            "_No environment set._ Set one so walkthroughs use concrete commands:\n"
+            "`/assist env Ubuntu 24.04, apt, bash` or `/assist env HOST_IP=10.0.0.5`."
+        )
+    out = "**Operator environment**\n\n"
+    if profile:
+        out += f"- Profile: {profile}\n"
+    for k, v in subs.items():
+        out += f"- `{k}` = `{v}`\n"
+    return out
+
+
 def render_research(d: dict) -> str:
     """§17.486 — format a /assist/{sid}/research response."""
     q = d.get("question", "?")
@@ -272,7 +308,7 @@ def handle_assist(
         arg1 = parts[1]
         # /assist <subcommand> ... — route to subcommand handler
         if arg1 in ("next", "submit", "skip", "handoff", "pause", "resume",
-                    "done", "friction", "guide", "research"):
+                    "done", "friction", "guide", "research", "env", "fix"):
             yield from dispatch_assist_sub(
                 pipe, arg1, parts[2:], fenced,
                 chat_id=chat_id, raw_head=head,
@@ -409,6 +445,31 @@ def dispatch_assist_sub(
         yield from assist_research_cmd(
             pipe, sid, question, node_key=node_key, chat_id=chat_id,
         ); return
+    if sub == "env":
+        if not sid:
+            yield no_session_msg("env"); return
+        text_arg = (fenced or " ".join(rest)).strip()
+        if not text_arg:
+            yield from assist_env_cmd(pipe, sid, show=True, chat_id=chat_id); return
+        # Pull out KEY=value substitutions; the remaining free text is the
+        # profile. `/assist env Ubuntu 24.04 HOST_IP=10.0.0.5` → profile +1 sub.
+        subs = dict(re.findall(r"([A-Za-z_]\w*)=(\S+)", text_arg))
+        profile_text = re.sub(r"[A-Za-z_]\w*=\S+", "", text_arg).strip(" ,\t") or None
+        yield from assist_env_cmd(
+            pipe, sid, profile=profile_text, substitutions=subs or None,
+            chat_id=chat_id,
+        ); return
+    if sub == "fix":
+        if not sid:
+            yield no_session_msg("fix"); return
+        error_text = (fenced or " ".join(rest)).strip()
+        if not error_text:
+            yield "Usage: `/assist fix [<session_id>] <error / what went wrong>`"; return
+        recalled = assist_recall(pipe, chat_id)
+        node_key = (recalled or {}).get("last_node_key")
+        yield from assist_fix_cmd(
+            pipe, sid, error_text, node_key=node_key, chat_id=chat_id,
+        ); return
     yield pipe._ASSIST_HELP
 
 
@@ -448,6 +509,9 @@ def assist_start(
     yield (
         f"🤝 **Assist session started** — `{sid}`\n\n"
         f"Job `{resp_job_id}` is now in `assisted_executing` ({pending} pending step(s)).\n\n"
+        f"💡 Tip: set your environment with `/assist env <OS, shell, tools>` "
+        f"(e.g. `/assist env Ubuntu 24.04, apt, bash`) so walkthroughs use concrete "
+        f"commands. Hit an error on any step? `/assist fix <the error>`.\n\n"
         f"Fetching first step...\n\n---\n\n"
     )
     yield from assist_next(pipe, sid, chat_id=chat_id)
@@ -544,6 +608,20 @@ def assist_submit(
         # the banner when status is omitted from a non-standard reply.
         status_val = d.get("status", "?")
         yield f"ℹ️ Step `{node_key}` already `{status_val}`. No change."; return
+    # §17.487 — hard-block path: the success-check judged this a failure and
+    # `assist_block_on_failed_verify` is on, so the node was NOT marked done.
+    if d.get("status") == "verification_failed":
+        v = d.get("success_verdict") or {}
+        msg = (
+            f"🛑 Step `{node_key}` looks like it **failed** — not marked done.\n\n"
+            f"_{v.get('reason', '')}_\n\n"
+        )
+        if v.get("suggestion"):
+            msg += f"Suggested next move: {v['suggestion']}\n\n"
+        msg += (
+            "Fix it and resubmit, or get help: `/assist fix <the error>`."
+        )
+        yield msg; return
     next_nk = d.get("next_node_key")
     # Update remembered node so the next `/assist submit` (no args) is
     # right. None on terminal => clear it so we don't suggest a
@@ -567,6 +645,17 @@ def assist_submit(
             "the assist step, but the DAG node was NOT overwritten by this "
             "call. Inspect with `/assist status` and re-run if needed."
         )
+    # §17.487 — warn mode: surface the success verdict without blocking.
+    verdict = d.get("success_verdict") or {}
+    outcome = verdict.get("outcome")
+    if outcome == "failed":
+        msg += (
+            f"\n\n⚠️ **This may have failed.** {verdict.get('reason', '')}\n"
+            f"If so, run `/assist fix <the error>` or re-do and resubmit."
+        )
+    elif (outcome == "unclear" and verdict.get("reason")
+          and verdict["reason"] != "verification unavailable"):
+        msg += f"\n\n_Couldn't confirm success: {verdict['reason']}_"
     yield msg
 
 
@@ -755,6 +844,68 @@ def assist_research_cmd(
     if not isinstance(d, dict):
         yield f"❌ Assist research: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
     yield render_research(d)
+
+
+def assist_env_cmd(
+    pipe, session_id: str, *, profile: str | None = None,
+    substitutions: dict | None = None, show: bool = False,
+    chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.487 — GET/PUT the session's operator environment."""
+    base = f"{pipe.valves.orchestrator_url}/assist/{session_id}/env"
+    try:
+        if show:
+            r = _ss().get(base, headers=pipe._auth_headers(),
+                          timeout=pipe.valves.request_timeout)
+        else:
+            r = _ss().put(
+                base,
+                json={"profile": profile, "substitutions": substitutions or {}},
+                headers=pipe._auth_headers(),
+                timeout=pipe.valves.request_timeout,
+            )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code == 404:
+        yield f"❌ Session `{session_id}` not found."; return
+    if r.status_code >= 400:
+        yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+    try:
+        d = r.json()
+    except ValueError as e:
+        yield f"❌ Assist env: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+    if not isinstance(d, dict):
+        yield f"❌ Assist env: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
+    env_block = render_environment(d.get("environment"))
+    if show:
+        yield env_block
+    else:
+        yield f"✅ Environment updated.\n\n{env_block}"
+
+
+def assist_fix_cmd(
+    pipe, session_id: str, error_text: str, *,
+    node_key: str | None = None, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.487 — POST /assist/{sid}/fix and render the diagnosis + fix."""
+    try:
+        r = _ss().post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/fix",
+            json={"error": error_text, "node_key": node_key},
+            headers=pipe._auth_headers(),
+            timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code >= 400:
+        yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+    try:
+        d = r.json()
+    except ValueError as e:
+        yield f"❌ Assist fix: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+    if not isinstance(d, dict):
+        yield f"❌ Assist fix: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
+    yield render_fix(d)
 
 
 def assist_simple_post(
