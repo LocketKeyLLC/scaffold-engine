@@ -292,3 +292,43 @@ class TestSubmitLearnedSubstitutions:
         with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
             out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
         assert "Learned for later steps" not in out
+
+
+# ── §17.491: sandbox-grounded verdict rendering ─────────────────────────────
+
+
+class TestSubmitSandboxVerdictRender:
+
+    def _post_session(self, body):
+        sess = MagicMock()
+        sess.post.return_value = _make_response(200, body)
+        return sess
+
+    def test_warn_failed_sandbox_says_ran(self, pipe):
+        body = {"status": "committed", "no_op": False, "next_node_key": "T3",
+                "mirror_divergence": False,
+                "success_verdict": {"outcome": "failed", "reason": "NameError: foo",
+                                    "grounded_by": "sandbox"}}
+        with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "code", chat_id=None))
+        assert "Ran your code in the sandbox" in out
+        assert "NameError" in out
+
+    def test_succeeded_sandbox_shows_verified(self, pipe):
+        body = {"status": "committed", "no_op": False, "next_node_key": "T3",
+                "mirror_divergence": False,
+                "success_verdict": {"outcome": "succeeded", "reason": "ok",
+                                    "grounded_by": "sandbox+model"}}
+        with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "code", chat_id=None))
+        assert "Verified by running your code in the sandbox" in out
+
+    def test_block_sandbox_says_ran(self, pipe):
+        body = {"status": "verification_failed", "no_op": False, "committed": False,
+                "next_node_key": None,
+                "success_verdict": {"outcome": "failed", "reason": "exit 1 traceback",
+                                    "grounded_by": "sandbox", "suggestion": "fix it"}}
+        with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "code", chat_id=None))
+        assert "Ran your code in the sandbox" in out
+        assert "not marked done" in out

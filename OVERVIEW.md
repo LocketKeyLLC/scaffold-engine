@@ -1865,9 +1865,9 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (refreshed post-§17.490, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
+### 14.1 Test counts (refreshed post-§17.491, 2026-06-13 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
 
-**Current local baseline (`make test`, full dev-image suite):** **3779 passed, 0 failed, 0 skipped in 25:21** — measured 2026-06-13 after §17.490, fully clean (0 skips). Per-§ measured lineage: §17.486 **3734** → §17.487 **3764** (+30 Tier-1 assist tests) → §17.488 **3766** (+2 spec redraw tests) → §17.489 **3769** (+2 topology redraw tests + the `test_topology_select_db` live test flipping skip→pass) → §17.490 **3779** (+10 auto-learn-substitutions tests). Both chronic live-LLM stragglers stay green via the §17.488/§17.489 `chat_until_nonempty` guards. Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
+**Current local baseline (`make test`, full dev-image suite):** **3787 passed, 0 failed, 0 skipped in 25:05** — measured 2026-06-13 after §17.491, fully clean (0 skips). Per-§ measured lineage: §17.486 **3734** → §17.487 **3764** (+30 Tier-1 assist tests) → §17.488 **3766** (+2 spec redraw tests) → §17.489 **3769** (+2 topology redraw tests + the `test_topology_select_db` live test flipping skip→pass) → §17.490 **3779** (+10 auto-learn-substitutions tests) → §17.491 **3787** (+8 sandbox-grounded codegen-verify tests). Both chronic live-LLM stragglers stay green via the §17.488/§17.489 `chat_until_nonempty` guards. Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
 
 **CI baseline (`test.yml`, the `-k "not integration"` subset):** **~3596 passed (projected), 14 skipped, 91 deselected (the integration tests)** — **no fresh CI run this cycle: GitHub Actions is org-billing-blocked**, so `main` merges (#64/#65/#66) are gated by local `make test` + `make ci-tier-0` instead. Projected from the local measure via the standing reconciliation: 3701 collected − 14 (service-needing, skipped in CI but pass live here) − 91 (integration, deselected in CI) = 3596. Last CI-measured green run was `27311904558` (§17.470, 3473 passed); the §17.472–484 additions are all non-integration unit/web tests, so `deselected` is carried at 91.
 
@@ -21980,6 +21980,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **Verification.** Full SDK suite — **142 passed** (4 new: sync + async `follow_redirects is False`, stream connect→`ConnectionError`, stream timeout→`TimeoutError` — the missing regression for S2). ci-tier-0 green (no vendored file touched). Coverage honesty: deep-read the 6 core modules + scanned resource wrappers; did not exhaustively read the thin resource method bodies.
 
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
+### §17.491 Feature — Assist Mode sandbox-grounded codegen verification (2026-06-13)
+
+§17.487 verified a submitted step by LLM-judging the pasted evidence. For **codegen** steps that's a text judgment of code; this grounds it by **actually running the code** in the `scaffold-coderunner` sandbox (already live: `CODERUNNER_URL` set, `CODEGEN_EXECUTION_CHECK_ENABLED=true`).
+
+**How.** `assist_guide.verify_step_success` gained a sandbox pre-check (codegen-tool only, gated by the existing `codegen_execution_check_enabled` + `coderunner_url` — no new config). It reuses the executor's `app/sandbox/codegen_check.codegen_exec_smoke` classifier (`pass | skip | fail`):
+- **`fail`** (definite runtime error) → authoritatively returns `outcome='failed'`, `grounded_by='sandbox'`, and **skips the LLM call** — a pasted error or broken code is caught deterministically, not by a maybe-judgment.
+- **`pass` / `skip`** → fall through to the LLM verdict (which judges *task-fit* — "it runs" is necessary, not sufficient). A `pass` is recorded as `grounded_by='sandbox+model'` and, on a `succeeded` verdict, the reason notes "code executed cleanly in the sandbox".
+
+Same gate as the executor's verify chain, same fail-soft classifier (sandbox off/unreachable/unresolved-sibling-import/timeout → `skip` → LLM decides). The block path (`assist_block_on_failed_verify`) inherits this for free — a sandbox `fail` is just `outcome='failed'`. Pipeline render distinguishes sandbox-grounded verdicts ("🛑 Ran your code in the sandbox — it failed" / "✓ Verified by running your code in the sandbox").
+
+**Verification.** `tests/test_assist_guide.py` +5 (sandbox fail overrides + skips LLM / pass→LLM as sandbox+model / skip→LLM / non-codegen skips sandbox / disabled skips), `tests/test_scaffold_router_assist_guide.py` +3 (sandbox failed/succeeded/block render). **Live smoke (real sandbox):** broken `print(undefined_var)` → `failed`/`grounded_by=sandbox` with the actual NameError; clean `print("hello")` → ran cleanly → LLM judged (`sandbox+model`). Full `make test`: **3787 passed, 0 failed, 0 skipped** — see §14.1. **Scope: verification only** (testing a `/assist fix`'s proposed code in the sandbox is a possible follow-up — fixes are often partial snippets that would mostly `skip`).
 
 ---
 

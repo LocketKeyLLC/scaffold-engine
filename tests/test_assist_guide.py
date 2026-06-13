@@ -513,3 +513,74 @@ async def test_extract_substitutions_failsoft():
             guidance_text="<HOST_IP>", evidence="x",
         )
     assert out2 == {}
+
+
+# ── §17.491: sandbox-grounded codegen verification ─────────────────────────
+
+
+async def test_verify_codegen_sandbox_fail_overrides_and_skips_llm(monkeypatch):
+    monkeypatch.setattr(assist_guide.settings, "codegen_execution_check_enabled", True)
+    monkeypatch.setattr(assist_guide.settings, "coderunner_url", "http://x")
+    with patch.object(assist_guide, "_sandbox_codegen_check",
+                      new=AsyncMock(return_value={"verdict": "fail", "reason": "NameError: foo"})), \
+         patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()) as tc:
+        v = await assist_guide.verify_step_success(
+            title="t", task_prompt="p", tool="codegen", evidence="print(foo)",
+        )
+    assert v["outcome"] == "failed"
+    assert v["grounded_by"] == "sandbox"
+    assert "NameError" in v["reason"]
+    tc.assert_not_called()  # a definite runtime error short-circuits the LLM
+
+
+async def test_verify_codegen_sandbox_pass_falls_through_to_llm(monkeypatch):
+    monkeypatch.setattr(assist_guide.settings, "codegen_execution_check_enabled", True)
+    monkeypatch.setattr(assist_guide.settings, "coderunner_url", "http://x")
+    with patch.object(assist_guide, "_sandbox_codegen_check",
+                      new=AsyncMock(return_value={"verdict": "pass", "reason": "ran cleanly"})), \
+         patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_verdict_resp("succeeded", reason="matches the task"))):
+        v = await assist_guide.verify_step_success(
+            title="t", task_prompt="p", tool="codegen", evidence="print(1)",
+        )
+    assert v["outcome"] == "succeeded"          # LLM judged task-fit
+    assert v["grounded_by"] == "sandbox+model"  # and it actually ran
+    assert "sandbox" in v["reason"].lower()
+
+
+async def test_verify_codegen_sandbox_skip_uses_llm(monkeypatch):
+    monkeypatch.setattr(assist_guide.settings, "codegen_execution_check_enabled", True)
+    monkeypatch.setattr(assist_guide.settings, "coderunner_url", "http://x")
+    with patch.object(assist_guide, "_sandbox_codegen_check",
+                      new=AsyncMock(return_value={"verdict": "skip", "reason": "no python block"})), \
+         patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_verdict_resp("succeeded"))):
+        v = await assist_guide.verify_step_success(
+            title="t", task_prompt="p", tool="codegen", evidence="some prose",
+        )
+    assert v["outcome"] == "succeeded"
+    assert v["grounded_by"] == "model"
+
+
+async def test_verify_non_codegen_skips_sandbox(monkeypatch):
+    monkeypatch.setattr(assist_guide.settings, "codegen_execution_check_enabled", True)
+    monkeypatch.setattr(assist_guide.settings, "coderunner_url", "http://x")
+    with patch.object(assist_guide, "_sandbox_codegen_check", new=AsyncMock()) as sb, \
+         patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_verdict_resp("succeeded"))):
+        v = await assist_guide.verify_step_success(
+            title="t", task_prompt="p", tool="shell", evidence="active",
+        )
+    sb.assert_not_called()
+    assert v["grounded_by"] == "model"
+
+
+async def test_verify_codegen_sandbox_disabled_skips(monkeypatch):
+    monkeypatch.setattr(assist_guide.settings, "codegen_execution_check_enabled", False)
+    with patch.object(assist_guide, "_sandbox_codegen_check", new=AsyncMock()) as sb, \
+         patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_verdict_resp("succeeded"))):
+        await assist_guide.verify_step_success(
+            title="t", task_prompt="p", tool="codegen", evidence="print(1)",
+        )
+    sb.assert_not_called()  # gated off → no sandbox call

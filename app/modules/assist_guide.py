@@ -335,17 +335,52 @@ _JUDGE_OUTCOME_TOOL = model_router.Tool(
 )
 
 
+async def _sandbox_codegen_check(evidence: str) -> Optional[dict]:
+    """§17.491 — run pasted codegen evidence in the scaffold-coderunner sandbox.
+
+    Reuses the executor's `codegen_exec_smoke` classifier (pass | skip | fail).
+    Returns ``{verdict, reason}`` or None on any error (fail-soft → the caller
+    falls back to the LLM verdict).
+    """
+    try:
+        from app.sandbox.codegen_check import codegen_exec_smoke
+        chk = await codegen_exec_smoke(evidence)
+        return {"verdict": chk.verdict, "reason": chk.reason}
+    except Exception as exc:
+        logger.warning("assist_sandbox_check_failed: %s", exc)
+        return None
+
+
 async def verify_step_success(
     *, title: str, task_prompt: str, tool: str, evidence: str,
     environment: Optional[dict] = None,
 ) -> dict:
     """Judge whether pasted evidence indicates the step worked. Fail-soft.
 
-    Returns ``{outcome, reason, suggestion}``. On any model/parse failure
-    returns ``outcome='unclear'`` so verification never blocks a submit it
-    couldn't assess.
+    Returns ``{outcome, reason, suggestion, grounded_by}``. On any model/parse
+    failure returns ``outcome='unclear'`` so verification never blocks a submit
+    it couldn't assess.
+
+    §17.491 — for ``codegen`` steps with the sandbox enabled, the pasted code is
+    RUN first: a definite runtime error (`fail`) authoritatively overrides to
+    ``failed`` and skips the LLM call; ``pass``/``skip`` fall through to the LLM
+    (which judges task-fit — "it runs" is necessary, not sufficient).
     """
     role = settings.assist_guide_model_role
+
+    # Sandbox pre-check (codegen only, sandbox on). Deterministic ground truth.
+    sandbox: Optional[dict] = None
+    if (tool or "").lower() == "codegen" and settings.codegen_execution_check_enabled \
+            and (settings.coderunner_url or "").strip():
+        sandbox = await _sandbox_codegen_check(evidence)
+        if sandbox and sandbox["verdict"] == "fail":
+            return {
+                "outcome": "failed",
+                "reason": sandbox["reason"],
+                "suggestion": "Fix the runtime error and resubmit — `/assist fix <the error>` can help.",
+                "grounded_by": "sandbox",
+            }
+
     env_block = render_environment_block(environment)
     user = (
         f"Task: {title}\n\n{task_prompt}\n\n"
@@ -371,17 +406,28 @@ async def verify_step_success(
         )
     except Exception as exc:
         logger.warning("assist_verify_step_failed: %s", exc)
-        return {"outcome": "unclear", "reason": "verification unavailable", "suggestion": ""}
+        return {"outcome": "unclear", "reason": "verification unavailable",
+                "suggestion": "", "grounded_by": "model"}
     if not resp.success or not resp.tool_calls:
-        return {"outcome": "unclear", "reason": "verification unavailable", "suggestion": ""}
+        return {"outcome": "unclear", "reason": "verification unavailable",
+                "suggestion": "", "grounded_by": "model"}
     args = resp.tool_calls[0].arguments or {}
     outcome = args.get("outcome")
     if outcome not in ("succeeded", "failed", "unclear"):
         outcome = "unclear"
+    reason = (args.get("reason") or "").strip()
+    # §17.491 — the code ran cleanly in the sandbox; the LLM judged task-fit.
+    # Record that the success is sandbox-backed, not just a text judgment.
+    grounded_by = "model"
+    if sandbox and sandbox["verdict"] == "pass":
+        grounded_by = "sandbox+model"
+        if outcome == "succeeded":
+            reason = (reason + " (code executed cleanly in the sandbox)").strip()
     return {
         "outcome": outcome,
-        "reason": (args.get("reason") or "").strip(),
+        "reason": reason,
         "suggestion": (args.get("suggestion") or "").strip(),
+        "grounded_by": grounded_by,
     }
 
 

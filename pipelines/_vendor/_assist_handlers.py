@@ -612,10 +612,13 @@ def assist_submit(
     # `assist_block_on_failed_verify` is on, so the node was NOT marked done.
     if d.get("status") == "verification_failed":
         v = d.get("success_verdict") or {}
-        msg = (
-            f"🛑 Step `{node_key}` looks like it **failed** — not marked done.\n\n"
-            f"_{v.get('reason', '')}_\n\n"
+        ran = "sandbox" in (v.get("grounded_by") or "")
+        head = (
+            f"🛑 Ran your code in the sandbox — it **failed**. `{node_key}` not marked done."
+            if ran else
+            f"🛑 Step `{node_key}` looks like it **failed** — not marked done."
         )
+        msg = f"{head}\n\n_{v.get('reason', '')}_\n\n"
         if v.get("suggestion"):
             msg += f"Suggested next move: {v['suggestion']}\n\n"
         msg += (
@@ -646,13 +649,19 @@ def assist_submit(
             "call. Inspect with `/assist status` and re-run if needed."
         )
     # §17.487 — warn mode: surface the success verdict without blocking.
+    # §17.491 — when grounded_by includes 'sandbox', the code was actually run.
     verdict = d.get("success_verdict") or {}
     outcome = verdict.get("outcome")
+    ran = "sandbox" in (verdict.get("grounded_by") or "")
     if outcome == "failed":
+        head = ("🛑 **Ran your code in the sandbox — it errored.**" if ran
+                else "⚠️ **This may have failed.**")
         msg += (
-            f"\n\n⚠️ **This may have failed.** {verdict.get('reason', '')}\n"
-            f"If so, run `/assist fix <the error>` or re-do and resubmit."
+            f"\n\n{head} {verdict.get('reason', '')}\n"
+            f"Run `/assist fix <the error>` or re-do and resubmit."
         )
+    elif outcome == "succeeded" and ran:
+        msg += "\n\n✓ _Verified by running your code in the sandbox._"
     elif (outcome == "unclear" and verdict.get("reason")
           and verdict["reason"] != "verification unavailable"):
         msg += f"\n\n_Couldn't confirm success: {verdict['reason']}_"
