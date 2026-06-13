@@ -580,6 +580,12 @@ class Settings(BaseSettings):
     # whys (expert); detailed = explain why each step matters + what to watch
     # for (novice); normal = current behavior (no directive).
     assist_default_verbosity: str = "normal"
+    # §17.500 — deep research: for /assist research + /assist fix, fetch & extract
+    # the top-N SearXNG result pages (trafilatura, via the research-agent helper)
+    # for real doc content instead of search snippets. The auto-guide pre-pass
+    # stays snippet-fast (not deep) so walkthroughs don't slow down. 0 = snippet-
+    # only everywhere.
+    assist_research_fetch_top_n: int = Field(default=2, ge=0, le=5)
     # §17.492 — deterministic scan of generated walkthroughs / fixes for
     # high-confidence destructive commands (rm -rf, dd, mkfs, DROP TABLE, force
     # push, …); matches are surfaced as a prominent "review before running"

@@ -256,14 +256,52 @@ async def _detect_unknowns(
     return queries[:max_queries]
 
 
-async def _confirm_query(
-    query: str, *, node_key: str, domain: Optional[str],
-) -> list[dict]:
-    """Confirm one query via Milvus (local KB) then SearXNG (web).
+async def _searxng_structured(query: str, max_results: int = 5) -> list[dict]:
+    """§17.500 — structured SearXNG results ([{title, content, url}]) so we can
+    fetch the result pages. Fail-soft → []."""
+    try:
+        from app.utils.http_clients import get_searxng_client
+        resp = await get_searxng_client().get(
+            "/search", params={"q": query, "format": "json", "categories": "general"},
+        )
+        resp.raise_for_status()
+        return [
+            {"title": r.get("title", ""), "content": r.get("content", ""), "url": r.get("url", "")}
+            for r in (resp.json().get("results") or [])[:max_results]
+            if r.get("url")
+        ]
+    except Exception as exc:
+        logger.warning("assist_searxng_structured_failed: %s", exc)
+        return []
 
-    Returns 0-2 source dicts ``{query, kind, text}``, only for non-empty,
-    non-failure results. The grounding helpers swallow their own exceptions
-    and return strings, so this never raises on a bad backend.
+
+async def _deep_web_sources(query: str, *, top_n: int) -> list[dict]:
+    """§17.500 — fetch + trafilatura-extract the top-N SearXNG pages for real
+    doc content. Reuses the research-agent fetcher. Fail-soft → []."""
+    results = await _searxng_structured(query)
+    if not results or top_n <= 0:
+        return []
+    try:
+        from app.modules.research_agent import _fetch_and_extract
+        pages = await _fetch_and_extract(results[:top_n])
+    except Exception as exc:
+        logger.warning("assist_deep_fetch_failed: %s", exc)
+        return []
+    return [
+        {"query": query, "kind": "web", "text": p["content"][:2000], "url": p.get("url", "")}
+        for p in pages if (p.get("content") or "").strip()
+    ]
+
+
+async def _confirm_query(
+    query: str, *, node_key: str, domain: Optional[str], deep: bool = False,
+) -> list[dict]:
+    """Confirm one query via Milvus (local KB) + web.
+
+    ``deep`` (used by /assist research + /assist fix) fetches & extracts the top
+    SearXNG result PAGES (real doc content); otherwise (the auto-guide pre-pass)
+    it uses fast search snippets. Returns ``{query, kind, text[, url]}`` source
+    dicts, only non-empty/non-failure. Never raises (helpers are fail-soft).
     """
     from app.modules.execution_agent import _milvus_search, _searxng_search
 
@@ -271,6 +309,14 @@ async def _confirm_query(
     milvus = await _milvus_search(query, node_key=node_key, domain=domain)
     if _is_useful_grounding(milvus):
         sources.append({"query": query, "kind": "milvus", "text": milvus.strip()})
+
+    if deep and settings.assist_research_fetch_top_n > 0:
+        web = await _deep_web_sources(query, top_n=settings.assist_research_fetch_top_n)
+        if web:
+            sources.extend(web)
+            return sources
+        # fetch found nothing → fall through to the snippet path.
+
     searx = await _searxng_search(query)
     if _is_useful_grounding(searx):
         sources.append({"query": query, "kind": "searxng", "text": searx.strip()})
@@ -279,17 +325,17 @@ async def _confirm_query(
 
 async def _research_prepass(
     *, task_text: str, tool: str, role: str, max_queries: int,
-    node_key: str, domain: Optional[str],
+    node_key: str, domain: Optional[str], deep: bool = False,
 ) -> list[dict]:
     queries = await _detect_unknowns(
         task_text=task_text, tool=tool, role=role, max_queries=max_queries,
     )
     if not queries:
         return []
-    logger.info("assist_guide_research: %d queries node_key=%s", len(queries), node_key)
+    logger.info("assist_guide_research: %d queries node_key=%s deep=%s", len(queries), node_key, deep)
     # One round-trip: all queries confirmed concurrently.
     batches = await asyncio.gather(
-        *[_confirm_query(q, node_key=node_key, domain=domain) for q in queries],
+        *[_confirm_query(q, node_key=node_key, domain=domain, deep=deep) for q in queries],
         return_exceptions=True,
     )
     sources: list[dict] = []
@@ -308,7 +354,8 @@ def _render_research_block(sources: list[dict]) -> str:
         "## Research (confirmed — authoritative facts; use them, do not contradict them)"
     ]
     for i, s in enumerate(sources, 1):
-        parts.append(f"[{i}] ({s['kind']}) query: {s['query']}\n{s['text']}")
+        src = f"{s['kind']}: {s['url']}" if s.get("url") else s["kind"]
+        parts.append(f"[{i}] ({src}) query: {s['query']}\n{s['text']}")
     return "\n\n".join(parts)
 
 
@@ -725,6 +772,7 @@ async def generate_fix(
             max_queries=settings.assist_guide_max_research_queries,
             node_key=node_key,
             domain=domain,
+            deep=True,  # §17.500 — troubleshooting wants real doc content, not snippets
         )
 
     parts = [ctx.assembled_prompt]
@@ -992,7 +1040,7 @@ async def research_one(
     a short cited answer. Does not persist — this is a side query.
     """
     role = settings.assist_guide_model_role
-    sources = await _confirm_query(question, node_key=node_key, domain=domain)
+    sources = await _confirm_query(question, node_key=node_key, domain=domain, deep=True)
     answer: Optional[str] = None
     if synthesize and sources:
         resp = await chat_until_nonempty(

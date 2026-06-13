@@ -300,7 +300,9 @@ def render_research(d: dict) -> str:
     for i, s in enumerate(sources, 1):
         body = s.get("text", "")
         preview = body if len(body) <= 600 else body[:600] + f"\n… [{len(body) - 600} more chars]"
-        out += f"_[{i}] ({s.get('kind')})_\n```\n{preview}\n```\n\n"
+        # §17.500 — deep web sources carry the page URL; show it.
+        label = f"{s.get('kind')} — {s['url']}" if s.get("url") else s.get("kind")
+        out += f"_[{i}] ({label})_\n```\n{preview}\n```\n\n"
     return out
 
 
