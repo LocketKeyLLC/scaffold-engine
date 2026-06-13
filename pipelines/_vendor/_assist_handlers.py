@@ -186,7 +186,11 @@ def render_step(step: dict) -> str:
         f"**Domain:** `{step.get('domain') or 'n/a'}`  |  "
         f"**Depends on:** {deps_str}\n\n"
         f"{upstream_block}"
-        f"**Task prompt:**\n\n```\n{step.get('base_prompt', '')}\n```\n\n"
+        # §17.486 — the human-facing walkthrough (generated separately) is now
+        # the primary content; the raw LLM task prompt is demoted to a
+        # collapsed block for operators who want the underlying instruction.
+        f"<details>\n<summary>Raw task prompt (underlying instruction)</summary>\n\n"
+        f"```\n{step.get('base_prompt', '')}\n```\n\n</details>\n\n"
         f"**When done, submit your evidence:**\n\n"
         f"```\n"
         f"/assist submit\n"
@@ -195,6 +199,48 @@ def render_step(step: dict) -> str:
         f"_Code fences (```) are optional. Content after the command "
         f"line is captured as-is._\n"
     )
+
+
+def render_guidance(d: dict) -> str:
+    """§17.486 — format a /assist/{sid}/guide response as the human walkthrough.
+
+    On a failed/empty generation, degrade gracefully to a pointer at the raw
+    task prompt rather than a blank section."""
+    node_key = d.get("node_key", "?")
+    if d.get("status") != "ready" or not d.get("guidance"):
+        return (
+            f"⚠️ Couldn't generate a walkthrough for `{node_key}` right now. "
+            f"Work from the raw task prompt above, or retry with `/assist guide`."
+        )
+    meta = d.get("guidance_meta") or {}
+    sources = meta.get("research_sources") or []
+    out = f"## 🧭 How to do this step\n\n{d['guidance']}\n"
+    if sources:
+        cites = ", ".join(
+            f"`{s.get('kind')}`: {s.get('query')}" for s in sources
+        )
+        out += f"\n_Confirmed via research — {cites}._\n"
+    if d.get("cached"):
+        out += "\n_(cached walkthrough — run `/assist guide` to regenerate)_\n"
+    return out
+
+
+def render_research(d: dict) -> str:
+    """§17.486 — format a /assist/{sid}/research response."""
+    q = d.get("question", "?")
+    sources = d.get("sources") or []
+    if not sources:
+        return f"🔍 No results found for: _{q}_. Try rephrasing the question."
+    out = f"### 🔍 Research: {q}\n\n"
+    answer = d.get("answer")
+    if answer:
+        out += f"{answer}\n\n"
+    out += "**Sources:**\n\n"
+    for i, s in enumerate(sources, 1):
+        body = s.get("text", "")
+        preview = body if len(body) <= 600 else body[:600] + f"\n… [{len(body) - 600} more chars]"
+        out += f"_[{i}] ({s.get('kind')})_\n```\n{preview}\n```\n\n"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +271,8 @@ def handle_assist(
             yield pipe._ASSIST_HELP; return
         arg1 = parts[1]
         # /assist <subcommand> ... — route to subcommand handler
-        if arg1 in ("next", "submit", "skip", "handoff", "pause", "resume", "done", "friction"):
+        if arg1 in ("next", "submit", "skip", "handoff", "pause", "resume",
+                    "done", "friction", "guide", "research"):
             yield from dispatch_assist_sub(
                 pipe, arg1, parts[2:], fenced,
                 chat_id=chat_id, raw_head=head,
@@ -336,6 +383,32 @@ def dispatch_assist_sub(
                 "`/assist friction <node_key> <note>`."
             ); return
         yield from assist_friction(pipe, sid, node_key, note); return
+    if sub == "guide":
+        if not sid:
+            yield no_session_msg("guide"); return
+        # The node defaults to the session's current step (resolved
+        # server-side); chat-memory's last_node_key is a hint. Everything
+        # after the (optional) session id — fence or remaining words — is
+        # the refine hint, e.g. `/assist guide redo for macOS`.
+        refine = fenced or (" ".join(rest).strip() if rest else None)
+        recalled = assist_recall(pipe, chat_id)
+        node_key = (recalled or {}).get("last_node_key")
+        yield from assist_guide_cmd(
+            pipe, sid, node_key=node_key, refine=refine,
+            research=pipe.valves.assist_guide_research, force=True,
+            chat_id=chat_id,
+        ); return
+    if sub == "research":
+        if not sid:
+            yield no_session_msg("research"); return
+        question = (fenced or " ".join(rest)).strip()
+        if not question:
+            yield "Usage: `/assist research [<session_id>] <question>`"; return
+        recalled = assist_recall(pipe, chat_id)
+        node_key = (recalled or {}).get("last_node_key")
+        yield from assist_research_cmd(
+            pipe, sid, question, node_key=node_key, chat_id=chat_id,
+        ); return
     yield pipe._ASSIST_HELP
 
 
@@ -411,6 +484,16 @@ def assist_next(
             pipe, chat_id, session_id=session_id, last_node_key=step["node_key"],
         )
     yield render_step(step)
+    # §17.486 — auto-generate the human walkthrough for the claimed step.
+    # Separate POST so the slow LLM call doesn't block the fast /next claim;
+    # force=False hits the cache when this step was already guided.
+    if step.get("node_key") and getattr(pipe.valves, "assist_auto_guide", True):
+        yield "\n_Generating walkthrough…_\n\n"
+        yield from assist_guide_cmd(
+            pipe, session_id, node_key=step["node_key"],
+            research=getattr(pipe.valves, "assist_guide_research", True),
+            force=False, chat_id=chat_id,
+        )
 
 
 def assist_submit(
@@ -612,6 +695,66 @@ def stream_sse_with_keepalive(
             except Exception:
                 pass
         reader.join(timeout=5)
+
+
+def assist_guide_cmd(
+    pipe, session_id: str, *, node_key: str | None = None,
+    refine: str | None = None, research: bool | None = None,
+    force: bool = True, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.486 — POST /assist/{sid}/guide and render the walkthrough.
+
+    Uses the dedicated `assist_guide_timeout` valve (not `request_timeout`):
+    generation is an 8192-token thinking-model call plus an optional research
+    pre-pass, well beyond the fast-call default."""
+    try:
+        r = _ss().post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/guide",
+            json={
+                "node_key": node_key,
+                "refine": refine,
+                "research": research,
+                "force": force,
+            },
+            headers=pipe._auth_headers(),
+            timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code >= 400:
+        yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+    try:
+        d = r.json()
+    except ValueError as e:
+        yield f"❌ Assist guide: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+    if not isinstance(d, dict):
+        yield f"❌ Assist guide: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
+    yield render_guidance(d)
+
+
+def assist_research_cmd(
+    pipe, session_id: str, question: str, *,
+    node_key: str | None = None, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.486 — POST /assist/{sid}/research and render cited results."""
+    try:
+        r = _ss().post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/research",
+            json={"question": question, "node_key": node_key},
+            headers=pipe._auth_headers(),
+            timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code >= 400:
+        yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+    try:
+        d = r.json()
+    except ValueError as e:
+        yield f"❌ Assist research: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+    if not isinstance(d, dict):
+        yield f"❌ Assist research: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
+    yield render_research(d)
 
 
 def assist_simple_post(

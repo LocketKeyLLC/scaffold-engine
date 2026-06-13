@@ -43,6 +43,54 @@
         "title": "AssistFrictionInput",
         "type": "object"
       },
+      "AssistGuideInput": {
+        "properties": {
+          "force": {
+            "default": true,
+            "description": "Regenerate even if a cached walkthrough exists.",
+            "title": "Force",
+            "type": "boolean"
+          },
+          "node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Defaults to the session's current step.",
+            "title": "Node Key"
+          },
+          "refine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Refinement hint, e.g. 'redo for macOS'.",
+            "title": "Refine"
+          },
+          "research": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Override assist_guide_research for this call.",
+            "title": "Research"
+          }
+        },
+        "title": "AssistGuideInput",
+        "type": "object"
+      },
       "AssistHandoffInput": {
         "properties": {
           "mode": {
@@ -63,6 +111,30 @@
           "node_key"
         ],
         "title": "AssistHandoffInput",
+        "type": "object"
+      },
+      "AssistResearchInput": {
+        "properties": {
+          "node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Key"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "title": "AssistResearchInput",
         "type": "object"
       },
       "AssistStartInput": {
@@ -3393,6 +3465,62 @@
         ]
       }
     },
+    "/assist/{session_id}/guide": {
+      "post": {
+        "description": "Generate (or return cached) the human walkthrough for a step.\n\nSeparate from `/next` on purpose: this can take 10-60s (a thinking-model\ncall plus an optional research pre-pass), so it must not block the fast\natomic claim. `force=true` (the default; `/assist guide`) regenerates;\nthe auto-guide path calls with `force=false` to hit the cache.",
+        "operationId": "assist_guide_assist__session_id__guide_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistGuideInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Guide",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
     "/assist/{session_id}/handoff": {
       "post": {
         "operationId": "assist_handoff_assist__session_id__handoff_post",
@@ -3533,6 +3661,62 @@
           }
         ],
         "summary": "Assist Pause",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/research": {
+      "post": {
+        "description": "Confirm an operator-supplied question via SearXNG/Milvus + a short\ncited synthesis. A side query — not persisted to the step's guidance.",
+        "operationId": "assist_research_assist__session_id__research_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistResearchInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Research",
         "tags": [
           "Assist"
         ]

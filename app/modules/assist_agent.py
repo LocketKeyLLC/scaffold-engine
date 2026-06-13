@@ -216,7 +216,7 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
                 LIMIT 1
              )
              AND status = 'pending'
-            RETURNING id, node_key
+            RETURNING id, node_key, guidance_status
         """),
         {"sid": session_id},
     )).mappings().first()
@@ -244,27 +244,8 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
     # Build the human-facing context (no grounding fetch by default; the
     # human already has the knowledge — pre-fetching just adds noise
     # unless explicitly requested via a future include_grounding flag).
-    node_row = (await db.execute(
-        text("""
-            SELECT node_key, title, description, prompt_template, depends_on,
-                   tool, domain, execution_order
-              FROM dag_nodes
-             WHERE job_id = :jid AND node_key = :nk
-        """),
-        {"jid": job_id, "nk": node_key},
-    )).mappings().first()
-    job_row = (await db.execute(
-        text("SELECT refined_brief FROM jobs WHERE id = :id"),
-        {"id": job_id},
-    )).mappings().first()
-    brief = (job_row or {}).get("refined_brief") or {}
-
-    ctx: StepContext = await assemble_step_context(
-        db=db,
-        job_id=job_id,
-        node=dict(node_row),
-        brief=brief,
-        fetch_grounding=None,
+    node_row, ctx = await _assemble_ctx_for_node(
+        db=db, job_id=job_id, node_key=node_key,
     )
 
     return {
@@ -281,7 +262,154 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
         "upstream_outputs": ctx.upstream_outputs,
         "upstream_truncated_keys": ctx.upstream_truncated_keys,
         "assembled_prompt": ctx.assembled_prompt,
+        # §17.486 — cache state so the client knows whether a cached
+        # walkthrough already exists or one will be generated on demand.
+        "guidance_status": claimed.get("guidance_status") or "none",
     }
+
+
+async def _assemble_ctx_for_node(
+    *, db, job_id: str, node_key: str,
+) -> tuple[dict, "StepContext"]:
+    """Fetch a node + brief and assemble the upstream-last StepContext.
+
+    Shared by ``get_next_step`` (claim path) and ``generate_step_guidance``
+    (guidance path) so the two cannot drift in what they consider "the step".
+    Returns ``(node_row_dict, ctx)``. ``fetch_grounding=None`` — the human's
+    walkthrough is grounded by the assist_guide research pre-pass, not here.
+    """
+    node_row = (await db.execute(
+        text("""
+            SELECT node_key, title, description, prompt_template, depends_on,
+                   tool, domain, execution_order
+              FROM dag_nodes
+             WHERE job_id = :jid AND node_key = :nk
+        """),
+        {"jid": job_id, "nk": node_key},
+    )).mappings().first()
+    if not node_row:
+        raise ValueError(f"node not found: {job_id}/{node_key}")
+    job_row = (await db.execute(
+        text("SELECT refined_brief FROM jobs WHERE id = :id"),
+        {"id": job_id},
+    )).mappings().first()
+    brief = (job_row or {}).get("refined_brief") or {}
+
+    ctx = await assemble_step_context(
+        db=db,
+        job_id=job_id,
+        node=dict(node_row),
+        brief=brief,
+        fetch_grounding=None,
+    )
+    return dict(node_row), ctx
+
+
+# ── Guidance generation (§17.486 — human walkthrough per step) ────────────
+
+
+async def generate_step_guidance(
+    *,
+    session_id: str,
+    node_key: str | None = None,
+    refine: str | None = None,
+    research: bool | None = None,
+    force: bool = False,
+    db,
+) -> dict:
+    """Generate (or return cached) the human walkthrough for a step.
+
+    Resolves ``node_key`` from the session's ``current_node_key`` when omitted.
+    Delegates generation + caching to ``assist_guide.ensure_guidance``. The
+    walkthrough is human-executable instructions (copy-paste commands for
+    shell/codegen work, numbered steps for non-coding work), optionally
+    grounded by a research pre-pass.
+    """
+    from app.config import settings
+    from app.modules import assist_guide
+
+    sess = (await db.execute(
+        text("""
+            SELECT id, job_id, status, current_node_key
+              FROM assist_sessions WHERE id = :sid
+        """),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    if sess["status"] not in ("active", "paused"):
+        raise ValueError(f"session status {sess['status']!r} cannot generate guidance")
+    job_id = str(sess["job_id"])
+    nk = node_key or sess["current_node_key"]
+    if not nk:
+        raise ValueError(
+            "no node_key supplied and session has no current step; "
+            "claim one with /assist next first"
+        )
+
+    if research is None:
+        research = settings.assist_guide_research
+
+    node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
+
+    res = await assist_guide.ensure_guidance(
+        session_id=session_id,
+        node_key=nk,
+        ctx=ctx,
+        node_description=node_row.get("description"),
+        research=research,
+        refine_hint=refine,
+        force=force,
+        domain=node_row.get("domain"),
+        db=db,
+    )
+    return {
+        "session_id": session_id,
+        "job_id": job_id,
+        "node_key": nk,
+        "title": ctx.title,
+        "tool": ctx.tool,
+        **res,
+    }
+
+
+async def run_step_research(
+    *,
+    session_id: str,
+    node_key: str | None = None,
+    question: str,
+    db,
+) -> dict:
+    """Confirm an operator-supplied question via the research helpers.
+
+    A side query — not persisted to the step's guidance. Resolves the node's
+    domain (when a node is in scope) to bias Milvus retrieval.
+    """
+    from app.modules import assist_guide
+
+    if not (question or "").strip():
+        raise ValueError("research question is empty")
+    sess = (await db.execute(
+        text("""
+            SELECT id, job_id, status, current_node_key
+              FROM assist_sessions WHERE id = :sid
+        """),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    nk = node_key or sess["current_node_key"]
+    domain = None
+    if nk:
+        drow = (await db.execute(
+            text("SELECT domain FROM dag_nodes WHERE job_id = :jid AND node_key = :nk"),
+            {"jid": str(sess["job_id"]), "nk": nk},
+        )).mappings().first()
+        domain = (drow or {}).get("domain")
+    res = await assist_guide.research_one(
+        question=question, node_key=nk or "?", domain=domain,
+    )
+    return {"session_id": session_id, "node_key": nk, **res}
 
 
 # ── Submit / commit human evidence ───────────────────────────────────────

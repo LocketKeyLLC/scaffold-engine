@@ -520,6 +520,18 @@ class Pipeline:
         # behavior that does not exist.
         assist_session_memory_enabled: bool = True
 
+        # §17.486 — guidance layer. When on, /assist next auto-generates a
+        # human walkthrough (copy-paste commands for shell/codegen work,
+        # step-by-step instructions for non-coding work) for each claimed
+        # step; /assist guide regenerates on demand. assist_guide_research
+        # gates the SearXNG/Milvus confirm pre-pass. Generation is a slow
+        # (8192-token) thinking-model call, so it gets its own timeout
+        # separate from the fast-call request_timeout. Model role + token
+        # budget are server-authoritative (app/config.py assist_guide_*).
+        assist_auto_guide: bool = True
+        assist_guide_research: bool = True
+        assist_guide_timeout: int = 180
+
         # §17.300 — first-turn welcome preamble. When a brand-new chat
         # receives a natural-language message, the pipeline prepends a
         # small "here's how this works" block ahead of the triage
@@ -1649,7 +1661,9 @@ class Pipeline:
         "| Command | Description |\n"
         "|---|---|\n"
         "| `/assist <job_id>` | Start a session and render the first step. |\n"
-        "| `/assist next [<session_id>]` | Fetch the next pending step. |\n"
+        "| `/assist next [<session_id>]` | Fetch the next pending step (auto-generates a walkthrough). |\n"
+        "| `/assist guide [<session_id>] [refine…]` | (Re)generate the step's walkthrough; add a hint like `redo for macOS`. |\n"
+        "| `/assist research [<session_id>] <question>` | Look up + confirm a fact (versions, flags, package names). |\n"
         "| `` /assist submit [<session_id>] [<node_key>]\\n```evidence``` `` | Submit human evidence. Both args optional after `/assist next`. |\n"
         "| `/assist skip [<session_id>] [<node_key>]` | Skip a node. |\n"
         "| `/assist handoff [<session_id>] <node_key> [single\\|all]` | Hand a node back to autonomous executor. |\n"
@@ -1824,6 +1838,24 @@ class Pipeline:
         self, session_id: str, node_key: str, note: str,
     ) -> Generator[str, None, None]:
         yield from _assist.assist_friction(self, session_id, node_key, note)
+
+    def _assist_guide(
+        self, session_id: str, *, node_key: str | None = None,
+        refine: str | None = None, research: bool | None = None,
+        force: bool = True, chat_id: str | None = None,
+    ) -> Generator[str, None, None]:
+        yield from _assist.assist_guide_cmd(
+            self, session_id, node_key=node_key, refine=refine,
+            research=research, force=force, chat_id=chat_id,
+        )
+
+    def _assist_research(
+        self, session_id: str, question: str, *,
+        node_key: str | None = None, chat_id: str | None = None,
+    ) -> Generator[str, None, None]:
+        yield from _assist.assist_research_cmd(
+            self, session_id, question, node_key=node_key, chat_id=chat_id,
+        )
 
     # ------------------------------------------------------------------
     # Long-poll with keepalive (DRY helper, #8.7)

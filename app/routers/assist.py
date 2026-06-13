@@ -53,6 +53,26 @@ class AssistChatMapInput(BaseModel):
     last_node_key: Optional[str] = None
 
 
+class AssistGuideInput(BaseModel):
+    node_key: Optional[str] = Field(
+        default=None, description="Defaults to the session's current step."
+    )
+    refine: Optional[str] = Field(
+        default=None, description="Refinement hint, e.g. 'redo for macOS'."
+    )
+    research: Optional[bool] = Field(
+        default=None, description="Override assist_guide_research for this call."
+    )
+    force: bool = Field(
+        default=True, description="Regenerate even if a cached walkthrough exists."
+    )
+
+
+class AssistResearchInput(BaseModel):
+    question: str
+    node_key: Optional[str] = None
+
+
 # ── Per-chat session map ─────────────────────────────────────────────
 # Path scoped under `/assist/_chatmap/` to avoid colliding with
 # `/assist/{session_id}/...`. The `_` prefix marks this as pipeline
@@ -122,6 +142,49 @@ async def assist_next(session_id: str, db=Depends(get_db)):
             "step_counts": (sess2 or {}).get("step_counts", {}),
         }
     return step
+
+
+@router.post("/assist/{session_id}/guide")
+async def assist_guide(session_id: str, body: AssistGuideInput, db=Depends(get_db)):
+    """Generate (or return cached) the human walkthrough for a step.
+
+    Separate from `/next` on purpose: this can take 10-60s (a thinking-model
+    call plus an optional research pre-pass), so it must not block the fast
+    atomic claim. `force=true` (the default; `/assist guide`) regenerates;
+    the auto-guide path calls with `force=false` to hit the cache.
+    """
+    try:
+        return await assist_agent.generate_step_guidance(
+            session_id=session_id,
+            node_key=body.node_key,
+            refine=body.refine,
+            research=body.research,
+            force=body.force,
+            db=db,
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=409, detail=msg)
+
+
+@router.post("/assist/{session_id}/research")
+async def assist_research(session_id: str, body: AssistResearchInput, db=Depends(get_db)):
+    """Confirm an operator-supplied question via SearXNG/Milvus + a short
+    cited synthesis. A side query — not persisted to the step's guidance."""
+    try:
+        return await assist_agent.run_step_research(
+            session_id=session_id,
+            node_key=body.node_key,
+            question=body.question,
+            db=db,
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=409, detail=msg)
 
 
 @router.post("/assist/{session_id}/submit")

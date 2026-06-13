@@ -296,6 +296,14 @@ async def apply_selective_replan(
                    submitted_at = NULL,
                    committed_at = NULL,
                    replan_triggered = TRUE,
+                   -- §17.486 — the regenerated prompt_template describes a new
+                   -- task; any cached walkthrough now describes the old one.
+                   -- Clear it so the next /assist next regenerates fresh
+                   -- guidance instead of serving a stale cache hit.
+                   guidance = NULL,
+                   guidance_meta = '{}'::jsonb,
+                   guidance_status = 'none',
+                   guidance_generated_at = NULL,
                    updated_at = NOW()
              WHERE session_id = :sid
                AND node_key = ANY(:keys)

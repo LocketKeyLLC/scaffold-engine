@@ -507,6 +507,30 @@ class Settings(BaseSettings):
     # known to be sufficient).
     assist_replan_regen_enabled: bool = True
     assist_replan_regen_max_tokens: int = Field(default=2048, ge=512, le=8192)
+    # §17.486 — Assist Mode guidance layer. When a human claims a step, the
+    # engine generates a human-executable walkthrough (copy-paste terminal
+    # commands for shell/codegen work, step-by-step instructions for
+    # non-coding work) instead of showing only the raw LLM prompt_template.
+    #   assist_auto_guide          — generate on every /assist next (cached;
+    #                                a re-view does not re-spend). Off = the
+    #                                walkthrough is generated only on demand
+    #                                via /assist guide.
+    #   assist_guide_research      — run a SearXNG/Milvus pre-pass to confirm
+    #                                unknowns (versions, flags, package names)
+    #                                and cite them. Fail-soft: any failure
+    #                                degrades to guidance without research.
+    #   assist_guide_model_role    — role resolved by model_router (cloud /
+    #                                thinking model by default, like the
+    #                                executor). Server-authoritative — not a
+    #                                per-request override.
+    #   assist_guide_max_tokens    — generous so a thinking model's reasoning
+    #                                budget does not starve the content (the
+    #                                §17.465 empty-content failure mode).
+    assist_auto_guide: bool = True
+    assist_guide_research: bool = True
+    assist_guide_model_role: str = "model_general"
+    assist_guide_max_tokens: int = Field(default=8192, ge=512, le=16384)
+    assist_guide_max_research_queries: int = Field(default=3, ge=0, le=8)
     # #2 — orphan detection: dag_nodes stuck in 'running' past this threshold
     # are treated as orphaned (executor died) and reset to 'pending' for
     # automatic re-execution. Sprint X.1 tightened 60→30 min: the audit

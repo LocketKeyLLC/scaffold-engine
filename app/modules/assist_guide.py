@@ -1,0 +1,496 @@
+"""Assist Mode guidance layer (§17.486).
+
+When a human claims a DAG step in Assist Mode, the engine should walk them
+through *how to do it* — copy-paste terminal commands for shell/codegen work,
+numbered step-by-step instructions for non-coding work — rather than handing
+them the raw LLM ``prompt_template`` (an execution hint written for a model)
+and saying "paste your output."
+
+This module is the generator. It is pure logic + DB persistence; it does no
+HTTP and owns no session lifecycle (that stays in ``assist_agent``). The
+flow per step:
+
+    1. (optional) research pre-pass — ask the model what facts a human would
+       need to look up (versions, current flags, exact package names), then
+       confirm each via the existing SearXNG / Milvus grounding and cite them.
+    2. generate the walkthrough with a human-facing system prompt selected by
+       the node's tool (shell → runbook, codegen → code+run, else → steps).
+    3. persist the result on the owning ``assist_steps`` row so a re-view does
+       not re-spend an LLM call. ``/assist guide`` regenerates with ``force``.
+
+Why reuse rather than reinvent: the autonomous executor already has a
+copy-paste runbook system prompt (``prompt_assembly.EXECUTION_SYSTEM_RUNBOOK``)
+and grounding helpers (``execution_agent._searxng_search`` / ``_milvus_search``)
+— this module composes them for the human-in-the-loop path. The generation
+goes through ``chat_until_nonempty`` because the cloud thinking models can
+return ``success=True`` with empty content when reasoning eats the token
+budget (§17.465); a generous ``max_tokens`` plus retry-on-empty avoids it.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from sqlalchemy import text
+
+from app import model_router
+from app.config import settings
+from app.modules.prompt_assembly import (
+    EXECUTION_SYSTEM_RUNBOOK,
+    StepContext,
+)
+from app.utils.llm_retry import chat_until_nonempty
+
+logger = logging.getLogger("scaffold.assist_guide")
+
+
+# ── Human-facing system prompts ──────────────────────────────────────────
+# These differ from the executor prompts (RUNBOOK/CODEGEN/LLM): those tell an
+# *LLM* to produce a deliverable; these tell the engine to produce
+# instructions the *human operator* will follow to produce it themselves.
+
+_RUNBOOK_HUMAN_FRAMING = (
+    "You are a hands-on co-pilot guiding a human operator through ONE step of "
+    "a larger plan. The reader will perform this step themselves on their own "
+    "machine. Produce the runbook they will follow — every command copy-paste "
+    "ready, every operator-supplied value a <PLACEHOLDER>, and a clear way to "
+    "confirm success. You are NOT performing the step; do not narrate it as "
+    "done."
+)
+
+GUIDE_SYSTEM_CODEGEN = """You are a hands-on co-pilot guiding a human operator through ONE code step of a larger plan. The reader will create and run this code themselves.
+
+Output structure (in this order, omit sections that don't apply):
+- ## What you're building — one or two sentences on the deliverable and where the file goes.
+- ## Code — the complete implementation in a single fenced code block. Real, working code, not a sketch. One implementation, not alternatives.
+- ## Run this — numbered, copy-paste-ready terminal commands to save, install deps, and run/test it. Use fenced code blocks. One command group per step.
+- ## Verify — how the operator confirms it worked: the expected output paired with the exact command that produces it.
+- ## Inputs needed — any value you could not determine (paths, names, keys). Each MUST appear in the code or commands as a <SCREAMING_SNAKE_CASE> placeholder, never as a guessed concrete value.
+
+Hard rules:
+- Never write past-tense narration ("Created the file", "Ran it and got…", "Output confirmed…"). The human runs it, not you.
+- Never invent concrete values (IPs, hostnames, ports, keys, versions) absent from the task or research block — use placeholders.
+- If the task enumerates specifics (a full language list, default values, every flag), implement them COMPLETELY; do not silently truncate to a subset.
+- If a confirmed-research block is provided, treat those facts as authoritative and use them (correct package name, current flag, exact version).
+- No emoji, no "let me know if…", no completion checkmarks — the operator marks completion.
+
+Produce the walkthrough for THIS step only. Nothing more."""
+
+GUIDE_SYSTEM_NONCODE = """You are a hands-on co-pilot guiding a human operator through ONE non-coding step of a larger plan. The deliverable is a decision, a written artifact, a configuration in a UI, or a manual action — not code or shell commands.
+
+Output structure (in this order, omit sections that don't apply):
+- ## Goal — one or two sentences: what this step produces and why it matters to the steps that follow.
+- ## Steps — a NUMBERED list the operator follows in order. Each step is one concrete action ("Open X and click Y", "Decide between A and B — pick A because…", "Write a paragraph covering Z"). Be specific enough to act on without guessing.
+- ## What to decide — when the step is a decision, lay out the real options with the trade-off that picks the winner, then state the recommended choice. Do not leave the decision hanging.
+- ## Done when — the observable signal that the step is complete (a file exists, a setting shows X, the document covers the listed points).
+- ## Inputs needed — anything the operator must supply that you could not determine. Mark each as a <PLACEHOLDER>, never a guessed value.
+
+Hard rules:
+- Never write past-tense narration as if you performed the step ("Configured…", "Decided…", "Wrote…"). The human does it.
+- Never invent concrete values (names, URLs, account IDs, versions) absent from the task or research block — use placeholders.
+- If a confirmed-research block is provided, treat those facts as authoritative.
+- No emoji, no filler closers, no completion checkmarks.
+
+Produce the walkthrough for THIS step only. Nothing more."""
+
+_GUIDE_USER_TRAILER = (
+    "---\n\n"
+    "Using the task and any upstream/research context above, write the "
+    "walkthrough the human operator will follow to COMPLETE this step "
+    "themselves. Follow the output structure and hard rules in your system "
+    "instructions exactly."
+)
+
+_RESEARCH_SYNTH_SYSTEM = (
+    "You answer a single operator question using only the provided search "
+    "results. Be concise and concrete. Cite the source index like [1] for "
+    "each fact. If the results do not answer the question, say so plainly "
+    "rather than guessing. No preamble, no filler."
+)
+
+
+def guide_system_for_tool(tool: str) -> str:
+    """Pick the human-facing system prompt for a node's tool type.
+
+    Mirrors ``prompt_assembly.system_for_tool`` (shell/codegen/else) but
+    targets the human operator rather than the LLM executor. The ``shell``
+    variant reuses ``EXECUTION_SYSTEM_RUNBOOK`` verbatim (it already targets a
+    human performing host commands) with a one-line operator framing prepended.
+    """
+    t = (tool or "").lower()
+    if t == "shell":
+        return f"{_RUNBOOK_HUMAN_FRAMING}\n\n{EXECUTION_SYSTEM_RUNBOOK}"
+    if t == "codegen":
+        return GUIDE_SYSTEM_CODEGEN
+    return GUIDE_SYSTEM_NONCODE
+
+
+# ── Research pre-pass (confirm unknowns) ──────────────────────────────────
+
+# A single-tool schema. Native tool-calling is the robust path here; the
+# coaxing fallback in model_router.tool_call covers providers without it.
+_FLAG_UNKNOWNS_TOOL = model_router.Tool(
+    name="flag_unknowns",
+    description=(
+        "Report the web/knowledge-base lookups a human operator would need "
+        "to perform this step correctly — version-specific commands, current "
+        "CLI flags, exact package names, API endpoints. Each query is a short "
+        "search string. Return an empty list if nothing needs looking up."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "queries": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Up to a few concrete search queries.",
+            }
+        },
+        "required": ["queries"],
+    },
+)
+
+# Markers the grounding helpers return when there is nothing useful. Sources
+# with these (or empty) bodies are dropped so the citation footnote and the
+# injected research block only ever carry real, confirmed facts. Strings must
+# match execution_agent._searxng_search / _milvus_search verbatim (lowercased).
+_EMPTY_MARKERS = ("no search results found.", "no knowledge base results found.")
+_FAILURE_PREFIXES = ("searxng search failed", "knowledge base search failed")
+
+
+def _is_useful_grounding(body: str) -> bool:
+    if not body or not body.strip():
+        return False
+    low = body.strip().lower()
+    if low in _EMPTY_MARKERS:
+        return False
+    return not any(low.startswith(p) for p in _FAILURE_PREFIXES)
+
+
+async def _detect_unknowns(
+    *, task_text: str, tool: str, role: str, max_queries: int,
+) -> list[str]:
+    """Ask the model which facts a human would need to confirm. Fail-soft."""
+    if max_queries <= 0:
+        return []
+    try:
+        resp = await model_router.tool_call(
+            [
+                {"role": "system", "content": (
+                    "You help a human prepare to execute a task. List only "
+                    "lookups that genuinely matter for correctness; prefer an "
+                    "empty list over speculative queries."
+                )},
+                {"role": "user", "content": (
+                    f"Task tool: {tool}\n\nTask:\n{task_text}\n\n"
+                    f"Call flag_unknowns with up to {max_queries} search "
+                    f"queries (or an empty list)."
+                )},
+            ],
+            [_FLAG_UNKNOWNS_TOOL],
+            role=role,
+            temperature=0.2,
+            max_tokens=1024,
+            tool_choice="auto",
+        )
+    except Exception as exc:  # network / provider error — never block guidance
+        logger.warning("assist_guide_detect_unknowns_failed: %s", exc)
+        return []
+    if not resp.success or not resp.tool_calls:
+        return []
+    args = resp.tool_calls[0].arguments or {}
+    raw = args.get("queries") or []
+    queries = [q.strip() for q in raw if isinstance(q, str) and q.strip()]
+    return queries[:max_queries]
+
+
+async def _confirm_query(
+    query: str, *, node_key: str, domain: Optional[str],
+) -> list[dict]:
+    """Confirm one query via Milvus (local KB) then SearXNG (web).
+
+    Returns 0-2 source dicts ``{query, kind, text}``, only for non-empty,
+    non-failure results. The grounding helpers swallow their own exceptions
+    and return strings, so this never raises on a bad backend.
+    """
+    from app.modules.execution_agent import _milvus_search, _searxng_search
+
+    sources: list[dict] = []
+    milvus = await _milvus_search(query, node_key=node_key, domain=domain)
+    if _is_useful_grounding(milvus):
+        sources.append({"query": query, "kind": "milvus", "text": milvus.strip()})
+    searx = await _searxng_search(query)
+    if _is_useful_grounding(searx):
+        sources.append({"query": query, "kind": "searxng", "text": searx.strip()})
+    return sources
+
+
+async def _research_prepass(
+    *, task_text: str, tool: str, role: str, max_queries: int,
+    node_key: str, domain: Optional[str],
+) -> list[dict]:
+    queries = await _detect_unknowns(
+        task_text=task_text, tool=tool, role=role, max_queries=max_queries,
+    )
+    if not queries:
+        return []
+    logger.info("assist_guide_research: %d queries node_key=%s", len(queries), node_key)
+    # One round-trip: all queries confirmed concurrently.
+    batches = await asyncio.gather(
+        *[_confirm_query(q, node_key=node_key, domain=domain) for q in queries],
+        return_exceptions=True,
+    )
+    sources: list[dict] = []
+    for b in batches:
+        if isinstance(b, Exception):
+            logger.warning("assist_guide_confirm_query_failed: %s", b)
+            continue
+        sources.extend(b)
+    return sources
+
+
+def _render_research_block(sources: list[dict]) -> str:
+    if not sources:
+        return ""
+    parts = [
+        "## Research (confirmed — authoritative facts; use them, do not contradict them)"
+    ]
+    for i, s in enumerate(sources, 1):
+        parts.append(f"[{i}] ({s['kind']}) query: {s['query']}\n{s['text']}")
+    return "\n\n".join(parts)
+
+
+# ── Generation ───────────────────────────────────────────────────────────
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _build_guide_user_prompt(
+    ctx: StepContext, node_description: Optional[str],
+    sources: list[dict], refine_hint: Optional[str],
+) -> str:
+    """Compose the user message: the same upstream-last task the executor
+    would see, plus a confirmed-research block and a human-walkthrough trailer.
+    """
+    parts: list[str] = [ctx.assembled_prompt]
+    if node_description and node_description.strip() and node_description.strip() not in ctx.assembled_prompt:
+        parts.append(f"Task description: {node_description.strip()}")
+    research_block = _render_research_block(sources)
+    if research_block:
+        parts.append(research_block)
+    parts.append(_GUIDE_USER_TRAILER)
+    if refine_hint and refine_hint.strip():
+        parts.append(
+            f"Operator refinement — apply this to the walkthrough: {refine_hint.strip()}"
+        )
+    return "\n\n".join(parts)
+
+
+async def generate_guidance(
+    *,
+    ctx: StepContext,
+    node_description: Optional[str] = None,
+    research: bool,
+    refine_hint: Optional[str] = None,
+    node_key: str,
+    domain: Optional[str] = None,
+) -> dict:
+    """Generate (do not persist) the human walkthrough for one step.
+
+    Returns ``{"guidance": str, "guidance_meta": dict, "status": str}``.
+    ``status`` is ``"ready"`` when non-empty content was produced, else
+    ``"failed"`` — never raises for an LLM/research failure (the caller shows
+    a graceful fallback to the raw prompt).
+    """
+    role = settings.assist_guide_model_role
+
+    sources: list[dict] = []
+    if research:
+        sources = await _research_prepass(
+            task_text=ctx.base_prompt,
+            tool=ctx.tool,
+            role=role,
+            max_queries=settings.assist_guide_max_research_queries,
+            node_key=node_key,
+            domain=domain,
+        )
+
+    system = guide_system_for_tool(ctx.tool)
+    user = _build_guide_user_prompt(ctx, node_description, sources, refine_hint)
+
+    resp = await chat_until_nonempty(
+        model_router.chat,
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        {"role": role},
+        temperature=0.3,
+        max_tokens=settings.assist_guide_max_tokens,
+        draws=3,
+        label="assist_guide",
+    )
+
+    text_out = (resp.text or "").strip() if (resp and resp.success) else ""
+    status = "ready" if text_out else "failed"
+    meta: dict[str, Any] = {
+        "model": getattr(resp, "model", "") if resp else "",
+        "tool": ctx.tool,
+        "research_sources": [{"query": s["query"], "kind": s["kind"]} for s in sources],
+        "refine_hint": refine_hint,
+        "status": status,
+        "generated_at": _utcnow_iso(),
+    }
+    if status == "failed":
+        meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"
+        logger.warning(
+            "assist_guide_generation_empty node_key=%s tool=%s error=%s",
+            node_key, ctx.tool, meta["error"],
+        )
+    return {"guidance": text_out, "guidance_meta": meta, "status": status}
+
+
+# ── Persistence (cache write + idempotent read) ──────────────────────────
+
+
+async def persist_guidance(
+    *, session_id: str, node_key: str, guidance: str,
+    guidance_meta: dict, status: str, db,
+) -> None:
+    await db.execute(
+        text("""
+            UPDATE assist_steps
+               SET guidance = :g,
+                   guidance_meta = CAST(:m AS jsonb),
+                   guidance_status = :s,
+                   guidance_generated_at = CASE
+                       WHEN :s = 'ready' THEN NOW()
+                       ELSE guidance_generated_at END,
+                   updated_at = NOW()
+             WHERE session_id = :sid AND node_key = :nk
+        """),
+        {
+            "g": guidance or None,
+            "m": json.dumps(guidance_meta),
+            "s": status,
+            "sid": session_id,
+            "nk": node_key,
+        },
+    )
+    await db.commit()
+
+
+async def read_cached_guidance(
+    *, session_id: str, node_key: str, db,
+) -> Optional[dict]:
+    """Return cached guidance only when a prior generation succeeded."""
+    row = (await db.execute(
+        text("""
+            SELECT guidance, guidance_meta, guidance_status, guidance_generated_at
+              FROM assist_steps
+             WHERE session_id = :sid AND node_key = :nk
+        """),
+        {"sid": session_id, "nk": node_key},
+    )).mappings().first()
+    if not row or row["guidance_status"] != "ready" or not row["guidance"]:
+        return None
+    meta = row["guidance_meta"]
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (ValueError, TypeError):
+            meta = {}
+    gen_at = row["guidance_generated_at"]
+    return {
+        "guidance": row["guidance"],
+        "guidance_meta": meta or {},
+        "status": "ready",
+        "cached": True,
+        "generated_at": gen_at.isoformat() if hasattr(gen_at, "isoformat") else gen_at,
+    }
+
+
+async def ensure_guidance(
+    *,
+    session_id: str,
+    node_key: str,
+    ctx: StepContext,
+    node_description: Optional[str] = None,
+    research: bool,
+    refine_hint: Optional[str] = None,
+    force: bool = False,
+    domain: Optional[str] = None,
+    db,
+) -> dict:
+    """Return guidance, generating + persisting only when needed.
+
+    ``force=False`` (the auto-guide / re-view path) returns a cached ``ready``
+    row without spending an LLM call. ``force=True`` (``/assist guide``) always
+    regenerates.
+    """
+    if not force:
+        cached = await read_cached_guidance(
+            session_id=session_id, node_key=node_key, db=db,
+        )
+        if cached:
+            return cached
+    res = await generate_guidance(
+        ctx=ctx,
+        node_description=node_description,
+        research=research,
+        refine_hint=refine_hint,
+        node_key=node_key,
+        domain=domain,
+    )
+    await persist_guidance(
+        session_id=session_id,
+        node_key=node_key,
+        guidance=res["guidance"],
+        guidance_meta=res["guidance_meta"],
+        status=res["status"],
+        db=db,
+    )
+    res["cached"] = False
+    return res
+
+
+# ── Explicit one-off research (/assist research <question>) ───────────────
+
+
+async def research_one(
+    *, question: str, node_key: str = "?", domain: Optional[str] = None,
+    synthesize: bool = True,
+) -> dict:
+    """Confirm a single operator-supplied question and optionally synthesize
+    a short cited answer. Does not persist — this is a side query.
+    """
+    role = settings.assist_guide_model_role
+    sources = await _confirm_query(question, node_key=node_key, domain=domain)
+    answer: Optional[str] = None
+    if synthesize and sources:
+        resp = await chat_until_nonempty(
+            model_router.chat,
+            [
+                {"role": "system", "content": _RESEARCH_SYNTH_SYSTEM},
+                {"role": "user", "content": (
+                    f"Question: {question}\n\n"
+                    f"{_render_research_block(sources)}"
+                )},
+            ],
+            {"role": role},
+            temperature=0.2,
+            # Generous budget: the cloud thinking model spends num_predict on
+            # reasoning first, so a tight cap returns empty content (§17.465).
+            # 8192 matches the node-exec budget that reliably clears reasoning.
+            max_tokens=8192,
+            draws=3,
+            label="assist_research",
+        )
+        if resp and resp.success:
+            answer = (resp.text or "").strip() or None
+    return {"question": question, "sources": sources, "answer": answer}
