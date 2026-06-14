@@ -300,13 +300,13 @@ class TestConfirmCommand:
         pipe.valves.assist_after_confirm = True
         log, responses = _http_call_log(monkeypatch)
         responses[("post", "/ideate/confirm")] = _make_response(
-            200, {"status": "planning", "job_id": "job-77"},
+            200, {"status": "planning", "job_id": "12121212-1212-4121-8121-121212121212"},
         )
         responses[("post", "/dag")] = _make_response(
             200, {"task_count": 2, "tasks": []},
         )
         responses[("post", "/assist/start")] = _make_response(
-            200, {"session_id": _UUID_A, "job_id": "job-77", "pending_steps": 2},
+            200, {"session_id": _UUID_A, "job_id": "12121212-1212-4121-8121-121212121212", "pending_steps": 2},
         )
         responses[("get", f"/assist/{_UUID_A}/next")] = _make_response(
             200, {"session_id": _UUID_A, "node_key": "T1", "title": "step",
@@ -315,7 +315,7 @@ class TestConfirmCommand:
         responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
 
         body = {"metadata": {"chat_id": "chat-confirm-into-assist"}}
-        list(pipe.pipe("/confirm job-77", "m", [{"role": "user", "content": "/confirm job-77"}], body))
+        list(pipe.pipe("/confirm 12121212-1212-4121-8121-121212121212", "m", [{"role": "user", "content": "/confirm 12121212-1212-4121-8121-121212121212"}], body))
 
         puts = [
             e for e in log
@@ -1325,7 +1325,7 @@ class TestAssistChatMemory:
         )
         responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
 
-        list(pipe.pipe("/assist job-1", "m", [], self._body_with_chat("chat-A")))
+        list(pipe.pipe("/assist 12121212-1212-4121-8121-121212121212", "m", [], self._body_with_chat("chat-A")))
         puts = [e for e in log if e[0] == "put" and "_chatmap/chat-A" in e[1]]
         assert puts, f"expected PUT to /assist/_chatmap/chat-A, got: {log}"
         assert puts[0][2] == {"session_id": _UUID_A, "last_node_key": "T1"} or \
@@ -1440,7 +1440,7 @@ class TestAssistChatMemory:
         _log, responses = _http_call_log(monkeypatch)
         responses[("post", "/assist/start")] = _make_response(200, "not json at all")
 
-        out = "".join(pipe.pipe("/assist job-1", "m", [], self._body_with_chat("chat-G")))
+        out = "".join(pipe.pipe("/assist 12121212-1212-4121-8121-121212121212", "m", [], self._body_with_chat("chat-G")))
         assert "❌" in out and "non-JSON" in out, \
             f"expected JSON-parse error yield; got: {out!r}"
 
@@ -1454,7 +1454,7 @@ class TestAssistChatMemory:
             200, {"job_id": "job-1", "pending_steps": 3},  # no session_id
         )
 
-        out = "".join(pipe.pipe("/assist job-1", "m", [], self._body_with_chat("chat-H")))
+        out = "".join(pipe.pipe("/assist 12121212-1212-4121-8121-121212121212", "m", [], self._body_with_chat("chat-H")))
         assert "❌" in out and "session_id" in out, \
             f"expected missing-session_id error yield; got: {out!r}"
 
@@ -1474,10 +1474,10 @@ class TestAssistChatMemory:
         )
         responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
 
-        out = "".join(pipe.pipe("/assist job-99", "m", [], self._body_with_chat("chat-I")))
+        out = "".join(pipe.pipe("/assist 12121212-1212-4121-8121-121212121212", "m", [], self._body_with_chat("chat-I")))
         # Session-started banner should still render, falling back to input job_id
         # and showing "?" for the unknown pending-steps count.
-        assert "job-99" in out, f"expected input job_id fallback; got: {out!r}"
+        assert "12121212-1212-4121-8121-121212121212" in out, f"expected input job_id fallback; got: {out!r}"
         assert "? pending" in out, f"expected '?' for unknown pending count; got: {out!r}"
 
     # -- §17.268: extend §17.259 JSON-parse hardening to /next and /submit --
