@@ -114,7 +114,7 @@ KNOWN_SUBCOMMANDS: dict = {
     # endpoint or a chat handler. Removed; see audit follow-ups.
     "/schedule": ("list", "add", "delete", "help"),
     "/assist": ("next", "submit", "skip", "handoff", "pause", "resume",
-                "done", "friction", "help"),
+                "done", "friction", "status", "help"),
     "/exec": ("retry", "help"),
     # §17.479 — node-control subcommands.
     "/node": ("reset", "del", "delete", "remove", "edit", "reorder", "help"),
@@ -433,8 +433,9 @@ STOP ASKING ONCE THE LOAD-BEARING GAPS ARE ANSWERED — don't drag the user
 through low-value questions. When every LOAD-BEARING bucket is covered (even if
 LOW-VALUE buckets remain open with safe defaults), replace the four sections
 with a 2-4 sentence scope summary, state the defaults you will assume for any
-remaining low-value gaps, and write: "Type `/go` to launch — I'll use sensible
-defaults for the rest, or answer the open points first to override them."
+remaining low-value gaps, and write: "Type `/go` to review the launch brief
+(then `/go confirm` to start) — I'll use sensible defaults for the rest, or
+answer the open points first to override them."
 While ANY load-bearing gap is still open, keep emitting all four sections every
 turn — even if the user answered everything else in their last message. (If all
 four buckets read "✓ covered", the same summary-and-`/go` close applies with no
@@ -1747,6 +1748,7 @@ class Pipeline:
         "| `/assist handoff [<session_id>] <node_key> [single\\|all]` | Hand a node back to autonomous executor. |\n"
         "| `/assist pause [<session_id>]` | Pause; resume later. |\n"
         "| `/assist resume [<session_id>]` | Resume a paused session. |\n"
+        "| `/assist status [<session_id>]` | Show session status, current step, and per-status step counts. |\n"
         "| `/assist done [<session_id>]` | Show the compiled output (clears chat memory). |\n"
         "| `/assist friction [<session_id>] [<node_key>] <note>` | Log a friction note. |\n"
         "| `/assist help` | Show this message. |\n\n"

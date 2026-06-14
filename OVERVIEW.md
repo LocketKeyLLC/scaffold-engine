@@ -21983,6 +21983,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.520 Fix — two LOW audit cleanups: `/assist status` implemented + triage `/go` wording (2026-06-14)
+
+The last two LOW findings from the 2026-06-14 lifecycle audit:
+
+**Dangling `/assist status`.** The mirror-divergence banner (`_assist_handlers.py`) told operators to "Inspect with `/assist status`", but the subcommand was never implemented — it fell through to the help table. Rather than delete the reference, **implemented the command** (the backing `GET /assist/{session_id}` roll-up already existed): new `assist_status()` renders status / job / current step / per-status step counts; wired into `handle_assist`'s subcommand set, `dispatch_assist_sub`, the `/assist` arg allow-list, and the `_ASSIST_HELP` table. Live: `GET /assist/{sid}` → `status=completed, current=T8, step_counts={committed:8}` renders correctly.
+
+**Triage `/go` wording.** The `TRIAGE_SYSTEM_PROMPT` close-out said *"Type `/go` to launch"*, but with `confirm_before_launch=True` (default) `/go` shows a brief and waits for `/go confirm`. Reworded to *"Type `/go` to review the launch brief (then `/go confirm` to start)"* so the promise matches the two-step gate.
+
+**Verification.** New `tests/test_scaffold_router_assist_status.py` (+4: render rollup, 404, dispatch routing, no-session hint); assist + commands + help-refresh suites — **181 passed**. No test pinned the old `/go` wording. Pipelines reloaded; live in OWUI. This closes every audit + dogfood finding (§17.501–520).
+
+---
+
 ### §17.519 Feature — machine-readable `deliverable_kind` (plan-only as data, not just banner) (2026-06-14)
 
 **Gap (logged in §17.506).** Whether a completed job's deliverable was actually executed vs. an unexecuted plan/runbook vs. assist-completed was only conveyed by **banner TEXT** inside `compiled_output` (§17.506/§17.516). Programmatic consumers (web UI, SDK, `/jobs` filters, dashboards) couldn't branch on it without string-matching prose.

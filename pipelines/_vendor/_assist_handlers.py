@@ -360,7 +360,8 @@ def handle_assist(
         arg1 = parts[1]
         # /assist <subcommand> ... — route to subcommand handler
         if arg1 in ("next", "submit", "skip", "handoff", "pause", "resume",
-                    "done", "friction", "guide", "research", "env", "fix", "verbose"):
+                    "done", "friction", "guide", "research", "env", "fix",
+                    "verbose", "status"):
             yield from dispatch_assist_sub(
                 pipe, arg1, parts[2:], fenced,
                 chat_id=chat_id, raw_head=head,
@@ -378,6 +379,39 @@ def handle_assist(
         ); return
 
     yield pipe._ASSIST_HELP
+
+
+def assist_status(pipe, session_id: str) -> Generator[str, None, None]:
+    """§17.520 — render an assist session roll-up (status, job, current step,
+    per-status step counts). Backs `/assist status`, which the mirror-divergence
+    banner already pointed at but was never implemented (dangling reference).
+    GET /assist/{session_id} returns the session + step_counts."""
+    try:
+        r = _ss(pipe).get(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}",
+            headers=pipe._auth_headers(),
+            timeout=pipe.valves.request_timeout,
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code == 404:
+        yield f"❌ No assist session `{session_id}`."; return
+    if r.status_code >= 400:
+        yield f"❌ Could not fetch session: HTTP {r.status_code} {r.text[:200]}"
+        return
+    try:
+        d = r.json()
+    except ValueError:
+        yield f"❌ Session status: non-JSON reply; raw: {r.text[:200]}"; return
+    counts = d.get("step_counts") or {}
+    counts_str = ", ".join(f"{k}={v}" for k, v in counts.items()) or "n/a"
+    yield (
+        f"🔎 **Assist session `{session_id}`**\n\n"
+        f"- Status: `{d.get('status', '?')}`\n"
+        f"- Job: `{d.get('job_id', '?')}`\n"
+        f"- Current step: `{d.get('current_node_key') or '(none)'}`\n"
+        f"- Steps: {counts_str}\n"
+    )
 
 
 def dispatch_assist_sub(
@@ -448,6 +482,10 @@ def dispatch_assist_sub(
         if not sid:
             yield no_session_msg("resume"); return
         yield from assist_simple_post(pipe, sid, "resume"); return
+    if sub == "status":
+        if not sid:
+            yield no_session_msg("status"); return
+        yield from assist_status(pipe, sid); return
     if sub == "done":
         if not sid:
             yield no_session_msg("done"); return
