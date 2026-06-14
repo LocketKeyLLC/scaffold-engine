@@ -21983,6 +21983,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.506 Fix — autonomous "completed" on hands-on jobs is hallucinated; add PLAN-NOT-EXECUTED banner (2026-06-14)
+
+**Symptom (user report, validated).** A homelab job ran autonomously and showed `completed`, but nothing was built — the user correctly called it a hallucinated completion. Forensics on job `eb920fc5`: 8 of 9 nodes were `tool=Shell` ("Install Proxmox", "Enable GPU passthrough", "Deploy AI VM"), all `done`, but their `output_text` is **runbooks for a human** (`<PLACEHOLDER>` vars, "power on the hardware, enter BIOS"). Root mechanism: `execution_agent._system_for_tool` returns `EXECUTION_SYSTEM_RUNBOOK` for Shell when `settings.shell_tool_enabled` is False (the default) and there is **no shell backend wired** (line ~908) — so a Shell node only ever *generates instructions*, marks itself `done`, and the job rolls up to `completed`. `compiled_output` then reads like a finished build (placeholders and all). This is the autonomous-vs-assist mismatch: a hands-on-hardware build is **assist-class** (the user is the executor) but ran autonomously, which can only produce text.
+
+**Fix.** `execution_compile._compile_output` now counts `done` Shell/runbook nodes (gated on `not settings.shell_tool_enabled`) and prepends a `_prepend_plan_only_banner` — *"⚠️ PLAN — NOT EXECUTED. This job includes N of M steps that are runbooks … the engine generated them but did not run them … run `/assist <job_id>`"*. Mirrors the existing `_prepend_skipped_banner` (operational metadata, applied in `_finish` AFTER synthesis so it survives LLM rewriting; lands at the very top as the most load-bearing warning). Gated on the flag so a future real shell backend suppresses it. Surfaces everywhere `compiled_output` is read (web `/results`, chat `/results`). Pairs with §17.504/§17.505 (steer to / unbreak Assist Mode).
+
+**Scope note.** This is a *surface* guardrail — it does not change the `completed` job status (high blast radius; lots of code keys off it). A deeper follow-up could add a distinct terminal state or a `plan_only` flag so programmatic consumers (not just humans reading the text) can branch on it.
+
+**Verification.** New `tests/test_compile_plan_only_banner.py` (**+7**: helper zero/none/present/singular; `_compile_output` shell-job→banner, pure-text→none, shell_tool_enabled→suppressed). 3 pre-existing compile tests that asserted exact `==` on Shell-node output relaxed to membership (the banner is additive; their concern is content *selection*) — full compile suite **69 passed**.
+
+---
+
 ### §17.505 Fix — Assist Mode 100% broken in production: `sys.modules["scaffold_router"]` KeyError (2026-06-14)
 
 **Symptom (user report).** A correct `/assist <job_id>` in OWUI returned `Response payload is not completed: <TransferEncodingError: 400, message='Not enough data to satisfy transfer length header.'>`. That aiohttp error = the pipeline's chunked response to OWUI was truncated because the generator raised mid-stream.

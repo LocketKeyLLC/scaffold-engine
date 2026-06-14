@@ -346,6 +346,40 @@ def _prepend_skipped_banner(text: str | None, skipped_count: int, total: int) ->
     return banner + text
 
 
+def _prepend_plan_only_banner(
+    text: str | None, runbook_count: int, total: int, job_id: str,
+) -> str | None:
+    """§17.506 — when N nodes are Shell/runbook steps the engine did NOT
+    execute (``shell_tool_enabled`` False, the default), prepend a banner
+    making clear the deliverable is a *plan to perform on real systems*, not
+    a completed build — and steer the user to Assist Mode, which walks each
+    step and records real per-step completion.
+
+    Why: autonomous execution of a hands-on-hardware job (install Proxmox,
+    configure a firewall, …) only generates runbooks and marks the nodes
+    ``done``, so the job rolls up to ``completed`` and the compiled output
+    reads like a finished build when nothing was actually executed. The
+    banner closes that "hallucinated completion" gap at the surface the user
+    reads. Sits AFTER synthesis (like ``_prepend_skipped_banner``) so it
+    survives any LLM rewriting — operational metadata, not narrative.
+
+    Returns the input unchanged when ``text`` is None or ``runbook_count`` is 0.
+    """
+    if text is None or runbook_count <= 0:
+        return text
+    plural = "step" if runbook_count == 1 else "steps"
+    verb = "is a runbook" if runbook_count == 1 else "are runbooks"
+    banner = (
+        f"> ⚠️ **PLAN — NOT EXECUTED.** This job includes {runbook_count} of "
+        f"{total} {plural} that {verb} of actions to perform on real systems; "
+        f"the engine generated them but did **not** run them, so nothing has "
+        f"been built or changed. To carry them out with the engine guiding and "
+        f"verifying each step, run `/assist {job_id}`."
+        f"\n\n---\n\n"
+    )
+    return banner + text
+
+
 # §17.473 — dominant-leaf preference for Strategy 0. dag_generator marks
 # EVERY structural leaf (a node nothing depends on) is_output_node, so a DAG
 # with a dead-end side-branch — e.g. a "configure Tailscale exit node" node
@@ -490,12 +524,27 @@ async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
     skipped_count = sum(1 for n in nodes if n["status"] == "skipped")
     total_count = len(nodes)
 
+    # §17.506 — count Shell/runbook nodes the engine did NOT execute. When
+    # `shell_tool_enabled` is False (default) a Shell node only ever produces
+    # a runbook for the human to run, yet is marked `done` — so the job can
+    # roll up to `completed` with nothing actually built. Gate on the flag so
+    # a future real shell backend (shell_tool_enabled=True) suppresses it.
+    runbook_count = (
+        sum(1 for n in nodes
+            if n["status"] == "done" and (n["tool"] or "").lower() == "shell")
+        if not settings.shell_tool_enabled else 0
+    )
+
     async def _finish(text_value: str | None, was_synthesized: bool) -> tuple[str | None, bool]:
-        """Apply the X.2 skipped banner + return."""
-        return (
-            _prepend_skipped_banner(text_value, skipped_count, total_count),
-            was_synthesized,
+        """Apply the X.2 skipped banner + §17.506 plan-only banner + return.
+
+        Plan-only banner is applied last so it lands at the very top — it's
+        the most load-bearing warning (the deliverable was not executed)."""
+        banner_text = _prepend_skipped_banner(text_value, skipped_count, total_count)
+        banner_text = _prepend_plan_only_banner(
+            banner_text, runbook_count, total_count, job_id,
         )
+        return (banner_text, was_synthesized)
 
     # Strategy 0 — explicit DELIVERABLE marker (§17.475) is the primary
     # signal: the DAG generator named exactly which node(s) produce the
