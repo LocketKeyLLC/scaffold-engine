@@ -240,7 +240,13 @@ def collect_upstream_code(
     if not upstream_outputs:
         return []
     out: list[tuple[str, str]] = []
-    for key, text in upstream_outputs.items():
+    for key, val in upstream_outputs.items():
+        # §17.514 — `_fetch_upstream_outputs` returns (output_text, confidence)
+        # tuples since §17.477; unpack the text (mirrors _format_upstream_block).
+        # Pre-fix this passed the whole tuple to extract_code_blocks →
+        # `TypeError: expected string or bytes-like object, got 'tuple'`, which
+        # crashed EVERY CodeGen node with upstream deps under the strict verifier.
+        text = val[0] if isinstance(val, tuple) else val
         if not text:
             continue
         py = "\n\n".join(

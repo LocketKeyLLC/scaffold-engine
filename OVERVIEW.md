@@ -21983,6 +21983,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.514–515 — Pre-deployment dogfood fixes (multi-job end-to-end run) (2026-06-14)
+
+Drove three complex, diverse jobs through the full lifecycle (triage→ideate→DAG→execute/assist) to validate usefulness before deployment: a logmerge CLI (autonomous/CodeGen), a hardened Vaultwarden setup (assist/Shell), and a Node.js blue-green pipeline (autonomous/LLM+CodeGen). Triage briefs were faithful (no fabrication, right ambiguities); DAGs were sensible and correctly tool/path-classified; the **assist** path worked end-to-end (8/8 steps committed → mirrored to dag_nodes → session+job completed; guidance was excellent — `## Prerequisites/Inputs/Risk/Run this/Verify` with a real UFW lockout-hazard callout; §17.506 banner correctly did NOT fire on the assist-completed job). Two real bugs surfaced and fixed:
+
+**§17.514 — autonomous CodeGen crashed on any node with upstream deps.** The logmerge run failed after node 1 with `TypeError: expected string or bytes-like object, got 'tuple'`. `_fetch_upstream_outputs` returns `dict[node_key → (output_text, confidence)]` tuples (since §17.477) and `_format_upstream_block` was updated to unpack them, but `collect_upstream_code` (`execution_verify.py`, called by the §17.429 strict CodeGen verifier) still treated the values as strings → passed the whole tuple to `extract_code_blocks` → crash. This broke **every CodeGen node with a dependency** under the default strict verifier (i.e. essentially all real code jobs). Fix: unpack `val[0] if isinstance(val, tuple) else val`. The existing tests only passed string values, so they never caught the production shape — added tuple-shaped regressions. **Live-confirmed:** re-running logmerge, the two CodeGen nodes (T2/T3) that previously crashed now pass.
+
+**§17.515 — ideation domain classifier leaked software tasks into `eng_design`.** The blue-green job was classified `domain=eng_design` (the circuits/EDA partition, deliberate-write-only with "no classifier route" per the eng/eng_design split) — purely because the refinement tool's `domain` field was a bare `enum: sorted(ALLOWED_DOMAINS)` with **no description**, so the LLM picked on the "design"/"deployment" keyword. Misrouted jobs get empty/wrong RAG grounding at execution (queries the job's domain). Fix: `LLM_SELECTABLE_DOMAINS = ALLOWED_DOMAINS − {eng_design}` for the schema enum + a domain-field description ("'eng' = software/infra/devops/deployment… when unsure choose eng"). `eng_design` stays in `ALLOWED_DOMAINS` for explicit overrides (web-UI dropdown + `/ideate domain=` unaffected).
+
+**Open dogfood findings (logged, not yet fixed):** assist-completed jobs leave `compiled_output` NULL (the assist path never calls `_compile_output`), so the default `/results` view shows no synthesized "here's what you built" summary — the per-node evidence is only visible via `/results <id> nodes`. A proper fix would synthesize an assist completion summary while suppressing the §17.506 banner (assist steps WERE executed). MED usefulness gap.
+
+**Verification.** New tuple regressions in `test_execution_codegen_verify.py` (+2) + domain-enum guard in `test_idea_refinement.py` (+2); affected suites (codegen-verify, idea_refinement, domain_filtering, web_ui) — **131 passed**. Live E2E: assist job (Vaultwarden) fully completed; autonomous job (logmerge) past the prior crash point.
+
+---
+
 ### §17.513 Fix (test determinism) — plan-only banner integration tests nondeterministic under full-suite load (2026-06-14)
 
 The full-suite runs after §17.508–512 surfaced **1 failure** in `test_compile_plan_only_banner.py::TestCompileOutputPlanOnly` — but **a different case each run** (first `test_shell_enabled_suppresses_banner`, then `test_shell_runbook_job_gets_banner`), while the file passed green alone, as a file, in the a–c range, and in the first-17 real-collection-order subset. Two distinct contributing factors, both fixed:

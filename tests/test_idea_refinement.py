@@ -288,3 +288,24 @@ class TestRefineIdeaDBInteractions:
         # Should have called execute (single INSERT refining + final UPDATE) and commit
         assert db.execute.call_count >= 2  # INSERT refining + final UPDATE
         assert db.commit.call_count >= 2   # after INSERT + after final UPDATE
+
+
+class TestDomainEnumGuard:
+    """§17.515 — the refinement LLM must NOT auto-select eng_design (the
+    circuits/EDA partition, explicit-override-only). It was leaking on software
+    tasks via the 'design' keyword (e.g. "blue-green DEPLOYMENT" → eng_design),
+    then getting empty/wrong RAG grounding at execution. It stays in
+    ALLOWED_DOMAINS so an explicit /ideate override is still accepted."""
+
+    def test_llm_enum_excludes_eng_design(self):
+        from app.modules.idea_refinement import REFINE_BRIEF_TOOL, ALLOWED_DOMAINS
+        enum = REFINE_BRIEF_TOOL.input_schema["properties"]["domain"]["enum"]
+        assert "eng_design" not in enum, "LLM must not auto-pick eng_design"
+        assert {"eng", "llm", "rag", "prompt", "spec"} <= set(enum)
+        assert "eng_design" in ALLOWED_DOMAINS  # explicit override still allowed
+
+    def test_domain_field_has_semantic_guidance(self):
+        from app.modules.idea_refinement import REFINE_BRIEF_TOOL
+        desc = (REFINE_BRIEF_TOOL.input_schema["properties"]["domain"]
+                .get("description", "")).lower()
+        assert "software" in desc and "eng" in desc  # tells the model what eng is
