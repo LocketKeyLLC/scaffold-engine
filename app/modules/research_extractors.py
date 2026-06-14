@@ -95,8 +95,18 @@ def _score_source(url: str) -> float:
 
 
 def _detect_domain(topic: str) -> str:
-    """Map research topic to Milvus partition domain via keyword scoring."""
-    topic_id = detect_topic_id(topic, TOPIC_KEYWORDS, default=1)
+    """Map research topic to Milvus partition domain via keyword scoring.
+
+    §17.501 — pass ``default=0`` (a topic_id NOT in ``topic_to_domain``,
+    whose keys are 1-6) so a topic that matches NO keywords falls through
+    to ``settings.default_domain`` ("eng") via the ``.get`` fallback below.
+    Previously ``default=1`` routed every keyword-less topic to topic_id 1
+    → the "llm" partition, contradicting the documented ``default_domain``
+    and stranding e.g. homelab/infra research in "llm" where domain-pinned
+    queries miss it. (Cross-domain ``domain=None`` retrieval still found it,
+    which is why the mis-routing was silent.)
+    """
+    topic_id = detect_topic_id(topic, TOPIC_KEYWORDS, default=0)
     return settings.topic_to_domain.get(topic_id, settings.default_domain)
 
 

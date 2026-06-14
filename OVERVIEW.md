@@ -21983,6 +21983,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.501 Fix — `_detect_domain` keyword-less fallback routed to "llm" not "eng" (2026-06-13)
+
+**Symptom.** Homelab research (topic matching no `TOPIC_KEYWORDS`) ingested into the **"llm"** Milvus partition. Silent because cross-domain (`domain=None`) retrieval still found it via fan-out — only a domain-pinned query would miss it.
+
+**Root cause.** `_detect_domain` (research_extractors.py) passed `default=1` to `detect_topic_id`; an unmatched topic returned topic_id 1, and `topic_to_domain[1] == "llm"`. This contradicted `settings.default_domain` ("eng") — whose `.get(topic_id, settings.default_domain)` fallback was **dead code**, since keys 1-6 are all mapped.
+
+**Fix.** Pass `default=0` (a topic_id absent from `topic_to_domain`) so the documented `default_domain` fallback fires → unmatched topics land in "eng". One-line change; makes the existing fallback live. `detect_topic_id`'s own `default=1` signature is untouched (its unit test at `test_topic_detection.py:35` stays valid).
+
+**Verification.** Live `_detect_domain` in-container: homelab→`eng`, gardening→`eng`, "fine-tune an llm with rlhf"→`llm`, "RAG retrieval pipeline"→`rag`. New `tests/test_research_domain_detection.py` (**+3**) + existing domain/research suite (topic_detection, research_verify, forum/hf ingest, ssrf-guard, gt_extractor_module) — **163 passed**. Pre-existing mis-routed homelab entries left in place (retrievable cross-domain); only future ingests are corrected. **Known secondary issue (not fixed here):** the query decomposition for that run produced mostly off-topic web-dev/CSS content (only ~4/31 entries genuinely homelab) — a research-quality bug at the query-generation layer, logged for follow-up.
+
+---
+
 ### §17.500 Feature — Assist Mode deep research (fetch + extract pages) (2026-06-13)
 
 The confirm step used SearXNG *snippets* (~200 chars). This adds **page fetch + extract** (trafilatura) for real doc content — reusing `research_agent._fetch_and_extract` (bounded concurrency, fail-soft). **Targeted to where accuracy matters:** `/assist research` and `/assist fix` go deep; the auto-guide pre-pass stays snippet-fast so walkthroughs don't slow down (and existing guide tests stay valid).
