@@ -714,6 +714,49 @@ class TestIsDeliverable:
         assert normalized[0]["is_deliverable"] is True
 
 
+@pytest.mark.smoke
+class TestLongNameCoercion:
+    """§17.507 — a >5-word task name is truncated-with-warning, NOT a fatal
+    error. Pre-fix, one over-length name (e.g. the LLM's non-deterministic
+    "Deploy media AI and game VMs") made `_normalize_tasks` append an error,
+    which failed the ENTIRE DAG build and marked the job `failed`."""
+
+    def test_long_name_truncated_not_errored(self):
+        tasks = [
+            {"id": "T1", "name": "Deploy media AI and game VMs",  # 6 words
+             "type": "action", "tool": "Shell", "depends_on": []},
+        ]
+        normalized, errors, warnings = _dag_gen._normalize_tasks(tasks)
+        assert not errors                       # build is NOT failed
+        assert len(normalized) == 1             # task survives
+        assert normalized[0]["name"] == "Deploy media AI and game"  # 5 words
+        assert any("truncated" in w.lower() for w in warnings)
+
+    def test_five_word_name_untouched(self):
+        tasks = [
+            {"id": "T1", "name": "Install the Proxmox VE host",  # exactly 5
+             "type": "action", "tool": "Shell", "depends_on": []},
+        ]
+        normalized, errors, warnings = _dag_gen._normalize_tasks(tasks)
+        assert not errors
+        assert normalized[0]["name"] == "Install the Proxmox VE host"
+        assert not any("truncated" in w.lower() for w in warnings)
+
+    def test_one_long_name_does_not_drop_other_tasks(self):
+        # The real failure mode: one bad name nuked the whole multi-node DAG.
+        tasks = [
+            {"id": "T1", "name": "Resolve design ambiguities", "type": "action",
+             "tool": "LLM", "depends_on": []},
+            {"id": "T2", "name": "Deploy media AI and game VMs", "type": "action",
+             "tool": "Shell", "depends_on": ["T1"]},
+            {"id": "T3", "name": "Document network topology", "type": "action",
+             "tool": "LLM", "depends_on": ["T2"]},
+        ]
+        normalized, errors, _w = _dag_gen._normalize_tasks(tasks)
+        assert not errors
+        assert {n["id"] for n in normalized} == {"T1", "T2", "T3"}
+
+
 # ===========================================================================
 # §17.476 — dead-end / dependency-completeness detection
 # ===========================================================================

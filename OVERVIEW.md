@@ -21983,6 +21983,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.507 Fix — DAG build hard-failed on a >5-word task name (coerce, don't crash) (2026-06-14)
+
+**Symptom.** Generating a fresh homelab DAG failed with `{"status":"failed","errors":["Task 4: name exceeds 5 words: 'Deploy media AI and game VMs'"]}` and marked the **whole job `failed`** — no nodes inserted. A retry (different non-deterministic LLM draw) succeeded, so the build was effectively a coin-flip on every node name.
+
+**Root cause.** `dag_generator._normalize_tasks` (line ~1030, rule #104) appended a hard **error** (and `continue`d, dropping the task) when `len(name.split()) > 5`. Any non-empty `errors` fails the entire DAG build. But the 5-word cap is a *stylistic guideline* handed to the LLM in the prompt ("Keep task names to max 5 words") — the `dag_nodes.title` column is unbounded. Failing the build over a one-word overage is the bug; the validator's job is to not crash on minor LLM style misses.
+
+**Fix.** Coerce-with-warning instead of erroring: truncate the name to 5 words, `logger.warning` + append to the `warnings` list, keep the task. Consistent with the function's existing unknown-type→`action` / unknown-tool coercions (#26). Full detail still lives in the node's `notes`/description. Genuine structural problems (missing id, missing name, duplicate id, non-object) still hard-error as before.
+
+**Verification.** New `TestLongNameCoercion` (**+3**: 6-word name truncated not errored; exactly-5-word untouched; one long name doesn't drop sibling tasks). Live: the exact failing input `'Deploy media AI and game VMs'` → `'Deploy media AI and game'`, `errors: []`, warning surfaced, sibling task preserved. Full dag_generator + validate_dag + parse-error-diag suites — **77 passed**. Surfaced while building the fresh homelab assist job (§17.505/§17.506 follow-on).
+
+---
+
 ### §17.506 Fix — autonomous "completed" on hands-on jobs is hallucinated; add PLAN-NOT-EXECUTED banner (2026-06-14)
 
 **Symptom (user report, validated).** A homelab job ran autonomously and showed `completed`, but nothing was built — the user correctly called it a hallucinated completion. Forensics on job `eb920fc5`: 8 of 9 nodes were `tool=Shell` ("Install Proxmox", "Enable GPU passthrough", "Deploy AI VM"), all `done`, but their `output_text` is **runbooks for a human** (`<PLACEHOLDER>` vars, "power on the hardware, enter BIOS"). Root mechanism: `execution_agent._system_for_tool` returns `EXECUTION_SYSTEM_RUNBOOK` for Shell when `settings.shell_tool_enabled` is False (the default) and there is **no shell backend wired** (line ~908) — so a Shell node only ever *generates instructions*, marks itself `done`, and the job rolls up to `completed`. `compiled_output` then reads like a finished build (placeholders and all). This is the autonomous-vs-assist mismatch: a hands-on-hardware build is **assist-class** (the user is the executor) but ran autonomously, which can only produce text.
