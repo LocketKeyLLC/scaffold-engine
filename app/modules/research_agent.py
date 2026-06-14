@@ -455,12 +455,17 @@ async def _search_queries(
             continue
 
         try:
+            # §17.503 — send ONLY `engines`, NOT `categories`. SearXNG treats
+            # the two as ADDITIVE: passing `categories=it` activates *every*
+            # engine tagged `it` (including MDN, which keyword-matches
+            # aggressively) regardless of the curated `engines` list, so a
+            # clean homelab query flooded with developer.mozilla.org pages.
+            # Engines-only makes the curated list authoritative.
             resp = await client.get(
                 "/search",
                 params={
                     "q": query_text,
                     "format": "json",
-                    "categories": q.get("search_category", "general"),
                     "engines": _engines_for_category(q.get("search_category", "general")),
                 },
             )
