@@ -1015,6 +1015,32 @@ async def _maybe_finalize_session(*, session_id: str, db) -> None:
         """),
         {"jid": sess["job_id"]},
     )
+    # §17.516 — synthesize a deliverable from the mirrored per-node evidence so
+    # the default /results shows a "here's what you built" summary. Before this,
+    # the assist path never called _compile_output, leaving compiled_output NULL
+    # (the deliverable was only reachable via `/results <id> nodes`).
+    # assist_completed=True suppresses the §17.506 PLAN-NOT-EXECUTED banner (the
+    # operator DID execute these steps) and prepends a positive assist header.
+    # Best-effort: a compile failure must not block session finalization.
+    try:
+        from app.modules.execution_compile import _compile_output
+        compiled, synthesized = await _compile_output(
+            str(sess["job_id"]), db, assist_completed=True,
+        )
+        if compiled:
+            await db.execute(
+                text(
+                    "UPDATE jobs SET compiled_output = :co, "
+                    "compiled_output_synthesized = :syn, updated_at = NOW() "
+                    "WHERE id = :jid"
+                ),
+                {"co": compiled, "syn": synthesized, "jid": sess["job_id"]},
+            )
+    except Exception as e:  # noqa: BLE001 — finalization must survive compile errors
+        logger.warning(
+            "assist_compile_failed session_id=%s job_id=%s err=%s",
+            session_id, sess["job_id"], e,
+        )
     await db.commit()
     logger.info("assist_session_completed session_id=%s job_id=%s",
                 session_id, sess["job_id"])

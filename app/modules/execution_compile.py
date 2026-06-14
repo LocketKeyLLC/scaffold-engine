@@ -380,6 +380,29 @@ def _prepend_plan_only_banner(
     return banner + text
 
 
+def _prepend_assist_completed_banner(
+    text: str | None, step_count: int,
+) -> str | None:
+    """§17.516 — positive header for a deliverable compiled from an Assist Mode
+    run. The operator executed and verified each step on their own systems, so
+    (unlike autonomous runbook output) this is a *record of work actually done*
+    — and the §17.506 PLAN-NOT-EXECUTED banner must be suppressed for it. The
+    deliverable below is synthesized from the evidence the operator submitted.
+
+    Returns the input unchanged when ``text`` is None.
+    """
+    if text is None:
+        return text
+    plural = "step" if step_count == 1 else "steps"
+    banner = (
+        f"> ✅ **Completed via Assist Mode** — you executed and verified "
+        f"{step_count} {plural} on your own systems. The summary below is "
+        f"compiled from the evidence you submitted."
+        f"\n\n---\n\n"
+    )
+    return banner + text
+
+
 # §17.473 — dominant-leaf preference for Strategy 0. dag_generator marks
 # EVERY structural leaf (a node nothing depends on) is_output_node, so a DAG
 # with a dead-end side-branch — e.g. a "configure Tailscale exit node" node
@@ -492,8 +515,15 @@ def _select_dominant_leaves(explicit: list, all_nodes: list) -> tuple[list, list
     return survivors, dropped
 
 
-async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
+async def _compile_output(
+    job_id: str, db, *, assist_completed: bool = False,
+) -> tuple[str | None, bool]:
     """Compile node outputs into a single deliverable.
+
+    §17.516 — ``assist_completed=True`` marks an Assist Mode finalization: the
+    operator executed the steps themselves, so the §17.506 PLAN-NOT-EXECUTED
+    banner is suppressed and a positive "Completed via Assist Mode" header is
+    prepended instead.
 
     Returns ``(text, was_synthesized)``:
       - ``text`` is ``None`` when no done node contributed output.
@@ -529,21 +559,28 @@ async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
     # a runbook for the human to run, yet is marked `done` — so the job can
     # roll up to `completed` with nothing actually built. Gate on the flag so
     # a future real shell backend (shell_tool_enabled=True) suppresses it.
+    # §17.516 — in an Assist Mode finalization the operator executed every step,
+    # so there is no "unexecuted runbook" — force runbook_count to 0 so the
+    # PLAN-NOT-EXECUTED banner never fires (a positive assist header is used).
     runbook_count = (
         sum(1 for n in nodes
             if n["status"] == "done" and (n["tool"] or "").lower() == "shell")
-        if not settings.shell_tool_enabled else 0
+        if (not settings.shell_tool_enabled and not assist_completed) else 0
     )
+    done_count = sum(1 for n in nodes if n["status"] == "done")
 
     async def _finish(text_value: str | None, was_synthesized: bool) -> tuple[str | None, bool]:
-        """Apply the X.2 skipped banner + §17.506 plan-only banner + return.
-
-        Plan-only banner is applied last so it lands at the very top — it's
-        the most load-bearing warning (the deliverable was not executed)."""
+        """Apply the X.2 skipped banner + §17.506 plan-only / §17.516 assist
+        banner + return. The top banner is applied last so it lands first —
+        either the plan-only warning (autonomous, unexecuted) or the positive
+        assist-completed header (operator executed it), never both."""
         banner_text = _prepend_skipped_banner(text_value, skipped_count, total_count)
-        banner_text = _prepend_plan_only_banner(
-            banner_text, runbook_count, total_count, job_id,
-        )
+        if assist_completed:
+            banner_text = _prepend_assist_completed_banner(banner_text, done_count)
+        else:
+            banner_text = _prepend_plan_only_banner(
+                banner_text, runbook_count, total_count, job_id,
+            )
         return (banner_text, was_synthesized)
 
     # Strategy 0 — explicit DELIVERABLE marker (§17.475) is the primary

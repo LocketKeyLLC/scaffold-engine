@@ -85,3 +85,62 @@ class TestCompileOutputPlanOnly:
         ])
         result, _ = await _compile_output("job-real", db)
         assert "PLAN — NOT EXECUTED" not in result
+
+
+class TestAssistCompletedBanner:
+    """§17.516 — assist-completed compile suppresses the plan-only banner and
+    adds a positive 'Completed via Assist Mode' header (the operator executed
+    the steps), so /results shows a real summary instead of NULL."""
+
+    def test_helper_none_unchanged(self):
+        from app.modules.execution_compile import _prepend_assist_completed_banner
+        assert _prepend_assist_completed_banner(None, 3) is None
+
+    def test_helper_banner_present(self):
+        from app.modules.execution_compile import _prepend_assist_completed_banner
+        out = _prepend_assist_completed_banner("BODY", 3)
+        assert "Completed via Assist Mode" in out
+        assert "3 steps" in out
+        assert out.endswith("BODY")
+
+    def test_helper_singular(self):
+        from app.modules.execution_compile import _prepend_assist_completed_banner
+        assert "1 step on" in _prepend_assist_completed_banner("B", 1)
+
+
+class TestCompileOutputAssistCompleted:
+    """End-to-end: assist_completed=True path through _compile_output."""
+
+    @staticmethod
+    def _prep(monkeypatch, **kw):
+        from app.modules.execution_agent import _compile_output
+        sett = _compile_output.__globals__["settings"]
+        kw.setdefault("compile_synthesis_enabled", False)
+        kw.setdefault("shell_tool_enabled", False)
+        for k, v in kw.items():
+            monkeypatch.setattr(sett, k, v)
+        return _compile_output
+
+    async def test_assist_completed_suppresses_plan_banner_adds_header(self, monkeypatch):
+        _compile_output = self._prep(monkeypatch)
+        db = make_mock_db([  # noqa: F405
+            {"node_key": "T1", "title": "Install", "tool": "Shell",
+             "status": "done", "output_text": "ran it; verified active"},
+            {"node_key": "T2", "title": "Document", "tool": "LLM",
+             "status": "done", "output_text": "wrote SETUP.md"},
+        ])
+        result, _ = await _compile_output("job-assist", db, assist_completed=True)
+        assert "PLAN — NOT EXECUTED" not in result      # suppressed for assist
+        assert "Completed via Assist Mode" in result     # positive header
+        assert "2 steps" in result                       # done_count
+
+    async def test_default_path_still_gets_plan_banner(self, monkeypatch):
+        # Same shell job WITHOUT assist_completed → the §17.506 banner still fires.
+        _compile_output = self._prep(monkeypatch)
+        db = make_mock_db([  # noqa: F405
+            {"node_key": "T1", "title": "Install", "tool": "Shell",
+             "status": "done", "output_text": "## Run this\n..."},
+        ])
+        result, _ = await _compile_output("job-auto", db)
+        assert "PLAN — NOT EXECUTED" in result
+        assert "Completed via Assist Mode" not in result

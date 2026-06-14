@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.516 Fix — assist-completed jobs now get a synthesized deliverable summary (2026-06-14)
+
+**Gap (from the §17.514–515 dogfood).** An Assist Mode finalization marked the job `completed` but **never called `_compile_output`**, so `compiled_output` stayed NULL — the default `/results` showed no "here's what you built" summary; the operator's per-step evidence was only reachable via `/results <id> nodes`. After manually executing an 8-step Vaultwarden build, the user got an empty default deliverable.
+
+**Fix.** `_maybe_finalize_session` (`assist_agent.py`) now compiles a deliverable from the mirrored per-node evidence after marking the job completed, persisting `compiled_output` + `compiled_output_synthesized` (best-effort: a compile failure is logged and never blocks finalization). `_compile_output` gains `assist_completed: bool`: when True it (a) forces `runbook_count=0` so the §17.506 PLAN-NOT-EXECUTED banner is **suppressed** — the operator *did* execute the steps — and (b) prepends a positive `_prepend_assist_completed_banner` ("✅ Completed via Assist Mode — you executed and verified N steps…"). The existing strategy logic (deliverable nodes / dominant-leaf / concat) then assembles the evidence summary.
+
+**Verification.** +5 tests (`_prepend_assist_completed_banner` none/present/singular; `_compile_output` assist_completed suppresses-plan-adds-header; default path still gets the plan banner). **Live (real data):** compiling J2 (the dogfood Vaultwarden assist job) → 653-char summary, assist header present, plan banner absent, content drawn from the T5/T6/T8 deliverable evidence; backfilled J2. **Live (real finalize path):** walked a 10-step homelab assist session to completion → `_maybe_finalize_session` auto-populated `compiled_output` with the assist header and no plan banner. Compile + assist regression suites — **91 passed**. Closes the open finding logged in §17.514–515.
+
+---
+
 ### §17.514–515 — Pre-deployment dogfood fixes (multi-job end-to-end run) (2026-06-14)
 
 Drove three complex, diverse jobs through the full lifecycle (triage→ideate→DAG→execute/assist) to validate usefulness before deployment: a logmerge CLI (autonomous/CodeGen), a hardened Vaultwarden setup (assist/Shell), and a Node.js blue-green pipeline (autonomous/LLM+CodeGen). Triage briefs were faithful (no fabrication, right ambiguities); DAGs were sensible and correctly tool/path-classified; the **assist** path worked end-to-end (8/8 steps committed → mirrored to dag_nodes → session+job completed; guidance was excellent — `## Prerequisites/Inputs/Risk/Run this/Verify` with a real UFW lockout-hazard callout; §17.506 banner correctly did NOT fire on the assist-completed job). Two real bugs surfaced and fixed:
