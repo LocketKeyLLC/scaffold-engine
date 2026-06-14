@@ -225,3 +225,53 @@ class TestPromptBuildSuccessUnaffected:
         reason = mock_set_status.call_args.kwargs.get("verification_reason", "")
         assert "execution error" in reason
         assert "prompt build error" not in reason
+
+
+@pytest.mark.smoke
+class TestGroundingDomainFanout:
+    """§17.517 — general node grounding fans out across ALL domains by default
+    (domain=None) so `/research` ingested under a different (heuristic) partition
+    than the job's domain is still found; the setting restores job-scoping."""
+
+    @staticmethod
+    async def _capture_grounding_domain(cross_domain: bool):
+        from app.modules import execution_agent
+        from app.modules.execution_agent import execute_next_node
+
+        db = AsyncMock(); db.execute = AsyncMock(); db.commit = AsyncMock()
+        mock_get_job = AsyncMock(return_value={
+            "id": "job-1", "status": "running",
+            "refined_brief": {"description": "x", "goals": ["y"], "domain": "eng"},
+        })
+        mock_get_next = AsyncMock(return_value={
+            "id": "node-1", "node_key": "T1", "title": "X", "tool": "LLM",
+            "prompt_template": "do X", "domain": None, "depends_on": [],
+            "assigned_model": None, "retry_count": 0,
+            "last_verification_reason": None,
+        })
+        rag = AsyncMock(return_value="")  # recording mock; grounding "succeeds" empty
+        # Patch on the object execute_next_node reads (its module global), so a
+        # reloaded app.config can't decouple it (cf. §17.513).
+        with patch.object(execution_agent.settings,
+                          "execution_grounding_cross_domain", cross_domain), \
+             patch("app.modules.execution_agent.async_session",
+                   _build_session_mock(db)), \
+             patch("app.modules.execution_agent._get_job", mock_get_job), \
+             patch("app.modules.execution_agent._get_next_node", mock_get_next), \
+             patch("app.modules.execution_agent._fetch_rag_context", new=rag), \
+             patch("app.modules.execution_agent.optimize_prompt",
+                   new=AsyncMock(side_effect=Exception("bypass optimize"))), \
+             patch("app.modules.execution_agent.model_router.chat",
+                   new=AsyncMock(side_effect=RuntimeError("stop after grounding"))), \
+             patch("app.modules.execution_agent._set_node_status", new=AsyncMock()), \
+             patch("app.modules.execution_agent._log_execution", new=AsyncMock()):
+            await execute_next_node("job-1")
+        assert rag.called, "grounding must run for an LLM node"
+        return rag.call_args.kwargs.get("domain", "MISSING")
+
+    async def test_default_fans_out_all_domains(self):
+        # job domain is "eng", but cross-domain default → grounding searches ALL
+        assert await self._capture_grounding_domain(True) is None
+
+    async def test_setting_false_scopes_to_job_domain(self):
+        assert await self._capture_grounding_domain(False) == "eng"

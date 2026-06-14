@@ -1016,6 +1016,10 @@ async def execute_next_node(
         project_goal = " ".join(brief.get("goals", [])) if brief else ""
         rag_query = f"{project_goal}: {title}" if project_goal else title
         job_domain = brief.get("domain") if brief else None
+        # §17.517 — general grounding fans out across all domains by default so
+        # research ingested under a different (heuristic) partition than the
+        # job's domain is still found. The cosine floor + reranker filter noise.
+        grounding_domain = None if settings.execution_grounding_cross_domain else job_domain
 
         if tool_lower == "milvus":
             rag_block = await _milvus_search(title, node_key=node_key, domain=node_snapshot.get("domain"))
@@ -1027,7 +1031,7 @@ async def execute_next_node(
             raw_prompt = f"{raw_prompt}\n\n## Web Search Results\n{search_results}"
             logger.info("searxng_context_injected: chars=%d node='%s'", len(search_results), title)
         else:
-            rag_context = await _fetch_rag_context(rag_query, top_k=settings.verifier_top_k, domain=job_domain)
+            rag_context = await _fetch_rag_context(rag_query, top_k=settings.verifier_top_k, domain=grounding_domain)
             if rag_context:
                 raw_prompt = f"{raw_prompt}\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}"
                 logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)

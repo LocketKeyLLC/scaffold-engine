@@ -643,6 +643,15 @@ class Settings(BaseSettings):
     upstream_confidence_ranking_enabled: bool = True
     rag_cosine_floor: float = Field(default=0.3, ge=0.0, le=1.0)
     verifier_top_k: int = Field(default=5, ge=1, le=50)
+    # §17.517 — general node grounding (_fetch_rag_context) fans out across ALL
+    # domain partitions instead of scoping to the job's single domain. The
+    # `domain` partition is a heuristic storage bucket, not a relevance boundary:
+    # `/research` ingests under `_detect_domain(topic)` while a job carries its
+    # own ideation-assigned domain, so scoping silently dropped relevant research
+    # binned into a different partition. The cosine floor (rag_cosine_floor) +
+    # reranker already filter cross-domain noise, so fan-out is strictly more
+    # recall-complete. Set False to restore the old job-domain-scoped behavior.
+    execution_grounding_cross_domain: bool = True
     # §17.188 — cap for ``_lookup_superseded`` so a brief-flood scenario
     # (filtered result count × 4) can't unboundedly inflate the Milvus
     # query limit. 128 is generous: typical retrieval returns ≤ 5 results

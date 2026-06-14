@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.517 Fix — execution grounding fans out across domains (research→build alignment) (2026-06-14)
+
+**Gap (from the dogfood/audit).** Node execution grounds on RAG via `_fetch_rag_context(... domain=job_domain)` (`execution_agent.py:1030`) — scoped to the job's single ideation-assigned domain. But `/research` ingests under `_detect_domain(topic)` (a separate heuristic). When the two differ (e.g. homelab research binned to `llm` while the job is `eng`), the build silently fails to ground on the very research the user ran for it. §17.501/§17.515 fixed the per-path *defaults* but never reconciled the two — the `domain` partition is a storage bucket, not a relevance boundary.
+
+**Fix.** General grounding now searches **all** partitions (`domain=None` fan-out) by default instead of scoping to `job_domain`, gated by new `settings.execution_grounding_cross_domain` (default True; set False to restore scoping). The existing relevance filters — `rag_cosine_floor` (0.3) + the CrossEncoder reranker — already drop cross-domain noise, so fan-out is strictly more recall-complete. Explicit Milvus-tool nodes keep their per-node `domain` (a deliberate DAG choice); only the auto-grounding path changed.
+
+**Verification.** +2 tests (`test_execution_agent_prompt_build.py::TestGroundingDomainFanout`: default passes `domain=None`, setting False passes the job domain — asserted on the recorded `_fetch_rag_context` call). **Live (real corpus):** homelab research exists in both `eng` and `llm`; a cross-domain (`domain=null`) `/rag` query returns a genuine mix (`llm/portainer` surfaces alongside `eng` entries) that a `domain="eng"` query never sees — confirming fan-out reaches the mis-binned research. Execution suites — **21 passed**. (Side note: `query_rag` leaves `domains_searched` unset even on fan-out — cosmetic metadata gap, logged, functionally irrelevant.)
+
+---
+
 ### §17.516 Fix — assist-completed jobs now get a synthesized deliverable summary (2026-06-14)
 
 **Gap (from the §17.514–515 dogfood).** An Assist Mode finalization marked the job `completed` but **never called `_compile_output`**, so `compiled_output` stayed NULL — the default `/results` showed no "here's what you built" summary; the operator's per-step evidence was only reachable via `/results <id> nodes`. After manually executing an 8-step Vaultwarden build, the user got an empty default deliverable.
