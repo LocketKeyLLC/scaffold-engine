@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.database import async_session
 from app import model_router
 from app.config import settings, get_model
-from app.modules.execution_compile import _compile_output  # re-exported for test patches
+from app.modules.execution_compile import _compile_output, compute_deliverable_kind  # re-exported for test patches
 from app.modules.execution_verify import (
     VERIFY_SYSTEM, _verify_output,  # re-exported for test patches
     _verify_codegen_output,  # §17.429 — stricter CodeGen verifier
@@ -732,12 +732,15 @@ async def execute_next_node(
                     # X.2: _compile_output now returns (text, was_synthesized).
                     compiled, was_synthesized = await _compile_output(job_id, db)
                     if compiled:
+                        kind = await compute_deliverable_kind(job_id, db)  # §17.519
                         await db.execute(
                             text(
                                 "UPDATE jobs SET compiled_output = :co, "
-                                "compiled_output_synthesized = :syn WHERE id = :jid"
+                                "compiled_output_synthesized = :syn, "
+                                "deliverable_kind = :dk WHERE id = :jid"
                             ),
-                            {"co": compiled, "syn": was_synthesized, "jid": job_id},
+                            {"co": compiled, "syn": was_synthesized,
+                             "dk": kind, "jid": job_id},
                         )
                         await db.commit()
                 return {"status": "complete", "message": "All nodes done. Job complete."}
@@ -762,13 +765,16 @@ async def execute_next_node(
                     # X.2: tuple return; persist synthesized flag too.
                     partial_result, partial_synthesized = await _compile_output(job_id, db)
                     if partial_result:
+                        kind = await compute_deliverable_kind(job_id, db)  # §17.519
                         await db.execute(
                             text(
                                 "UPDATE jobs SET compiled_output = :co, "
                                 "compiled_output_synthesized = :syn, "
+                                "deliverable_kind = :dk, "
                                 "status = 'blocked' WHERE id = :jid"
                             ),
-                            {"co": partial_result, "syn": partial_synthesized, "jid": job_id},
+                            {"co": partial_result, "syn": partial_synthesized,
+                             "dk": kind, "jid": job_id},
                         )
                     else:
                         await db.execute(
@@ -1412,12 +1418,14 @@ async def execute_next_node(
                 # Returns None text when no done node contributed (e.g.,
                 # every node was skipped). Store NULL in that case.
                 compiled, was_synthesized = await _compile_output(job_id, db)
+                kind = await compute_deliverable_kind(job_id, db) if compiled else None  # §17.519
                 await db.execute(
                     text(
                         "UPDATE jobs SET compiled_output = :out, "
-                        "compiled_output_synthesized = :syn WHERE id = :jid"
+                        "compiled_output_synthesized = :syn, "
+                        "deliverable_kind = :dk WHERE id = :jid"
                     ),
-                    {"out": compiled, "syn": was_synthesized, "jid": job_id},
+                    {"out": compiled, "syn": was_synthesized, "dk": kind, "jid": job_id},
                 )
                 await db.commit()
                 logger.info(

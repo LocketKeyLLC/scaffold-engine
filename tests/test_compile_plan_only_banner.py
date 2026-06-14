@@ -158,3 +158,34 @@ class TestCompileOutputAssistCompleted:
         result, _ = await _compile_output("job-auto", db)
         assert "PLAN — NOT EXECUTED" in result
         assert "Completed via Assist Mode" not in result
+
+
+class TestComputeDeliverableKind:
+    """§17.519 — machine-readable deliverable kind set on jobs.deliverable_kind."""
+
+    async def test_assist_completed(self):
+        from app.modules.execution_compile import compute_deliverable_kind
+        db = AsyncMock()  # noqa: F405 — assist path returns before any query
+        assert await compute_deliverable_kind("j", db, assist_completed=True) \
+            == "assist_completed"
+
+    async def test_plan_only_when_shell_done_and_no_backend(self, monkeypatch):
+        from app.modules import execution_compile as ec
+        monkeypatch.setattr(ec.settings, "shell_tool_enabled", False)
+        db = AsyncMock(); row = MagicMock(); row.scalar = MagicMock(return_value=3)  # noqa: F405
+        db.execute = AsyncMock(return_value=row)  # noqa: F405
+        assert await ec.compute_deliverable_kind("j", db) == "plan_only"
+
+    async def test_executed_when_no_shell_nodes(self, monkeypatch):
+        from app.modules import execution_compile as ec
+        monkeypatch.setattr(ec.settings, "shell_tool_enabled", False)
+        db = AsyncMock(); row = MagicMock(); row.scalar = MagicMock(return_value=0)  # noqa: F405
+        db.execute = AsyncMock(return_value=row)  # noqa: F405
+        assert await ec.compute_deliverable_kind("j", db) == "executed"
+
+    async def test_shell_backend_enabled_is_executed(self, monkeypatch):
+        from app.modules import execution_compile as ec
+        monkeypatch.setattr(ec.settings, "shell_tool_enabled", True)
+        db = AsyncMock(); row = MagicMock(); row.scalar = MagicMock(return_value=5)  # noqa: F405
+        db.execute = AsyncMock(return_value=row)  # noqa: F405
+        assert await ec.compute_deliverable_kind("j", db) == "executed"

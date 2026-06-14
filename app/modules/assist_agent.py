@@ -1023,18 +1023,25 @@ async def _maybe_finalize_session(*, session_id: str, db) -> None:
     # operator DID execute these steps) and prepends a positive assist header.
     # Best-effort: a compile failure must not block session finalization.
     try:
-        from app.modules.execution_compile import _compile_output
+        from app.modules.execution_compile import (
+            _compile_output, compute_deliverable_kind,
+        )
         compiled, synthesized = await _compile_output(
             str(sess["job_id"]), db, assist_completed=True,
         )
         if compiled:
+            kind = await compute_deliverable_kind(  # §17.519 → 'assist_completed'
+                str(sess["job_id"]), db, assist_completed=True,
+            )
             await db.execute(
                 text(
                     "UPDATE jobs SET compiled_output = :co, "
-                    "compiled_output_synthesized = :syn, updated_at = NOW() "
+                    "compiled_output_synthesized = :syn, "
+                    "deliverable_kind = :dk, updated_at = NOW() "
                     "WHERE id = :jid"
                 ),
-                {"co": compiled, "syn": synthesized, "jid": sess["job_id"]},
+                {"co": compiled, "syn": synthesized,
+                 "dk": kind, "jid": sess["job_id"]},
             )
     except Exception as e:  # noqa: BLE001 — finalization must survive compile errors
         logger.warning(

@@ -1720,6 +1720,17 @@
             ],
             "title": "Compiled Output"
           },
+          "deliverable_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deliverable Kind"
+          },
           "job_id": {
             "title": "Job Id",
             "type": "string"

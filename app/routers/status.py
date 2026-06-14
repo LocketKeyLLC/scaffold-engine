@@ -98,6 +98,10 @@ class LogsResponse(BaseModel):
     limit: int
     offset: int
     compiled_output: Optional[str] = None
+    # §17.519 — machine-readable deliverable kind: 'executed' | 'plan_only' |
+    # 'assist_completed' | None. Lets clients branch on whether the work was
+    # actually performed without parsing the compiled_output banner text.
+    deliverable_kind: Optional[str] = None
     timestamp: str
 
 
@@ -188,7 +192,8 @@ async def get_logs(
 
     # 1. Verify job exists, get status + (optional) compiled output
     job_result = await db.execute(
-        text("SELECT status, compiled_output FROM jobs WHERE id = :job_id"),
+        text("SELECT status, compiled_output, deliverable_kind "
+             "FROM jobs WHERE id = :job_id"),
         {"job_id": job_id},
     )
     job_row = job_result.first()
@@ -253,5 +258,6 @@ async def get_logs(
         limit=limit,
         offset=offset,
         compiled_output=job_row.compiled_output if include_compiled else None,
+        deliverable_kind=job_row.deliverable_kind,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )

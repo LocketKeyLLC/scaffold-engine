@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.519 Feature — machine-readable `deliverable_kind` (plan-only as data, not just banner) (2026-06-14)
+
+**Gap (logged in §17.506).** Whether a completed job's deliverable was actually executed vs. an unexecuted plan/runbook vs. assist-completed was only conveyed by **banner TEXT** inside `compiled_output` (§17.506/§17.516). Programmatic consumers (web UI, SDK, `/jobs` filters, dashboards) couldn't branch on it without string-matching prose.
+
+**Fix.** New queryable column `jobs.deliverable_kind` (migration 052, single-statement `ADD COLUMN IF NOT EXISTS` + CHECK): `'executed'` | `'plan_only'` | `'assist_completed'` | NULL. Computed by `compute_deliverable_kind(job_id, db, *, assist_completed)` in `execution_compile` (mirrors the banner gating: assist→`assist_completed`; done Shell nodes + `not shell_tool_enabled`→`plan_only`; else `executed`) and persisted at all four finalize sites (3 autonomous in `execution_agent`, 1 assist in `assist_agent`). Deliberately does **not** change `_compile_output`'s `(text, synthesized)` return signature (≈25 call sites) — the helper takes a separate cheap COUNT query. Surfaced in the `/logs/{job_id}` response (`LogsResponse.deliverable_kind`); OpenAPI snapshot regenerated (host-side, since the container mounts `docs/` read-only) and `--check` passes.
+
+**Verification.** +5 tests (`compute_deliverable_kind` ×4: assist/plan_only/executed/shell-backend; `/logs` surfacing ×1) + `test_status_logs` `_make_row` defaulted `deliverable_kind=None` (mirrors the §17.445 `last_verification_reason` pattern). Each affected file green in isolation (status_logs 19, banner 16, compile 53, assist 10, prompt_build 6). **Live-validated** via the §17.519 dogfood: an autonomous blue-green job (no Shell nodes) → `deliverable_kind='executed'`; the assist Vaultwarden/homelab jobs → `'assist_completed'` (see §17.516). *Note:* minimal multi-file pytest invocations that import `test_status_logs.py` first hit its module-level `sys.modules.setdefault("app.database", <stub>)` and cross-pollute — a pre-existing, full-suite-safe harness quirk; verify these files individually or via the full suite.
+
+---
+
 ### §17.518 Fix (test determinism) — banner tests flaked on a live synthesis LLM call (§17.513 fixed the wrong gate) (2026-06-14)
 
 The full-suite run after §17.517 flaked again: 2 of the `test_compile_plan_only_banner.py` integration tests **timed out (>30s)** under load (a slow 33-min run). Root cause — `_compile_output` synthesis is gated **per-job by `_resolve_synthesis_enabled`** (which reads `jobs.compile_synthesis_override` from the DB), NOT by the global `compile_synthesis_enabled` setting that §17.513 disabled. With the `make_mock_db` fixture, that override read returns junk → resolves synthesis ON → a real `model_router.tool_call` to a cloud model → 30s pytest-timeout. §17.513's synthesis-disable only won when the mock happened to return NULL, so the flake persisted.

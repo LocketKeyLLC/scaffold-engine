@@ -83,6 +83,9 @@ def _make_row(**kwargs):
     # §17.445 — get_logs now SELECTs last_verification_reason; default it so a
     # MagicMock attribute (which would fail NodeLog's str|None) isn't auto-made.
     kwargs.setdefault("last_verification_reason", None)
+    # §17.519 — get_logs now SELECTs deliverable_kind; default it so the
+    # MagicMock doesn't auto-create an attr that fails LogsResponse's str|None.
+    kwargs.setdefault("deliverable_kind", None)
     obj = MagicMock()
     for k, v in kwargs.items():
         setattr(obj, k, v)
@@ -337,6 +340,20 @@ class TestGetLogs:
         assert resp.nodes[0].tool == "Milvus"
         assert resp.nodes[0].domain == "eng"
         assert resp.nodes[1].node_key == "T2"
+
+    @pytest.mark.asyncio
+    async def test_deliverable_kind_surfaced(self):
+        """§17.519 — get_logs returns jobs.deliverable_kind so clients can
+        branch on plan_only vs executed vs assist_completed without parsing the
+        compiled_output banner text."""
+        job_row = _make_row(status="completed", compiled_output="X",
+                            deliverable_kind="plan_only")
+        db = _make_db([_make_result([job_row]), _make_result([]),
+                       _make_result([])])
+        resp = await get_logs(job_id="11111111-1111-4111-8111-111111111111",
+                              include_output=False, include_compiled=True,
+                              db=db, limit=100, offset=0)
+        assert resp.deliverable_kind == "plan_only"
 
     @pytest.mark.asyncio
     async def test_job_not_found(self):

@@ -380,6 +380,36 @@ def _prepend_plan_only_banner(
     return banner + text
 
 
+async def compute_deliverable_kind(
+    job_id: str, db, *, assist_completed: bool = False,
+) -> str:
+    """§17.519 — machine-readable companion to the §17.506/§17.516 banners.
+
+    Returns one of: 'assist_completed' (operator executed via Assist Mode),
+    'plan_only' (autonomous run produced unexecuted Shell runbooks, i.e.
+    `shell_tool_enabled` False with done Shell nodes), or 'executed' (real
+    autonomous output). Lets consumers branch without parsing banner text.
+    Mirrors the banner gating in `_compile_output`; persisted to
+    `jobs.deliverable_kind` by the finalize sites.
+    """
+    if assist_completed:
+        return "assist_completed"
+    try:
+        row = await db.execute(
+            text(
+                "SELECT COUNT(*) FROM dag_nodes WHERE job_id = :jid "
+                "AND status = 'done' AND lower(tool) = 'shell'"
+            ),
+            {"jid": job_id},
+        )
+        shell_done = row.scalar() or 0
+    except Exception:  # noqa: BLE001 — never block finalize on this read
+        shell_done = 0
+    if shell_done and not settings.shell_tool_enabled:
+        return "plan_only"
+    return "executed"
+
+
 def _prepend_assist_completed_banner(
     text: str | None, step_count: int,
 ) -> str | None:
