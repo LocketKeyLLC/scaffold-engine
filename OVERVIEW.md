@@ -21983,6 +21983,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.518 Fix (test determinism) — banner tests flaked on a live synthesis LLM call (§17.513 fixed the wrong gate) (2026-06-14)
+
+The full-suite run after §17.517 flaked again: 2 of the `test_compile_plan_only_banner.py` integration tests **timed out (>30s)** under load (a slow 33-min run). Root cause — `_compile_output` synthesis is gated **per-job by `_resolve_synthesis_enabled`** (which reads `jobs.compile_synthesis_override` from the DB), NOT by the global `compile_synthesis_enabled` setting that §17.513 disabled. With the `make_mock_db` fixture, that override read returns junk → resolves synthesis ON → a real `model_router.tool_call` to a cloud model → 30s pytest-timeout. §17.513's synthesis-disable only won when the mock happened to return NULL, so the flake persisted.
+
+**Fix.** Both `_prep` helpers now patch `execution_compile._resolve_synthesis_enabled` → `AsyncMock(return_value=False)`, deterministically forcing the heuristic (no-LLM) compile path regardless of the mock DB or settings-object identity. Verified: the file runs **12 passed in ~2.2s across 3 consecutive runs** (was 28–66s with the live call). Scoped to these tests — the other `_compile_output` tests (`test_execution_agent_compile.py`) already control synthesis explicitly (they patch `model_router.tool_call`) and have been stable. Lesson: a "unit" test over `_compile_output` must stub `_resolve_synthesis_enabled`, not just the global setting.
+
+---
+
 ### §17.517 Fix — execution grounding fans out across domains (research→build alignment) (2026-06-14)
 
 **Gap (from the dogfood/audit).** Node execution grounds on RAG via `_fetch_rag_context(... domain=job_domain)` (`execution_agent.py:1030`) — scoped to the job's single ideation-assigned domain. But `/research` ingests under `_detect_domain(topic)` (a separate heuristic). When the two differ (e.g. homelab research binned to `llm` while the job is `eng`), the build silently fails to ground on the very research the user ran for it. §17.501/§17.515 fixed the per-path *defaults* but never reconciled the two — the `domain` partition is a storage bucket, not a relevance boundary.

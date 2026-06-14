@@ -13,6 +13,18 @@ import pytest
 from app.modules.execution_compile import _prepend_plan_only_banner
 
 
+def _force_no_synthesis(monkeypatch):
+    """§17.518 — synthesis is gated per-job via `_resolve_synthesis_enabled`
+    (it reads `jobs.compile_synthesis_override` from the DB), NOT just the global
+    `compile_synthesis_enabled` setting. With the mock DB that read returns junk,
+    so synthesis can fire a live LLM call → a 30s pytest-timeout flake under
+    load. §17.513 disabled the wrong (global) gate; patch the real resolver off
+    so the compile path is deterministic and never hits the network."""
+    import app.modules.execution_compile as _ec
+    monkeypatch.setattr(_ec, "_resolve_synthesis_enabled",
+                        AsyncMock(return_value=False))
+
+
 class TestPlanOnlyBannerHelper:
     def test_zero_runbook_unchanged(self):
         assert _prepend_plan_only_banner("body", 0, 5, "job-1") == "body"
@@ -50,6 +62,7 @@ class TestCompileOutputPlanOnly:
         settings_kw.setdefault("compile_synthesis_enabled", False)
         for k, v in settings_kw.items():
             monkeypatch.setattr(sett, k, v)
+        _force_no_synthesis(monkeypatch)
         return _compile_output
 
     async def test_shell_runbook_job_gets_banner(self, monkeypatch):
@@ -119,6 +132,7 @@ class TestCompileOutputAssistCompleted:
         kw.setdefault("shell_tool_enabled", False)
         for k, v in kw.items():
             monkeypatch.setattr(sett, k, v)
+        _force_no_synthesis(monkeypatch)
         return _compile_output
 
     async def test_assist_completed_suppresses_plan_banner_adds_header(self, monkeypatch):
