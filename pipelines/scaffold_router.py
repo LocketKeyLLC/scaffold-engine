@@ -869,6 +869,45 @@ class Pipeline:
         "---\n\n"
     )
 
+    # §17.504 — assist-intent nudge. A free-text message that *asks the engine
+    # to assist/help implement an existing build* (e.g. "assist with the
+    # completion and implementation of the homelab") is NOT the `/assist`
+    # command — the leading word "assist" is prose, so dispatch falls through
+    # to the triage planner and the user gets 4-section planning replies while
+    # believing they're in Assist Mode. This regex spots that intent so we can
+    # point them at the real entry point. Anchored to imperative requests
+    # ("assist …" at the start, "help me <do-verb>", "step/walk me through")
+    # to avoid firing on project *descriptions* ("build an app that assists…").
+    # NB: the verb group uses *stems* (complet, configur) so it matches
+    # "complete"/"completion"/"configure"/"configuration" — therefore NO
+    # trailing \b ("complet" is a prefix, not followed by a word boundary in
+    # "complete"). The leading \b keeps the match word-anchored.
+    _ASSIST_INTENT_RE = re.compile(
+        r"^\s*(?:please\s+|can\s+you\s+)?assist\b"
+        r"|\bhelp\s+me\b[^.]{0,40}?\b(?:implement|complet|finish|"
+        r"set\s*up|setup|deploy|configur|install|build\s+out|run)"
+        r"|\b(?:step\s+through|walk\s+me\s+through)\b",
+        re.IGNORECASE,
+    )
+
+    _ASSIST_NUDGE = (
+        "💡 **Looking for Assist Mode?** Typing \"assist\" / \"help me "
+        "implement\" in chat starts a *planning* conversation (below), not "
+        "the interactive step-through executor. To run an existing job's "
+        "steps yourself with the engine as co-pilot, use "
+        "`/assist <job_id>` — find the id with `/jobs`. The job must still "
+        "be in progress (`planning`/`executing`/`blocked`/`failed`), not "
+        "already completed.\n\n"
+        "---\n\n"
+    )
+
+    @classmethod
+    def _looks_like_assist_intent(cls, msg: str) -> bool:
+        """True when free-text `msg` reads as a request to use Assist Mode
+        but isn't the `/assist` command (slash commands are dispatched
+        before this is ever consulted)."""
+        return bool(msg) and bool(cls._ASSIST_INTENT_RE.search(msg))
+
     @staticmethod
     def _is_first_turn(messages: list[dict]) -> bool:
         """True when the user has sent exactly one user-message in this chat.
@@ -1233,6 +1272,12 @@ class Pipeline:
                 "trying to build or change? A sentence or two is enough."
             )
             return
+
+        # §17.504 — assist-intent nudge. Free-text "assist with…" / "help me
+        # implement…" looks like Assist Mode but routes to triage. Surface the
+        # real `/assist <job_id>` entry point; the planning reply still runs.
+        if self._looks_like_assist_intent(msg):
+            yield self._ASSIST_NUDGE
 
         yield self._call_triage(messages)
 

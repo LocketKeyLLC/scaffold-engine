@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.504 Fix — assist-intent nudge: free-text "assist with…" routed silently to triage (2026-06-14)
+
+**Symptom (user report, root-caused).** A user believed they were using Assist Mode on the `DeFruscio HomeLab` job, but "the responses were like triage." Verified against the OWUI chat DB: the chat's single user message was *"assist with the completion and implementation of the defruscio homelab using provided components."* — natural language, **not** the `/assist` command. `SELECT count(*) FROM assist_sessions` = **0** (none ever, any job), confirming Assist Mode was never entered. The leading word "assist" is prose; command dispatch only matches a slash-prefixed `/assist` at a word boundary, so it fell through to the triage planner (the 4-section Scope/Options/Gaps/My-pick format). Compounding: the job had already auto-executed to `completed` (default autonomous path after `/confirm`), and `completed` is excluded from `_VALID_START_STATUSES` (`assist_agent.py:38` = planning/executing/blocked/failed/assisted_*), so even the correct `/assist <job_id>` would have been rejected.
+
+**Fix (pipeline-side, scaffold_router.py).** New `_ASSIST_INTENT_RE` + `_looks_like_assist_intent()` detect imperative assist requests ("assist …" at start, "help me <implement/complete/deploy/…>", "step/walk me through") while NOT firing on project *descriptions* that merely mention assist ("build an app that **assists** users"). When a free-text message matches, `pipe()` prepends a one-line `_ASSIST_NUDGE` before the triage reply pointing at `/assist <job_id>` (find via `/jobs`; job must be in progress, not completed). Additive — triage planning still runs. Same discoverability class as §17.502. *Regex note:* the verb group uses stems (`complet`, `configur`) so it carries NO trailing `\b` — caught by the test (`help me complete` failed with `complet\b` because "complete" has no boundary after the stem).
+
+**Verification.** New `tests/test_scaffold_router_assist_nudge.py` (**+16**: real transcript triggers; imperative requests trigger; descriptions/normal-planning do NOT; pipe() emits nudge-then-triage for assist intent, omits it otherwise). Broader scaffold_router suite (welcome + commands + helpers + help-refresh + nudge) — **210 passed** `--noconftest`. Pipelines container reloaded; live in OWUI. No route/schema change.
+
+---
+
 ### §17.503 Fix — research SearXNG flooded with MDN noise (`categories`+`engines` conflict + dead engine map) (2026-06-13)
 
 **Symptom.** A homelab `/research` run ingested 31 entries but ~28 were `developer.mozilla.org` noise (CSS `lab()`, devtools panels, "What is a web server?") — only 3 genuinely homelab (jellyfin, portainer, superuser VLAN). The decomposition was *excellent* (facets: control panels / media servers / network security / container orchestration / monitoring; queries like "homelab media server plex jellyfin emby setup"), so the bug was downstream of query generation.
