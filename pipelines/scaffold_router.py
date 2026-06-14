@@ -2271,7 +2271,17 @@ class Pipeline:
                 elif event_type == "error":
                     yield from self._render_error_event(payload); return
                 elif event_type == "research_started":
-                    yield f"📊 Depth: {payload.get('depth','?')} | Max iterations: {payload.get('max_iterations','?')}\n\n"
+                    yield f"📊 Depth: {payload.get('depth','?')} | Max iterations: {payload.get('max_iterations','?')}\n"
+                    # §17.502 — surface the verification path up-front. On a
+                    # long run the SSE stream can drop before research_complete
+                    # (where the /rag hint also lives), leaving the user unsure
+                    # anything was ingested. This early, reliable event ensures
+                    # they always know how to check.
+                    yield (
+                        "_Ingests into the shared knowledge base — when done, "
+                        "check with `/rag <query>` (searches all domains) or "
+                        "`/research/list`._\n\n"
+                    )
                 elif event_type == "decomposition_complete":
                     facets = payload.get("facets", [])
                     yield f"🧩 Decomposed into {len(facets)} facets: {', '.join(facets)}\n"
@@ -5058,6 +5068,7 @@ class Pipeline:
 
 - **Launch from a conversation** — describe what you want for a few turns, then `/go`. The triage LLM asks clarifying questions; when you `/go`, it synthesizes your turns into a brief and Phase 1 runs.
 - **One-shot launch** — `/idea <your idea>` — skips triage entirely. Phase 1 pauses at the confirmation gate; you `/confirm <id>` to proceed.
+- **Check what a `/research` run ingested** — research feeds the *global* knowledge base, not a specific job, so `/dag` and `/results` won't show it. Use `/rag <query>` (searches all domains) to retrieve the content, or `/research/list` to see each session's ingest count.
 - **Recover from a failed node** — `/results <job_id>` shows what broke; `/exec retry <job_id> <node_key>` re-runs just that node and re-flows downstream.
 - **Inspect cost mid-flight** — `/cost <job_id>` shows LLM spend so far. `/jobs` lists every active job; `/jobs find <text>` filters by title.
 

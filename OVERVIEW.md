@@ -21983,6 +21983,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.502 Fix — `/research` ingestion is discoverable (kickoff + help breadcrumb) (2026-06-13)
+
+**Symptom (user report).** Ran `/research` on a homelab topic; it ingested fine (31 entries) but the user couldn't tell — and when they asked "was it ingested?" the triage LLM bounced them between `/dag` and `/research`, neither of which can show knowledge-base content. The completion message *does* carry a `/rag` hint (scaffold_router.py `research_complete`), but on a long CPU run the SSE stream can drop before completion, so the hint is never seen.
+
+**Root cause.** `/research` ingests into the **global** knowledge base, not the active job — so `/dag`/`/results` legitimately show nothing research-related. The only inspection path is `/rag` (or `/research/list`), and it was surfaced *only* at stream end. The triage prompt knows nothing about `/rag`, so free-text "did it save?" questions got LLM-improvised answers pointing at the wrong commands.
+
+**Fix (pipeline-side, scaffold_router.py).** (1) The `research_started` SSE event — early and reliable — now appends a one-line breadcrumb: *"Ingests into the shared knowledge base — when done, check with `/rag <query>` (searches all domains) or `/research/list`."* So the path survives a dropped stream. (2) `/help` "Common scenarios" gains a "Check what a `/research` run ingested" entry making the global-KB-not-job model explicit.
+
+**Verification.** Pipeline tests (help-refresh + commands + research-mode-discovery + helpers) — **199 passed** `--noconftest`. Syntax-checked. No route/schema change → ci-tier-0 unaffected. Pairs with §17.501 (the homelab entries that prompted this had also mis-routed to the "llm" partition).
+
+---
+
 ### §17.501 Fix — `_detect_domain` keyword-less fallback routed to "llm" not "eng" (2026-06-13)
 
 **Symptom.** Homelab research (topic matching no `TOPIC_KEYWORDS`) ingested into the **"llm"** Milvus partition. Silent because cross-domain (`domain=None`) retrieval still found it via fan-out — only a domain-pinned query would miss it.
