@@ -38,8 +38,12 @@ class TestCompileOutputPlanOnly:
     """End-to-end through _compile_output with mocked node rows."""
 
     async def test_shell_runbook_job_gets_banner(self, monkeypatch):
-        from app.config import settings
-        monkeypatch.setattr(settings, "shell_tool_enabled", False)
+        # Patch the settings object _compile_output actually reads (bound at
+        # execution_compile import). test_auth.py reloads app.config → a fresh
+        # Settings object, so patching app.config.settings would miss the one
+        # the code-under-test uses. See §17.506.
+        from app.modules import execution_compile
+        monkeypatch.setattr(execution_compile.settings, "shell_tool_enabled",False)
         db = make_mock_db([  # noqa: F405
             {"node_key": "T1", "title": "Install Proxmox", "tool": "Shell",
              "status": "done", "output_text": "## Run this\n```bash\n...\n```"},
@@ -53,8 +57,12 @@ class TestCompileOutputPlanOnly:
         assert "1 of 2" in result  # only T1 is a Shell/runbook node
 
     async def test_pure_text_job_no_banner(self, monkeypatch):
-        from app.config import settings
-        monkeypatch.setattr(settings, "shell_tool_enabled", False)
+        # Patch the settings object _compile_output actually reads (bound at
+        # execution_compile import). test_auth.py reloads app.config → a fresh
+        # Settings object, so patching app.config.settings would miss the one
+        # the code-under-test uses. See §17.506.
+        from app.modules import execution_compile
+        monkeypatch.setattr(execution_compile.settings, "shell_tool_enabled",False)
         db = make_mock_db([  # noqa: F405
             {"node_key": "T1", "title": "Research", "tool": "SearXNG",
              "status": "done", "output_text": "data"},
@@ -67,8 +75,12 @@ class TestCompileOutputPlanOnly:
 
     async def test_shell_enabled_suppresses_banner(self, monkeypatch):
         # A real shell backend (shell_tool_enabled=True) DID execute — no banner.
-        from app.config import settings
-        monkeypatch.setattr(settings, "shell_tool_enabled", True)
+        # Patch the settings object _compile_output actually reads (bound at
+        # execution_compile import). test_auth.py reloads app.config → a fresh
+        # Settings object, so patching app.config.settings would miss the one
+        # the code-under-test uses. See §17.506.
+        from app.modules import execution_compile
+        monkeypatch.setattr(execution_compile.settings, "shell_tool_enabled",True)
         db = make_mock_db([  # noqa: F405
             {"node_key": "T1", "title": "Install", "tool": "Shell",
              "status": "done", "output_text": "executed output"},

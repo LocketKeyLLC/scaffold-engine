@@ -21983,6 +21983,12 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.513 Fix (test isolation) — plan-only banner test polluted by config reload (2026-06-14)
+
+The full-suite run after §17.508–512 surfaced **1 failure**: `test_compile_plan_only_banner.py::test_shell_enabled_suppresses_banner` failed **only in the full suite** (green alone and as a file). Root cause: `test_auth.py` does `importlib.reload(app.config)`, swapping in a fresh `Settings` object; the test patched `app.config.settings` (the new object) but `_compile_output` reads `execution_compile.settings` (bound at import → the old object), so `shell_tool_enabled=True` never reached the code-under-test and the banner wrongly appeared. Fix: patch `execution_compile.settings` (the object the code actually reads), robust to the reload. Verified by running `test_auth.py` immediately before the banner file — **27 passed** (was the exact pollution order). Lesson: when monkeypatching a module-imported singleton, patch it on the consuming module, not on `app.config`, since `test_auth`'s reload decouples the two.
+
+---
+
 ### §17.508–512 — Full-lifecycle guidance audit remediation (triage→assist) (2026-06-14)
 
 A full audit of the user-facing guidance across the whole lifecycle (5 parallel stage audits, every load-bearing finding verified in code) confirmed each stage individually works but surfaced one structural through-line gap plus several over-claim/dead-end gaps. The verified top-5 are fixed here:
