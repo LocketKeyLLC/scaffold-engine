@@ -51,7 +51,20 @@ async def test_start_session_rejects_invalid_status():
         _result(mappings_first={"id": "abc", "status": "completed"}),
     ]
     with pytest.raises(ValueError, match="assist mode requires"):
-        await assist_agent.start_assist_session(job_id="abc", db=db)
+        await assist_agent.start_assist_session(
+            job_id="11111111-1111-1111-1111-111111111111", db=db,
+        )
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_start_session_rejects_non_uuid_job_id():
+    """§17.521 — a non-UUID job_id (e.g. a pasted title) is rejected with a
+    clean ValueError BEFORE the query, not a raw asyncpg DataError → HTTP 500."""
+    db = AsyncMock()
+    with pytest.raises(ValueError, match="not a job id"):
+        await assist_agent.start_assist_session(job_id="DeFruscio", db=db)
+    db.execute.assert_not_called()  # never reaches the uuid-cast query
 
 
 @pytest.mark.smoke
@@ -69,7 +82,9 @@ async def test_start_session_returns_session_dict_and_commits():
         _result(scalar=4),                  # SELECT total
         _result(scalar=4),                  # SELECT pending
     ]
-    out = await assist_agent.start_assist_session(job_id="job-1", db=db)
+    out = await assist_agent.start_assist_session(
+        job_id="22222222-2222-2222-2222-222222222222", db=db,
+    )
     assert out["session_id"] == "sess-1"
     assert out["total_steps"] == 4
     assert out["pending_steps"] == 4

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid as _uuid
 from dataclasses import asdict
 from typing import Any, AsyncGenerator, Optional
 
@@ -60,6 +61,19 @@ async def start_assist_session(
       - UPDATE jobs.status -> 'assisted_executing'
       - INSERT one assist_steps row per `dag_nodes` row in pending status
     """
+    # §17.521 — validate job_id is a UUID BEFORE it reaches the query. A
+    # non-UUID (e.g. a pasted job TITLE like "DeFruscio HomeLab") otherwise
+    # hits asyncpg's uuid cast and surfaces as a raw HTTP 500 DBAPIError
+    # ("invalid input for query argument $1 … invalid UUID"). Raise a clean
+    # ValueError → the endpoint maps it to a friendly 4xx with a helpful hint.
+    try:
+        _uuid.UUID(str(job_id))
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError(
+            f"invalid job_id {job_id!r}: not a job id (expected a UUID). "
+            f"Job titles aren't accepted — find the id with /jobs."
+        )
+
     # 1. Validate job state.
     row = (await db.execute(
         text("SELECT id, status FROM jobs WHERE id = :id"),

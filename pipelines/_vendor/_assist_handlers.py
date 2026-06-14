@@ -580,6 +580,17 @@ def dispatch_assist_sub(
 def assist_start(
     pipe, job_id: str, *, chat_id: str | None = None,
 ) -> Generator[str, None, None]:
+    # §17.521 — reject a non-UUID job_id (e.g. a pasted job TITLE like
+    # "DeFruscio HomeLab" → only "DeFruscio" reaches here) before the
+    # round-trip, with an actionable hint. Otherwise it 4xx's server-side
+    # (and pre-§17.521 surfaced as a raw HTTP 500 DataError).
+    if not pipe._UUID_RE.match((job_id or "").strip()):
+        yield (
+            f"❌ `{job_id}` isn't a job id. `/assist` needs the job's **UUID**, "
+            f"not its title — run `/jobs` to find it, then "
+            f"`/assist <job_id>`."
+        )
+        return
     try:
         r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/start",

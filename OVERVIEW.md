@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.521 Fix — `/assist <title>` (non-UUID job_id) leaked a raw HTTP 500 DataError (2026-06-14)
+
+**Symptom (user report).** `/assist DeFruscio HomeLab` (using the job *title*, not its UUID) returned `❌ Could not start assist session: HTTP 500 {"error":"DBAPIError","message":"…asyncpg.exceptions.DataError… invalid input for query argument $1: 'DeFruscio' (invalid UUID …)"}`. The pipeline took the first token `DeFruscio` as the job_id and POSTed it; `start_assist_session` passed it straight into `SELECT … WHERE id = :id`, where asyncpg's uuid cast raised an uncaught `DataError` → a raw 500 leaking internal DB error details.
+
+**Fix (both layers).** (1) Orchestrator: `start_assist_session` validates `job_id` is a UUID up-front (`uuid.UUID(...)`) and raises a clean `ValueError` → the endpoint's existing `except ValueError` maps it to **HTTP 409** with a helpful message ("not a job id … Job titles aren't accepted — find the id with /jobs"). No more 500, no DBAPIError leak — covers all callers (SDK/curl too). (2) Pipeline: `assist_start` rejects a non-UUID `job_id` via `pipe._UUID_RE` **before** the round-trip, with an actionable hint ("`DeFruscio` isn't a job id … run `/jobs`").
+
+**Verification.** +2 orchestrator tests (non-UUID → ValueError before any query; db.execute not called) + 2 pipeline tests (non-UUID → hint, no POST); 2 pre-existing start tests updated to use real UUIDs (they'd used fake `"abc"`/`"job-1"` ids the new guard correctly rejects). assist suites green (11 + 6). **Live:** `POST /assist/start {job_id:"DeFruscio"}` → HTTP 409 + clean message, no DBAPIError leak (was 500). Found by the user dogfooding `/assist` with a job title.
+
+---
+
 ### §17.520 Fix — two LOW audit cleanups: `/assist status` implemented + triage `/go` wording (2026-06-14)
 
 The last two LOW findings from the 2026-06-14 lifecycle audit:

@@ -60,3 +60,24 @@ class TestAssistStatus:
         # not a crash or the help table.
         out = "".join(pipe._handle_assist("/assist status", body=None))
         assert "status" in out.lower()
+
+
+class TestAssistStartNonUuid:
+    """§17.521 — `/assist <title>` (non-UUID) is caught early with a hint,
+    not sent to the orchestrator (which pre-fix surfaced a raw HTTP 500)."""
+
+    def test_non_uuid_job_id_rejected_before_post(self, pipe):
+        sess = MagicMock()
+        with patch.object(_vendor, "_ss", return_value=sess):
+            out = "".join(_vendor.assist_start(pipe, "DeFruscio", chat_id=None))
+        assert "isn't a job id" in out
+        assert "/jobs" in out
+        sess.post.assert_not_called()  # no round-trip on bad input
+
+    def test_via_handle_assist_title(self, pipe):
+        # `/assist DeFruscio HomeLab` → "DeFruscio" parsed as job_id → caught.
+        sess = MagicMock()
+        with patch.object(_vendor, "_ss", return_value=sess):
+            out = "".join(pipe._handle_assist("/assist DeFruscio HomeLab", body=None))
+        assert "isn't a job id" in out
+        sess.post.assert_not_called()
