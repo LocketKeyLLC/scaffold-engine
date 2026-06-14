@@ -261,8 +261,15 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
 SUMMARY_SYSTEM_V1 = """You are a research summarizer. Given collected knowledge entries,
 produce a concise summary organized by facet/theme.
 
-Write in clear prose paragraphs. Include key facts, numbers, and specifics.
-Keep it under 500 words. No markdown headers — just flowing text with topic transitions."""
+CRITICAL: Summarize ONLY the provided entries. Do NOT add facts, names, numbers,
+or claims that are not present in the entries — no outside or recalled knowledge.
+If the entries are thin or off-topic, say so plainly rather than filling the gap
+from memory. (This prevents the summary from bleeding unrelated training-data
+content — e.g. a "kubernetes" run that drifted into a Svelte tutorial.)
+
+Write in clear prose paragraphs. Include key facts, numbers, and specifics
+DRAWN FROM THE ENTRIES. Keep it under 500 words. No markdown headers — just
+flowing text with topic transitions."""
 
 
 # Sprint W.6 — native tool-call schemas. The wrapper falls back to

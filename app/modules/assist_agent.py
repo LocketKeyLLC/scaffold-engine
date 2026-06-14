@@ -222,7 +222,46 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
     )).mappings().first()
     if not claimed:
         await db.commit()
-        return None
+        # §17.512 — no pending step is claimable. Before reporting "nothing to
+        # do", re-surface a step already PRESENTED to this user but not yet
+        # submitted, so a lost / scrolled-away / reconnect walkthrough is
+        # recoverable via `/assist next` instead of being a dead-end. Only
+        # fires when nothing new is claimable, so it never blocks forward
+        # progress on parallel/ready steps.
+        presented = (await db.execute(
+            text("""
+                SELECT s.node_key, s.guidance_status
+                  FROM assist_steps s
+                  JOIN dag_nodes d
+                    ON d.job_id = s.job_id AND d.node_key = s.node_key
+                 WHERE s.session_id = :sid AND s.status = 'presented'
+                 ORDER BY d.execution_order NULLS LAST, s.node_key
+                 LIMIT 1
+            """),
+            {"sid": session_id},
+        )).mappings().first()
+        if not presented:
+            return None
+        node_row, ctx = await _assemble_ctx_for_node(
+            db=db, job_id=job_id, node_key=presented["node_key"],
+        )
+        return {
+            "session_id": session_id,
+            "job_id": job_id,
+            "node_key": ctx.node_key,
+            "title": ctx.title,
+            "description": node_row.get("description"),
+            "tool": ctx.tool,
+            "domain": ctx.domain,
+            "depends_on": list(node_row.get("depends_on") or []),
+            "system_prompt": ctx.system_prompt,
+            "base_prompt": ctx.base_prompt,
+            "upstream_outputs": ctx.upstream_outputs,
+            "upstream_truncated_keys": ctx.upstream_truncated_keys,
+            "assembled_prompt": ctx.assembled_prompt,
+            "guidance_status": presented.get("guidance_status") or "none",
+            "re_presented": True,
+        }
 
     node_key = claimed["node_key"]
     await db.execute(

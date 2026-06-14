@@ -1821,6 +1821,10 @@ async def execute_all_nodes(
             node_results.append(result)
 
             if status == "done":
+                # §17.509 — a Shell node with no real backend only generated a
+                # runbook; flag it so the live ticker doesn't render "✅ complete"
+                # for work that was never executed (matches the §17.506 banner).
+                _done_tool = (result.get("tool") or "").lower()
                 yield _sse("node_done", {
                     "job_id": job_id,
                     "node_key": result.get("node_key"),
@@ -1829,6 +1833,8 @@ async def execute_all_nodes(
                     "verified": result.get("verified"),
                     "confidence": result.get("confidence"),
                     "model_used": result.get("model_used"),
+                    "tool": result.get("tool"),
+                    "runbook_only": _done_tool == "shell" and not settings.shell_tool_enabled,
                 })
             elif status == "failed":
                 _failed_key = result.get("node_key", "")

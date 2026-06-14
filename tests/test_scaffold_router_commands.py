@@ -785,7 +785,11 @@ class TestResearchCommand:
 
         output = "".join(pipe._research_and_stream("Docker networking", "medium"))
         assert "/go" in output
-        assert "build a project plan" in output
+        # §17.510 — research_complete still suggests /go, but no longer claims
+        # /go builds "from this research" (it doesn't read the KB); it points
+        # users to /rag for the ingested knowledge instead.
+        assert "from this research" not in output
+        assert "/rag" in output
         assert "Research Complete" in output
 
     def test_awaiting_reply_renders_paused_block(self, pipe, monkeypatch):

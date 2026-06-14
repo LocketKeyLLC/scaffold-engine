@@ -178,11 +178,16 @@ def render_step(step: dict) -> str:
     if not step.get("node_key"):
         counts = step.get("step_counts", {})
         counts_str = ", ".join(f"{k}={v}" for k, v in counts.items()) or "n/a"
+        # §17.512 — a presented-but-unsubmitted step is now re-surfaced by the
+        # orchestrator, so reaching here means nothing is ready: either every
+        # step is submitted/skipped (session about to finalize) or the rest are
+        # waiting on dependencies.
         return (
-            f"⏳ **No claimable step right now.**\n\n"
+            f"⏳ **No step ready right now.**\n\n"
             f"Step roll-up: {counts_str}\n\n"
-            f"Some steps may already be presented to you and waiting on submit. "
-            f"Use `/assist next` again after you submit."
+            f"Either all steps are submitted/skipped, or the remaining ones are "
+            f"waiting on dependencies. Use `/assist done` to finish, or check "
+            f"`/jobs` for status."
         )
     upstream = step.get("upstream_outputs") or {}
     upstream_block = ""
@@ -193,7 +198,15 @@ def render_step(step: dict) -> str:
             upstream_block += f"_{nk}:_\n```\n{preview}\n```\n\n"
     deps = step.get("depends_on") or []
     deps_str = ", ".join(deps) if deps else "(none)"
+    # §17.512 — when the orchestrator re-surfaces an already-presented step
+    # (nothing new claimable), tell the user this is their current step, not a
+    # new one — so re-running `/assist next` reads as recovery, not a skip.
+    re_shown = (
+        "↩️ _Re-showing your current step (submit or `/assist skip` it to "
+        "move on)._\n\n" if step.get("re_presented") else ""
+    )
     return (
+        f"{re_shown}"
         f"### Step `{step['node_key']}` — {step.get('title', '?')}\n\n"
         f"**Tool:** `{step.get('tool', 'LLM')}`  |  "
         f"**Domain:** `{step.get('domain') or 'n/a'}`  |  "

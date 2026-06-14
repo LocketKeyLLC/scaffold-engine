@@ -21983,6 +21983,24 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.508–512 — Full-lifecycle guidance audit remediation (triage→assist) (2026-06-14)
+
+A full audit of the user-facing guidance across the whole lifecycle (5 parallel stage audits, every load-bearing finding verified in code) confirmed each stage individually works but surfaced one structural through-line gap plus several over-claim/dead-end gaps. The verified top-5 are fixed here:
+
+**§17.508 — autonomous-vs-assist choice surfaced for hands-on plans (HIGH).** `/confirm` silently auto-executed autonomously (`assist_after_confirm` valve default False) and never offered the choice — so a hands-on build (e.g. homelab) ran autonomously, generating runbooks-marked-done → "completed" with nothing built (the user's original complaint). Fix (`scaffold_router.py` confirm chain): after the DAG is built, count Shell steps; if any, STOP and present the choice (`/assist <id>` recommended vs `/execute <id>` autonomous-runbook-only) instead of auto-running. Pure text-class DAGs (LLM/CodeGen) still auto-execute — common flow unchanged, both existing confirm tests stay green (their mock DAGs have no Shell tasks). This is the documented "operator picks" intent, now actually implemented per-job instead of via a hidden global valve.
+
+**§17.509 — live ticker stops claiming "✅ complete" for unexecuted runbook nodes (MED).** The `node_done` SSE render said "✅ Step T*n* complete." for Shell/runbook nodes that were never executed (undercutting §17.506's end-of-run banner mid-stream). Fix: orchestrator emits `tool` + `runbook_only` (gated on `shell_tool_enabled`) on `node_done` (`execution_agent.py`); pipeline renders "📋 Step T*n* — runbook generated (not executed; you perform it)." for runbook_only nodes (`scaffold_router.py` `_handle_sse_event`).
+
+**§17.510 — research_complete no longer over-claims the build link (MED).** It said "`/go` to build a project plan from this research," but `/go` (`_synthesize_idea`) uses zero RAG — it synthesizes from chat only. Fix: reworded to point at `/rag` (the real way to use the ingested knowledge, which also grounds builds at execution time) and to describe `/go` honestly as "start a build from your chat description."
+
+**§17.511 — research summary anti-bleed guard (MED).** `SUMMARY_SYSTEM_V1` only said "summarize collected entries" with no scope constraint, and both runtime guards (faithfulness, CoVe) default off — so summaries could bleed unrelated training-data content (the "kubernetes→Svelte" gotcha). Fix: added an always-on "summarize ONLY the provided entries; do not add outside/recalled facts" clause to the prompt.
+
+**§17.512 — assist re-surfaces a presented-but-unsubmitted step (MED).** `get_next_step` claimed only `pending` rows, so a step already `presented` (lost to scroll/reconnect/accidental `/next`) was a dead-end — `/assist next` skipped it or returned "nothing claimable." Fix: when nothing new is claimable, re-surface the current `presented` step (re-assembled, `re_presented=True`) instead of None; pipeline flags it "↩️ Re-showing your current step." Only fires when nothing else is ready, so it never blocks parallel progress. The stale "no claimable step" copy was corrected too.
+
+**Verification.** New `tests/test_scaffold_router_audit_fixes.py` (§17.508 hands-on→choice + text→auto; §17.509 runbook vs executed render; §17.512 re-presented note) + `tests/test_research_summary_antibleed.py` (§17.511); one existing test (`test_research_complete_suggests_go`) updated for the §17.510 reword. **§17.512 verified LIVE** on a real assist session: 1st `/next` claims T1, 2nd `/next` re-surfaces T1 (`re_presented=True`, full prompt) — previously a dead-end. Pipeline + research + assist suites green. **Not fixed (below top-5, logged):** triage "Type /go to launch" vs the `/go confirm` two-step (LOW); the dangling `/assist status` reference in the mirror-divergence banner (LOW).
+
+---
+
 ### §17.507 Fix — DAG build hard-failed on a >5-word task name (coerce, don't crash) (2026-06-14)
 
 **Symptom.** Generating a fresh homelab DAG failed with `{"status":"failed","errors":["Task 4: name exceeds 5 words: 'Deploy media AI and game VMs'"]}` and marked the **whole job `failed`** — no nodes inserted. A retry (different non-deterministic LLM draw) succeeded, so the build was effectively a coin-flip on every node name.

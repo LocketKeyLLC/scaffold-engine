@@ -1676,6 +1676,33 @@ class Pipeline:
             )
             return
 
+        # §17.508 — surface the autonomous-vs-assist choice for HANDS-ON plans.
+        # A DAG with Shell/runbook steps is assist-class: those actions must be
+        # performed by the user on real systems (the engine has no shell
+        # backend by default), so auto-executing them only generates runbooks
+        # marked done → a "completed" job that built nothing (§17.506). For such
+        # plans, STOP and let the user choose, recommending Assist. Pure
+        # text-class DAGs (LLM/CodeGen/research) still auto-execute — that's
+        # what autonomous mode does well — so the common flow is unchanged.
+        tasks = dag_data.get("tasks", []) if isinstance(dag_data, dict) else []
+        shell_steps = sum(
+            1 for t in tasks
+            if isinstance(t, dict) and str(t.get("tool", "")).lower() == "shell"
+        )
+        if shell_steps:
+            yield (
+                f"📋 **Execution plan ready — {num_nodes} steps "
+                f"({shell_steps} hands-on).**\n\n"
+                f"This plan has steps you must run on real systems — the engine "
+                f"can't perform them for you. Choose how to proceed:\n\n"
+                f"- `/assist {job_id}` — **recommended**: walk through each step "
+                f"yourself with the engine guiding and verifying.\n"
+                f"- `/execute {job_id}` — run autonomously: the engine only "
+                f"generates runbook instructions and marks them done; it will "
+                f"**not** actually perform the hands-on steps.\n"
+            )
+            return
+
         yield f"📋 Execution plan ready — running {num_nodes} steps...\n\n"
         yield from self._execute_and_stream(job_id, num_nodes)
 
@@ -2378,9 +2405,14 @@ class Pipeline:
                     if payload.get("summary"):
                         yield f"**Summary:**\n\n{payload['summary']}\n\n"
                     yield "---\n\n**Next steps:**\n\n"
-                    yield "- `/go` to build a project plan from this research\n"
+                    # §17.510 — honest about the research→build link. `/go`
+                    # synthesizes a brief from your CHAT, not the KB; the
+                    # ingested knowledge is used automatically as grounding when
+                    # a build's nodes execute (same-domain retrieval). Don't
+                    # imply `/go` reads this research directly.
+                    yield "- `/rag <query>` to retrieve what was ingested (this knowledge also grounds builds at execution time)\n"
                     yield "- `/research <subtopic> --depth deep` to explore further\n"
-                    yield "- `/rag <query>` to query what was ingested\n"
+                    yield "- `/go` to start a new build from your chat description\n"
 
         finally:
             # §17.262 — runs on GeneratorExit (client disconnect) AND on
@@ -2588,7 +2620,14 @@ class Pipeline:
         if event_type == "node_start":
             yield f"🔄 Step {payload.get('node_key','?')}: {payload.get('title','')} ({payload.get('tool','')})...\n"
         elif event_type == "node_done":
-            yield f"✅ Step {payload.get('node_key','?')} complete.\n"
+            # §17.509 — don't claim "complete" for unexecuted runbook steps.
+            if payload.get("runbook_only"):
+                yield (
+                    f"📋 Step {payload.get('node_key','?')} — runbook generated "
+                    f"(not executed; you perform it).\n"
+                )
+            else:
+                yield f"✅ Step {payload.get('node_key','?')} complete.\n"
         elif event_type == "node_failed":
             reason = payload.get("error") or payload.get("verification_reason") or "unknown"
             yield f"❌ Step {payload.get('node_key','?')} failed: {reason}\n"
