@@ -21983,9 +21983,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
-### §17.513 Fix (test isolation) — plan-only banner test polluted by config reload (2026-06-14)
+### §17.513 Fix (test determinism) — plan-only banner integration tests nondeterministic under full-suite load (2026-06-14)
 
-The full-suite run after §17.508–512 surfaced **1 failure**: `test_compile_plan_only_banner.py::test_shell_enabled_suppresses_banner` failed **only in the full suite** (green alone and as a file). Root cause: `test_auth.py` does `importlib.reload(app.config)`, swapping in a fresh `Settings` object; the test patched `app.config.settings` (the new object) but `_compile_output` reads `execution_compile.settings` (bound at import → the old object), so `shell_tool_enabled=True` never reached the code-under-test and the banner wrongly appeared. Fix: patch `execution_compile.settings` (the object the code actually reads), robust to the reload. Verified by running `test_auth.py` immediately before the banner file — **27 passed** (was the exact pollution order). Lesson: when monkeypatching a module-imported singleton, patch it on the consuming module, not on `app.config`, since `test_auth`'s reload decouples the two.
+The full-suite runs after §17.508–512 surfaced **1 failure** in `test_compile_plan_only_banner.py::TestCompileOutputPlanOnly` — but **a different case each run** (first `test_shell_enabled_suppresses_banner`, then `test_shell_runbook_job_gets_banner`), while the file passed green alone, as a file, in the a–c range, and in the first-17 real-collection-order subset. Two distinct contributing factors, both fixed:
+
+1. **Settings-object identity (first run).** The test patched `app.config.settings`, but `test_auth.py`'s `importlib.reload(app.config)` swaps in a fresh `Settings` object while `_compile_output` keeps reading its import-bound one. *Initially mis-attributed as the whole cause* — a diagnostic then proved `execution_compile.settings IS _compile_output.__globals__["settings"]` even after the reload, so the patched object was already correct after switching to it.
+
+2. **Synthesis nondeterminism (second run — the real driver).** These integration tests left `compile_synthesis_enabled` at its default, so `_compile_output` made a **live synthesis LLM call**; under full-suite load (3879 tests, model contention/timing) that path's result transitively perturbed the banner assertions. Lighter contexts (isolation, a–c, first-17) never tripped it.
+
+**Fix.** A `_prep(monkeypatch, **settings)` helper patches `_compile_output.__globals__["settings"]` (the exact object the called function reads — reload-proof) AND sets `compile_synthesis_enabled=False`, so the compile path is fully deterministic with no LLM call. Tests now run faster too (16s vs 47s for the file). Verified: isolation, `test_auth.py`+file (27 passed), first-17 in real collection order (246 passed), and the full-suite re-run (below). Lesson: unit tests over `_compile_output` must disable synthesis — a live LLM in a "unit" path is a latent flake.
 
 ---
 
