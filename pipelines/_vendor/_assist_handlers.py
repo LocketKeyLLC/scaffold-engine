@@ -40,21 +40,33 @@ from typing import Generator
 import requests
 
 
-# §17.296 — lazy globals accessor. Captures scaffold_router's module
-# globals each call so any unittest patch lands here too without the
-# vendor module needing to re-import after monkeypatch.
-def _scaffold_router():
-    return sys.modules["scaffold_router"]
+# §17.505 — recover scaffold_router's module namespace from the live Pipeline
+# instance instead of `sys.modules["scaffold_router"]`.
+#
+# OWUI's pipeline loader (`load_module_from_path` → importlib `exec_module`)
+# does NOT register loaded pipelines in `sys.modules`, so the old
+# `sys.modules["scaffold_router"]` lookup raised `KeyError: 'scaffold_router'`
+# in production — crashing the assist generator mid-stream (OWUI surfaced it as
+# `TransferEncodingError: Not enough data to satisfy transfer length header`).
+# It only ever worked under the unittest harness, which DOES register the
+# module under that name — so every assist test passed while live `/assist`
+# always crashed (hence: zero assist sessions ever created).
+#
+# A Pipeline method's `__globals__` IS scaffold_router's live module `__dict__`
+# in both environments, and reads through it honor any test monkeypatch on the
+# module. Every caller already has the `pipe` instance in scope.
+def _sr_ns(pipe):
+    return type(pipe).pipe.__globals__
 
 
-def _ss():
+def _ss(pipe):
     """The shared ``requests.Session`` from scaffold_router."""
-    return _scaffold_router()._HTTP_SESSION
+    return _sr_ns(pipe)["_HTTP_SESSION"]
 
 
-def _sse_events_const():
+def _sse_events_const(pipe):
     """The ``_SSE`` vendor module reference (event-name constants)."""
-    return _scaffold_router()._SSE
+    return _sr_ns(pipe)["_SSE"]
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +83,7 @@ def assist_remember(
     if not chat_id or not pipe.valves.assist_session_memory_enabled:
         return
     try:
-        _ss().put(
+        _ss(pipe).put(
             f"{pipe.valves.orchestrator_url}/assist/_chatmap/{chat_id}",
             json={"session_id": session_id, "last_node_key": last_node_key},
             headers=pipe._auth_headers(),
@@ -85,7 +97,7 @@ def assist_recall(pipe, chat_id: str | None) -> dict | None:
     if not chat_id or not pipe.valves.assist_session_memory_enabled:
         return None
     try:
-        r = _ss().get(
+        r = _ss(pipe).get(
             f"{pipe.valves.orchestrator_url}/assist/_chatmap/{chat_id}",
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
@@ -102,7 +114,7 @@ def assist_forget(pipe, chat_id: str | None) -> None:
     if not chat_id or not pipe.valves.assist_session_memory_enabled:
         return
     try:
-        _ss().delete(
+        _ss(pipe).delete(
             f"{pipe.valves.orchestrator_url}/assist/_chatmap/{chat_id}",
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
@@ -518,7 +530,7 @@ def assist_start(
     pipe, job_id: str, *, chat_id: str | None = None,
 ) -> Generator[str, None, None]:
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/start",
             json={
                 "job_id": job_id,
@@ -557,7 +569,7 @@ def assist_next(
     pipe, session_id: str, *, chat_id: str | None = None,
 ) -> Generator[str, None, None]:
     try:
-        r = _ss().get(
+        r = _ss(pipe).get(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/next",
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
@@ -609,7 +621,7 @@ def assist_submit(
         yield (f"❌ Evidence is {len(evidence)} chars; cap is "
                f"{pipe.valves.assist_max_evidence_chars}. Trim and resend."); return
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/submit",
             json={
                 "node_key": node_key,
@@ -717,7 +729,7 @@ def assist_skip(
     pipe, session_id: str, node_key: str, *, chat_id: str | None = None,
 ) -> Generator[str, None, None]:
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/submit",
             json={"node_key": node_key, "output": "", "action": "skip"},
             headers=pipe._auth_headers(),
@@ -784,7 +796,7 @@ def stream_sse_with_keepalive(
         daemon=True,
     )
     reader.start()
-    sse_const = _sse_events_const()
+    sse_const = _sse_events_const(pipe)
     try:
         while True:
             try:
@@ -851,7 +863,7 @@ def assist_guide_cmd(
     generation is an 8192-token thinking-model call plus an optional research
     pre-pass, well beyond the fast-call default."""
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/guide",
             json={
                 "node_key": node_key,
@@ -899,7 +911,7 @@ def assist_guide_stream_cmd(
         daemon=True,
     )
     reader.start()
-    sse_const = _sse_events_const()
+    sse_const = _sse_events_const(pipe)
     started = False
     got_text = False
     try:
@@ -968,7 +980,7 @@ def assist_research_cmd(
 ) -> Generator[str, None, None]:
     """§17.486 — POST /assist/{sid}/research and render cited results."""
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/research",
             json={"question": question, "node_key": node_key},
             headers=pipe._auth_headers(),
@@ -996,10 +1008,10 @@ def assist_env_cmd(
     base = f"{pipe.valves.orchestrator_url}/assist/{session_id}/env"
     try:
         if show:
-            r = _ss().get(base, headers=pipe._auth_headers(),
+            r = _ss(pipe).get(base, headers=pipe._auth_headers(),
                           timeout=pipe.valves.request_timeout)
         else:
-            r = _ss().put(
+            r = _ss(pipe).put(
                 base,
                 json={"profile": profile, "substitutions": substitutions or {},
                       "verbosity": verbosity},
@@ -1031,7 +1043,7 @@ def assist_fix_cmd(
 ) -> Generator[str, None, None]:
     """§17.487 — POST /assist/{sid}/fix and render the diagnosis + fix."""
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/fix",
             json={"error": error_text, "node_key": node_key},
             headers=pipe._auth_headers(),
@@ -1054,7 +1066,7 @@ def assist_simple_post(
     pipe, session_id: str, action: str,
 ) -> Generator[str, None, None]:
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/{action}",
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
@@ -1078,7 +1090,7 @@ def assist_done(
 ) -> Generator[str, None, None]:
     # Pull session, then job's compiled_output via /exec/status.
     try:
-        r = _ss().get(
+        r = _ss(pipe).get(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}",
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
@@ -1098,7 +1110,7 @@ def assist_done(
         assist_forget(pipe, chat_id)
     job_id = sess.get("job_id")
     try:
-        r2 = _ss().get(
+        r2 = _ss(pipe).get(
             f"{pipe.valves.orchestrator_url}/exec/status/{job_id}",
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
@@ -1142,7 +1154,7 @@ def assist_friction(
     pipe, session_id: str, node_key: str, note: str,
 ) -> Generator[str, None, None]:
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/friction",
             json={"node_key": node_key, "note": note},
             headers=pipe._auth_headers(),

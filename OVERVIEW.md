@@ -21983,6 +21983,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.505 Fix — Assist Mode 100% broken in production: `sys.modules["scaffold_router"]` KeyError (2026-06-14)
+
+**Symptom (user report).** A correct `/assist <job_id>` in OWUI returned `Response payload is not completed: <TransferEncodingError: 400, message='Not enough data to satisfy transfer length header.'>`. That aiohttp error = the pipeline's chunked response to OWUI was truncated because the generator raised mid-stream.
+
+**Root cause.** `pipelines/_vendor/_assist_handlers.py` resolved scaffold_router's shared `_HTTP_SESSION` / `_SSE` via `sys.modules["scaffold_router"]` (the `_scaffold_router()` / `_ss()` / `_sse_events_const()` helpers, §17.296). But OWUI's pipeline loader (`load_module_from_path` → `importlib.util.spec_from_file_location` + `module_from_spec` + `exec_module`) **does not register loaded pipelines in `sys.modules`**. So the very first `_ss()` call in `assist_start` raised `KeyError: 'scaffold_router'`, crashing the generator. **This means every `/assist` command had been broken in production since the §17.296 vendor split** — corroborated by §17.501-era forensics (`SELECT count(*) FROM assist_sessions` = 0, ever). It passed all tests because the unittest harness (`tests/_scaffold_router_setup.py:41`) DOES register the module under `"scaffold_router"` — a test/prod environment divergence the mocks hid (cf. the "live smoke for default-off/fail-soft features" lesson).
+
+**Fix.** Recover scaffold_router's namespace from the live Pipeline instance: `type(pipe).pipe.__globals__` IS the module's live `__dict__` in both environments and honors test monkeypatches. New `_sr_ns(pipe)`; `_ss`/`_sse_events_const` take `pipe`; all 20 call sites threaded (each already had `pipe` in scope — AST-verified). Removed the `sys.modules` lookup entirely.
+
+**Verification.** Reproduced OWUI's loader inside the `open-webui-pipelines` container (`exec_module`, `'scaffold_router' not in sys.modules`) → old path `KeyError`, new `_ss(pipe)` returns a `requests.Session`. Live: `/assist` on the (completed) homelab job now returns a clean **HTTP 409** ("job … is in status 'completed'; assist mode requires one of …") rendered as a friendly message, not a crash. Pipelines reloaded. Tests: all `test_scaffold_router_*.py` — **627 passed**; assist suite — **205 passed**. Follow-up worth considering: a live OWUI-loader smoke in CI so this class of test/prod divergence can't recur.
+
+---
+
 ### §17.504 Fix — assist-intent nudge: free-text "assist with…" routed silently to triage (2026-06-14)
 
 **Symptom (user report, root-caused).** A user believed they were using Assist Mode on the `DeFruscio HomeLab` job, but "the responses were like triage." Verified against the OWUI chat DB: the chat's single user message was *"assist with the completion and implementation of the defruscio homelab using provided components."* — natural language, **not** the `/assist` command. `SELECT count(*) FROM assist_sessions` = **0** (none ever, any job), confirming Assist Mode was never entered. The leading word "assist" is prose; command dispatch only matches a slash-prefixed `/assist` at a word boundary, so it fell through to the triage planner (the 4-section Scope/Options/Gaps/My-pick format). Compounding: the job had already auto-executed to `completed` (default autonomous path after `/confirm`), and `completed` is excluded from `_VALID_START_STATUSES` (`assist_agent.py:38` = planning/executing/blocked/failed/assisted_*), so even the correct `/assist <job_id>` would have been rejected.
