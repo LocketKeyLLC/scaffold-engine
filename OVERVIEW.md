@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.528 Feature — task decomposition, part 4: umbrella `/results` rollup view (2026-06-15)
+
+**Why.** An umbrella has no DAG, so `/results <umbrella>` previously showed an empty 0-node view. Operators need to watch a decomposition's components from one place.
+
+**Change.** `execution_handler.execution_status` now SELECTs `job_type` and, for an umbrella, returns a rollup via new `_umbrella_status`: `job_type='umbrella'` + `children` (each `{job_id, title, status, component_index}`) + `children_total`/`children_completed`, while keeping the standard keys (`nodes=[]`, `counts={}`, …) so existing SDK/pipeline readers don't KeyError. Pipeline `_handle_results` detects `job_type='umbrella'` and renders `_render_umbrella` — a per-child status list with a `/results <child>` drill-in hint — instead of the node view. `/exec/status` is a plain-dict response (no Pydantic model), so the OpenAPI snapshot is unchanged.
+
+**Verification.** +1 orchestrator test (`execution_status` umbrella → children rollup, `nodes==[]`) + 1 pipeline test (`_render_umbrella` lists children + `N/M completed` + drill-in hint). 13 + 8 green; existing `execution_status` tests unaffected (no `job_type` on their fixtures → `getattr` default `'legacy'` → normal node path). **Live:** `GET /exec/status/<umbrella>` returns `job_type=umbrella`, `children_completed/total 0/2`, both components `executing`.
+
+---
+
 ### §17.527 Feature — task decomposition, part 3: umbrella-finalize reaper sweep + full-pipeline validation (2026-06-15)
 
 **Why.** An umbrella sits `aggregating` while children run; normally each child rolls it up on finish (`decomposition._rollup_umbrella` in its `finally`). The gap: if a child is terminated by the stale-job reaper (which doesn't call the rollup), the umbrella could stay `aggregating` forever. Also a backstop for any missed rollup write.

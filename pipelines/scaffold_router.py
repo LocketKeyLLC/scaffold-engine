@@ -4067,6 +4067,30 @@ class Pipeline:
                 lines.append(f"- `/skip {job_id} {node_key}`{title_part}\n")
         return "".join(lines)
 
+    def _render_umbrella(self, job_id: str, data: dict) -> str:
+        """§17.528 — rollup view for a decomposition umbrella: each component
+        child + its status, with a drill-in hint."""
+        children = data.get("children") or []
+        total = data.get("children_total", len(children))
+        done = data.get("children_completed", 0)
+        status = data.get("job_status", "aggregating")
+        head_icon = {"completed": "✅", "failed": "❌"}.get(status, "⏳")
+        child_icon = {
+            "completed": "✅", "failed": "❌", "cancelled": "🛑", "blocked": "⏸️",
+        }
+        lines = [
+            f"{head_icon} **Umbrella** `{job_id}` — {status} "
+            f"({done}/{total} components completed)\n"
+        ]
+        for c in children:
+            cs = c.get("status", "?")
+            lines.append(
+                f"- {child_icon.get(cs, '⏳')} `{c.get('job_id', '')}` — "
+                f"{c.get('title', '')} ({cs})"
+            )
+        lines.append("\n_Drill into any component with `/results <its job_id>`._")
+        return "\n".join(lines)
+
     def _handle_results(
         self, parts: list, *, chat_id: str | None = None,
     ) -> str:
@@ -4131,6 +4155,11 @@ class Pipeline:
             return "⚠️ Unexpected response from orchestrator."
 
         status = data.get("status") or data.get("job_status") or "unknown"
+
+        # §17.528 — an umbrella (task decomposition) has no DAG; show the
+        # component-children rollup instead of an empty node view.
+        if data.get("job_type") == "umbrella":
+            return self._render_umbrella(job_id, data)
 
         if status in ("completed", "done"):
             compiled = data.get("compiled_output", "")

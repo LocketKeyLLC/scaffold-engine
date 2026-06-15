@@ -1756,3 +1756,28 @@ class TestComponentsTriage:
         assert "optional Components header" in p
         for header in ("Scope so far", "Options", "Gaps", "My pick"):
             assert header in p
+
+
+class TestUmbrellaResults:
+    """§17.528 — /results on a decomposition umbrella shows the child rollup."""
+
+    def test_render_umbrella_lists_children_and_rollup(self):
+        data = {
+            "job_type": "umbrella",
+            "job_status": "aggregating",
+            "children_total": 2,
+            "children_completed": 1,
+            "children": [
+                {"job_id": "c0", "title": "Auth", "status": "completed",
+                 "component_index": 0},
+                {"job_id": "c1", "title": "Billing", "status": "executing",
+                 "component_index": 1},
+            ],
+        }
+        # _render_umbrella uses no instance state, so an unbound call is fine.
+        out = _mod.Pipeline._render_umbrella(None, "umb", data)
+        assert "Umbrella" in out and "umb" in out
+        assert "1/2 components completed" in out
+        assert "`c0`" in out and "Auth" in out
+        assert "`c1`" in out and "Billing" in out
+        assert "/results <its job_id>" in out

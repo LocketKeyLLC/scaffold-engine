@@ -88,6 +88,25 @@ async def test_skipped_counts_as_satisfied_for_deps(regression_check=True):
     assert result["next_node"]["node_key"] == "T2"
 
 
+async def test_execution_status_umbrella_returns_children_rollup():
+    """§17.528 — an umbrella reports its component children, not a node view."""
+    job = _job_row(id="umb", title="Umbrella", status="aggregating",
+                   compiled_output=None, job_type="umbrella")
+    children = [
+        SimpleNamespace(id="c0", title="Auth", status="completed", component_index=0),
+        SimpleNamespace(id="c1", title="Billing", status="executing", component_index=1),
+    ]
+    db = _mock_db(job, children)   # 2nd execute() → fetchall() = children
+    result = await execution_handler.execution_status(uuid4(), db)
+    assert result["job_type"] == "umbrella"
+    assert result["job_status"] == "aggregating"
+    assert result["children_total"] == 2
+    assert result["children_completed"] == 1
+    assert result["nodes"] == [] and result["total_nodes"] == 0
+    assert [c["component_index"] for c in result["children"]] == [0, 1]
+    assert result["children"][0]["status"] == "completed"
+
+
 async def test_failed_node_is_not_actionable(regression_check=True):
     """#7.7 — failed nodes require /exec/retry, not picked up by /execute."""
     job = _job_row(id="j1", title="t", status="executing", compiled_output=None)
