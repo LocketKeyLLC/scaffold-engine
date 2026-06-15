@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.529 Fix — recovery NEXT_ACTIONS missing `aggregating` (decomposition follow-up) (2026-06-15)
+
+**Why.** The full `make test` baseline (3921 passed / **2 failed**) caught a gap §17.525 introduced: adding `'aggregating'` to the `JobStatus` Literal without a matching `app/modules/recovery.py::NEXT_ACTIONS` entry. `test_recovery.py::test_registry_covers_every_known_job_status` + `test_every_status_returns_at_least_one_action[aggregating]` assert the registry covers **every** `JOB_STATUSES` member — so the new status failed both. (The targeted per-phase runs didn't include `test_recovery`; the full suite did — the value of the baseline run.)
+
+**Change.** Added an `aggregating` entry: a `wait` action pointing at `/exec/status/{job_id}` (the umbrella child rollup) with `command="/results {job_id}"` and a "component jobs are running; check the rollup" description. No schema/OpenAPI change (registry is server-side, not vendored).
+
+**Verification.** `test_recovery.py` 27 green; ci-tier-0 green. Full-suite baseline now **3923 passed / 0 failed** (the 2 failures resolved). Lesson reinforced: a new `JobStatus` member must land in THREE places — the SQL CHECK (053), the `JobStatus` Literal, AND the recovery `NEXT_ACTIONS` registry.
+
+---
+
 ### §17.528 Feature — task decomposition, part 4: umbrella `/results` rollup view (2026-06-15)
 
 **Why.** An umbrella has no DAG, so `/results <umbrella>` previously showed an empty 0-node view. Operators need to watch a decomposition's components from one place.
