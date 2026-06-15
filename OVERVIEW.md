@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.523 Feature — triage surfaces task Components (decomposition groundwork) (2026-06-15)
+
+**Why.** A user expected a multi-part build to break into several jobs; the engine has no decomposition today. First step toward triage-time decomposition (each component → its own job at /go): make the triage conversation itself *name the components* so the user can decide scope before launch — and do it with minimal token cost.
+
+**Change (`pipelines/scaffold_router.py::TRIAGE_SYSTEM_PROMPT`).** Added an **optional** fifth section, **Components**, placed right after "Scope so far". It is emitted *only* when the build clearly splits into 2-5 independently-buildable parts (`name — one-clause scope` per line) and is omitted entirely — header included — for a single-focus build, so simple tasks pay zero extra tokens. The four required headers (Scope so far / Options / Gaps / My pick) are unchanged; the "no extra headers" rule now whitelists Components as the sole exception. Updated the multi-part worked example (home-lab) to demonstrate it, and the locked-summary close now names the in-scope components and notes each becomes its own job at /go. The authoritative, machine-readable component extraction (synthesis prompt + parser + the `/decompose` consumer) lands with the decomposition feature so the format change stays atomic with its consumer.
+
+**Verification.** +4 `TestComponentsTriage` prompt tests (optional section present; omit-for-single-focus token-economy guidance; "each chosen part becomes its own job"; Components is the only extra header). Full `test_scaffold_router_commands.py` green (111). Pipeline syntax-checked. Live triage dogfood (4b) pending in OWUI.
+
+---
+
 ### §17.522 Fix — Phase-2 research distillation silently dropped 100% of results (shape-drift regression) (2026-06-15)
 
 **Symptom (user report → DB/log forensics).** A user reported the engine "isn't operating as it should": a task they expected to decompose into sub-jobs instead produced two duplicate jobs that did nothing. Forensics on the two jobs (`ba2706cc`, `6c1265dc` — both the same BIOS-OS idea, submitted 4h apart; the claimed third job `4005b40` never existed; there is no job-spawning feature) showed the real defect in the logs: **`phase2_distill_shape_drift: raw=10 kept=0 dropped=10`** on every run → `facts_extracted=0, milvus_ingested=0`. Every DAG was being built with **zero grounded research**.

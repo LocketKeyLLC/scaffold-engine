@@ -1729,3 +1729,30 @@ class TestInfoGainTriage:
         p = _mod.TRIAGE_SYSTEM_PROMPT
         for header in ("Scope so far", "Options", "Gaps", "My pick"):
             assert header in p
+
+
+class TestComponentsTriage:
+    """§17.x — triage breaks a multi-part task into named Components so each can
+    become its own job at /go. Optional by design: omitted for a single-focus
+    build to keep per-turn output (and tokens) minimal."""
+
+    def test_prompt_defines_optional_components_section(self):
+        p = _mod.TRIAGE_SYSTEM_PROMPT
+        assert "**Components:**" in p
+        assert "OPTIONAL" in p
+
+    def test_prompt_components_omitted_for_single_focus(self):
+        # Token economy: a single-focus build must not carry the section.
+        p = _mod.TRIAGE_SYSTEM_PROMPT
+        assert "single-focus build" in p
+
+    def test_prompt_components_each_becomes_a_job(self):
+        p = _mod.TRIAGE_SYSTEM_PROMPT
+        assert "each chosen part becomes its own job" in p
+
+    def test_components_is_the_only_extra_header_allowed(self):
+        # The four required headers stay mandatory; Components is the sole add.
+        p = _mod.TRIAGE_SYSTEM_PROMPT
+        assert "optional Components header" in p
+        for header in ("Scope so far", "Options", "Gaps", "My pick"):
+            assert header in p
