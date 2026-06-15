@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.524 Feature — `quick_research` grounded-research primitive (batched-at-/go) (2026-06-15)
+
+**Why.** The user chose grounded standards research wired into the real SearXNG path, run *batched at /go* (one pass per chosen component) rather than the 20-60 min autonomous `/research` SSE loop. Need a fast, synchronous "search → distill grounded facts" call the decomposition fan-out can invoke per component.
+
+**Change (`app/modules/gt_extractor.py::quick_research`).** New helper: `quick_research(queries, *, domain, top_k, ingest, route) -> {entries, results_found, ingested}`. Searches each query via `search_searxng` (dedup by URL, capped at `ideation_max_queries`, `research_searxng_delay` between calls), distills via the §17.522 `distill_entries` native-tool-call primitive (so results are grounded objects, never hallucinated strings), and optionally ingests into Milvus via `ingest_entries`. Fails soft to `entries=[]` — research is best-effort and must never raise into /go. No new HTTP endpoint: research is batched server-side inside the forthcoming `/decompose` (avoids an unused public surface + OpenAPI/SDK churn); a public endpoint can follow if inline triage research is ever wanted.
+
+**Verification.** +4 `test_quick_research.py` (empty-query short-circuit; search→distill→URL-dedup composition with first-query-as-topic; ingest-off never touches RAG; no-results→empty). 16 green with `test_gt_extractor`. Verified-by-composition: both halves (`search_searxng`, `distill_entries`) are the exact functions live-proven in the §17.522 Phase-2 smoke (10 results → 10 distilled entries → 10 ingested).
+
+---
+
 ### §17.523 Feature — triage surfaces task Components (decomposition groundwork) (2026-06-15)
 
 **Why.** A user expected a multi-part build to break into several jobs; the engine has no decomposition today. First step toward triage-time decomposition (each component → its own job at /go): make the triage conversation itself *name the components* so the user can decide scope before launch — and do it with minimal token cost.

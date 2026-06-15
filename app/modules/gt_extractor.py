@@ -530,6 +530,56 @@ async def distill_entries(
     return _normalize_legacy_keys(entries)
 
 
+async def quick_research(
+    queries: list[str],
+    *,
+    domain: str = "eng",
+    top_k: int = 15,
+    ingest: bool = False,
+    route: dict | None = None,
+) -> dict:
+    """Fast, grounded standards research: SearXNG search → distill, no loop.
+
+    §17.x — the synchronous counterpart to the autonomous ``/research`` SSE
+    loop (which runs 20-60 min). Reuses :func:`search_searxng` +
+    :func:`distill_entries` so the result is grounded in real sources, not the
+    triage model's memory. Used batched-at-/go by the decomposition fan-out
+    (one call per component) and exposed via ``POST /research/quick``.
+
+    Returns ``{entries, results_found, ingested}``; ``entries`` is ``[]`` on any
+    soft failure (research is best-effort and must never raise into /go).
+    """
+    if not queries:
+        return {"entries": [], "results_found": 0, "ingested": 0}
+
+    all_results: list[dict] = []
+    seen_urls: set[str] = set()
+    for i, q in enumerate(queries[: settings.ideation_max_queries]):
+        if i > 0:
+            await asyncio.sleep(settings.research_searxng_delay)
+        for r in await search_searxng(q):
+            url = r.get("url", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                all_results.append(r)
+
+    entries = await distill_entries(
+        all_results, topic=queries[0], route=route, max_results=top_k,
+    )
+
+    ingested = 0
+    if ingest and entries:
+        from app.modules.rag_pipeline import ingest_entries
+        stats = await ingest_entries(entries, domain=domain or "eng")
+        ingested = stats["new"] + stats["versioned"]
+
+    return {
+        "entries": entries,
+        "results_found": len(all_results),
+        "ingested": ingested,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
