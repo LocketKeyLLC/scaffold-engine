@@ -20,6 +20,16 @@ def _resp(args: dict, success: bool = True):
     return r
 
 
+class _ACM:
+    """Minimal async context manager for mocking async_session()/slot-sem."""
+    def __init__(self, val=None):
+        self.val = val
+    async def __aenter__(self):
+        return self.val
+    async def __aexit__(self, *a):
+        return False
+
+
 @pytest.mark.smoke
 class TestExtractComponents:
     async def test_normalizes_filters_and_caps(self, monkeypatch):
@@ -50,6 +60,61 @@ class TestExtractComponents:
                             AsyncMock(return_value=_resp({})))
         monkeypatch.setattr(dc, "read_tool_args", lambda r: None)
         assert await dc.extract_components("idea") == []
+
+    async def test_caps_at_max_components(self, monkeypatch):
+        # §17.530 — over-split must be clamped so the fan-out stays bounded.
+        payload = {"components": [
+            {"label": f"C{i}", "description": f"build part {i}"} for i in range(9)
+        ]}
+        monkeypatch.setattr(dc.model_router, "tool_call",
+                            AsyncMock(return_value=_resp(payload)))
+        monkeypatch.setattr(dc, "read_tool_args", lambda r: payload)
+        out = await dc.extract_components("idea")
+        assert len(out) == dc.MAX_COMPONENTS
+
+
+@pytest.mark.smoke
+class TestResurrectionGuard:
+    """§17.530 — a child whose Phase 1/2 returns a failure dict must NOT fall
+    through to execute_all_nodes (whose guard would resurrect the failed job),
+    but must still roll the umbrella up."""
+
+    def _wire(self, monkeypatch, *, phase1, phase2=None):
+        db = AsyncMock()
+        monkeypatch.setattr(dc, "async_session", lambda: _ACM(db))
+        monkeypatch.setattr(dc, "get_ideation_slot_sem", lambda: _ACM())
+        monkeypatch.setattr(dc, "analyze_and_confirm", AsyncMock(return_value=phase1))
+        rac = AsyncMock(return_value=phase2)
+        monkeypatch.setattr(dc, "research_and_compile", rac)
+        ean = MagicMock()  # must NOT be called on the failure paths
+        monkeypatch.setattr(dc, "execute_all_nodes", ean)
+        roll = AsyncMock()
+        monkeypatch.setattr(dc, "_rollup_umbrella", roll)
+        return rac, ean, roll
+
+    async def test_phase1_failure_skips_execute_but_rolls_up(self, monkeypatch):
+        rac, ean, roll = self._wire(monkeypatch, phase1={"status": "failed"})
+        await dc.run_component_pipeline(
+            "c0", "idea", domain="eng", research_queries=None,
+            model_overrides=None, umbrella_id="u",
+        )
+        rac.assert_not_called()      # Phase 2 not reached
+        ean.assert_not_called()      # execute_all_nodes NOT reached → no resurrection
+        roll.assert_awaited()        # umbrella still rolled up
+
+    async def test_phase2_conflict_skips_execute_but_rolls_up(self, monkeypatch):
+        rac, ean, roll = self._wire(
+            monkeypatch,
+            phase1={"status": "awaiting_confirmation"},
+            phase2={"status": "conflict"},
+        )
+        await dc.run_component_pipeline(
+            "c1", "idea", domain="eng", research_queries=None,
+            model_overrides=None, umbrella_id="u",
+        )
+        rac.assert_awaited()         # Phase 2 ran
+        ean.assert_not_called()      # but execute_all_nodes was NOT reached
+        roll.assert_awaited()
 
 
 @pytest.mark.smoke

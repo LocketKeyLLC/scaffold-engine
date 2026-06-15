@@ -21983,6 +21983,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.530 Hardening — decomposition stress-test fixes: resurrection guard, component cap, shielded rollup (2026-06-15)
+
+**Why.** Stress-testing the decomposition subsystem (live multi-component jobs through the OWUI pipeline + an adversarial code review) surfaced real hazards, two HIGH.
+
+**Fixes (`app/modules/decomposition.py` + `app/routers/workflow.py`).**
+- **HIGH — failed-child resurrection (correctness).** `run_component_pipeline` ignored `analyze_and_confirm`/`research_and_compile` return values. Those RETURN a `{"status":"failed"}`/`"conflict"` dict (they don't raise), so a child whose Phase 1/2 failed fell through to `execute_all_nodes`, whose guard `WHERE status NOT IN ('running','completed')` (`execution_agent.py:1651`) flips a `failed`/`blocked`/`cancelled` job back to `running` and re-runs it — it could then complete and **corrupt the umbrella rollup** (umbrella `completed` off a child that actually failed). Now both phases are captured and gated: a `failed` Phase 1 or a `failed`/`conflict` Phase 2 returns early (the `finally` still rolls up; the child stays terminal).
+- **HIGH — unbounded fan-out (resource).** `extract_components` had no ceiling on component count — a model over-split would spawn N full pipelines concurrently (N held DB sessions + N unbounded research bursts on a single-worker process). Added `MAX_COMPONENTS=5` clamp (logged when it fires).
+- **MED — shielded rollup.** The `finally` rollup is now `asyncio.shield`-wrapped so a `CancelledError` landing mid-finally can't skip the umbrella update (per `feedback_cancellederror_basexception`); the Stage-7 reaper sweep remains the backstop.
+- **LOW — extraction signal.** `/decompose`'s not-decomposed response now carries `reason` (`single_focus` vs `extraction_unavailable`) so a silent splitter failure is distinguishable from a genuine single build.
+
+**Verification.** +3 `test_decomposition` tests (caps-at-MAX; Phase-1-failure and Phase-2-conflict each skip `execute_all_nodes` but still roll up) — 10 green. ci-tier-0 green. **Live on the fixed code:** a 3-part dev-suite idea → 3 components created + ran through Phase 1 → injection → grounded Phase 2 cleanly (no `component_pipeline_failed`, no SQL errors); a trivial single-function idea → `decomposed:false, reason:single_focus`. Reviewed-but-not-fixed (lower risk, noted): process-restart can strand a child between Phase 1 and Phase 2 (the 72h awaiting reaper + umbrella sweep recover it); zero-child umbrella orphan via `ON DELETE SET NULL` (very low probability).
+
+---
+
 ### §17.529 Fix — recovery NEXT_ACTIONS missing `aggregating` (decomposition follow-up) (2026-06-15)
 
 **Why.** The full `make test` baseline (3921 passed / **2 failed**) caught a gap §17.525 introduced: adding `'aggregating'` to the `JobStatus` Literal without a matching `app/modules/recovery.py::NEXT_ACTIONS` entry. `test_recovery.py::test_registry_covers_every_known_job_status` + `test_every_status_returns_at_least_one_action[aggregating]` assert the registry covers **every** `JOB_STATUSES` member — so the new status failed both. (The targeted per-phase runs didn't include `test_recovery`; the full suite did — the value of the baseline run.)

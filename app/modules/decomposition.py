@@ -48,6 +48,11 @@ _COMPONENT_TASKS: set[asyncio.Task] = set()
 # A build must split into at least this many parts to be worth decomposing;
 # below it, /decompose declines and the caller uses the normal single-job path.
 MIN_COMPONENTS = 2
+# Hard ceiling on components: each becomes its own full pipeline (Phase 1+2 +
+# DAG + execute), so an unbounded split would fan out N heavy concurrent runs
+# and pin N DB connections. The extractor is asked for 2-5; this enforces it
+# even if the model over-splits.
+MAX_COMPONENTS = 5
 
 DECOMPOSE_SYSTEM = (
     "You split a multi-part software/engineering build into independent "
@@ -148,7 +153,12 @@ async def extract_components(
                 q for q in (c.get("research_queries") or []) if isinstance(q, str)
             ][:4],
         })
-    return out
+    if len(out) > MAX_COMPONENTS:
+        logger.warning(
+            "extract_components: model emitted %d components; capping to %d",
+            len(out), MAX_COMPONENTS,
+        )
+    return out[:MAX_COMPONENTS]
 
 
 async def _rollup_umbrella(db: AsyncSession, umbrella_id: str) -> None:
@@ -195,10 +205,17 @@ async def run_component_pipeline(
     try:
         async with async_session() as db:
             async with get_ideation_slot_sem():
-                await analyze_and_confirm(
+                phase1 = await analyze_and_confirm(
                     idea_text, db,
                     domain=domain, model_overrides=model_overrides, job_id=child_id,
                 )
+            # §17.530 — STOP if Phase 1 failed. analyze_and_confirm RETURNS a
+            # {"status":"failed"} dict (it does not raise), so without this gate
+            # the child falls through to execute_all_nodes, whose guard
+            # (status NOT IN running/completed) RESURRECTS the failed job back to
+            # 'running' — it could then complete and corrupt the umbrella rollup.
+            if isinstance(phase1, dict) and phase1.get("status") == "failed":
+                return  # finally still rolls the umbrella up; child stays failed
             # Honor the decomposition tool's curated research queries: they
             # drive Phase 2's grounded search (read at ideation_workflow's
             # recommended_research_queries). Phase 1 left the row in
@@ -218,7 +235,14 @@ async def run_component_pipeline(
                     {"q": json.dumps(research_queries), "id": child_id},
                 )
                 await db.commit()
-            await research_and_compile(child_id, db, model_overrides=model_overrides)
+            phase2 = await research_and_compile(
+                child_id, db, model_overrides=model_overrides,
+            )
+            # §17.530 — same resurrection guard for Phase 2: a 'failed' or
+            # 'conflict' (lost the atomic claim, e.g. reaper-cancelled mid-flight)
+            # must NOT fall through to execute_all_nodes.
+            if isinstance(phase2, dict) and phase2.get("status") in ("failed", "conflict"):
+                return
 
         # execute_all_nodes auto-generates the DAG and self-manages sessions;
         # consume the SSE generator to completion to run the child autonomously.
@@ -232,9 +256,14 @@ async def run_component_pipeline(
         except Exception:
             logger.exception("component_pipeline_fail_mark_failed: child=%s", child_id)
     finally:
-        try:
+        # §17.530 — shield the rollup so a CancelledError landing in this finally
+        # can't skip the umbrella update mid-await. The Stage-7 reaper sweep is
+        # the backstop, but shielding keeps the common case correct.
+        async def _do_rollup() -> None:
             async with async_session() as rdb:
                 await _rollup_umbrella(rdb, umbrella_id)
+        try:
+            await asyncio.shield(_do_rollup())
         except Exception:
             logger.exception("component_pipeline_rollup_failed: umbrella=%s", umbrella_id)
 

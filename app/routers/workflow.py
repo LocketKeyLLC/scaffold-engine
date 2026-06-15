@@ -131,7 +131,10 @@ async def decompose_endpoint(body: IdeaInput, db=Depends(get_db)):
             body.idea, model_overrides=body.model_overrides,
         )
     if len(components) < MIN_COMPONENTS:
-        return {"decomposed": False, "components": components}
+        # §17.530 — distinguish "genuinely one focused build" from "the splitter
+        # LLM failed" so the caller/logs aren't blind to an extraction error.
+        reason = "single_focus" if components else "extraction_unavailable"
+        return {"decomposed": False, "components": components, "reason": reason}
     result = await create_and_run_decomposition(
         body.idea, db, components=components, model_overrides=body.model_overrides,
     )
