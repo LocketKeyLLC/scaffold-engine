@@ -29,10 +29,9 @@ from app.database import async_session
 from app import model_router
 from app.config import settings
 from app.modules.gt_extractor import (
-    DISTILL_PROMPT,
-    DISTILL_SYSTEM,
     TOPIC_KEYWORDS,
     TOPIC_MAP,
+    distill_entries,
     format_toon_rows,
     push_to_github as gt_push_to_github,
     search_searxng,
@@ -41,7 +40,7 @@ from app.modules.idea_refinement import create_ideation_job, refine_idea
 from app.modules.rag_pipeline import ingest_entries
 from app.utils.job_utils import fail_job as _fail_job
 from app.utils.llm_retry import generate_until_nonempty
-from app.utils.llm_parsing import parse_json_array, parse_json_object
+from app.utils.llm_parsing import parse_json_object
 from app.utils.topic_detection import detect_topic_id
 
 logger = logging.getLogger("scaffold.ideation")
@@ -372,47 +371,28 @@ async def research_and_compile(
                 job_id, q, len(results),
             )
 
-        # Step 2: LLM distillation (router/4b)
+        # Step 2: LLM distillation (router/4b) via the shared native-tool-call
+        # primitive. §17.x — the legacy generate + parse_json_array path here
+        # dropped 100% of results (phase2_distill_shape_drift: raw=10 kept=0
+        # dropped=10) because DISTILL_SYSTEM no longer carries an object-shape
+        # spec — that moved into RECORD_DISTILLED_ENTRIES_TOOL when gt_extractor
+        # switched to native tool-calls, but this path was never migrated. The
+        # 4b model returned an array of strings and the §17.339 dict-filter
+        # discarded all of them. distill_entries forces the object shape via the
+        # tool schema (and keeps the §17.464 fail-soft-on-empty contract).
         entries: list[dict] = []
         distill_cap = settings.ideation_max_distill_results
         if all_results:
-            results_text = "\n\n".join(
-                f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['content']}"
-                for r in all_results[:distill_cap]
-            )
-            topic_str = brief.get("title", "unknown")
             distill_route = (
                 {"model": model} if model
                 else {"role": settings.ideation_model_role, "overrides": model_overrides}
             )
-            # §17.464 — retry-on-empty (thinking-model guard). An empty distill
-            # draw silently dropped a whole research round's entries (fail-soft
-            # `or []`); re-draw with 8192-token headroom first.
-            resp = await generate_until_nonempty(
-                model_router.generate,
-                DISTILL_PROMPT.format(topic=topic_str, results=results_text),
-                distill_route,
-                system=DISTILL_SYSTEM,
-                temperature=0.2,
-                max_tokens=8192,
-                label="phase2_distill",
+            entries = await distill_entries(
+                all_results,
+                topic=brief.get("title", "unknown"),
+                route=distill_route,
+                max_results=distill_cap,
             )
-            if resp.success:
-                raw_entries = parse_json_array(resp.text) or []
-                entries = [e for e in raw_entries if isinstance(e, dict)]
-                dropped = len(raw_entries) - len(entries)
-                if dropped:
-                    # §17.339 — distill LLM occasionally emits a JSON array
-                    # of strings (or mixed types) instead of objects. Filter
-                    # to dicts so downstream format_toon_rows / ingest_entries
-                    # can rely on the documented shape. Drop rather than
-                    # coerce: a string entry has no title/source/tags, and
-                    # synthesizing those would pollute Milvus with provenance-
-                    # free rows.
-                    logger.warning(
-                        "phase2_distill_shape_drift: job_id=%s raw=%d kept=%d dropped=%d",
-                        job_id, len(raw_entries), len(entries), dropped,
-                    )
             logger.info(
                 "phase2_distill: job_id=%s entry_count=%d", job_id, len(entries),
             )

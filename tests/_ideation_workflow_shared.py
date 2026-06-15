@@ -71,6 +71,23 @@ def _load_module():
     mock_logger.bind.return_value = mock_logger
     stubs["structlog"].stdlib.get_logger.return_value = mock_logger
 
+    # §17.x — load the REAL app.utils.llm_retry (lightweight; imports only
+    # ``logging``) so the Phase-2 compile path exercises the actual
+    # generate_until_nonempty retry wrapper. Without this, the module-level
+    # ``from app.utils.llm_retry import generate_until_nonempty`` raised
+    # ModuleNotFoundError ('app.utils' stubbed as MagicMock → not a package),
+    # which the loader caught and turned into a silent skip of EVERY Phase-2
+    # test (skip-cascade; same class of bug as the §17.290 job_utils heal).
+    _retry_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "app", "utils", "llm_retry.py")
+    )
+    _retry_spec = importlib.util.spec_from_file_location(
+        "app.utils.llm_retry", _retry_path
+    )
+    _retry_mod = importlib.util.module_from_spec(_retry_spec)
+    _retry_spec.loader.exec_module(_retry_mod)
+    stubs["app.utils.llm_retry"] = _retry_mod
+
     with patch.dict(sys.modules, stubs):
         spec = importlib.util.spec_from_file_location("ideation_workflow", _MODULE_PATH)
         mod = importlib.util.module_from_spec(spec)

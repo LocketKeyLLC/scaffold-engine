@@ -468,6 +468,69 @@ def _append_toon_row(file_content: str, row: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Shared distill primitive
+# ---------------------------------------------------------------------------
+
+async def distill_entries(
+    results: list[dict],
+    *,
+    topic: str,
+    route: dict | None = None,
+    max_results: int = 15,
+) -> list[dict]:
+    """Distill raw SearXNG results into structured knowledge entries.
+
+    The single reliable distill path, shared by :func:`extract_ground_truths`
+    and the ideation Phase-2 grounded-research step. Uses the native
+    ``model_router.tool_call`` + ``RECORD_DISTILLED_ENTRIES_TOOL`` contract so
+    the model is forced to emit objects (``{title, content, tags?, source?}``).
+
+    §17.x — replaces the legacy ``generate`` + ``parse_json_array`` path that
+    silently dropped 100% of results: ``DISTILL_SYSTEM`` no longer carries an
+    object-shape spec (it moved into the tool schema), so the bare-generate
+    path let the 4b model return an array of *strings* which the dict-filter
+    discarded (``phase2_distill_shape_drift: raw=10 kept=0 dropped=10``).
+
+    Returns ``[]`` on any soft failure (no results, LLM error, parse failure,
+    empty draw) — research grounding is best-effort and must never raise into
+    the ideation/decompose flow.
+    """
+    if not results:
+        return []
+    results_text = "\n\n".join(
+        f"Title: {r.get('title', '')}\nURL: {r.get('url', '')}\n"
+        f"Snippet: {r.get('content', '')}"
+        for r in results[:max_results]
+    )
+    route = route or {"role": "model_router"}
+    resp = await model_router.tool_call(
+        messages=[
+            {"role": "system", "content": DISTILL_SYSTEM},
+            {"role": "user",
+             "content": DISTILL_PROMPT.format(topic=topic, results=results_text)},
+        ],
+        tools=[RECORD_DISTILLED_ENTRIES_TOOL],
+        temperature=0.2,
+        max_tokens=4096,
+        **route,
+    )
+    if not resp.success:
+        logger.warning("distill_entries: llm_failed topic=%r err=%s", topic, resp.error)
+        return []
+    args = read_tool_args(resp)
+    if args is None or not isinstance(args.get("entries"), list):
+        logger.warning(
+            "distill_entries: parse_failed topic=%r raw=%r",
+            topic, (resp.text or "")[:200],
+        )
+        return []
+    entries = [e for e in args["entries"] if isinstance(e, dict)]
+    if not entries:
+        return []
+    return _normalize_legacy_keys(entries)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 

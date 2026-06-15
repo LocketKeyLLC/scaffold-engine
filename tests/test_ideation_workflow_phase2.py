@@ -27,11 +27,12 @@ async def test_research_happy_path():
         "configuration": {"domain": "eng", "estimated_nodes": 3},
     }
     _mod.model_router = MagicMock()
-    _mod.model_router.generate = AsyncMock(side_effect=[
-        _llm_response(json.dumps(distilled)),
-        _llm_response(json.dumps(workflow)),
-    ])
-    _mod.parse_json_array = MagicMock(return_value=distilled)
+    # §17.x — distill now flows through the shared distill_entries tool-call
+    # primitive; compile remains the only model_router.generate call.
+    _mod.model_router.generate = AsyncMock(
+        return_value=_llm_response(json.dumps(workflow))
+    )
+    _mod.distill_entries = AsyncMock(return_value=distilled)
     _mod.parse_json_object = MagicMock(return_value=workflow)
     _mod.ingest_entries = AsyncMock(return_value={"new": 1, "versioned": 0})
     _mod.format_toon_rows = MagicMock(return_value=["row1"])
@@ -89,12 +90,11 @@ async def test_research_uses_model_router_not_general():
         {"title": "T", "url": "https://e.com/x", "content": "snip"},
     ])
     _mod.model_router = MagicMock()
-    _mod.model_router.generate = AsyncMock(side_effect=[
-        _llm_response(json.dumps([{"content": "fact"}])),
-        _llm_response(json.dumps({"compiled_prompt": "x", "workflow_steps": [],
-                                  "configuration": {"domain": "eng"}})),
-    ])
-    _mod.parse_json_array = MagicMock(return_value=[{"content": "fact"}])
+    _mod.model_router.generate = AsyncMock(return_value=_llm_response(
+        json.dumps({"compiled_prompt": "x", "workflow_steps": [],
+                    "configuration": {"domain": "eng"}})
+    ))
+    _mod.distill_entries = AsyncMock(return_value=[{"content": "fact"}])
     _mod.parse_json_object = MagicMock(return_value={
         "compiled_prompt": "x", "workflow_steps": [],
         "configuration": {"domain": "eng"},
@@ -106,18 +106,21 @@ async def test_research_uses_model_router_not_general():
 
     await _mod.research_and_compile(job_id="job-mr", db=db)
 
-    # Sprint E.7: model_router.generate now receives role= directly. Phase 2
-    # makes 2 LLM calls (distill + compile) — both must use the configured
-    # ideation role. See test_ideation_workflow_phase1 for #6.1 history.
+    # Sprint E.7 / §17.x: both LLM calls must use the configured ideation role.
+    # Distill now routes via distill_entries(route=...) (native tool-call);
+    # compile still goes through model_router.generate(role=...).
     from app.config import settings
-    called_roles = [
+    distill_route = _mod.distill_entries.call_args.kwargs.get("route", {})
+    assert distill_route.get("role") == settings.ideation_model_role, (
+        f"Distill must route through '{settings.ideation_model_role}'. "
+        f"Got route: {distill_route}"
+    )
+    compile_roles = [
         c.kwargs.get("role")
         for c in _mod.model_router.generate.call_args_list
     ]
-    configured_calls = called_roles.count(settings.ideation_model_role)
-    assert configured_calls >= 2, (
-        f"Expected distill + compile to both use '{settings.ideation_model_role}' "
-        f"(>=2 calls). Got roles: {called_roles}"
+    assert settings.ideation_model_role in compile_roles, (
+        f"Compile must use '{settings.ideation_model_role}'. Got: {compile_roles}"
     )
 
 
@@ -137,12 +140,11 @@ async def test_research_user_feedback_folded_into_brief():
         {"title": "T", "url": "https://e.com/y", "content": "snip"},
     ])
     _mod.model_router = MagicMock()
-    _mod.model_router.generate = AsyncMock(side_effect=[
-        _llm_response(json.dumps([{"content": "f"}])),
-        _llm_response(json.dumps({"compiled_prompt": "x", "workflow_steps": [],
-                                  "configuration": {"domain": "eng"}})),
-    ])
-    _mod.parse_json_array = MagicMock(return_value=[{"content": "f"}])
+    _mod.model_router.generate = AsyncMock(return_value=_llm_response(
+        json.dumps({"compiled_prompt": "x", "workflow_steps": [],
+                    "configuration": {"domain": "eng"}})
+    ))
+    _mod.distill_entries = AsyncMock(return_value=[{"content": "f"}])
     _mod.parse_json_object = MagicMock(return_value={
         "compiled_prompt": "x", "workflow_steps": [],
         "configuration": {"domain": "eng"},
@@ -153,8 +155,8 @@ async def test_research_user_feedback_folded_into_brief():
     feedback = "Focus on Python, not Java."
     await _mod.research_and_compile(job_id="job-fb", db=db, user_feedback=feedback)
 
-    # The second LLM call (compile) should have the feedback in its prompt
-    compile_call = _mod.model_router.generate.call_args_list[1]
+    # §17.x — distill is now distill_entries; compile is the only generate call.
+    compile_call = _mod.model_router.generate.call_args_list[0]
     compile_prompt = compile_call.args[0] if compile_call.args else ""
     assert feedback in compile_prompt
 

@@ -21983,6 +21983,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.522 Fix — Phase-2 research distillation silently dropped 100% of results (shape-drift regression) (2026-06-15)
+
+**Symptom (user report → DB/log forensics).** A user reported the engine "isn't operating as it should": a task they expected to decompose into sub-jobs instead produced two duplicate jobs that did nothing. Forensics on the two jobs (`ba2706cc`, `6c1265dc` — both the same BIOS-OS idea, submitted 4h apart; the claimed third job `4005b40` never existed; there is no job-spawning feature) showed the real defect in the logs: **`phase2_distill_shape_drift: raw=10 kept=0 dropped=10`** on every run → `facts_extracted=0, milvus_ingested=0`. Every DAG was being built with **zero grounded research**.
+
+**Root cause (regression).** When `gt_extractor` migrated distillation to native tool-calls (Sprint X.12), the strict "JSON array of objects" output spec was removed from `DISTILL_SYSTEM` and moved into `RECORD_DISTILLED_ENTRIES_TOOL`'s schema (see the comment at `gt_extractor.py:81`). But the ideation Phase-2 path (`ideation_workflow.py::research_and_compile`) was **never migrated** — it still called `model_router.generate(... DISTILL_SYSTEM ...)` + `parse_json_array`. With no object-shape spec in the system prompt, the 4b model returned a JSON array of **strings**; the §17.339 dict-filter then correctly discarded all of them. The §17.464 retry-on-empty guard didn't help — the draw wasn't *empty*, it was the wrong *shape*.
+
+**Fix.** Added a single reliable distill primitive `gt_extractor.distill_entries(results, *, topic, route, max_results)` that uses the proven `model_router.tool_call` + `RECORD_DISTILLED_ENTRIES_TOOL` + `read_tool_args` contract (the same one `extract_ground_truths` already uses), forcing the object shape and failing soft to `[]`. Phase-2 distill now calls it; the route still carries `{role: ideation_model_role, overrides}` so model selection is unchanged. `extract_ground_truths` is deliberately left intact (it returns granular `llm_failed`/`parse_failed`/`empty` statuses the `/gt` UI depends on). Removed the now-unused `DISTILL_PROMPT`/`DISTILL_SYSTEM`/`parse_json_array` imports from `ideation_workflow.py`.
+
+**Verification.** Unit: `test_ideation_workflow_phase2.py` updated to mock `distill_entries` (distill no longer goes through `model_router.generate`); the #6.1 role test now asserts the distill *route* carries the ideation role and compile still uses it. **Live smoke** (mocks hid the original 100%-fail, so this was mandatory): re-ran the BIOS-OS idea through `/ideate`+`/ideate/confirm` on the live orchestrator → `phase2_distill: entry_count=10`, `phase2_ingest stats={'new':10,…}`, `phase2_complete: facts_extracted=10 milvus_ingested=10`, **no shape_drift warning** (was 0/0/dropped=10).
+
+**Also — test-harness heal (skip-cascade).** Surfaced while verifying: the `_ideation_workflow_shared.py` importlib loader never stubbed `app.utils.llm_retry`, so `ideation_workflow.py` had been failing to load and **silently skipping every Phase-2 test** since that import was added (same class as the §17.290 `job_utils` heal). Fixed by loading the *real* (logging-only) `llm_retry` module in the loader so the compile path exercises the actual `generate_until_nonempty` wrapper. 12 previously-skipped Phase-2 tests now run and pass (39 green across the ideation/gt/llm_retry set).
+
+---
+
 ### §17.521 Fix — `/assist <title>` (non-UUID job_id) leaked a raw HTTP 500 DataError (2026-06-14)
 
 **Symptom (user report).** `/assist DeFruscio HomeLab` (using the job *title*, not its UUID) returned `❌ Could not start assist session: HTTP 500 {"error":"DBAPIError","message":"…asyncpg.exceptions.DataError… invalid input for query argument $1: 'DeFruscio' (invalid UUID …)"}`. The pipeline took the first token `DeFruscio` as the job_id and POSTed it; `start_assist_session` passed it straight into `SELECT … WHERE id = :id`, where asyncpg's uuid cast raised an uncaught `DataError` → a raw 500 leaking internal DB error details.
