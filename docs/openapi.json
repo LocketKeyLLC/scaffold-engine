@@ -3113,6 +3113,17 @@
             ],
             "title": "Completed At"
           },
+          "component_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Component Index"
+          },
           "created_at": {
             "title": "Created At",
             "type": "string"
@@ -3125,6 +3136,17 @@
             "default": 0,
             "title": "Node Count",
             "type": "integer"
+          },
+          "parent_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Job Id"
           },
           "status": {
             "title": "Status",

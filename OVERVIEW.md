@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.525 Feature — task decomposition, part 1: schema (umbrella + component jobs) (2026-06-15)
+
+**Why.** Groundwork for triage-time decomposition (one task → an umbrella job grouping N component child jobs, each running its own DAG). Additive schema only; no behavior change yet, suite stays green.
+
+**Change.** Migration `053_job_decomposition.sql` (single idempotent `DO` block, cf. 043): adds `jobs.parent_job_id UUID` (self-FK, **`ON DELETE SET NULL`** so deleting an umbrella never cascades into live children) + `jobs.component_index INT`; widens `job_type` CHECK to add `'umbrella'`/`'component'`; widens status CHECK to add `'aggregating'` (umbrella-alive-while-children-run); partial index on `parent_job_id`. `app/schemas.py`: `'aggregating'` added to the `JobStatus` Literal (so `JOB_STATUSES`, the /jobs filter, and any status-aware path pick it up automatically); `JobSummary` gains `parent_job_id`/`component_index` (both default None). Vendored to SDK (`make sync-schemas`) + `docs/openapi.json` regenerated (`make openapi-snapshot`).
+
+**Verification.** Migration applied live (schema_migrations has 053; both columns present; job_type CHECK shows the 4-value set). `make ci-tier-0` green (SDK-schema + SSE + next-actions parity all in sync). Schema/jobs/openapi/SDK-parity tests green (16). *Note:* a mixed run that also collected `test_status_logs.py` showed its documented §17.519 `app.database`-stub cross-pollution (ImportError in unrelated files) — not from this change; the same files pass clean without it.
+
+---
+
 ### §17.524 Feature — `quick_research` grounded-research primitive (batched-at-/go) (2026-06-15)
 
 **Why.** The user chose grounded standards research wired into the real SearXNG path, run *batched at /go* (one pass per chosen component) rather than the 20-60 min autonomous `/research` SSE loop. Need a fast, synchronous "search → distill grounded facts" call the decomposition fan-out can invoke per component.

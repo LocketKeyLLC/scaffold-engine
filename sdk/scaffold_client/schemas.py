@@ -25,6 +25,8 @@ JobStatus = Literal[
     "pending", "refining", "awaiting_confirmation", "researching", "planning", "executing",
     "running", "completed", "failed", "cancelled", "blocked",
     "assisted_executing", "assisted_running", "assisted_paused",
+    # §17.525 — umbrella job alive while its component children still run.
+    "aggregating",
 ]
 
 # Runtime-iterable mirror of JobStatus, derived directly from the Literal
@@ -776,6 +778,11 @@ class JobSummary(BaseModel):
     # PATCH /jobs/{id} response (also JobSummary) and any older client stay
     # compatible.
     completed_at: str | None = None
+    # §17.525 — task decomposition. parent_job_id links a component child to its
+    # umbrella; component_index is its ordinal within that umbrella. Both None
+    # for ordinary (non-decomposed) jobs and umbrellas themselves.
+    parent_job_id: str | None = None
+    component_index: int | None = None
 
 
 class JobListResponse(BaseModel):
