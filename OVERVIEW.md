@@ -21983,6 +21983,19 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.526 Feature — task decomposition, part 2: extraction, `/decompose`, autonomous child runs (2026-06-15)
+
+**Why.** Deliver the capability the user asked for: one multi-part idea becomes several linked, independently-built jobs ("ba2706cc should have spawned its parts"). Builds on the §17.525 schema and the §17.522 grounded-research fix (each child's Phase 2 now actually grounds).
+
+**Change.**
+- **`app/modules/decomposition.py` (new).** `DECOMPOSE_COMPONENTS_TOOL` + `extract_components(idea)` — native tool-call (reuses the §17.522 reliable contract) splitting an idea into normalized `{label, description, domain, research_queries}` components (domain validated against `LLM_SELECTABLE_DOMAINS`, queries capped at 4, bad entries dropped, fails soft to `[]`). `create_and_run_decomposition` inserts the umbrella (`job_type='umbrella'`, `status='aggregating'`, no DAG, never executes) + one child (`job_type='component'`, `parent_job_id`, `component_index`) per part, then spawns `run_component_pipeline` per child. Each child drives itself on its own session: Phase 1 → inject the component's curated research queries → Phase 2 (grounded search+distill+ingest) → `execute_all_nodes` (auto-DAG + run). Any failure marks the child `failed` (never strands it); the `finally` always `_rollup_umbrella`s — umbrella → `completed` once all children terminal with ≥1 completed, else `failed`. Strong task refs (`_COMPONENT_TASKS`) survive GC.
+- **`POST /decompose` (`app/routers/workflow.py`).** Reuses `IdeaInput`. Runs extraction under the ideation slot-sem; `<MIN_COMPONENTS` (2) returns `{"decomposed": false, "components": [...]}` (caller falls back to single-job `/ideate`); otherwise creates+launches and returns the umbrella id + child roll-up immediately.
+- **Pipeline `/go` branch (`pipelines/scaffold_router.py`).** New default-OFF valve `decompose_on_go`; when on, `_auto_chain` first tries `/decompose` (`_try_decompose`), reporting the launched umbrella + components, and falls back transparently to the normal single-job flow on a single-focus idea or any error. Default off because fanning out N full pipelines is heavy on CPU-only inference.
+
+**Verification.** +7 `test_decomposition.py` (extraction normalize/filter/cap; rollup completed/failed/noop-while-running; create-inserts-umbrella+children-and-spawns). **Live `/decompose` smoke:** a 2-part finance-toolkit idea → 2 sensible components ("CLI Expense Tracker with SQLite", "PDF Monthly Report Generator"), umbrella `aggregating` + 2 `component` children correctly linked (`parent_job_id`, `component_index` 0/1), both spawned and running Phase 1. Full child→completion→umbrella-rollup is unit-covered (CPU child runs take 10-30min each); a reaper safety-sweep for reaped-child umbrellas lands in part 3.
+
+---
+
 ### §17.525 Feature — task decomposition, part 1: schema (umbrella + component jobs) (2026-06-15)
 
 **Why.** Groundwork for triage-time decomposition (one task → an umbrella job grouping N component child jobs, each running its own DAG). Additive schema only; no behavior change yet, suite stays green.

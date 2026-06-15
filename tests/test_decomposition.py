@@ -1,0 +1,120 @@
+"""Tests for app.modules.decomposition — triage-time task decomposition.
+
+Covers the pure logic: component extraction/normalization, umbrella roll-up,
+and umbrella+children creation with per-child spawn. The full child pipeline
+(Phase 1 → Phase 2 → DAG → execute) is exercised by a live smoke, not here.
+"""
+import json
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from app.modules import decomposition as dc
+
+
+def _resp(args: dict, success: bool = True):
+    r = MagicMock()
+    r.success = success
+    r.text = json.dumps(args)
+    r.error = None if success else "boom"
+    return r
+
+
+@pytest.mark.smoke
+class TestExtractComponents:
+    async def test_normalizes_filters_and_caps(self, monkeypatch):
+        payload = {"components": [
+            {"label": "Auth service", "description": "Build auth",
+             "domain": "eng", "research_queries": ["a", "b", "c", "d", "e"]},
+            {"label": "", "description": "no label"},          # dropped — no label
+            {"label": "Billing", "description": ""},            # dropped — no description
+            {"label": "NLP parser", "description": "parse text", "domain": "bogus"},
+            "not-a-dict",                                        # dropped — not a dict
+        ]}
+        monkeypatch.setattr(dc.model_router, "tool_call",
+                            AsyncMock(return_value=_resp(payload)))
+        monkeypatch.setattr(dc, "read_tool_args", lambda r: payload)
+
+        out = await dc.extract_components("idea")
+        assert [c["label"] for c in out] == ["Auth service", "NLP parser"]
+        assert out[0]["research_queries"] == ["a", "b", "c", "d"]   # capped at 4
+        assert out[1]["domain"] == "eng"                            # bogus -> default
+
+    async def test_llm_failure_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(dc.model_router, "tool_call",
+                            AsyncMock(return_value=_resp({}, success=False)))
+        assert await dc.extract_components("idea") == []
+
+    async def test_parse_failure_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(dc.model_router, "tool_call",
+                            AsyncMock(return_value=_resp({})))
+        monkeypatch.setattr(dc, "read_tool_args", lambda r: None)
+        assert await dc.extract_components("idea") == []
+
+
+@pytest.mark.smoke
+class TestRollupUmbrella:
+    def _db_returning(self, row):
+        mappings = MagicMock()
+        mappings.first.return_value = row
+        result = MagicMock()
+        result.mappings.return_value = mappings
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=result)
+        return db
+
+    async def test_completed_when_all_terminal_and_one_done(self):
+        db = self._db_returning({"total": 3, "terminal": 3, "done": 1})
+        await dc._rollup_umbrella(db, "umb")
+        update = db.execute.call_args_list[-1]
+        assert "UPDATE jobs SET status" in str(update.args[0])
+        assert update.args[1]["s"] == "completed"
+        db.commit.assert_awaited()
+
+    async def test_failed_when_all_terminal_and_none_done(self):
+        db = self._db_returning({"total": 2, "terminal": 2, "done": 0})
+        await dc._rollup_umbrella(db, "umb")
+        assert db.execute.call_args_list[-1].args[1]["s"] == "failed"
+
+    async def test_noop_while_children_still_running(self):
+        db = self._db_returning({"total": 3, "terminal": 2, "done": 1})
+        await dc._rollup_umbrella(db, "umb")
+        assert db.execute.call_count == 1          # SELECT only; no UPDATE
+        db.commit.assert_not_awaited()
+
+
+@pytest.mark.smoke
+class TestCreateAndRun:
+    async def test_inserts_umbrella_children_and_spawns(self, monkeypatch):
+        def result_with(val):
+            r = MagicMock()
+            r.scalar_one.return_value = val
+            return r
+        # umbrella insert, child0 insert, child1 insert, metadata update
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[
+            result_with("umb"), result_with("c0"), result_with("c1"), MagicMock(),
+        ])
+        spawned = []
+        monkeypatch.setattr(dc, "_spawn_component",
+                            lambda *a, **k: spawned.append((a, k)))
+
+        comps = [
+            {"label": "A", "description": "desc-a", "domain": "eng",
+             "research_queries": ["q1"]},
+            {"label": "B", "description": "desc-b", "domain": "rag",
+             "research_queries": []},
+        ]
+        out = await dc.create_and_run_decomposition("big idea", db, components=comps)
+
+        assert out["umbrella_job_id"] == "umb"
+        assert out["status"] == "aggregating"
+        assert [c["job_id"] for c in out["children"]] == ["c0", "c1"]
+        assert [c["component_index"] for c in out["children"]] == [0, 1]
+        assert all(c["status"] == "refining" for c in out["children"])
+        assert len(spawned) == 2
+        # each spawn carries the component description + its umbrella id
+        assert spawned[0][0] == ("c0", "desc-a")
+        assert spawned[0][1]["umbrella_id"] == "umb"
+        assert spawned[0][1]["research_queries"] == ["q1"]
+        db.commit.assert_awaited()

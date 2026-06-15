@@ -512,6 +512,13 @@ class Pipeline:
         # Triage
         triage_model: str = "qwen3:4b"
         triage_history_window: int = 8  # last N turns sent to triage; first user msg always pinned
+        # §17.526 — when true, /go first tries POST /decompose: a multi-part
+        # build fans out into an umbrella + one autonomously-run component job
+        # per part. Default OFF — fanning out N full pipelines is heavy on
+        # CPU-only inference, so it stays opt-in. A single-focus idea (or any
+        # decompose failure) transparently falls back to the normal single-job
+        # /ideate auto-chain.
+        decompose_on_go: bool = False
         log_pipe_inputs: bool = False  # diagnostic: log body keys + message shape on every pipe() call
         # Sprint X.7 — diagnostic: one structured line per pipe() call with the
         # routing decision (which command branch / triage / unrecognized), the
@@ -2056,7 +2063,42 @@ class Pipeline:
     # /go auto-chain
     # ------------------------------------------------------------------
 
+    def _try_decompose(self, message: str) -> Generator[str, None, bool]:
+        """§17.526 — POST /decompose; if the idea splits into ≥2 components, launch
+        an umbrella + one autonomous component job each and report. Returns True
+        when handled, False to fall back to the single-job /ideate path."""
+        yield "Checking whether this splits into independent components"
+        ok, res = yield from self._post_with_keepalive(
+            f"{self.valves.orchestrator_url}/decompose",
+            {"idea": message, "model_overrides": self._model_overrides()},
+            self.valves.stream_timeout,
+            progress_label="Decomposing into components",
+        )
+        if not ok or getattr(res, "status_code", 500) >= 400:
+            return False  # error → fall back to normal flow
+        try:
+            data = res.json()
+        except ValueError:
+            return False
+        if not data.get("decomposed"):
+            return False  # single-focus build → normal single-job flow
+        umbrella = data.get("umbrella_job_id", "")
+        children = data.get("children", []) or []
+        yield f"\n\n**Launched {len(children)} components** under umbrella `{umbrella}`:\n\n"
+        for c in children:
+            yield f"- `{c.get('job_id','')}` — {c.get('label','')}\n"
+        yield (
+            f"\nEach component runs autonomously through its own pipeline "
+            f"(research → DAG → execute). Track all of them with "
+            f"`/results {umbrella}`.\n"
+        )
+        return True
+
     def _auto_chain(self, message: str) -> Generator[str, None, None]:
+        if self.valves.decompose_on_go:
+            handled = yield from self._try_decompose(message)
+            if handled:
+                return
         yield "Let me think about this"
         ok, res = yield from self._post_with_keepalive(
             f"{self.valves.orchestrator_url}/ideate",

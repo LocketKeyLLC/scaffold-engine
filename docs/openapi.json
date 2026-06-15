@@ -4331,6 +4331,48 @@
         "summary": "Get Dag"
       }
     },
+    "/decompose": {
+      "post": {
+        "description": "§17.526 — split a multi-part idea into an umbrella + component child jobs,\neach run autonomously through the normal pipeline (Phase 1 → grounded Phase 2\n→ DAG → execute). Returns the umbrella id + child roll-up immediately.\n\nIf the idea has fewer than ``MIN_COMPONENTS`` separable parts, returns\n``{\"decomposed\": false, \"components\": [...]}`` and creates nothing — the\ncaller (the /go auto-chain) then falls back to the single-job ``POST /ideate``.\nThe model-validation gate runs before any LLM work or row creation.",
+        "operationId": "decompose_endpoint_decompose_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdeaInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Decompose Endpoint"
+      }
+    },
     "/design": {
       "post": {
         "description": "Create a design_circuit job from a natural-language brief.\n\nThree response shapes, distinguished by which fields are populated:\n\n  * Success — ``job_id`` + ``spec_id`` set; ``ambiguities=[]``\n    and ``errors=[]``. Status code 200.\n  * Ambiguity — ``ambiguities`` non-empty; ``job_id`` is null and\n    no DB rows are persisted. Operator clarifies and re-posts.\n    Status code 200.\n  * Extractor error — ``errors`` non-empty; no rows persisted.\n    Status code 200 (errors are data, not exceptions — same\n    posture as the simulator wrappers).",

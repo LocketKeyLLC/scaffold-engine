@@ -28,6 +28,11 @@ from starlette.responses import StreamingResponse
 
 from app.database import get_db
 from app.modules.dag_generator import generate_dag as _generate_dag
+from app.modules.decomposition import (
+    MIN_COMPONENTS,
+    create_and_run_decomposition,
+    extract_components,
+)
 from app.modules.execution_agent import (
     execute_next_node,
     skip_node,
@@ -108,6 +113,30 @@ async def ideate_start_endpoint(body: IdeaInput, db=Depends(get_db)):
         model_overrides=body.model_overrides,
     )
     return {"job_id": job_id, "status": "refining"}
+
+
+@router.post("/decompose")
+async def decompose_endpoint(body: IdeaInput, db=Depends(get_db)):
+    """§17.526 — split a multi-part idea into an umbrella + component child jobs,
+    each run autonomously through the normal pipeline (Phase 1 → grounded Phase 2
+    → DAG → execute). Returns the umbrella id + child roll-up immediately.
+
+    If the idea has fewer than ``MIN_COMPONENTS`` separable parts, returns
+    ``{"decomposed": false, "components": [...]}`` and creates nothing — the
+    caller (the /go auto-chain) then falls back to the single-job ``POST /ideate``.
+    The model-validation gate runs before any LLM work or row creation."""
+    await _require_valid_models(body.model_overrides)
+    async with get_ideation_slot_sem():
+        components = await extract_components(
+            body.idea, model_overrides=body.model_overrides,
+        )
+    if len(components) < MIN_COMPONENTS:
+        return {"decomposed": False, "components": components}
+    result = await create_and_run_decomposition(
+        body.idea, db, components=components, model_overrides=body.model_overrides,
+    )
+    result["decomposed"] = True
+    return result
 
 
 @router.post("/ideate/confirm")
