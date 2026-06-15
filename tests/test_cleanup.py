@@ -27,15 +27,15 @@ def _db_with_counts(*counts, orphan_rows=None):
     """Build an AsyncMock db whose sequential execute() calls return results
     with the given len(fetchall()) values.
 
-    Expects exactly 8 counts: (orphan, running, long_phase, planning,
+    Expects exactly 9 counts: (orphan, running, long_phase, planning,
     awaiting_confirmation, research_sessions, paused_research,
-    assist_abandoned). If the orphan count is nonzero, callers must pass
-    orphan_rows= so Stage 0 can read row.job_id / row.node_key. A
-    refresh-parent-jobs call is then injected between Stage 0 and the
-    running-job reaper.
+    assist_abandoned, umbrellas_finalized). If the orphan count is nonzero,
+    callers must pass orphan_rows= so Stage 0 can read row.job_id /
+    row.node_key. A refresh-parent-jobs call is then injected between Stage 0
+    and the running-job reaper.
     """
-    assert len(counts) == 8, (
-        f"_db_with_counts expects 8 counts (orphan + 7 reapers), got {len(counts)}"
+    assert len(counts) == 9, (
+        f"_db_with_counts expects 9 counts (orphan + 8 reapers), got {len(counts)}"
     )
     db = AsyncMock()
     results = []
@@ -67,9 +67,9 @@ def _db_with_counts(*counts, orphan_rows=None):
     return db
 
 
-async def test_reap_stale_jobs_returns_all_eight_counts():
-    """The function always returns a dict with 8 category keys (7 + orphan)."""
-    db = _db_with_counts(0, 2, 4, 1, 5, 3, 0, 6)
+async def test_reap_stale_jobs_returns_all_nine_counts():
+    """The function always returns a dict with 9 category keys (8 + orphan)."""
+    db = _db_with_counts(0, 2, 4, 1, 5, 3, 0, 6, 7)
     result = await cleanup.reap_stale_jobs(db)
     assert set(result.keys()) == {
         "orphan_nodes_reset",
@@ -80,6 +80,7 @@ async def test_reap_stale_jobs_returns_all_eight_counts():
         "research_to_failed",
         "paused_to_cancelled",
         "assist_abandoned",
+        "umbrellas_finalized",
     }
     assert result["orphan_nodes_reset"] == 0
     assert result["running_to_failed"] == 2
@@ -89,45 +90,46 @@ async def test_reap_stale_jobs_returns_all_eight_counts():
     assert result["research_to_failed"] == 3
     assert result["paused_to_cancelled"] == 0
     assert result["assist_abandoned"] == 6
+    assert result["umbrellas_finalized"] == 7
     db.commit.assert_awaited()
 
 
 async def test_reap_stale_jobs_orphan_reset_count_propagates():
     """When Stage 0 finds orphans, count surfaces in the return dict."""
     db = _db_with_counts(
-        2, 0, 0, 0, 0, 0, 0, 0,
+        2, 0, 0, 0, 0, 0, 0, 0, 0,
         orphan_rows=[_orphan_row(node_key="T1"), _orphan_row(node_key="T2")],
     )
     result = await cleanup.reap_stale_jobs(db)
     assert result["orphan_nodes_reset"] == 2
 
 
-async def test_reap_stale_jobs_runs_eight_sql_statements():
-    """Stage 0 orphan reaper + 7 category statements = 8 statements when no orphans."""
-    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0)
-    await cleanup.reap_stale_jobs(db)
-    assert db.execute.await_count == 8
-
-
-async def test_reap_stale_jobs_runs_nine_sql_statements_when_orphans_found():
-    """With orphans, the refresh-parent-jobs UPDATE fires too: 9 statements total."""
-    db = _db_with_counts(
-        1, 0, 0, 0, 0, 0, 0, 0,
-        orphan_rows=[_orphan_row()],
-    )
+async def test_reap_stale_jobs_runs_nine_sql_statements():
+    """Stage 0 orphan reaper + 8 category statements = 9 statements when no orphans."""
+    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 0)
     await cleanup.reap_stale_jobs(db)
     assert db.execute.await_count == 9
 
 
+async def test_reap_stale_jobs_runs_ten_sql_statements_when_orphans_found():
+    """With orphans, the refresh-parent-jobs UPDATE fires too: 10 statements total."""
+    db = _db_with_counts(
+        1, 0, 0, 0, 0, 0, 0, 0, 0,
+        orphan_rows=[_orphan_row()],
+    )
+    await cleanup.reap_stale_jobs(db)
+    assert db.execute.await_count == 10
+
+
 async def test_reap_stale_jobs_no_reaping_returns_zero_counts():
-    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0)
+    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 0)
     result = await cleanup.reap_stale_jobs(db)
     assert all(v == 0 for v in result.values())
 
 
 async def test_reap_stale_jobs_passes_threshold_params_from_settings():
     """Thresholds in bind params must come from settings, not module constants."""
-    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0)
+    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 0)
     await cleanup.reap_stale_jobs(db)
     calls = db.execute.await_args_list
     # Stage 0 — orphan-node threshold
@@ -232,3 +234,26 @@ def test_long_phase_reaper_excludes_planning():
     # The dedicated planning reaper is the sole handler and ends 'cancelled'.
     assert "status = 'planning'" in cleanup._REAP_PLANNING_SQL
     assert "'cancelled'" in cleanup._REAP_PLANNING_SQL
+
+
+# ---------------------------------------------------------------------------
+# §17.527 — umbrella-finalize sweep (task decomposition)
+# ---------------------------------------------------------------------------
+
+def test_umbrella_sweep_targets_only_aggregating_umbrellas_all_children_terminal():
+    sql = cleanup._REAP_STALE_UMBRELLA_SQL
+    assert "job_type = 'umbrella'" in sql
+    assert "status = 'aggregating'" in sql
+    # at least one child AND no non-terminal child
+    assert "EXISTS (SELECT 1 FROM jobs c WHERE c.parent_job_id = u.id)" in sql
+    assert "NOT IN ('completed', 'failed', 'cancelled', 'blocked')" in sql
+    # completed iff >=1 child completed, else failed
+    assert "THEN 'completed' ELSE 'failed' END" in sql
+
+
+async def test_umbrella_sweep_runs_last_and_count_propagates():
+    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 4)
+    result = await cleanup.reap_stale_jobs(db)
+    assert result["umbrellas_finalized"] == 4
+    # the umbrella sweep is the final statement (no orphans => 9 calls)
+    assert "umbrella" in str(db.execute.await_args_list[-1].args[0]).lower()

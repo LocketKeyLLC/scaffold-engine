@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.527 Feature — task decomposition, part 3: umbrella-finalize reaper sweep + full-pipeline validation (2026-06-15)
+
+**Why.** An umbrella sits `aggregating` while children run; normally each child rolls it up on finish (`decomposition._rollup_umbrella` in its `finally`). The gap: if a child is terminated by the stale-job reaper (which doesn't call the rollup), the umbrella could stay `aggregating` forever. Also a backstop for any missed rollup write.
+
+**Change (`app/modules/cleanup.py`).** New `_REAP_STALE_UMBRELLA_SQL` + Stage 7 in `reap_stale_jobs` (returns `umbrellas_finalized`): finalizes any `aggregating` umbrella that has ≥1 child and **no** non-terminal child → `completed` if ≥1 child completed, else `failed`. Runs **last**, after the child reapers in the same transaction, so children reaped this cycle already read as terminal. `aggregating` remains absent from every other reaper whitelist (umbrellas are otherwise inert by design).
+
+**Verification.** `test_cleanup.py` updated for the 9-stage shape (`_db_with_counts` now 9 counts; statement-count tests 9/10; +2 umbrella-sweep tests: SQL-invariant guard + runs-last/count-propagates). 12 green. **Live:** `POST /jobs/cleanup` returns the new `umbrellas_finalized` key and the sweep executes cleanly against Postgres (0 finalized — the in-flight umbrella correctly not touched). **Full-pipeline live validation of the whole feature:** a `/decompose` 2-part idea ran both component children end-to-end through Phase 1 → curated-query injection → **grounded Phase 2** (one child ingested 10 facts; the other distilled 0 and fail-soft-continued — no crash) → **DAG generated** (7 and 5 nodes) → **executing their own DAGs** autonomously. Confirms decomposition produces real, independently-built jobs.
+
+---
+
 ### §17.526 Feature — task decomposition, part 2: extraction, `/decompose`, autonomous child runs (2026-06-15)
 
 **Why.** Deliver the capability the user asked for: one multi-part idea becomes several linked, independently-built jobs ("ba2706cc should have spawned its parts"). Builds on the §17.525 schema and the §17.522 grounded-research fix (each child's Phase 2 now actually grounds).
