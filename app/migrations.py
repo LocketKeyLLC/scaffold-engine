@@ -31,9 +31,21 @@ _MIGRATIONS_DIR = Path("/code/db/migrations")
 # works; this one is unique to the migration runner.
 _ADVISORY_LOCK_KEY = 817263541
 
-# Files assumed already applied on existing deployments (pre-runner baseline).
-# On a fresh DB these will run; on an established DB they'll be seeded into
-# schema_migrations without re-executing (see _seed_baseline_if_established).
+# Files folded into the db/init.sql baseline (§17.94 — "post-migration-033
+# state"). On a FRESH DB these objects are created by init.sql, so the runner
+# must NOT re-execute the migration files (several are multi-statement and the
+# asyncpg path would reject them; the core-table ALTERs would also revert folded
+# state) — they are seeded into schema_migrations as already-applied instead
+# (see _seed_baseline_if_established). On an established DB schema_migrations is
+# already populated, so seeding is a no-op. Migrations > 033 are applied normally
+# by the runner.
+#
+# §17.535 — extended 002–017 → 002–033 to match the actual init.sql currency.
+# The old 002–017 range left the table-creating migrations 018–033 to be run by
+# the runner on a fresh DB, but it halted at the multi-statement 020 (and earlier
+# wrongly seeded 009/010/011 as applied without their tables existing in init.sql)
+# — so a fresh bootstrap produced an incomplete schema. init.sql now declares all
+# 002–033 objects, so the whole range is correctly seeded here.
 _PRE_RUNNER_BASELINE = frozenset({
     "002_add_confidence.sql",
     "003_add_compiled_output.sql",
@@ -51,6 +63,22 @@ _PRE_RUNNER_BASELINE = frozenset({
     "015_research_sessions_status_varchar.sql",
     "016_scheduler_timezone.sql",
     "017_dag_nodes_is_output_node.sql",
+    "018_scheduled_jobs_last_status_check.sql",
+    "019_dag_nodes_unique_job_node_key.sql",
+    "020_research_sessions_single_running.sql",
+    "021_updated_at_triggers.sql",
+    "022_prompt_revisions.sql",
+    "023_assist_mode.sql",
+    "024_drop_assist_steps_applied_status.sql",
+    "025_drop_dead_error_types.sql",
+    "026_dag_nodes_last_verification_reason.sql",
+    "027_jobs_compiled_output_synthesized.sql",
+    "028_research_sessions_last_activity_at.sql",
+    "029_jobs_compile_synthesis_override.sql",
+    "030_cost_telemetry.sql",
+    "031_drop_performance_logs.sql",
+    "032_system_alerts.sql",
+    "033_llm_call_logs_call_kind.sql",
 })
 
 _CREATE_TRACKING_TABLE = """
@@ -71,16 +99,20 @@ async def _get_applied(db) -> set[str]:
 
 
 async def _is_established_db(db) -> bool:
-    """Post-017 marker: dag_nodes.is_output_node column exists.
+    """Post-033 marker: llm_call_logs.call_kind column exists (added by mig 033).
 
-    More specific than 'jobs' table existence (which is true after migration
-    001) — ensures we only seed the baseline on DBs that actually received
-    migrations 002–017 out-of-band.
+    The seed range is now the full init.sql baseline (002–033, §17.535), so the
+    marker must prove the DB carries that whole baseline — not merely the old
+    017 marker (dag_nodes.is_output_node), which a stale through-017 DB could
+    have without the 018–033 objects. call_kind is the last column the through-033
+    baseline adds and is declared in init.sql, so its presence ⟺ a complete
+    through-033 bootstrap (or a fully-migrated DB, where schema_migrations is
+    already non-empty and seeding is skipped before this is consulted).
     """
     result = await db.execute(text(
         "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'dag_nodes' "
-        "  AND column_name = 'is_output_node' "
+        "WHERE table_name = 'llm_call_logs' "
+        "  AND column_name = 'call_kind' "
         "  AND table_schema = current_schema()"
     ))
     return result.first() is not None
@@ -93,7 +125,7 @@ async def _seed_baseline_if_established(db, applied: set[str]) -> None:
     if not await _is_established_db(db):
         return
     logger.warning(
-        "migrations_seed_baseline: post-017 marker present with no "
+        "migrations_seed_baseline: post-033 marker present with no "
         "schema_migrations entries; seeding %d baseline files as applied",
         len(_PRE_RUNNER_BASELINE),
     )

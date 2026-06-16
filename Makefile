@@ -133,7 +133,7 @@ ci: _ensure_dev ## Run CI-safe tests (no live services; dev image) + bench regre
 	@printf '\n--- Audit I4: bench regression gates ---\n'
 	$(MAKE) bench-check
 
-ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The 4 prereqs are byte-equal/grep gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
+ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift lint-migrations ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The 5 prereqs are byte-equal/grep/lint gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
 	@printf '\033[1m▶ static-scan inventory tests (host pytest, --noconftest)\033[0m\n'
 	@if command -v pytest >/dev/null 2>&1; then \
 		PYTHONPATH=$(CURDIR):$(CURDIR)/sdk pytest \
@@ -144,6 +144,9 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 		printf '\033[1;33m⚠ host pytest not found — skipped the 2 inventory scans (byte-equal gates above still ran). Full coverage: make test\033[0m\n'; \
 	fi
 	@printf '\033[1;32m✓ ci-tier-0 passed (static parity gates green)\033[0m\n'
+
+lint-migrations: ## §17.534 — enforce the single-statement migration rule (§17.140) on every new migration (>033). Pure-Python static gate; no docker, no DB. Part of ci-tier-0.
+	@python3 scripts/lint_migrations.py
 
 audit: _ensure_dev ## §17.97 — CVE scan against pinned deps via pip-audit (dev image). Scans requirements.txt + requirements-ci.txt + requirements-dev.txt. Non-zero exit on a known vulnerability; pass a tag through ARGS to ignore one (e.g. ARGS="--ignore-vuln GHSA-xxxx").
 	@for f in requirements.txt requirements-ci.txt requirements-dev.txt; do \

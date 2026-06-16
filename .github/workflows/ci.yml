@@ -114,6 +114,42 @@ jobs:
         run: make ci-smoke
 
   # ──────────────────────────────────────────────────────────
+  # Dependency CVE scan (§17.534)
+  # ──────────────────────────────────────────────────────────
+  # pip-audit against the THREE pinned requirements files — the same set
+  # `make audit` scans in the dev image, but run here cloud-side (no docker
+  # exec) so a known-vulnerable dep blocks the PR instead of waiting for an
+  # operator to remember `make audit`. Pins are strict (everything in compose
+  # is digest-locked) so without an automated scan CVEs accrue silently.
+  #
+  # If this fails on an UNFIXABLE / accepted advisory, append an ignore to the
+  # step below: `--ignore-vuln GHSA-xxxx-…` (same flag `make audit` ARGS uses).
+  # Document why in the commit. Dependabot (§17.534, .github/dependabot.yml)
+  # opens the PRs that clear these.
+  security:
+    name: "Dependency CVE scan (pip-audit)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pip-audit
+        run: |
+          pip install --upgrade pip
+          pip install pip-audit==2.9.0
+
+      - name: pip-audit (requirements.txt, requirements-ci.txt, requirements-dev.txt)
+        run: |
+          for f in requirements.txt requirements-ci.txt requirements-dev.txt; do
+            printf '\n== pip-audit -r %s ==\n' "$f"
+            pip-audit --strict -r "$f"
+          done
+
+  # ──────────────────────────────────────────────────────────
   # Tier 2: full-stack integration (§17.247)
   # ──────────────────────────────────────────────────────────
   # §17.397 — gated behind the `RUN_TIER2_INTEGRATION` repo variable.

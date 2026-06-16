@@ -1,0 +1,64 @@
+# §17.534 — automated dependency / image update PRs.
+#
+# Everything in this repo is strictly pinned (pip deps by ==version, all
+# container images by @sha256 digest). That gives reproducibility but means a
+# security patch never lands unless someone bumps the pin by hand. Dependabot
+# closes that gap: it opens the PRs; the CI gates (pip-audit in ci.yml, the full
+# test.yml suite, ci-tier-0) prove each bump before it merges.
+#
+# Grouped + weekly to keep PR volume low. Raise a group's limit or split a
+# package out only if a bump needs isolated review.
+version: 2
+updates:
+  # ── Python deps — root requirements{,-dev,-ci}.txt ───────────────────────
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(pip)"
+    groups:
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # ── Python deps — the four harness sidecars (docker/<name>/requirements.txt)
+  - package-ecosystem: "pip"
+    directories:
+      - "/docker/ngspice"
+      - "/docker/verilator"
+      - "/docker/symbiyosys"
+      - "/docker/coderunner"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps(sidecar)"
+
+  # ── Container base images — Dockerfile + docker-compose.yml digest pins ───
+  - package-ecosystem: "docker"
+    directories:
+      - "/"
+      - "/docker/ngspice"
+      - "/docker/verilator"
+      - "/docker/symbiyosys"
+      - "/docker/coderunner"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(docker)"
+
+  # ── GitHub Actions used by the three workflows ───────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci(actions)"

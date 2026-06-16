@@ -236,6 +236,227 @@ BEGIN
 END;
 $$;
 
+-- ════════════════════════════════════════════════════════════════════════
+-- §17.535 — non-core tables created by migrations 009–032 (folded into the
+-- through-033 baseline). PREVIOUSLY MISSING from init.sql: the header claimed
+-- "post-migration-033 state" and the runner seeds 002–033 as already-applied,
+-- but these tables were never declared here — so a FRESH bootstrap created only
+-- the 8 core tables, the runner skipped (seeded) the table-creating migrations,
+-- and halted at 018 (`scheduled_jobs does not exist`). Declared here at their
+-- through-033 shape; later ALTERs (e.g. assist_steps guidance cols, mig 051)
+-- are applied by the runner on top (it runs 034+ normally once it no longer
+-- halts). Order respects FK deps: assist_sessions before assist_steps.
+-- ════════════════════════════════════════════════════════════════════════
+
+-- mig 009: dedup audit log (RAG ingest 3-tier decisions).
+CREATE TABLE IF NOT EXISTS dedup_log (
+    id                SERIAL PRIMARY KEY,
+    new_content_hash  VARCHAR(64) NOT NULL,
+    existing_entry_id VARCHAR(255) NOT NULL,
+    similarity_score  DOUBLE PRECISION NOT NULL,
+    action_taken      VARCHAR(20) NOT NULL DEFAULT 'rejected',
+    created_at        TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_dedup_log_created_at ON dedup_log(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dedup_log_existing_entry ON dedup_log(existing_entry_id);
+
+-- mig 010 (+012/013/014/015/020/028): research session lifecycle.
+CREATE TABLE IF NOT EXISTS research_sessions (
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    topic                   TEXT NOT NULL,
+    depth                   VARCHAR(32) NOT NULL DEFAULT 'medium',
+    domain                  VARCHAR(50) NOT NULL DEFAULT 'eng',
+    iterations_completed    INTEGER NOT NULL DEFAULT 0,
+    total_entries_extracted INTEGER NOT NULL DEFAULT 0,
+    total_entries_ingested  INTEGER NOT NULL DEFAULT 0,
+    total_entries_rejected  INTEGER NOT NULL DEFAULT 0,
+    total_urls_searched     INTEGER NOT NULL DEFAULT 0,
+    total_queries           INTEGER NOT NULL DEFAULT 0,
+    duration_ms             INTEGER NOT NULL DEFAULT 0,
+    coverage_pct            DOUBLE PRECISION,
+    status                  VARCHAR(32) NOT NULL DEFAULT 'running',
+    summary                 TEXT,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at            TIMESTAMPTZ,
+    state_snapshot          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    error_message           TEXT,
+    pause_question          TEXT,
+    pause_expires_at        TIMESTAMPTZ,
+    pause_reply             TEXT,
+    last_activity_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_research_sessions_created_at ON research_sessions(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_research_sessions_status ON research_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_research_sessions_active_activity
+    ON research_sessions(status, last_activity_at DESC)
+    WHERE status IN ('pending', 'running');
+CREATE INDEX IF NOT EXISTS idx_research_sessions_active_updated
+    ON research_sessions(status, updated_at DESC)
+    WHERE status IN ('pending', 'running', 'paused_awaiting_reply');
+-- mig 020: at most one running session at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_research_sessions_single_running
+    ON research_sessions(status) WHERE status = 'running';
+
+-- mig 011 (+016 timezone, +018 status check): scheduled research jobs.
+CREATE TABLE IF NOT EXISTS scheduled_jobs (
+    id              SERIAL PRIMARY KEY,
+    topic           TEXT NOT NULL,
+    depth           TEXT NOT NULL DEFAULT 'medium'
+        CHECK (depth IN ('shallow', 'medium', 'deep')),
+    cron_expression TEXT NOT NULL,
+    enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+    last_run_at     TIMESTAMPTZ,
+    last_status     TEXT
+        CHECK (last_status IS NULL OR last_status IN ('success', 'failed', 'running', 'timeout')),
+    last_job_id     TEXT,
+    next_run_at     TIMESTAMPTZ,
+    run_count       INTEGER NOT NULL DEFAULT 0,
+    failure_count   INTEGER NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    timezone        VARCHAR(64) NOT NULL DEFAULT 'UTC'
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_enabled ON scheduled_jobs(enabled) WHERE enabled = TRUE;
+CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run ON scheduled_jobs(next_run_at) WHERE enabled = TRUE;
+
+-- mig 030: per-provider/model cost rates.
+CREATE TABLE IF NOT EXISTS model_costs (
+    provider          TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    input_per_1m_usd  NUMERIC(10,6) NOT NULL DEFAULT 0,
+    output_per_1m_usd NUMERIC(10,6) NOT NULL DEFAULT 0,
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (provider, model)
+);
+
+-- mig 030 (+033 call_kind): per-call LLM telemetry.
+CREATE TABLE IF NOT EXISTS llm_call_logs (
+    id                BIGSERIAL PRIMARY KEY,
+    job_id            UUID,
+    node_id           UUID,
+    provider          TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    latency_ms        INTEGER NOT NULL DEFAULT 0,
+    cost_usd          NUMERIC(10,6) NOT NULL DEFAULT 0,
+    success           BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    call_kind         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_llm_call_logs_call_kind ON llm_call_logs(call_kind) WHERE call_kind IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_llm_call_logs_created_at ON llm_call_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_llm_call_logs_job_id ON llm_call_logs(job_id) WHERE job_id IS NOT NULL;
+
+-- mig 032: system alert sink.
+CREATE TABLE IF NOT EXISTS system_alerts (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    kind       TEXT NOT NULL,
+    severity   TEXT NOT NULL
+        CHECK (severity IN ('info', 'warning', 'critical')),
+    message    TEXT NOT NULL,
+    payload    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    dedup_key  TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_system_alerts_created_at ON system_alerts(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_system_alerts_dedup_key_created
+    ON system_alerts(dedup_key, created_at DESC) WHERE dedup_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_system_alerts_kind_created ON system_alerts(kind, created_at DESC);
+
+-- mig 022: per-node prompt revision history.
+CREATE TABLE IF NOT EXISTS prompt_revisions (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    job_id          UUID NOT NULL,
+    node_key        TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    prompt_text     TEXT NOT NULL,
+    edited_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    edited_by       TEXT,
+    source          TEXT NOT NULL DEFAULT 'manual'
+        CHECK (source IN ('manual', 'optimizer', 'initial', 'system')),
+    CONSTRAINT prompt_revisions_unique_revision UNIQUE (job_id, node_key, revision_number),
+    CONSTRAINT prompt_revisions_job_node_fkey
+        FOREIGN KEY (job_id, node_key) REFERENCES dag_nodes(job_id, node_key) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_prompt_revisions_edited_at ON prompt_revisions(edited_at DESC);
+CREATE INDEX IF NOT EXISTS idx_prompt_revisions_job_node
+    ON prompt_revisions(job_id, node_key, revision_number DESC);
+
+-- mig 023 (+024 drop applied_status): Assist Mode session.
+CREATE TABLE IF NOT EXISTS assist_sessions (
+    id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    job_id           UUID NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE,
+    status           TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'paused', 'completed', 'abandoned', 'cancelled')),
+    current_node_key TEXT,
+    handoff_policy   TEXT NOT NULL DEFAULT 'manual'
+        CHECK (handoff_policy IN ('manual', 'auto_on_skip', 'auto_all_remaining')),
+    replan_policy    TEXT NOT NULL DEFAULT 'context_only'
+        CHECK (replan_policy IN ('context_only', 'selective', 'full', 'disabled')),
+    started_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at     TIMESTAMPTZ,
+    metadata         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_assist_sessions_status ON assist_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_assist_sessions_last_activity
+    ON assist_sessions(last_activity_at) WHERE status IN ('active', 'paused');
+
+-- mig 023: Assist Mode per-step walker state. The guidance_* columns are added
+-- on top by mig 051 (which the runner applies after this baseline is seeded).
+CREATE TABLE IF NOT EXISTS assist_steps (
+    id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_id       UUID NOT NULL REFERENCES assist_sessions(id) ON DELETE CASCADE,
+    job_id           UUID NOT NULL,
+    node_key         TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'presented', 'awaiting_input', 'received',
+                          'committed', 'skipped', 'escalated', 'handed_off')),
+    presented_at     TIMESTAMPTZ,
+    submitted_at     TIMESTAMPTZ,
+    committed_at     TIMESTAMPTZ,
+    evidence_kind    TEXT
+        CHECK (evidence_kind IS NULL OR evidence_kind IN ('text', 'command_output',
+              'file_diff', 'screenshot_ref', 'url', 'none')),
+    evidence         TEXT,
+    evidence_meta    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    friction_note    TEXT,
+    divergence       BOOLEAN NOT NULL DEFAULT FALSE,
+    replan_triggered BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT assist_steps_session_id_node_key_key UNIQUE (session_id, node_key),
+    CONSTRAINT assist_steps_job_node_fkey
+        FOREIGN KEY (job_id, node_key) REFERENCES dag_nodes(job_id, node_key) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_assist_steps_job_node ON assist_steps(job_id, node_key);
+CREATE INDEX IF NOT EXISTS idx_assist_steps_session_status ON assist_steps(session_id, status);
+
+-- mig 021: updated_at triggers for the non-core tables above.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_research_sessions_updated_at') THEN
+        CREATE TRIGGER trg_research_sessions_updated_at BEFORE UPDATE ON research_sessions
+            FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_scheduled_jobs_updated_at') THEN
+        CREATE TRIGGER trg_scheduled_jobs_updated_at BEFORE UPDATE ON scheduled_jobs
+            FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_assist_sessions_updated_at') THEN
+        CREATE TRIGGER trg_assist_sessions_updated_at BEFORE UPDATE ON assist_sessions
+            FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_assist_steps_updated_at') THEN
+        CREATE TRIGGER trg_assist_steps_updated_at BEFORE UPDATE ON assist_steps
+            FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+    END IF;
+END;
+$$;
+
 -- Migration tracking table (also created by app/migrations.py on first run).
 -- Declared here so fresh DB init has it available before the runner executes.
 CREATE TABLE IF NOT EXISTS schema_migrations (

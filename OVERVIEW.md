@@ -21983,6 +21983,35 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.535 Fix — fresh-bootstrap migration bug: init.sql was an incomplete baseline (2026-06-16)
+
+**Why.** Surfaced while building the §17.534 migration lint. `db/init.sql`'s header claims "post-migration-033 state," and the runner seeds 002–017 as already-applied, **but init.sql only ever created the 8 core tables** — every non-core table created by migrations 009–032 (dedup_log, research_sessions, scheduled_jobs, prompt_revisions, assist_sessions/steps, model_costs, llm_call_logs, system_alerts) was missing. Reproduced empirically against a throwaway DB: a fresh bootstrap created only the core tables, the runner seeded the table-creating migrations as "applied" without their tables existing, then **halted at 018** (`scheduled_jobs does not exist`) — leaving `research_sessions`, `scheduled_jobs`, `assist_steps`, `llm_call_logs`, `system_alerts`, `model_overrides`, `jobs.parent_job_id`, and everything from 034–053 absent. Established DBs were unaffected (their `schema_migrations` is already fully populated, so seeding never fires), which is why the live host never hit it — but any new install was broken. Root cause: init.sql folded in core-table ALTERs (so 002–033 *must* be skipped) yet omitted the non-core tables those same migrations create (so they *must* run) — a contradiction.
+
+**Change.**
+- `db/init.sql` — declared the 9 missing non-core tables (+ their indexes, FKs, and updated_at triggers) at their through-033 shape, making init.sql a genuinely complete through-033 baseline. `assist_steps` is declared *without* the mig-051 guidance columns (the runner adds them on top, since 051 > 033).
+- `app/migrations.py` — `_PRE_RUNNER_BASELINE` extended 002–017 → **002–033** to match init.sql's actual currency; `_is_established_db` marker re-anchored from `dag_nodes.is_output_node` (017) to `llm_call_logs.call_kind` (033) so it proves the *whole* through-033 baseline is present, not just the old 017 column. On a fresh DB the runner now seeds 002–033 and applies 034–053 normally.
+
+**Verification.** Full throwaway-DB reproduction with the new code (host `app/`+`db/` mounted over the prod image, fresh `scaffold_freshtest`): runner returns `status: ok`, seeds 32, applies 034–053 (20 files), `schema_migrations` = 52, **no errors**. Schema diffed against the live fully-migrated DB: **identical table set** (only runtime-created `apscheduler_jobs` differs), **identical columns** (only a pre-existing unrelated `dag_nodes.tool` varchar/text drift — init.sql matches mig 005, live drifted; left as-is), **identical index set**. Proved the new runner is a **no-op on the live DB** (`applied: []`, still 52 rows) — existing deployments are unaffected; the fix only changes the fresh-install path. init.sql applies clean to an empty DB; `migrations.py` compiles; `lint-migrations` + `ci-tier-0` still green. (Takes effect on the next image rebuild + restart; live schema needs no migration.)
+
+---
+
+### §17.534 DevOps — CI hardening: dep CVE scan, image scan, version pins, migration lint, Dependabot (2026-06-16)
+
+**Why.** A DevOps review found the supply-chain/CI layer was the weakest part of an otherwise strongly-hardened stack: `pip-audit` existed only as a manual `make audit` (operator-only `docker exec`), so CVEs in the strictly-pinned deps accrued silently; nothing reminded anyone to bump the @sha256-pinned images/deps (no Dependabot/Renovate); two workflows used floating versions (`python-version: '3.12'`, `postgres:16`) that could drift from the pinned `3.12.13` / digest the prod stack runs; and the §17.140 single-statement migration rule (real — re-verified live: `exec_driver_sql` rejects multi-command files with *"cannot insert multiple commands into a prepared statement"*) had no static gate, so a multi-statement file fails *silently at lifespan startup* (the runner logs `migration_failed` and returns; lifespan logs but does not abort).
+
+**Change.**
+- **Dependency CVE gate** — new `security` job in `ci.yml` runs `pip-audit --strict` against `requirements{,-ci,-dev}.txt` on every push/PR (blocking; same set `make audit` scans, now cloud-side). Documented `--ignore-vuln` escape for accepted advisories.
+- **Image scan** — `aquasecurity/trivy-action` step in `test.yml` scans the freshly-built `scaffold-orchestrator:ci` image (HIGH/CRITICAL, `ignore-unfixed`, **report-only** `exit-code: 0` — base-layer CVEs are often unfixed-upstream; pip-audit is the blocking gate for deps we control).
+- **Version pins** — `retrieval-quality.yml` `3.12` → `3.12.13`; `test.yml` Postgres service → the exact `postgres:16@sha256:2586e2…` digest the compose stack runs.
+- **Migration lint (ratchet)** — `scripts/lint_migrations.py` (pure-Python dollar-quote/comment/string-aware statement counter) enforces single-statement on every migration `> 033`; migrations `002–033` are folded into the `db/init.sql` baseline (§17.94) and grandfathered. Wired as a `ci-tier-0` prereq + standalone `make lint-migrations`, so it runs at pre-push and in the ci.yml smoke job.
+- **Dependabot** — `.github/dependabot.yml` covers root pip deps, the four sidecar `requirements.txt`, all Dockerfiles + compose digest pins, and GitHub Actions (weekly, grouped). It opens the bump PRs; the CI gates above prove them.
+
+**Verification.** `make lint-migrations` → green (20 post-baseline single-statement, 32 grandfathered ≤ 033); regression-tested it fails (exit 1) on a planted multi-statement `>033` file and passes DO-block / comma-ALTER / quoted-`;` forms. `make ci-tier-0` → green end-to-end with the new prereq (all existing parity gates still pass). All four YAML files parse. Multi-statement rejection re-confirmed live against `scaffold-postgres` via the exact runner path (temp table, rolled back).
+
+**Latent risk surfaced (NOT fixed here — out of scope, needs its own change).** `db/init.sql` is the baked baseline *through migration 033* and the runner only seeds `002–017` (`_PRE_RUNNER_BASELINE`) as applied. On a **fresh** bootstrap the runner therefore tries to (re)apply `018–053`, hits the multi-statement `020` (also `022`, `023`), is rejected, and **halts at the first error** — so `034–053` never apply on a brand-new DB (existing/established DBs are unaffected; their migrations are already recorded). The clean fix is to extend `_PRE_RUNNER_BASELINE` to the full init.sql currency (`002–033`) so a fresh DB seeds the baked range and only runs `034+`. Flagged for a follow-up.
+
+---
+
 ### §17.533 Feature — umbrella-level compiled deliverable (the decomposition payoff) (2026-06-15)
 
 **Why.** Until now `/results <umbrella>` only listed child statuses — the components' outputs were never stitched into one result, so a finished decomposition had no unified deliverable. This is the natural completion of the feature.

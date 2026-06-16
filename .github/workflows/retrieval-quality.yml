@@ -23,7 +23,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          # §17.534 — pin the patch version to match the 3.12.13 used by every
+          # other workflow + the Dockerfile base, so a floating 3.12.x bump can't
+          # silently change behavior under this gate.
+          python-version: '3.12.13'
 
       # §17.432 — install requirements-ci.txt, not a bare `pytest pytest-asyncio`.
       # Both target tests import the app (conftest.py eager-imports
