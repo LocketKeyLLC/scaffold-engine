@@ -60,10 +60,20 @@ services:
       - USE_OLLAMA_DOCKER=false
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?WEBUI_SECRET_KEY is required}
       - DEFAULT_MODELS=scaffold_router
-    env_file:
-      - .env
+    # §17.536 — env_file removed (least-privilege). Loading the whole .env
+    # injected POSTGRES_PASSWORD / SCAFFOLD_API_KEY / MODEL_* / timeouts OWUI
+    # never reads. The only secrets it uses (WEBUI_SECRET_KEY and the pipelines
+    # key as OPENAI_API_KEYS) are set explicitly above via ${VAR}, which compose
+    # interpolates from .env independently of env_file.
     volumes:
       - open-webui:/app/backend/data
+    healthcheck:
+      # §17.536 — OWUI image ships curl + an unauthenticated /health.
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     security_opt:
       - no-new-privileges:true
     restart: always
@@ -97,8 +107,11 @@ services:
       # (api_key, orchestrator_url, ollama_url) — eliminates rotation
       # drift. Default false preserves OWUI valve UI as source of truth.
       - SCAFFOLD_VALVES_ENV_OVERRIDE=${SCAFFOLD_VALVES_ENV_OVERRIDE:-false}
-    env_file:
-      - .env
+    # §17.536 — env_file removed (least-privilege). The values the pipeline
+    # env-fallbacks read (SCAFFOLD_API_KEY, SCAFFOLD_ORCHESTRATOR_URL,
+    # SCAFFOLD_OLLAMA_URL) plus PIPELINES_API_KEY are all set explicitly above
+    # via ${VAR}; the wholesale .env (POSTGRES_PASSWORD, MODEL_*, WEBUI_SECRET_KEY
+    # …) was injected but never consumed here.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9099/"]
       interval: 15s
@@ -151,6 +164,14 @@ services:
       # but persisting it across restarts is harmless and avoids the
       # dangling-volume cruft the audit pass M5 flagged.
       - searxng-cache:/var/cache/searxng
+    healthcheck:
+      # §17.536 — searxng image has python3 + wget but NOT curl; use the
+      # sidecar urllib pattern against the unauthenticated /healthz endpoint.
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz',timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     security_opt:
       - no-new-privileges:true
     cap_drop:

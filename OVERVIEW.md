@@ -21983,6 +21983,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.536 DevOps — compose least-privilege: scope env_file, add open-webui/searxng healthchecks (2026-06-16)
+
+**Why.** Two findings from the §17.534 DevOps review. (1) Secret over-sharing: `open-webui` and `pipelines` loaded the *entire* `.env` via `env_file`, so each received `POSTGRES_PASSWORD`, `SCAFFOLD_API_KEY`, `WEBUI_SECRET_KEY`, all `MODEL_*_PROVIDER`, timeouts, etc. that they never read — a least-privilege violation (a compromise of either container hands over the DB password + API key). (2) `open-webui` and `searxng` had no healthcheck, so `restart: always` couldn't detect a hung-but-alive process and nothing could gate on their health.
+
+**Change.**
+- **env_file scoping** (`docker-compose.yml`) — dropped `env_file: .env` from `open-webui` and `pipelines`. Compose still interpolates `${VAR}` from `.env` independently of `env_file`, so the secrets each service genuinely uses still resolve through their explicit `environment:` blocks (`WEBUI_SECRET_KEY` + the pipelines key for OWUI; `SCAFFOLD_API_KEY` + orchestrator/ollama URLs for pipelines). The orchestrator keeps `env_file` — it legitimately consumes many `.env`-only keys (`MODEL_*_PROVIDER`, timeouts, stale thresholds, `RAG_BM25_ENABLED`, …). (`scaffold-postgres` still loads the full `.env` too; same trivially-safe scoping available as a follow-up — left for now since it was out of this task's approved scope.)
+- **healthchecks** — `open-webui`: `curl -f /health` (image ships curl; /health is unauthenticated). `searxng`: the sidecar `python3` urllib pattern against `/healthz` (the searxng image has python3 + wget but **not** curl).
+
+**Verification.** `docker compose config` renders valid; resolved env-key counts drop open-webui ~30 → 7 (only `WEBUI_SECRET_KEY` of the sentinel secrets remains; `POSTGRES_PASSWORD`/`MODEL_*` gone) and pipelines → 5 (only `SCAFFOLD_API_KEY`); orchestrator retains all 59. Both new healthcheck commands run green inside the live containers (`/health` → exit 0; `/healthz` urllib → exit 0). Takes effect on the next `docker compose up -d` (recreates open-webui, pipelines, searxng); no data migration.
+
+---
+
 ### §17.535 Fix — fresh-bootstrap migration bug: init.sql was an incomplete baseline (2026-06-16)
 
 **Why.** Surfaced while building the §17.534 migration lint. `db/init.sql`'s header claims "post-migration-033 state," and the runner seeds 002–017 as already-applied, **but init.sql only ever created the 8 core tables** — every non-core table created by migrations 009–032 (dedup_log, research_sessions, scheduled_jobs, prompt_revisions, assist_sessions/steps, model_costs, llm_call_logs, system_alerts) was missing. Reproduced empirically against a throwaway DB: a fresh bootstrap created only the core tables, the runner seeded the table-creating migrations as "applied" without their tables existing, then **halted at 018** (`scheduled_jobs does not exist`) — leaving `research_sessions`, `scheduled_jobs`, `assist_steps`, `llm_call_logs`, `system_alerts`, `model_overrides`, `jobs.parent_job_id`, and everything from 034–053 absent. Established DBs were unaffected (their `schema_migrations` is already fully populated, so seeding never fires), which is why the live host never hit it — but any new install was broken. Root cause: init.sql folded in core-table ALTERs (so 002–033 *must* be skipped) yet omitted the non-core tables those same migrations create (so they *must* run) — a contradiction.
