@@ -1781,3 +1781,19 @@ class TestUmbrellaResults:
         assert "`c0`" in out and "Auth" in out
         assert "`c1`" in out and "Billing" in out
         assert "/results <its job_id>" in out
+
+    def test_render_umbrella_surfaces_retry_for_stuck_children(self):
+        # §17.532 — failed/blocked components get an inline recovery hint.
+        data = {
+            "job_type": "umbrella", "job_status": "aggregating",
+            "children_total": 2, "children_completed": 0,
+            "children": [
+                {"job_id": "c0", "title": "X", "status": "blocked",
+                 "component_index": 0},
+                {"job_id": "c1", "title": "Y", "status": "failed",
+                 "component_index": 1},
+            ],
+        }
+        out = _mod.Pipeline._render_umbrella(None, "u", data)
+        assert "`/results c0` to inspect failed nodes & retry" in out
+        assert "`/results c1` to inspect failed nodes & retry" in out

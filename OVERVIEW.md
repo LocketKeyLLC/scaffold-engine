@@ -21983,6 +21983,19 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.532 Robustness — zero-child umbrella finalize, stranded-component reaper, blocked-child hints (2026-06-15)
+
+**Why.** Three decomposition edge cases left open in earlier parts: an umbrella orphaned to zero children could hang `aggregating` forever; a component child stranded by a process restart only got reaped at 26-72h (umbrella hangs that long); and a `blocked`/`failed` component offered no recovery path in the rollup view.
+
+**Change (`app/modules/cleanup.py` + `pipelines/scaffold_router.py`).**
+- **Zero-child finalize.** `_REAP_STALE_UMBRELLA_SQL` gains an OR clause: an `aggregating` umbrella with **zero** children (e.g. all detached via the migration-053 `ON DELETE SET NULL` FK) that is stale → `failed` (param `:stale_min` = `decompose_component_stale_minutes`). The normal all-children-terminal path still finalizes immediately (no time bound).
+- **Stranded-component reaper (Stage 6.5).** New `_REAP_STRANDED_COMPONENT_SQL` fails a `component` stuck in an early phase (`refining`/`awaiting_confirmation`/`researching`/`planning`) past `decompose_component_stale_minutes` (default 180) — recovers restart-stranded children ~26-72h sooner. Runs **before** the umbrella sweep so the umbrella finalizes the same cycle. `running`/`executing` excluded (the orphan-node + running reapers own those). Returns `components_reaped`.
+- **Blocked-child hint.** `_render_umbrella` appends `→ /results <id> to inspect failed nodes & retry` to each `failed`/`blocked` component line.
+
+**Verification.** `test_cleanup` updated to the 10-stage shape + 3 new tests (zero-child clause, stranded-component SQL targets early phases only, component-sweep-before-umbrella ordering) — 15 green. +1 pipeline test (retry hint on stuck children). No schema/OpenAPI change.
+
+---
+
 ### §17.531 Security — decomposition fan-out cap, server kill switch, description bound (2026-06-15)
 
 **Why.** Decomposition's genuinely-new risk is *amplification*: one request spawns up to 5 autonomous pipelines, each making many cloud LLM calls. `MAX_COMPONENTS` bounds one umbrella but nothing bounded the total in flight or gave operators a server-side off switch.

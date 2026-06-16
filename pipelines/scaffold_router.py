@@ -4084,10 +4084,14 @@ class Pipeline:
         ]
         for c in children:
             cs = c.get("status", "?")
-            lines.append(
-                f"- {child_icon.get(cs, '⏳')} `{c.get('job_id', '')}` — "
-                f"{c.get('title', '')} ({cs})"
+            cid = c.get("job_id", "")
+            line = (
+                f"- {child_icon.get(cs, '⏳')} `{cid}` — {c.get('title', '')} ({cs})"
             )
+            # §17.532 — surface a recovery path for stuck components inline.
+            if cs in ("failed", "blocked"):
+                line += f" → `/results {cid}` to inspect failed nodes & retry"
+            lines.append(line)
         lines.append("\n_Drill into any component with `/results <its job_id>`._")
         return "\n".join(lines)
 

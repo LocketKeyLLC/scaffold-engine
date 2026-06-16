@@ -27,15 +27,15 @@ def _db_with_counts(*counts, orphan_rows=None):
     """Build an AsyncMock db whose sequential execute() calls return results
     with the given len(fetchall()) values.
 
-    Expects exactly 9 counts: (orphan, running, long_phase, planning,
+    Expects exactly 10 counts: (orphan, running, long_phase, planning,
     awaiting_confirmation, research_sessions, paused_research,
-    assist_abandoned, umbrellas_finalized). If the orphan count is nonzero,
-    callers must pass orphan_rows= so Stage 0 can read row.job_id /
-    row.node_key. A refresh-parent-jobs call is then injected between Stage 0
-    and the running-job reaper.
+    assist_abandoned, components_reaped, umbrellas_finalized). If the orphan
+    count is nonzero, callers must pass orphan_rows= so Stage 0 can read
+    row.job_id / row.node_key. A refresh-parent-jobs call is then injected
+    between Stage 0 and the running-job reaper.
     """
-    assert len(counts) == 9, (
-        f"_db_with_counts expects 9 counts (orphan + 8 reapers), got {len(counts)}"
+    assert len(counts) == 10, (
+        f"_db_with_counts expects 10 counts (orphan + 9 reapers), got {len(counts)}"
     )
     db = AsyncMock()
     results = []
@@ -67,9 +67,9 @@ def _db_with_counts(*counts, orphan_rows=None):
     return db
 
 
-async def test_reap_stale_jobs_returns_all_nine_counts():
-    """The function always returns a dict with 9 category keys (8 + orphan)."""
-    db = _db_with_counts(0, 2, 4, 1, 5, 3, 0, 6, 7)
+async def test_reap_stale_jobs_returns_all_ten_counts():
+    """The function always returns a dict with 10 category keys (9 + orphan)."""
+    db = _db_with_counts(0, 2, 4, 1, 5, 3, 0, 6, 8, 7)
     result = await cleanup.reap_stale_jobs(db)
     assert set(result.keys()) == {
         "orphan_nodes_reset",
@@ -80,6 +80,7 @@ async def test_reap_stale_jobs_returns_all_nine_counts():
         "research_to_failed",
         "paused_to_cancelled",
         "assist_abandoned",
+        "components_reaped",
         "umbrellas_finalized",
     }
     assert result["orphan_nodes_reset"] == 0
@@ -90,6 +91,7 @@ async def test_reap_stale_jobs_returns_all_nine_counts():
     assert result["research_to_failed"] == 3
     assert result["paused_to_cancelled"] == 0
     assert result["assist_abandoned"] == 6
+    assert result["components_reaped"] == 8
     assert result["umbrellas_finalized"] == 7
     db.commit.assert_awaited()
 
@@ -97,39 +99,39 @@ async def test_reap_stale_jobs_returns_all_nine_counts():
 async def test_reap_stale_jobs_orphan_reset_count_propagates():
     """When Stage 0 finds orphans, count surfaces in the return dict."""
     db = _db_with_counts(
-        2, 0, 0, 0, 0, 0, 0, 0, 0,
+        2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         orphan_rows=[_orphan_row(node_key="T1"), _orphan_row(node_key="T2")],
     )
     result = await cleanup.reap_stale_jobs(db)
     assert result["orphan_nodes_reset"] == 2
 
 
-async def test_reap_stale_jobs_runs_nine_sql_statements():
-    """Stage 0 orphan reaper + 8 category statements = 9 statements when no orphans."""
-    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 0)
-    await cleanup.reap_stale_jobs(db)
-    assert db.execute.await_count == 9
-
-
-async def test_reap_stale_jobs_runs_ten_sql_statements_when_orphans_found():
-    """With orphans, the refresh-parent-jobs UPDATE fires too: 10 statements total."""
-    db = _db_with_counts(
-        1, 0, 0, 0, 0, 0, 0, 0, 0,
-        orphan_rows=[_orphan_row()],
-    )
+async def test_reap_stale_jobs_runs_ten_sql_statements():
+    """Stage 0 orphan reaper + 9 category statements = 10 statements when no orphans."""
+    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     await cleanup.reap_stale_jobs(db)
     assert db.execute.await_count == 10
 
 
+async def test_reap_stale_jobs_runs_eleven_sql_statements_when_orphans_found():
+    """With orphans, the refresh-parent-jobs UPDATE fires too: 11 statements total."""
+    db = _db_with_counts(
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        orphan_rows=[_orphan_row()],
+    )
+    await cleanup.reap_stale_jobs(db)
+    assert db.execute.await_count == 11
+
+
 async def test_reap_stale_jobs_no_reaping_returns_zero_counts():
-    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 0)
+    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     result = await cleanup.reap_stale_jobs(db)
     assert all(v == 0 for v in result.values())
 
 
 async def test_reap_stale_jobs_passes_threshold_params_from_settings():
     """Thresholds in bind params must come from settings, not module constants."""
-    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 0)
+    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     await cleanup.reap_stale_jobs(db)
     calls = db.execute.await_args_list
     # Stage 0 — orphan-node threshold
@@ -252,8 +254,38 @@ def test_umbrella_sweep_targets_only_aggregating_umbrellas_all_children_terminal
 
 
 async def test_umbrella_sweep_runs_last_and_count_propagates():
-    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 4)
+    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 0, 4)
     result = await cleanup.reap_stale_jobs(db)
     assert result["umbrellas_finalized"] == 4
-    # the umbrella sweep is the final statement (no orphans => 9 calls)
+    # the umbrella sweep is the final statement (no orphans => 10 calls)
     assert "umbrella" in str(db.execute.await_args_list[-1].args[0]).lower()
+
+
+def test_umbrella_sweep_handles_zero_child_orphan():
+    # §17.532 — the sweep also finalizes an aggregating umbrella with ZERO
+    # children once stale (the ON DELETE SET NULL orphan case).
+    sql = cleanup._REAP_STALE_UMBRELLA_SQL
+    assert "NOT EXISTS (SELECT 1 FROM jobs c WHERE c.parent_job_id = u.id)" in sql
+    assert "make_interval(mins => :stale_min)" in sql
+
+
+def test_stranded_component_sweep_targets_early_phases_only():
+    # §17.532 — fail a component stuck in an early phase past the threshold;
+    # never touch running/executing (the orphan/running reapers own those).
+    sql = cleanup._REAP_STRANDED_COMPONENT_SQL
+    assert "job_type = 'component'" in sql
+    assert "status IN ('refining', 'awaiting_confirmation', 'researching', 'planning')" in sql
+    assert "'running'" not in sql and "'executing'" not in sql
+    assert "make_interval(mins => :stale_min)" in sql
+
+
+async def test_stranded_component_sweep_runs_before_umbrella_sweep():
+    # component reaper (count idx 8) must precede the umbrella sweep (idx 9) so
+    # children failed this cycle are reflected in the rollup.
+    db = _db_with_counts(0, 0, 0, 0, 0, 0, 0, 0, 3, 0)
+    result = await cleanup.reap_stale_jobs(db)
+    assert result["components_reaped"] == 3
+    calls = [str(c.args[0]).lower() for c in db.execute.await_args_list]
+    comp_idx = next(i for i, s in enumerate(calls) if "job_type = 'component'" in s)
+    umb_idx = next(i for i, s in enumerate(calls) if "job_type = 'umbrella'" in s)
+    assert comp_idx < umb_idx
