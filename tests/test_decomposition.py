@@ -72,6 +72,58 @@ class TestExtractComponents:
         out = await dc.extract_components("idea")
         assert len(out) == dc.MAX_COMPONENTS
 
+    async def test_caps_description_length(self, monkeypatch):
+        # §17.531 — a padded/over-long description must be truncated.
+        long_desc = "x" * (dc.MAX_COMPONENT_DESC_LEN + 500)
+        payload = {"components": [
+            {"label": "A", "description": long_desc},
+            {"label": "B", "description": "short"},
+        ]}
+        monkeypatch.setattr(dc.model_router, "tool_call",
+                            AsyncMock(return_value=_resp(payload)))
+        monkeypatch.setattr(dc, "read_tool_args", lambda r: payload)
+        out = await dc.extract_components("idea")
+        assert len(out[0]["description"]) == dc.MAX_COMPONENT_DESC_LEN
+
+
+@pytest.mark.smoke
+class TestDecomposeEndpointGuards:
+    """§17.531 — server-side kill switch + global fan-out cap on /decompose."""
+
+    async def test_killswitch_short_circuits_no_llm(self, monkeypatch):
+        from app.routers import workflow as wf
+        from app.schemas import IdeaInput
+        monkeypatch.setattr(wf.settings, "decompose_enabled", False)
+        ec = AsyncMock()
+        monkeypatch.setattr(wf, "extract_components", ec)
+        out = await wf.decompose_endpoint(IdeaInput(idea="a multi-part build"), db=AsyncMock())
+        assert out == {"decomposed": False, "reason": "disabled"}
+        ec.assert_not_called()   # no LLM work when disabled
+
+    async def test_fanout_cap_rejects_429(self, monkeypatch):
+        from app.routers import workflow as wf
+        from app.schemas import IdeaInput
+        monkeypatch.setattr(wf.settings, "decompose_enabled", True)
+        monkeypatch.setattr(wf.settings, "decompose_max_inflight_components", 20)
+        monkeypatch.setattr(wf, "_require_valid_models", AsyncMock())
+        monkeypatch.setattr(wf, "get_ideation_slot_sem", lambda: _ACM())
+        monkeypatch.setattr(wf, "extract_components", AsyncMock(return_value=[
+            {"label": "a", "description": "d"},
+            {"label": "b", "description": "d"},
+            {"label": "c", "description": "d"},
+        ]))
+        cr = AsyncMock()
+        monkeypatch.setattr(wf, "create_and_run_decomposition", cr)
+        # 19 in flight + 3 new = 22 > cap 20 -> reject
+        res = MagicMock()
+        res.scalar_one.return_value = 19
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=res)
+        with pytest.raises(wf.HTTPException) as ei:
+            await wf.decompose_endpoint(IdeaInput(idea="a multi-part build idea"), db=db)
+        assert ei.value.status_code == 429
+        cr.assert_not_called()   # nothing created when over cap
+
 
 @pytest.mark.smoke
 class TestResurrectionGuard:

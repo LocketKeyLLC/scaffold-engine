@@ -53,6 +53,9 @@ MIN_COMPONENTS = 2
 # and pin N DB connections. The extractor is asked for 2-5; this enforces it
 # even if the model over-splits.
 MAX_COMPONENTS = 5
+# §17.531 — cap on a component's description (it becomes the child's input_text
+# and feeds refine/DAG prompts). Generous but bounded.
+MAX_COMPONENT_DESC_LEN = 4000
 
 DECOMPOSE_SYSTEM = (
     "You split a multi-part software/engineering build into independent "
@@ -147,7 +150,11 @@ async def extract_components(
         domain = c.get("domain")
         out.append({
             "label": label[:80],
-            "description": desc,
+            # §17.531 — bound the description: it becomes a child's input_text
+            # and flows into refine/DAG prompts. Cap to MAX_COMPONENT_DESC_LEN so
+            # an over-long (or injection-padded) field can't bloat downstream
+            # prompts. Mirrors the MAX_LLM_TEXT_LEN bounds on schema input fields.
+            "description": desc[:MAX_COMPONENT_DESC_LEN],
             "domain": domain if domain in LLM_SELECTABLE_DOMAINS else "eng",
             "research_queries": [
                 q for q in (c.get("research_queries") or []) if isinstance(q, str)

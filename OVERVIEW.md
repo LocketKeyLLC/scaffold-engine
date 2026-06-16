@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.531 Security — decomposition fan-out cap, server kill switch, description bound (2026-06-15)
+
+**Why.** Decomposition's genuinely-new risk is *amplification*: one request spawns up to 5 autonomous pipelines, each making many cloud LLM calls. `MAX_COMPONENTS` bounds one umbrella but nothing bounded the total in flight or gave operators a server-side off switch.
+
+**Change.** Three config settings (`app/config.py`): `decompose_enabled` (default True), `decompose_max_inflight_components` (default 20), `decompose_component_stale_minutes` (default 180 — used by §17.532). `POST /decompose` (`workflow.py`): (1) **kill switch** — if `decompose_enabled=False`, returns `{"decomposed":false,"reason":"disabled"}` before any LLM work (the chat surface can't override it via the `decompose_on_go` valve); (2) **global fan-out cap** — counts non-terminal `component` jobs and **429s** if creating these children would exceed the cap, bounding total autonomous fan-out + cloud cost across ALL umbrellas. `extract_components` (`decomposition.py`): caps each component description to `MAX_COMPONENT_DESC_LEN=4000` (it becomes the child's `input_text` → refine/DAG prompts; mirrors the `MAX_LLM_TEXT_LEN` schema bounds).
+
+**Verification.** +3 `test_decomposition` tests (desc-cap; kill-switch short-circuits with no LLM call; over-cap → 429, nothing created) — 13 green. No schema/OpenAPI change (config + endpoint only).
+
+---
+
 ### §17.530 Hardening — decomposition stress-test fixes: resurrection guard, component cap, shielded rollup (2026-06-15)
 
 **Why.** Stress-testing the decomposition subsystem (live multi-component jobs through the OWUI pipeline + an adversarial code review) surfaced real hazards, two HIGH.

@@ -716,6 +716,21 @@ class Settings(BaseSettings):
     # until a slot frees. Default 4 (ideation is cloud-bound, not CPU-bound like
     # execution, so a higher cap than execution's 2 is fine).
     ideation_global_concurrency: int = Field(default=4, ge=1, le=32)
+    # §17.531 — task-decomposition controls.
+    # decompose_enabled: server-side kill switch. When false, POST /decompose
+    #   415-rejects regardless of the pipeline's decompose_on_go valve (operator
+    #   override that the chat surface can't bypass).
+    # decompose_max_inflight_components: global ceiling on non-terminal component
+    #   jobs. /decompose rejects (429) if creating its children would exceed it —
+    #   bounds the total autonomous fan-out (and cloud cost) across ALL umbrellas,
+    #   not just within one (MAX_COMPONENTS bounds a single umbrella).
+    # decompose_component_stale_minutes: a component child stuck in an early phase
+    #   (refining/awaiting_confirmation/researching/planning) past this is reaped
+    #   to failed — recovers children stranded by a process restart far sooner
+    #   than the generic 26h sweep, so umbrellas don't hang.
+    decompose_enabled: bool = Field(default=True)
+    decompose_max_inflight_components: int = Field(default=20, ge=1, le=500)
+    decompose_component_stale_minutes: int = Field(default=180, ge=10, le=43200)
     # Max queue wait when the cap is full. 0 = wait forever; otherwise
     # the run emits a 503-shaped SSE error and bails. Default 1800s
     # matches scheduler_job_timeout so a queued run can't outlive the
