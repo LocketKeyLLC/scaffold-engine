@@ -4093,6 +4093,10 @@ class Pipeline:
                 line += f" → `/results {cid}` to inspect failed nodes & retry"
             lines.append(line)
         lines.append("\n_Drill into any component with `/results <its job_id>`._")
+        # §17.533 — once the umbrella finalizes, show the assembled deliverable.
+        compiled = data.get("compiled_output")
+        if compiled:
+            lines.append("\n---\n\n" + compiled)
         return "\n".join(lines)
 
     def _handle_results(

@@ -168,10 +168,35 @@ async def extract_components(
     return out[:MAX_COMPONENTS]
 
 
+async def _compile_umbrella_deliverable(db: AsyncSession, umbrella_id: str) -> str:
+    """§17.533 — stitch the component children's compiled outputs into one
+    umbrella-level markdown deliverable (ordered by component_index)."""
+    title = (await db.execute(
+        text("SELECT title FROM jobs WHERE id = :u"), {"u": umbrella_id},
+    )).scalar_one_or_none() or "Decomposed build"
+    rows = (await db.execute(
+        text("""
+            SELECT component_index, title, status, compiled_output
+            FROM jobs WHERE parent_job_id = :u
+            ORDER BY component_index
+        """),
+        {"u": umbrella_id},
+    )).mappings().all()
+    parts = [f"# {title}", "", f"_Assembled from {len(rows)} components._", ""]
+    for r in rows:
+        idx = (r["component_index"] or 0) + 1
+        parts.append(f"## Component {idx}: {r['title']} [{r['status']}]")
+        body = (r["compiled_output"] or "").strip()
+        parts.append(body if body else "_(no output produced)_")
+        parts.append("")
+    return "\n".join(parts).rstrip() + "\n"
+
+
 async def _rollup_umbrella(db: AsyncSession, umbrella_id: str) -> None:
     """Recompute an umbrella's status from its children. Idempotent + safe to
     call repeatedly; only promotes from 'aggregating' to a terminal state once
-    every child is terminal."""
+    every child is terminal. On 'completed', also assembles the unified
+    deliverable from the children's outputs (§17.533)."""
     row = (await db.execute(
         text("""
             SELECT count(*) AS total,
@@ -186,10 +211,23 @@ async def _rollup_umbrella(db: AsyncSession, umbrella_id: str) -> None:
     if not row or not row["total"] or row["terminal"] != row["total"]:
         return
     new_status = "completed" if row["done"] > 0 else "failed"
-    await db.execute(
-        text("UPDATE jobs SET status = :s WHERE id = :u AND status = 'aggregating'"),
-        {"s": new_status, "u": umbrella_id},
+    compiled = (
+        await _compile_umbrella_deliverable(db, umbrella_id)
+        if new_status == "completed" else None
     )
+    # COALESCE keeps any prior compiled_output if a racing finalizer already set
+    # it; the status='aggregating' guard makes the finalize itself single-winner.
+    result = await db.execute(
+        text("""
+            UPDATE jobs SET status = :s,
+                compiled_output = COALESCE(:co, compiled_output)
+            WHERE id = :u AND status = 'aggregating'
+            RETURNING id
+        """),
+        {"s": new_status, "co": compiled, "u": umbrella_id},
+    )
+    if result.first() is None:
+        return  # lost the finalize race; another caller already rolled up
     await db.commit()
     logger.info(
         "umbrella_rollup: umbrella=%s status=%s (%d/%d children completed)",

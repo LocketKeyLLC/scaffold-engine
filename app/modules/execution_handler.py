@@ -193,7 +193,9 @@ async def _umbrella_status(job_id: UUID, job, db: AsyncSession) -> dict:
             if (_completed_at := getattr(job, "completed_at", None))
             else None
         ),
-        "compiled_output": None,
+        # §17.533 — the assembled umbrella deliverable (set by _rollup_umbrella
+        # on completion); None until the umbrella finalizes to 'completed'.
+        "compiled_output": getattr(job, "compiled_output", None),
         "synthesized": False,
         "synthesis_override": None,
         "children": children,

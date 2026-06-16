@@ -21983,6 +21983,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.533 Feature — umbrella-level compiled deliverable (the decomposition payoff) (2026-06-15)
+
+**Why.** Until now `/results <umbrella>` only listed child statuses — the components' outputs were never stitched into one result, so a finished decomposition had no unified deliverable. This is the natural completion of the feature.
+
+**Change.** `_rollup_umbrella` (`app/modules/decomposition.py`), when finalizing an umbrella to `completed`, calls new `_compile_umbrella_deliverable` to assemble the children's `compiled_output` (ordered by `component_index`) into one markdown doc (title + a `## Component N: <title> [status]` section per child) and writes it to the umbrella's `jobs.compiled_output`. The finalize UPDATE now uses `RETURNING` + `COALESCE(:co, compiled_output)` so it's single-winner under the race (a losing caller doesn't commit). `execution_handler._umbrella_status` surfaces the umbrella's `compiled_output`; the pipeline `_render_umbrella` appends it below the child list once present.
+
+**Verification.** +4 tests (`_rollup_umbrella` completed → assembles deliverable in the UPDATE; failed → skips compile, `co=None`; lost-race → no commit; `run_component_pipeline` happy path reaches `execute_all_nodes` then rolls up) — `test_decomposition` 17 green. **Live (real Postgres, synthetic completed children — no LLM):** umbrella finalized `completed` with a correctly-assembled deliverable (title + both component sections + bodies); the COALESCE/RETURNING SQL works against asyncpg.
+
+---
+
 ### §17.532 Robustness — zero-child umbrella finalize, stranded-component reaper, blocked-child hints (2026-06-15)
 
 **Why.** Three decomposition edge cases left open in earlier parts: an umbrella orphaned to zero children could hang `aggregating` forever; a component child stranded by a process restart only got reaped at 26-72h (umbrella hangs that long); and a `blocked`/`failed` component offered no recovery path in the rollup view.

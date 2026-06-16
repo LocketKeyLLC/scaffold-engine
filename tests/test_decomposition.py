@@ -168,6 +168,91 @@ class TestResurrectionGuard:
         ean.assert_not_called()      # but execute_all_nodes was NOT reached
         roll.assert_awaited()
 
+    async def test_happy_path_reaches_execute_then_rolls_up(self, monkeypatch):
+        db = AsyncMock()
+        monkeypatch.setattr(dc, "async_session", lambda: _ACM(db))
+        monkeypatch.setattr(dc, "get_ideation_slot_sem", lambda: _ACM())
+        monkeypatch.setattr(dc, "analyze_and_confirm",
+                            AsyncMock(return_value={"status": "awaiting_confirmation"}))
+        monkeypatch.setattr(dc, "research_and_compile",
+                            AsyncMock(return_value={"status": "planning"}))
+        called = {"n": 0}
+
+        async def fake_ean(cid, **k):
+            called["n"] += 1
+            if False:        # async generator that yields nothing
+                yield
+        monkeypatch.setattr(dc, "execute_all_nodes", fake_ean)
+        roll = AsyncMock()
+        monkeypatch.setattr(dc, "_rollup_umbrella", roll)
+        await dc.run_component_pipeline(
+            "c", "idea", domain="eng", research_queries=["q"],
+            model_overrides=None, umbrella_id="u",
+        )
+        assert called["n"] == 1      # execute reached on the happy path
+        roll.assert_awaited()
+
+
+@pytest.mark.smoke
+class TestUmbrellaCompile:
+    """§17.533 — on completion the umbrella stitches its children's outputs into
+    one deliverable; a failed umbrella does not."""
+
+    def _counts(self, total, terminal, done):
+        r = MagicMock()
+        r.mappings.return_value.first.return_value = {
+            "total": total, "terminal": terminal, "done": done,
+        }
+        return r
+
+    async def test_completed_assembles_deliverable(self):
+        counts = self._counts(2, 2, 2)
+        title = MagicMock()
+        title.scalar_one_or_none.return_value = "KM System"
+        kids = MagicMock()
+        kids.mappings.return_value.all.return_value = [
+            {"component_index": 0, "title": "Indexer", "status": "completed",
+             "compiled_output": "INDEXER OUT"},
+            {"component_index": 1, "title": "Dashboard", "status": "completed",
+             "compiled_output": "DASH OUT"},
+        ]
+        upd = MagicMock()
+        upd.first.return_value = object()      # won the finalize race
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[counts, title, kids, upd])
+        await dc._rollup_umbrella(db, "u")
+        params = db.execute.call_args_list[3].args[1]   # the UPDATE
+        assert params["s"] == "completed"
+        co = params["co"]
+        assert "# KM System" in co
+        assert "Component 1: Indexer" in co and "INDEXER OUT" in co
+        assert "Component 2: Dashboard" in co and "DASH OUT" in co
+        db.commit.assert_awaited()
+
+    async def test_failed_skips_compile(self):
+        counts = self._counts(2, 2, 0)        # all terminal, none completed
+        upd = MagicMock()
+        upd.first.return_value = object()
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[counts, upd])
+        await dc._rollup_umbrella(db, "u")
+        assert db.execute.await_count == 2    # counts + UPDATE only; no compile SELECTs
+        params = db.execute.call_args_list[1].args[1]
+        assert params["s"] == "failed" and params["co"] is None
+
+    async def test_lost_finalize_race_does_not_commit(self):
+        counts = self._counts(1, 1, 1)
+        title = MagicMock()
+        title.scalar_one_or_none.return_value = "X"
+        kids = MagicMock()
+        kids.mappings.return_value.all.return_value = []
+        upd = MagicMock()
+        upd.first.return_value = None         # another caller already finalized
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[counts, title, kids, upd])
+        await dc._rollup_umbrella(db, "u")
+        db.commit.assert_not_awaited()        # we lost the race -> no commit
+
 
 @pytest.mark.smoke
 class TestRollupUmbrella:
