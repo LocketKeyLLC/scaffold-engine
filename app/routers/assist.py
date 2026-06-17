@@ -9,6 +9,7 @@ OVERVIEW.md §9 ("Assist Mode") for the design.
 """
 from __future__ import annotations
 
+import logging
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -19,6 +20,8 @@ from starlette.responses import StreamingResponse
 from app.config import settings
 from app.database import get_db
 from app.modules import assist_agent, assist_session_map
+
+logger = logging.getLogger("scaffold")
 
 router = APIRouter(tags=["Assist"])
 
@@ -99,10 +102,25 @@ class AssistEnvInput(BaseModel):
 
 
 @router.put("/assist/_chatmap/{chat_id}")
-async def assist_chatmap_put(chat_id: str, body: AssistChatMapInput):
+async def assist_chatmap_put(chat_id: str, body: AssistChatMapInput, db=Depends(get_db)):
     await assist_session_map.remember(
         chat_id, session_id=body.session_id, last_node_key=body.last_node_key,
     )
+    # §17.538 — persist the link durably on the session row so it survives
+    # Redis LRU eviction (the chatmap key is tiny + rarely read → prime
+    # eviction bait under embedding-cache memory pressure, which was silently
+    # orphaning active assist sessions from their chat → §17.537 gate saw
+    # nothing → back to triage). Best-effort: Redis is still set above, so a
+    # DB hiccup degrades to the pre-§17.538 (Redis-only) behaviour, not a 500.
+    try:
+        await db.execute(
+            text("UPDATE assist_sessions SET chat_id = :cid WHERE id = :sid"),
+            {"cid": chat_id, "sid": body.session_id},
+        )
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        await db.rollback()
+        logger.warning("chatmap durable-link write failed for %s: %s", chat_id, exc)
     return {"chat_id": chat_id, "stored": True}
 
 
@@ -110,10 +128,39 @@ async def assist_chatmap_put(chat_id: str, body: AssistChatMapInput):
 async def assist_chatmap_get(chat_id: str, db=Depends(get_db)):
     entry = await assist_session_map.recall(chat_id)
     if entry is None:
-        raise HTTPException(status_code=404, detail=f"no chat map for {chat_id}")
-    # §17.537 — surface the mapped session's live status so the pipeline can
-    # decide whether plain chat should route INTO assist (active session) or
-    # fall back to triage (terminal/missing). Best-effort: a purged session
+        # §17.538 — Redis miss (typically LRU eviction). Recover the durable
+        # link from Postgres: the most-recently-active session bound to this
+        # chat. Re-seed Redis so subsequent reads are fast again (self-heal).
+        # Only `active` sessions are recoverable — a terminal session must NOT
+        # capture plain chat back into assist.
+        try:
+            row = (await db.execute(
+                text("""
+                    SELECT id, current_node_key
+                      FROM assist_sessions
+                     WHERE chat_id = :cid AND status = 'active'
+                     ORDER BY last_activity_at DESC
+                     LIMIT 1
+                """),
+                {"cid": chat_id},
+            )).mappings().first()
+        except Exception as exc:  # noqa: BLE001 — recovery is best-effort
+            logger.warning("chatmap PG recovery failed for %s: %s", chat_id, exc)
+            row = None
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"no chat map for {chat_id}")
+        sid = str(row["id"])
+        last_node_key = row["current_node_key"]
+        await assist_session_map.remember(
+            chat_id, session_id=sid, last_node_key=last_node_key,
+        )
+        return {
+            "chat_id": chat_id, "session_id": sid,
+            "last_node_key": last_node_key, "status": "active",
+        }
+    # §17.537 — Redis hit: surface the mapped session's live status so the
+    # pipeline can decide whether plain chat routes INTO assist (active) or
+    # falls back to triage (terminal/missing). Best-effort: a purged session
     # row yields status=None, which the pipeline treats as "don't auto-route".
     status = None
     sid = entry.get("session_id")
