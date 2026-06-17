@@ -558,6 +558,15 @@ class Pipeline:
         assist_auto_guide: bool = True
         assist_guide_research: bool = True
         assist_guide_timeout: int = 180
+        # §17.537 — assist-aware chat routing. When a chat has an ACTIVE
+        # assist session, plain (non-command) text is a conversational turn
+        # ON that session — route it to the step guidance (refine=<text>)
+        # instead of the triage planner. Without this, every bare message
+        # mid-assist bounced to triage, freezing the session and repeating
+        # the Scope/Options/Gaps blocks (the DeFruscio HomeLab symptom).
+        # Requires assist_session_memory_enabled (the chatmap is the signal).
+        # Flip off to force the old explicit-/assist-command flow.
+        assist_chat_routing_enabled: bool = True
         # §17.493 — stream the walkthrough token-by-token (SSE) instead of a
         # blocking POST + full result. Off → the §17.486 non-streamed path.
         assist_stream: bool = True
@@ -1300,6 +1309,23 @@ class Pipeline:
             )
             return
 
+        # §17.537 — assist-aware chat routing. When THIS chat has an ACTIVE
+        # assist session, plain text is a conversational turn on that session,
+        # not a new triage idea: route it to the current step's guidance so the
+        # user gets grounded, step-by-step help instead of the planner's
+        # repeating Scope/Options/Gaps blocks. Falls through to triage on a
+        # recall miss or a paused/terminal session. Placed BEFORE the §17.504
+        # nudge — that nudge points at `/assist <job_id>` and is wrong/confusing
+        # once the user is already inside an active session.
+        cid = self._chat_id_from_body(body)
+        active = self._active_assist_session(cid)
+        if active:
+            yield from self._assist_chat_turn(
+                active["session_id"], msg,
+                node_key=active.get("last_node_key"), chat_id=cid,
+            )
+            return
+
         # §17.504 — assist-intent nudge. Free-text "assist with…" / "help me
         # implement…" looks like Assist Mode but routes to triage. Surface the
         # real `/assist <job_id>` entry point; the planning reply still runs.
@@ -1829,6 +1855,33 @@ class Pipeline:
 
     def _assist_forget(self, chat_id: str | None) -> None:
         return _assist.assist_forget(self, chat_id)
+
+    def _active_assist_session(self, chat_id: str | None) -> dict | None:
+        """§17.537 — recalled assist session for this chat IF it's active.
+
+        The signal for assist-aware chat routing. Returns the chatmap entry
+        (`{session_id, last_node_key, status}`) only when the mapped session
+        is `active`; a recall miss, a paused session, or a terminal session
+        returns None so plain text falls through to the triage planner. Gated
+        by `assist_chat_routing_enabled` (and, transitively, by the chatmap's
+        own `assist_session_memory_enabled`)."""
+        if not self.valves.assist_chat_routing_enabled:
+            return None
+        recalled = self._assist_recall(chat_id)
+        if not recalled or not recalled.get("session_id"):
+            return None
+        if recalled.get("status") != "active":
+            return None
+        return recalled
+
+    def _assist_chat_turn(
+        self, session_id: str, refine: str, *,
+        node_key: str | None = None, chat_id: str | None = None,
+    ) -> Generator[str, None, None]:
+        """§17.537 — delegate a plain-language assist-session turn to guidance."""
+        yield from _assist.assist_chat_turn(
+            self, session_id, refine, node_key=node_key, chat_id=chat_id,
+        )
 
     # §17.307 — active-job chat memory. Mirrors the assist chatmap
     # shape (remember / recall) but in-pipeline (no orchestrator

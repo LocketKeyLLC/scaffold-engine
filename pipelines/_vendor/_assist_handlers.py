@@ -1036,6 +1036,34 @@ def assist_guide_stream_cmd(
         reader.join(timeout=5)
 
 
+def assist_chat_turn(
+    pipe, session_id: str, refine: str, *,
+    node_key: str | None = None, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.537 — a plain-language chat turn inside an ACTIVE assist session.
+
+    The router calls this when a chat with an active assist session receives
+    bare (non-command) text. Rather than bouncing to the triage planner (the
+    DeFruscio HomeLab symptom — frozen session + repeating Scope/Options/Gaps),
+    the message is treated as a `refine` hint and answered with the current
+    step's walkthrough. Mirrors the `/assist guide` dispatch: streamed when the
+    `assist_stream` valve is on, blocking otherwise. A one-line banner orients
+    the user (they typed a question and got step guidance, not a planner reply)
+    and points at the commands to advance or step out."""
+    yield (
+        "_💬 In your active assist session — answering for the current step. "
+        "Use `/assist next` to advance, `/assist pause` to step back to "
+        "planning._\n\n"
+    )
+    _cmd = (assist_guide_stream_cmd
+            if getattr(pipe.valves, "assist_stream", True) else assist_guide_cmd)
+    yield from _cmd(
+        pipe, session_id, node_key=node_key, refine=refine,
+        research=pipe.valves.assist_guide_research, force=True,
+        chat_id=chat_id,
+    )
+
+
 def assist_research_cmd(
     pipe, session_id: str, question: str, *,
     node_key: str | None = None, chat_id: str | None = None,
