@@ -926,6 +926,22 @@ class Pipeline:
         re.IGNORECASE,
     )
 
+    # §17.539 — history-based active-session recovery anchor. chat_id is
+    # structurally unavailable to an external pipe (OWUI pops `metadata` from
+    # the body for OpenAI-compat endpoints AND the pipelines server passes no
+    # request headers to pipe(), so X-OpenWebUI-Chat-Id never arrives), so
+    # routing cannot rely on it. The conversation `messages` ARE reliably
+    # delivered (full history — that is why _window_messages exists), and the
+    # assist-start turn carries the session id ("🤝 Assist session started —
+    # `<sid>`"). This regex recovers that id from history, mirroring §17.444's
+    # _extract_pending_brief. \W+ consumes the "** — `" between the phrase and
+    # the UUID (backtick included).
+    _ASSIST_SESSION_MARKER_RE = re.compile(
+        r"Assist session started\W+"
+        r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+    )
+
     _ASSIST_NUDGE = (
         "💡 **Looking for Assist Mode?** Typing \"assist\" / \"help me "
         "implement\" in chat starts a *planning* conversation (below), not "
@@ -1317,8 +1333,16 @@ class Pipeline:
         # recall miss or a paused/terminal session. Placed BEFORE the §17.504
         # nudge — that nudge points at `/assist <job_id>` and is wrong/confusing
         # once the user is already inside an active session.
+        # §17.539 — resolve the active session from chat_id (fast path, when
+        # OWUI delivers one) OR from the conversation history (robust path —
+        # the confirmed reality is OWUI does NOT deliver chat_id to an external
+        # pipe, so the history marker is the load-bearing signal). Either way
+        # the routing decision no longer depends on OWUI's metadata/header quirks.
         cid = self._chat_id_from_body(body)
-        active = self._active_assist_session(cid)
+        active = (
+            self._active_assist_session(cid)
+            or self._active_assist_session_via_history(messages)
+        )
         if active:
             yield from self._assist_chat_turn(
                 active["session_id"], msg,
@@ -1865,13 +1889,39 @@ class Pipeline:
         returns None so plain text falls through to the triage planner. Gated
         by `assist_chat_routing_enabled` (and, transitively, by the chatmap's
         own `assist_session_memory_enabled`)."""
+        # §17.539 — observability at the silent fork. The §17.537/538
+        # assist-vs-triage decision was previously invisible: a missing
+        # chat_id or an unwritten chatmap looked identical to "no session"
+        # and dropped the user back to triage with no signal (it took
+        # Redis/Postgres forensics + two wrong root causes to diagnose). Each
+        # skip branch now logs its precise reason. chat_id is an OWUI chat
+        # UUID, not user content.
         if not self.valves.assist_chat_routing_enabled:
+            return None
+        if not chat_id:
+            self.logger.info(
+                "assist_routing skip reason=chat_id_missing "
+                "(OWUI sent no chat_id — unsaved/temporary chat?)"
+            )
             return None
         recalled = self._assist_recall(chat_id)
         if not recalled or not recalled.get("session_id"):
+            self.logger.info(
+                "assist_routing skip reason=no_session_for_chat chat_id=%s "
+                "(chatmap never written or no active session)", chat_id,
+            )
             return None
         if recalled.get("status") != "active":
+            self.logger.info(
+                "assist_routing skip reason=session_not_active "
+                "chat_id=%s session=%s status=%s",
+                chat_id, recalled.get("session_id"), recalled.get("status"),
+            )
             return None
+        self.logger.info(
+            "assist_routing match chat_id=%s session=%s node=%s",
+            chat_id, recalled.get("session_id"), recalled.get("last_node_key"),
+        )
         return recalled
 
     def _assist_chat_turn(
@@ -1882,6 +1932,77 @@ class Pipeline:
         yield from _assist.assist_chat_turn(
             self, session_id, refine, node_key=node_key, chat_id=chat_id,
         )
+
+    def _session_id_from_history(self, messages: List[dict]) -> str | None:
+        """§17.539 — most-recent assist session id named in an assistant turn.
+
+        The assist-start message ("🤝 Assist session started — `<sid>`") is in
+        the conversation history OWUI delivers, so we can recover the session
+        even when chat_id is absent. Scans newest-first; returns None if no
+        assist session was ever started in this chat."""
+        for m in reversed(messages or []):
+            if m.get("role") != "assistant":
+                continue
+            content = m.get("content")
+            if not isinstance(content, str):
+                continue
+            match = self._ASSIST_SESSION_MARKER_RE.search(content)
+            if match:
+                return match.group(1)
+        return None
+
+    def _get_assist_session(self, session_id: str) -> dict | None:
+        """§17.539 — GET /assist/{sid} → session dict (status, current_node_key,
+        …), or None on miss/error. Used to confirm a history-recovered session
+        is still live before routing to it."""
+        try:
+            r = _HTTP_SESSION.get(
+                f"{self.valves.orchestrator_url}/assist/{session_id}",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+            if r.status_code == 200:
+                d = r.json()
+                return d if isinstance(d, dict) else None
+        except requests.exceptions.RequestException as e:
+            self.logger.warning("get_assist_session failed: %s", e)
+        return None
+
+    def _active_assist_session_via_history(
+        self, messages: List[dict],
+    ) -> dict | None:
+        """§17.539 — recover an ACTIVE assist session from conversation history
+        when chat_id is unavailable (the confirmed real failure: OWUI never
+        delivers chat_id to the pipe). Confirms liveness via GET /assist/{sid}.
+
+        Returns the same `{session_id, last_node_key, status}` shape as
+        `_active_assist_session` so the routing fork is signal-agnostic."""
+        if not self.valves.assist_chat_routing_enabled:
+            return None
+        sid = self._session_id_from_history(messages)
+        if not sid:
+            return None
+        sess = self._get_assist_session(sid)
+        if not sess:
+            self.logger.info(
+                "assist_routing history: session %s not found/unreachable", sid,
+            )
+            return None
+        if sess.get("status") != "active":
+            self.logger.info(
+                "assist_routing history: session %s status=%s (not active)",
+                sid, sess.get("status"),
+            )
+            return None
+        self.logger.info(
+            "assist_routing history-match session=%s node=%s",
+            sid, sess.get("current_node_key"),
+        )
+        return {
+            "session_id": sid,
+            "last_node_key": sess.get("current_node_key"),
+            "status": "active",
+        }
 
     # §17.307 — active-job chat memory. Mirrors the assist chatmap
     # shape (remember / recall) but in-pipeline (no orchestrator
@@ -1903,6 +2024,14 @@ class Pipeline:
         }
 
     def _active_job_recall(self, chat_id: str | None) -> dict | None:
+        # §17.539 — chat_id is NOT delivered to the pipe in this OWUI setup
+        # (see _active_assist_session_via_history), so this recall returns None
+        # in practice and no-arg commands ask for an explicit job id. That is a
+        # deliberate SAFE degradation: unlike assist routing (§17.539), this
+        # feeds state-altering commands (/cancel, /skip, /execute confirm), and
+        # "which job is active" is ambiguous from history — a wrong-job
+        # auto-recall on a no-arg /cancel is worse than asking for an explicit
+        # id. So this is intentionally NOT made history-based.
         if not chat_id or not self.valves.active_job_memory_enabled:
             return None
         return getattr(self, "_active_jobs_by_chat", {}).get(chat_id)

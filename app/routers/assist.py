@@ -268,7 +268,7 @@ async def assist_guide_stream(
     if not nk:
         raise HTTPException(status_code=409, detail="no node_key supplied and session has no current step")
 
-    from app.main import _sse_with_disconnect_watch
+    from app.utils.sse import _sse_with_disconnect_watch
     from app.sse_events import ASSIST_GUIDE_DELTA, ASSIST_GUIDE_DONE
 
     async def _gen():
@@ -437,7 +437,7 @@ async def assist_handoff(session_id: str, body: AssistHandoffInput, request: Req
     if sess["status"] != "active":
         raise HTTPException(status_code=409, detail=f"session status {sess['status']!r} cannot handoff")
 
-    from app.main import _sse_with_disconnect_watch  # avoid circular import at module-top
+    from app.utils.sse import _sse_with_disconnect_watch  # moved from app.main (§17.540)
 
     source = assist_agent.handoff_step(
         session_id=session_id,
