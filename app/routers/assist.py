@@ -13,6 +13,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from starlette.responses import StreamingResponse
 
 from app.config import settings
@@ -106,11 +107,26 @@ async def assist_chatmap_put(chat_id: str, body: AssistChatMapInput):
 
 
 @router.get("/assist/_chatmap/{chat_id}")
-async def assist_chatmap_get(chat_id: str):
+async def assist_chatmap_get(chat_id: str, db=Depends(get_db)):
     entry = await assist_session_map.recall(chat_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"no chat map for {chat_id}")
-    return {"chat_id": chat_id, **entry}
+    # §17.537 — surface the mapped session's live status so the pipeline can
+    # decide whether plain chat should route INTO assist (active session) or
+    # fall back to triage (terminal/missing). Best-effort: a purged session
+    # row yields status=None, which the pipeline treats as "don't auto-route".
+    status = None
+    sid = entry.get("session_id")
+    if sid:
+        try:
+            row = (await db.execute(
+                text("SELECT status FROM assist_sessions WHERE id = :sid"),
+                {"sid": sid},
+            )).mappings().first()
+            status = row["status"] if row else None
+        except Exception:  # noqa: BLE001 — status is advisory; never 500 the map
+            status = None
+    return {"chat_id": chat_id, **entry, "status": status}
 
 
 @router.delete("/assist/_chatmap/{chat_id}")
