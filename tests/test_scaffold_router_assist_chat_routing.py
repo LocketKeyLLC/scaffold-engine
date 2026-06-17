@@ -178,3 +178,125 @@ class TestAssistChatTurnEndToEnd:
         assert "/assist next" in out                    # advance hint
         assert "How to do this step" in out             # rendered guidance
         assert "Boot the OPNsense installer USB" in out
+
+
+# ---------------------------------------------------------------------------
+# §17.539 — history-based recovery (chat_id is unavailable in this OWUI setup)
+# ---------------------------------------------------------------------------
+
+# The real assist-start marker as OWUI saves it (from the live chat DB dump).
+_START_MARKER = (
+    "🤝 **Assist session started** — `50815e37-76c7-4862-90e3-354d481f7c3b`\n\n"
+    "Job `915fa635-eea0-4b0e-a90b-8a512ceb3b9b` is now in `assisted_executing` "
+    "(9 pending steps)."
+)
+# Body with NO chat_id — the confirmed production reality (OWUI pops metadata).
+NO_CID_BODY: dict = {}
+
+
+@pytest.mark.smoke
+class TestSessionIdFromHistory:
+    def test_extracts_from_real_marker(self, pipe):
+        msgs = [
+            {"role": "user", "content": "/assist 915fa635-…"},
+            {"role": "assistant", "content": _START_MARKER},
+            {"role": "user", "content": "no link up detected"},
+        ]
+        assert pipe._session_id_from_history(msgs) == \
+            "50815e37-76c7-4862-90e3-354d481f7c3b"
+
+    def test_returns_most_recent_when_multiple(self, pipe):
+        older = _START_MARKER  # session 50815e37…
+        newer = "🤝 **Assist session started** — `aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`"
+        msgs = [
+            {"role": "assistant", "content": older},
+            {"role": "user", "content": "..."},
+            {"role": "assistant", "content": newer},
+            {"role": "user", "content": "what next"},
+        ]
+        assert pipe._session_id_from_history(msgs) == \
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def test_none_when_no_marker(self, pipe):
+        msgs = [
+            {"role": "user", "content": "build me a homelab"},
+            {"role": "assistant", "content": "**Scope so far:** ..."},
+        ]
+        assert pipe._session_id_from_history(msgs) is None
+
+    def test_ignores_marker_in_user_turn(self, pipe):
+        # Only assistant turns are authoritative (a user could paste anything).
+        msgs = [{"role": "user", "content": _START_MARKER}]
+        assert pipe._session_id_from_history(msgs) is None
+
+
+@pytest.mark.smoke
+class TestActiveAssistSessionViaHistory:
+    def _msgs(self):
+        return [
+            {"role": "assistant", "content": _START_MARKER},
+            {"role": "user", "content": "no link up detected"},
+        ]
+
+    def test_active_session_recovered(self, pipe):
+        sess = {"status": "active", "current_node_key": "T1"}
+        with patch.object(pipe, "_get_assist_session", return_value=sess):
+            out = pipe._active_assist_session_via_history(self._msgs())
+        assert out == {
+            "session_id": "50815e37-76c7-4862-90e3-354d481f7c3b",
+            "last_node_key": "T1",
+            "status": "active",
+        }
+
+    def test_terminal_session_not_recovered(self, pipe):
+        with patch.object(pipe, "_get_assist_session",
+                          return_value={"status": "completed"}):
+            assert pipe._active_assist_session_via_history(self._msgs()) is None
+
+    def test_unreachable_session_not_recovered(self, pipe):
+        with patch.object(pipe, "_get_assist_session", return_value=None):
+            assert pipe._active_assist_session_via_history(self._msgs()) is None
+
+    def test_no_marker_skips_http(self, pipe):
+        with patch.object(pipe, "_get_assist_session") as get:
+            assert pipe._active_assist_session_via_history(
+                [{"role": "user", "content": "hi"}]) is None
+        get.assert_not_called()
+
+
+@pytest.mark.smoke
+class TestPipeRoutesViaHistoryWithoutChatId:
+    def test_no_chat_id_still_routes_via_history(self, pipe):
+        # The actual production failure: body has NO chat_id, but the active
+        # session is recoverable from the assist-start marker in history.
+        msgs = [
+            {"role": "assistant", "content": _START_MARKER},
+            {"role": "user", "content": "what's my next step"},
+        ]
+        sess = {"status": "active", "current_node_key": "T1"}
+        with patch.object(pipe, "_get_assist_session", return_value=sess), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT") as triage, \
+             patch.object(
+                 pipe, "_assist_chat_turn",
+                 side_effect=lambda *a, **k: iter(["GUIDE_OUTPUT"]),
+             ) as guide:
+            out = "".join(pipe.pipe("what's my next step", "model-id", msgs, NO_CID_BODY))
+        assert "GUIDE_OUTPUT" in out
+        assert "TRIAGE_OUTPUT" not in out
+        triage.assert_not_called()
+        args, kwargs = guide.call_args
+        assert args[0] == "50815e37-76c7-4862-90e3-354d481f7c3b"
+        assert args[1] == "what's my next step"
+        assert kwargs["node_key"] == "T1"
+
+    def test_no_chat_id_no_history_marker_falls_to_triage(self, pipe):
+        msgs = [
+            {"role": "user", "content": "build a homelab"},
+            {"role": "assistant", "content": "**Scope so far:** ..."},
+            {"role": "user", "content": "what about networking"},
+        ]
+        with patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT") as triage, \
+             patch.object(pipe, "_assist_chat_turn") as guide:
+            out = "".join(pipe.pipe("what about networking", "model-id", msgs, NO_CID_BODY))
+        assert "TRIAGE_OUTPUT" in out
+        guide.assert_not_called()
