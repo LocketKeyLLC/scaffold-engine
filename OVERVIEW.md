@@ -2167,6 +2167,12 @@ Both `Client.jobs.status()` (sync) and `AsyncClient.health()/status()` (async) d
 
 All 18 original HIGH-severity findings: 15 fixed in code + 3 retracted within the audit. All 10 priority-queue items: fixed in code. All 8 cross-cutting patterns A–H: resolved. Audit coverage of the codebase as it stands today is **closed**.
 
+### 16.7 Post-audit live findings
+
+Discovered during live verification of later work, outside the 2026-05-05 audit scope.
+
+1. 🟥 **OPEN** — `app/model_router.py:273` (embedding calls get a non-embedding fallback). `_dispatch_with_retry` does `fallback = fallback or _smart_fallback(model, settings.model_fallback)`, which **silently discards the embed callers' explicit `fallback=None`** — both `app/providers/ollama.py:139` and `app/model_router.py:693` pass it deliberately to mean "embeddings have no fallback." The injected `settings.model_fallback` (`qwen3.5:latest`) is a chat model that returns `HTTP 501 "this model does not support embeddings"` on `/api/embed`. **Effect:** when a `/api/embed` call to `nomic-embed-text` fails — e.g. `HTTP 400 "input length exceeds context length"` on an over-long chunk — the router burns a guaranteed-doomed fallback round-trip (501, ~14s on the live smoke) before failing, adding latency + error-log noise. Observed live during the §17.543 research-ingest smoke (request_id `c456316c`, 2026-06-18). **Suggested fix:** make the `None` sentinel survive — e.g. distinguish "unset" from "explicitly None", or have `_smart_fallback` return `None` for the embedder role / `/api/embed` endpoint. The embedder is config-only (invariant), so there is no valid drop-in embedding fallback to inject anyway. **Secondary (separate, smaller):** the originating `HTTP 400 input-length` means an ingest chunk exceeded the embedder's context window — research ingest should bound chunk size to the embedder's token limit, not just `research_chunk_size` chars.
+
 ---
 
 ## 17. Sprint history + roadmap
