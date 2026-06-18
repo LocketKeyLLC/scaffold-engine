@@ -646,10 +646,22 @@ async def _extract_entries(
                     "extraction_parse_failed: batch=%d raw_len=%d",
                     i // batch_size + 1, len(resp.text),
                 )
+        elif resp and resp.success:
+            # The LLM call succeeded but returned no parseable `entries`
+            # tool-call — a tool-calling miss, NOT a transport/LLM failure.
+            # Mislabeling this as extraction_llm_failed (with success=True)
+            # obscured a real signal: a high rate here means the extractor
+            # model is dropping to the non-LLM fallback. (§17.546)
+            logger.warning(
+                "extraction_no_tool_args: batch=%d (LLM responded but emitted "
+                "no parseable `entries` tool-call; using non-LLM fallback)",
+                i // batch_size + 1,
+            )
         else:
             logger.warning(
                 "extraction_llm_failed: batch=%d success=%s error=%s",
-                i // batch_size + 1, resp.success,
+                i // batch_size + 1,
+                resp.success if resp else False,
                 resp.error if resp else "no-resp",
             )
 

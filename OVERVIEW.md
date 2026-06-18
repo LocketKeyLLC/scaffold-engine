@@ -21989,6 +21989,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.546 Fix — split the mislabeled `extraction_llm_failed` log (research extractor) (2026-06-18)
+
+**Symptom.** `_extract_entries` (`app/modules/research_agent.py`) logged `extraction_llm_failed: … success=True error=None` at WARNING whenever a batch produced no parseable `entries` tool-call — even when the LLM call itself succeeded. Observed in the §17.543 smoke (batches 11–12). The name implied a transport/LLM failure; the reality is the extractor model returned content with no parseable tool-call, after which the code falls back to non-LLM extraction.
+
+**Change.** The single `else` is now two branches: `extraction_no_tool_args` (`resp.success` true but no parseable `entries` — a tool-calling miss → non-LLM fallback) vs. `extraction_llm_failed` (the genuine `resp is None`/`success=False` case, now logging `success=False`). No control-flow change; the fallback path is unchanged.
+
+**Why it matters beyond cosmetics.** The old name buried a real quality signal: a high `extraction_no_tool_args` rate means the 7b extractor is frequently dropping to the dumber non-LLM fallback, degrading research extraction. The split makes that rate independently greppable so it can be measured (open follow-up — the smoke's 2/12 sample is too small to size).
+
+**Verification.** Research extraction tests green — `test_research_agent_extract_no_entries` + `_core` + `_summary` = **42 passed** in the dev image.
+
+---
+
 ### §17.545 Fix — embed payloads set `truncate=true` so over-length input can't 400/drop the entry (closes §16.7 secondary) (2026-06-18)
 
 **Root cause.** Neither embed payload (`app/providers/ollama.py::embed`, the role/ingest path; `app/model_router.py::embed`, the model path) set Ollama's `truncate` flag on `/api/embed`. When an input exceeds the embedder's context (nomic-embed-text = **2048 tokens**, confirmed via `/api/show`: `nomic-bert.context_length=2048`), Ollama can return `HTTP 400 "the input length exceeds the context length"` — which, since embeddings have no fallback (§17.544), drops the entry from ingest. Reproduced exactly: on the live daemon, `truncate=false` → that 400; `truncate` unset or `true` → 200 (head-truncates).
