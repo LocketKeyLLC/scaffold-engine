@@ -695,6 +695,9 @@ async def embed(
     payload: dict[str, Any] = {
         "model": model,
         "input": inputs,
+        # §17.545 — see OllamaProvider.embed: truncate to context instead of
+        # 400-ing on over-length input (§16.7).
+        "truncate": True,
     }
     resp = await _dispatch_with_retry("/api/embed", payload, model, fallback=None)
     await _record_call(resp)

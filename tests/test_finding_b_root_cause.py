@@ -100,6 +100,25 @@ class TestOllamaEmbedTimeoutBound:
             result = await provider.embed("qwen3-embedding:8b", ["hi"], timeout=5)
         assert result == []
 
+    async def test_embed_payload_sets_truncate_true(self):
+        """§17.545 — embed payload must set truncate=True so over-length input
+        head-truncates to the embedder context instead of returning the
+        context-length HTTP 400 that drops the entry (§16.7)."""
+        from app.providers.ollama import OllamaProvider
+
+        captured: dict = {}
+
+        async def _capture(endpoint, payload, model, fallback=None):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return types.SimpleNamespace(success=True, raw={"embeddings": [[0.1]]})
+
+        provider = OllamaProvider()
+        with patch("app.model_router._dispatch_with_retry", _capture):
+            await provider.embed("nomic-embed-text", ["hello"], timeout=5)
+        assert captured["endpoint"] == "/api/embed"
+        assert captured["payload"].get("truncate") is True
+
     def test_default_timeout_formula(self):
         """Verify the timeout-derivation formula directly without I/O.
 
