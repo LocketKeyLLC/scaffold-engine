@@ -21991,6 +21991,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.552 Feat — wire the corpus golden set into `ci-tier-2` as a retrieval-quality gate (2026-06-18)
+
+**What.** The `make ci-tier-2` golden-retrieval sidecar (step 4/5) previously ran `score_retrieval.py` against the default `golden_set.json` — the 0%-floored historical set (§17.211/§17.229/§17.550) — and only **printed** the numbers. Now it runs against `tests/fixtures/golden_set_corpus.json` (the §17.550 corpus-matched set) **and gates**: the step exits non-zero (failing tier 2) if `coverage_at_5 < RETRIEVAL_MIN_COV5` or `mean_title_mrr < RETRIEVAL_MIN_MRR`. Floors default to **0.70 / 0.55** — conservative vs the as-deployed 0.864 / 0.818 (§17.551) and even the BM25-off counterfactual 0.818 / 0.765, so normal corpus drift won't flake the gate but a real break (reranker down, BM25 dropped, corpus wiped → the 0% scenario) fails it. Both floors are env-overridable (`RETRIEVAL_MIN_COV5` / `RETRIEVAL_MIN_MRR`) for retuning as the corpus grows.
+
+**Verification.** `make -n ci-tier-2` parses clean. Ran the step exactly as the Makefile invokes it (corpus golden set, live stack, full pipeline) → `coverage_at_5=86.4% coverage_at_10=86.4% mean_mrr=0.818`, **gate PASS** (exit 0). Negative check: forcing `RETRIEVAL_MIN_COV5=0.99` → **exit 1** (gate correctly rejects below-floor). The historical `golden_set.json` stays in-tree as archival reference; nothing else in tier 2 changed.
+
+---
+
 ### §17.551 Verify — BM25 hybrid retrieval (§17.431) is already live in production; impact quantified (2026-06-18)
 
 **Discovery.** Investigating the "deploy BM25" item (a system review flagged `rag_bm25_enabled` default `False` as "gated, not deployed"), the destructive migration turned out to be **unnecessary — BM25 is already live.** Evidence from the running orchestrator: `toon_v2` already carries the `sparse_bm25` `SPARSE_FLOAT_VECTOR` field **and** the `bm25_canonical_text` BM25 `Function`; `RAG_BM25_ENABLED=true` is in `.env` and reaches the orchestrator via its `env_file` (the §17.536 least-privilege env_file removal applied to OWUI/pipelines, **not** the orchestrator, which keeps `env_file: .env`); so `settings.rag_bm25_enabled=True` **and** `collection_has_bm25()=True` → `_keyword_search` routes to `_bm25_search`. The collection got the BM25 schema because `_auto_create_collection` calls `build_toon_v2_schema()` with no arg, which follows `settings.rag_bm25_enabled` — so any (re)create while the flag was set produced the BM25 schema. The migration script confirmed it: `scripts/migrate_toon_v2_bm25.py` (dry-run) reported `'toon_v2' already has 'sparse_bm25' — already migrated, nothing to do.` The review's "not deployed" was a false negative (read the config default, not `.env` + the live collection). **The committed default stays `False`** (opt-in posture, §17.128-family rationale); this host opts in via `.env`.

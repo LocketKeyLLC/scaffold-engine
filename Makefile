@@ -306,7 +306,7 @@ check-next-actions: ## §17.195 — Verify pipelines/_vendor/_next_actions.py is
 	fi
 	@echo "✓ pipelines/_vendor/_next_actions.py is in sync with sdk/scaffold_client/next_actions.py."
 
-ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + golden retrieval sidecar + bench regression gates (§17.352). Runs locally OR via self-hosted CI; requires the orchestrator + Milvus + Postgres + Redis + Ollama stack to be live.
+ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + golden retrieval gate (§17.550 corpus set, floors cov5>=70%/mrr>=0.55) + bench regression gates (§17.352). Runs locally OR via self-hosted CI; requires the orchestrator + Milvus + Postgres + Redis + Ollama stack to be live.
 	@set -euo pipefail; \
 	printf '\033[1;36m== §17.247 tier 2 — full-stack integration ==\033[0m\n'; \
 	printf '\033[1;36m-- step 1/5: orchestrator /health --\033[0m\n'; \
@@ -334,10 +334,17 @@ ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + g
 		-w /code \
 		scaffold-engine:dev \
 		python3 scripts/score_retrieval.py \
+			--golden tests/fixtures/golden_set_corpus.json \
 			--output /host-tmp/retrieval_report_ci_tier_2.json \
 		2>&1 | grep -vE "reranker_decision|provenance_fetch_failed|Loading weights" | tail -15; \
-	python3 -c "import json,sys; d=json.load(open('/tmp/ci-tier-2/retrieval_report_ci_tier_2.json')); \
-	print(f\"  ✓ coverage_at_5={d['coverage_at_5']:.1%}  coverage_at_10={d['coverage_at_10']:.1%}  mean_mrr={d['mean_title_mrr']:.3f}\")"; \
+	python3 -c "import json,sys,os; \
+	d=json.load(open('/tmp/ci-tier-2/retrieval_report_ci_tier_2.json')); \
+	c5=d['coverage_at_5']; c10=d['coverage_at_10']; mrr=d['mean_title_mrr']; \
+	min5=float(os.environ.get('RETRIEVAL_MIN_COV5','0.70')); \
+	minmrr=float(os.environ.get('RETRIEVAL_MIN_MRR','0.55')); \
+	print('  coverage_at_5=%.1f%%  coverage_at_10=%.1f%%  mean_mrr=%.3f  (§17.550 corpus set; floors cov5>=%.0f%% mrr>=%.2f)' % (c5*100,c10*100,mrr,min5*100,minmrr)); \
+	sys.exit(0 if (c5>=min5 and mrr>=minmrr) else 1)" \
+	|| { printf '\033[1;31m✗ retrieval quality below floor — corpus golden set §17.550 (override: RETRIEVAL_MIN_COV5 / RETRIEVAL_MIN_MRR)\033[0m\n'; exit 1; }; \
 	printf '\033[1;36m-- step 5/5: bench regression gates (§17.352) --\033[0m\n'; \
 	$(MAKE) bench-check; \
 	printf '\033[1;32mAll tier 2 checks passed.\033[0m\n'
