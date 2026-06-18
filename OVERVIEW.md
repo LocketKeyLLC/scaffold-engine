@@ -21983,6 +21983,21 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.543 Perf — semaphore-bounded concurrent SearXNG fan-out in the research loop (2026-06-17)
+
+**Motivation.** `_search_queries` ran each search serially with `await asyncio.sleep(research_searxng_delay)` (1.5s) after every cache-miss query. With up to `research_max_queries` (8) misses that's ≥12s of wall-clock per research iteration, ×N iterations. (Cache hits already `continue`d before the sleep, so the delay only ever applied to misses — the "even on cache hits" framing in the audit was wrong.)
+
+**Why not just `gather` and drop the delay.** The delay is deliberate politeness — the homelab SearXNG fans out to upstream engines that rate-limit. So the fix keeps the cooldown but stops it being a strict serial barrier.
+
+**Change** (`app/modules/research_agent.py` + `app/config.py`):
+- New config `research_searxng_concurrency` (default 3, 1–8).
+- `_search_queries` restructured into 3 phases: (1) sequential dedup + cache-hit resolution (cheap Redis gets); (2) cache-MISS queries fetched concurrently under `asyncio.Semaphore(concurrency)`, with `asyncio.sleep(delay)` held **inside** each slot as a cooldown (effective rate ≈ concurrency/delay, still polite); (3) URL dedup done sequentially after the gather so `url_history` stays race-free and the winning duplicate is deterministic.
+- `search_history` semantics preserved exactly: added on a received response (200 or non-200), left un-added on exception so a later iteration may retry. Within-batch dup queries are deduped via a `seen_in_batch` set before dispatch.
+
+**Verification.** Research unit suite green — `test_research_agent_core` (incl. `TestSearchQueries`), `_searxng_engines`, `_helpers`, `quick_research`, `_lifecycle`, `_topic_bypass` = **50 passed** in the dev image. The 3 `TestSearchQueries` tests needed `mock_settings.research_searxng_concurrency = 3` added (they patch `settings` wholesale; without it `asyncio.Semaphore(MagicMock)` raised) — a test-mock update, not a logic fix. Live smoke against the real SearXNG (3 distinct queries): 20 unique-URL results, **2.6s vs ≥4.5s+net serial**, no upstream throttling/errors; the 20-result cap (`research_max_urls_per_iteration`) truncation order matches pre-change behavior.
+
+---
+
 ### §17.542 Perf — parallelize per-partition Milvus search fan-out (vector / BM25 / LIKE) (2026-06-17)
 
 **Motivation.** Under partition-key isolation `_vector_search`, `_bm25_search`, and `_keyword_search_like` each fan out one `collection.search/query()` per domain partition, but did so **serially** inside a single `_sync()` closure on one executor thread. With `domain=None` (cross-domain retrieval) that's N sequential Milvus round-trips; the common `domain_hint` path is 2 partitions (`{hint, "llm"}`, §17.188).

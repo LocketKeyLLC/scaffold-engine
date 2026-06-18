@@ -436,65 +436,85 @@ async def _search_queries(
     """Run SearXNG searches with URL + case-insensitive query dedup."""
     from app.utils.http_clients import get_searxng_client
 
-    all_results = []
     client = get_searxng_client()
 
+    # §17.543 — Phase 1: dedup queries + resolve cache hits sequentially (cheap
+    # Redis gets). Each result group is (facet, [result dicts]); facet travels
+    # with its results so the concurrent fan-out below stays order-independent.
+    cache_groups: list[tuple[str, list[dict]]] = []
+    pending: list[dict] = []
+    seen_in_batch: set[str] = set()
     for q in queries[:settings.research_max_queries]:
         query_text = (q["query"] or "").strip()
         query_key = query_text.lower()
-        if not query_key or query_key in state.search_history:
+        if not query_key or query_key in state.search_history or query_key in seen_in_batch:
             continue
-
+        seen_in_batch.add(query_key)
         cached = await _searxng_cache_get(query_text)
         if cached is not None:
             logger.info("searxng_cache_hit: query=%s results=%d", query_text, len(cached))
-            for r in cached:
-                url = r.get("url", "")
-                if url and url not in state.url_history:
-                    state.url_history.add(url)
-                    all_results.append({
-                        "title": r.get("title", ""),
-                        "url": url,
-                        "content": r.get("content", ""),
-                        "facet": q.get("facet", ""),
-                    })
             state.search_history.add(query_key)
-            continue
+            cache_groups.append((q.get("facet", ""), cached))
+        else:
+            pending.append(q)
 
-        try:
-            # §17.503 — send ONLY `engines`, NOT `categories`. SearXNG treats
-            # the two as ADDITIVE: passing `categories=it` activates *every*
-            # engine tagged `it` (including MDN, which keyword-matches
-            # aggressively) regardless of the curated `engines` list, so a
-            # clean homelab query flooded with developer.mozilla.org pages.
-            # Engines-only makes the curated list authoritative.
-            resp = await client.get(
-                "/search",
-                params={
-                    "q": query_text,
-                    "format": "json",
-                    "engines": _engines_for_category(q.get("search_category", "general")),
-                },
-            )
-            if resp.status_code == 200:
-                results = resp.json().get("results", [])[:10]
-                await _searxng_cache_set(query_text, results)
-                logger.info("searxng_cache_miss: query=%s results=%d", query_text, len(results))
-                for r in results:
-                    url = r.get("url", "")
-                    if url and url not in state.url_history:
-                        state.url_history.add(url)
-                        all_results.append({
-                            "title": r.get("title", ""),
-                            "url": url,
-                            "content": r.get("content", ""),
-                            "facet": q.get("facet", ""),
-                        })
-            state.search_history.add(query_key)
-        except Exception as e:
-            logger.warning("research_search_failed: query='%s' error=%s", query_text, e)
+    # §17.543 — Phase 2: fetch cache-MISS queries concurrently, bounded by a
+    # semaphore. The per-query delay is held INSIDE the slot as a cooldown, so
+    # the effective request rate stays ~concurrency/delay — politeness to the
+    # upstream engines SearXNG fans out to, just no longer a strict serial wait.
+    sem = asyncio.Semaphore(settings.research_searxng_concurrency)
 
-        await asyncio.sleep(settings.research_searxng_delay)
+    async def _fetch_one(q: dict) -> tuple[str, list[dict]]:
+        query_text = (q["query"] or "").strip()
+        query_key = query_text.lower()
+        async with sem:
+            try:
+                # §17.503 — send ONLY `engines`, NOT `categories`. SearXNG treats
+                # the two as ADDITIVE: passing `categories=it` activates *every*
+                # engine tagged `it` (including MDN, which keyword-matches
+                # aggressively) regardless of the curated `engines` list, so a
+                # clean homelab query flooded with developer.mozilla.org pages.
+                # Engines-only makes the curated list authoritative.
+                resp = await client.get(
+                    "/search",
+                    params={
+                        "q": query_text,
+                        "format": "json",
+                        "engines": _engines_for_category(q.get("search_category", "general")),
+                    },
+                )
+                if resp.status_code == 200:
+                    results = resp.json().get("results", [])[:10]
+                    await _searxng_cache_set(query_text, results)
+                    logger.info("searxng_cache_miss: query=%s results=%d", query_text, len(results))
+                    state.search_history.add(query_key)
+                    return q.get("facet", ""), results
+                # Non-200: mark attempted (matches pre-§17.543 behavior) but no results.
+                state.search_history.add(query_key)
+            except Exception as e:
+                # Exception leaves query_key un-added so a later iteration may retry.
+                logger.warning("research_search_failed: query='%s' error=%s", query_text, e)
+            finally:
+                await asyncio.sleep(settings.research_searxng_delay)
+        return q.get("facet", ""), []
+
+    miss_groups = await asyncio.gather(*[_fetch_one(q) for q in pending]) if pending else []
+
+    # §17.543 — Phase 3: dedup URLs sequentially across all groups. Done after
+    # the gather (single coroutine) so url_history stays race-free and the
+    # winning duplicate is deterministic (cache hits first, then misses).
+    all_results: list[dict] = []
+    for facet, results in [*cache_groups, *miss_groups]:
+        for r in results:
+            url = r.get("url", "")
+            if url and url not in state.url_history:
+                state.url_history.add(url)
+                all_results.append({
+                    "title": r.get("title", ""),
+                    "url": url,
+                    "content": r.get("content", ""),
+                    "facet": facet,
+                })
 
     return all_results[:settings.research_max_urls_per_iteration]
 

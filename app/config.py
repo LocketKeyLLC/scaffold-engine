@@ -414,6 +414,10 @@ class Settings(BaseSettings):
     ideation_max_distill_results: int = Field(default=15, ge=1, le=200)
     research_max_urls_per_iteration: int = Field(default=20, ge=1, le=200)
     research_searxng_delay: float = Field(default=1.5, ge=0.0, le=60.0)
+    # §17.543 — max concurrent SearXNG searches per iteration. The delay above
+    # is held inside each slot as a cooldown, so effective request rate is
+    # ~concurrency / delay. Keep small to stay polite to upstream engines.
+    research_searxng_concurrency: int = Field(default=3, ge=1, le=8)
     research_chunk_size: int = Field(default=1500, ge=100, le=50000)
     research_timeout: int = Field(default=3600, ge=1, le=86400)
     github_token: str = ""

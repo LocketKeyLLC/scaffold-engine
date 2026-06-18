@@ -106,6 +106,7 @@ class TestSearchQueries:
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock):
             mock_settings.research_max_queries = 10
             mock_settings.research_searxng_delay = 0
+            mock_settings.research_searxng_concurrency = 3
             mock_settings.research_max_urls_per_iteration = 20
             from app.modules.research_agent import _search_queries, ResearchState
 
@@ -135,6 +136,7 @@ class TestSearchQueries:
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock):
             mock_settings.research_max_queries = 10
             mock_settings.research_searxng_delay = 0
+            mock_settings.research_searxng_concurrency = 3
             mock_settings.research_max_urls_per_iteration = 20
             from app.modules.research_agent import _search_queries, ResearchState
 
@@ -157,6 +159,7 @@ class TestSearchQueries:
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock):
             mock_settings.research_max_queries = 10
             mock_settings.research_searxng_delay = 0
+            mock_settings.research_searxng_concurrency = 3
             mock_settings.research_max_urls_per_iteration = 20
             from app.modules.research_agent import _search_queries, ResearchState
 
