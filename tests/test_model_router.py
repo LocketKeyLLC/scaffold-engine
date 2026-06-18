@@ -135,6 +135,61 @@ async def test_coaxing_floors_max_tokens_for_thinking_model():
 
 
 # ---------------------------------------------------------------------------
+# §17.548 — native-first tool call with coaxing fallback
+# ---------------------------------------------------------------------------
+_TOOL = None
+
+
+def _mk_tool():
+    return model_router.Tool(
+        name="record", description="x",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+
+@pytest.mark.smoke
+async def test_native_first_keeps_native_when_tool_calls_present():
+    """A tool-capable model that emits tool_calls keeps the single native call —
+    no coaxing fallback."""
+    class P:
+        async def tool_call(self, model, messages, tools, *, temperature, max_tokens, tool_choice):
+            return model_router.ModelResponse(
+                model=model, success=True,
+                tool_calls=[model_router.ToolCall(id="t0", name="record", arguments={"entries": [1]})],
+            )
+
+    with patch.object(model_router, "_tool_call_via_coaxing", AsyncMock()) as coax:
+        resp = await model_router._native_first_then_coax(
+            P(), "kimi-k2.7-code:cloud", [{"role": "user", "content": "hi"}], [_mk_tool()],
+            temperature=0.1, max_tokens=100, tool_choice="auto", role=None, fallback=None,
+        )
+    assert resp.tool_calls and resp.tool_calls[0].name == "record"
+    coax.assert_not_called()
+
+
+@pytest.mark.smoke
+async def test_native_first_falls_back_to_coax_on_prose():
+    """Native success but NO tool_calls (model answered in prose) → coaxing."""
+    class P:
+        async def tool_call(self, model, messages, tools, *, temperature, max_tokens, tool_choice):
+            return model_router.ModelResponse(model=model, success=True, text="prose", tool_calls=[])
+
+    async def _coax(*a, **k):
+        return model_router.ModelResponse(
+            model="kimi-k2.7-code:cloud", success=True,
+            tool_calls=[model_router.ToolCall(id="coaxed_0", name="record", arguments={"entries": [1, 2]})],
+        )
+
+    with patch.object(model_router, "_tool_call_via_coaxing", side_effect=_coax) as coax:
+        resp = await model_router._native_first_then_coax(
+            P(), "kimi-k2.7-code:cloud", [{"role": "user", "content": "hi"}], [_mk_tool()],
+            temperature=0.1, max_tokens=100, tool_choice="auto", role=None, fallback=None,
+        )
+    coax.assert_called_once()
+    assert resp.tool_calls and resp.tool_calls[0].id == "coaxed_0"
+
+
+# ---------------------------------------------------------------------------
 # _call_ollama — response parsing + error paths
 # ---------------------------------------------------------------------------
 def _mk_response(status: int, payload: dict | None = None, text: str = ""):

@@ -575,13 +575,11 @@ async def tool_call(
             getattr(provider, "supports_native_tools", False)
             and not _model_lacks_native_tools(resolved_model)
         ):
-            resp = await provider.tool_call(
-                resolved_model, messages, tools,
+            resp = await _native_first_then_coax(
+                provider, resolved_model, messages, tools,
                 temperature=temperature, max_tokens=max_tokens,
-                tool_choice=tool_choice,
+                tool_choice=tool_choice, role=role, fallback=fallback,
             )
-            if not resp.success:
-                resp.error = _format_provider_error(resp, role)
             return await _record_call(resp)
         coaxed = await _tool_call_via_coaxing(
             provider, resolved_model, messages, tools,
@@ -598,10 +596,10 @@ async def tool_call(
         getattr(provider, "supports_native_tools", False)
         and not _model_lacks_native_tools(model)
     ):
-        resp = await provider.tool_call(
-            model, messages, tools,
+        resp = await _native_first_then_coax(
+            provider, model, messages, tools,
             temperature=temperature, max_tokens=max_tokens,
-            tool_choice=tool_choice,
+            tool_choice=tool_choice, role=None, fallback=fallback,
         )
         return await _record_call(resp)
     coaxed = await _tool_call_via_coaxing(
@@ -610,6 +608,47 @@ async def tool_call(
         role=None, fallback=fallback,
     )
     return await _record_call(coaxed)
+
+
+async def _native_first_then_coax(
+    provider,
+    model: str,
+    messages: list[dict[str, str]],
+    tools: list[Tool],
+    *,
+    temperature: float,
+    max_tokens: int,
+    tool_choice: str,
+    role: str | None,
+    fallback: str | None,
+) -> ModelResponse:
+    """§17.548 — native-first tool call with a coaxing fallback.
+
+    Tries the provider's native ``tool_call``. If the model succeeds but emits
+    NO ``tool_calls`` (it answered in prose — common when the prompt doesn't
+    compel the tool, and this Ollama ignores ``tool_choice`` so we can't force
+    it), fall back to the JSON-coaxing path and parse the structured output
+    from content. Tool-capable models that DO call the tool keep the clean,
+    single-call native path; everything else still gets structured output.
+    """
+    resp = await provider.tool_call(
+        model, messages, tools,
+        temperature=temperature, max_tokens=max_tokens, tool_choice=tool_choice,
+    )
+    if tools and resp.success and not resp.tool_calls:
+        logger.info(
+            "tool_call_native_empty_coax_fallback: model=%s role=%s "
+            "(native returned no tool_calls; retrying via coaxing)",
+            model, role,
+        )
+        return await _tool_call_via_coaxing(
+            provider, model, messages, tools,
+            temperature=temperature, max_tokens=max_tokens,
+            role=role, fallback=fallback,
+        )
+    if not resp.success and role:
+        resp.error = _format_provider_error(resp, role)
+    return resp
 
 
 async def _tool_call_via_coaxing(
@@ -779,6 +818,7 @@ async def validate_models(overrides: dict | None = None) -> Optional[list[str]]:
     OLLAMA_ROLES = [
         "model_general", "model_verifier", "model_coder",
         "model_router", "model_fallback", "model_cloud_alt",
+        "model_research_extract",
     ]
     needed = {role: get_model(role, overrides) for role in OLLAMA_ROLES}
 

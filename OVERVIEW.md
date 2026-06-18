@@ -21991,6 +21991,21 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.548 Feat — research extraction does native tool-calling (native-first + coaxing fallback) on a tool-capable model (2026-06-18)
+
+**Why.** §17.547 made research extraction *work* (coaxing on `qwen3.5:397b-cloud`), but always via the JSON-coaxing workaround — the thinking model never emits native `tool_calls`. Wanted genuine native tool-calling on a capable model, with coaxing only as a safety net.
+
+**Investigation.** A raw `/api/chat` call with an unambiguous tool task → `kimi-k2.7-code:cloud` and `qwen3-coder-next:cloud` both emit real `tool_calls`, so native tool-calling **does** work in this Ollama. The 100% miss had two prompt/config causes: (a) `EXTRACT_SYSTEM_V1` instructed the model to *output a JSON array in content* — never to call a tool — so models correctly put JSON in `content`, not `tool_calls`; (b) Ollama's `/api/chat` **ignores `tool_choice`** here (`"required"` did not force a call), so the tool can't be compelled — it depends entirely on the prompt.
+
+**Change (3 parts).**
+1. **Native-first + coaxing fallback** (`model_router._native_first_then_coax`): try the native `tool_call`; if it succeeds but returns no `tool_calls` (model answered in prose), auto-fall-back to `_tool_call_via_coaxing`. Tool-capable models keep the clean single native call; anything else still gets structured output. Used by both the role and model dispatch branches.
+2. **Tool-oriented prompt**: `EXTRACT_SYSTEM_V1` now instructs the model to call `record_entries` (the field list is kept as the tool's arg description); the content-JSON `OUTPUT FORMAT` block is gone. The coaxing fallback re-injects a JSON instruction on its own, so the prompt works for both paths.
+3. **Tool-capable extraction model**: new role `model_research_extract` (default `kimi-k2.7-code:cloud`, provider ollama; added to `ROLE_FIELDS` + `validate_models`'s `OLLAMA_ROLES`). The three research extraction call sites (`_extract_entries` + the URL/PDF-mode variants) now use it instead of `model_verifier`, and their `max_tokens` went 1024→4096 (a 5–15-entry tool call doesn't fit in 1024). `model_verifier` stays `qwen3.5:397b-cloud` for verification/faithfulness/CoVe (still coaxed via the §17.547 deny-list).
+
+**Verification.** `test_model_router.py` (+2 native-first tests) + tool_call + config + research extraction = **116 passed** in the dev image; 10 model-override/switchable tests green (new role is switchable, no schema/valves cascade — `SWITCHABLE_ROLE_FIELDS` is only consumed by the runtime-override endpoint). Live (fresh-process + live cloud), production extraction path `role=model_research_extract`: **3/3 runs went NATIVE** (no coax fallback needed) producing 5 entries each — vs the §17.547 measurement of **0/16** on `qwen3.5`.
+
+---
+
 ### §17.547 Fix — per-model native-tools gate: thinking models route to coaxing (fixes 100% tool-call miss) (2026-06-18)
 
 **Measurement (the §17.546 follow-up).** Ran the exact production extraction path (`EXTRACT_*` prompts + `RECORD_ENTRIES_TOOL` + `model_router.tool_call`, `role="model_verifier"`) over 16 controlled calls: **16/16 misses** (0 parseable `entries`) at both `max_tokens=1024` and `4096`. So LLM research extraction was silently falling back to non-LLM chunking for **every** distilled URL.

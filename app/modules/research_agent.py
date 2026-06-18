@@ -204,7 +204,8 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
 }"""
 
 EXTRACT_SYSTEM_V1 = """You are a knowledge extraction engine. Given search results about a topic,
-extract atomic, self-contained factual entries.
+extract atomic, self-contained factual entries and record them by calling the
+`record_entries` tool.
 
 Rules:
 - Each entry is ONE fact that can be understood without surrounding context
@@ -214,18 +215,16 @@ Rules:
 - 5-15 entries per batch
 - Content must NOT contain escaped quotes or backslashes
 
-OUTPUT FORMAT (strict JSON array, no markdown fences):
-[
-  {
-    "title": "Short descriptive title",
-    "content": "Self-contained factual statement. Technically precise.",
-    "tags": "comma,separated,tags",
-    "source": "URL",
-    "confidence_score": 0.85,
-    "source_type": "tech_docs|news|community|official_docs|curated",
-    "facet": "which facet of the topic this covers"
-  }
-]"""
+Call `record_entries` with an `entries` array; each entry has:
+- title: Short descriptive title
+- content: Self-contained factual statement. Technically precise.
+- tags: comma,separated,tags
+- source: the URL the fact came from
+- confidence_score: 0.0-1.0 (see the confidence rule above)
+- source_type: one of tech_docs|news|community|official_docs|curated
+- facet: which facet of the topic this covers
+
+Respond ONLY by calling the tool — do not write a prose answer."""
 
 EXTRACT_PROMPT_V1 = """Extract factual knowledge entries from these search results about: {topic}
 
@@ -523,7 +522,7 @@ async def _extract_entries(
     results: list[dict],
     topic: str,
     *,
-    role: str = "model_verifier",
+    role: str = "model_research_extract",
     overrides: dict | None = None,
     session_id: str | None = None,
 ) -> list[dict]:
@@ -621,7 +620,7 @@ async def _extract_entries(
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=topic, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],
-            role=role, overrides=overrides, temperature=0.1, max_tokens=1024,
+            role=role, overrides=overrides, temperature=0.1, max_tokens=4096,
             session_id=session_id,
         )
 
@@ -1536,10 +1535,10 @@ async def _run_research_url_mode(
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=prompt_topic, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],
-            role="model_verifier",
+            role="model_research_extract",
             overrides=overrides,
             temperature=0.1,
-            max_tokens=1024,
+            max_tokens=4096,
             session_id=session_id,
         ))
         async for hb in _await_with_heartbeat(
@@ -1706,10 +1705,10 @@ async def _run_research_pdf_mode(
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=filename, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],
-            role="model_verifier",
+            role="model_research_extract",
             overrides=overrides,
             temperature=0.1,
-            max_tokens=1024,
+            max_tokens=4096,
             session_id=session_id,
         ))
         async for hb in _await_with_heartbeat(

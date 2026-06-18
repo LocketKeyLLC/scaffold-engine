@@ -32,6 +32,7 @@ ROLE_FIELDS = frozenset({
     "model_coder",
     "model_general",
     "model_verifier",
+    "model_research_extract",
     "model_cloud_heavy",
     "model_cloud_alt",
     "model_fallback",
@@ -304,6 +305,12 @@ class Settings(BaseSettings):
     # design wait for an expensive 10-iter futile loop.
     device_sizing_max_iterations: int = Field(default=3, ge=1, le=10)
     model_verifier: str = "qwen3.5:397b-cloud"
+    # §17.548 — research extraction (record_entries tool call). Points at a
+    # tool-CAPABLE model (kimi emits native tool_calls) rather than the
+    # thinking model_verifier (qwen3.5, which never does — see §17.547), so the
+    # native-first path in tool_call actually fires; the coaxing fallback still
+    # catches any batch where the model answers in prose.
+    model_research_extract: str = "kimi-k2.7-code:cloud"
     model_cloud_heavy: str = "qwen3.5:397b-cloud"
     model_cloud_alt: str = "qwen3.5:397b-cloud"
     model_fallback: str = "qwen3.5:latest"
@@ -336,6 +343,7 @@ class Settings(BaseSettings):
     # of silently returning ProviderError at first dispatch.
     model_general_provider: ProviderName = "ollama"
     model_verifier_provider: ProviderName = "ollama"
+    model_research_extract_provider: ProviderName = "ollama"
     model_coder_provider: ProviderName = "ollama"
     model_router_provider: ProviderName = "ollama"
     model_fallback_provider: ProviderName = "ollama"
