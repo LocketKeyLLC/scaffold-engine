@@ -21983,6 +21983,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.541 UX — surface real error detail in scaffold_router auto-chain failures; clarify stall/409 recovery (2026-06-17)
+
+**Motivation.** Audit of the OWUI command surface found several auto-chain failure paths that swallowed the orchestrator's actual error and showed a generic line, while a better extraction pattern already existed in-file (research-phase handler, ~line 1696: `r.json().get("message") or r.json().get("detail") or r.text[:200]`). Users hit "I had trouble with that request" / "I wasn't able to plan that" with no HTTP status, no detail, and (for stalls) no sign their work survived.
+
+**Changes** (all in `pipelines/scaffold_router.py`, string-only, no control-flow change):
+- `/go` Phase-1 `/ideate` ≥400 (was ~2302): now extracts `message`/`detail`/`text[:200]` and shows `HTTP {status}: {err}` before "Could you rephrase it?".
+- `/go` Phase-3 `/dag` ≥400 (was ~2378): same extraction, plus the retry hint is pulled to the front and bolded — **"Research is done — retry just this step with `/dag {job_id}`"** — instead of being buried after a generic line.
+- Research-stream `stream_stalled` (was ~2586): now tells the user research may still be running in the background and to check `/jobs`, instead of a bare "Closing."
+- Execute-stream `409` (was ~2712): now names the in-scope `job_id` and points to `/results {job_id}` instead of a context-free "already being processed."
+
+**Verification.** `python3 -m py_compile pipelines/scaffold_router.py` clean; confirmed `job_id` is the first param of `_execute_and_stream` (in scope for the 409 edit) and the error-extraction mirrors the existing line-1696 pattern. **Not yet live-smoked in OWUI** — these are display-only strings on already-exercised error branches; behavior is unchanged.
+
+---
+
 ### §17.540 Fix — latent `_sse_with_disconnect_watch` import broke the streaming guide/handoff (HTTP 500) (2026-06-17)
 
 **Symptom.** Once §17.539 first routed a real user into the streaming guide, OWUI showed **HTTP 500**. Orchestrator log: `ImportError: cannot import name '_sse_with_disconnect_watch' from 'app.main'` on `POST /assist/{sid}/guide/stream`.

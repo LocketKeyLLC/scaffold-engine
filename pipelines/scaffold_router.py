@@ -2300,7 +2300,14 @@ class Pipeline:
 
         r = res
         if r.status_code >= 400:
-            yield "\nI had trouble with that request. Could you rephrase it?"
+            try:
+                err = r.json().get("message") or r.json().get("detail") or r.text[:200]
+            except Exception:
+                err = r.text[:200]
+            yield (
+                f"\n⚠️ I had trouble with that request (HTTP {r.status_code}): {err}\n"
+                f"Could you rephrase it?"
+            )
             return
         try:
             data = r.json()
@@ -2376,10 +2383,14 @@ class Pipeline:
             return
         r = res
         if r.status_code >= 400:
-            yield "\n\nI wasn't able to plan that. Please rephrase or simplify."
+            try:
+                err = r.json().get("message") or r.json().get("detail") or r.text[:200]
+            except Exception:
+                err = r.text[:200]
             yield (
-                f"\n\nResearch finished — only the plan step failed. "
-                f"Retry with `/dag {job_id}` or check status with `/jobs`.\n"
+                f"\n\n❌ Planning failed (HTTP {r.status_code}): {err}\n"
+                f"**Research is done — retry just this step with `/dag {job_id}`** "
+                f"(or check status with `/jobs`).\n"
             )
             return
         try:
@@ -2583,7 +2594,9 @@ class Pipeline:
                 if event_type == "heartbeat":
                     yield "\u200b"
                 elif event_type == "stream_stalled":
-                    yield f"\n⚠️ **Stream stalled** — no data in {payload.get('idle_seconds','?')}s. Closing.\n"
+                    yield (f"\n⚠️ **Stream stalled** — no data in {payload.get('idle_seconds','?')}s. "
+                           f"Research may still be running in the background — "
+                           f"check `/jobs` for current status.\n")
                     return
                 elif event_type == "error":
                     yield from self._render_error_event(payload); return
@@ -2709,7 +2722,9 @@ class Pipeline:
                     yield "\u200b"; continue
                 if msg_type == "http_error":
                     if f1 == 409:
-                        yield "That question is already being processed. Please wait."
+                        yield (f"Job `{job_id}` is already being processed. "
+                               f"Check progress with `/results {job_id}`, "
+                               f"or wait a moment before retrying.")
                         return
                     hint = self._drift_hint() if f1 == 401 else ""
                     yield f"⚠️ Execution failed (HTTP {f1}). Please try again.{hint}"
