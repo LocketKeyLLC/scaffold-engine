@@ -21983,6 +21983,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.542 Perf — parallelize per-partition Milvus search fan-out (vector / BM25 / LIKE) (2026-06-17)
+
+**Motivation.** Under partition-key isolation `_vector_search`, `_bm25_search`, and `_keyword_search_like` each fan out one `collection.search/query()` per domain partition, but did so **serially** inside a single `_sync()` closure on one executor thread. With `domain=None` (cross-domain retrieval) that's N sequential Milvus round-trips; the common `domain_hint` path is 2 partitions (`{hint, "llm"}`, §17.188).
+
+**Safety basis.** Concurrent `collection.search()` on the *same* `Collection` is already in production — the vector and keyword legs run under one `asyncio.gather` (rag_pipeline.py ~806), each with its own `run_in_executor`. So two concurrent same-Collection searches already happen every query; the per-partition fan-out is strictly more of the same proven pattern, not a new concurrency model.
+
+**Change.** Each of the three functions: the per-domain body was lifted out of the `for d in domains` loop into a `_search_one(d)` helper (per-domain try/except preserved, so one failing partition no longer aborts the rest — it returns `[]` and the others proceed), then dispatched via `asyncio.gather(*[loop.run_in_executor(None, _search_one, d) for d in domains])`. Results are flattened, sorted by score desc, truncated to `top_k` — identical merge semantics to before. Added an early `if collection is None: return []` guard before the gather.
+
+**Verification.** RAG unit suite green — `test_rag_pipeline{,_cache,_smoke}.py` + `test_rag_protocol.py` = **85 passed** in the dev image, running the volume-mounted new code (confirmed container sees `§17.542`). Live end-to-end against real Milvus (`query_rag('…', domain=None)`): `status: ok`, 3 results correctly merged across 3 partitions (`rag`/`eng`/`llm`), no concurrency errors. Note: the long-running uvicorn process holds pre-change code in memory until the next orchestrator restart; the new fan-out has been exercised via fresh-process import + live Milvus, not yet via the live HTTP endpoint.
+
+---
+
 ### §17.541 UX — surface real error detail in scaffold_router auto-chain failures; clarify stall/409 recovery (2026-06-17)
 
 **Motivation.** Audit of the OWUI command surface found several auto-chain failure paths that swallowed the orchestrator's actual error and showed a generic line, while a better extraction pattern already existed in-file (research-phase handler, ~line 1696: `r.json().get("message") or r.json().get("detail") or r.text[:200]`). Users hit "I had trouble with that request" / "I wasn't able to plan that" with no HTTP status, no detail, and (for stalls) no sign their work survived.
