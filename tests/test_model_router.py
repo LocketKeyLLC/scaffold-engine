@@ -57,6 +57,84 @@ def test_smart_fallback_returns_default_for_non_code():
 
 
 # ---------------------------------------------------------------------------
+# §17.547 — per-model native-tools gate (qwen3.5 thinking models → coaxing)
+# ---------------------------------------------------------------------------
+@pytest.mark.smoke
+def test_model_lacks_native_tools_flags_qwen35():
+    # Default deny-list is ["qwen3.5"] — the measured 100%-miss thinking model.
+    assert model_router._model_lacks_native_tools("qwen3.5:397b-cloud") is True
+    assert model_router._model_lacks_native_tools("qwen3.5:latest") is True
+    assert model_router._model_lacks_native_tools("QWEN3.5:foo") is True  # case-insensitive
+    assert model_router._model_lacks_native_tools("qwen2.5-coder:7b") is False
+    assert model_router._model_lacks_native_tools("") is False
+
+
+@pytest.mark.smoke
+async def test_tool_call_routes_coax_model_through_coaxing():
+    """A deny-listed model must skip the native provider path and use coaxing,
+    even though the Ollama provider advertises supports_native_tools=True."""
+    from app.providers import get_provider
+
+    provider = get_provider("ollama")
+    native = AsyncMock()  # must NOT be called for a coax-listed model
+
+    async def _coax(*a, **k):
+        return model_router.ModelResponse(
+            model="qwen3.5:397b-cloud", success=True, text="ok",
+        )
+
+    tool = model_router.Tool(
+        name="record", description="x",
+        input_schema={"type": "object", "properties": {}},
+    )
+    with patch.object(provider, "tool_call", native), \
+         patch.object(model_router, "_tool_call_via_coaxing", side_effect=_coax) as coax_mock, \
+         patch.object(model_router, "_record_call", AsyncMock(side_effect=lambda r: r)):
+        resp = await model_router.tool_call(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[tool], model="qwen3.5:397b-cloud",
+        )
+    assert resp.success is True
+    native.assert_not_called()
+    coax_mock.assert_called_once()
+
+
+@pytest.mark.smoke
+async def test_coaxing_floors_max_tokens_for_thinking_model():
+    """§17.547 — coaxed tool calls on a thinking model get max_tokens floored
+    (so reasoning doesn't consume the whole budget before the JSON); other
+    coaxed models keep the caller's value."""
+    from app.config import settings
+
+    captured: dict = {}
+
+    class FakeProvider:
+        async def chat_completion(self, model, messages, *, temperature, max_tokens, fallback):
+            captured["max_tokens"] = max_tokens
+            return model_router.ModelResponse(model=model, success=True, text='{"entries": []}')
+
+    tool = model_router.Tool(
+        name="record", description="x",
+        input_schema={"type": "object", "properties": {}},
+    )
+    msgs = [{"role": "user", "content": "hi"}]
+
+    # Thinking model: caller's tight 1024 is floored up.
+    await model_router._tool_call_via_coaxing(
+        FakeProvider(), "qwen3.5:397b-cloud", msgs, [tool],
+        temperature=0.1, max_tokens=1024, role=None, fallback=None,
+    )
+    assert captured["max_tokens"] == settings.tool_call_coax_min_tokens
+
+    # Non-thinking model: caller's value is preserved.
+    await model_router._tool_call_via_coaxing(
+        FakeProvider(), "qwen2.5:7b", msgs, [tool],
+        temperature=0.1, max_tokens=1024, role=None, fallback=None,
+    )
+    assert captured["max_tokens"] == 1024
+
+
+# ---------------------------------------------------------------------------
 # _call_ollama — response parsing + error paths
 # ---------------------------------------------------------------------------
 def _mk_response(status: int, payload: dict | None = None, text: str = ""):

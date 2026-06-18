@@ -78,6 +78,19 @@ def _timeout_for(model: str) -> int:
     return settings.cloud_timeout if _is_cloud(model) else settings.local_timeout
 
 
+def _model_lacks_native_tools(model: str) -> bool:
+    """§17.547 — True if ``model`` is known not to emit native ``tool_calls``.
+
+    Ollama's ``supports_native_tools`` flag is provider-wide, but tool-call
+    support is really per-model: qwen3.5 thinking models return their answer in
+    content/thinking and never populate ``message.tool_calls``, yielding a 100%
+    tool-call miss. ``tool_call`` routes these through the JSON-coaxing fallback
+    instead. Substring match (case-insensitive) on ``settings.tool_call_coax_models``.
+    """
+    m = (model or "").lower()
+    return any(sub.lower() in m for sub in settings.tool_call_coax_models)
+
+
 def _smart_fallback(model: str, default_fallback: str) -> str:
     """Map non-existent models to appropriate fallbacks."""
     model_lower = model.lower()
@@ -558,7 +571,10 @@ async def tool_call(
 
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
-        if getattr(provider, "supports_native_tools", False):
+        if (
+            getattr(provider, "supports_native_tools", False)
+            and not _model_lacks_native_tools(resolved_model)
+        ):
             resp = await provider.tool_call(
                 resolved_model, messages, tools,
                 temperature=temperature, max_tokens=max_tokens,
@@ -578,7 +594,10 @@ async def tool_call(
     model = model or settings.model_general
     from app.providers import get_provider
     provider = get_provider("ollama")
-    if getattr(provider, "supports_native_tools", False):
+    if (
+        getattr(provider, "supports_native_tools", False)
+        and not _model_lacks_native_tools(model)
+    ):
         resp = await provider.tool_call(
             model, messages, tools,
             temperature=temperature, max_tokens=max_tokens,
@@ -633,9 +652,18 @@ async def _tool_call_via_coaxing(
     )
     augmented = [{"role": "system", "content": coaxing_system}] + list(messages)
 
+    # §17.547 — thinking models routed here (qwen3.5 et al.) spend tokens
+    # reasoning before the JSON; floor the budget so a tight caller value
+    # (e.g. research extraction's 1024) isn't consumed by reasoning alone.
+    effective_max = (
+        max(max_tokens, settings.tool_call_coax_min_tokens)
+        if _model_lacks_native_tools(model)
+        else max_tokens
+    )
+
     resp = await provider.chat_completion(
         model, augmented, temperature=temperature,
-        max_tokens=max_tokens, fallback=fallback,
+        max_tokens=effective_max, fallback=fallback,
     )
     if not resp.success:
         if role:

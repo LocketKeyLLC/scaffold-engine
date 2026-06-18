@@ -308,6 +308,22 @@ class Settings(BaseSettings):
     model_cloud_alt: str = "qwen3.5:397b-cloud"
     model_fallback: str = "qwen3.5:latest"
 
+    # §17.547 — models that do NOT reliably emit native `tool_calls`. qwen3.5
+    # thinking models put their answer in content/thinking and never populate
+    # message.tool_calls over Ollama's /api/chat, so a 100% tool-call miss was
+    # measured for research extraction (role=model_verifier=qwen3.5:397b-cloud).
+    # model_router.tool_call routes any model whose id contains one of these
+    # substrings (case-insensitive) through the JSON-coaxing fallback instead of
+    # the native path, even though the Ollama provider advertises
+    # supports_native_tools=True (that flag is provider-wide, not per-model).
+    tool_call_coax_models: list[str] = Field(default_factory=lambda: ["qwen3.5"])
+    # §17.547 — min token budget for coaxed tool calls on a thinking model. Such
+    # models spend tokens reasoning before emitting the JSON, so a tight caller
+    # budget (research extraction passes 1024) can be consumed by reasoning
+    # alone → empty output → entries=0. Floor it so the JSON survives. Only
+    # applied to tool_call_coax_models; other coaxed calls keep the caller value.
+    tool_call_coax_min_tokens: int = Field(default=4096, ge=512, le=32768)
+
     # Per-role provider routing (Sprint E). Each role names which backend
     # serves it; default "ollama" preserves pre-Sprint-E behavior. Override
     # with MODEL_<ROLE>_PROVIDER env vars. The reranker is exempt — it runs

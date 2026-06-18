@@ -2173,6 +2173,8 @@ Discovered during live verification of later work, outside the 2026-05-05 audit 
 
 1. ✅ **FIXED (§17.544, 2026-06-18)** — `app/model_router.py:273` (embedding calls got a non-embedding fallback). `_dispatch_with_retry` does `fallback = fallback or _smart_fallback(model, settings.model_fallback)`, which **silently discards the embed callers' explicit `fallback=None`** — both `app/providers/ollama.py:139` and `app/model_router.py:693` pass it deliberately to mean "embeddings have no fallback." The injected `settings.model_fallback` (`qwen3.5:latest`) is a chat model that returns `HTTP 501 "this model does not support embeddings"` on `/api/embed`. **Effect:** when a `/api/embed` call to `nomic-embed-text` fails — e.g. `HTTP 400 "input length exceeds context length"` on an over-long chunk — the router burns a guaranteed-doomed fallback round-trip (501, ~14s on the live smoke) before failing, adding latency + error-log noise. Observed live during the §17.543 research-ingest smoke (request_id `c456316c`, 2026-06-18). **Fixed in §17.544:** `_dispatch_with_retry` now guards the injection by endpoint (`if endpoint != "/api/embed"`), so `/api/embed` honors the callers' `fallback=None` and never attempts the chat-model fallback. The embedder is config-only (invariant), so there is no valid drop-in embedding fallback to inject anyway. **✅ Secondary FIXED (§17.545):** the originating `HTTP 400 input-length` (input exceeded the 2048-token embedder context) no longer drops the entry — both embed payloads now send `truncate=true`, so over-length input head-truncates to the embedder context instead of failing. (Full sub-chunking of over-long docs for complete tail coverage remains a possible future ingest enhancement, not an open bug.)
 
+2. ✅ **FIXED (§17.547, 2026-06-18)** — 100% native tool-call miss on `qwen3.5:397b-cloud` (`role="model_verifier"`). Measured 16/16 misses on the production research-extraction path: the thinking cloud model returns prose/thinking and never populates `message.tool_calls`, but `OllamaProvider.supports_native_tools=True` is provider-wide so every model is forced down the native path → `read_tool_args` returns `None` → silent fallback to non-LLM chunking for every distilled URL. Same miss affected the other `model_verifier` native-tool paths (`gt_extractor`, `execution_verify`, research decompose/gap). **Fixed in §17.547:** a per-model gate (`_model_lacks_native_tools`, `settings.tool_call_coax_models=["qwen3.5"]`) routes such models through the JSON-coaxing fallback, plus a `tool_call_coax_min_tokens=4096` floor so the thinking model's reasoning doesn't starve the JSON (the call site's `max_tokens=1024` was marginal). Live: production path went from 0/16 → 3/3 runs producing entries.
+
 ---
 
 ## 17. Sprint history + roadmap
@@ -21986,6 +21988,24 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **Verification.** Full SDK suite — **142 passed** (4 new: sync + async `follow_redirects is False`, stream connect→`ConnectionError`, stream timeout→`TimeoutError` — the missing regression for S2). ci-tier-0 green (no vendored file touched). Coverage honesty: deep-read the 6 core modules + scanned resource wrappers; did not exhaustively read the thin resource method bodies.
 
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
+### §17.547 Fix — per-model native-tools gate: thinking models route to coaxing (fixes 100% tool-call miss) (2026-06-18)
+
+**Measurement (the §17.546 follow-up).** Ran the exact production extraction path (`EXTRACT_*` prompts + `RECORD_ENTRIES_TOOL` + `model_router.tool_call`, `role="model_verifier"`) over 16 controlled calls: **16/16 misses** (0 parseable `entries`) at both `max_tokens=1024` and `4096`. So LLM research extraction was silently falling back to non-LLM chunking for **every** distilled URL.
+
+**Root cause (two compounding factors).**
+1. `role="model_verifier"` resolves to **`qwen3.5:397b-cloud`** — a *thinking* cloud model that returns its answer in content/thinking and never populates `message.tool_calls` over Ollama's `/api/chat`. But `OllamaProvider.supports_native_tools = True` is **provider-wide**, so every model is forced down the native tool path regardless of whether it actually emits tool calls.
+2. Even via the JSON-coaxing fallback, the extraction call's `max_tokens=1024` is marginal for a thinking model — reasoning can consume the whole budget before the JSON is emitted (flaky: 0 entries one run, 3 the next).
+
+**Fix.**
+- **Per-model gate** (`model_router._model_lacks_native_tools`): a model whose id matches `settings.tool_call_coax_models` (default `["qwen3.5"]`, substring/case-insensitive) skips `provider.tool_call` and uses the existing `_tool_call_via_coaxing` (JSON-in-content) path, even though the provider advertises native tools. Applied on both the role and model dispatch branches in `tool_call`.
+- **Token floor** in `_tool_call_via_coaxing`: for those models, `max_tokens` is floored to `settings.tool_call_coax_min_tokens` (default 4096) so reasoning doesn't starve the JSON.
+
+**Verification.** `test_model_router.py` + `_tool_call.py` = **84 passed** in the dev image, incl. 3 new: `_model_lacks_native_tools` matching, coax-routing (deny-listed model skips native), and the token floor. Live (fresh-process + live cloud model), production path `role=model_verifier max_tokens=1024`: **3/3 runs produced 4–5 entries** with `tool_calls=True` (was 0/16).
+
+**Blast radius.** The gate also repairs the other native-tool paths on `model_verifier`/`qwen3.5:397b-cloud` — `gt_extractor`, `execution_verify`, and the research decompose/gap steps (research_agent.py:1539/1709) — which were subject to the same miss. Confirms the recurring lesson (memory `tool_call_needs_tool_objects` / `thinking_model_empty_content`): default-routing + mocks hid a 100%-fail tool-call bug; a live smoke surfaced it.
 
 ---
 
