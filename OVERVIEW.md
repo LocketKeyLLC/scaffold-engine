@@ -21991,6 +21991,23 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.551 Verify — BM25 hybrid retrieval (§17.431) is already live in production; impact quantified (2026-06-18)
+
+**Discovery.** Investigating the "deploy BM25" item (a system review flagged `rag_bm25_enabled` default `False` as "gated, not deployed"), the destructive migration turned out to be **unnecessary — BM25 is already live.** Evidence from the running orchestrator: `toon_v2` already carries the `sparse_bm25` `SPARSE_FLOAT_VECTOR` field **and** the `bm25_canonical_text` BM25 `Function`; `RAG_BM25_ENABLED=true` is in `.env` and reaches the orchestrator via its `env_file` (the §17.536 least-privilege env_file removal applied to OWUI/pipelines, **not** the orchestrator, which keeps `env_file: .env`); so `settings.rag_bm25_enabled=True` **and** `collection_has_bm25()=True` → `_keyword_search` routes to `_bm25_search`. The collection got the BM25 schema because `_auto_create_collection` calls `build_toon_v2_schema()` with no arg, which follows `settings.rag_bm25_enabled` — so any (re)create while the flag was set produced the BM25 schema. The migration script confirmed it: `scripts/migrate_toon_v2_bm25.py` (dry-run) reported `'toon_v2' already has 'sparse_bm25' — already migrated, nothing to do.` The review's "not deployed" was a false negative (read the config default, not `.env` + the live collection). **The committed default stays `False`** (opt-in posture, §17.128-family rationale); this host opts in via `.env`.
+
+**Impact (measured via the §17.550 corpus yardstick, full pipeline: vector + keyword + RRF + CrossEncoder rerank).**
+
+| Config | cov@5 | cov@10 | mean title MRR | misses |
+|---|---|---|---|---|
+| **BM25 ON (as deployed)** | **86.4%** | **86.4%** | **0.818** | 3/22 |
+| BM25 OFF (counterfactual) | 81.8% | 81.8% | 0.765 | 4/22 |
+
+So BM25 is already delivering **+4.6 pts coverage, +0.053 MRR** vs the LIKE-scan keyword leg, fixing the *"Sallen-Key low-pass filter"* keyword-precision miss (miss → rank 1) with **zero regressions** (every prior hit retained; MRR rose from more rank-1 placements). On 22 queries the coverage delta is a single-query flip; the MRR gain is the more robust signal. Remaining 3 misses (interrupt-21h, ISA-design-principles, hallucination-eval-RAG) are tokenization/golden-strictness, not made worse.
+
+**Method (fully non-destructive — `toon_v2` never mutated).** (1) Rehearsed the migration on a throwaway `_bm25_migrate_test` (80 real rows): full flow + the production `upsert`-with-Function path (the script only exercises `insert`) both OK. (2) Built a parallel `toon_v2_bm25_eval` from a dump, ran the golden set against it. (3) Got the as-deployed number by scoring the live `toon_v2` with the production config. (4) Confirmed the BM25-OFF counterfactual by forcing `RAG_BM25_ENABLED=false`. All temp collections dropped; live `toon_v2` row_count 1314 throughout. **Row-count note for any future recreate:** live `row_count`=1314 includes ~32 upsert tombstones; live entities = **1282** (per-domain sum; zero rows outside `VALID_DOMAINS`). The per-domain dump captures the 1282 live rows and the migration's dumped-vs-reinserted check (1282==1282) is the integrity gate — expect post-recreate `row_count` to settle at ~1282 (tombstone compaction), not data loss.
+
+---
+
 ### §17.550 Feat — corpus-matched retrieval golden set (a non-zero quality yardstick) (2026-06-18)
 
 **Why.** `tests/fixtures/golden_set.json` (20 queries) has been **floored at 0% coverage** since §17.211/§17.229 — its `expected_entry_ids` (and even the §17.230 title substrings) point at pre-§17.63 content the current corpus no longer holds. Live confirmation this session: `score_retrieval.py` against the live `toon_v2` returned **cov@5/@10 = 0.0%, MRR 0.000** on all 20 queries. Cause is corpus mismatch, not a retrieval bug — the corpus is 8086/BIOS/concept-drift + RAG-paper + digital-circuit content, while the golden queries ask about topological sort / OAuth2 / gRPC / caching. A 0% harness can't measure *any* retrieval change (e.g. the BM25 cutover), so there was no working before/after yardstick.
