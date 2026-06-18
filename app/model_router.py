@@ -270,7 +270,13 @@ async def _dispatch_with_retry(
     straight to the fallback — waiting won't fix a 401 or a missing model.
     """
     retries = max_retries if max_retries is not None else settings.max_retries
-    fallback = fallback or _smart_fallback(model, settings.model_fallback)
+    # §16.7 — /api/embed has no valid fallback: the embedder is config-only
+    # (dim-locked at 512) and the global ``model_fallback`` is a chat model that
+    # returns HTTP 501 on /api/embed, so injecting it just burns a doomed
+    # round-trip. Honor the embed callers' explicit ``fallback=None`` instead.
+    # Chat/generate/classify keep the smart-fallback default unchanged.
+    if endpoint != "/api/embed":
+        fallback = fallback or _smart_fallback(model, settings.model_fallback)
 
     # §17.409 (arch-review R4) — shallow-copy so the per-attempt/fallback
     # ``payload["model"] = …`` swaps below never mutate the caller's dict.

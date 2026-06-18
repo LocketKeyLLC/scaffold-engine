@@ -178,6 +178,56 @@ async def test_dispatch_skips_fallback_when_same_as_primary():
     assert call_log == ["same", "same"]  # only 2 attempts, no 3rd for fallback
 
 
+@pytest.mark.smoke
+async def test_dispatch_no_fallback_injected_on_embed_endpoint():
+    """§16.7 — /api/embed must NOT get the chat-model smart fallback injected,
+    even when the caller passes fallback=None. A failing embed should not burn a
+    doomed round-trip to settings.model_fallback (a chat model that 501s)."""
+    call_log = []
+
+    async def fake_call(endpoint, payload, model, timeout):
+        call_log.append(model)
+        return model_router.ModelResponse(
+            model=model, success=False,
+            error="HTTP 400: input length exceeds context length",  # fail-fast
+        )
+
+    with patch.object(model_router, "_call_ollama", side_effect=fake_call), \
+         patch.object(model_router, "_sleep_for_attempt", AsyncMock()):
+        resp = await model_router._dispatch_with_retry(
+            "/api/embed", {}, "nomic-embed-text", fallback=None, max_retries=3,
+        )
+    assert resp.success is False
+    assert resp.fallback_used is False
+    # Only the embedder was called — no second model (no qwen3.5:latest 501).
+    assert call_log == ["nomic-embed-text"]
+
+
+@pytest.mark.smoke
+async def test_dispatch_still_injects_smart_fallback_on_generate():
+    """Regression guard: non-embed endpoints keep the smart-fallback default
+    when fallback=None — the §16.7 fix must not touch chat/generate behavior."""
+    from app.config import settings
+    call_log = []
+
+    async def fake_call(endpoint, payload, model, timeout):
+        call_log.append(model)
+        ok = model == settings.model_fallback
+        return model_router.ModelResponse(
+            model=model, success=ok, text="ok" if ok else None,
+            error=None if ok else "HTTP 500: boom",  # transient → retries then falls back
+        )
+
+    with patch.object(model_router, "_call_ollama", side_effect=fake_call), \
+         patch.object(model_router, "_sleep_for_attempt", AsyncMock()):
+        resp = await model_router._dispatch_with_retry(
+            "/api/generate", {}, "qwen3:4b", fallback=None, max_retries=2,
+        )
+    assert resp.success is True
+    assert resp.fallback_used is True
+    assert settings.model_fallback in call_log
+
+
 # ---------------------------------------------------------------------------
 # Retry policy: classifier + backoff + per-error-class branching
 # ---------------------------------------------------------------------------
