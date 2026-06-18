@@ -21991,6 +21991,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.550 Feat — corpus-matched retrieval golden set (a non-zero quality yardstick) (2026-06-18)
+
+**Why.** `tests/fixtures/golden_set.json` (20 queries) has been **floored at 0% coverage** since §17.211/§17.229 — its `expected_entry_ids` (and even the §17.230 title substrings) point at pre-§17.63 content the current corpus no longer holds. Live confirmation this session: `score_retrieval.py` against the live `toon_v2` returned **cov@5/@10 = 0.0%, MRR 0.000** on all 20 queries. Cause is corpus mismatch, not a retrieval bug — the corpus is 8086/BIOS/concept-drift + RAG-paper + digital-circuit content, while the golden queries ask about topological sort / OAuth2 / gRPC / caching. A 0% harness can't measure *any* retrieval change (e.g. the BM25 cutover), so there was no working before/after yardstick.
+
+**What.** New fixture `tests/fixtures/golden_set_corpus.json` (version `corpus-1.0`, 22 pairs) built against the live corpus (1,282 live entries: eng=801, llm=369, rag=52, eng_design=38, prompt=21, spec=1). Every pair targets a title that **exists** in the queried partition, using the §17.230 title-substring AND-match shape (`expected_titles_contain`). Drop-in for `score_retrieval.py` (reads `["pairs"]`; pass `--golden tests/fixtures/golden_set_corpus.json`). Domains assigned per pair so each target sits in its partition; spans all 6 populated domains.
+
+**Verification.** Deterministic pre-check: **22/22** pairs have ≥1 live in-corpus title matching all substrings. Live baseline against `toon_v2` (full pipeline: vector + LIKE keyword + RRF + CrossEncoder rerank, `RAG_BM25_ENABLED` inert pre-migration): **cov@5 = cov@10 = 81.8%, mean title MRR = 0.765**, 4/22 misses (interrupt-21h, ISA-design-principles, Sallen-Key-LP, hallucination-eval-RAG — a mix of keyword-precision gaps and golden strictness, all diagnostic). The old `golden_set.json` is kept as historical reference (not deleted); this fixture is the live yardstick going forward. Not yet wired into `make ci-tier-2` (still references the historical set) — a deliberate separate follow-up so "add yardstick" isn't conflated with "change the CI gate."
+
+---
+
 ### §17.549 Feat — broader research sub-topic coverage + soft recency bias (2026-06-18)
 
 **Goal.** Research should (a) cover more distinct sub-topics and (b) favor the most up-to-date information.
