@@ -21991,6 +21991,23 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.549 Feat — broader research sub-topic coverage + soft recency bias (2026-06-18)
+
+**Goal.** Research should (a) cover more distinct sub-topics and (b) favor the most up-to-date information.
+
+**Breadth.**
+- Decompose facet target widened **3–8 → 5–12** (`DECOMPOSE_SYSTEM_V1` + the `plan_research` tool-arg description). Live: a "Kubernetes autoscaling" decompose now returns **12 facets** (was capped at 8).
+- `research_max_queries` **8 → 12**, `research_max_urls_per_iteration` **20 → 30** (config) so the extra facets actually get searched/ingested.
+- Iteration counts (`ResearchState.max_iterations`) **shallow/medium/deep 1/2/4 → 2/3/6** so gap-analysis chases more sub-topics. (Cost/latency rises with depth — the explicit tradeoff.)
+
+**Recency (soft — no hard `time_range` filter, per the chosen design).**
+- **Synthesis side:** `_recency_directive()` prepends today's date to the decompose / gap / extract system prompts so the model prefers current versions/recent sources and favors the newer source on conflict.
+- **Retrieval side:** the model proved **unreliable** at adding recency cues to queries from a prompt instruction (measured 0/12 even with a "MUST" directive), so `_apply_recency_cue()` **deterministically appends the current year** to each search query that doesn't already name one (gated on `research_recency_query_boost`, default on). Live: `"kubernetes autoscaling best practices"` → searched as `"… 2026"`, still 10 results (no recall collapse). It's a soft bias — SearXNG ranks fresh results higher but older ones aren't excluded.
+
+**Verification.** Research suite green — `test_research_agent_core` (incl. `TestSearchQueries` + 3 new `_apply_recency_cue` tests), `_helpers`, `_state_lifecycle`, `_searxng_engines`, `quick_research`, `_topic_bypass` = **50 passed** in the dev image. Live (fresh-process + live services): decompose → 12 facets; `_search_queries` issues the year-appended query and returns results. The 3 pre-existing `TestSearchQueries` dedup tests set `research_recency_query_boost=False` (they test dedup, not recency).
+
+---
+
 ### §17.548 Feat — research extraction does native tool-calling (native-first + coaxing fallback) on a tool-capable model (2026-06-18)
 
 **Why.** §17.547 made research extraction *work* (coaxing on `qwen3.5:397b-cloud`), but always via the JSON-coaxing workaround — the thinking model never emits native `tool_calls`. Wanted genuine native tool-calling on a capable model, with coaxing only as a safety net.

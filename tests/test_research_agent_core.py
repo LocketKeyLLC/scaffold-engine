@@ -107,6 +107,7 @@ class TestSearchQueries:
             mock_settings.research_max_queries = 10
             mock_settings.research_searxng_delay = 0
             mock_settings.research_searxng_concurrency = 3
+            mock_settings.research_recency_query_boost = False
             mock_settings.research_max_urls_per_iteration = 20
             from app.modules.research_agent import _search_queries, ResearchState
 
@@ -137,6 +138,7 @@ class TestSearchQueries:
             mock_settings.research_max_queries = 10
             mock_settings.research_searxng_delay = 0
             mock_settings.research_searxng_concurrency = 3
+            mock_settings.research_recency_query_boost = False
             mock_settings.research_max_urls_per_iteration = 20
             from app.modules.research_agent import _search_queries, ResearchState
 
@@ -160,6 +162,7 @@ class TestSearchQueries:
             mock_settings.research_max_queries = 10
             mock_settings.research_searxng_delay = 0
             mock_settings.research_searxng_concurrency = 3
+            mock_settings.research_recency_query_boost = False
             mock_settings.research_max_urls_per_iteration = 20
             from app.modules.research_agent import _search_queries, ResearchState
 
@@ -413,3 +416,30 @@ class TestRunResearch:
             iter_complete = [e for e in events if e["type"] == "iteration_complete"]
             assert len(iter_complete) == 1
             assert iter_complete[0]["data"]["reason"] == "no_results"
+
+
+# ---------------------------------------------------------------------------
+# §17.549 — soft recency query cue
+# ---------------------------------------------------------------------------
+@pytest.mark.smoke
+def test_apply_recency_cue_appends_current_year():
+    from datetime import datetime, timezone
+    from app.modules.research_agent import _apply_recency_cue
+    yr = datetime.now(timezone.utc).strftime("%Y")
+    # Default settings.research_recency_query_boost is True.
+    assert _apply_recency_cue("kubernetes autoscaling strategies") == \
+        f"kubernetes autoscaling strategies {yr}"
+
+
+@pytest.mark.smoke
+def test_apply_recency_cue_skips_when_year_present():
+    from app.modules.research_agent import _apply_recency_cue
+    # A query that already names a year is left untouched (no double-tagging).
+    assert _apply_recency_cue("redis 2023 release notes") == "redis 2023 release notes"
+
+
+@pytest.mark.smoke
+def test_apply_recency_cue_respects_disable_flag(monkeypatch):
+    from app.modules import research_agent
+    monkeypatch.setattr(research_agent.settings, "research_recency_query_boost", False)
+    assert research_agent._apply_recency_cue("kubernetes autoscaling") == "kubernetes autoscaling"

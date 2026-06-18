@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import AsyncGenerator
@@ -174,7 +175,7 @@ DECOMPOSE_SYSTEM_V1 = """You are a research planner. Decompose the given topic i
 keyword-based search engine queries (3-8 words each, NOT natural language questions).
 
 Rules:
-- Produce 3-8 distinct facets covering DIFFERENT aspects of the topic
+- Produce 5-12 distinct facets covering DIFFERENT aspects of the topic (break the topic into as many genuinely distinct sub-topics as it warrants)
 - Each query targets DIFFERENT information (no overlap)
 - Include the topic's core terms for relevance
 - Mix overview queries with specific detail queries
@@ -297,7 +298,7 @@ PLAN_RESEARCH_TOOL = Tool(
             "facets": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "3-8 distinct facets covering different aspects of the topic",
+                "description": "5-12 distinct facets covering different aspects/sub-topics of the topic",
             },
             "queries": {
                 "type": "array",
@@ -362,6 +363,41 @@ ASSESS_COVERAGE_TOOL = Tool(
 # Decomposition, search, extraction, gap analysis, summary
 # =============================================================================
 
+def _recency_directive() -> str:
+    """§17.549 — soft recency bias at the SYNTHESIS stage (what the model
+    reliably applies): tells it today's date so decompose/extract favor the
+    most up-to-date information. Query-side recency is handled deterministically
+    by ``_apply_recency_cue`` (the model proved unreliable at adding cues to
+    queries). No SearXNG ``time_range`` — older sources aren't hard-filtered."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return (
+        f"Today's date is {today}. Prioritize the most up-to-date information: "
+        f"prefer current stable versions, recent releases, and recent sources; "
+        f"when sources conflict or duplicate, favor the newer one. Treat older "
+        f"information as potentially outdated unless it is foundational."
+    )
+
+
+def _sys(prompt: str) -> str:
+    """Prepend the §17.549 recency directive to a system prompt."""
+    return f"{_recency_directive()}\n\n{prompt}"
+
+
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def _apply_recency_cue(query_text: str) -> str:
+    """§17.549 — soft, deterministic recency: append the current year to a
+    search query that doesn't already name a year, biasing SearXNG toward fresh
+    results without a hard ``time_range`` filter. Gated on
+    ``settings.research_recency_query_boost``."""
+    if not query_text or not settings.research_recency_query_boost:
+        return query_text
+    if _YEAR_RE.search(query_text):
+        return query_text
+    return f"{query_text} {datetime.now(timezone.utc).strftime('%Y')}"
+
+
 async def _decompose_topic(
     topic: str,
     *,
@@ -383,7 +419,7 @@ async def _decompose_topic(
 
     resp = await _bounded_tool_call(
         messages=[
-            {"role": "system", "content": DECOMPOSE_SYSTEM_V1},
+            {"role": "system", "content": _sys(DECOMPOSE_SYSTEM_V1)},
             {"role": "user", "content": prompt},
         ],
         tools=[PLAN_RESEARCH_TOOL],
@@ -405,7 +441,7 @@ async def _decompose_topic(
         )
         retry_resp = await _bounded_tool_call(
             messages=[
-                {"role": "system", "content": DECOMPOSE_SYSTEM_V1},
+                {"role": "system", "content": _sys(DECOMPOSE_SYSTEM_V1)},
                 {"role": "user", "content": retry_prompt},
             ],
             tools=[PLAN_RESEARCH_TOOL],
@@ -444,7 +480,10 @@ async def _search_queries(
     pending: list[dict] = []
     seen_in_batch: set[str] = set()
     for q in queries[:settings.research_max_queries]:
-        query_text = (q["query"] or "").strip()
+        # §17.549 — soft recency: bias the query toward fresh results, and store
+        # it back on q so the Phase-2 fetch + cache key use the same text.
+        q["query"] = _apply_recency_cue((q["query"] or "").strip())
+        query_text = q["query"]
         query_key = query_text.lower()
         if not query_key or query_key in state.search_history or query_key in seen_in_batch:
             continue
@@ -616,7 +655,7 @@ async def _extract_entries(
         )
         resp = await _bounded_tool_call(
             messages=[
-                {"role": "system", "content": EXTRACT_SYSTEM_V1},
+                {"role": "system", "content": _sys(EXTRACT_SYSTEM_V1)},
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=topic, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],
@@ -715,7 +754,7 @@ async def _analyze_gaps(
     for attempt in range(2):
         resp = await _bounded_tool_call(
             messages=[
-                {"role": "system", "content": GAP_SYSTEM_V1},
+                {"role": "system", "content": _sys(GAP_SYSTEM_V1)},
                 {"role": "user", "content": prompt},
             ],
             tools=[ASSESS_COVERAGE_TOOL],
@@ -1531,7 +1570,7 @@ async def _run_research_url_mode(
         # age out via the §17.85 reaper, not get spuriously kept alive.
         task = asyncio.create_task(_bounded_tool_call(
             messages=[
-                {"role": "system", "content": EXTRACT_SYSTEM_V1},
+                {"role": "system", "content": _sys(EXTRACT_SYSTEM_V1)},
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=prompt_topic, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],
@@ -1701,7 +1740,7 @@ async def _run_research_pdf_mode(
         # §17.209 — same gating as URL-mode (§17.208 + comment at line 1840).
         task = asyncio.create_task(_bounded_tool_call(
             messages=[
-                {"role": "system", "content": EXTRACT_SYSTEM_V1},
+                {"role": "system", "content": _sys(EXTRACT_SYSTEM_V1)},
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=filename, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],

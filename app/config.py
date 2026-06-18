@@ -433,11 +433,15 @@ class Settings(BaseSettings):
 
     # Research agent
     research_max_iterations: int = Field(default=3, ge=1, le=20)
-    research_max_queries: int = Field(default=8, ge=1, le=50)
+    research_max_queries: int = Field(default=12, ge=1, le=50)
     ideation_max_queries: int = Field(default=5, ge=1, le=50)
     ideation_max_distill_results: int = Field(default=15, ge=1, le=200)
-    research_max_urls_per_iteration: int = Field(default=20, ge=1, le=200)
+    research_max_urls_per_iteration: int = Field(default=30, ge=1, le=200)
     research_searxng_delay: float = Field(default=1.5, ge=0.0, le=60.0)
+    # §17.549 — soft recency: append the current year to search queries that
+    # don't already name one, biasing SearXNG toward fresh results without a
+    # hard time_range filter. Set false to restore pre-§17.549 query text.
+    research_recency_query_boost: bool = True
     # §17.543 — max concurrent SearXNG searches per iteration. The delay above
     # is held inside each slot as a cooldown, so effective request rate is
     # ~concurrency / delay. Keep small to stay polite to upstream engines.
