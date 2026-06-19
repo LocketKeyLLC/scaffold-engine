@@ -21991,6 +21991,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.559 Fix — research summary empty-content (thinking model budget) — bump to 8192 + retry-on-empty (2026-06-18)
+
+The bug the §17.558 eval caught on its first run. `_generate_summary` called `model_router.generate(..., max_tokens=2048)`; the cloud default `model_verifier` (qwen3.5:397b-cloud) is a **thinking model** that spends `num_predict` on reasoning before emitting content, so 2048 returned `success=True` + **empty text** on some topics — `score_research.py` measured `analog-filters` returning an empty summary **2/2 runs** (an empty research summary is worse than a hallucination). The empty text then flowed through cove/faithfulness/finalize into a near-empty summary instead of the §17.166 fallback. **Fix:** `_SUMMARY_MAX_TOKENS = 8192` (was a 2048 literal) gives the reasoning room to still leave a real summary, plus **retry-on-empty** — `success=True` + empty retries one draw; timeout and genuine `success=False` still fall back immediately (the §17.166 contract preserved, no retry on those). The "thinking model empty content" pattern (generous budget + retry-on-empty).
+
+**Verification.** `test_research_agent_summary.py` **19 passed** (+2: retry-then-succeed, persistent-empty→fallback; existing timeout/success/failure contracts unchanged). Live `score_research.py` post-fix: **synthesis_ok 3/3** (was 2/3) — `analog-filters` went empty → **cov 100% / grounding 83%**; mean coverage 100%. (Grounding still `n/a` on 2/3 this run — the separate §17.558 faithfulness-timeout flakiness under sequential qwen3.5 load, not this fix.)
+
+---
+
 ### §17.558 Feat — research-output quality eval (`score_research.py`): grounding + coverage (2026-06-18)
 
 Research synthesis had only "did it run" smoke tests — no measure of **grounding** (is the summary fabricated? the §17.522 failure mode) or **coverage** (are the facets addressed?). "What good is data if it's a hallucination?" New `scripts/score_research.py` scores the synthesis step **in isolation** from golden `{topic, entries, expected_facets}` (so it's repeatable, free of SearXNG/fetch variance):

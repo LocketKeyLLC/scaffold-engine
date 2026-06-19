@@ -157,6 +157,46 @@ class TestGenerateSummaryTimeout:
             out = await _generate_summary(state)
         assert "1 entries" in out
 
+    async def test_retries_on_empty_content_then_succeeds(self):
+        """§17.559 — the thinking model can return success=True + EMPTY text
+        (budget spent on reasoning). One retry lands a real summary instead of
+        returning an empty one (the §17.558 analog-filters failure mode)."""
+        from app.modules.research_agent import _generate_summary
+        from app.modules.research_state import ResearchState
+        from app.providers.base import ModelResponse
+        state = ResearchState(topic="t", depth="shallow", domain="llm")
+        state.all_entries = [{"facet": "f", "content": "c"}]
+
+        calls = {"n": 0}
+
+        async def _empty_then_text(*a, **kw):
+            calls["n"] += 1
+            text = "   " if calls["n"] == 1 else "real summary text"
+            return ModelResponse(text=text, model="m", success=True, provider="ollama")
+
+        with patch("app.modules.research_agent.model_router.generate",
+                   new=_empty_then_text):
+            out = await _generate_summary(state)
+        assert calls["n"] == 2  # retried once
+        assert "real summary text" in out
+
+    async def test_falls_back_on_persistent_empty_content(self):
+        """§17.559 — empty on both draws → the §17.166 fallback shape, never an
+        empty summary."""
+        from app.modules.research_agent import _generate_summary
+        from app.modules.research_state import ResearchState
+        from app.providers.base import ModelResponse
+        state = ResearchState(topic="t", depth="shallow", domain="llm")
+        state.all_entries = [{"facet": "f", "content": "c"}]
+
+        async def _always_empty(*a, **kw):
+            return ModelResponse(text="", model="m", success=True, provider="ollama")
+
+        with patch("app.modules.research_agent.model_router.generate",
+                   new=_always_empty):
+            out = await _generate_summary(state)
+        assert "1 entries" in out  # fallback, not empty
+
 
 class TestSummaryConstants:
     """Pin the budget + timeout values so regressions surface in code review."""

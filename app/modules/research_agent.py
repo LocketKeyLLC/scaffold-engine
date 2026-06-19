@@ -848,6 +848,14 @@ _SUMMARY_PROMPT_BUDGET_CHARS = 6000
 # without letting a wedged Ollama hold the session running for the
 # full 30-min HTTP local_timeout.
 _SUMMARY_PROMPT_TIMEOUT_S = 120
+# §17.559 — output budget for the summary generation. Was 2048; the cloud
+# default model_verifier (qwen3.5:397b-cloud) is a THINKING model that spends
+# num_predict on reasoning before emitting content, so 2048 returned
+# success=True + EMPTY text on some topics (score_research.py §17.558 caught
+# `analog-filters` empty 2/2 runs). 8192 gives the reasoning room to still
+# leave a real summary; paired with retry-on-empty below. See the
+# "thinking model empty content" issue.
+_SUMMARY_MAX_TOKENS = 8192
 
 
 # §17.445 (Phase A / A2) — research summaries were an UN-ATTRIBUTED synthesis:
@@ -1003,39 +1011,56 @@ async def _generate_summary(
         + _build_summary_prompt_body(state)
     )
 
-    try:
-        resp = await asyncio.wait_for(
-            model_router.generate(
-                prompt, role=role, overrides=overrides, system=SUMMARY_SYSTEM_V1,
-                temperature=0.3, max_tokens=2048,
-            ),
-            timeout=_SUMMARY_PROMPT_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
-        logger.warning(
-            "summary_timeout: topic=%s entries=%d budget_s=%d — falling back",
-            state.topic, len(state.all_entries), _SUMMARY_PROMPT_TIMEOUT_S,
-        )
+    def _fallback() -> str:
         return _attach_sources_block(
             f"Research collected {len(state.all_entries)} entries on '{state.topic}'.",
             state,
         )
 
-    if resp.success:
-        summary_text = resp.text.strip()
-        # §17.452 (Phase C / CoVe) — revise the summary against the sources FIRST,
-        # so the faithfulness score below reflects the revised text (default-off).
-        summary_text = await _maybe_cove_revise(summary_text, state, overrides)
-        # §17.448 (Phase B / B1) — score the (possibly revised) summary against
-        # the collected sources (default-off, fail-soft → None when disabled).
-        state.faithfulness = await _maybe_score_faithfulness(
-            summary_text, state, overrides,
+    # §17.559 — retry-on-empty. A thinking model can return success=True with
+    # EMPTY content (budget spent on reasoning); one extra draw usually lands a
+    # real summary. Timeout and genuine success=False fall back immediately (no
+    # retry) — preserving the §17.166 fallback contract. Only the empty-success
+    # case retries.
+    summary_text = ""
+    for attempt in range(2):
+        try:
+            resp = await asyncio.wait_for(
+                model_router.generate(
+                    prompt, role=role, overrides=overrides, system=SUMMARY_SYSTEM_V1,
+                    temperature=0.3, max_tokens=_SUMMARY_MAX_TOKENS,
+                ),
+                timeout=_SUMMARY_PROMPT_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "summary_timeout: topic=%s entries=%d budget_s=%d — falling back",
+                state.topic, len(state.all_entries), _SUMMARY_PROMPT_TIMEOUT_S,
+            )
+            return _fallback()
+        if not resp.success:
+            return _fallback()
+        summary_text = (resp.text or "").strip()
+        if summary_text:
+            break
+        logger.warning(
+            "summary_empty_content: topic=%s attempt=%d max_tokens=%d — %s",
+            state.topic, attempt, _SUMMARY_MAX_TOKENS,
+            "retrying" if attempt == 0 else "falling back",
         )
-        return _finalize_summary_text(summary_text, state)
-    return _attach_sources_block(
-        f"Research collected {len(state.all_entries)} entries on '{state.topic}'.",
-        state,
+
+    if not summary_text:
+        return _fallback()
+
+    # §17.452 (Phase C / CoVe) — revise the summary against the sources FIRST,
+    # so the faithfulness score below reflects the revised text (default-off).
+    summary_text = await _maybe_cove_revise(summary_text, state, overrides)
+    # §17.448 (Phase B / B1) — score the (possibly revised) summary against
+    # the collected sources (default-off, fail-soft → None when disabled).
+    state.faithfulness = await _maybe_score_faithfulness(
+        summary_text, state, overrides,
     )
+    return _finalize_summary_text(summary_text, state)
 
 
 # =============================================================================
