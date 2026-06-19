@@ -4,6 +4,10 @@
 CONTAINER := scaffold-orchestrator
 COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
+# §17.554 — coverage floor for `make coverage`. 77 = ~5 pts under the §17.553
+# 82% unit baseline (headroom for normal churn; catches a real drop). Override:
+# `COVERAGE_MIN=0 make coverage` for pure reporting, or raise as coverage grows.
+COVERAGE_MIN ?= 77
 API_URL   ?= http://localhost:8000
 
 .PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit
@@ -32,7 +36,7 @@ _ensure_dev:
 test: _ensure_dev ## Run all tests in dev image (~1340 passing, ~8 skipped post-§17.63)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v
 
-coverage: _ensure_dev ## §17.553 — app/ unit coverage in dev image (report-only, no gate). Excludes validate/integration, so I/O-heavy modules under-report.
+coverage: _ensure_dev ## §17.553/554 — app/ unit coverage in dev image; gates at COVERAGE_MIN% (default 77). Excludes validate/integration, so I/O-heavy modules under-report.
 	# COVERAGE_FILE under /tmp: /code is root-owned in the dev image but tests
 	# run as uid 1000, so coverage's default CWD-relative .coverage SQLite DB
 	# is unwritable (X.28, same as cache_dir). Env var beats config + survives
@@ -40,7 +44,8 @@ coverage: _ensure_dev ## §17.553 — app/ unit coverage in dev image (report-on
 	docker exec -e COVERAGE_FILE=/tmp/.coverage $(CONTAINER) pytest tests/ -m "not validate" --timeout=30 -q \
 		--cov=app --cov-branch \
 		--cov-report=term-missing:skip-covered \
-		--cov-report=xml:/tmp/coverage.xml
+		--cov-report=xml:/tmp/coverage.xml \
+		--cov-fail-under=$(COVERAGE_MIN)
 
 test-cli: _ensure_dev ## Run scaffold CLI tests (cli/tests/) inside the dev container
 	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m pytest tests/ --timeout=10 -v"

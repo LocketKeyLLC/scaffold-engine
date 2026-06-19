@@ -21991,6 +21991,12 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.554 Feat — turn `make coverage` into a gate at 77% (§17.553 follow-up) (2026-06-18)
+
+Supersedes the "no `--cov-fail-under` gate yet" note in §17.553. `make coverage` now passes `--cov-fail-under=$(COVERAGE_MIN)` (Makefile var, default **77** — ~5 pts under the measured 82% unit baseline: headroom for normal churn, fails on a real drop). Overridable: `COVERAGE_MIN=0 make coverage` for pure reporting, or raise as coverage grows. **Verification:** `make -n coverage` shows `--cov-fail-under=77`; gate exercised both ways in a one-off dev container — floor=0 → 10 passed exit 0; floor=100 → `Coverage failure: total … is less than fail-under=100` (pytest non-zero). At the 82% baseline the gate clears. Still local/dev only — not yet invoked by a CI tier (a follow-up if/when coverage should block merges).
+
+---
+
 ### §17.553 Feat — code-coverage measurement (`make coverage`) + baseline (2026-06-18)
 
 **Why.** No coverage tooling existed (no `pytest-cov`/`coverage` in any requirements file) — 3,966 unit tests but no way to quantify what `app/` they exercise. Closes the other half of the "we measure latency/errors but not test/retrieval coverage" gap (cf. §17.550–552 for retrieval).
