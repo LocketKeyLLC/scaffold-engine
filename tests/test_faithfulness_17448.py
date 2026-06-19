@@ -57,6 +57,29 @@ async def test_none_on_exception_failsoft():
         assert await F.score_faithfulness("ans", "ctx") is None
 
 
+@pytest.mark.asyncio
+async def test_retries_coax_miss_then_succeeds():
+    """§17.560 — an intermittent coax miss (success but no parseable claims)
+    retries; a later draw with claims is used instead of returning None."""
+    good = [{"claim": "a", "supported": True}, {"claim": "b", "supported": False}]
+    mock = AsyncMock(side_effect=[_resp([]), _resp(good)])  # miss, then hit
+    with patch.object(F.model_router, "tool_call", new=mock):
+        out = await F.score_faithfulness("ans", "ctx")
+    assert out is not None and out["total"] == 2 and out["supported"] == 1
+    assert mock.await_count == 2  # retried once after the coax miss
+
+
+@pytest.mark.asyncio
+async def test_gives_up_after_max_attempts(monkeypatch):
+    """§17.560 — persistent coax miss across all attempts → None (fail-soft),
+    bounded by _FAITHFULNESS_ATTEMPTS."""
+    monkeypatch.setattr(F, "_FAITHFULNESS_ATTEMPTS", 3)
+    mock = AsyncMock(return_value=_resp([]))  # always a miss
+    with patch.object(F.model_router, "tool_call", new=mock):
+        assert await F.score_faithfulness("ans", "ctx") is None
+    assert mock.await_count == 3
+
+
 # ───────────────────────── wire-in (research_agent) ─────────────────────────
 
 def test_finalize_summary_appends_faithfulness_note():

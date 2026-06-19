@@ -21991,6 +21991,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.560 Fix — faithfulness flakiness: retry the intermittent coax miss + bump budget (2026-06-18)
+
+The grounding half of the §17.558 eval was flaky — `score_faithfulness` returned `None` on ~2/3 topics. **Diagnosed before fixing** (a probe, 4 back-to-back calls on a real summary): NOT a timeout — failures returned in **34–49 s, well under the 90 s budget** — the coaxed qwen3.5 thinking model (`role=model_verifier`) intermittently completes the call but emits prose with **no parseable tool-call JSON** (a coax miss; same "first call works, rest fail" shape as the §17.556 kimi spike). **Fix:** retry the intermittent miss (timeout / no-success / no-claims → up to `_FAITHFULNESS_ATTEMPTS=3` draws; a genuine exception stays fail-soft → `None`, no retry), plus `_FAITHFULNESS_MAX_TOKENS` 2048→8192 so reasoning doesn't crowd out the JSON. Retry is the main lever for intermittency; the budget bump is insurance.
+
+**Verification.** `test_faithfulness_17448.py` **14 passed** (+2: retry-coax-miss-then-succeed asserting `await_count==2`; give-up-after-3 → `None`). Probe post-fix: **4/4 scored** (was 1/4), each 1.00. End-to-end `score_research.py`: **grounding scored 3/3** (was 1/3), mean grounding 100% — the §17.558 baseline is now clean (synthesis 3/3, coverage 100%, grounding 3/3). Cost: retry adds latency on a miss (one probe call hit 175 s across re-rolls), acceptable since faithfulness is default-off in production and an optional eval signal.
+
+---
+
 ### §17.559 Fix — research summary empty-content (thinking model budget) — bump to 8192 + retry-on-empty (2026-06-18)
 
 The bug the §17.558 eval caught on its first run. `_generate_summary` called `model_router.generate(..., max_tokens=2048)`; the cloud default `model_verifier` (qwen3.5:397b-cloud) is a **thinking model** that spends `num_predict` on reasoning before emitting content, so 2048 returned `success=True` + **empty text** on some topics — `score_research.py` measured `analog-filters` returning an empty summary **2/2 runs** (an empty research summary is worse than a hallucination). The empty text then flowed through cove/faithfulness/finalize into a near-empty summary instead of the §17.166 fallback. **Fix:** `_SUMMARY_MAX_TOKENS = 8192` (was a 2048 literal) gives the reasoning room to still leave a real summary, plus **retry-on-empty** — `success=True` + empty retries one draw; timeout and genuine `success=False` still fall back immediately (the §17.166 contract preserved, no retry on those). The "thinking model empty content" pattern (generous budget + retry-on-empty).

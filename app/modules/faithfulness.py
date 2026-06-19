@@ -58,6 +58,15 @@ _FAITHFULNESS_TOOL = Tool(
 
 _MAX_CONTEXT_CHARS = 24_000
 _TIMEOUT_S = 90
+# §17.560 — was max_tokens=2048. role=model_verifier (qwen3.5:397b-cloud) is a
+# coaxed thinking model; score_research.py (§17.558) measured grounding `n/a`
+# on 2/3 topics, and a probe confirmed it's NOT a timeout (failures returned in
+# 34-49 s, well under 90 s) — the model intermittently completes the call but
+# emits prose with no parseable tool-call JSON (a coax miss, same "first call
+# works, rest fail" pattern as §17.556). Fix: more budget so reasoning doesn't
+# crowd out the JSON + retry the coax miss (the main lever for intermittency).
+_FAITHFULNESS_MAX_TOKENS = 8192
+_FAITHFULNESS_ATTEMPTS = 3
 
 
 async def score_faithfulness(
@@ -75,36 +84,50 @@ async def score_faithfulness(
     if not (answer or "").strip() or not (context or "").strip():
         return None
     ctx = context[:_MAX_CONTEXT_CHARS]
-    try:
-        resp = await asyncio.wait_for(
-            model_router.tool_call(
-                messages=[
-                    {"role": "system", "content": _FAITHFULNESS_SYSTEM},
-                    {"role": "user",
-                     "content": f"CONTEXT:\n{ctx}\n\nANSWER:\n{answer}"},
-                ],
-                tools=[_FAITHFULNESS_TOOL],
-                role=role,
-                overrides=overrides,
-                temperature=0.0,
-                max_tokens=2048,
-            ),
-            timeout=_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("faithfulness_timeout: budget_s=%d", _TIMEOUT_S)
-        return None
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("faithfulness_error: %s", exc)
-        return None
 
-    if not getattr(resp, "success", False):
-        return None
-    args = read_tool_args(resp)
-    if not args:
-        return None
-    claims = args.get("claims")
-    if not isinstance(claims, list) or not claims:
+    # §17.560 — retry the intermittent coax miss (timeout / no-success /
+    # no-claims). The thinking model sometimes emits prose instead of the tool
+    # call; a re-roll usually lands it. A genuine exception is a hard failure
+    # (fail-soft → None, no retry).
+    claims = None
+    for attempt in range(_FAITHFULNESS_ATTEMPTS):
+        try:
+            resp = await asyncio.wait_for(
+                model_router.tool_call(
+                    messages=[
+                        {"role": "system", "content": _FAITHFULNESS_SYSTEM},
+                        {"role": "user",
+                         "content": f"CONTEXT:\n{ctx}\n\nANSWER:\n{answer}"},
+                    ],
+                    tools=[_FAITHFULNESS_TOOL],
+                    role=role,
+                    overrides=overrides,
+                    temperature=0.0,
+                    max_tokens=_FAITHFULNESS_MAX_TOKENS,
+                ),
+                timeout=_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("faithfulness_timeout: attempt=%d budget_s=%d", attempt, _TIMEOUT_S)
+            continue
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("faithfulness_error: %s", exc)
+            return None
+
+        if not getattr(resp, "success", False):
+            logger.warning("faithfulness_no_success: attempt=%d", attempt)
+            continue
+        args = read_tool_args(resp)
+        candidate = args.get("claims") if args else None
+        if isinstance(candidate, list) and candidate:
+            claims = candidate
+            break
+        logger.warning(
+            "faithfulness_no_claims: attempt=%d (coax miss, no parseable tool-call) — %s",
+            attempt, "retrying" if attempt < _FAITHFULNESS_ATTEMPTS - 1 else "giving up",
+        )
+
+    if not claims:
         return None
 
     total = len(claims)
