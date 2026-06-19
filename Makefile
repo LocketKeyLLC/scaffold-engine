@@ -32,6 +32,16 @@ _ensure_dev:
 test: _ensure_dev ## Run all tests in dev image (~1340 passing, ~8 skipped post-§17.63)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v
 
+coverage: _ensure_dev ## §17.553 — app/ unit coverage in dev image (report-only, no gate). Excludes validate/integration, so I/O-heavy modules under-report.
+	# COVERAGE_FILE under /tmp: /code is root-owned in the dev image but tests
+	# run as uid 1000, so coverage's default CWD-relative .coverage SQLite DB
+	# is unwritable (X.28, same as cache_dir). Env var beats config + survives
+	# a stale baked pyproject.
+	docker exec -e COVERAGE_FILE=/tmp/.coverage $(CONTAINER) pytest tests/ -m "not validate" --timeout=30 -q \
+		--cov=app --cov-branch \
+		--cov-report=term-missing:skip-covered \
+		--cov-report=xml:/tmp/coverage.xml
+
 test-cli: _ensure_dev ## Run scaffold CLI tests (cli/tests/) inside the dev container
 	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m pytest tests/ --timeout=10 -v"
 

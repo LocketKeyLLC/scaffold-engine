@@ -21991,6 +21991,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.553 Feat — code-coverage measurement (`make coverage`) + baseline (2026-06-18)
+
+**Why.** No coverage tooling existed (no `pytest-cov`/`coverage` in any requirements file) — 3,966 unit tests but no way to quantify what `app/` they exercise. Closes the other half of the "we measure latency/errors but not test/retrieval coverage" gap (cf. §17.550–552 for retrieval).
+
+**What.**
+- `pytest-cov==7.1.0` added to `requirements-dev.txt` (dev-only; `scripts/_prune_dev_deps.py` uninstalls it from the prod runtime image).
+- `[tool.coverage.run]` / `[tool.coverage.report]` in `pyproject.toml` (`source=["app"]`, `branch=true`, exclude `TYPE_CHECKING`/`__main__`/abstractmethods). **`--cov` is deliberately NOT in pytest `addopts`** — cloud `ci-smoke` runs `requirements-ci.txt` (no pytest-cov) and a global `--cov` would crash it with "unrecognized arguments"; coverage is opt-in per-target only.
+- `make coverage` target — `pytest tests/ -m "not validate" --cov=app --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml:/tmp/coverage.xml`, report-only (no gate, per the "not a gate yet" decision).
+- **`COVERAGE_FILE=/tmp/.coverage`** is set in the target (and `data_file` in config): `/code` is root-owned in the dev image but tests run as uid 1000, so coverage's default CWD-relative SQLite DB is unwritable — the env var fixes it independently of the baked pyproject (same class as the `cache_dir`→/tmp fix). Two runs failed on this before the fix.
+
+**Baseline (2026-06-18, dev image, `-m "not validate"`).** **82% line+branch coverage of `app/`** — 15,488 statements (2,420 missed), 4,292 branches (561 partial); 3,966 passed / 16 deselected in 23m44s. **Reads as unit coverage only:** integration/`validate` tests are excluded, so I/O-heavy modules under-report — the lowest are exactly those exercised by integration tier (`routers/specs.py` 31%, `routers/assist.py` 40%, `routers/workflow.py` 42%, `scheduler.py` 74%, `sim/design_pipeline.py` 70%, `providers/anthropic.py` 70%), while pure-logic modules are high (`schemas.py` 95%, `sim/formal_verify.py` 95%, `sim/device_sizing.py` 94%). No `--cov-fail-under` gate yet — deferred until the number is trusted; a fuller picture needs `coverage combine` with the tier-2 integration run (the live stack), a separate follow-up.
+
+---
+
 ### §17.552 Feat — wire the corpus golden set into `ci-tier-2` as a retrieval-quality gate (2026-06-18)
 
 **What.** The `make ci-tier-2` golden-retrieval sidecar (step 4/5) previously ran `score_retrieval.py` against the default `golden_set.json` — the 0%-floored historical set (§17.211/§17.229/§17.550) — and only **printed** the numbers. Now it runs against `tests/fixtures/golden_set_corpus.json` (the §17.550 corpus-matched set) **and gates**: the step exits non-zero (failing tier 2) if `coverage_at_5 < RETRIEVAL_MIN_COV5` or `mean_title_mrr < RETRIEVAL_MIN_MRR`. Floors default to **0.70 / 0.55** — conservative vs the as-deployed 0.864 / 0.818 (§17.551) and even the BM25-off counterfactual 0.818 / 0.765, so normal corpus drift won't flake the gate but a real break (reranker down, BM25 dropped, corpus wiped → the 0% scenario) fails it. Both floors are env-overridable (`RETRIEVAL_MIN_COV5` / `RETRIEVAL_MIN_MRR`) for retuning as the corpus grows.
