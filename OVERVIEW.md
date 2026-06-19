@@ -21991,6 +21991,19 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.556 Verify — gt_extractor coax path is reliable; native switch would regress (closes the "finish the tool-call role split" idea) (2026-06-18)
+
+A system-review candidate proposed routing the still-coaxed `model_verifier`/`model_router` tool-call paths (`gt_extractor`, `execution_verify`, research decompose/gap) to a native-tool model, mirroring §17.548's research-extraction switch. **Measured it instead of assuming.** Ran the real `gt_extractor.distill_entries` path (`DISTILL_SYSTEM`/`DISTILL_PROMPT` + `RECORD_DISTILLED_ENTRIES_TOOL`, the production call) 5× per role on live cloud:
+
+| Path | Success | Entry counts |
+|---|---|---|
+| Coaxed `model_router`=qwen3.5 (current) | **5/5** | 4,4,4,4,4 |
+| Native `model_research_extract`=kimi (proposed) | **1/5** | 12,0,0,0,0 |
+
+**Conclusion: the switch would be a regression.** The §17.547 coax gate already made this path reliable (5/5); native kimi is flaky on *this* prompt/tool (1/5) even though §17.548 measured it 3/3 on the *research* extraction prompt — i.e. **native-vs-coax reliability is per-prompt, not a blanket property.** The earlier premise ("coaxing is strictly less reliable than native") is false here. Combined with §17.548's deliberate choice to keep judgment paths (verify/faithfulness/CoVe) on coaxed qwen3.5, the whole "finish the role split" item resolves to **leave as-is**. Lesson kept: any future role change must be A/B-measured per prompt (cf. the `model_ab.py` generalization). (The `record_llm_call_failed: password authentication` noise during the spike is the standalone-script telemetry-DB artifact — fail-soft, both roles hit it, qwen3.5 still 5/5.)
+
+---
+
 ### §17.555 Feat — wire the coverage gate into CI (`test.yml` unit-test job) (2026-06-18)
 
 Promotes the §17.554 gate from local-only into CI. The `Scaffold Engine CI` → "Unit Tests" job already runs the full `-k "not integration"` suite in `scaffold-orchestrator:ci`; that image is the Dockerfile **`dev` stage** (build-push-action builds the last stage, which copies the builder venv incl. `requirements-dev.txt` → `pytest-cov` is present). So coverage **piggybacks on the run that already happens** — no second ~10-min run added. The step now passes `--cov=app --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=${COVERAGE_MIN}` (workflow env `COVERAGE_MIN=77`) plus `-e COVERAGE_FILE=/tmp/.coverage` (the ci image's `/code` is root-owned vs the container user — same fix as `make coverage`).
