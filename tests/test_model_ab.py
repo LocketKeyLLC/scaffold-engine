@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.model_ab import _avg, _summarize, score_codegen
+from scripts.model_ab import _avg, _summarize, score_codegen, score_extraction, TASKS
 
 
 _GOLDEN = {
@@ -84,8 +84,8 @@ async def test_run_one_rejects_fallback_used(monkeypatch):
                              success=True, fallback_used=True)
     monkeypatch.setattr(model_router, "generate", _gen)
 
-    r = await _run_one("qwen3-coder:480b-cloud", _GOLDEN,
-                       system="s", temperature=0.2, max_tokens=512)
+    r = await _run_one(TASKS["codegen"], "qwen3-coder:480b-cloud", _GOLDEN,
+                       temperature=0.2, max_tokens=512)
     assert r["ok"] is False and r["passed"] is False
     assert "fell back" in r["error"]
 
@@ -102,8 +102,8 @@ async def test_run_one_rejects_model_mismatch(monkeypatch):
                              success=True, fallback_used=False)
     monkeypatch.setattr(model_router, "generate", _gen)
 
-    r = await _run_one("candidate:cloud", _GOLDEN,
-                       system="s", temperature=0.2, max_tokens=512)
+    r = await _run_one(TASKS["codegen"], "candidate:cloud", _GOLDEN,
+                       temperature=0.2, max_tokens=512)
     assert r["ok"] is False and "fell back" in r["error"]
 
 
@@ -125,8 +125,8 @@ async def test_run_one_scores_matching_model(monkeypatch):
     monkeypatch.setattr(model_router, "generate", _gen)
     monkeypatch.setattr(cc, "codegen_exec_smoke", _exec)
 
-    r = await _run_one("qwen3.5:397b-cloud", _GOLDEN,
-                       system="s", temperature=0.2, max_tokens=512)
+    r = await _run_one(TASKS["codegen"], "qwen3.5:397b-cloud", _GOLDEN,
+                       temperature=0.2, max_tokens=512)
     assert r["ok"] is True and r["passed"] is True
     assert r["resolved_model"] == "qwen3.5:397b-cloud"
 
@@ -181,3 +181,34 @@ async def test_is_available_true_on_transient_error(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _Client())
     assert await _is_available("maybe:cloud", "http://x:11434") is True
+
+
+# ── §17.557 — extraction task scoring (native-or-coaxed entries-produced) ────
+
+
+def test_score_extraction_pass_counts_dict_entries():
+    s = score_extraction({"entries": [{"title": "a"}, {"title": "b"}]})
+    assert s["passed"] is True and s["entries"] == 2
+    assert s["metric"] == "entries" and s["metric_value"] == 2
+
+
+def test_score_extraction_empty_entries_fails():
+    s = score_extraction({"entries": []})
+    assert s["passed"] is False and s["entries"] == 0
+
+
+def test_score_extraction_none_args_fails():
+    # read_tool_args returns None on a tool-call miss (the §17.556 failure mode)
+    s = score_extraction(None)
+    assert s["passed"] is False and s["entries"] == 0
+
+
+def test_score_extraction_ignores_non_dict_entries():
+    # the shape-drift case (§17.522): model returns strings, not objects
+    s = score_extraction({"entries": ["just", "strings"]})
+    assert s["passed"] is False and s["entries"] == 0
+
+
+def test_extraction_task_registered():
+    assert "extraction" in TASKS
+    assert TASKS["extraction"].default_goldens.name == "extraction_goldens.json"

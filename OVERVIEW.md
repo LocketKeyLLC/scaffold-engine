@@ -21991,6 +21991,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.557 Feat — generalize `model_ab.py` to a pluggable `--task` harness (codegen + extraction) (2026-06-18)
+
+`model_ab.py` was CodeGen-only. Generalized it to a `--task` registry so model A/Bs for other roles are first-class, not ad-hoc scripts. Each `Task` supplies a `dispatch` (how to call the model) + a `score` (task-specific verdict); the shared infra (pre-flight `/api/show`, **fallback rejection** so an unavailable candidate is never scored as itself, latency/throughput capture, summary table, JSONL) is reused. Two tasks ship:
+- **codegen** (§17.495, unchanged behavior) — `generate()` → structural goldens + sandbox exec-smoke.
+- **extraction** (new) — `tool_call(DISTILL_*)` → did the model emit a parseable non-empty `entries` tool-call (native or coaxed). This is the objective form of the §17.556 manual spike; new fixture `tests/fixtures/extraction_goldens.json` (2 goldens).
+
+The pure scorers (`score_codegen`, `score_extraction`) and aggregation (`_summarize`/`_avg`) stay import-light + unit-tested. **Verification:** `test_model_ab.py` **18 passed** (existing `_run_one`/fallback-rejection tests updated to the `(task, model, golden)` signature; +5 `score_extraction` cases). `--task extraction --dry-run` loads the fixture; **live A/B reproduced §17.556** — `qwen3.5:397b-cloud` (coaxed) 3/3 (4/6/8 entries) vs `kimi-k2.7-code:cloud` (native) 1/3 (10/0/0). A `verifier` task (verdict-match goldens) is the obvious next registry slot. Why it matters: the §17.556 "measure before switching roles" lesson is now a one-liner (`model_ab.py --task extraction --models A B`), not a throwaway script.
+
+---
+
 ### §17.556 Verify — gt_extractor coax path is reliable; native switch would regress (closes the "finish the tool-call role split" idea) (2026-06-18)
 
 A system-review candidate proposed routing the still-coaxed `model_verifier`/`model_router` tool-call paths (`gt_extractor`, `execution_verify`, research decompose/gap) to a native-tool model, mirroring §17.548's research-extraction switch. **Measured it instead of assuming.** Ran the real `gt_extractor.distill_entries` path (`DISTILL_SYSTEM`/`DISTILL_PROMPT` + `RECORD_DISTILLED_ENTRIES_TOOL`, the production call) 5× per role on live cloud:
