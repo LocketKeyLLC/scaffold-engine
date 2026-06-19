@@ -21991,6 +21991,21 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.558 Feat — research-output quality eval (`score_research.py`): grounding + coverage (2026-06-18)
+
+Research synthesis had only "did it run" smoke tests — no measure of **grounding** (is the summary fabricated? the §17.522 failure mode) or **coverage** (are the facets addressed?). "What good is data if it's a hallucination?" New `scripts/score_research.py` scores the synthesis step **in isolation** from golden `{topic, entries, expected_facets}` (so it's repeatable, free of SearXNG/fetch variance):
+- **Coverage** (deterministic, unit-tested) — fraction of `expected_facets` addressed in the summary via case-insensitive AND-substring match (§17.550 shape).
+- **Grounding** — reuses the existing `faithfulness.score_faithfulness(summary, entries_text)` → fraction of summary claims supported by the collected entries (the real anti-hallucination signal, not a term-overlap proxy).
+- Empty summaries are flagged **`synthesis_failed`**, distinct from "low coverage / ungrounded", so means aren't polluted.
+
+Fixture `tests/fixtures/research_goldens.json` (3 topics); `test_score_research.py` **5 passed** (pure coverage scorer). Grounding is LLM-judged (qwen3.5 coaxed) → a measured eval with a soft floor, **not** a byte-deterministic CI gate like the retrieval one.
+
+**Baseline + findings (the eval earned its keep on first run).** 3 topics: x86 cov 100%, rag cov 33–100% (stochastic across runs), grounding 0.67–1.0 when scored. **Two real issues surfaced:**
+1. **`analog-filters` synthesis returns an EMPTY summary, reproducibly (2/2 runs)** — `_generate_summary` (`max_tokens=2048`) lets the qwen3.5 thinking model spend its budget on reasoning and return success+empty (the documented "thinking model empty content" issue). An empty research summary is worse than a hallucination → **follow-up: bump `_generate_summary` budget (→8192) + retry-on-empty.**
+2. Grounding via `faithfulness` (qwen3.5) is slow and occasionally times out under sequential load → grounding `n/a` on some topics; transparent via `grounding_scored/synthesis_ok`. Coverage is stochastic run-to-run (synthesis non-determinism), so this is a **diagnostic**, not a hard gate.
+
+---
+
 ### §17.557 Feat — generalize `model_ab.py` to a pluggable `--task` harness (codegen + extraction) (2026-06-18)
 
 `model_ab.py` was CodeGen-only. Generalized it to a `--task` registry so model A/Bs for other roles are first-class, not ad-hoc scripts. Each `Task` supplies a `dispatch` (how to call the model) + a `score` (task-specific verdict); the shared infra (pre-flight `/api/show`, **fallback rejection** so an unavailable candidate is never scored as itself, latency/throughput capture, summary table, JSONL) is reused. Two tasks ship:

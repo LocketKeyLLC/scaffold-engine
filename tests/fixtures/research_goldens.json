@@ -1,0 +1,50 @@
+{
+  "version": "research-1.0",
+  "note": "§17.558 — goldens for score_research.py. Each topic supplies collected `entries` (the synthesis input) + `expected_facets` (coverage targets, §17.550 AND-substring shape). The eval drives _generate_summary over the entries, then scores COVERAGE (facets addressed) + GROUNDING (faithfulness of the summary against the entries). Entries are real factual content so grounding is meaningful; a good summary should cover the facets AND stay grounded (no fabricated claims).",
+  "goldens": [
+    {
+      "id": "x86-real-mode",
+      "topic": "x86 real-mode programming",
+      "expected_facets": [
+        {"name": "segmentation", "contains": ["segment"]},
+        {"name": "dos-interrupts", "contains": ["21h"]},
+        {"name": "bios-keyboard", "contains": ["keyboard"]},
+        {"name": "protected-mode", "contains": ["protected mode"]}
+      ],
+      "entries": [
+        {"facet": "segmentation", "content": "The 8086 uses a segmented memory model. A 20-bit physical address is formed by shifting the 16-bit segment register left by 4 bits and adding the 16-bit offset, giving access to a 1 MB address space from 16-bit registers."},
+        {"facet": "dos-interrupts", "content": "INT 21h is the primary DOS API interrupt. The AH register selects the function: 01h reads a character, 02h writes a character, 09h prints a '$'-terminated string, and 4Ch terminates the program. Parameters are passed in registers."},
+        {"facet": "bios-keyboard", "content": "INT 16h provides BIOS keyboard services. AH=00h blocks until a keystroke is available and returns the scan code in AH and the ASCII code in AL. AH=01h checks keyboard status without blocking."},
+        {"facet": "protected-mode", "content": "Real mode uses segment:offset addressing limited to 1 MB. Protected mode, introduced on the 80286, adds descriptor tables, four privilege rings, and access to extended memory beyond 1 MB, forming the basis of modern multitasking operating systems."}
+      ]
+    },
+    {
+      "id": "rag-retrieval",
+      "topic": "retrieval-augmented generation",
+      "expected_facets": [
+        {"name": "hybrid-search", "contains": ["BM25"]},
+        {"name": "reranking", "contains": ["rerank"]},
+        {"name": "chunking", "contains": ["chunk"]}
+      ],
+      "entries": [
+        {"facet": "hybrid-search", "content": "Hybrid search combines a dense vector leg (semantic embeddings) with a sparse lexical leg (BM25 term scoring) and fuses the two rank lists with Reciprocal Rank Fusion (RRF), which is robust to differing score scales between the legs."},
+        {"facet": "reranking", "content": "A cross-encoder reranker jointly encodes the query and each candidate document to produce a relevance score. It is more accurate than bi-encoder retrieval but quadratically more expensive, so it is applied only to the top-k candidates returned by first-stage retrieval."},
+        {"facet": "chunking", "content": "Document chunking trades recall against precision: small chunks improve precision but fragment context, while overlap between adjacent chunks preserves cross-boundary context at the cost of some redundancy in the index."}
+      ]
+    },
+    {
+      "id": "analog-filters",
+      "topic": "analog active and passive filter design",
+      "expected_facets": [
+        {"name": "sallen-key", "contains": ["Sallen-Key"]},
+        {"name": "passive-rc", "contains": ["RC"]},
+        {"name": "band-pass", "contains": ["band"]}
+      ],
+      "entries": [
+        {"facet": "sallen-key", "content": "A Sallen-Key filter is a second-order active filter topology using a single op-amp. The low-pass variant places two resistors and two capacitors around the op-amp to set the cutoff frequency and Q, giving a 2-pole (40 dB/decade) rolloff."},
+        {"facet": "passive-rc", "content": "A first-order passive RC low-pass filter is a single resistor and capacitor; its cutoff frequency is f = 1 / (2*pi*R*C) and it rolls off at 20 dB/decade. It needs no power supply but cannot provide gain and loads the source impedance."},
+        {"facet": "band-pass", "content": "A multiple-feedback (MFB) band-pass filter passes a band of frequencies between a low and a high cutoff, attenuating signals outside the band. Its center frequency and bandwidth are set by the feedback resistor and capacitor network around the op-amp."}
+      ]
+    }
+  ]
+}
