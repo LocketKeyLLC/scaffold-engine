@@ -32,6 +32,10 @@ env:
   HF_HUB_DISABLE_TELEMETRY: "1"
   TOKENIZERS_PARALLELISM: "false"
   PYTHONPATH: /code
+  # §17.555 — app/ coverage floor for the unit-test job. 77 = ~4-5 pts under
+  # the measured baselines (81% in this exact `-k "not integration"` scope,
+  # 82% for `-m "not validate"`); headroom for churn, fails on a real drop.
+  COVERAGE_MIN: "77"
 
 jobs:
   unit-tests:
@@ -124,7 +128,13 @@ jobs:
           ignore-unfixed: true
           exit-code: '0'
 
-      - name: Run unit tests
+      # §17.555 — runs the unit suite AND gates app/ coverage at COVERAGE_MIN%.
+      # pytest-cov rides in via the dev build stage (requirements-dev.txt).
+      # COVERAGE_FILE under /tmp: the ci image's /code is root-owned but the
+      # container's default user differs, so coverage's CWD-relative SQLite DB
+      # is unwritable (same fix as `make coverage`). --cov-fail-under exits
+      # non-zero on a coverage drop, failing the job.
+      - name: Run unit tests + coverage gate
         run: |
           docker run --rm \
             --network host \
@@ -134,9 +144,13 @@ jobs:
             -e SEARXNG_URL=$SEARXNG_URL \
             -e SCAFFOLD_API_KEY=$SCAFFOLD_API_KEY \
             -e PYTHONPATH=/code:/code/sdk \
+            -e COVERAGE_FILE=/tmp/.coverage \
             scaffold-orchestrator:ci \
             pytest tests/ --timeout=30 -v \
-              -k "not integration"
+              -k "not integration" \
+              --cov=app --cov-branch \
+              --cov-report=term-missing:skip-covered \
+              --cov-fail-under=${COVERAGE_MIN}
 
   # Full integration tests require Ollama + Milvus + SearXNG.
   # Enable this job on a self-hosted runner with GPU/CPU inference.

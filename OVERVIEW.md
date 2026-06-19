@@ -21991,6 +21991,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.555 Feat — wire the coverage gate into CI (`test.yml` unit-test job) (2026-06-18)
+
+Promotes the §17.554 gate from local-only into CI. The `Scaffold Engine CI` → "Unit Tests" job already runs the full `-k "not integration"` suite in `scaffold-orchestrator:ci`; that image is the Dockerfile **`dev` stage** (build-push-action builds the last stage, which copies the builder venv incl. `requirements-dev.txt` → `pytest-cov` is present). So coverage **piggybacks on the run that already happens** — no second ~10-min run added. The step now passes `--cov=app --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=${COVERAGE_MIN}` (workflow env `COVERAGE_MIN=77`) plus `-e COVERAGE_FILE=/tmp/.coverage` (the ci image's `/code` is root-owned vs the container user — same fix as `make coverage`).
+
+**Threshold rationale (measured, not guessed).** test.yml's scope is `-k "not integration"`, *different* from `make coverage`'s `-m "not validate"`. Measured both on the live dev image: `-m "not validate"` = **82%** (3966 passed), `-k "not integration"` = **81%** (3891 passed) — within 1 pt, confirming integration tests add negligible coverage and that 77 has ~4 pts headroom in the CI scope too. **Verification limits (honest):** pytest-cov presence is verified (dev stage), the YAML parses, `--cov-fail-under` is verified to fire both ways (§17.554), and 81% ≥ 77 locally — but the CI job itself is **unverified end-to-end** because GitHub Actions is org-billing-blocked (PR #69). First green CI run after billing is restored is the real confirmation; `COVERAGE_MIN` is a one-line workflow env to retune if the CI scope (no live Milvus/Ollama, only Postgres) lands lower than the local measurement.
+
+---
+
 ### §17.554 Feat — turn `make coverage` into a gate at 77% (§17.553 follow-up) (2026-06-18)
 
 Supersedes the "no `--cov-fail-under` gate yet" note in §17.553. `make coverage` now passes `--cov-fail-under=$(COVERAGE_MIN)` (Makefile var, default **77** — ~5 pts under the measured 82% unit baseline: headroom for normal churn, fails on a real drop). Overridable: `COVERAGE_MIN=0 make coverage` for pure reporting, or raise as coverage grows. **Verification:** `make -n coverage` shows `--cov-fail-under=77`; gate exercised both ways in a one-off dev container — floor=0 → 10 passed exit 0; floor=100 → `Coverage failure: total … is less than fail-under=100` (pytest non-zero). At the 82% baseline the gate clears. Still local/dev only — not yet invoked by a CI tier (a follow-up if/when coverage should block merges).
