@@ -1814,30 +1814,7 @@ class Pipeline:
         # with hands-on/Shell steps recommends Assist (auto-running them only
         # writes runbooks marked done → a "completed" job that built nothing,
         # §17.506); a pure text/code/research DAG recommends Autonomous.
-        tasks = dag_data.get("tasks", []) if isinstance(dag_data, dict) else []
-        shell_steps = sum(
-            1 for t in tasks
-            if isinstance(t, dict) and str(t.get("tool", "")).lower() == "shell"
-        )
-        if shell_steps:
-            rec = (
-                f"This plan has **{shell_steps} hands-on step(s)** you run on "
-                f"real systems — **Assist is recommended** (the engine can't "
-                f"perform those for you)."
-            )
-        else:
-            rec = (
-                "This is a text/code/research plan the engine can run on its "
-                "own — **Autonomous is recommended**."
-            )
-        yield (
-            f"📋 **Execution plan ready — {num_nodes} steps.**\n\n"
-            f"{rec} How do you want to proceed?\n\n"
-            f"- `/execute {job_id}` — **autonomous**: the engine runs every "
-            f"step itself.\n"
-            f"- `/assist {job_id}` — **assisted**: you run each step, the "
-            f"engine guides and verifies.\n"
-        )
+        yield self._execution_choice(job_id, dag_data, num_nodes)
         return
 
     # ------------------------------------------------------------------
@@ -2164,10 +2141,12 @@ class Pipeline:
         arg = parts[1].lower() if len(parts) > 1 else ""
         if arg in ("on", "true", "1", "yes", "enable"):
             self.valves.advanced_commands_enabled = True
+            self._persist_advanced()
             return ("🔓 **Advanced commands enabled.** `/help` now lists the "
                     "full surface. Turn back off with `/advanced off`.")
         if arg in ("off", "false", "0", "no", "disable"):
             self.valves.advanced_commands_enabled = False
+            self._persist_advanced()
             return ("🔒 **Advanced commands disabled** — back to the guided "
                     "core. `/advanced on` to re-enable.")
         state = "on" if self.valves.advanced_commands_enabled else "off"
@@ -2177,16 +2156,46 @@ class Pipeline:
             f"- `/advanced off` — guided/minimal core only\n"
         )
 
+    def _persist_advanced(self) -> None:
+        """§17.562 — best-effort persist of the advanced toggle to valves.json
+        so it survives a pipelines-container restart (OWUI reloads valves.json
+        on init). Merge-write to avoid clobbering other valves; silent on any
+        error — the in-memory value still applies for this session."""
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            live = os.path.join(here, "scaffold_router", "valves.json")
+            data: dict = {}
+            if os.path.exists(live):
+                with open(live, "r") as f:
+                    content = f.read().strip()
+                if content and content != "{}":
+                    loaded = json.loads(content)
+                    if isinstance(loaded, dict):
+                        data = loaded
+            data["advanced_commands_enabled"] = (
+                self.valves.advanced_commands_enabled
+            )
+            with open(live, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
     @staticmethod
     def _top_action_cmd(actions: list | None, job_id: str | None) -> str:
-        """First actionable, pre-filled command from a next_actions list."""
+        """First actionable, fully-filled command from a next_actions list.
+
+        §17.562 — skips node-specific actions whose `{node_key}` placeholder is
+        still unfilled (no node context here): a bare `/skip <id> {node_key}`
+        reads as broken in /here·/next. Those degrade to "—" → the user opens
+        `/results` for node detail.
+        """
         for a in (actions or []):
             if not isinstance(a, dict):
                 continue
             if a.get("action") == "wait":
                 continue
             cmd = a.get("command")
-            if cmd:
+            if cmd and "{" not in cmd:
                 return f"`{cmd}`"
         return "—"
 
@@ -2650,8 +2659,43 @@ class Pipeline:
             yield "\n\n⚠️ Unexpected response from DAG generation."
             return
 
-        yield f"\nReady — executing {num_nodes} steps...\n\n"
-        yield from self._execute_and_stream(job_id, num_nodes)
+        # §17.562 — always-ask: present the autonomous-vs-assist choice rather
+        # than silently auto-executing (consistent with /confirm). This tail is
+        # the edge path where /ideate did NOT pause at awaiting_confirmation.
+        yield "\n"
+        yield self._execution_choice(job_id, dag_data, num_nodes)
+        return
+
+    def _execution_choice(
+        self, job_id: str, dag_data: dict, num_nodes: int,
+    ) -> str:
+        """§17.562 — the always-ask autonomous-vs-assist prompt after planning.
+        Shared by /confirm and the /go auto-chain so the choice is identical.
+        Shell/hands-on steps drive the *recommendation*, not the visibility."""
+        tasks = dag_data.get("tasks", []) if isinstance(dag_data, dict) else []
+        shell_steps = sum(
+            1 for t in tasks
+            if isinstance(t, dict) and str(t.get("tool", "")).lower() == "shell"
+        )
+        if shell_steps:
+            rec = (
+                f"This plan has **{shell_steps} hands-on step(s)** you run on "
+                f"real systems — **Assist is recommended** (the engine can't "
+                f"perform those for you)."
+            )
+        else:
+            rec = (
+                "This is a text/code/research plan the engine can run on its "
+                "own — **Autonomous is recommended**."
+            )
+        return (
+            f"📋 **Execution plan ready — {num_nodes} steps.**\n\n"
+            f"{rec} How do you want to proceed?\n\n"
+            f"- `/execute {job_id}` — **autonomous**: the engine runs every "
+            f"step itself.\n"
+            f"- `/assist {job_id}` — **assisted**: you run each step, the "
+            f"engine guides and verifies.\n"
+        )
 
     # ------------------------------------------------------------------
     # SSE reader helper (#8.7, #8.12)
@@ -3076,10 +3120,11 @@ class Pipeline:
     def _render_completion_next_block(
         self, job_id: str, failed_nodes: list,
     ) -> str:
+        adv = self.valves.advanced_commands_enabled
         lines: list[str] = ["\n\n---\n\n**Next steps:**"]
         # `/exec retry` rows first when there are failures — operator
-        # action is highest-leverage on those.
-        if failed_nodes:
+        # action is highest-leverage on those (advanced surface only).
+        if failed_nodes and adv:
             for fn in failed_nodes:
                 if isinstance(fn, dict):
                     nk = fn.get("node_key", "?")
@@ -3090,15 +3135,29 @@ class Pipeline:
                         f"this failed step"
                     )
         lines.append(f"- `/results {job_id}` — full status + node-by-node detail")
-        lines.append(f"- `/cost {job_id}` — see total LLM cost + latency rollup")
-        if not failed_nodes:
-            # Only suggest the friction commands when there's nothing
-            # broken to fix first — operator decision tree is "fix vs
-            # tune", not all four at once.
+        lines.append("- `/here` — your active work + next step")
+        if adv:
             lines.append(
-                f"- `/jobs rename {job_id} <new title>` — set a memorable "
-                f"title for later lookup"
+                f"- `/cost {job_id}` — see total LLM cost + latency rollup"
             )
+            if not failed_nodes:
+                lines.append(
+                    f"- `/jobs rename {job_id} <new title>` — set a memorable "
+                    f"title for later lookup"
+                )
+        else:
+            # §17.562 — guided: the retry/cost/rename commands are gated; point
+            # at /advanced rather than naming a command that would 🔒-block.
+            if failed_nodes:
+                lines.append(
+                    "- `/advanced on` — unlock `/exec retry` to re-run failed "
+                    "steps (plus `/cost`, job management)"
+                )
+            else:
+                lines.append(
+                    "- `/advanced on` — unlock `/cost`, `/jobs rename`, and the "
+                    "full surface"
+                )
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -4918,7 +4977,8 @@ class Pipeline:
             f"before proceeding"
         )
         lines.append(f"- `/results {job_id}` — peek at current state")
-        lines.append(f"- `/cost {job_id}` — see costs so far")
+        if self.valves.advanced_commands_enabled:
+            lines.append(f"- `/cost {job_id}` — see costs so far")
 
         # Append the raw JSON as a smaller footer so operators who want
         # the full payload still have it.

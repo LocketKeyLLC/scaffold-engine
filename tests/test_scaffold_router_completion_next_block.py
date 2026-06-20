@@ -29,7 +29,13 @@ from tests._scaffold_router_setup import Pipeline
 
 @pytest.fixture
 def pipe():
-    return Pipeline()
+    p = Pipeline()
+    # §17.562 — the completion next-block surfaces /cost, /jobs rename,
+    # /exec retry, which are advanced commands; this file asserts that full
+    # (advanced) block. The guided variant is covered in
+    # TestCompletionNextBlockGuided below.
+    p.valves.advanced_commands_enabled = True
+    return p
 
 
 _SAMPLE_JOB_ID = "abc1234e-d5f6-7890-abcd-ef1234567890"
@@ -58,6 +64,32 @@ class TestCompletionNextBlockHappyPath:
         command, never the literal `<job_id>` placeholder."""
         out = pipe._render_completion_next_block(_SAMPLE_JOB_ID, [])
         assert "<job_id>" not in out
+
+
+@pytest.mark.smoke
+class TestCompletionNextBlockGuided:
+    """§17.562 — guided mode hides gated commands and points at /advanced."""
+
+    def test_guided_hides_gated_and_points_advanced(self):
+        p = Pipeline()
+        p.valves.advanced_commands_enabled = False
+        out = p._render_completion_next_block(_SAMPLE_JOB_ID, [])
+        assert f"/results {_SAMPLE_JOB_ID}" in out   # core stays
+        assert "/here" in out
+        # No pre-filled (actionable) gated command — the /advanced pointer may
+        # NAME them, but never with the real id ready to run.
+        assert f"/cost {_SAMPLE_JOB_ID}" not in out
+        assert f"/jobs rename {_SAMPLE_JOB_ID}" not in out
+        assert "/advanced on" in out
+
+    def test_guided_failed_nodes_point_advanced_for_retry(self):
+        p = Pipeline()
+        p.valves.advanced_commands_enabled = False
+        out = p._render_completion_next_block(
+            _SAMPLE_JOB_ID, [{"node_key": "T1", "title": "x"}])
+        # No pre-filled retry command; point at /advanced instead.
+        assert f"/exec retry {_SAMPLE_JOB_ID}" not in out
+        assert "/advanced on" in out
 
 
 @pytest.mark.smoke

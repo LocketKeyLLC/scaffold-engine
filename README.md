@@ -128,13 +128,18 @@ Now type your first idea into the chat. For your first run, pick something small
 
 Press Enter. The system replies with refined-brief output and a job ID. Copy the job ID (a UUID like `481010cd-9542-4b27-9af3-7c80f468af89`).
 
-Then approve and execute:
+Then approve it:
 
 ```
 /confirm 481010cd-9542-4b27-9af3-7c80f468af89
 ```
 
-The system runs research → DAG generation → node execution, streaming progress events to your chat. When it's done you'll see the final compiled script.
+The system runs research → DAG generation, then **asks how you want to run the plan** (with a recommendation):
+
+- `/execute <job_id>` — **autonomous**: the engine runs every step itself (best for writing / code / research).
+- `/assist <job_id>` — **assisted**: you run each step on your own machine, the engine guides and verifies (best for plans with hands-on / shell steps).
+
+For this first run, pick `/execute`. It streams progress events to your chat; when it's done you'll see the final compiled script.
 
 Check progress at any time with:
 
@@ -142,12 +147,16 @@ Check progress at any time with:
 /results 481010cd-9542-4b27-9af3-7c80f468af89
 ```
 
-That command knows the job's current status and shows what to do next — including pre-filled commands if a node failed and needs a retry.
+…or just type **`/here`** to see everything in progress and your next step — no job ID needed. `/resume` jumps straight back into whatever you were doing.
+
+> **Don't memorize IDs.** `/here`, `/next`, and `/resume` all work off the most recent job, so you rarely need to paste a UUID.
 
 > **What can go wrong on your first run:**
 > - Phase 2 (research) can take 10–25 minutes on CPU. The chat shows a visible "⏳ Phase 2 — researching + ingesting… (Xm YYs elapsed)" marker every ~2 minutes (§17.173). For sub-step detail, tail the orchestrator (`docker logs -f scaffold-orchestrator`) — it logs each SearXNG query, distillation batch, and Milvus ingest as it happens.
 > - If the system says `awaiting_confirmation` and won't move forward, you skipped step 6 (the `/confirm` command).
 > - If a DAG node fails after three auto-retries, it goes to `blocked`. Run `/results <job_id>` for a copy-pasteable retry or skip command.
+
+> **Guided by default.** The chat exposes a small core set — `/go`, `/idea`, `/confirm`, `/execute`, `/assist`, `/here`, `/next`, `/resume`, `/results`, `/cancel`, `/help`. The ~45 power commands (`/research`, `/jobs`, `/model`, `/schedule`, `/rag`, …) are one toggle away: type **`/advanced on`** (it sticks across restarts). `/help` lists the core; `/help` after `/advanced on` lists everything. Full reference: [USER_GUIDE.md](./USER_GUIDE.md).
 
 ---
 
