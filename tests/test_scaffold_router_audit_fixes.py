@@ -55,21 +55,24 @@ class TestConfirmHandsOnChoice:
         assert "hands-on" in out.lower()
 
     @patch("pipelines.scaffold_router._HTTP_SESSION.post")
-    def test_text_dag_still_autoexecutes(self, mock_post, pipe):
+    def test_text_dag_offers_choice_recommending_autonomous(self, mock_post, pipe):
+        """§17.562 — a text/code DAG now ALSO offers the choice (was: silently
+        auto-executed), recommending Autonomous. No /execute/all auto-fire."""
         confirm_resp = MagicMock(status_code=200)
         confirm_resp.json.return_value = {"status": "planning", "job_id": "job-txt"}
         dag_resp = MagicMock(status_code=200)
         dag_resp.json.return_value = {"task_count": 2, "tasks": [
             {"id": "T1", "tool": "LLM"}, {"id": "T2", "tool": "CodeGen"}]}
-        exec_resp = MagicMock(status_code=200)
-        exec_resp.iter_lines.return_value = iter([])
-        exec_resp.close = MagicMock()
-        mock_post.side_effect = [confirm_resp, dag_resp, exec_resp]
-        list(pipe.pipe("/confirm job-txt", "m",
+        # No exec response queued — if the code tried /execute/all the
+        # side_effect list would exhaust and raise (hard guard).
+        mock_post.side_effect = [confirm_resp, dag_resp]
+        out = "".join(pipe.pipe("/confirm job-txt", "m",
                        [{"role": "user", "content": "/confirm job-txt"}], {}))
         urls = [c.args[0] for c in mock_post.call_args_list]
-        assert any("/execute/all" in u for u in urls), \
-            "text-class DAG should still auto-execute"
+        assert not any("/execute/all" in u for u in urls), \
+            "text DAG must NOT silently auto-execute (always-ask)"
+        assert "/execute job-txt" in out and "/assist job-txt" in out
+        assert "autonomous is recommended" in out.lower()
 
 
 @pytest.mark.smoke

@@ -6,7 +6,7 @@ GET /logs/{job_id}     — per-node execution history for a single job
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -15,29 +15,24 @@ from sqlalchemy import text
 
 from app.database import get_db
 from app.modules.recovery import next_actions_for
+from app.schemas import JOB_STATUSES, JobStatus
+from app.web.routes import phase_label_for
 
 logger = logging.getLogger("scaffold.routers.status")
 router = APIRouter()
 
 
 # ── Canonical job status enum ─────────────────────────────────────────
-# Must mirror the jobs_status_check CHECK constraint in the database.
-JobStatus = Literal[
-    "pending",
-    "refining",
-    "awaiting_confirmation",
-    "researching",
-    "planning",
-    "executing",
-    "running",
-    "completed",
-    "failed",
-    "cancelled",
-    "blocked",
-    "assisted_executing",
-    "assisted_running",
-    "assisted_paused",
-]
+# JobStatus / JOB_STATUSES are the single source of truth (app/schemas.py),
+# mirroring the jobs_status_check CHECK constraint. §17.561 — this router
+# previously redeclared its own Literal that drifted (missing 'aggregating'),
+# which silently dropped umbrella jobs from /status counts and 422'd
+# ?status=aggregating. Importing the canonical enum makes drift impossible;
+# see tests/test_status_endpoint.py::test_status_enum_parity.
+# Terminal statuses a job can no longer progress from — drives /work.
+_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"completed", "failed", "cancelled"}
+)
 
 
 # ── Pydantic response models ──────────────────────────────────────────
@@ -56,6 +51,11 @@ class StatusCounts(BaseModel):
     assisted_executing: int = 0
     assisted_running: int = 0
     assisted_paused: int = 0
+    # §17.561 — umbrella jobs live in 'aggregating' while their component
+    # children run. Was missing here, so umbrella counts were silently
+    # discarded by the valid_keys filter in get_status. Parity with
+    # app.schemas.JOB_STATUSES is asserted in test_status_endpoint.py.
+    aggregating: int = 0
 
 
 class JobSummary(BaseModel):
@@ -72,6 +72,33 @@ class StatusResponse(BaseModel):
     status_counts: StatusCounts
     total_jobs: int
     recent_jobs: list[JobSummary]
+    timestamp: str
+
+
+# ── §17.561 — "my active work" models (GET /work) ─────────────────────
+class WorkJob(BaseModel):
+    id: str
+    title: str = ""
+    status: str
+    phase: str
+    job_type: str = "legacy"
+    node_count: int = 0
+    updated_at: Optional[str] = None
+    next_actions: list[dict[str, Any]] = []
+
+
+class WorkAssistSession(BaseModel):
+    session_id: str
+    job_id: str
+    job_title: str = ""
+    status: str
+    current_node_key: Optional[str] = None
+    last_activity_at: Optional[str] = None
+
+
+class WorkResponse(BaseModel):
+    jobs: list[WorkJob] = []
+    assist_sessions: list[WorkAssistSession] = []
     timestamp: str
 
 
@@ -171,6 +198,82 @@ async def get_status(
         status_counts=status_counts,
         total_jobs=total,
         recent_jobs=recent_jobs,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@router.get("/work")
+async def get_work(db=Depends(get_db)) -> WorkResponse:
+    """List the user's active (non-terminal) work in one response.
+
+    Single-user "you-are-here" primitive backing the pipeline's /here,
+    /resume, and /next verbs (§17.561). Returns non-terminal jobs (newest
+    first) and active/paused assist sessions, each with a human phase label
+    and pre-filled next_actions — so the user never needs a UUID to resume.
+    Replaces the per-replica, chat-scoped recall the pipeline relied on
+    (OWUI doesn't reliably deliver chat_id).
+    """
+    # 1. Non-terminal jobs, newest first, with node counts + recovery actions.
+    job_rows = await db.execute(
+        text("""
+            SELECT j.id, j.title, j.status, j.job_type, j.error_summary,
+                   j.updated_at, COALESCE(n.node_count, 0) AS node_count
+            FROM jobs j
+            LEFT JOIN (
+                SELECT job_id, COUNT(*) AS node_count
+                FROM dag_nodes GROUP BY job_id
+            ) n ON n.job_id = j.id
+            WHERE j.status NOT IN ('completed', 'failed', 'cancelled')
+            ORDER BY j.updated_at DESC
+        """),
+    )
+    jobs = [
+        WorkJob(
+            id=str(row.id),
+            title=row.title or "",
+            status=row.status,
+            phase=phase_label_for(row.status),
+            job_type=row.job_type or "legacy",
+            node_count=row.node_count,
+            updated_at=row.updated_at.isoformat() if row.updated_at else None,
+            next_actions=next_actions_for(
+                row.status, str(row.id), error_summary=row.error_summary
+            ),
+        )
+        for row in job_rows
+    ]
+
+    # 2. Active/paused assist sessions, joined to the job title.
+    sess_rows = await db.execute(
+        text("""
+            SELECT s.id, s.job_id, s.status, s.current_node_key,
+                   s.last_activity_at, j.title
+            FROM assist_sessions s
+            JOIN jobs j ON j.id = s.job_id
+            WHERE s.status IN ('active', 'paused')
+            ORDER BY s.last_activity_at DESC
+        """),
+    )
+    sessions = [
+        WorkAssistSession(
+            session_id=str(row.id),
+            job_id=str(row.job_id),
+            job_title=row.title or "",
+            status=row.status,
+            current_node_key=row.current_node_key,
+            last_activity_at=(
+                row.last_activity_at.isoformat() if row.last_activity_at else None
+            ),
+        )
+        for row in sess_rows
+    ]
+
+    logger.info(
+        "work_queried jobs=%d assist_sessions=%d", len(jobs), len(sessions)
+    )
+    return WorkResponse(
+        jobs=jobs,
+        assist_sessions=sessions,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 

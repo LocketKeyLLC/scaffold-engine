@@ -48,7 +48,10 @@ async def test_start_session_rejects_unknown_job():
 async def test_start_session_rejects_invalid_status():
     db = AsyncMock()
     db.execute.side_effect = [
-        _result(mappings_first={"id": "abc", "status": "completed"}),
+        _result(mappings_first={
+            "id": "abc", "status": "completed",
+            "job_type": "legacy", "node_count": 5,
+        }),
     ]
     with pytest.raises(ValueError, match="assist mode requires"):
         await assist_agent.start_assist_session(
@@ -72,7 +75,10 @@ async def test_start_session_rejects_non_uuid_job_id():
 async def test_start_session_returns_session_dict_and_commits():
     db = AsyncMock()
     db.execute.side_effect = [
-        _result(mappings_first={"id": "job-1", "status": "planning"}),
+        _result(mappings_first={
+            "id": "job-1", "status": "planning",
+            "job_type": "legacy", "node_count": 4,
+        }),
         _result(mappings_first={
             "id": "sess-1", "job_id": "job-1", "status": "active",
             "handoff_policy": "manual", "replan_policy": "context_only",
@@ -89,6 +95,57 @@ async def test_start_session_returns_session_dict_and_commits():
     assert out["total_steps"] == 4
     assert out["pending_steps"] == 4
     assert db.commit.await_count == 1
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_start_session_umbrella_returns_assist_unavailable():
+    """§17.561 — /assist on an umbrella job returns structured guidance, not a
+    phantom empty session. No INSERT/UPDATE, no commit; child rollup attached."""
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _result(mappings_first={
+            "id": "u-1", "status": "aggregating",
+            "job_type": "umbrella", "node_count": 0,
+        }),
+        _result(mappings_all=[
+            {"id": "c-1", "title": "Backend", "status": "running",
+             "component_index": 0},
+            {"id": "c-2", "title": "Frontend", "status": "completed",
+             "component_index": 1},
+        ]),
+    ]
+    out = await assist_agent.start_assist_session(
+        job_id="33333333-3333-3333-3333-333333333333", db=db,
+    )
+    assert out["assist_unavailable"] is True
+    assert out["reason"] == "umbrella"
+    assert out["children_total"] == 2
+    assert out["children"][0]["title"] == "Backend"
+    db.commit.assert_not_called()
+    assert db.execute.await_count == 2  # SELECT job + SELECT children only
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_start_session_zero_node_job_returns_assist_unavailable():
+    """A non-umbrella job with 0 DAG nodes also gets the friendly guard
+    (reason='no_dag') instead of an empty session."""
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _result(mappings_first={
+            "id": "j-0", "status": "planning",
+            "job_type": "legacy", "node_count": 0,
+        }),
+    ]
+    out = await assist_agent.start_assist_session(
+        job_id="44444444-4444-4444-4444-444444444444", db=db,
+    )
+    assert out["assist_unavailable"] is True
+    assert out["reason"] == "no_dag"
+    assert out["children"] == []
+    db.commit.assert_not_called()
+    assert db.execute.await_count == 1  # only the SELECT job ran
 
 
 @pytest.mark.smoke

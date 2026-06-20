@@ -281,6 +281,10 @@ class TestPayloadInclusion:
 
     def _run_command(self, pipe, command, mock_post):
         """Call pipe() with correct signature, exhaust generator."""
+        # §17.562 — these tests assert payload CONTENTS for advanced commands
+        # (/optimize, /rag, …); enable the full surface so the guided gate
+        # doesn't short-circuit them before the HTTP call.
+        pipe.valves.advanced_commands_enabled = True
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"status": "ok", "job_id": "test-job-1"}

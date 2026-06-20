@@ -56,7 +56,10 @@ async def start_assist_session(
     Idempotent on job_id (UNIQUE in the schema). If a session already
     exists, return its id without re-seeding steps.
 
-    Side effects (all in one transaction):
+    Umbrella jobs and any job with 0 DAG nodes return early with
+    ``{"assist_unavailable": True, ...}`` and NO side effects (§17.561).
+
+    Side effects (all in one transaction) for assistable jobs:
       - INSERT assist_sessions row (or no-op if it exists)
       - UPDATE jobs.status -> 'assisted_executing'
       - INSERT one assist_steps row per `dag_nodes` row in pending status
@@ -76,11 +79,58 @@ async def start_assist_session(
 
     # 1. Validate job state.
     row = (await db.execute(
-        text("SELECT id, status FROM jobs WHERE id = :id"),
+        text("""
+            SELECT j.id, j.status, j.job_type,
+                   (SELECT COUNT(*) FROM dag_nodes WHERE job_id = j.id)
+                       AS node_count
+              FROM jobs j WHERE j.id = :id
+        """),
         {"id": job_id},
     )).mappings().first()
     if not row:
         raise ValueError(f"job not found: {job_id}")
+
+    # §17.561 — umbrella / 0-node guard. Umbrella jobs (multi-part
+    # decompositions) intentionally have NO DAG nodes of their own — the work
+    # runs in autonomous component children. Before the gate, starting assist
+    # on one seeded an empty session and `/assist next` rendered the cryptic
+    # "⏳ No step ready right now." Detect it BEFORE creating any session row
+    # and return structured guidance the router surfaces as a friendly 200
+    # ("components run automatically; watch with /results"), not an error.
+    # Runs ahead of the status check so an 'aggregating' umbrella also gets the
+    # guidance rather than a confusing 409.
+    if row["job_type"] == "umbrella" or row["node_count"] == 0:
+        children: list[dict] = []
+        if row["job_type"] == "umbrella":
+            child_rows = (await db.execute(
+                text("""
+                    SELECT id, title, status, component_index
+                      FROM jobs WHERE parent_job_id = :u
+                     ORDER BY component_index
+                """),
+                {"u": job_id},
+            )).mappings().all()
+            children = [{
+                "job_id": str(c["id"]),
+                "title": c["title"],
+                "status": c["status"],
+                "component_index": c["component_index"],
+            } for c in child_rows]
+        reason = "umbrella" if row["job_type"] == "umbrella" else "no_dag"
+        logger.info(
+            "assist_unavailable job_id=%s reason=%s job_type=%s nodes=%d",
+            job_id, reason, row["job_type"], row["node_count"],
+        )
+        return {
+            "assist_unavailable": True,
+            "reason": reason,
+            "job_id": job_id,
+            "job_type": row["job_type"],
+            "job_status": row["status"],
+            "children": children,
+            "children_total": len(children),
+        }
+
     if row["status"] not in _VALID_START_STATUSES:
         raise ValueError(
             f"job {job_id} is in status {row['status']!r}; "

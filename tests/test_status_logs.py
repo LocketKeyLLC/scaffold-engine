@@ -68,11 +68,15 @@ _spec.loader.exec_module(_mod)
 
 get_status = _mod.get_status
 get_logs = _mod.get_logs
+get_work = _mod.get_work
 StatusResponse = _mod.StatusResponse
 LogsResponse = _mod.LogsResponse
 StatusCounts = _mod.StatusCounts
 JobSummary = _mod.JobSummary
 NodeLog = _mod.NodeLog
+WorkResponse = _mod.WorkResponse
+WorkJob = _mod.WorkJob
+WorkAssistSession = _mod.WorkAssistSession
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────
@@ -505,3 +509,106 @@ class TestModels:
         )
         assert nl.domain == "eng"
         assert nl.confidence == 0.95
+
+
+# ── Tests: §17.561 enum-drift guard ───────────────────────────────────
+
+
+class TestEnumParity:
+    """The router must not redeclare its own status enum. §17.561 — a drifted
+    local Literal silently dropped 'aggregating' (umbrella jobs) from /status
+    counts. These tests fail if the local enum is ever reintroduced."""
+
+    def test_status_counts_mirrors_canonical_statuses(self):
+        from app.schemas import JOB_STATUSES
+        fields = set(StatusCounts.model_fields.keys())
+        assert fields == set(JOB_STATUSES), (
+            "StatusCounts fields must exactly mirror app.schemas.JOB_STATUSES; "
+            f"missing={set(JOB_STATUSES) - fields} extra={fields - set(JOB_STATUSES)}"
+        )
+
+    def test_router_uses_canonical_jobstatus(self):
+        from app.schemas import JobStatus as CanonicalJobStatus
+        assert _mod.JobStatus is CanonicalJobStatus
+
+    @pytest.mark.asyncio
+    async def test_aggregating_count_surfaced(self):
+        """An 'aggregating' (umbrella) row reaches status_counts instead of
+        being discarded by the valid_keys filter."""
+        count_rows = [_make_row(status="aggregating", cnt=2)]
+        db = _make_db([_make_result(count_rows), _make_result([])])
+        resp = await get_status(limit=20, status_filter=None, db=db)
+        assert resp.status_counts.aggregating == 2
+
+
+# ── Tests: GET /work (§17.561 "my active work") ────────────────────────
+
+
+class TestGetWork:
+
+    @pytest.mark.asyncio
+    async def test_returns_jobs_and_sessions(self):
+        """/work returns non-terminal jobs (with phase + next_actions) AND
+        active assist sessions in one response."""
+        job_rows = [
+            _make_row(
+                id="11111111-1111-4111-8111-111111111111",
+                title="Build a homelab",
+                status="planning",
+                job_type="legacy",
+                error_summary=None,
+                node_count=3,
+                updated_at=datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc),
+            ),
+        ]
+        sess_rows = [
+            _make_row(
+                id="22222222-2222-4222-8222-222222222222",
+                job_id="11111111-1111-4111-8111-111111111111",
+                status="active",
+                current_node_key="T1",
+                last_activity_at=datetime(2026, 6, 20, 12, 5, tzinfo=timezone.utc),
+                title="Build a homelab",
+            ),
+        ]
+        db = _make_db([_make_result(job_rows), _make_result(sess_rows)])
+
+        resp = await get_work(db=db)
+
+        assert isinstance(resp, WorkResponse)
+        assert len(resp.jobs) == 1
+        assert resp.jobs[0].phase, "phase label must be populated"
+        assert resp.jobs[0].next_actions, "next_actions must be populated"
+        assert resp.jobs[0].job_type == "legacy"
+        assert len(resp.assist_sessions) == 1
+        assert resp.assist_sessions[0].session_id == \
+            "22222222-2222-4222-8222-222222222222"
+        assert resp.assist_sessions[0].current_node_key == "T1"
+        assert resp.assist_sessions[0].job_title == "Build a homelab"
+
+    @pytest.mark.asyncio
+    async def test_empty_work(self):
+        """No active work returns two empty lists, not an error."""
+        db = _make_db([_make_result([]), _make_result([])])
+        resp = await get_work(db=db)
+        assert resp.jobs == []
+        assert resp.assist_sessions == []
+
+    @pytest.mark.asyncio
+    async def test_null_title_session(self):
+        """A session whose job has a NULL title degrades to ''."""
+        job_rows = []
+        sess_rows = [
+            _make_row(
+                id="33333333-3333-4333-8333-333333333333",
+                job_id="44444444-4444-4444-8444-444444444444",
+                status="paused",
+                current_node_key=None,
+                last_activity_at=None,
+                title=None,
+            ),
+        ]
+        db = _make_db([_make_result(job_rows), _make_result(sess_rows)])
+        resp = await get_work(db=db)
+        assert resp.assist_sessions[0].job_title == ""
+        assert resp.assist_sessions[0].current_node_key is None

@@ -2795,6 +2795,11 @@
       },
       "StatusCounts": {
         "properties": {
+          "aggregating": {
+            "default": 0,
+            "title": "Aggregating",
+            "type": "integer"
+          },
           "assisted_executing": {
             "default": 0,
             "title": "Assisted Executing",
@@ -3026,6 +3031,142 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "WorkAssistSession": {
+        "properties": {
+          "current_node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Node Key"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "job_title": {
+            "default": "",
+            "title": "Job Title",
+            "type": "string"
+          },
+          "last_activity_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Activity At"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "job_id",
+          "status"
+        ],
+        "title": "WorkAssistSession",
+        "type": "object"
+      },
+      "WorkJob": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "job_type": {
+            "default": "legacy",
+            "title": "Job Type",
+            "type": "string"
+          },
+          "next_actions": {
+            "default": [],
+            "items": {
+              "type": "object"
+            },
+            "title": "Next Actions",
+            "type": "array"
+          },
+          "node_count": {
+            "default": 0,
+            "title": "Node Count",
+            "type": "integer"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "phase"
+        ],
+        "title": "WorkJob",
+        "type": "object"
+      },
+      "WorkResponse": {
+        "properties": {
+          "assist_sessions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WorkAssistSession"
+            },
+            "title": "Assist Sessions",
+            "type": "array"
+          },
+          "jobs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WorkJob"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp"
+        ],
+        "title": "WorkResponse",
         "type": "object"
       },
       "_LogLevelPatchIn": {
@@ -7756,7 +7897,8 @@
                     "blocked",
                     "assisted_executing",
                     "assisted_running",
-                    "assisted_paused"
+                    "assisted_paused",
+                    "aggregating"
                   ],
                   "type": "string"
                 },
@@ -7879,6 +8021,30 @@
         "tags": [
           "Specs"
         ]
+      }
+    },
+    "/work": {
+      "get": {
+        "description": "List the user's active (non-terminal) work in one response.\n\nSingle-user \"you-are-here\" primitive backing the pipeline's /here,\n/resume, and /next verbs (§17.561). Returns non-terminal jobs (newest\nfirst) and active/paused assist sessions, each with a human phase label\nand pre-filled next_actions — so the user never needs a UUID to resume.\nReplaces the per-replica, chat-scoped recall the pipeline relied on\n(OWUI doesn't reliably deliver chat_id).",
+        "operationId": "get_work_work_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Work"
       }
     }
   }

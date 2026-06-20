@@ -138,7 +138,9 @@ class TestPipeRouting:
 
     def test_slash_command_dispatches_despite_active_session(self, pipe):
         # An active session must NOT swallow `/jobs` etc. — slash dispatch
-        # happens before the plain-text routing block.
+        # happens before the plain-text routing block. §17.562: /jobs is an
+        # advanced command, so enable advanced mode for this dispatch check.
+        pipe.valves.advanced_commands_enabled = True
         rec = {"session_id": "s1", "last_node_key": "T1", "status": "active"}
         with patch.object(pipe, "_assist_recall", return_value=rec), \
              patch.object(pipe, "_assist_chat_turn") as guide, \

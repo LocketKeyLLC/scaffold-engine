@@ -34,7 +34,11 @@ from tests._scaffold_router_setup import Pipeline
 
 @pytest.fixture
 def pipe():
-    return Pipeline()
+    p = Pipeline()
+    # §17.562 — this file asserts the FULL command reference; that surface
+    # lives behind advanced mode now (guided /help shows only the core verbs).
+    p.valves.advanced_commands_enabled = True
+    return p
 
 
 @pytest.mark.smoke

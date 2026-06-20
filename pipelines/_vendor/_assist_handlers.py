@@ -610,6 +610,43 @@ def assist_start(
         d = r.json()
     except ValueError as e:
         yield f"❌ Assist start: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+    # §17.561/562 — umbrella / 0-node guard. The orchestrator returns HTTP 200
+    # with assist_unavailable instead of seeding a phantom empty session (which
+    # used to render the cryptic "⏳ No step ready right now."). Surface clear
+    # guidance: umbrella work runs autonomously in component children; a 0-node
+    # job needs a plan first.
+    if isinstance(d, dict) and d.get("assist_unavailable"):
+        if d.get("reason") == "umbrella":
+            kids = d.get("children") or []
+            done = sum(1 for c in kids if c.get("status") == "completed")
+            lines = [
+                f"📦 **This is a multi-part job** — its {len(kids)} component(s) "
+                f"run **automatically**. There's nothing to step through here.",
+                "",
+                f"Progress: **{done}/{len(kids)}** components completed.",
+                "",
+            ]
+            for c in kids:
+                icon = "✅" if c.get("status") == "completed" else (
+                    "❌" if c.get("status") in ("failed", "cancelled", "blocked")
+                    else "⏳")
+                lines.append(
+                    f"- {icon} {c.get('title', '')} — `{c.get('status', '')}`"
+                )
+            lines += [
+                "",
+                f"Watch progress or read the assembled result with "
+                f"`/results {d.get('job_id', '')}`.",
+            ]
+            yield "\n".join(lines)
+            return
+        # reason == 'no_dag'
+        yield (
+            "ℹ️ This job has no execution plan yet, so there's nothing to "
+            "assist with. Build a plan first with `/confirm <job_id>`, then "
+            "`/assist <job_id>`."
+        )
+        return
     sid = d.get("session_id") if isinstance(d, dict) else None
     if not sid:
         yield f"❌ Assist start: orchestrator reply missing `session_id`; raw: {str(d)[:200]}"; return

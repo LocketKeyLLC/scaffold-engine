@@ -59,10 +59,11 @@ class TestHandleCommand:
         assert "/help" in result
 
     def test_help_command(self, pipe):
-        """'/help' should return help text without making any HTTP call."""
+        """'/help' should return help text without making any HTTP call.
+        §17.562 — default (guided) help lists the core verbs."""
         result = pipe._handle_command("/help")
         assert "/go" in result
-        assert "/status" in result
+        assert "/here" in result
 
     @patch("scaffold_router._HTTP_SESSION.post")
     def test_idea_command(self, mock_post, pipe):
@@ -273,23 +274,26 @@ class TestConfirmCommand:
 
 
     @patch("pipelines.scaffold_router._HTTP_SESSION.post")
-    def test_confirm_invokes_execute_all(self, mock_post, pipe):
-        """/confirm must auto-chain into /execute/all (regression for known issue #14)."""
+    def test_confirm_chains_research_dag_then_offers_choice(self, mock_post, pipe):
+        """§17.562 — /confirm auto-chains research → DAG, then ALWAYS presents
+        the autonomous-vs-assist choice (was: silently auto-ran /execute/all
+        unless the plan had Shell steps). Silent auto-run was a top assist-vs-
+        autonomous confusion complaint; the user now picks explicitly."""
         from unittest.mock import MagicMock
         confirm_resp = MagicMock(status_code=200)
         confirm_resp.json.return_value = {"status": "planning", "job_id": "job-42"}
         dag_resp = MagicMock(status_code=200)
         dag_resp.json.return_value = {"task_count": 3, "tasks": []}
-        exec_resp = MagicMock(status_code=200)
-        exec_resp.iter_lines.return_value = iter([])
-        exec_resp.close = MagicMock()
-        mock_post.side_effect = [confirm_resp, dag_resp, exec_resp]
+        mock_post.side_effect = [confirm_resp, dag_resp]
         messages = [{"role": "user", "content": "/confirm job-42"}]
-        list(pipe.pipe("/confirm job-42", "test-model", messages, {}))
+        out = "".join(pipe.pipe("/confirm job-42", "test-model", messages, {}))
         urls = [c.args[0] for c in mock_post.call_args_list]
         assert any("/ideate/confirm" in u for u in urls)
         assert any("/dag" in u for u in urls)
-        assert any("/execute/all" in u for u in urls), f"/execute/all never called — got {urls}"
+        # No silent auto-execute — the choice is presented instead.
+        assert not any("/execute/all" in u for u in urls), \
+            f"/execute/all should NOT auto-fire — got {urls}"
+        assert "/execute job-42" in out and "/assist job-42" in out
 
     def test_confirm_into_assist_carries_chat_id(self, pipe, monkeypatch):
         """When valves.assist_after_confirm=True, /confirm auto-chains into
@@ -593,6 +597,12 @@ class TestModelCommand:
 
 class TestResearchCommand:
     """Tests for /research command parsing and dispatch."""
+
+    @pytest.fixture(autouse=True)
+    def _enable_advanced(self, pipe):
+        # §17.562 — /research is an advanced command; enable the full surface
+        # so these parsing/dispatch tests exercise the handler, not the gate.
+        pipe.valves.advanced_commands_enabled = True
 
     def test_research_usage_error(self, pipe):
         """'/research' with no topic yields the §17.310 mode-discovery
@@ -1155,7 +1165,9 @@ class TestU8DCommands:
         assert "✅" in out and "❌" in out
 
     def test_help_lists_new_commands(self, pipe):
-        """The help text should advertise the new U.8.D commands."""
+        """The full (advanced) help should advertise the U.8.D commands.
+        §17.562 — these live under the advanced surface now."""
+        pipe.valves.advanced_commands_enabled = True
         out = pipe._handle_command("/help")
         for cmd in ("/health", "/logs", "/exec retry", "/cleanup", "/config"):
             assert cmd in out, f"expected `{cmd}` in /help output"
@@ -1254,6 +1266,7 @@ class TestCostCommand:
         assert "/cost" in KNOWN_COMMANDS
 
     def test_help_advertises_cost(self, pipe):
+        pipe.valves.advanced_commands_enabled = True  # §17.562 — /cost is advanced
         out = pipe._handle_command("/help")
         assert "/cost" in out
 
@@ -1603,6 +1616,7 @@ class TestSyncActionJsonGuards:
     ValueError up the stack, surfacing as 'Internal pipeline error' in OWUI."""
 
     def test_jobs_list_action_handles_non_json_body(self, pipe, monkeypatch):
+        pipe.valves.advanced_commands_enabled = True  # §17.562 — /jobs is advanced
         _log, responses = _http_call_log(monkeypatch)
         responses[("get", "/jobs")] = _make_response(200, "not json at all")
 

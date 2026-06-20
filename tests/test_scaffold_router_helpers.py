@@ -171,6 +171,12 @@ class TestNoiseInputGuard:
 class TestHelp:
     """_help: returns the command reference text."""
 
+    @pytest.fixture(autouse=True)
+    def _enable_advanced(self, pipe):
+        # §17.562 — the full command reference lives behind advanced mode;
+        # guided /help lists only the core verbs.
+        pipe.valves.advanced_commands_enabled = True
+
     def test_returns_string(self, pipe):
         result = pipe._help()
         assert isinstance(result, str)

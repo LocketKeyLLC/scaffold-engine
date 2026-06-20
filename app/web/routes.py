@@ -176,6 +176,36 @@ def _pipeline_steps(status: str, *, has_nodes: bool) -> list[dict]:
     return out
 
 
+# Single user-facing phase label for ANY job status — backs the /work and
+# /here "you-are-here" surfaces (§17.561). Deliberately NOT folded into
+# _PIPELINE_STEPS: that tuple's index positions drive the web stepper's
+# err_idx=4 heuristic above, so inserting "Assemble" would shift Execute.
+# This map covers the statuses the 6-phase stepper doesn't (umbrella
+# aggregating, assist*, terminal-error) without disturbing it.
+_PHASE_LABEL_EXTRA: dict[str, str] = {
+    "aggregating": "Assemble",
+    "assisted_executing": "Execute",
+    "assisted_running": "Execute",
+    "assisted_paused": "Paused",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "blocked": "Blocked",
+}
+
+
+def phase_label_for(status: str) -> str:
+    """Return the single user-facing phase label for a job status.
+
+    Reuses the _PIPELINE_STEPS groupings (Refine/Review/Research/Plan/
+    Execute/Done) and falls back to _PHASE_LABEL_EXTRA for statuses outside
+    the linear stepper. Unknown statuses degrade to a title-cased form.
+    """
+    for label, statuses in _PIPELINE_STEPS:
+        if status in statuses:
+            return label
+    return _PHASE_LABEL_EXTRA.get(status, status.replace("_", " ").title())
+
+
 # §17.458 — server-side markdown renderer for the web UI's compiled_output.
 # "commonmark" preset for spec-faithful parsing, but html=False so any raw HTML
 # in the (LLM/pipeline-generated) output is ESCAPED rather than passed through —

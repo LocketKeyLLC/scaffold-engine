@@ -105,7 +105,27 @@ KNOWN_COMMANDS: tuple = (
     # §17.479 — interactive node control (Phase 5 surfaces for the §17.478
     # /nodes CRUD API).
     "/node",
+    # §17.562 — guided/minimal core verbs (DB-derived stateful defaults).
+    "/here", "/next", "/resume", "/advanced",
 )
+
+# §17.562 — the guided/minimal CORE surface. When advanced_commands_enabled
+# is off (default), only these pass dispatch; every other known command
+# returns a one-line "enable with /advanced on" hint. The set covers the
+# whole happy path: scope → launch → review → run/assist → resume → see-state.
+# /assist/* subcommands resolve to the "/assist" base, so they're all core.
+_CORE_COMMANDS: frozenset = frozenset({
+    "/go", "/run", "/idea", "/confirm", "/execute",
+    "/here", "/status", "/next", "/resume", "/results",
+    "/assist", "/cancel",
+    "/help", "/advanced",
+})
+
+# §17.562 — lookup-class commands that get the "what's next" footer appended
+# (non-streaming path only). Deliberately excludes commands that already
+# render next steps (/idea, /confirm, /status, /here, /jobs) or are pure
+# config/diagnostics (/help, /health, /model, /config, /advanced).
+_FOOTER_COMMANDS: frozenset = frozenset({"/results", "/cost", "/logs", "/rag"})
 
 KNOWN_SUBCOMMANDS: dict = {
     "/model": ("list", "available", "set", "reset", "probe", "test", "help"),
@@ -597,6 +617,18 @@ class Pipeline:
         # pipeline replica; UUID re-type is the recovery if the
         # pipelines container restarts.
         active_job_memory_enabled: bool = True
+
+        # §17.562 — guided/minimal command surface. When OFF (default), only
+        # the _CORE_COMMANDS verbs are accepted; every other known command
+        # returns a one-line "type /advanced on" hint and /help lists only the
+        # core. Flip ON (via `/advanced on` or the valve) for the full ~50-
+        # command surface. Keeps the surface small + low-stress for the common
+        # user while leaving every power command one toggle away.
+        advanced_commands_enabled: bool = False
+        # §17.562 — append a compact "where you are / what's next" footer
+        # (current job phase + top next action, from GET /work) to NON-
+        # streaming command replies. Never interleaved into an SSE stream.
+        status_footer_enabled: bool = True
 
         # Model overrides — §17.346 flipped router/coder/verifier defaults to
         # the same cloud model as §17.344's triage flip. Keep in sync with
@@ -1260,6 +1292,20 @@ class Pipeline:
                 body=body,
             )
 
+        # §17.562 — guided/minimal surface + streaming core verbs. The
+        # /advanced toggle is handled first (it controls the gate). Then non-
+        # core commands are blocked with a one-line hint when advanced mode is
+        # off. Then the streaming /resume verb dispatches. Plain text and core
+        # verbs fall through to the normal chain untouched.
+        if msg.startswith("/"):
+            if self._is_cmd(msg, "/advanced"):
+                yield self._handle_advanced(msg); return
+            gate = self._gate_advanced(msg)
+            if gate is not None:
+                yield gate; return
+            if self._is_cmd(msg, "/resume"):
+                yield from self._handle_resume(body=body); return
+
         # Word-boundary command dispatch (#8.6)
         if self._is_cmd(msg, "/go", "/run"):
             yield from self._handle_go(msg, messages); return
@@ -1293,6 +1339,12 @@ class Pipeline:
                 msg, chat_id=self._chat_id_from_body(body),
             )
             if result:
+                # §17.562 — append the "what's next" footer to lookup-class
+                # replies that don't already render next steps. Non-streaming
+                # path only — never inside an SSE stream.
+                _, base = self._command_base(msg)
+                if base in _FOOTER_COMMANDS:
+                    result = result + self._status_footer()
                 yield result
             return
 
@@ -1753,35 +1805,40 @@ class Pipeline:
             )
             return
 
-        # §17.508 — surface the autonomous-vs-assist choice for HANDS-ON plans.
-        # A DAG with Shell/runbook steps is assist-class: those actions must be
-        # performed by the user on real systems (the engine has no shell
-        # backend by default), so auto-executing them only generates runbooks
-        # marked done → a "completed" job that built nothing (§17.506). For such
-        # plans, STOP and let the user choose, recommending Assist. Pure
-        # text-class DAGs (LLM/CodeGen/research) still auto-execute — that's
-        # what autonomous mode does well — so the common flow is unchanged.
+        # §17.562 — ALWAYS surface the autonomous-vs-assist choice after
+        # planning, with a recommendation (was §17.508: only shown when the
+        # plan had Shell steps, else it silently auto-executed). Silent
+        # auto-run was a top "assist-vs-autonomous confusion" complaint — the
+        # user never learned the option existed. Shell-step detection now
+        # drives the *recommendation*, not whether the choice appears. A DAG
+        # with hands-on/Shell steps recommends Assist (auto-running them only
+        # writes runbooks marked done → a "completed" job that built nothing,
+        # §17.506); a pure text/code/research DAG recommends Autonomous.
         tasks = dag_data.get("tasks", []) if isinstance(dag_data, dict) else []
         shell_steps = sum(
             1 for t in tasks
             if isinstance(t, dict) and str(t.get("tool", "")).lower() == "shell"
         )
         if shell_steps:
-            yield (
-                f"📋 **Execution plan ready — {num_nodes} steps "
-                f"({shell_steps} hands-on).**\n\n"
-                f"This plan has steps you must run on real systems — the engine "
-                f"can't perform them for you. Choose how to proceed:\n\n"
-                f"- `/assist {job_id}` — **recommended**: walk through each step "
-                f"yourself with the engine guiding and verifying.\n"
-                f"- `/execute {job_id}` — run autonomously: the engine only "
-                f"generates runbook instructions and marks them done; it will "
-                f"**not** actually perform the hands-on steps.\n"
+            rec = (
+                f"This plan has **{shell_steps} hands-on step(s)** you run on "
+                f"real systems — **Assist is recommended** (the engine can't "
+                f"perform those for you)."
             )
-            return
-
-        yield f"📋 Execution plan ready — running {num_nodes} steps...\n\n"
-        yield from self._execute_and_stream(job_id, num_nodes)
+        else:
+            rec = (
+                "This is a text/code/research plan the engine can run on its "
+                "own — **Autonomous is recommended**."
+            )
+        yield (
+            f"📋 **Execution plan ready — {num_nodes} steps.**\n\n"
+            f"{rec} How do you want to proceed?\n\n"
+            f"- `/execute {job_id}` — **autonomous**: the engine runs every "
+            f"step itself.\n"
+            f"- `/assist {job_id}` — **assisted**: you run each step, the "
+            f"engine guides and verifies.\n"
+        )
+        return
 
     # ------------------------------------------------------------------
     # Backward-compat aliases (older tests reference these method names)
@@ -2023,6 +2080,29 @@ class Pipeline:
             "remembered_at": time.time(),
         }
 
+    def _fetch_work(self) -> dict | None:
+        """GET /work — the user's non-terminal jobs + active assist sessions.
+
+        §17.562 — the single-user "you-are-here" primitive backing /here,
+        /next, /resume, and the status footer. Returns the parsed dict, or
+        None on any error so callers degrade gracefully. This is the DB-
+        derived path that does NOT depend on chat_id (OWUI doesn't deliver
+        one) — distinct from _active_job_recall, which stays the per-chat
+        cache for the existing no-arg id-taking commands (/results, /cost,
+        /cancel, …) and their state-altering confirm-friction.
+        """
+        try:
+            r = _HTTP_SESSION.get(
+                f"{self.valves.orchestrator_url}/work",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+            if r.status_code >= 400:
+                return None
+            return r.json()
+        except (requests.exceptions.RequestException, ValueError):
+            return None
+
     def _active_job_recall(self, chat_id: str | None) -> dict | None:
         # §17.539 — chat_id is NOT delivered to the pipe in this OWUI setup
         # (see _active_assist_session_via_history), so this recall returns None
@@ -2031,7 +2111,9 @@ class Pipeline:
         # feeds state-altering commands (/cancel, /skip, /execute confirm), and
         # "which job is active" is ambiguous from history — a wrong-job
         # auto-recall on a no-arg /cancel is worse than asking for an explicit
-        # id. So this is intentionally NOT made history-based.
+        # id. So this is intentionally NOT made history-based. §17.562 — for
+        # the read-only "where am I / resume" case, /here, /next and /resume
+        # use _fetch_work (DB-derived, chat_id-independent) instead.
         if not chat_id or not self.valves.active_job_memory_enabled:
             return None
         return getattr(self, "_active_jobs_by_chat", {}).get(chat_id)
@@ -2048,6 +2130,174 @@ class Pipeline:
             f"📌 Using active job `{short}`{title_part} (most recent "
             f"in this chat). Pass an explicit job_id to override.\n\n"
         )
+
+    # ------------------------------------------------------------------
+    # §17.562 — guided/minimal surface + DB-derived core verbs
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _command_base(msg: str) -> tuple[str, str]:
+        """(token, base) for a slash command. `/assist next`→('/assist','/assist');
+        `/assist/next`→('/assist/next','/assist'); `/research/list`→(…,'/research')."""
+        tok = (msg.split(None, 1)[0] or "").lower()
+        base = "/" + tok.lstrip("/").split("/", 1)[0]
+        return tok, base
+
+    def _gate_advanced(self, msg: str) -> str | None:
+        """Return a hint when `msg` is a non-core command and advanced mode is
+        off; None when it should dispatch. Unknown commands fall through (None)
+        so the existing did-you-mean suggester still runs."""
+        if self.valves.advanced_commands_enabled:
+            return None
+        tok, base = self._command_base(msg)
+        if tok in _CORE_COMMANDS or base in _CORE_COMMANDS:
+            return None
+        if tok not in KNOWN_COMMANDS and base not in KNOWN_COMMANDS:
+            return None  # unknown → let _handle_command's suggester handle it
+        return (
+            f"🔒 `{tok}` is an advanced command. The guided surface keeps "
+            f"things simple — type `/advanced on` to enable the full command "
+            f"set, then re-run it. (`/help` lists the core verbs.)"
+        )
+
+    def _handle_advanced(self, msg: str) -> str:
+        parts = msg.split()
+        arg = parts[1].lower() if len(parts) > 1 else ""
+        if arg in ("on", "true", "1", "yes", "enable"):
+            self.valves.advanced_commands_enabled = True
+            return ("🔓 **Advanced commands enabled.** `/help` now lists the "
+                    "full surface. Turn back off with `/advanced off`.")
+        if arg in ("off", "false", "0", "no", "disable"):
+            self.valves.advanced_commands_enabled = False
+            return ("🔒 **Advanced commands disabled** — back to the guided "
+                    "core. `/advanced on` to re-enable.")
+        state = "on" if self.valves.advanced_commands_enabled else "off"
+        return (
+            f"Advanced commands are **{state}**.\n\n"
+            f"- `/advanced on` — enable the full ~50-command surface\n"
+            f"- `/advanced off` — guided/minimal core only\n"
+        )
+
+    @staticmethod
+    def _top_action_cmd(actions: list | None, job_id: str | None) -> str:
+        """First actionable, pre-filled command from a next_actions list."""
+        for a in (actions or []):
+            if not isinstance(a, dict):
+                continue
+            if a.get("action") == "wait":
+                continue
+            cmd = a.get("command")
+            if cmd:
+                return f"`{cmd}`"
+        return "—"
+
+    def _render_here(self, work: dict) -> str:
+        """The 'you-are-here' surface: active jobs + assist sessions."""
+        jobs = work.get("jobs") or []
+        sessions = work.get("assist_sessions") or []
+        if not jobs and not sessions:
+            return (
+                "✨ **Nothing in progress right now.**\n\n"
+                "Start something: just describe what you want to build and "
+                "then `/go` — or `/idea <your idea>` to jump straight in."
+            )
+        out: list[str] = ["**📍 Your active work**\n"]
+        if jobs:
+            out.append("| Job | Phase | Next step |")
+            out.append("|---|---|---|")
+            for j in jobs:
+                jid = (j.get("id") or "")[:8]
+                title = j.get("title") or "_(untitled)_"
+                phase = j.get("phase") or j.get("status") or ""
+                nxt = self._top_action_cmd(j.get("next_actions"), j.get("id"))
+                out.append(f"| `{jid}` {title} | {phase} | {nxt} |")
+            out.append("")
+        if sessions:
+            out.append("**🤝 Assist sessions** (you're walking these yourself)\n")
+            for s in sessions:
+                sid = (s.get("session_id") or "")[:8]
+                title = s.get("job_title") or ""
+                node = s.get("current_node_key") or "start"
+                out.append(
+                    f"- `{sid}` {title} — at **{node}** → `/resume` or "
+                    f"`/assist next`"
+                )
+            out.append("")
+        out.append("_Tip: `/next` for your single next step, `/resume` to jump "
+                   "back in._")
+        return "\n".join(out)
+
+    def _render_next(self, work: dict) -> str:
+        """The single highest-priority next step for the user's current work."""
+        jobs = work.get("jobs") or []
+        sessions = work.get("assist_sessions") or []
+        if sessions:
+            s = sessions[0]
+            node = s.get("current_node_key") or "the first step"
+            return (
+                f"👉 Resume your assist session with `/resume` (or "
+                f"`/assist next`) — job _{s.get('job_title','')}_, at **{node}**."
+            )
+        if not jobs:
+            return (
+                "✨ Nothing in progress. Describe an idea and `/go`, or "
+                "`/idea <your idea>`."
+            )
+        j = jobs[0]
+        cmd = self._top_action_cmd(j.get("next_actions"), j.get("id"))
+        title = j.get("title") or ""
+        phase = j.get("phase") or ""
+        if cmd == "—":
+            return (
+                f"📍 _{title}_ is in **{phase}** — nothing to do right now. "
+                f"Check progress with `/results`."
+            )
+        return f"👉 Next for _{title}_ (**{phase}**): {cmd}"
+
+    def _handle_resume(self, body: dict | None = None):
+        """Jump back into in-progress work with no UUID. One item → resume it;
+        many → show the list to pick; none → friendly empty state."""
+        work = self._fetch_work()
+        if work is None:
+            yield ("⚠️ Couldn't reach the orchestrator to find your work. "
+                   "Try `/health`.")
+            return
+        jobs = work.get("jobs") or []
+        sessions = work.get("assist_sessions") or []
+        if not jobs and not sessions:
+            yield ("✨ Nothing to resume. Describe an idea and `/go`, or "
+                   "`/idea <your idea>`.")
+            return
+        if len(jobs) + len(sessions) > 1:
+            yield "You have more than one thing in progress — pick one:\n\n"
+            yield self._render_here(work)
+            return
+        if sessions:
+            sid = sessions[0].get("session_id")
+            yield (f"▶️ Resuming assist session `{(sid or '')[:8]}`…\n\n"
+                   f"---\n\n")
+            yield from self._assist_next(
+                sid, chat_id=self._chat_id_from_body(body),
+            )
+            return
+        # exactly one non-terminal job → point at its next step (don't auto-fire
+        # a 10–25 min run; the user chooses).
+        yield self._render_next(work)
+
+    def _status_footer(self) -> str:
+        """Compact 'where you are / what's next' footer for NON-streaming
+        replies. Empty string when disabled, on error, or nothing in progress.
+        MUST NOT be appended inside an SSE stream (corrupts the auto-chain)."""
+        if not self.valves.status_footer_enabled:
+            return ""
+        work = self._fetch_work()
+        if not work:
+            return ""
+        jobs = work.get("jobs") or []
+        sessions = work.get("assist_sessions") or []
+        if not jobs and not sessions:
+            return ""
+        nxt = self._render_next(work)
+        return f"\n\n---\n{nxt}"
 
     def _resolve_session_id(
         self, args: list, chat_id: str | None,
@@ -3114,6 +3364,19 @@ class Pipeline:
                 # §17.313 — pass chat_id for the 📌 active-job marker
                 # (synergy with §17.307).
                 return self._render_status(r.json(), chat_id=chat_id)
+            # §17.562 — guided core verbs (DB-derived, no UUID needed).
+            if cmd == "/here":
+                work = self._fetch_work()
+                if work is None:
+                    return ("⚠️ Couldn't reach the orchestrator. Try "
+                            "`/health`.")
+                return self._render_here(work)
+            if cmd == "/next":
+                work = self._fetch_work()
+                if work is None:
+                    return ("⚠️ Couldn't reach the orchestrator. Try "
+                            "`/health`.")
+                return self._render_next(work)
 
             # ----- U.8.D — diagnostics + admin parity -------------------
             if cmd == "/exec":
@@ -5378,6 +5641,40 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def _help(self) -> str:
+        # §17.562 — guided/minimal help. When advanced mode is off (default),
+        # show only the small core surface; the full ~50-command reference is
+        # one `/advanced on` away.
+        if not self.valves.advanced_commands_enabled:
+            return self._help_core()
+        return self._help_full()
+
+    @staticmethod
+    def _help_core() -> str:
+        return """**Scaffold Engine — quick start**
+
+Describe what you want to build, then **`/go`**. That's the whole loop.
+
+**The core commands**
+| Command | What it does |
+|---|---|
+| *(just chat)* | Describe an idea; the engine asks questions until you `/go`. |
+| `/go` | Turn the conversation into a plan and launch. |
+| `/idea <text>` | Skip the chat — send an idea straight in. |
+| `/confirm <job_id>` | Approve a refined idea → research + plan. |
+| `/here` | **Where am I?** Everything in progress + the next step for each. |
+| `/next` | The single next thing to do. |
+| `/resume` | Jump back into whatever you were doing — no IDs needed. |
+| `/results` | See the output (or progress) of your current job. |
+| `/assist <job_id>` | Walk through a hands-on plan step-by-step, guided. |
+| `/cancel` | Stop the current job. |
+
+After a plan is ready you'll be asked to pick **autonomous** (`/execute`) or
+**assisted** (`/assist`) — with a recommendation.
+
+_Lost? Just type `/here`. Want the full ~50-command surface? `/advanced on`._"""
+
+    @staticmethod
+    def _help_full() -> str:
         return """**Scaffold Engine — full command reference**
 
 **Canonical flow:** chat naturally to scope an idea → `/go` to launch → review the plan → `/confirm <job_id>` to execute.
