@@ -21991,6 +21991,25 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.566 Perf+Fix — research-extract role: A/B-driven swap kimi → qwen3-coder-next (flaky 5/10 → clean 10/10, 3.5× faster) (2026-06-20)
+
+Throughput/quality pass on the research-extraction role. An objective A/B (`scripts/model_ab.py --task extraction --repeat 5` over the extraction goldens, fallback-rejecting) compared the current `model_research_extract` default against tool-call-native candidates:
+
+| model | pass | avg wall | note |
+|---|---|---|---|
+| `qwen3.5:397b-cloud` (coaxed baseline) | 10/10 | 14.26s | reliable, slow |
+| **`qwen3-coder-next:cloud`** | **10/10** | **4.04s** | native tool-calls, ~3.5× faster |
+| `kimi-k2.7-code:cloud` (**the prior default**) | **5/10** | 3.94s | FLAKY — intermittent `entries=0` |
+| `qwen2.5:7b` (local) | 10/10 | 167s | CPU-bound, unusable hot-path |
+
+The A/B exposed that the **shipping** default (`kimi-k2.7-code:cloud`, set in §17.548) was **flaky on extraction (5/10, intermittent empty `entries`)** — the exact symptom behind research-summary gaps. **Fix:** `app/config.py:model_research_extract` → `qwen3-coder-next:cloud` (config-only; not a pipeline valve). It's absent from `tool_call_coax_models` (`["qwen3.5"]`), so it uses the native tool-call path (`will_coax=False`, verified). Scoped to extraction only — `model_coder` stays `kimi` because `qwen3-coder-next` failed the cli-entrypoint codegen golden at runtime (memory note). Verifier role NOT changed — the harness has no `verifier` task yet (the §17.557 future slot), so it wasn't measured; left as-is rather than blind-swapped.
+
+**Ollama config (the offered "keep-warm" tweak):** `OLLAMA_NUM_PARALLEL=4` is **already set** (plus FLASH_ATTENTION + q8 KV-cache). The remaining lever is `OLLAMA_KEEP_ALIVE=0` (models unload immediately — hurts the local embedder/reranker on the ingest path), but flipping it needs a host systemd edit + `sudo` + an ollama restart, and on this CPU-only/RAM-constrained host `KEEP_ALIVE=0` may be a deliberate OOM-safety choice — so it's left as an operator decision, not shipped.
+
+**Verification.** A/B 60 trials (above). Config loads (`settings.model_research_extract='qwen3-coder-next:cloud'`, `will_coax=False`). **Live cold URL ingest** (`httpbin.org/html`): extraction reached `extraction_complete` in ~1 keepalive (visibly faster), 3 entries, ingested clean, provenance **481→484** (3 rows tied to the session, §17.563/564 path intact). Test data cleaned up afterward.
+
+---
+
 ### §17.565 Feat — wire up the vestigial `artifacts` table (write path + REST + SDK + CLI + chat `/results`) (2026-06-20)
 
 Audit found the `artifacts` table fully scaffolded but never wired: table + `Artifact*` schemas + `dag_nodes.output_artifact_id` all existed, but **zero writes/reads, no endpoint, nothing set `output_artifact_id`, 0 rows** — outputs lived only inline (`dag_nodes.output_text` + `jobs.compiled_output`). User chose to implement it (with chat + CLI surfacing).

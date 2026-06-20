@@ -305,12 +305,18 @@ class Settings(BaseSettings):
     # design wait for an expensive 10-iter futile loop.
     device_sizing_max_iterations: int = Field(default=3, ge=1, le=10)
     model_verifier: str = "qwen3.5:397b-cloud"
-    # §17.548 — research extraction (record_entries tool call). Points at a
-    # tool-CAPABLE model (kimi emits native tool_calls) rather than the
-    # thinking model_verifier (qwen3.5, which never does — see §17.547), so the
-    # native-first path in tool_call actually fires; the coaxing fallback still
-    # catches any batch where the model answers in prose.
-    model_research_extract: str = "kimi-k2.7-code:cloud"
+    # §17.548 — research extraction (record_entries tool call) points at a
+    # tool-CAPABLE model (native tool_calls) rather than the thinking
+    # model_verifier (qwen3.5, which never does — see §17.547), so the
+    # native-first path in tool_call fires; coaxing still catches prose batches.
+    # §17.566 — swapped kimi-k2.7-code:cloud → qwen3-coder-next:cloud after an
+    # objective A/B (scripts/model_ab.py --task extraction, repeat=5 on the
+    # extraction goldens): kimi was FLAKY (5/10, intermittent entries=0) while
+    # qwen3-coder-next was 10/10 AND ~3.5× faster (4.0s vs 14.3s baseline).
+    # It's NOT in tool_call_coax_models, so it uses the native path. (Scoped to
+    # extraction only — qwen3-coder-next failed the cli-entrypoint codegen
+    # golden at runtime, so model_coder stays kimi.)
+    model_research_extract: str = "qwen3-coder-next:cloud"
     model_cloud_heavy: str = "qwen3.5:397b-cloud"
     model_cloud_alt: str = "qwen3.5:397b-cloud"
     model_fallback: str = "qwen3.5:latest"
