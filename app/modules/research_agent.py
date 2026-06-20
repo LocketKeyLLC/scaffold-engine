@@ -1623,6 +1623,10 @@ async def _run_research_url_mode(
                 )
                 entry["facet"] = "direct_url"
                 entry.setdefault("source_type", "community")
+                # §17.563 — attach provenance so ingest_entries writes a
+                # rag_entry_provenance row (the distill path previously omitted
+                # it, so distilled URL entries had no provenance/audit linkage).
+                entry.setdefault("provenance", build_provenance(source_ref=src_url))
             entries.extend(batch_entries)
         else:
             # Audit Finding A — distinguish "model declined to use the
@@ -1647,6 +1651,8 @@ async def _run_research_url_mode(
                         "confidence_score": _score_source(url),
                         "source_type": "community",
                         "facet": "direct_url",
+                        # §17.563 — provenance on the chunk-fallback path too.
+                        "provenance": build_provenance(source_ref=url),
                     })
                     fallback_count += 1
             logger.info(

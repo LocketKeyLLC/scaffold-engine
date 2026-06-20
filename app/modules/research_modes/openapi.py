@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncGenerator
 
+from app.modules.provenance import build_provenance
 from app.modules.research_state import (
     ResearchState,
     _await_with_heartbeat,
@@ -88,6 +89,9 @@ async def run_research_openapi_mode(
             "confidence_score": 0.95,
             "facet": primary_facet,
             "domain_tags": tags,
+            # §17.563 — provenance so ingest_entries writes a
+            # rag_entry_provenance row (was omitted for OpenAPI entries).
+            "provenance": build_provenance(source_ref=source_url),
         })
 
     yield _sse("extraction_complete", {

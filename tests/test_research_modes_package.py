@@ -162,3 +162,30 @@ class TestSourceShapeRegressionGuard:
                 f"§17.298: alias assignment for {name} mode is missing "
                 f"from research_agent.py. Expected line: {anchor!r}"
             )
+
+
+@pytest.mark.smoke
+class TestEveryModeWritesProvenance:
+    """§17.563 — every research-mode producer must attach provenance to its
+    entries so ingest_entries writes a rag_entry_provenance row. A live cold
+    ingest caught OpenAPI (and the URL distill path) shipping Milvus entries
+    with NO provenance — retrievable but with no audit linkage / quality
+    signal. This static guard fails if a mode file builds entries without ever
+    calling build_provenance (catches a whole mode forgetting it, incl. future
+    modes); the per-entry distill-path case is pinned functionally in
+    test_research_url_mode.py::test_url_mode_distill_path_attaches_provenance."""
+
+    @pytest.mark.parametrize("mode_name", _MODE_NAMES)
+    def test_mode_references_build_provenance(self, mode_name):
+        mod = __import__(
+            f"app.modules.research_modes.{mode_name}",
+            fromlist=["x"],
+        )
+        with open(mod.__file__, encoding="utf-8") as f:
+            src = f.read()
+        assert "build_provenance" in src, (
+            f"§17.563: research_modes/{mode_name}.py builds ingest entries but "
+            f"never calls build_provenance — entries will land in Milvus with "
+            f"no rag_entry_provenance row. Attach "
+            f"`build_provenance(source_ref=...)` to each entry."
+        )

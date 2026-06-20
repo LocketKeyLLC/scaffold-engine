@@ -277,6 +277,52 @@ class TestRunResearchUrlMode:
         assert all("provenance" in e for e in entries)
 
     @pytest.mark.asyncio
+    async def test_url_mode_distill_path_attaches_provenance(self):
+        """§17.563 — the LLM-distill path (the common case) must attach
+        provenance to every entry so ingest_entries writes a
+        rag_entry_provenance row. Pre-fix, distilled URL entries had a Milvus
+        vector but NO provenance key → no audit linkage / quality_signal. A
+        live cold ingest of httpbin.org/html caught it: 6 Milvus entries, 0
+        provenance rows."""
+        fake_resp = _llm_with_entries(
+            '[{"title":"T","content":"body content here long enough to pass",'
+            '"tags":"","source":"https://example.com/page",'
+            '"source_type":"community"}]'
+        )
+        ingest_seen: list[list[dict]] = []
+
+        async def _capture_ingest(entries, **_):
+            ingest_seen.append(list(entries))
+            return {"new": len(entries), "versioned": 0, "rejected": 0,
+                    "skipped_hash": 0}
+
+        with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(202), None))), \
+             patch.object(ra, "_robots_allowed", AsyncMock(return_value=True)), \
+             patch.object(ra, "_fetch_url_bounded", AsyncMock(return_value="<html>x</html>")), \
+             patch("asyncio.to_thread", AsyncMock(return_value="Clean article body " * 30)), \
+             patch.object(ra.model_router, "generate", AsyncMock(return_value=fake_resp)), \
+             patch.object(ra.model_router, "tool_call", AsyncMock(return_value=fake_resp)), \
+             patch.object(ra, "ingest_entries", AsyncMock(side_effect=_capture_ingest)), \
+             patch.object(ra, "_generate_summary", AsyncMock(return_value="summary")), \
+             patch.object(ra, "_update_session_iteration", AsyncMock()), \
+             patch.object(ra, "_finalize_session", AsyncMock()):
+
+            events = []
+            async for blob in ra.run_research("https://example.com/page", depth="medium"):
+                events.append(blob)
+
+        parsed = _parse_sse(events)
+        etypes = [e for e, _ in parsed]
+        # Confirm the DISTILL path (not the bypass path).
+        assert "extraction_complete" in etypes
+        assert "distill_bypassed" not in etypes
+        assert ingest_seen, "ingest_entries was never invoked"
+        entries = ingest_seen[0]
+        assert entries, "no entries produced via distill path"
+        assert all(e.get("provenance") for e in entries), \
+            "every distilled URL entry must carry provenance (§17.563)"
+
+    @pytest.mark.asyncio
     async def test_url_mode_robots_blocked(self):
         """Robots disallow -> error event, no ingestion."""
         ingest_mock = AsyncMock()

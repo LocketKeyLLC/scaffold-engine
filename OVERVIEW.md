@@ -21991,6 +21991,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.563 Fix — research provenance gap: URL-distill + OpenAPI ingests wrote no rag_entry_provenance rows (2026-06-20)
+
+A live cold URL ingest (run end-to-end to validate the §17.561/562 work didn't disturb research→DB integration) **caught a real gap the static map missed**: ingesting `https://httpbin.org/html` produced **6 Milvus entries (retrievable) but 0 `rag_entry_provenance` rows**. Root cause: `ingest_entries` only writes a provenance row when `entry.get("provenance")` is set (`rag_pipeline.py:1303/1344`), and two entry-producers never attached one:
+- **URL mode, LLM-distill path** (`research_agent.py:1618-1626`) + its chunk-fallback (`:1642-1650`) — only the `distill_bypass` path set provenance, so the *common* distill case (articles, docs, httpbin) shipped entries with none.
+- **OpenAPI mode** (`research_modes/openapi.py`) — built entries with no provenance at all (didn't even import `build_provenance`).
+
+`topic`, `github`, `hf`, `forum`, and URL-bypass were already correct. Impact was metadata-only (entries are still retrievable via the Milvus `source_url`), but affected entries get a neutral `quality_signal=1.0` in re-rank (`rag_pipeline.py:896-898`) and lack Postgres audit linkage (session_id / source_ref / raw_upstream_hash).
+
+**Fix:** attach `build_provenance(source_ref=...)` in all three spots, mirroring the github/hf/forum pattern.
+
+**Verification.** New `test_research_url_mode.py::test_url_mode_distill_path_attaches_provenance` (drives the distill path, captures ingested entries, asserts every one carries provenance) + a `test_research_modes_package.py::TestEveryModeWritesProvenance` static guard (each mode producer must reference `build_provenance` — catches a whole mode forgetting it, incl. future modes). Targeted research suite **104 passed**. **Live re-run after the fix:** same `httpbin.org/html` ingest → provenance **481 → 487**, all 6 rows tied to the session with `source_ref=https://httpbin.org/html` (was 0). Test data (both runs' sessions + Milvus entries + provenance) cleaned up afterward — KB back to baseline (481 provenance, 140 sessions).
+
+---
+
 ### §17.562 Feat — interaction-layer rework, Phase 2 (pipeline): guided/minimal surface + `/here` `/next` `/resume` + always-ask + umbrella guidance (2026-06-20)
 
 Phase 2 (the OWUI-facing half of §17.561) makes the surface small and low-stress, consuming the Phase 1 `GET /work` primitive. User-directed: guided/minimal command surface + always-ask autonomous-vs-assist.
