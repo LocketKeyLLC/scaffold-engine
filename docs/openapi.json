@@ -1,6 +1,125 @@
 {
   "components": {
     "schemas": {
+      "ArtifactListResponse": {
+        "properties": {
+          "artifacts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ArtifactRead"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "ArtifactListResponse",
+        "type": "object"
+      },
+      "ArtifactRead": {
+        "properties": {
+          "artifact_type": {
+            "enum": [
+              "dag",
+              "prompt",
+              "toon_file",
+              "plan",
+              "code",
+              "report",
+              "mermaid",
+              "other"
+            ],
+            "title": "Artifact Type",
+            "type": "string"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "file_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Path"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "job_id": {
+            "format": "uuid",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "metadata": {
+            "title": "Metadata",
+            "type": "object"
+          },
+          "mime_type": {
+            "default": "text/plain",
+            "title": "Mime Type",
+            "type": "string"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "artifact_type",
+          "title",
+          "id",
+          "created_at"
+        ],
+        "title": "ArtifactRead",
+        "type": "object"
+      },
       "AssistChatMapInput": {
         "properties": {
           "last_node_key": {
@@ -3328,6 +3447,51 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/artifacts/{artifact_id}": {
+      "get": {
+        "description": "Fetch a single artifact, including its full content.",
+        "operationId": "get_artifact_artifacts__artifact_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Artifact"
+      }
+    },
     "/assist/_chatmap/{chat_id}": {
       "delete": {
         "operationId": "assist_chatmap_delete_assist__chatmap__chat_id__delete",
@@ -5658,6 +5822,51 @@
         "tags": [
           "Management"
         ]
+      }
+    },
+    "/jobs/{job_id}/artifacts": {
+      "get": {
+        "description": "List a job's artifacts (job-level deliverable first, then per-node).",
+        "operationId": "list_job_artifacts_jobs__job_id__artifacts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Job Artifacts"
       }
     },
     "/jobs/{job_id}/cancel": {

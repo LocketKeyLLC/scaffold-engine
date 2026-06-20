@@ -3587,5 +3587,63 @@ def alerts_list(ctx, kind, since, limit):
         click.secho(f"{aid:<10}{sev:<10}{knd:<34}{msg}", fg=_sev_color.get(sev))
 
 
+# §17.565 — artifacts: typed deliverables persisted per job.
+@cli.group(help="List and fetch a job's persisted artifacts (deliverables).")
+def artifacts() -> None:
+    pass
+
+
+@artifacts.command("list", help="List a job's artifacts.")
+@click.argument("job_id")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON response.")
+@click.pass_context
+def artifacts_list(ctx: click.Context, job_id: str, as_json: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get(f"/jobs/{job_id}/artifacts")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    arts = (data or {}).get("artifacts") or []
+    if not arts:
+        click.echo("No artifacts for this job.")
+        return
+    click.echo(f"{'id':<10}{'type':<10}{'bytes':>8}  title")
+    click.echo("-" * 60)
+    for a in arts:
+        click.echo(
+            f"{str(a.get('id',''))[:8]:<10}{a.get('artifact_type','?'):<10}"
+            f"{a.get('size_bytes',0):>8}  {a.get('title','')}"
+        )
+    click.echo(f"\n{len(arts)} artifact(s). Fetch one: scaffold artifacts get <id>")
+
+
+@artifacts.command("get", help="Fetch one artifact's content.")
+@click.argument("artifact_id")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON response.")
+@click.pass_context
+def artifacts_get(ctx: click.Context, artifact_id: str, as_json: bool) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get(f"/artifacts/{artifact_id}")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    click.secho(
+        f"# {data.get('title','')}  [{data.get('artifact_type','?')}]  "
+        f"{data.get('size_bytes',0)} bytes",
+        fg="cyan",
+    )
+    click.echo(data.get("content") or "")
+
+
 if __name__ == "__main__":
     cli()

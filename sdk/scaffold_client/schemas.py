@@ -260,6 +260,12 @@ class ArtifactRead(ArtifactBase):
     model_config = {"from_attributes": True}
 
 
+# §17.565 — list response for GET /jobs/{job_id}/artifacts.
+class ArtifactListResponse(BaseModel):
+    artifacts: list[ArtifactRead] = []
+    total: int = 0
+
+
 # ---------------------------------------------------------------------------
 # 6. Performance Logs
 # ---------------------------------------------------------------------------

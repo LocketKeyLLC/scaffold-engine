@@ -1107,6 +1107,11 @@ async def _maybe_finalize_session(*, session_id: str, db) -> None:
                 {"co": compiled, "syn": synthesized,
                  "dk": kind, "jid": sess["job_id"]},
             )
+            # §17.565 — persist the assist deliverable as artifact rows.
+            from app.modules.artifacts import persist_job_artifacts
+            await persist_job_artifacts(
+                str(sess["job_id"]), db, deliverable_kind=kind,
+            )
     except Exception as e:  # noqa: BLE001 — finalization must survive compile errors
         logger.warning(
             "assist_compile_failed session_id=%s job_id=%s err=%s",

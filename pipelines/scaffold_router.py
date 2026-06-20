@@ -107,6 +107,8 @@ KNOWN_COMMANDS: tuple = (
     "/node",
     # §17.562 — guided/minimal core verbs (DB-derived stateful defaults).
     "/here", "/next", "/resume", "/advanced",
+    # §17.565 — artifacts (typed deliverables): fetch one or list a job's.
+    "/artifacts",
 )
 
 # §17.562 — the guided/minimal CORE surface. When advanced_commands_enabled
@@ -117,7 +119,7 @@ KNOWN_COMMANDS: tuple = (
 _CORE_COMMANDS: frozenset = frozenset({
     "/go", "/run", "/idea", "/confirm", "/execute",
     "/here", "/status", "/next", "/resume", "/results",
-    "/assist", "/cancel",
+    "/assist", "/cancel", "/artifacts",
     "/help", "/advanced",
 })
 
@@ -3330,6 +3332,8 @@ class Pipeline:
                 return self._handle_schedule(msg)
             if cmd == "/results":          # #8.1
                 return self._handle_results(parts, chat_id=chat_id)
+            if cmd == "/artifacts":        # §17.565
+                return self._handle_artifacts(parts)
             if cmd == "/jobs":
                 # §17.309 — pass chat_id for the active-job 📌 marker.
                 return self._handle_jobs(msg, chat_id=chat_id)
@@ -4618,6 +4622,76 @@ class Pipeline:
             lines.append("\n---\n\n" + compiled)
         return "\n".join(lines)
 
+    # §17.565 — artifacts (typed deliverables)
+    def _artifacts_section(self, job_id: str) -> str:
+        """Best-effort '📦 Artifacts' block appended to /results output.
+        Returns '' on any error or when the job has no artifacts."""
+        try:
+            r = _HTTP_SESSION.get(
+                f"{self.valves.orchestrator_url}/jobs/{job_id}/artifacts",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+            if r.status_code >= 400:
+                return ""
+            arts = (r.json() or {}).get("artifacts") or []
+        except (requests.exceptions.RequestException, ValueError):
+            return ""
+        if not arts:
+            return ""
+        lines = ["\n\n---\n\n**📦 Artifacts**\n"]
+        for a in arts:
+            atype = a.get("artifact_type", "?")
+            title = a.get("title") or "(untitled)"
+            size = a.get("size_bytes") or 0
+            aid = a.get("id", "")
+            lines.append(f"- `[{atype}]` {title} ({size} bytes) — `/artifacts {aid}`")
+        return "\n".join(lines)
+
+    def _handle_artifacts(self, parts: list) -> str:
+        """`/artifacts <artifact_id>` fetches one artifact's content;
+        `/artifacts <job_id>` lists a job's artifacts. The id is tried as an
+        artifact first, then as a job (both are UUIDs)."""
+        if len(parts) < 2 or _is_placeholder(parts[1]):
+            return (
+                "Usage: `/artifacts <artifact_id>` (fetch one) or "
+                "`/artifacts <job_id>` (list a job's artifacts).\n\n"
+                "💡 `/results <job_id>` shows the 📦 Artifacts list with ids."
+            )
+        oid = parts[1].strip()
+        base = self.valves.orchestrator_url
+        try:
+            r = _HTTP_SESSION.get(
+                f"{base}/artifacts/{oid}",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException:
+            return (f"⚠️ Cannot reach orchestrator at {base}. Try `/health`.")
+        if r.status_code == 200:
+            try:
+                a = r.json()
+            except ValueError:
+                return "⚠️ Unexpected response from orchestrator."
+            atype = a.get("artifact_type", "?")
+            title = a.get("title") or "(untitled)"
+            content = a.get("content") or ""
+            fence = "python" if atype == "code" else ""
+            return (
+                f"**📦 {title}** `[{atype}]` · {a.get('size_bytes', 0)} bytes\n\n"
+                f"```{fence}\n{content}\n```"
+            )
+        # Not an artifact id — try it as a job id (list).
+        if r.status_code in (404, 422):
+            section = self._artifacts_section(oid)
+            if section:
+                return "**📦 Artifacts**" + section.split("**📦 Artifacts**", 1)[-1]
+            return (
+                f"No artifact or job artifacts found for `{oid}`.\n\n"
+                f"💡 Run `/results <job_id>` to see a job's artifacts, or check the id."
+            )
+        return f"⚠️ Error {r.status_code}: {r.text[:200]}"
+
     def _handle_results(
         self, parts: list, *, chat_id: str | None = None,
     ) -> str:
@@ -4702,10 +4776,10 @@ class Pipeline:
                 if total else ""
             )
             if compiled:
-                return compiled + nodes_hint
+                return compiled + nodes_hint + self._artifacts_section(job_id)
             return (
                 f"✅ Job `{job_id}` completed, but no compiled output is "
-                f"available.{nodes_hint}"
+                f"available.{nodes_hint}{self._artifacts_section(job_id)}"
             )
 
         if status in ("running", "executing", "planning", "researching", "refining"):

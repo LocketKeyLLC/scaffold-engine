@@ -21991,6 +21991,19 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.565 Feat — wire up the vestigial `artifacts` table (write path + REST + SDK + CLI + chat `/results`) (2026-06-20)
+
+Audit found the `artifacts` table fully scaffolded but never wired: table + `Artifact*` schemas + `dag_nodes.output_artifact_id` all existed, but **zero writes/reads, no endpoint, nothing set `output_artifact_id`, 0 rows** — outputs lived only inline (`dag_nodes.output_text` + `jobs.compiled_output`). User chose to implement it (with chat + CLI surfacing).
+
+- **Write path** — new `app/modules/artifacts.py::persist_job_artifacts(job_id, db, *, deliverable_kind)`: writes ONE job-level row from `compiled_output` (`artifact_type` = `plan` if `deliverable_kind=='plan_only'` else `report`) + one per-node `code` row for each completed CodeGen node, setting that node's `output_artifact_id`. **Sole writer** of the table + the column; idempotent via explicit delete-before-insert (the table has no unique constraint). Called (try/except, log-only — never blocks completion) from the 3 `execution_agent.py` finalize sites (complete / blocked-partial / autocomplete) + the `assist_agent.py` completion site. Umbrella rollup deferred (children already produce their own artifacts).
+- **Read path** — new `app/routers/artifacts.py`: `GET /jobs/{job_id}/artifacts` (`ArtifactListResponse`) + `GET /artifacts/{artifact_id}` (`ArtifactRead`), registered in `app/main.py` (auth inherited from the global middleware). New `ArtifactListResponse` schema; `make sync-schemas` + `make openapi-snapshot` regenerated.
+- **Chat** — `pipelines/scaffold_router.py`: `/results` on a completed job appends a **📦 Artifacts** section; new core `/artifacts <id>` command fetches one artifact (or lists a job's, falling back from artifact-id → job-id).
+- **CLI** — `cli/scaffold_cli/main.py`: `scaffold artifacts list <job_id>` + `scaffold artifacts get <artifact_id>`.
+
+**Verification.** Unit (`test_artifacts.py` — write choreography, type mapping, idempotency, empty-output no-op), router (`test_artifacts_router.py`), pipeline (`test_scaffold_router_artifacts.py`) — all green; full router pipeline suite **706 passed**; targeted app sweep **66 + 13 passed**; `check-schemas` + `openapi-check` green. **Live end-to-end (no LLM):** seeded a completed job + CodeGen + LLM nodes → `persist_job_artifacts` wrote **2 artifacts** (1 `report` job-level + 1 `code` per-node; LLM node → none); `GET /jobs/{id}/artifacts` returned both; `GET /artifacts/{id}` returned the code content; `dag_nodes.output_artifact_id` set on CodeGen, NULL on LLM; re-run stayed at 2 (idempotent); `scaffold artifacts list` rendered both. Test data cleaned up (CASCADE on job delete removed artifacts) — KB/jobs back to baseline.
+
+---
+
 ### §17.564 Fix — remaining research provenance gaps (PDF mode, topic-fallback) + AST guard hardening (2026-06-20)
 
 Audit follow-up to §17.563: two more producers of the same class still shipped Milvus entries with no `rag_entry_provenance` row, and the §17.563 static guard had a blind spot (it scanned only `research_modes/*.py`, not the topic/url/pdf producers that live in `research_agent.py`).

@@ -65,6 +65,7 @@ from app.modules.prompt_assembly import (  # noqa: F401  re-exported for callers
     EXECUTION_SYSTEM_CODEGEN,
     EXECUTION_SYSTEM_RUNBOOK,
 )
+from app.modules.artifacts import persist_job_artifacts  # §17.565
 from app.modules.rag_pipeline import query_rag
 from app.utils.cost_tracking import current_job_id, current_node_id
 from app.utils.llm_retry import chat_until_nonempty  # §17.465
@@ -742,6 +743,12 @@ async def execute_next_node(
                             {"co": compiled, "syn": was_synthesized,
                              "dk": kind, "jid": job_id},
                         )
+                        # §17.565 — persist deliverable(s) as artifact rows.
+                        # Best-effort: never let an artifact write break completion.
+                        try:
+                            await persist_job_artifacts(job_id, db, deliverable_kind=kind)
+                        except Exception:
+                            logger.exception("persist_job_artifacts failed (complete) job=%s", job_id)
                         await db.commit()
                 return {"status": "complete", "message": "All nodes done. Job complete."}
 
@@ -776,6 +783,11 @@ async def execute_next_node(
                             {"co": partial_result, "syn": partial_synthesized,
                              "dk": kind, "jid": job_id},
                         )
+                        # §17.565 — persist partial deliverable as artifacts.
+                        try:
+                            await persist_job_artifacts(job_id, db, deliverable_kind=kind)
+                        except Exception:
+                            logger.exception("persist_job_artifacts failed (blocked) job=%s", job_id)
                     else:
                         await db.execute(
                             text("UPDATE jobs SET status = 'blocked' WHERE id = :jid"),
@@ -1427,6 +1439,12 @@ async def execute_next_node(
                     ),
                     {"out": compiled, "syn": was_synthesized, "dk": kind, "jid": job_id},
                 )
+                if compiled:
+                    # §17.565 — persist deliverable(s) as artifacts.
+                    try:
+                        await persist_job_artifacts(job_id, db, deliverable_kind=kind)
+                    except Exception:
+                        logger.exception("persist_job_artifacts failed (autocomplete) job=%s", job_id)
                 await db.commit()
                 logger.info(
                     "compiled_output_stored: chars=%s synthesized=%s job=%s",
