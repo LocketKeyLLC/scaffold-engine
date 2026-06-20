@@ -82,8 +82,10 @@ class TestStatusCrossRefFooter:
             recent=[_job(_OTHER_JOB_ID)],
         )
         out = pipe._render_status(data, chat_id=_CHAT_A)
-        # Footer pointer to /jobs for management actions.
-        assert "filter / find / rename / delete" in out
+        # §17.562 — footer points at the core /here, and at /advanced for the
+        # gated job-management commands.
+        assert "`/here`" in out
+        assert "rename / delete" in out
         assert "`/jobs`" in out
 
     def test_footer_appears_after_recent_table(self, pipe):
@@ -184,9 +186,13 @@ class TestStatusEmptyState:
         out = pipe._render_status(_status_payload(), chat_id=_CHAT_A)
         assert "/idea Build a CLI that converts screenshots to PDF" in out
 
-    def test_empty_state_includes_research_starter(self, pipe):
+    def test_empty_state_points_research_behind_advanced(self, pipe):
+        # §17.562 — guided/minimal: the empty state no longer sends a brand-new
+        # operator straight at gated /research; it surfaces /research behind the
+        # /advanced pointer instead.
         out = pipe._render_status(_status_payload(), chat_id=_CHAT_A)
-        assert "/research kubernetes best practices" in out
+        assert "/advanced on" in out
+        assert "/research" in out
 
     def test_empty_state_includes_chat_path(self, pipe):
         out = pipe._render_status(_status_payload(), chat_id=_CHAT_A)
@@ -313,10 +319,10 @@ class TestSourceShapeRegressionGuard:
         assert "self._render_status(r.json(), chat_id=chat_id)" in src
 
     def test_status_cross_ref_anchored(self):
-        """Pin the /jobs cross-ref phrasing — load-bearing for the
-        disambiguation contract."""
+        """Pin the /status cross-ref phrasing — load-bearing for the
+        disambiguation contract. §17.562 — points at /here + /advanced."""
         src = self._src()
-        assert "filter / find / rename / delete" in src
+        assert "unlocks job management" in src
 
     def test_jobs_footer_now_includes_status(self):
         """The §17.309 footer was extended in §17.313. Pin the

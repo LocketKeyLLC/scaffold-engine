@@ -930,10 +930,10 @@ class Pipeline:
         "**B) Jump straight in with one command:**\n"
         "- `/idea Build a CLI that converts screenshots to PDF` — kick off "
         "Phase 1 directly\n"
-        "- `/research kubernetes best practices` — autonomous web "
-        "research + ingest\n"
-        "- `/jobs` — see what's already running\n"
-        "- `/help` — the full command reference\n\n"
+        "- `/here` — see what's in progress and your next step\n"
+        "- `/help` — the core commands\n\n"
+        "_Power user? `/advanced on` unlocks the full surface — `/research`, "
+        "`/jobs`, and ~45 more._\n\n"
         "---\n\n"
     )
 
@@ -979,7 +979,7 @@ class Pipeline:
         "implement\" in chat starts a *planning* conversation (below), not "
         "the interactive step-through executor. To run an existing job's "
         "steps yourself with the engine as co-pilot, use "
-        "`/assist <job_id>` — find the id with `/jobs`. The job must still "
+        "`/assist <job_id>` — find the id with `/here`. The job must still "
         "be in progress (`planning`/`executing`/`blocked`/`failed`), not "
         "already completed.\n\n"
         "---\n\n"
@@ -3510,26 +3510,26 @@ class Pipeline:
         lines.append("---")
         lines.append("")
         lines.append(
-            "💡 For filter / find / rename / delete, use "
-            "`/jobs` (or `/jobs help`)."
+            "💡 `/here` shows your active work + next step. "
+            "`/advanced on` unlocks job management (`/jobs`: rename / delete)."
         )
         return "\n".join(lines)
 
     @staticmethod
     def _status_empty_state() -> str:
         """§17.313 — empty state for `/status` (no jobs in the system).
-        Mirror of §17.309's /jobs empty state: surface §17.300
-        welcome's starter exemplars so a brand-new operator (or one
-        with all jobs cleaned up) has a path forward."""
+        §17.562 — guided/minimal: surface core verbs only; `/research` lives
+        behind the `/advanced` pointer so a brand-new operator isn't sent at a
+        gated command."""
         return (
             "## 📊 Job Status\n\n"
             "_No jobs yet._\n\n"
             "**Get started:**\n"
             "- `/idea Build a CLI that converts screenshots to PDF` "
             "— kick off Phase 1 directly\n"
-            "- `/research kubernetes best practices` — "
-            "autonomous web research + ingest\n"
-            "- _Or describe an idea in the chat and type `/go`._"
+            "- _Or describe an idea in the chat and type `/go`._\n"
+            "- `/advanced on` — unlock `/research` (web research → knowledge "
+            "base) and the full surface"
         )
 
 
