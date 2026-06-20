@@ -715,6 +715,9 @@ async def _extract_entries(
                         "confidence_score": _score_source(r.get("url", "")),
                         "source_type": "community",
                         "facet": r.get("facet", ""),
+                        # §17.564 — provenance on the topic extraction-fallback
+                        # path (the LLM-success path above already sets it).
+                        "provenance": build_provenance(source_ref=r.get("url", "")),
                     })
                     logger.info("extraction_fallback: url='%s'", r.get("url", ""))
 
@@ -1705,6 +1708,7 @@ async def _run_research_pdf_mode(
     t0: float,
 ) -> AsyncGenerator[str, None]:
     """PDF-mode: extract bytes via pypdf (or plumber fallback), distill, ingest."""
+    from app.modules.provenance import build_provenance
     if len(pdf_bytes) > settings.research_max_pdf_bytes:
         cap_mb = settings.research_max_pdf_bytes // (1024 * 1024)
         raise RuntimeError(
@@ -1809,6 +1813,11 @@ async def _run_research_pdf_mode(
                     entry["confidence_score"] = pdf_default_confidence
                 entry["facet"] = "direct_pdf"
                 entry["source_type"] = entry.get("source_type") or "tech_docs"
+                # §17.564 — provenance so ingest_entries writes a
+                # rag_entry_provenance row for PDF distill entries too.
+                entry.setdefault(
+                    "provenance", build_provenance(source_ref=virtual_url)
+                )
             entries.extend(batch_entries)
         else:
             # Audit Finding A — same wording fix as the URL-mode site.
@@ -1829,6 +1838,8 @@ async def _run_research_pdf_mode(
                         "confidence_score": pdf_default_confidence,
                         "source_type": "tech_docs",
                         "facet": "direct_pdf",
+                        # §17.564 — provenance on the PDF chunk-fallback path.
+                        "provenance": build_provenance(source_ref=virtual_url),
                     })
 
     yield _sse("extraction_complete", {

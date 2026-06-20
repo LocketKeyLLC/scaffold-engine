@@ -215,6 +215,40 @@ class TestRunResearchPdf:
             assert complete["page_count"] == 1
 
     @pytest.mark.asyncio
+    async def test_pdf_distill_attaches_provenance(self):
+        """§17.564 — PDF distill entries must carry provenance so
+        ingest_entries writes a rag_entry_provenance row. Pre-fix a live PDF
+        ingest wrote Milvus entries with none (same class as URL distill).
+        Covers the loop-setdefault path the AST literal guard can't see."""
+        pdf_bytes = _make_test_pdf("Milvus vector DB content. " * 30)
+        fake_llm = _llm_with_entries(
+            '[{"title":"Milvus","content":"Milvus is a vector DB.","tags":"","source":"pdf://x.pdf","source_type":"tech_docs"}]'
+        )
+        ingest_seen: list[list[dict]] = []
+
+        async def _capture_ingest(entries, **_):
+            ingest_seen.append(list(entries))
+            return {"new": len(entries), "versioned": 0, "rejected": 0,
+                    "skipped_hash": 0}
+
+        with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(102), None))), \
+             patch.object(ra.model_router, "generate", AsyncMock(return_value=fake_llm)), \
+             patch.object(ra.model_router, "tool_call", AsyncMock(return_value=fake_llm)), \
+             patch.object(ra, "ingest_entries", AsyncMock(side_effect=_capture_ingest)), \
+             patch.object(ra, "_generate_summary", AsyncMock(return_value="summary")), \
+             patch.object(ra, "_update_session_iteration", AsyncMock()), \
+             patch.object(ra, "_finalize_session", AsyncMock()):
+
+            async for _ in ra.run_research_pdf(pdf_bytes, filename="test.pdf"):
+                pass
+
+        assert ingest_seen, "ingest_entries was never invoked"
+        entries = ingest_seen[0]
+        assert entries, "no entries produced"
+        assert all(e.get("provenance") for e in entries), \
+            "every PDF distill entry must carry provenance (§17.564)"
+
+    @pytest.mark.asyncio
     async def test_oversize_pdf_rejected(self):
         big_pdf = b"X" * (21 * 1024 * 1024)  # 21 MB
         with patch.object(ra, "_guard_and_create_session", AsyncMock(return_value=(str(101), None))), \

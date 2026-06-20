@@ -21991,6 +21991,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.564 Fix — remaining research provenance gaps (PDF mode, topic-fallback) + AST guard hardening (2026-06-20)
+
+Audit follow-up to §17.563: two more producers of the same class still shipped Milvus entries with no `rag_entry_provenance` row, and the §17.563 static guard had a blind spot (it scanned only `research_modes/*.py`, not the topic/url/pdf producers that live in `research_agent.py`).
+
+- **PDF mode** — distill loop (`research_agent.py:1794-1815`) + chunk-fallback (`:1824-1834`) attached no provenance. Fixed via a local `build_provenance` import + `setdefault`/literal `provenance` keyed on the PDF `virtual_url`.
+- **Topic mode extraction-fallback** (`research_agent.py:706-720`) — the LLM-success path already set provenance; the raw-chunk fallback didn't. Fixed.
+- After this, **every** ingest producer (topic success+fallback, URL distill+bypass+fallback, PDF distill+fallback, OpenAPI, GitHub, HF, forum) attaches provenance.
+
+**Guard hardening.** New AST-based guard (`test_research_modes_package.py::TestEntryLiteralsCarryProvenance`) parses `research_agent.py` AND every mode file and flags any ingest-entry **dict literal** (has both `content` and `source` keys, value-of-`content` not itself a dict — so JSON-schema `properties` like `RECORD_ENTRIES_TOOL` are correctly excluded) that lacks a `provenance` key. This catches the per-path omission class the §17.563 presence-scan missed (would have flagged URL-fallback, PDF-fallback, topic-fallback, OpenAPI). The loop-`setdefault` paths (URL/PDF distill, on LLM-parsed dicts) aren't literals, so they're covered by functional tests instead: new `test_research_pdf_mode.py::test_pdf_distill_attaches_provenance` joins the §17.563 URL-distill test.
+
+**Verification.** Research suite **283 passed** (incl. the new AST guard + PDF functional test; the AST guard's first run correctly flagged the `RECORD_ENTRIES_TOOL` schema dict as a false positive, which drove the `content`-value-not-a-dict refinement). **Live cold PDF ingest** (generated a 1-page PDF → `POST /research/pdf`): pypdf extracted, 3 entries distilled, provenance **481 → 484**, all 3 rows tied to the session with `source_ref=pdf://scaffold_prov_test.pdf` (was 0). Test data cleaned up — KB back to baseline (481 provenance, 140 sessions). Research→DB provenance is now complete across all modes.
+
+---
+
 ### §17.563 Fix — research provenance gap: URL-distill + OpenAPI ingests wrote no rag_entry_provenance rows (2026-06-20)
 
 A live cold URL ingest (run end-to-end to validate the §17.561/562 work didn't disturb research→DB integration) **caught a real gap the static map missed**: ingesting `https://httpbin.org/html` produced **6 Milvus entries (retrievable) but 0 `rag_entry_provenance` rows**. Root cause: `ingest_entries` only writes a provenance row when `entry.get("provenance")` is set (`rag_pipeline.py:1303/1344`), and two entry-producers never attached one:
