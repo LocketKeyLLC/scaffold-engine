@@ -262,7 +262,7 @@ class Settings(BaseSettings):
     model_router: str = "qwen3.5:397b-cloud"
     model_embedder_pipeline: str = "nomic-embed-text"
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-    model_coder: str = "kimi-k2.7-code:cloud"
+    model_coder: str = "qwen3-coder-next:cloud"  # §17.572 — A/B'd (see docker-compose.yml MODEL_CODER, the decisive source)
     model_general: str = "qwen3.5:397b-cloud"
     # Ideation phase model role (Apr 26 2026): which ROLE_FIELDS entry to
     # use for analyze/distill/compile. "model_router" = local 4b (audit
@@ -776,16 +776,21 @@ class Settings(BaseSettings):
     # poorly (each additional concurrent job further carves the cores).
     # Operators on stronger inference hardware can raise via env override.
     execution_global_concurrency: int = Field(default=2, ge=1, le=32)
-    # §17.568 — PROTOTYPE: optional parallel-frontier execution WITHIN one job
-    # (independent dep-satisfied nodes run concurrently). Default OFF — the
-    # serial executor is the byte-identical, battle-tested path; this is
-    # experimental and, on this CPU-bound host, contends with the per-job
-    # concurrency (execution_global_concurrency) and Ollama NUM_PARALLEL=4, so
-    # the win is workload-dependent (measure per DAG shape). max_inflight caps
-    # concurrent nodes per job (distinct from execution_global_concurrency,
-    # which caps concurrent jobs).
-    parallel_execution_enabled: bool = Field(default=False)
-    parallel_execution_max_inflight: int = Field(default=4, ge=1, le=16)
+    # §17.568 — parallel-frontier execution WITHIN one job (independent
+    # dep-satisfied nodes run concurrently). §17.571 — PROMOTED to default ON
+    # after the prototype proved out: unit + integration (atomic claim) + live
+    # diamond (pipeline_complete correct; 2.6× wall-clock when the cloud serves
+    # the frontier concurrently). max_inflight DEFAULT LOWERED 4 → 2 to match
+    # this host's budget: Ollama NUM_PARALLEL=4 split across
+    # execution_global_concurrency=2 concurrent jobs = 2 in-flight nodes/job is
+    # the non-contending sweet spot (4 would over-subscribe under 2 live jobs).
+    # max_inflight caps concurrent nodes per job (distinct from
+    # execution_global_concurrency, which caps concurrent jobs). Operators on
+    # stronger inference hardware can raise it. R6: under heavy contention a node
+    # could approach node_orphan_threshold_minutes (30) — raise that if enabling
+    # a high max_inflight on slow hardware (this host's STALE_THRESHOLD=1560).
+    parallel_execution_enabled: bool = Field(default=True)
+    parallel_execution_max_inflight: int = Field(default=2, ge=1, le=16)
     # §17.442 — bound concurrent ideation requests (/ideas + /ideate). Unlike
     # execution, ideation had NO cap: the §17.441 stress test fired 6 concurrent
     # /ideate and all 6 hit the cloud at once (latency 33→81 s). The cap queues

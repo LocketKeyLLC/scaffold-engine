@@ -21991,6 +21991,31 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.572 Perf — A/B-driven model_coder swap kimi → qwen3-coder-next (40/40 @ 2.4× speed) (2026-06-21)
+
+Continuing the role A/B sweep (after §17.566 extract, §17.567 verify). `model_ab.py --task codegen` (8 exec-verified goldens × 5 repeats) on the 3 viable cloud candidates:
+- **qwen3-coder-next:cloud — 40/40, avg 1.78s** ✓ (incl. cli-entrypoint 5/5, 2 exec=pass)
+- kimi-k2.7-code:cloud (prior) — 40/40, avg 4.3s
+- qwen3.5:397b-cloud — 39/40, avg 26.25s
+
+qwen3-coder-next matches kimi's perfect pass rate at **2.4× the speed** (14.7× vs qwen3.5) and is purpose-built for code. **Swapped `model_coder` kimi → qwen3-coder-next** (both sites: `docker-compose.yml MODEL_CODER` — the decisive source — + `config.py`, per the §17.567 sync rule). This also consolidates on one fast code model (already `model_research_extract` since §17.566).
+
+**Over-elaboration concern (the real §17.498 rejection reason) refuted by a faithfulness spot-check.** §17.498 rejected qwen3-coder-next not for cli-entrypoint (a since-fixed scoring artifact, §17.497) but because it "over-elaborated / parroted the CODEGEN prompt examples." Since the pass/exec gates can't measure that, I generated actual outputs for the minimal-ask goldens: on `signature-stub` ("contract only") qwen3-coder-next produced a clean 4-line stub (117 chars) while **kimi over-elaborated** with a full Args/Returns/Raises docstring (613 chars); on `module-function` they were byte-identical minimal functions. So the over-elaboration is gone (model improved) — qwen3-coder-next is now equally-or-more faithful AND faster. (The goldens' `must_not_contain` guards also caught no CLI-scaffolding bloat: 40/40 incl. cli-entrypoint 5/5.) No test asserts the old `model_coder` default (the `/model reset` test pins only general+verifier), so no test fallout.
+
+---
+
+### §17.571 Feat — promote parallel-frontier DAG execution to default-ON (2026-06-21)
+
+§17.568 shipped parallel-frontier execution as a valve-OFF prototype; it's now proven (unit + integration atomic-claim + live diamond: `pipeline_complete` correct, 2.6× wall-clock when the cloud serves the frontier concurrently), so promote it to default.
+
+- **`config.py`**: `parallel_execution_enabled` default `False → True`; `parallel_execution_max_inflight` default `4 → 2` — host-tuned: Ollama `NUM_PARALLEL=4` split across `execution_global_concurrency=2` concurrent jobs = 2 in-flight nodes/job is the non-contending sweet spot (4 would over-subscribe under 2 live jobs). Operators on stronger hardware can raise it.
+- **`docker-compose.dev.yml`**: pin `PARALLEL_EXECUTION_ENABLED=false` for the DEV/test container so the mock-based serial executor suite (which validates the serial loop's session/keepalive/retry internals) keeps exercising the serial path; the dedicated parallel tests enable it explicitly at runtime, so dev coverage of BOTH paths is intact. Prod (base compose only) takes the config default → parallel.
+- **R6 reaper note**: under heavy contention a node could approach `node_orphan_threshold_minutes` (30); this host's `STALE_THRESHOLD=1560` (26h) covers long phases, and `max_inflight=2` keeps per-node latency bounded — raise the orphan threshold if enabling a high max_inflight on slow hardware.
+
+**Verification.** Full suite green in dev (serial path via the dev pin, unchanged); the parallel path's correctness rests on §17.568's unit + integration + live diamond coverage (that confirm ran `pipeline_complete=True` with max_inflight 4 — the promoted default 2 still covers a diamond's 2-wide sibling frontier, identical code path). Prod post-build confirmed `parallel_execution_enabled=True`.
+
+---
+
 ### §17.570 Feat — grounding LOOP: per-node detection (#2) + CoVe correction (#1), composed (2026-06-21)
 
 Builds on §17.569 (which only *flagged* low-grounding deliverables) to close the detect→correct loop, using the existing `cove.py::cove_revise` (draft → verification questions → independent answers → revise; fail-soft), previously wired only into research.

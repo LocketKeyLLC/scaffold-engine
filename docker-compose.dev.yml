@@ -33,6 +33,13 @@ services:
       # app/logging_config.py — stdout still carries the structured log
       # stream, which `docker logs` captures, so dev visibility is intact.
       LOG_FILE: ""
+      # §17.571: parallel-frontier execution is PROMOTED to default-ON in prod
+      # (config.py default True). Pin it OFF in dev so the mock-based serial
+      # executor suite (which validates the serial loop's session/keepalive/
+      # retry internals) keeps exercising the serial path. The dedicated
+      # parallel tests (test_*_parallel.py + the integration claim test)
+      # enable it explicitly at runtime, so dev coverage of both paths is intact.
+      PARALLEL_EXECUTION_ENABLED: "false"
     # Dev-only mounts. All :ro so the container view cannot mutate host
     # source. These shadow the image's baked-in copies with the working
     # tree so edits pick up live without a rebuild — the live-reload
