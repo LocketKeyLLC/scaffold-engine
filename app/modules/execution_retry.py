@@ -53,6 +53,8 @@ from collections import deque
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_model, settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,6 +100,20 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
         }
 
     if row.retry_count >= row.max_retries:
+        # §17.577 — final escalation rung: hand the job to Assist Mode (human)
+        # instead of just failing. Opt-in + fail-soft (falls through to the
+        # normal exhausted error if assist can't start).
+        if settings.node_escalation_enabled and settings.node_escalation_to_assist:
+            try:
+                from app.modules.assist_agent import start_assist_session
+                await start_assist_session(job_id=job_id, db=db)
+                logger.info(
+                    "node_escalated_to_assist job=%s node=%s retries=%d/%d",
+                    job_id, node_key, row.retry_count, row.max_retries,
+                )
+                return {"status": "escalated_to_assist", "node_key": node_key}
+            except Exception as exc:  # fail-soft
+                logger.warning("escalate_to_assist_failed job=%s err=%s", job_id, exc)
         return {
             "status": "error",
             "message": "Node %s exhausted retries (%d/%d)" % (
@@ -106,6 +122,18 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
         }
 
     new_retry_count = row.retry_count + 1
+
+    # §17.577 — adaptive escalation: pick the model rung for THIS retry
+    # (retry 1 → order[0], clamped to the last rung). Set on the node row in
+    # Stage 5 so both serial + parallel re-execution honor it via assigned_model.
+    escalation_model: str | None = None
+    if settings.node_escalation_enabled and settings.node_escalation_order:
+        order = settings.node_escalation_order
+        rung_role = order[min(new_retry_count - 1, len(order) - 1)]
+        try:
+            escalation_model = get_model(rung_role)
+        except Exception as exc:  # fail-soft — unknown role → no escalation
+            logger.warning("escalation_model_resolve_failed: rung=%s err=%s", rung_role, exc)
 
     # ---- Stage 2: Load full DAG topology ----
     all_rows = (await db.execute(
@@ -148,10 +176,11 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
                 started_at   = NULL,
                 completed_at = NULL,
                 retry_count  = retry_count + 1,
+                assigned_model = COALESCE(:esc_model, assigned_model),
                 updated_at   = now()
             WHERE job_id = :jid AND node_key = :nk
         """),
-        {"jid": job_id, "nk": node_key},
+        {"jid": job_id, "nk": node_key, "esc_model": escalation_model},
     )
 
     if downstream_to_reset:

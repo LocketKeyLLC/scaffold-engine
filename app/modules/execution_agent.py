@@ -621,6 +621,37 @@ async def _maybe_node_grounding(
     return output
 
 
+async def _best_of_n_inference(gen_fn, evidence: str, node_key: str) -> str:
+    """§17.578 — generate ``best_of_n_count`` candidates concurrently and return
+    the one best grounded in ``evidence`` (faithfulness score). Fail-soft: if all
+    generations fail, falls back to a single generation; scoring misses count 0."""
+    n = settings.best_of_n_count
+    results = await asyncio.gather(
+        *[gen_fn() for _ in range(n)], return_exceptions=True
+    )
+    cands = [r for r in results if isinstance(r, str) and r.strip()]
+    if not cands:
+        return await gen_fn()           # all failed → normal single path (may raise)
+    if len(cands) == 1:
+        return cands[0]
+    from app.modules.faithfulness import score_faithfulness
+    verdicts = await asyncio.gather(
+        *[score_faithfulness(c, evidence, role=settings.faithfulness_model_role)
+          for c in cands],
+        return_exceptions=True,
+    )
+    scored = []
+    for c, v in zip(cands, verdicts):
+        s = v.get("score", 0.0) if isinstance(v, dict) else 0.0
+        scored.append((s, c))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    logger.info(
+        "best_of_n: node=%s candidates=%d best_score=%.2f",
+        node_key, len(cands), scored[0][0],
+    )
+    return scored[0][1]
+
+
 async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = None) -> str:
     """Query RAG pipeline and format results as grounding context."""
     try:
@@ -1235,6 +1266,26 @@ async def execute_next_node(
             "message": "Prompt build failed. Review brief, RAG sources, or upstream outputs; retry when fixed.",
         }
 
+    # §17.578 — best-of-N eligibility: deliverable text node with upstream
+    # evidence to judge against. Fetch is_deliverable only when the valve is on
+    # (no cost otherwise). Gates the N-candidate generate below.
+    _best_of_n_eligible = False
+    if (settings.best_of_n_enabled and _upstream_block
+            and (tool or "") not in ("CodeGen", "Shell")):
+        try:
+            async with async_session() as _dbn:
+                _r = await _dbn.execute(
+                    text(
+                        "SELECT COALESCE(is_deliverable, FALSE) "
+                        "OR COALESCE(is_output_node, FALSE) "
+                        "FROM dag_nodes WHERE id = :id"
+                    ),
+                    {"id": node_id},
+                )
+                _best_of_n_eligible = bool(_r.scalar())
+        except Exception:
+            _best_of_n_eligible = False
+
     # Execute with timeout guard.
     _node_t0 = time.monotonic()
     try:
@@ -1266,7 +1317,14 @@ async def execute_next_node(
                 raise RuntimeError(resp.error or "Model returned failure")
             return resp.text.strip()
 
-        output = await asyncio.wait_for(_run_inference(), timeout=settings.node_timeout_seconds)
+        if _best_of_n_eligible:
+            # §17.578 — generate N candidates, keep the best-grounded one.
+            output = await asyncio.wait_for(
+                _best_of_n_inference(_run_inference, _upstream_block, node_key),
+                timeout=settings.node_timeout_seconds,
+            )
+        else:
+            output = await asyncio.wait_for(_run_inference(), timeout=settings.node_timeout_seconds)
     except asyncio.TimeoutError:
         elapsed = round(time.monotonic() - _node_t0, 1)
         timeout_msg = (

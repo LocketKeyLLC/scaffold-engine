@@ -21991,6 +21991,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.578 Feat — best-of-N for deliverable nodes (program F3/6, opt-in) (2026-06-21)
+
+Generate N candidates concurrently for a deliverable node and keep the best — reuses the parallel pattern + the grounding scorer as judge. `_best_of_n_inference` (`execution_agent.py`): `asyncio.gather` N `_run_inference()` calls, judge each by `score_faithfulness` vs the node's `_upstream_block`, return the highest; the normal verifier then runs on the winner. Hooked at the generation point in `execute_next_node`, gated on **eligibility** = deliverable node (`is_deliverable`/`is_output_node`, fetched only when the valve is on) + non-CodeGen/Shell + has upstream evidence. **Valves:** `best_of_n_enabled=False`, `best_of_n_count=2` (ge2 le4). **Default OFF**; deliverable nodes only bound the N× cost. Fail-soft (all candidates fail → single generation; 1 survivor → no judging). Tests: `test_execution_best_of_n.py` (3) — picks highest grounding / single-candidate skips judging / all-fail falls back. Executor regression 119 passed.
+
+### §17.577 Feat — adaptive escalation ladder (program F2/6, opt-in) (2026-06-21)
+
+When a node fails and is retried, escalate the model per rung; final rung hands off to Assist. Implemented entirely in `retry_failed_node` (`execution_retry.py`) so it works for BOTH the serial and parallel re-execution paths: on reset, set the node's `assigned_model` to `get_model(node_escalation_order[retry-1])` (clamped to the last rung) — both paths re-read `assigned_model`. The exhausted branch, when `node_escalation_to_assist`, calls `start_assist_session` (returns `escalated_to_assist`) instead of just failing. **Valves:** `node_escalation_enabled=False`, `node_escalation_order=["model_cloud_heavy"]`, `node_escalation_to_assist=False`. **Default OFF**, fail-soft (unknown rung role / assist failure → normal behavior). Tests: `test_execution_retry_escalation.py` (5) — off→no model set / on→rung model set / clamp to last rung / exhausted→assist / exhausted+assist-off→normal error; retry regression 18 passed.
+
 ### §17.576 Feat — learning flywheel: high-grounding deliverables → RAG exemplars (program F1/6, opt-in) (2026-06-21)
 
 Turns the engine's own best output into retrievable few-shot context — a compounding quality loop reusing RAG + the grounding scores. New `app/modules/flywheel.py` (isolated; hooks just call in):

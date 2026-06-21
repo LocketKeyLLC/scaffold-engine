@@ -537,6 +537,23 @@ class Settings(BaseSettings):
     exemplar_min_grounding: float = Field(default=0.85, ge=0.0, le=1.0)
     exemplar_retrieval_enabled: bool = False
     exemplar_retrieval_top_k: int = Field(default=2, ge=1, le=10)
+    # §17.577 — adaptive escalation ladder (opt-in, default OFF). When a node
+    # fails and is retried, escalate the model per retry rung: retry N uses
+    # node_escalation_order[N-1] (clamped to the last rung). Implemented in
+    # retry_failed_node (sets the node's assigned_model on reset), so it works
+    # for BOTH the serial and parallel re-execution paths. node_escalation_to_assist:
+    # when retries are exhausted, hand the job to Assist Mode (final human rung)
+    # instead of just failing. Both fail-soft.
+    node_escalation_enabled: bool = False
+    node_escalation_order: list[str] = Field(default_factory=lambda: ["model_cloud_heavy"])
+    node_escalation_to_assist: bool = False
+    # §17.578 — best-of-N for DELIVERABLE nodes (opt-in, default OFF). Generate N
+    # candidates concurrently, judge each by grounding (faithfulness vs the node's
+    # upstream evidence), keep the best; the normal verifier then runs on the
+    # winner. Deliverable nodes only (few) to bound the N× cost; non-CodeGen/Shell
+    # with upstream evidence. Fail-soft (any error → single candidate).
+    best_of_n_enabled: bool = False
+    best_of_n_count: int = Field(default=2, ge=2, le=4)
     # §17.452 (Phase C) — Chain-of-Verification revision of research summaries
     # (draft → verification questions → independent answers → revise). Where
     # faithfulness *scores*, CoVe *corrects*. Default-OFF: it adds ~3 LLM calls
