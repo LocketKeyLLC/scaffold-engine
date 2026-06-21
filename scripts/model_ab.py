@@ -307,6 +307,45 @@ def _print_table(summary: dict[str, dict], task_name: str = "codegen") -> None:
     print()
 
 
+async def run_model_ab_task(
+    task_name: str,
+    models: list[str],
+    *,
+    repeat: int = 1,
+    temperature: float = 0.2,
+    max_tokens: int = 8192,
+    limit: int = 0,
+) -> dict:
+    """§17.578 — library API for the model A/B harness (used by the scheduled
+    re-A/B governance job). Runs every (model, golden, repeat) trial for
+    ``task_name`` and returns ``{"task", "models", "summary": <per-model dict>,
+    "rows": <trial rows>}``. Shares _load_goldens/_is_available/_run_one/
+    _summarize with the CLI ``main()``; caller is responsible for init_clients()."""
+    from app.config import settings
+    if task_name not in TASKS:
+        raise ValueError(f"unknown task: {task_name!r} (have {sorted(TASKS)})")
+    task = TASKS[task_name]
+    goldens = _load_goldens(task.default_goldens)
+    if limit > 0:
+        goldens = goldens[:limit]
+
+    available = {m: await _is_available(m, settings.ollama_base_url) for m in models}
+    rows: list[dict] = []
+    for model in models:
+        if not available[model]:
+            rows.append({"task": task.name, "model": model, "golden": "(preflight)",
+                         "ok": False, "passed": False, "error": "not pulled"})
+            continue
+        for golden in goldens:
+            for i in range(repeat):
+                r = await _run_one(task, model, golden,
+                                   temperature=temperature, max_tokens=max_tokens)
+                r["repeat"] = i
+                rows.append(r)
+    return {"task": task.name, "models": models,
+            "summary": _summarize(rows), "rows": rows}
+
+
 async def main() -> int:
     from app.config import settings
 
