@@ -262,7 +262,7 @@ class Settings(BaseSettings):
     model_router: str = "qwen3.5:397b-cloud"
     model_embedder_pipeline: str = "nomic-embed-text"
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-    model_coder: str = "qwen3-coder-next:cloud"  # §17.572 — A/B'd (see docker-compose.yml MODEL_CODER, the decisive source)
+    model_coder: str = "kimi-k2.7-code:cloud"  # §17.575 — reverted §17.572 (see docker-compose.yml MODEL_CODER, decisive)
     model_general: str = "qwen3.5:397b-cloud"
     # Ideation phase model role (Apr 26 2026): which ROLE_FIELDS entry to
     # use for analyze/distill/compile. "model_router" = local 4b (audit
@@ -528,6 +528,15 @@ class Settings(BaseSettings):
     # default-off. Both reuse grounding_min_score + cove_model_role.
     grounding_correct_enabled: bool = True
     node_grounding_enabled: bool = False
+    # §17.576 — learning flywheel (opt-in, default OFF both directions). When a
+    # job completes with grounding ≥ exemplar_min_grounding, its deliverable is
+    # ingested into RAG tagged source_type="exemplar"; at DAG-plan time, similar
+    # exemplars are retrieved + injected as few-shot "proven prior solutions".
+    # Pollution guard: the grounding threshold + RAG's 3-tier dedup. Fail-soft.
+    exemplar_ingest_enabled: bool = False
+    exemplar_min_grounding: float = Field(default=0.85, ge=0.0, le=1.0)
+    exemplar_retrieval_enabled: bool = False
+    exemplar_retrieval_top_k: int = Field(default=2, ge=1, le=10)
     # §17.452 (Phase C) — Chain-of-Verification revision of research summaries
     # (draft → verification questions → independent answers → revise). Where
     # faithfulness *scores*, CoVe *corrects*. Default-OFF: it adds ~3 LLM calls
@@ -813,6 +822,13 @@ class Settings(BaseSettings):
     decompose_enabled: bool = Field(default=True)
     decompose_max_inflight_components: int = Field(default=20, ge=1, le=500)
     decompose_component_stale_minutes: int = Field(default=180, ge=10, le=43200)
+    # §17.574 — cap how many component pipelines EXECUTE concurrently within a
+    # decomposition. They already spawn all-at-once and each child's DAG now runs
+    # node-parallel (§17.571), so an N-component umbrella could otherwise stack
+    # N×inflight inference calls on the host. ON by default (a safety bound on
+    # existing unbounded fan-out); the rest queue. Distinct from
+    # decompose_max_inflight_components (which throttles NEW decompositions).
+    decompose_component_max_concurrent: int = Field(default=3, ge=1, le=20)
     # Max queue wait when the cap is full. 0 = wait forever; otherwise
     # the run emits a 503-shaped SSE error and bails. Default 1800s
     # matches scheduler_job_timeout so a queued run can't outlive the

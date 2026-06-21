@@ -45,6 +45,27 @@ logger = logging.getLogger("scaffold.decompose")
 # weak ref; mirror ideation_workflow._PHASE1_BACKGROUND_TASKS).
 _COMPONENT_TASKS: set[asyncio.Task] = set()
 
+# §17.574 — bound how many component pipelines execute concurrently. Components
+# already spawn all-at-once (fire-and-forget, below) and each child's DAG now
+# runs node-parallel by default (§17.571), so an N-component umbrella could put
+# N×inflight inference calls on the host at once. This semaphore caps concurrent
+# components; the rest queue (still spawned, just gated on entry). Lazy + resettable
+# (settings.decompose_component_max_concurrent), mirroring get_ideation_slot_sem.
+_component_sem: asyncio.Semaphore | None = None
+
+
+def get_component_sem() -> asyncio.Semaphore:
+    global _component_sem
+    if _component_sem is None:
+        _component_sem = asyncio.Semaphore(settings.decompose_component_max_concurrent)
+    return _component_sem
+
+
+def _reset_component_sem() -> None:
+    """Drop the cached semaphore so a settings change (or a test) re-reads the cap."""
+    global _component_sem
+    _component_sem = None
+
 # A build must split into at least this many parts to be worth decomposing;
 # below it, /decompose declines and the caller uses the normal single-job path.
 MIN_COMPONENTS = 2
@@ -247,6 +268,10 @@ async def run_component_pipeline(
     """Drive one component child through the full pipeline on its own session,
     then roll its umbrella up. Any failure marks the child ``failed`` (so it
     never strands in a non-terminal status) and still triggers the rollup."""
+    # §17.574 — bound concurrent component pipelines; beyond the cap they queue
+    # here (already spawned, gated on entry). Released in the finally below.
+    sem = get_component_sem()
+    await sem.acquire()
     try:
         async with async_session() as db:
             async with get_ideation_slot_sem():
@@ -311,6 +336,7 @@ async def run_component_pipeline(
             await asyncio.shield(_do_rollup())
         except Exception:
             logger.exception("component_pipeline_rollup_failed: umbrella=%s", umbrella_id)
+        sem.release()  # §17.574 — free the component slot for a queued child
 
 
 def _spawn_component(

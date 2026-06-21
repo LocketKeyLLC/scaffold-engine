@@ -21991,6 +21991,24 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.575 Fix — REVERT §17.572 model_coder swap (qwen3-coder-next flaky on cli-entrypoint) (2026-06-21)
+
+The §17.572 swap `model_coder` kimi → qwen3-coder-next was reverted. The F6 full suite caught `test_codegen_golden_live[cli-entrypoint]` failing: qwen3-coder-next inlined the argparse logic under `if __name__ == "__main__":` **without defining a module-level `main()`**, failing the golden's `must_define: main`. It's **intermittent** — it passed the A/B's exec-smoke gate 5/5 and §17.572's own suite run, but the stricter live golden test fails it some fraction of the time. This is exactly the §17.498 / memory caution ("qwen3-coder-next … fails cli-entrypoint at runtime"); my A/B's small N (5 repeats) masked the flakiness, and the exec-smoke gate doesn't enforce `must_define`. **Lesson: a 5/5 A/B is too small an N to override a documented runtime caution on a structural-faithfulness failure mode.** Reverted both sites (compose + config) to `kimi-k2.7-code:cloud` (stable on cli-entrypoint across every prior suite). `model_research_extract` stays qwen3-coder-next (§17.566 — extraction has no such structural golden). Memory + index corrected.
+
+### §17.574 Feat — bounded component concurrency (program F4/6) (2026-06-21)
+
+Decomposition components already spawn all-at-once (fire-and-forget) and each child's DAG now runs node-parallel (§17.571), so an N-component umbrella could stack N×inflight inference calls on the host. `run_component_pipeline` now acquires a module semaphore `get_component_sem()` (lazy + resettable, sized by `decompose_component_max_concurrent`, **default 3**); components beyond the cap queue on entry and release in the `finally` (after the umbrella rollup). Distinct from `decompose_max_inflight_components` (throttles NEW decompositions, not inflight execution). **Default ON** — a safety bound on existing *unbounded* fan-out. Tests: `test_decomposition_concurrency.py` (2) — cap=2 over 4 children → ≤2 concurrent; cap=1 → strictly serial.
+
+### §17.573 Feat — quality-telemetry rollup endpoint (program F6/6) (2026-06-21)
+
+First of a 6-feature program recombining this session's infrastructure (see plan). Read-only rollup turning already-recorded signals into a tuning view — no new recording.
+
+- `observability_rollups.quality_rollup(window_minutes, grounding_threshold, db)` + `GET /observability/quality`: per `(tool, node_type)` → total/done/failed/skipped, `pass_rate`, avg verifier `confidence`, avg `retry_count` (from `dag_nodes`, windowed via the parent `jobs.created_at` join); + grounding distribution from `jobs.metadata.grounding` (count scored, avg/min, # auto-corrected, # below threshold). Mirrors the §X.20 rollup pattern (fail-open `data_source`). docs/openapi.json regenerated for the new route.
+
+**Verification.** `test_observability_quality_rollup.py` (5 passed): aggregation (pass_rate 8/(8+2), grounding shape), pass_rate None when undecided, fail-open, endpoint 200 + window validation. Full suite green. Default: always-on read endpoint (no behavior change).
+
+---
+
 ### §17.572 Perf — A/B-driven model_coder swap kimi → qwen3-coder-next (40/40 @ 2.4× speed) (2026-06-21)
 
 Continuing the role A/B sweep (after §17.566 extract, §17.567 verify). `model_ab.py --task codegen` (8 exec-verified goldens × 5 repeats) on the 3 viable cloud candidates:

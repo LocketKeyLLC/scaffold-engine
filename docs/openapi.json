@@ -6867,6 +6867,74 @@
         ]
       }
     },
+    "/observability/quality": {
+      "get": {
+        "description": "§17.573 — execution-quality rollup over recent jobs.\n\nSurfaces the signals the model-tuning + grounding work tunes against,\naggregated from existing telemetry (no new recording):\n\n- ``by_node_type``: per (tool, node_type) — total/done/failed/skipped,\n  pass_rate, avg verifier confidence, avg retry count. Shows which\n  node kinds are failing, low-confidence, or retry-heavy.\n- ``grounding``: distribution of ``jobs.metadata.grounding.score`` —\n  count scored, avg/min, # auto-corrected (CoVe), # below threshold.\n\nRead-only; fail-open (``data_source`` flags a query error vs empty).",
+        "operationId": "quality_rollup_endpoint_observability_quality_get",
+        "parameters": [
+          {
+            "description": "Job creation window in minutes (default 24h).",
+            "in": "query",
+            "name": "window_minutes",
+            "required": false,
+            "schema": {
+              "default": 1440,
+              "description": "Job creation window in minutes (default 24h).",
+              "maximum": 10080,
+              "minimum": 1,
+              "title": "Window Minutes",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Score below which a deliverable counts as low-grounding.",
+            "in": "query",
+            "name": "grounding_threshold",
+            "required": false,
+            "schema": {
+              "default": 0.7,
+              "description": "Score below which a deliverable counts as low-grounding.",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Grounding Threshold",
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Quality Rollup Endpoint Observability Quality Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Quality Rollup Endpoint",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
     "/optimize": {
       "post": {
         "description": "Step 14: Optimize a prompt — strip filler, reduce tokens, verify intent, score clarity.",
