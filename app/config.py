@@ -755,6 +755,16 @@ class Settings(BaseSettings):
     # poorly (each additional concurrent job further carves the cores).
     # Operators on stronger inference hardware can raise via env override.
     execution_global_concurrency: int = Field(default=2, ge=1, le=32)
+    # §17.568 — PROTOTYPE: optional parallel-frontier execution WITHIN one job
+    # (independent dep-satisfied nodes run concurrently). Default OFF — the
+    # serial executor is the byte-identical, battle-tested path; this is
+    # experimental and, on this CPU-bound host, contends with the per-job
+    # concurrency (execution_global_concurrency) and Ollama NUM_PARALLEL=4, so
+    # the win is workload-dependent (measure per DAG shape). max_inflight caps
+    # concurrent nodes per job (distinct from execution_global_concurrency,
+    # which caps concurrent jobs).
+    parallel_execution_enabled: bool = Field(default=False)
+    parallel_execution_max_inflight: int = Field(default=4, ge=1, le=16)
     # §17.442 — bound concurrent ideation requests (/ideas + /ideate). Unlike
     # execution, ideation had NO cap: the §17.441 stress test fired 6 concurrent
     # /ideate and all 6 hit the cloud at once (latency 33→81 s). The cap queues

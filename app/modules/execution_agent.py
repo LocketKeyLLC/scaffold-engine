@@ -72,6 +72,12 @@ from app.utils.llm_retry import chat_until_nonempty  # §17.465
 
 logger = logging.getLogger(__name__)
 
+
+def _sse_event(event: str, data: dict) -> str:
+    """§17.568 — module-level SSE formatter (byte-identical to the nested
+    `_sse` in execute_all_nodes) so `_run_parallel_frontier` can emit frames."""
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
 # ---------------------------------------------------------------------------
 # Sprint X.24 — process-wide cap on concurrent execute_all_nodes runs.
 # Lazy-init so the value is read from settings at first use; tests reset
@@ -328,6 +334,50 @@ async def _get_next_node(db: AsyncSession, job_id: str) -> dict | None:
     claimed = claim.mappings().first()
     await db.commit()
     return dict(claimed) if claimed else None
+
+
+async def _claim_ready_nodes(
+    db: AsyncSession, job_id: str, limit: int,
+) -> list[dict]:
+    """§17.568 — atomically claim up to ``limit`` dep-satisfied pending nodes
+    for parallel-frontier execution. This is the atomic claim the
+    ``_get_next_node`` docstring (§17.409) prescribes for same-job parallelism:
+    the dep-satisfied predicate is folded into the claim's WHERE as a NOT EXISTS
+    over unfinished deps, and ``FOR UPDATE SKIP LOCKED`` makes concurrent claims
+    disjoint and race-free w.r.t. dependency state. Flips the claimed rows to
+    'running' and returns them with the same column shape as ``_get_next_node``.
+    """
+    if limit <= 0:
+        return []
+    claimed = await db.execute(
+        text("""
+            UPDATE dag_nodes SET status = 'running', started_at = NOW()
+            WHERE id IN (
+                SELECT n.id FROM dag_nodes n
+                WHERE n.job_id = :jid AND n.status = 'pending'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM unnest(COALESCE(n.depends_on, ARRAY[]::text[])) AS dep(k)
+                      WHERE NOT EXISTS (
+                          SELECT 1 FROM dag_nodes d
+                          WHERE d.job_id = :jid AND d.node_key = dep.k
+                            AND d.status IN ('done', 'skipped')
+                      )
+                  )
+                ORDER BY n.execution_order ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT :lim
+            )
+            RETURNING id, node_key, title, node_type, depends_on,
+                      assigned_model, prompt_template, execution_order, tool, domain,
+                      retry_count, last_verification_reason
+        """),
+        {"jid": job_id, "lim": limit},
+    )
+    rows = [dict(r) for r in claimed.mappings()]
+    await db.commit()
+    return rows
+
 
 async def _set_node_status(
     db: AsyncSession,
@@ -700,6 +750,7 @@ async def execute_next_node(
     skip_optimize: bool = False,
     skip_verify: bool = False,
     model_overrides: dict | None = None,
+    preclaimed_node: dict | None = None,
 ) -> dict:
     """Execute the next pending node in the DAG.
 
@@ -707,6 +758,17 @@ async def execute_next_node(
     async sessions around each DB phase. Long LLM work (optimize/execute/
     verify) runs with NO session open — connections are not held across
     10+ minute model calls.
+
+    §17.568 — ``preclaimed_node`` supports parallel-frontier execution: when
+    the caller (``_run_parallel_frontier``) has already atomically claimed a
+    node via ``_claim_ready_nodes`` (status flipped to 'running'), it passes
+    the node row here to execute that specific node, SKIPPING this function's
+    own claim + the no-claimable terminal/finalize block. When None (the
+    serial path and all existing callers), behavior is byte-identical: it
+    claims the next ready node itself. The terminal block stays reachable for
+    finalization via a no-preclaim call. The all-done autocomplete at the end
+    of the per-node body is idempotent (UPDATE ... WHERE status!='completed'),
+    so concurrent workers finishing the last node race safely.
     """
     # ---- Phase 1 (fast session): validate + claim next node ----
     async with async_session() as db:
@@ -716,7 +778,12 @@ async def execute_next_node(
         if job["status"] not in ("running", "executing", "planning"):
             return {"status": "error", "message": f"Job status is '{job['status']}' — not executable"}
 
-        node = await _get_next_node(db, job_id)
+        # §17.568 — parallel path passes an already-claimed node; serial path
+        # (preclaimed_node None) claims here, byte-identical to before.
+        node = (
+            preclaimed_node if preclaimed_node is not None
+            else await _get_next_node(db, job_id)
+        )
         if node is None:
             if await _all_nodes_done(db, job_id):
                 result = await db.execute(
@@ -1564,6 +1631,160 @@ async def _peek_next_node(job_id: str) -> dict | None:
             return c
     return None
 
+
+async def _run_parallel_frontier(
+    job_id: str,
+    *,
+    model_overrides: dict | None,
+    t0: float,
+    retry_budget: int,
+) -> AsyncGenerator[str, None]:
+    """§17.568 — PROTOTYPE parallel-frontier executor (valve-gated).
+
+    Runs the ready frontier (dep-satisfied pending nodes) concurrently, bounded
+    by ``parallel_execution_max_inflight``. The LOOP atomically claims nodes
+    (``_claim_ready_nodes``) and owns the terminal/finalize decision; per-node
+    work runs in worker tasks via ``execute_next_node(preclaimed_node=...)``
+    (each its own session). SSE events stream as workers complete; ordering
+    interleaves across nodes (consumers key on node_key). On cancellation the
+    finally cancels all inflight workers so none leak onto a dying job (R8).
+    """
+    _sse = _sse_event
+    cap = settings.parallel_execution_max_inflight
+    sem = asyncio.Semaphore(cap)
+    results_q: asyncio.Queue = asyncio.Queue()
+    inflight: set[asyncio.Task] = set()
+    node_results: list[dict] = []
+
+    async def _worker(node: dict) -> None:
+        async with sem:
+            try:
+                res = await execute_next_node(
+                    job_id, model_overrides=model_overrides, preclaimed_node=node,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — surface as a failed node
+                res = {
+                    "status": "failed", "node_key": node.get("node_key"),
+                    "title": node.get("title"), "error": f"worker error: {e}",
+                }
+            await results_q.put(res)
+
+    def _reap() -> None:
+        for t in [t for t in inflight if t.done()]:
+            inflight.discard(t)
+
+    try:
+        while True:
+            # 1. Refill the frontier up to the cap.
+            free = cap - len(inflight)
+            if free > 0:
+                async with async_session() as db:
+                    claimed = await _claim_ready_nodes(db, job_id, free)
+                for n in claimed:
+                    yield _sse("node_start", {
+                        "job_id": job_id, "node_key": n["node_key"],
+                        "title": n["title"], "tool": n.get("tool", "LLM"),
+                    })
+                    inflight.add(asyncio.create_task(_worker(n)))
+
+            # 2. Terminal — ONLY the loop finalizes, only when nothing is
+            #    running and nothing was claimable. No-preclaim call hits the
+            #    terminal block (complete / blocked); idempotent if a worker's
+            #    autocomplete already flipped the job.
+            if not inflight:
+                fin = await execute_next_node(job_id, model_overrides=model_overrides)
+                status = fin.get("status", "unknown")
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                if status == "complete":
+                    summary = await _build_pipeline_summary(
+                        job_id, node_results, elapsed_ms, async_session,
+                        extra_fields={"status": "completed"},
+                    )
+                    logger.info(
+                        "pipeline_completed(parallel): job=%s total=%s passed=%s "
+                        "failed=%s duration_ms=%s", job_id, summary["total_nodes"],
+                        summary["passed"], summary["failed"], elapsed_ms,
+                    )
+                    yield _sse("pipeline_complete", summary)
+                    return
+                # blocked / error / unexpected → terminal
+                fin["nodes_completed"] = len(node_results)
+                fin["duration_ms"] = elapsed_ms
+                yield _sse(status if status in ("blocked", "error") else "error", fin)
+                return
+
+            # 3. Drain one worker result; keepalive on idle.
+            try:
+                res = await asyncio.wait_for(
+                    results_q.get(), timeout=settings.sse_keepalive_seconds,
+                )
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                _reap()
+                continue
+            _reap()
+
+            # 4. Emit + auto-retry. A retried node resets to 'pending' and is
+            #    re-claimed on the next refill (no pop/continue needed).
+            status = res.get("status", "unknown")
+            if status == "done":
+                node_results.append(res)
+                _done_tool = (res.get("tool") or "").lower()
+                yield _sse("node_done", {
+                    "job_id": job_id,
+                    "node_key": res.get("node_key"),
+                    "title": res.get("title"),
+                    "output": res.get("output"),
+                    "verified": res.get("verified"),
+                    "confidence": res.get("confidence"),
+                    "model_used": res.get("model_used"),
+                    "tool": res.get("tool"),
+                    "runbook_only": _done_tool == "shell" and not settings.shell_tool_enabled,
+                })
+            elif status == "failed":
+                _failed_key = res.get("node_key", "")
+                _retried = False
+                if retry_budget > 0:
+                    try:
+                        async with async_session() as _retry_db:
+                            rr = await retry_failed_node(job_id, _failed_key, _retry_db)
+                            if rr.get("status") == "reset":
+                                _retried = True
+                                retry_budget -= 1
+                                yield _sse("node_retry", {
+                                    "job_id": job_id, "node_key": _failed_key,
+                                    "title": res.get("title"),
+                                    "retry_count": rr.get("retry_count", 0),
+                                    "budget_remaining": retry_budget,
+                                    "message": "Auto-retrying failed node",
+                                })
+                    except Exception as _retry_exc:
+                        logger.warning("auto_retry_failed(parallel): node=%s error=%s",
+                                       _failed_key, _retry_exc)
+                if not _retried:
+                    node_results.append(res)
+                    yield _sse("node_failed", {
+                        "job_id": job_id, "node_key": _failed_key,
+                        "title": res.get("title"), "error": res.get("error"),
+                        "verification_reason": res.get("verification_reason"),
+                        "model_used": res.get("model_used"),
+                        "retries_exhausted": not _retried,
+                    })
+            else:
+                # skipped / unexpected per-node status — record, keep going.
+                node_results.append(res)
+                logger.info("parallel_node_status=%s job=%s node=%s",
+                            status, job_id, res.get("node_key"))
+    finally:
+        # R8 — cancel any inflight workers so none keep writing to a dying job.
+        for t in list(inflight):
+            t.cancel()
+        if inflight:
+            await asyncio.gather(*inflight, return_exceptions=True)
+
+
 async def execute_all_nodes(
     job_id: str,
     model_overrides: dict | None = None,
@@ -1746,7 +1967,19 @@ async def execute_all_nodes(
                     yield _sse("error", {"message": f"DAG generation failed: {exc}"})
                     return
 
-        # ---- Main execute loop ----
+        # §17.568 — PROTOTYPE parallel-frontier path (valve, default OFF).
+        # When off, the serial loop below runs unchanged (byte-identical). The
+        # branch shares this function's outer try/except/finally (slot release +
+        # cleanup); _run_parallel_frontier cancels its own inflight workers.
+        if settings.parallel_execution_enabled:
+            async for _ev in _run_parallel_frontier(
+                job_id, model_overrides=model_overrides, t0=t0,
+                retry_budget=retry_budget,
+            ):
+                yield _ev
+            return
+
+        # ---- Main execute loop (serial) ----
         while True:
             # ---- Session 4 (short peek only; execute_next_node owns its own sessions) ----
             node = await _peek_next_node(job_id)
