@@ -21991,6 +21991,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.567 Feat+Perf — model_ab `verifier` task + A/B-driven model_verifier swap qwen3.5 → kimi (30/30 @ 4.6× speed) (2026-06-20)
+
+Built the long-deferred (§17.557) `verifier` task for the A/B harness, then used it to swap the verifier role.
+
+- **Harness task** (`scripts/model_ab.py`): new `verifier` task = **verdict-match**. Mirrors `execution_verify._verify_output` exactly (`VERIFY_SYSTEM` + `VERIFY_TOOL`/`record_verification`, temp 0.0, `read_tool_args` parse); goldens (`tests/fixtures/verifier_goldens.json`, 6 clear PASS/FAIL cases) carry a known-correct verdict and `passed` iff the model's verdict matches — fail-closed (no tool call → verdict `none`), matching prod. Pure `score_verifier` unit-tested (`test_model_ab.py`, +6, 24 passed).
+- **A/B result** (`--task verifier --repeat 5`, 30 trials/model): `qwen3.5:397b-cloud` (baseline, coaxed) **30/30 @ 6.12s**; **`kimi-k2.7-code:cloud` 30/30 @ 1.34s** ✅ (~4.6× faster, native tool-calls, zero flakiness); `qwen3-coder-next:cloud` 28/30 @ 1.35s; `qwen2.5:7b` 20/30 @ 106s. Cross-task contrast: kimi was *flaky on extraction* (§17.566, 5/10) but *perfect on verify* (30/30) — per-task reliability differs, which is the whole point of measuring per role.
+- **Swap.** `model_verifier` qwen3.5:397b-cloud → kimi-k2.7-code:cloud. The verifier runs **per node**, so the 6.12→1.34s win compounds across a DAG, at identical measured accuracy and on the native (non-coax) path. **Source-of-truth note:** `model_verifier` is env-overridable (unlike `model_research_extract`), so the swap is in THREE places — `docker-compose.yml` `MODEL_VERIFIER` default (decisive for the orchestrator), `app/config.py` (code default for CLI/tests), and the `scaffold_router.py` pipeline valve (sent as a per-job override). `kimi` isn't in `tool_call_coax_models`, so `will_coax=False` (verified in prod). Caveat: the 6 goldens are clear-cut PASS/FAIL — they prove kimi matches accuracy + is far faster, but don't stress *borderline* judgment; the prod verifier is a deliberately lenient presence-checker, so this fits, and borderline goldens are a noted follow-up.
+
+**Verification.** `test_model_ab.py` 24 passed (incl. 6 new `score_verifier`); A/B 120 trials (above); prod after `make build`: `env MODEL_VERIFIER=kimi-k2.7-code:cloud`, `settings.model_verifier=kimi-k2.7-code:cloud`, `will_coax=False`; health green.
+
+---
+
 ### §17.566 Perf+Fix — research-extract role: A/B-driven swap kimi → qwen3-coder-next (flaky 5/10 → clean 10/10, 3.5× faster) (2026-06-20)
 
 Throughput/quality pass on the research-extraction role. An objective A/B (`scripts/model_ab.py --task extraction --repeat 5` over the extraction goldens, fallback-rejecting) compared the current `model_research_extract` default against tool-call-native candidates:

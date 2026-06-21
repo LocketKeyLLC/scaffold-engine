@@ -13,6 +13,10 @@ a JSONL record per (model, golden, repeat). Pluggable by ``--task``:
     of the §17.556 manual spike (coaxed qwen3.5 5/5 vs native kimi 1/5 on the
     distill prompt) — native-vs-coax reliability is per-prompt, so MEASURE it
     before any role/model switch.
+  • ``verifier`` (§17.567) — tool_call(record_verification) on (task, output)
+    goldens with a KNOWN-correct verdict → does the model's pass/fail match
+    (verdict-match)? Mirrors execution_verify._verify_output (VERIFY_SYSTEM +
+    VERIFY_TOOL, temp 0.0). Decides whether a candidate beats model_verifier.
 
 The objective-scoring counterpart to ad-hoc A/Bs flipped from code comments
 (§17.344/§17.346/§17.548). Runs INSIDE the orchestrator container (needs app
@@ -135,6 +139,49 @@ async def _score_extraction(golden: dict, resp: Any) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# verifier task (§17.567) — record_verification verdict-match
+# ---------------------------------------------------------------------------
+
+def score_verifier(args: dict | None, expected: str) -> dict:
+    """Pure scoring: a parsed record_verification tool-args dict + the golden's
+    known-correct verdict → ``passed`` iff the model's verdict matches. A model
+    that emits no parseable tool call (native miss / coax-fail) scores
+    ``passed=False`` with verdict ``none`` — exactly how the production verifier
+    fail-closes (execution_verify._run_verification). Import-light for tests."""
+    if not args or "pass" not in args:
+        return {"passed": False, "verdict": "none", "expected": expected,
+                "metric": "verdict_match", "metric_value": "none"}
+    verdict = "pass" if bool(args.get("pass")) else "fail"
+    return {"passed": verdict == expected, "verdict": verdict,
+            "expected": expected, "metric": "verdict_match",
+            "metric_value": verdict}
+
+
+async def _dispatch_verifier(model: str, golden: dict, *, temperature: float,
+                             max_tokens: int) -> Any:
+    # Mirror execution_verify._verify_output: same VERIFY_SYSTEM + VERIFY_TOOL,
+    # same TASK/OUTPUT message shape, temperature 0.0 (prod verifier is
+    # deterministic). The harness temperature arg is ignored on purpose so the
+    # A/B reflects the real verifier call.
+    from app import model_router
+    from app.modules.execution_verify import VERIFY_SYSTEM, VERIFY_TOOL
+    return await model_router.tool_call(
+        messages=[
+            {"role": "system", "content": VERIFY_SYSTEM},
+            {"role": "user",
+             "content": f"TASK: {golden['task']}\n\nOUTPUT:\n{golden['output']}"},
+        ],
+        tools=[VERIFY_TOOL],
+        model=model, temperature=0.0, max_tokens=max_tokens,
+    )
+
+
+async def _score_verifier(golden: dict, resp: Any) -> dict:
+    from app.utils.tool_call_args import read_tool_args
+    return score_verifier(read_tool_args(resp), golden["expected"])
+
+
+# ---------------------------------------------------------------------------
 # task registry
 # ---------------------------------------------------------------------------
 
@@ -151,6 +198,8 @@ TASKS: dict[str, Task] = {
                     _dispatch_codegen, _score_codegen),
     "extraction": Task("extraction", _FIXTURES / "extraction_goldens.json",
                        _dispatch_extraction, _score_extraction),
+    "verifier": Task("verifier", _FIXTURES / "verifier_goldens.json",
+                     _dispatch_verifier, _score_verifier),
 }
 
 

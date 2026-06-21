@@ -636,7 +636,9 @@ class Pipeline:
         # the same cloud model as §17.344's triage flip. Keep in sync with
         # app/config.py Settings defaults; the per-role rationale lives there.
         model_general: str = "qwen3.5:397b-cloud"
-        model_verifier: str = "qwen3.5:397b-cloud"
+        # §17.567 — A/B'd (model_ab.py --task verifier): kimi 30/30 @ 1.34s vs
+        # qwen3.5 30/30 @ 6.12s. Keep in sync with app/config.py:model_verifier.
+        model_verifier: str = "kimi-k2.7-code:cloud"
         model_coder: str = "kimi-k2.7-code:cloud"  # §17.498 — A/B'd coder-specialized model
         # §17.472 — synced to the orchestrator's real embedder. §17.83
         # switched the live embedder to nomic-embed-text (qwen3-embedding:8b

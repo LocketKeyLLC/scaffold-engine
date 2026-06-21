@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.model_ab import _avg, _summarize, score_codegen, score_extraction, TASKS
+from scripts.model_ab import (
+    _avg, _summarize, score_codegen, score_extraction, score_verifier, TASKS,
+)
 
 
 _GOLDEN = {
@@ -212,3 +214,38 @@ def test_score_extraction_ignores_non_dict_entries():
 def test_extraction_task_registered():
     assert "extraction" in TASKS
     assert TASKS["extraction"].default_goldens.name == "extraction_goldens.json"
+
+
+# §17.567 — verifier task (verdict-match)
+
+def test_score_verifier_matching_pass():
+    s = score_verifier({"pass": True, "reason": "ok", "confidence": 0.9}, "pass")
+    assert s["passed"] is True and s["verdict"] == "pass"
+    assert s["metric"] == "verdict_match" and s["metric_value"] == "pass"
+
+
+def test_score_verifier_matching_fail():
+    s = score_verifier({"pass": False, "reason": "missing", "confidence": 0.9}, "fail")
+    assert s["passed"] is True and s["verdict"] == "fail"
+
+
+def test_score_verifier_mismatch_fails():
+    # model said pass, golden expected fail → verdict-match miss
+    s = score_verifier({"pass": True, "reason": "x", "confidence": 0.5}, "fail")
+    assert s["passed"] is False and s["verdict"] == "pass" and s["expected"] == "fail"
+
+
+def test_score_verifier_no_toolcall_fails_closed():
+    # read_tool_args returns None on a tool-call miss → fail-closed, verdict none
+    s = score_verifier(None, "pass")
+    assert s["passed"] is False and s["verdict"] == "none"
+
+
+def test_score_verifier_missing_pass_key_fails_closed():
+    s = score_verifier({"reason": "no pass key"}, "pass")
+    assert s["passed"] is False and s["verdict"] == "none"
+
+
+def test_verifier_task_registered():
+    assert "verifier" in TASKS
+    assert TASKS["verifier"].default_goldens.name == "verifier_goldens.json"

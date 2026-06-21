@@ -304,7 +304,15 @@ class Settings(BaseSettings):
     # one refinement → safety net, without making a non-convergent
     # design wait for an expensive 10-iter futile loop.
     device_sizing_max_iterations: int = Field(default=3, ge=1, le=10)
-    model_verifier: str = "qwen3.5:397b-cloud"
+    # §17.567 — model_verifier qwen3.5:397b-cloud → kimi-k2.7-code:cloud after
+    # an objective A/B (scripts/model_ab.py --task verifier, repeat=5 over the
+    # verdict-match goldens): kimi matched the baseline's perfect accuracy
+    # (30/30) at ~4.6× the speed (1.34s vs 6.12s) with native tool-calls (no
+    # coax) and zero flakiness. The verifier runs per-node, so the latency win
+    # compounds. (kimi was flaky on EXTRACTION (§17.566) but perfect on the
+    # lenient presence-check verify task — per-task reliability differs.) Not in
+    # tool_call_coax_models, so it uses the native path.
+    model_verifier: str = "kimi-k2.7-code:cloud"
     # §17.548 — research extraction (record_entries tool call) points at a
     # tool-CAPABLE model (native tool_calls) rather than the thinking
     # model_verifier (qwen3.5, which never does — see §17.547), so the
