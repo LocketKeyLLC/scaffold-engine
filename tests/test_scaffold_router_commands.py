@@ -568,9 +568,10 @@ class TestModelCommand:
         assert "general" in result
         assert pipe.valves.model_general == "qwen3.5:397b-cloud"
         # §17.346: model_verifier default flipped qwen2.5:7b → cloud;
-        # §17.440: cloud model migrated qwen3-vl:235b-instruct-cloud → qwen3.5:397b-cloud
-        # (instruct variant retires 2026-06-16)
-        assert pipe.valves.model_verifier == "qwen3.5:397b-cloud"
+        # §17.440: migrated qwen3-vl:235b-instruct-cloud → qwen3.5:397b-cloud;
+        # §17.567: A/B-driven swap qwen3.5:397b-cloud → kimi-k2.7-code:cloud
+        # (verify verdict-match 30/30 @ 1.34s vs 6.12s).
+        assert pipe.valves.model_verifier == "kimi-k2.7-code:cloud"
 
     @patch("scaffold_router._HTTP_SESSION.get")
     def test_model_available(self, mock_get, pipe):
