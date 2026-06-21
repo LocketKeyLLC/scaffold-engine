@@ -858,6 +858,23 @@ async def execute_next_node(
                         except Exception:
                             logger.exception("persist_job_artifacts failed (complete) job=%s", job_id)
                         await db.commit()
+                        # §17.576 — learning flywheel (opt-in): a high-grounding
+                        # deliverable becomes a retrievable exemplar. No-op when
+                        # the valve is off or grounding is below threshold.
+                        try:
+                            _grow = await db.execute(
+                                text("SELECT metadata->'grounding'->>'score' FROM jobs WHERE id = :jid"),
+                                {"jid": job_id},
+                            )
+                            _gscore = _grow.scalar()
+                            from app.modules.flywheel import maybe_ingest_exemplar
+                            await maybe_ingest_exemplar(
+                                job_id=job_id, compiled_output=compiled,
+                                deliverable_kind=kind,
+                                grounding_score=float(_gscore) if _gscore is not None else None,
+                            )
+                        except Exception:
+                            logger.exception("exemplar_ingest hook failed job=%s", job_id)
                 return {"status": "complete", "message": "All nodes done. Job complete."}
 
             # Partial compile for blocked jobs (#22, cached)

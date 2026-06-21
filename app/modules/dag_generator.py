@@ -507,9 +507,24 @@ async def _generate_dag_with_validator(
 
     dag_data: dict | None = None
 
+    # §17.576 — learning flywheel: inject similar high-grounding exemplars as
+    # few-shot "proven prior solutions" (opt-in; "" when disabled or none found).
+    # Computed once outside the retry loop; fail-soft inside retrieve_exemplars.
+    _exemplar_block = ""
+    try:
+        from app.modules.flywheel import retrieve_exemplars
+        _ex_query = ""
+        if isinstance(brief_data, dict):
+            _ex_query = str(brief_data.get("description") or brief_data.get("title") or "")
+        _exemplar_block = await retrieve_exemplars(_ex_query or json.dumps(brief_data)[:500])
+    except Exception:
+        _exemplar_block = ""
+
     for attempt in range(1, max_attempts + 1):
         prompt_body = DAG_PROMPT.format(brief=json.dumps(brief_data, indent=2))
         prompt = (corrections_block + "\n\n" + prompt_body) if corrections_block else prompt_body
+        if _exemplar_block:
+            prompt = _exemplar_block + prompt
 
         # §17.463 — retry-on-empty around the generator call (thinking-model
         # empty-content guard). 8192-token headroom + up to 3 re-draws.

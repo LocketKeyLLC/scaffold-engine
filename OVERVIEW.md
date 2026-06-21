@@ -21991,6 +21991,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.576 Feat — learning flywheel: high-grounding deliverables → RAG exemplars (program F1/6, opt-in) (2026-06-21)
+
+Turns the engine's own best output into retrievable few-shot context — a compounding quality loop reusing RAG + the grounding scores. New `app/modules/flywheel.py` (isolated; hooks just call in):
+- **Ingest** `maybe_ingest_exemplar` — hooked in the executor completion path (after `persist_job_artifacts`): when a job's `jobs.metadata.grounding.score ≥ exemplar_min_grounding` (0.85) and it's not plan_only, ingest the deliverable into RAG tagged `source_type="exemplar"` via `ingest_entries`. Pollution-guarded by the grounding threshold + RAG's existing 3-tier dedup (cosine≥0.95 reject). Fail-soft.
+- **Retrieve** `retrieve_exemplars` — hooked in `dag_generator.generate_dag` before the planner LLM call: over-fetch via `query_rag` then **post-filter on `source_type`** (keeps the RAG hot path untouched), formatting a "Proven prior solutions (ADAPT, don't copy)" few-shot block prepended to the DAG prompt.
+- **Valves** (`config.py`): `exemplar_ingest_enabled=False`, `exemplar_min_grounding=0.85`, `exemplar_retrieval_enabled=False`, `exemplar_retrieval_top_k=2`. **Default OFF both directions** (opt-in).
+
+**Verification.** `test_flywheel.py` (7 passed): ingest gating (disabled/below-threshold/plan_only skip; high-grounding → `source_type="exemplar"` tagged) + retrieval (disabled; post-filter drops non-exemplars; none-found → ""). Targeted regression (dag_generator + executor compile/autocomplete) 122 passed. **Live round-trip (real Milvus):** ingested an exemplar → flushed → `retrieve_exemplars` returned it (marker + header present, `source_type` survived the round-trip) → deleted it (cleanup ok, no pollution). Full suite green.
+
 ### §17.575 Fix — REVERT §17.572 model_coder swap (qwen3-coder-next flaky on cli-entrypoint) (2026-06-21)
 
 The §17.572 swap `model_coder` kimi → qwen3-coder-next was reverted. The F6 full suite caught `test_codegen_golden_live[cli-entrypoint]` failing: qwen3-coder-next inlined the argparse logic under `if __name__ == "__main__":` **without defining a module-level `main()`**, failing the golden's `must_define: main`. It's **intermittent** — it passed the A/B's exec-smoke gate 5/5 and §17.572's own suite run, but the stricter live golden test fails it some fraction of the time. This is exactly the §17.498 / memory caution ("qwen3-coder-next … fails cli-entrypoint at runtime"); my A/B's small N (5 repeats) masked the flakiness, and the exec-smoke gate doesn't enforce `must_define`. **Lesson: a 5/5 A/B is too small an N to override a documented runtime caution on a structural-faithfulness failure mode.** Reverted both sites (compose + config) to `kimi-k2.7-code:cloud` (stable on cli-entrypoint across every prior suite). `model_research_extract` stays qwen3-coder-next (§17.566 — extraction has no such structural golden). Memory + index corrected.
