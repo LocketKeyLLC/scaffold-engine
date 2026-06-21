@@ -1,12 +1,17 @@
 """§17.568 — parallel-frontier executor (_run_parallel_frontier).
 
 Drives the parallel loop over a diamond DAG (T1 → {T2,T3} → T4) with stubbed
-claim/exec/summary so it runs without a real DB or LLM. Asserts:
+claim/exec/all-done/summary so it runs without a real DB or LLM. Asserts:
   - independent siblings (T2,T3) run CONCURRENTLY (a 2-party barrier releases;
     a serial executor would time out → T4 never runs → assertion fails),
   - dependencies are respected (T4 only starts after T2 AND T3 are done),
-  - the loop owns finalization (exactly one no-preclaim terminal call),
+  - the loop finalizes exactly once (via _all_nodes_done → one summary),
   - node_done streams for every node + a terminal pipeline_complete.
+
+The terminal path checks _all_nodes_done DIRECTLY (a worker's idempotent
+autocomplete may already have flipped the job to 'completed' — §17.568 live
+probe caught a no-preclaim execute_next_node finalize wrongly returning 'error'
+under that race), so the stubs patch _all_nodes_done.
 """
 import asyncio
 import time
@@ -32,7 +37,7 @@ async def test_parallel_frontier_diamond_concurrency_and_deps(monkeypatch):
     done: set[str] = set()
     claimed: set[str] = set()
     started: list[str] = []
-    terminal_calls = {"n": 0}
+    summary_calls = {"n": 0}
     both_siblings_started = asyncio.Event()
 
     async def fake_claim(db, job_id, limit):
@@ -44,9 +49,7 @@ async def test_parallel_frontier_diamond_concurrency_and_deps(monkeypatch):
                  "depends_on": DAG[k]} for k in take]
 
     async def fake_exec(job_id, *, model_overrides=None, preclaimed_node=None):
-        if preclaimed_node is None:                      # terminal finalize
-            terminal_calls["n"] += 1
-            return {"status": "complete"} if len(done) == 4 else {"status": "blocked"}
+        assert preclaimed_node is not None, "happy path never finalizes via execute_next_node"
         nk = preclaimed_node["node_key"]
         started.append(nk)
         if nk == "T4":
@@ -60,13 +63,18 @@ async def test_parallel_frontier_diamond_concurrency_and_deps(monkeypatch):
         done.add(nk)
         return {"status": "done", "node_key": nk, "title": nk, "tool": "LLM"}
 
+    async def fake_all_done(db, job_id):
+        return len(done) == 4
+
     async def fake_summary(job_id, node_results, elapsed_ms, sf, extra_fields=None):
+        summary_calls["n"] += 1
         return {"total_nodes": len(node_results),
                 "passed": len(node_results), "failed": 0}
 
     monkeypatch.setattr(ea, "async_session", lambda: _DummyDB())
     monkeypatch.setattr(ea, "_claim_ready_nodes", fake_claim)
     monkeypatch.setattr(ea, "execute_next_node", fake_exec)
+    monkeypatch.setattr(ea, "_all_nodes_done", fake_all_done)
     monkeypatch.setattr(ea, "_build_pipeline_summary", fake_summary)
     monkeypatch.setattr(settings, "parallel_execution_max_inflight", 4)
     monkeypatch.setattr(settings, "sse_keepalive_seconds", 0.2)
@@ -79,7 +87,7 @@ async def test_parallel_frontier_diamond_concurrency_and_deps(monkeypatch):
 
     assert set(started) == {"T1", "T2", "T3", "T4"}        # all executed
     assert both_siblings_started.is_set()                  # T2,T3 concurrent
-    assert terminal_calls["n"] == 1                        # loop finalized once
+    assert summary_calls["n"] == 1                         # finalized once
     joined = "".join(events)
     for k in ("T1", "T2", "T3", "T4"):
         assert f'"node_key": "{k}"' in joined              # node_done streamed
@@ -89,9 +97,13 @@ async def test_parallel_frontier_diamond_concurrency_and_deps(monkeypatch):
 @pytest.mark.smoke  # noqa: F405
 @pytest.mark.asyncio  # noqa: F405
 async def test_parallel_frontier_blocked_terminal(monkeypatch):
-    """A job with no completable nodes finalizes 'blocked' (loop-owned)."""
+    """No completable nodes + not all done → loop finalizes 'blocked' via the
+    execute_next_node terminal path (job still 'running')."""
     async def fake_claim(db, job_id, limit):
         return []                                          # nothing claimable
+
+    async def fake_all_done(db, job_id):
+        return False                                       # → blocked branch
 
     async def fake_exec(job_id, *, model_overrides=None, preclaimed_node=None):
         assert preclaimed_node is None
@@ -99,6 +111,7 @@ async def test_parallel_frontier_blocked_terminal(monkeypatch):
 
     monkeypatch.setattr(ea, "async_session", lambda: _DummyDB())
     monkeypatch.setattr(ea, "_claim_ready_nodes", fake_claim)
+    monkeypatch.setattr(ea, "_all_nodes_done", fake_all_done)
     monkeypatch.setattr(ea, "execute_next_node", fake_exec)
     monkeypatch.setattr(settings, "sse_keepalive_seconds", 0.2)
 

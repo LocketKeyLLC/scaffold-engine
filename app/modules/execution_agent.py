@@ -1690,14 +1690,19 @@ async def _run_parallel_frontier(
                     inflight.add(asyncio.create_task(_worker(n)))
 
             # 2. Terminal — ONLY the loop finalizes, only when nothing is
-            #    running and nothing was claimable. No-preclaim call hits the
-            #    terminal block (complete / blocked); idempotent if a worker's
-            #    autocomplete already flipped the job.
+            #    running and nothing was claimable. Decide all-done DIRECTLY:
+            #    the last worker's idempotent autocomplete may have already
+            #    flipped the job to 'completed' (+ compiled), and a no-preclaim
+            #    execute_next_node call would then hit its 'not executable'
+            #    status guard and wrongly return 'error' instead of complete
+            #    (caught by the §17.568 live diamond probe). For the not-all-done
+            #    (blocked) case the job is still 'running', so execute_next_node
+            #    runs its terminal/partial-compile + blocked-cause logic.
             if not inflight:
-                fin = await execute_next_node(job_id, model_overrides=model_overrides)
-                status = fin.get("status", "unknown")
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
-                if status == "complete":
+                async with async_session() as _term_db:
+                    all_done = await _all_nodes_done(_term_db, job_id)
+                if all_done:
                     summary = await _build_pipeline_summary(
                         job_id, node_results, elapsed_ms, async_session,
                         extra_fields={"status": "completed"},
@@ -1709,7 +1714,11 @@ async def _run_parallel_frontier(
                     )
                     yield _sse("pipeline_complete", summary)
                     return
-                # blocked / error / unexpected → terminal
+                # Not all done → blocked. Job is still 'running' (no worker
+                # autocompleted), so execute_next_node runs its blocked-cause +
+                # partial-compile terminal path and returns 'blocked'/'error'.
+                fin = await execute_next_node(job_id, model_overrides=model_overrides)
+                status = fin.get("status", "unknown")
                 fin["nodes_completed"] = len(node_results)
                 fin["duration_ms"] = elapsed_ms
                 yield _sse(status if status in ("blocked", "error") else "error", fin)
