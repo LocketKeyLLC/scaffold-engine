@@ -21991,6 +21991,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.569 Feat — grounding gate: flag low-faithfulness synthesized deliverables (default ON, flag-only) (2026-06-21)
+
+The §17.519/§17.522 failure mode: the W.7 LLM **synthesis** pass rewrites the node-output "heuristic" into a coherent deliverable and can introduce claims absent from the source work (hallucination/drift). Nothing checked a *job* deliverable's grounding (the `faithfulness` scorer was wired only into research). This gate closes that — the highest-value remaining quality lever.
+
+- **Gate** (`execution_compile._maybe_grounding_gate`): on a SYNTHESIZED deliverable, `score_faithfulness(synthesized, heuristic)` (RAGAS supported/total) against the source node-work the synthesis drew from. **Flag-only, default ON, fail-soft:** below `grounding_min_score` (0.7) it prepends a ⚠️ banner (with up to 5 unsupported claims) + records `jobs.metadata.grounding` (best-effort, own session) — it **never blocks** delivery, and a scorer miss (None) is a no-op with no DB write. Hooked at the single synthesis chokepoint `_maybe_synthesize`'s `if synthesized:` branch, so it covers every compile strategy and **only** fires on synthesized text — verbatim CodeGen/Shell (which skip synthesis) are auto-excluded (faithfulness on code is meaningless). Reuses `faithfulness_model_role` (= kimi, fast).
+- **Valves** (`config.py`): `grounding_gate_enabled: bool = True`, `grounding_min_score: float = 0.7`. Config-only (no schema/pipeline/openapi impact); compose doesn't override → default-ON applies in prod.
+
+**Verification.** `test_execution_compile_grounding.py` (6 passed): low-score → banner + metadata write; high-score → no banner but records; None → no-op + **no DB write** (keeps mock compile tests untouched); valve-off → scorer not called; threshold boundary (0.70 not flagged, 0.69 flagged); verbatim CodeGen → gate never reached. Compile regression `test_execution_agent_compile` + plan-only/synthesis-override + executor/research-summary suites **123 passed** (default-ON gate is a no-op in mock tests — `score_faithfulness` fails-soft to None without an LLM). **Live (real kimi faithfulness call):** a deliverable with 2 fabricated claims scored **0.33 (1/3 supported)**, both hallucinations correctly listed, ⚠️ banner prepended, `jobs.metadata.grounding` recorded; cleaned up.
+
+---
+
 ### §17.568 Feat (prototype) — optional parallel-frontier DAG execution behind a valve (default OFF) (2026-06-20)
 
 A single job's DAG nodes ran strictly serially (`execute_all_nodes` → `execute_next_node` claims+runs one node at a time), so independent branches (e.g. a diamond `T1 → {T2,T3} → T4`) couldn't overlap. Prototype: optionally run the ready frontier (dep-satisfied pending nodes) concurrently, bounded by a cap, **valve-gated default OFF** so the serial path is byte-identical when off.

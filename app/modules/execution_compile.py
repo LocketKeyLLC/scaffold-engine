@@ -295,6 +295,61 @@ async def _resolve_synthesis_enabled(job_id: str, db) -> bool:
     return bool(override)
 
 
+def _format_grounding_banner(verdict: dict) -> str:
+    """§17.569 — the ⚠️ low-grounding banner prepended to a synthesized
+    deliverable whose claims aren't supported by the source node-work."""
+    pct = int(round(verdict.get("score", 0.0) * 100))
+    lines = [
+        f"> ⚠️ **Grounding check:** only {pct}% of this deliverable's claims "
+        f"({verdict.get('supported', 0)}/{verdict.get('total', 0)}) are supported "
+        f"by the source work — treat the unsupported claims below with caution.",
+    ]
+    for c in (verdict.get("unsupported_claims") or [])[:5]:
+        lines.append(f"> - _unsupported:_ {c}")
+    return "\n".join(lines) + "\n\n"
+
+
+async def _maybe_grounding_gate(
+    job_id: str, text_value: str, evidence: str,
+) -> str:
+    """§17.569 — flag (never block) a synthesized deliverable whose claims
+    aren't grounded in the source node-work (``evidence`` = the heuristic the
+    synthesis rewrote). Default ON, FLAG-ONLY, fail-soft: a scorer miss (None)
+    is a no-op with no DB write. When score < grounding_min_score, records
+    jobs.metadata.grounding (best-effort, own session) and prepends a banner.
+    """
+    if not settings.grounding_gate_enabled:
+        return text_value
+    from app.modules.faithfulness import score_faithfulness  # circular-safe
+    verdict = await score_faithfulness(
+        text_value, evidence, role=settings.faithfulness_model_role,
+    )
+    if verdict is None:
+        return text_value  # not scored → no-op (no DB write, no banner)
+    try:
+        from app.database import async_session
+        async with async_session() as mdb:
+            await mdb.execute(
+                text(
+                    "UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) "
+                    "|| jsonb_build_object('grounding', CAST(:v AS jsonb)) "
+                    "WHERE id = :jid"
+                ),
+                {"v": json.dumps(verdict), "jid": job_id},
+            )
+            await mdb.commit()
+    except Exception as exc:  # best-effort metric — never break compile
+        logger.warning("grounding_metadata_write_failed: job=%s err=%s", job_id, exc)
+    logger.info(
+        "grounding_scored: job=%s score=%.2f supported=%d/%d",
+        job_id, verdict.get("score", 0.0),
+        verdict.get("supported", 0), verdict.get("total", 0),
+    )
+    if verdict.get("score", 1.0) < settings.grounding_min_score:
+        return _format_grounding_banner(verdict) + text_value
+    return text_value
+
+
 async def _maybe_synthesize(
     *, job_id: str, heuristic: str | None,
     strategy: str, source_tool: str | None, db,
@@ -322,7 +377,10 @@ async def _maybe_synthesize(
         source_strategy=strategy, source_tool=source_tool, db=db,
     )
     if synthesized:
-        return synthesized, True
+        # §17.569 — grounding gate: the synthesis can introduce claims absent
+        # from the source work; flag (never block) when unsupported.
+        annotated = await _maybe_grounding_gate(job_id, synthesized, heuristic)
+        return annotated, True
     return heuristic, False
 
 

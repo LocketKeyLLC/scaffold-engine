@@ -507,6 +507,15 @@ class Settings(BaseSettings):
     # behaviour. faithfulness_model_role picks which role scores it.
     faithfulness_check_enabled: bool = False
     faithfulness_model_role: str = "model_verifier"
+    # §17.569 — grounding gate: faithfulness-score the SYNTHESIZED job
+    # deliverable against the source node-work (the W.7 synthesis can introduce
+    # claims not in the work — the §17.522 drift). Default ON, FLAG-ONLY: when
+    # score < grounding_min_score it prepends a ⚠️ banner + records
+    # jobs.metadata.grounding; it NEVER blocks delivery, and is fail-soft (a
+    # scorer miss → no banner). Only runs on synthesized text (verbatim
+    # CodeGen/Shell skip synthesis). Reuses faithfulness_model_role for scoring.
+    grounding_gate_enabled: bool = True
+    grounding_min_score: float = Field(default=0.7, ge=0.0, le=1.0)
     # §17.452 (Phase C) — Chain-of-Verification revision of research summaries
     # (draft → verification questions → independent answers → revise). Where
     # faithfulness *scores*, CoVe *corrects*. Default-OFF: it adds ~3 LLM calls
