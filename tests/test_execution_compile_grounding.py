@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import app.database as dbm
+import app.modules.cove as cov
 import app.modules.faithfulness as fa
 from app.config import settings
 from app.modules import execution_compile as ec
@@ -37,6 +38,8 @@ def mdb(monkeypatch):
 def _gate_defaults(monkeypatch):
     monkeypatch.setattr(settings, "grounding_gate_enabled", True)
     monkeypatch.setattr(settings, "grounding_min_score", 0.7)
+    # §17.569 flag-tests assume no correction; the §17.570 tests opt back in.
+    monkeypatch.setattr(settings, "grounding_correct_enabled", False)
 
 
 @pytest.mark.smoke
@@ -105,3 +108,51 @@ async def test_verbatim_synthesis_skip_never_reaches_gate(monkeypatch):
     )
     assert was is False and txt == "code body"
     sf.assert_not_awaited()
+
+
+# ---- §17.570 Layer A — deliverable CoVe correction ----
+
+@pytest.mark.asyncio
+async def test_correction_lifts_above_threshold_no_banner(monkeypatch, mdb):
+    """Low → CoVe revises → re-score clears threshold → corrected text, no banner."""
+    monkeypatch.setattr(settings, "grounding_correct_enabled", True)
+    # 1st score low, 2nd score (re-score of revised) high.
+    monkeypatch.setattr(fa, "score_faithfulness", AsyncMock(side_effect=[
+        {"score": 0.4, "supported": 2, "total": 5, "unsupported_claims": ["bad"]},
+        {"score": 0.9, "supported": 9, "total": 10, "unsupported_claims": []},
+    ]))
+    cove = AsyncMock(return_value={"revised": "grounded body", "changed": True, "questions": ["q"]})
+    monkeypatch.setattr(cov, "cove_revise", cove)
+    out = await ec._maybe_grounding_gate("job-1", "drifty body", "evidence")
+    assert out == "grounded body"          # corrected text adopted
+    assert "Grounding check" not in out    # re-score cleared → no banner
+    cove.assert_awaited_once()
+    mdb.execute.assert_awaited()           # metadata recorded (corrected:True)
+
+
+@pytest.mark.asyncio
+async def test_correction_still_low_banners_with_note(monkeypatch, mdb):
+    """Low → CoVe revises but re-score still low → corrected text + banner noting it."""
+    monkeypatch.setattr(settings, "grounding_correct_enabled", True)
+    monkeypatch.setattr(fa, "score_faithfulness", AsyncMock(side_effect=[
+        {"score": 0.3, "supported": 1, "total": 4, "unsupported_claims": ["a", "b"]},
+        {"score": 0.5, "supported": 2, "total": 4, "unsupported_claims": ["b"]},
+    ]))
+    monkeypatch.setattr(cov, "cove_revise", AsyncMock(
+        return_value={"revised": "less drifty", "changed": True, "questions": []}))
+    out = await ec._maybe_grounding_gate("job-1", "drifty", "evidence")
+    assert "Grounding check" in out and "auto-revision was attempted" in out
+    assert out.endswith("less drifty")     # corrected text retained under the banner
+
+
+@pytest.mark.asyncio
+async def test_correct_disabled_is_flag_only(monkeypatch, mdb):
+    """grounding_correct_enabled=False → no CoVe call, original flag behavior."""
+    monkeypatch.setattr(settings, "grounding_correct_enabled", False)
+    monkeypatch.setattr(fa, "score_faithfulness", AsyncMock(return_value={
+        "score": 0.4, "supported": 2, "total": 5, "unsupported_claims": ["x"]}))
+    cove = AsyncMock()
+    monkeypatch.setattr(cov, "cove_revise", cove)
+    out = await ec._maybe_grounding_gate("job-1", "body", "evidence")
+    assert "Grounding check" in out and "auto-revision" not in out
+    cove.assert_not_awaited()

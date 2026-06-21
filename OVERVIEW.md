@@ -21991,6 +21991,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.570 Feat — grounding LOOP: per-node detection (#2) + CoVe correction (#1), composed (2026-06-21)
+
+Builds on §17.569 (which only *flagged* low-grounding deliverables) to close the detect→correct loop, using the existing `cove.py::cove_revise` (draft → verification questions → independent answers → revise; fail-soft), previously wired only into research.
+
+- **Layer A — deliverable self-correction** (`execution_compile._maybe_grounding_gate`, **default ON**): the gate is now detect → **correct** → re-verify → flag-if-still-low. When a synthesized deliverable scores below `grounding_min_score`, it CoVe-revises + re-scores; adopts the revised text; banners ONLY if still low (noting "auto-revision attempted"); records `jobs.metadata.grounding` with `corrected`/`score_before`/`score_after`. Fail-soft — a CoVe/rescore miss falls back to the pre-correction flag behavior. (`_record_grounding_metadata` extracted.)
+- **Layer B — per-node grounding** (`execution_agent._maybe_node_grounding`, **default OFF / opt-in**): on a passing, groundable node (non-CodeGen/Shell, with upstream evidence) score the output against `_upstream_block` (the evidence it was given) and CoVe-revise **in place** before persist — fixing drift at the node that introduced it so the corrected text propagates to downstream nodes. Hooked just before the Phase-3 persist; the existing `_set_node_status(..., output=output)` writes the corrected text. No node-level re-verify after CoVe (it's claim-pruning, not a rewrite; the deliverable gate re-checks the whole). Default-off because it adds ~1 verifier call per groundable node (CPU cost).
+- **Valves** (`config.py`): `grounding_correct_enabled: bool = True`, `node_grounding_enabled: bool = False`. Reuse `grounding_min_score` (0.7) + `cove_model_role` + `faithfulness_model_role`. Config-only (no schema/openapi; compose doesn't override → defaults apply).
+
+**Verification.** `test_execution_compile_grounding.py` (Layer A: correction lifts past threshold → no banner + `corrected:True`; still-low → banner w/ note + corrected text retained; correct-disabled → flag-only, no CoVe) + `test_execution_agent_node_grounding.py` (Layer B: disabled no-op / low→corrects in place / high→unchanged no CoVe / None no-op / CoVe-no-change keeps original) — **14 passed**. Compile + executor regression **104 passed** (existing §17.569 flag-tests pinned `grounding_correct_enabled=False`; per-node default-off → zero exec impact). **Live (real kimi CoVe+faithfulness):** Layer A lifted a 2-hallucination deliverable from **0.33 → 1.0**, `corrected:True` recorded, banner suppressed; Layer B dropped the fabricated claim from a node output in place (`changed=True`). Cleaned up.
+
+---
+
 ### §17.569 Feat — grounding gate: flag low-faithfulness synthesized deliverables (default ON, flag-only) (2026-06-21)
 
 The §17.519/§17.522 failure mode: the W.7 LLM **synthesis** pass rewrites the node-output "heuristic" into a coherent deliverable and can introduce claims absent from the source work (hallucination/drift). Nothing checked a *job* deliverable's grounding (the `faithfulness` scorer was wired only into research). This gate closes that — the highest-value remaining quality lever.

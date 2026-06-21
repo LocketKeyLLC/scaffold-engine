@@ -580,6 +580,47 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "") -> str:
     )
 
 
+async def _maybe_node_grounding(
+    job_id: str, node_id: str, output: str, evidence: str, *, tool: str | None,
+) -> str:
+    """§17.570 — per-node grounding loop (opt-in, default OFF). Score this
+    node's output against the upstream evidence it was given; when it drifts
+    below ``grounding_min_score``, CoVe-revise it IN PLACE so the corrected
+    text is what gets persisted + consumed downstream — fixing drift at the
+    node that introduced it. Fail-soft: a scorer/CoVe miss returns the original.
+    The caller gates on groundable nodes (non-CodeGen/Shell, with evidence).
+    """
+    if not settings.node_grounding_enabled:
+        return output
+    from app.modules.faithfulness import score_faithfulness  # circular-safe
+    verdict = await score_faithfulness(
+        output, evidence, role=settings.faithfulness_model_role,
+    )
+    if verdict is None:
+        return output
+    score = verdict.get("score", 1.0)
+    logger.info(
+        "node_grounding_scored: job=%s node=%s score=%.2f supported=%d/%d tool=%s",
+        job_id, node_id, score, verdict.get("supported", 0),
+        verdict.get("total", 0), tool,
+    )
+    if score < settings.grounding_min_score:
+        try:
+            from app.modules.cove import cove_revise  # circular-safe
+            rev = await cove_revise(
+                output, evidence, role=settings.cove_model_role,
+            )
+            if rev and rev.get("changed") and rev.get("revised"):
+                logger.info(
+                    "node_grounding_corrected: job=%s node=%s score_before=%.2f",
+                    job_id, node_id, score,
+                )
+                return rev["revised"]
+        except Exception as exc:  # fail-soft — keep the original output
+            logger.warning("node_grounding_correct_failed: node=%s err=%s", node_id, exc)
+    return output
+
+
 async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = None) -> str:
     """Query RAG pipeline and format results as grounding context."""
     try:
@@ -1440,6 +1481,16 @@ async def execute_next_node(
 
     verified = (verify_status == "pass")
     db_confidence = confidence if (verify_status != "skipped" and confidence > 0.0) else None
+
+    # §17.570 — per-node grounding loop (opt-in, default OFF): on a passing,
+    # groundable node (non-CodeGen/Shell, with upstream evidence) score the
+    # output against the evidence it was given and CoVe-revise IN PLACE if it
+    # drifted, so the corrected text is what gets persisted (line below) +
+    # consumed by downstream nodes. Fail-soft + no-op when the valve is off.
+    if verify_status == "pass" and _upstream_block and (tool or "") not in ("CodeGen", "Shell"):
+        output = await _maybe_node_grounding(
+            job_id, node_id, output, _upstream_block, tool=tool,
+        )
 
     # ---- Phase 3 (fast session): persist + atomic autocomplete ----
     job_complete = False

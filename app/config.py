@@ -516,6 +516,18 @@ class Settings(BaseSettings):
     # CodeGen/Shell skip synthesis). Reuses faithfulness_model_role for scoring.
     grounding_gate_enabled: bool = True
     grounding_min_score: float = Field(default=0.7, ge=0.0, le=1.0)
+    # §17.570 — grounding LOOP (detect → correct). Upgrades the §17.569 gate
+    # from flag-only to self-correcting via CoVe (cove_revise).
+    # grounding_correct_enabled (default ON): when the deliverable scores below
+    # grounding_min_score, CoVe-revise it + re-score before deciding to banner —
+    # so a low deliverable auto-corrects rather than just warning. Fail-soft.
+    # node_grounding_enabled (default OFF, opt-in): per-node detect+correct pass
+    # — score each groundable node's output against its upstream evidence and
+    # CoVe-revise in place when it drifts, fixing it before it propagates
+    # downstream. Adds ~1 verifier call per groundable node (CPU-bound cost), so
+    # default-off. Both reuse grounding_min_score + cove_model_role.
+    grounding_correct_enabled: bool = True
+    node_grounding_enabled: bool = False
     # §17.452 (Phase C) — Chain-of-Verification revision of research summaries
     # (draft → verification questions → independent answers → revise). Where
     # faithfulness *scores*, CoVe *corrects*. Default-OFF: it adds ~3 LLM calls

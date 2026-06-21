@@ -295,37 +295,26 @@ async def _resolve_synthesis_enabled(job_id: str, db) -> bool:
     return bool(override)
 
 
-def _format_grounding_banner(verdict: dict) -> str:
+def _format_grounding_banner(verdict: dict, *, corrected: bool = False) -> str:
     """§17.569 — the ⚠️ low-grounding banner prepended to a synthesized
-    deliverable whose claims aren't supported by the source node-work."""
+    deliverable whose claims aren't supported by the source node-work.
+    §17.570 — when ``corrected`` a CoVe auto-revision ran but couldn't lift
+    grounding past the threshold; note it so the reader knows it was attempted."""
     pct = int(round(verdict.get("score", 0.0) * 100))
+    note = " (an auto-revision was attempted but couldn't fully ground it)" if corrected else ""
     lines = [
         f"> ⚠️ **Grounding check:** only {pct}% of this deliverable's claims "
         f"({verdict.get('supported', 0)}/{verdict.get('total', 0)}) are supported "
-        f"by the source work — treat the unsupported claims below with caution.",
+        f"by the source work{note} — treat the unsupported claims below with caution.",
     ]
     for c in (verdict.get("unsupported_claims") or [])[:5]:
         lines.append(f"> - _unsupported:_ {c}")
     return "\n".join(lines) + "\n\n"
 
 
-async def _maybe_grounding_gate(
-    job_id: str, text_value: str, evidence: str,
-) -> str:
-    """§17.569 — flag (never block) a synthesized deliverable whose claims
-    aren't grounded in the source node-work (``evidence`` = the heuristic the
-    synthesis rewrote). Default ON, FLAG-ONLY, fail-soft: a scorer miss (None)
-    is a no-op with no DB write. When score < grounding_min_score, records
-    jobs.metadata.grounding (best-effort, own session) and prepends a banner.
-    """
-    if not settings.grounding_gate_enabled:
-        return text_value
-    from app.modules.faithfulness import score_faithfulness  # circular-safe
-    verdict = await score_faithfulness(
-        text_value, evidence, role=settings.faithfulness_model_role,
-    )
-    if verdict is None:
-        return text_value  # not scored → no-op (no DB write, no banner)
+async def _record_grounding_metadata(job_id: str, record: dict) -> None:
+    """Best-effort write of jobs.metadata.grounding (own session — never
+    touches the caller's transaction; never breaks compile)."""
     try:
         from app.database import async_session
         async with async_session() as mdb:
@@ -335,18 +324,66 @@ async def _maybe_grounding_gate(
                     "|| jsonb_build_object('grounding', CAST(:v AS jsonb)) "
                     "WHERE id = :jid"
                 ),
-                {"v": json.dumps(verdict), "jid": job_id},
+                {"v": json.dumps(record), "jid": job_id},
             )
             await mdb.commit()
     except Exception as exc:  # best-effort metric — never break compile
         logger.warning("grounding_metadata_write_failed: job=%s err=%s", job_id, exc)
-    logger.info(
-        "grounding_scored: job=%s score=%.2f supported=%d/%d",
-        job_id, verdict.get("score", 0.0),
-        verdict.get("supported", 0), verdict.get("total", 0),
+
+
+async def _maybe_grounding_gate(
+    job_id: str, text_value: str, evidence: str,
+) -> str:
+    """§17.569/§17.570 — grounding LOOP on a synthesized deliverable: detect
+    (faithfulness) → correct (CoVe) → re-verify → flag-if-still-low. Default
+    ON, fail-soft, NEVER blocks. A scorer miss (None) is a no-op (no DB write).
+    When ``grounding_correct_enabled`` and the deliverable scores below
+    ``grounding_min_score``, it CoVe-revises + re-scores before deciding to
+    banner — so a low deliverable auto-corrects rather than merely warning.
+    """
+    if not settings.grounding_gate_enabled:
+        return text_value
+    from app.modules.faithfulness import score_faithfulness  # circular-safe
+    verdict = await score_faithfulness(
+        text_value, evidence, role=settings.faithfulness_model_role,
     )
-    if verdict.get("score", 1.0) < settings.grounding_min_score:
-        return _format_grounding_banner(verdict) + text_value
+    if verdict is None:
+        return text_value  # not scored → no-op (no DB write, no banner)
+    score_before = verdict.get("score", 1.0)
+    corrected = False
+
+    # §17.570 — when low, CoVe-revise + re-score before deciding to banner.
+    if score_before < settings.grounding_min_score and settings.grounding_correct_enabled:
+        try:
+            from app.modules.cove import cove_revise  # circular-safe
+            rev = await cove_revise(
+                text_value, evidence, role=settings.cove_model_role,
+            )
+            if rev and rev.get("changed") and rev.get("revised"):
+                rescore = await score_faithfulness(
+                    rev["revised"], evidence, role=settings.faithfulness_model_role,
+                )
+                text_value = rev["revised"]
+                corrected = True
+                if rescore is not None:
+                    verdict = rescore
+        except Exception as exc:  # fail-soft — keep the pre-correction text
+            logger.warning("grounding_correct_failed: job=%s err=%s", job_id, exc)
+
+    score_after = verdict.get("score", 1.0)
+    record = dict(verdict)
+    record["corrected"] = corrected
+    if corrected:
+        record["score_before"] = score_before
+        record["score_after"] = score_after
+    await _record_grounding_metadata(job_id, record)
+    logger.info(
+        "grounding_scored: job=%s score=%.2f supported=%d/%d corrected=%s",
+        job_id, score_after, verdict.get("supported", 0),
+        verdict.get("total", 0), corrected,
+    )
+    if score_after < settings.grounding_min_score:
+        return _format_grounding_banner(verdict, corrected=corrected) + text_value
     return text_value
 
 
