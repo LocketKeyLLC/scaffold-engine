@@ -38,9 +38,11 @@ from app.modules.gt_extractor import (
 )
 from app.modules.idea_refinement import create_ideation_job, refine_idea
 from app.modules.rag_pipeline import ingest_entries
+from app.providers.base import Tool
 from app.utils.job_utils import fail_job as _fail_job
 from app.utils.llm_retry import generate_until_nonempty
 from app.utils.llm_parsing import parse_json_object
+from app.utils.tool_call_args import read_tool_args
 from app.utils.topic_detection import detect_topic_id
 
 logger = logging.getLogger("scaffold.ideation")
@@ -135,15 +137,54 @@ FEASIBILITY_SYSTEM = (
     "1. Is this achievable with local CPU-only LLM infrastructure (Ollama, Milvus, SearXNG)?\n"
     "2. What are the risks or unknowns?\n"
     "3. What clarifications would improve the plan?\n\n"
-    "OUTPUT FORMAT (strict JSON, no markdown fences):\n"
-    '{\n'
-    '  "feasible": true,\n'
-    '  "confidence": 0.8,\n'
-    '  "risks": ["risk1"],\n'
-    '  "clarifications_needed": ["question1"],\n'
-    '  "recommended_research_queries": ["query1", "query2"],\n'
-    '  "summary": "one paragraph assessment"\n'
-    '}'
+    "Emit your assessment via the emit_feasibility_assessment tool."
+)
+
+# §17.580 — native tool-call schema for the feasibility pass. Mirrors
+# idea_refinement.REFINE_BRIEF_TOOL: model_router.tool_call parses structured
+# args on native-tool providers and falls back to JSON-coaxing internally on
+# non-native providers (e.g. the qwen3.5:397b-cloud reasoning model routed
+# through model_general), so this pass no longer silently falls back when the
+# model emits <think> prose instead of a bare JSON object. Replaces the legacy
+# generate() + parse_json_object() path that assumed clean JSON text.
+FEASIBILITY_TOOL = Tool(
+    name="emit_feasibility_assessment",
+    description=(
+        "Emit a structured technical-feasibility assessment for a refined brief."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "feasible": {
+                "type": "boolean",
+                "description": "Whether the idea is achievable on local CPU-only infra",
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Confidence in the assessment, 0.0-1.0",
+            },
+            "risks": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Risks or unknowns",
+            },
+            "clarifications_needed": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Questions that would improve the plan",
+            },
+            "recommended_research_queries": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Search queries to ground the plan in Phase 2",
+            },
+            "summary": {
+                "type": "string",
+                "description": "One-paragraph assessment",
+            },
+        },
+        "required": ["feasible", "confidence", "summary"],
+    },
 )
 
 COMPILE_SYSTEM = (
@@ -215,15 +256,24 @@ async def analyze_and_confirm(
         {"model": model} if model
         else {"role": settings.ideation_model_role, "overrides": model_overrides}
     )
-    resp = await model_router.generate(
-        "Assess this brief:\n" + json.dumps(brief, indent=2),
-        system=FEASIBILITY_SYSTEM,
+    resp = await model_router.tool_call(
+        messages=[
+            {"role": "system", "content": FEASIBILITY_SYSTEM},
+            {
+                "role": "user",
+                "content": "Assess this brief:\n" + json.dumps(brief, indent=2),
+            },
+        ],
+        tools=[FEASIBILITY_TOOL],
         temperature=0.2,
-        max_tokens=2048,
+        # §17.580 — generous ceiling: model_general routes to the qwen3.5
+        # reasoning model, which spends tokens on <think> before emitting the
+        # tool call; 2048 truncated it pre-fix. Matches the tool_call default.
+        max_tokens=4096,
         **route_kwargs,
     )
 
-    feasibility = parse_json_object(resp.text) if resp.success else None
+    feasibility = read_tool_args(resp)
     feasibility_fallback = feasibility is None
     if feasibility_fallback:
         logger.warning(

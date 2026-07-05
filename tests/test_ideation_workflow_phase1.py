@@ -19,11 +19,12 @@ async def test_analyze_happy_path():
         "recommended_research_queries": ["RAG best practices"],
         "summary": "Feasible.",
     }
+    # §17.580 — feasibility now goes through model_router.tool_call +
+    # read_tool_args (the real dep is loaded), not generate + parse_json_object.
     _mod.model_router = MagicMock()
-    _mod.model_router.generate = AsyncMock(
-        return_value=_llm_response(json.dumps(feasibility))
+    _mod.model_router.tool_call = AsyncMock(
+        return_value=_tool_response(feasibility)
     )
-    _mod.parse_json_object = MagicMock(return_value=feasibility)
 
     db = AsyncMock()
     result = await _mod.analyze_and_confirm(idea_text="Build a RAG chatbot", db=db)
@@ -55,9 +56,12 @@ async def test_analyze_feasibility_llm_fails():
         "job_id": "job-002",
         "refined_brief": {"title": "Test", "domain": "eng"},
     })
+    # §17.580 — genuine failure: tool_call unsuccessful / no tool_calls →
+    # read_tool_args returns None → graceful fallback dict.
     _mod.model_router = MagicMock()
-    _mod.model_router.generate = AsyncMock(return_value=_llm_response("", success=False))
-    _mod.parse_json_object = MagicMock(return_value=None)
+    _mod.model_router.tool_call = AsyncMock(
+        return_value=_tool_response(None, success=False)
+    )
 
     db = AsyncMock()
     result = await _mod.analyze_and_confirm(idea_text="build something", db=db)
@@ -65,6 +69,7 @@ async def test_analyze_feasibility_llm_fails():
     assert result["status"] == "awaiting_confirmation"
     assert result["feasibility"]["feasible"] is True
     assert result["feasibility"]["confidence"] == 0.5
+    assert result["feasibility"]["fallback"] is True
 
 
 @pytest.mark.smoke
@@ -76,10 +81,9 @@ async def test_analyze_uses_model_router_not_general():
         "refined_brief": {"title": "X", "domain": "eng"},
     })
     _mod.model_router = MagicMock()
-    _mod.model_router.generate = AsyncMock(
-        return_value=_llm_response(json.dumps({"feasible": True}))
+    _mod.model_router.tool_call = AsyncMock(
+        return_value=_tool_response({"feasible": True, "confidence": 0.7, "summary": "ok"})
     )
-    _mod.parse_json_object = MagicMock(return_value={"feasible": True})
     # Pin the mocked settings to the real configured role so production code
     # and assertion both reference the same string.
     from app.config import settings as _real_settings
@@ -88,16 +92,48 @@ async def test_analyze_uses_model_router_not_general():
     db = AsyncMock()
     await _mod.analyze_and_confirm(idea_text="x", db=db)
 
-    # Sprint E.7: model_router.generate now receives role= directly. The
-    # configured ideation role (default "model_general") must be the one passed.
+    # §17.580: feasibility routes through model_router.tool_call (was generate).
+    # The configured ideation role (default "model_general") must be passed.
     # Audit #6.1 originally mandated "model_router"; April 26 2026 made it
     # configurable via IDEATION_MODEL_ROLE since model_general now resolves
     # to a cloud model, not a local one.
     from app.config import settings
     called_roles = [
         c.kwargs.get("role")
-        for c in _mod.model_router.generate.call_args_list
+        for c in _mod.model_router.tool_call.call_args_list
     ]
     assert settings.ideation_model_role in called_roles, (
         f"Expected configured role '{settings.ideation_model_role}' in {called_roles}"
     )
+
+
+@pytest.mark.smoke
+async def test_feasibility_tool_call_immune_to_reasoning_prose():
+    """§17.580 regression: the feasibility pass reads structured tool-call args,
+    so a reasoning model that emits <think> prose in .text no longer forces the
+    fallback (the pre-fix generate() + parse_json_object bug that fired on
+    every job because model_general → qwen3.5:397b-cloud emits prose)."""
+    _mod.refine_idea = AsyncMock(return_value={
+        "status": "awaiting_confirmation",
+        "job_id": "job-580",
+        "refined_brief": {"title": "Intake parser", "domain": "eng"},
+    })
+    feasibility = {"feasible": True, "confidence": 0.9, "summary": "Achievable."}
+    # .text is pure reasoning prose (what broke the old path); the real args
+    # ride on .tool_calls[0].arguments, which read_tool_args reads instead.
+    resp = _tool_response(feasibility)
+    resp.text = "<think>Consider the CPU-only constraints and stdlib scope…</think>"
+    _mod.model_router = MagicMock()
+    _mod.model_router.tool_call = AsyncMock(return_value=resp)
+
+    db = AsyncMock()
+    result = await _mod.analyze_and_confirm(idea_text="build an intake parser", db=db)
+
+    # tool_call was used, with the feasibility tool.
+    assert _mod.model_router.tool_call.called
+    tools_arg = _mod.model_router.tool_call.call_args.kwargs["tools"]
+    assert tools_arg[0].name == "emit_feasibility_assessment"
+    # No fallback: the real parsed values survived, immune to the .text prose.
+    assert result["feasibility"]["confidence"] == 0.9
+    assert result["feasibility"].get("fallback") is not True
+    assert "⚠️" not in result["message"]
