@@ -204,6 +204,71 @@ class TestToolCallLegacyModelPath:
 
 
 @pytest.mark.smoke
+class TestToolCallRetryOnEmptyArgs:
+    """§17.583 — tool_call re-draws when success=True but no usable tool args
+    (the thinking-model variance), replacing the per-call-site wrapper."""
+
+    async def test_redraws_until_args_present(self):
+        """Argless first draw, valid second → returns the valid one (2 draws)."""
+        empty = _ok(text="<think>reasoning…</think>")  # success, no tool_calls
+        good = _ok(tool_calls=[ToolCall(
+            id="t0", name="record_verification",
+            arguments={"pass": True, "reason": "ok", "confidence": 0.9})])
+        with patch.object(model_router, "_tool_call_once",
+                          AsyncMock(side_effect=[empty, good])) as once:
+            resp = await model_router.tool_call(
+                messages=[{"role": "user", "content": "x"}],
+                tools=[SAMPLE_TOOL], role="model_verifier",
+            )
+        assert once.await_count == 2
+        assert resp.tool_calls[0].arguments["pass"] is True
+
+    async def test_all_argless_exhausts_returns_last(self):
+        """All draws argless → stop at `draws` and return the last (caller then
+        sees read_tool_args→None and fails closed)."""
+        with patch.object(model_router, "_tool_call_once", AsyncMock(
+                side_effect=[_ok(text="a"), _ok(text="b"), _ok(text="c")])) as once:
+            resp = await model_router.tool_call(
+                messages=[{"role": "user", "content": "x"}],
+                tools=[SAMPLE_TOOL], role="model_verifier",
+            )
+        assert once.await_count == 3   # draws default = 3
+        assert resp.tool_calls == []
+
+    async def test_draws_1_opts_out(self):
+        """draws=1 disables retry (e.g. a router-style call where no-tool is valid)."""
+        with patch.object(model_router, "_tool_call_once",
+                          AsyncMock(side_effect=[_ok(text="nope")])) as once:
+            resp = await model_router.tool_call(
+                messages=[{"role": "user", "content": "x"}],
+                tools=[SAMPLE_TOOL], role="model_verifier", draws=1,
+            )
+        assert once.await_count == 1
+        assert resp.tool_calls == []
+
+    async def test_hard_failure_no_retry(self):
+        """success=False returns immediately — don't burn re-draws on a hard error."""
+        with patch.object(model_router, "_tool_call_once",
+                          AsyncMock(side_effect=[_fail("boom")])) as once:
+            resp = await model_router.tool_call(
+                messages=[{"role": "user", "content": "x"}],
+                tools=[SAMPLE_TOOL], role="model_verifier",
+            )
+        assert once.await_count == 1
+        assert not resp.success
+
+    async def test_empty_tools_no_retry(self):
+        """The empty-tools no-op path returns on the first draw (never retries)."""
+        with patch.object(model_router, "_tool_call_once",
+                          AsyncMock(side_effect=[_ok(text="hi")])) as once:
+            resp = await model_router.tool_call(
+                messages=[{"role": "user", "content": "x"}],
+                tools=[], role="model_verifier",
+            )
+        assert once.await_count == 1
+
+
+@pytest.mark.smoke
 class TestToolCallEmptyTools:
     """Empty tools list short-circuits to a plain chat call (no schema injection)."""
 

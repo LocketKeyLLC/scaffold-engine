@@ -40,7 +40,6 @@ from app.modules.idea_refinement import create_ideation_job, refine_idea
 from app.modules.rag_pipeline import ingest_entries
 from app.providers.base import Tool
 from app.utils.job_utils import fail_job as _fail_job
-from app.utils.llm_retry import tool_call_until_args
 from app.utils.tool_call_args import read_tool_args
 from app.utils.topic_detection import detect_topic_id
 
@@ -197,8 +196,8 @@ COMPILE_SYSTEM = (
 # §17.580's feasibility tool: model_general → qwen3.5:397b-cloud is a reasoning
 # model, and the legacy generate() + parse_json_object() path silently produced
 # a compile failure whenever it emitted <think> prose. model_router.tool_call
-# parses structured args natively / via coaxing; tool_call_until_args re-draws
-# on the empty-args thinking-model variance (compile failure is fatal).
+# parses structured args natively / via coaxing and (§17.583) re-draws
+# internally on the empty-args thinking-model variance (compile failure is fatal).
 COMPILE_TOOL = Tool(
     name="emit_execution_plan",
     description=(
@@ -296,25 +295,21 @@ async def analyze_and_confirm(
         {"model": model} if model
         else {"role": settings.ideation_model_role, "overrides": model_overrides}
     )
-    # §17.582 — feasibility gets the SAME retry-on-empty-args guard + 8192
-    # headroom as the compile pass (§17.581), closing the review's asymmetry
-    # finding: model_general → qwen3.5 spends tokens on <think> before the tool
-    # call, and a single argless draw would else silently flip to the fallback
-    # verdict (the SDK example even diverts to a human on fallback=True).
-    resp = await tool_call_until_args(
-        model_router.tool_call,
-        [
+    # §17.583 — retry-on-empty-args is now built into model_router.tool_call
+    # (draws=3 default), so this is a plain call. 8192 headroom for the qwen3.5
+    # reasoning model that spends tokens on <think> before the tool call.
+    resp = await model_router.tool_call(
+        messages=[
             {"role": "system", "content": FEASIBILITY_SYSTEM},
             {
                 "role": "user",
                 "content": "Assess this brief:\n" + json.dumps(brief, indent=2),
             },
         ],
-        [FEASIBILITY_TOOL],
-        route_kwargs,
+        tools=[FEASIBILITY_TOOL],
         temperature=0.2,
         max_tokens=8192,
-        label="phase1_feasibility",
+        **route_kwargs,
     )
 
     # §17.582 — treat an empty-args dict ({}) as a failed assessment, not just
@@ -527,17 +522,14 @@ async def research_and_compile(
             {"model": model} if model
             else {"role": settings.ideation_model_role, "overrides": model_overrides}
         )
-        # §17.581 — native tool-call compile (was generate + parse_json_object).
-        # model_general → qwen3.5:397b-cloud emits <think> prose that
-        # parse_json_object couldn't read, silently producing "research
-        # completed but compile failed" (the twin of the §17.463 DAG bug and
-        # §17.580's feasibility bug, one step later). tool_call reads structured
-        # args; tool_call_until_args keeps the §17.464 retry-on-empty guard —
-        # here it re-draws on the empty-ARGS thinking-model variance, with
-        # 8192-token headroom. Compile failure is fatal, so the guard matters.
-        resp = await tool_call_until_args(
-            model_router.tool_call,
-            [
+        # §17.581/§17.583 — native tool-call compile (was generate +
+        # parse_json_object). model_general → qwen3.5:397b-cloud emits <think>
+        # prose that parse_json_object couldn't read, silently producing
+        # "research completed but compile failed". tool_call reads structured
+        # args and (§17.583) now re-draws internally on the empty-ARGS
+        # thinking-model variance — compile failure is fatal, so that matters.
+        resp = await model_router.tool_call(
+            messages=[
                 {"role": "system", "content": COMPILE_SYSTEM},
                 {
                     "role": "user",
@@ -546,11 +538,10 @@ async def research_and_compile(
                     + feedback_section,
                 },
             ],
-            [COMPILE_TOOL],
-            compile_route,
+            tools=[COMPILE_TOOL],
             temperature=0.3,
             max_tokens=8192,
-            label="phase2_compile",
+            **compile_route,
         )
 
         # §17.582 — falsy guard (not just `is None`): native-tool providers

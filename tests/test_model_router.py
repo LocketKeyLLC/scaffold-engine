@@ -93,6 +93,7 @@ async def test_tool_call_routes_coax_model_through_coaxing():
         resp = await model_router.tool_call(
             messages=[{"role": "user", "content": "hi"}],
             tools=[tool], model="qwen3.5:397b-cloud",
+            draws=1,  # §17.583 — isolate the routing assertion from retry re-draws
         )
     assert resp.success is True
     native.assert_not_called()
