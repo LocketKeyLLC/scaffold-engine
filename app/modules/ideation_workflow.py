@@ -40,8 +40,7 @@ from app.modules.idea_refinement import create_ideation_job, refine_idea
 from app.modules.rag_pipeline import ingest_entries
 from app.providers.base import Tool
 from app.utils.job_utils import fail_job as _fail_job
-from app.utils.llm_retry import generate_until_nonempty
-from app.utils.llm_parsing import parse_json_object
+from app.utils.llm_retry import tool_call_until_args
 from app.utils.tool_call_args import read_tool_args
 from app.utils.topic_detection import detect_topic_id
 
@@ -191,18 +190,59 @@ COMPILE_SYSTEM = (
     "You are a prompt architect. Given a refined brief and researched facts, produce:\n"
     "1. An optimal prompt for executing this idea via a DAG of LLM nodes\n"
     "2. A step-by-step workflow the user should follow\n\n"
-    "OUTPUT FORMAT (strict JSON, no markdown fences):\n"
-    '{\n'
-    '  "compiled_prompt": "the full prompt text ready for DAG generation",\n'
-    '  "workflow_steps": [\n'
-    '    {"step": 1, "action": "what to do", "tool": "LLM|CodeGen|SearXNG|Milvus", "notes": "details"}\n'
-    '  ],\n'
-    '  "configuration": {\n'
-    '    "temperature": 0.3,\n'
-    '    "domain": "prompt|rag|llm|spec|eng",\n'
-    '    "estimated_nodes": 3\n'
-    '  }\n'
-    '}'
+    "Emit the plan via the emit_execution_plan tool."
+)
+
+# §17.581 — native tool-call schema for the Phase-2 compile pass. Same fix as
+# §17.580's feasibility tool: model_general → qwen3.5:397b-cloud is a reasoning
+# model, and the legacy generate() + parse_json_object() path silently produced
+# a compile failure whenever it emitted <think> prose. model_router.tool_call
+# parses structured args natively / via coaxing; tool_call_until_args re-draws
+# on the empty-args thinking-model variance (compile failure is fatal).
+COMPILE_TOOL = Tool(
+    name="emit_execution_plan",
+    description=(
+        "Emit an execution plan (DAG-ready prompt + workflow steps) for a brief."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "compiled_prompt": {
+                "type": "string",
+                "description": "Full prompt text ready for DAG generation",
+            },
+            "workflow_steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "step": {"type": "integer"},
+                        "action": {"type": "string"},
+                        "tool": {
+                            "type": "string",
+                            "enum": ["LLM", "CodeGen", "SearXNG", "Milvus", "Shell"],
+                        },
+                        "notes": {"type": "string"},
+                    },
+                    "required": ["step", "action"],
+                },
+                "description": "Ordered steps the user should follow",
+            },
+            "configuration": {
+                "type": "object",
+                "properties": {
+                    "temperature": {"type": "number"},
+                    "domain": {
+                        "type": "string",
+                        "enum": ["prompt", "rag", "llm", "spec", "eng"],
+                    },
+                    "estimated_nodes": {"type": "integer"},
+                },
+                "description": "Suggested DAG configuration",
+            },
+        },
+        "required": ["compiled_prompt", "workflow_steps"],
+    },
 )
 
 
@@ -480,23 +520,33 @@ async def research_and_compile(
             {"model": model} if model
             else {"role": settings.ideation_model_role, "overrides": model_overrides}
         )
-        # §17.464 — retry-on-empty (thinking-model guard). This is the critical
-        # one: an empty compile draw made parse_json_object → None → _fail_job,
-        # i.e. "research completed but compile failed" — the twin of the §17.463
-        # DAG bug, one step earlier. Re-draw with 8192-token headroom first.
-        resp = await generate_until_nonempty(
-            model_router.generate,
-            "Compile an execution plan from this context:\n"
-            + compile_context
-            + feedback_section,
+        # §17.581 — native tool-call compile (was generate + parse_json_object).
+        # model_general → qwen3.5:397b-cloud emits <think> prose that
+        # parse_json_object couldn't read, silently producing "research
+        # completed but compile failed" (the twin of the §17.463 DAG bug and
+        # §17.580's feasibility bug, one step later). tool_call reads structured
+        # args; tool_call_until_args keeps the §17.464 retry-on-empty guard —
+        # here it re-draws on the empty-ARGS thinking-model variance, with
+        # 8192-token headroom. Compile failure is fatal, so the guard matters.
+        resp = await tool_call_until_args(
+            model_router.tool_call,
+            [
+                {"role": "system", "content": COMPILE_SYSTEM},
+                {
+                    "role": "user",
+                    "content": "Compile an execution plan from this context:\n"
+                    + compile_context
+                    + feedback_section,
+                },
+            ],
+            [COMPILE_TOOL],
             compile_route,
-            system=COMPILE_SYSTEM,
             temperature=0.3,
             max_tokens=8192,
             label="phase2_compile",
         )
 
-        workflow = parse_json_object(resp.text) if resp.success else None
+        workflow = read_tool_args(resp)
         if workflow is None:
             # Compile failure is fatal — do not emit empty workflow_steps.
             # §17.290 — uniform 500 for all in-band Phase 2 failures.

@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.utils.llm_retry import chat_until_nonempty, generate_until_nonempty
+from app.utils.llm_retry import (
+    chat_until_nonempty,
+    generate_until_nonempty,
+    tool_call_until_args,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -134,3 +138,74 @@ async def test_chat_forwards_messages_and_budget():
     assert kwargs["temperature"] == 0.7
     assert kwargs["role"] == "model_coder"
     assert kwargs["overrides"] is None
+
+
+# ---------------------------------------------------------------------------
+# §17.581 — tool_call_until_args (structured-args sibling)
+# ---------------------------------------------------------------------------
+
+_TOOLS = [SimpleNamespace(name="emit_x")]
+
+
+def _tc_resp(args, *, success=True):
+    """Response with .tool_calls[0].arguments, matching read_tool_args."""
+    tool_calls = (
+        [] if args is None else [SimpleNamespace(arguments=args)]
+    )
+    return SimpleNamespace(success=success, tool_calls=tool_calls, error=None)
+
+
+async def _tc_call(mock, *, draws=3):
+    return await tool_call_until_args(
+        mock, _MESSAGES, _TOOLS, {"role": "model_general", "overrides": None},
+        temperature=0.3, max_tokens=8192, draws=draws, label="phase2_compile",
+    )
+
+
+@pytest.mark.smoke
+async def test_tc_valid_first_draw_no_retry():
+    mock = AsyncMock(side_effect=[_tc_resp({"compiled_prompt": "x"})])
+    resp = await _tc_call(mock)
+    assert resp.tool_calls[0].arguments == {"compiled_prompt": "x"}
+    assert mock.call_count == 1
+
+
+@pytest.mark.smoke
+async def test_tc_no_args_then_valid_redraws():
+    """The §17.581 failure mode: success but no tool args (reasoning-model
+    prose), then a parseable draw → recovered."""
+    mock = AsyncMock(side_effect=[_tc_resp(None), _tc_resp({"compiled_prompt": "x"})])
+    resp = await _tc_call(mock)
+    assert resp.tool_calls[0].arguments == {"compiled_prompt": "x"}
+    assert mock.call_count == 2
+
+
+@pytest.mark.smoke
+async def test_tc_all_argless_exhausts_and_returns_last():
+    """All draws argless → returns the last so the caller's read_tool_args→None
+    handling (fail_job) still applies."""
+    mock = AsyncMock(side_effect=[_tc_resp(None), _tc_resp(None), _tc_resp(None)])
+    resp = await _tc_call(mock)
+    assert resp.tool_calls == []
+    assert mock.call_count == 3
+
+
+@pytest.mark.smoke
+async def test_tc_hard_failure_returns_immediately():
+    """success=False → surface at once, don't burn re-draws."""
+    mock = AsyncMock(side_effect=[_tc_resp(None, success=False)])
+    resp = await _tc_call(mock)
+    assert resp.success is False
+    assert mock.call_count == 1
+
+
+@pytest.mark.smoke
+async def test_tc_forwards_messages_tools_and_budget():
+    mock = AsyncMock(side_effect=[_tc_resp({"compiled_prompt": "x"})])
+    await _tc_call(mock)
+    _, kwargs = mock.call_args
+    assert kwargs["messages"] is _MESSAGES
+    assert kwargs["tools"] is _TOOLS
+    assert kwargs["max_tokens"] == 8192
+    assert kwargs["temperature"] == 0.3
+    assert kwargs["role"] == "model_general"
