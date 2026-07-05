@@ -296,25 +296,32 @@ async def analyze_and_confirm(
         {"model": model} if model
         else {"role": settings.ideation_model_role, "overrides": model_overrides}
     )
-    resp = await model_router.tool_call(
-        messages=[
+    # §17.582 — feasibility gets the SAME retry-on-empty-args guard + 8192
+    # headroom as the compile pass (§17.581), closing the review's asymmetry
+    # finding: model_general → qwen3.5 spends tokens on <think> before the tool
+    # call, and a single argless draw would else silently flip to the fallback
+    # verdict (the SDK example even diverts to a human on fallback=True).
+    resp = await tool_call_until_args(
+        model_router.tool_call,
+        [
             {"role": "system", "content": FEASIBILITY_SYSTEM},
             {
                 "role": "user",
                 "content": "Assess this brief:\n" + json.dumps(brief, indent=2),
             },
         ],
-        tools=[FEASIBILITY_TOOL],
+        [FEASIBILITY_TOOL],
+        route_kwargs,
         temperature=0.2,
-        # §17.580 — generous ceiling: model_general routes to the qwen3.5
-        # reasoning model, which spends tokens on <think> before emitting the
-        # tool call; 2048 truncated it pre-fix. Matches the tool_call default.
-        max_tokens=4096,
-        **route_kwargs,
+        max_tokens=8192,
+        label="phase1_feasibility",
     )
 
+    # §17.582 — treat an empty-args dict ({}) as a failed assessment, not just
+    # None: native-tool providers coerce missing args to {} (openai.py:347,
+    # anthropic.py:416), which `read_tool_args` returns verbatim.
     feasibility = read_tool_args(resp)
-    feasibility_fallback = feasibility is None
+    feasibility_fallback = not feasibility
     if feasibility_fallback:
         logger.warning(
             "phase1_feasibility_fallback: job_id=%s llm_success=%s",
@@ -546,8 +553,12 @@ async def research_and_compile(
             label="phase2_compile",
         )
 
+        # §17.582 — falsy guard (not just `is None`): native-tool providers
+        # coerce missing tool args to {} (openai.py:347, anthropic.py:416), and
+        # read_tool_args returns that {} verbatim — advancing to 'planning' with
+        # an empty workflow would violate the §17.290/§17.463 no-empty invariant.
         workflow = read_tool_args(resp)
-        if workflow is None:
+        if not workflow:
             # Compile failure is fatal — do not emit empty workflow_steps.
             # §17.290 — uniform 500 for all in-band Phase 2 failures.
             # Pre-§17.290 this branch returned 502 (Bad Gateway, on the

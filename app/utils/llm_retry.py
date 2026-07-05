@@ -21,6 +21,32 @@ import logging
 logger = logging.getLogger("scaffold.llm_retry")
 
 
+async def _redraw_until(call, is_usable, *, draws, label, detail,
+                        event="llm_empty_redraw"):
+    """§17.582 — core retry-on-empty loop shared by the three public guards.
+
+    ``call`` is a zero-arg coroutine factory that performs one draw; ``is_usable``
+    inspects the response and returns True when it's worth keeping. A hard
+    failure (``success=False``) returns immediately; otherwise re-draw up to
+    ``draws`` times, returning the last response so the caller's existing
+    empty-handling still applies. Consolidates the previously-triplicated loop
+    in ``generate_until_nonempty`` / ``chat_until_nonempty`` /
+    ``tool_call_until_args`` (§17.464/465/581) so a future policy change (jitter,
+    wall-time cap, metrics) lands in one place.
+    """
+    resp = None
+    for d in range(draws):
+        resp = await call()
+        if not resp.success:
+            return resp
+        if is_usable(resp):
+            return resp
+        logger.warning(
+            "%s: label=%s draw=%d/%d (%s)", event, label or "?", d + 1, draws, detail,
+        )
+    return resp
+
+
 async def generate_until_nonempty(
     generate,
     prompt: str,
@@ -55,24 +81,15 @@ async def generate_until_nonempty(
         immediately; otherwise the first non-empty draw, or the last empty one if
         all ``draws`` are exhausted (the caller then handles the empty as before).
     """
-    resp = None
-    for d in range(draws):
-        resp = await generate(
-            prompt,
-            system=system,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **route_kwargs,
-        )
-        if not resp.success:
-            return resp
-        if (resp.text or "").strip():
-            return resp
-        logger.warning(
-            "llm_empty_redraw: label=%s draw=%d/%d (thinking-model empty content, §17.464)",
-            label or "?", d + 1, draws,
-        )
-    return resp
+    return await _redraw_until(
+        lambda: generate(
+            prompt, system=system, temperature=temperature,
+            max_tokens=max_tokens, **route_kwargs,
+        ),
+        lambda r: bool((r.text or "").strip()),
+        draws=draws, label=label,
+        detail="thinking-model empty content, §17.464",
+    )
 
 
 async def chat_until_nonempty(
@@ -116,23 +133,15 @@ async def chat_until_nonempty(
         immediately; otherwise the first non-empty draw, or the last empty one if
         all ``draws`` are exhausted (the caller handles the empty as before).
     """
-    resp = None
-    for d in range(draws):
-        resp = await chat(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **route_kwargs,
-        )
-        if not resp.success:
-            return resp
-        if (resp.text or "").strip():
-            return resp
-        logger.warning(
-            "llm_empty_redraw: label=%s draw=%d/%d (thinking-model empty content, §17.465)",
-            label or "?", d + 1, draws,
-        )
-    return resp
+    return await _redraw_until(
+        lambda: chat(
+            messages=messages, temperature=temperature,
+            max_tokens=max_tokens, **route_kwargs,
+        ),
+        lambda r: bool((r.text or "").strip()),
+        draws=draws, label=label,
+        detail="thinking-model empty content, §17.465",
+    )
 
 
 async def tool_call_until_args(
@@ -180,21 +189,12 @@ async def tool_call_until_args(
     """
     from app.utils.tool_call_args import read_tool_args
 
-    resp = None
-    for d in range(draws):
-        resp = await tool_call(
-            messages=messages,
-            tools=tools,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **route_kwargs,
-        )
-        if not resp.success:
-            return resp
-        if read_tool_args(resp) is not None:
-            return resp
-        logger.warning(
-            "tool_call_empty_redraw: label=%s draw=%d/%d (no tool args, §17.581)",
-            label or "?", d + 1, draws,
-        )
-    return resp
+    return await _redraw_until(
+        lambda: tool_call(
+            messages=messages, tools=tools, temperature=temperature,
+            max_tokens=max_tokens, **route_kwargs,
+        ),
+        lambda r: read_tool_args(r) is not None,
+        draws=draws, label=label,
+        detail="no tool args, §17.581", event="tool_call_empty_redraw",
+    )

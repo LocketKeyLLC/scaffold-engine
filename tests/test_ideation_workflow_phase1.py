@@ -137,3 +137,45 @@ async def test_feasibility_tool_call_immune_to_reasoning_prose():
     assert result["feasibility"]["confidence"] == 0.9
     assert result["feasibility"].get("fallback") is not True
     assert "⚠️" not in result["message"]
+
+
+@pytest.mark.smoke
+async def test_feasibility_empty_args_dict_falls_back():
+    """§17.582 — an empty-args {} (native providers coerce missing args to {},
+    not None) must still trigger the fallback: the guard is now `not feasibility`,
+    not the weaker `feasibility is None`."""
+    _mod.refine_idea = AsyncMock(return_value={
+        "status": "awaiting_confirmation", "job_id": "job-ea",
+        "refined_brief": {"title": "X", "domain": "eng"},
+    })
+    _mod.model_router = MagicMock()
+    _mod.model_router.tool_call = AsyncMock(return_value=_tool_response({}))
+
+    db = AsyncMock()
+    result = await _mod.analyze_and_confirm(idea_text="x", db=db)
+
+    assert result["feasibility"]["fallback"] is True
+    assert result["feasibility"]["confidence"] == 0.5
+
+
+@pytest.mark.smoke
+async def test_feasibility_redraws_on_empty_args():
+    """§17.582 — feasibility now uses tool_call_until_args (matching compile), so
+    an argless draw followed by a valid one recovers instead of falling back."""
+    _mod.refine_idea = AsyncMock(return_value={
+        "status": "awaiting_confirmation", "job_id": "job-rd",
+        "refined_brief": {"title": "X", "domain": "eng"},
+    })
+    good = {"feasible": True, "confidence": 0.88, "summary": "ok"}
+    _mod.model_router = MagicMock()
+    _mod.model_router.tool_call = AsyncMock(side_effect=[
+        _tool_response(None),   # draw 1: no tool args (thinking-model variance)
+        _tool_response(good),   # draw 2: valid
+    ])
+
+    db = AsyncMock()
+    result = await _mod.analyze_and_confirm(idea_text="x", db=db)
+
+    assert _mod.model_router.tool_call.call_count == 2   # it re-drew
+    assert result["feasibility"]["confidence"] == 0.88
+    assert result["feasibility"].get("fallback") is not True

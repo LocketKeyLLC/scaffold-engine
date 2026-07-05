@@ -63,15 +63,24 @@ from scaffold_client import (
     AsyncClient,
     AuthenticationError,
     ConnectionError as ScaffoldConnectionError,
+    NotFoundError,
     OrchestratorError,
+    RequestError,
     ScaffoldError,
     TimeoutError as ScaffoldTimeoutError,
 )
+from scaffold_client.schemas import JOB_STATUSES
 
 logger = logging.getLogger("scaffold.arbitrage")
 
-# Terminal job states shared by the whole engine (job_status flow).
+# Terminal job states. Validated against the SDK's canonical JobStatus set so a
+# rename/removal upstream fails fast at import instead of making _await_terminal
+# poll a finished job to its timeout. (The SDK exposes no terminal-only subset
+# to import; this at least catches drift in the names we hardcode.)
 TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "blocked"})
+assert TERMINAL_STATES <= set(JOB_STATUSES), (
+    f"TERMINAL_STATES drifted from SDK JobStatus: {TERMINAL_STATES - set(JOB_STATUSES)}"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -268,8 +277,12 @@ class PipelineResult:
     skipped_nodes: list[str] = field(default_factory=list)
 
 
-# Transient (retryable) SDK errors vs. contract errors we must NOT retry.
-_TRANSIENT = (ScaffoldTimeoutError, ScaffoldConnectionError, OrchestratorError)
+# Network-transient errors — always safe to retry (the request likely never
+# reached the server). 5xx (OrchestratorError) is retried ONLY for idempotent
+# calls (GET): retrying a non-idempotent POST duplicates work (ideate creates a
+# job every call) or masks the real 5xx behind a follow-up conflict (confirm's
+# atomic claim fails on the retry once the job is already failed).
+_NETWORK_TRANSIENT = (ScaffoldTimeoutError, ScaffoldConnectionError)
 
 
 # ---------------------------------------------------------------------------
@@ -277,14 +290,21 @@ _TRANSIENT = (ScaffoldTimeoutError, ScaffoldConnectionError, OrchestratorError)
 # ---------------------------------------------------------------------------
 
 
-async def _retry_transient(cfg: PipelineConfig, label: str, coro_factory):
+async def _retry_transient(cfg: PipelineConfig, label: str, coro_factory,
+                           *, retry_5xx: bool = False):
     """Await ``coro_factory()`` with bounded exponential backoff on transient
-    SDK errors. Contract errors (auth, 4xx, not-found) propagate immediately."""
+    SDK errors. Contract errors (auth, 4xx, not-found) propagate immediately.
+
+    ``retry_5xx`` opts a call into retrying server errors (OrchestratorError);
+    pass it only for idempotent calls (GET). Non-idempotent POSTs leave it False
+    so a deterministic 5xx isn't retried into duplicate work / a masked error.
+    """
+    retryable = _NETWORK_TRANSIENT + ((OrchestratorError,) if retry_5xx else ())
     last: Exception | None = None
     for attempt in range(1, cfg.retry_attempts + 1):
         try:
             return await coro_factory()
-        except _TRANSIENT as exc:
+        except retryable as exc:
             last = exc
             delay = min(cfg.retry_base_delay_s * 2 ** (attempt - 1), cfg.retry_max_delay_s)
             logger.warning("retry %s attempt=%d/%d delay=%.1fs cause=%s",
@@ -303,7 +323,9 @@ def _check_failure(body: dict, label: str) -> dict:
     """
     if not isinstance(body, dict):
         raise SchemaMismatch(f"{label}: expected object, got {type(body).__name__}")
-    if body.get("status") == "failed" or "error" in body or "errors" in body:
+    # Truthiness, not key-presence: a success body carrying error=null / errors=[]
+    # must not trip this (else `detail` falls through to a nonsense status string).
+    if body.get("status") == "failed" or body.get("error") or body.get("errors"):
         detail = body.get("error") or body.get("errors") or body.get("status")
         raise PipelineFailure(f"{label}: {detail}")
     return body
@@ -405,6 +427,7 @@ async def execute_with_qa(client: AsyncClient, cfg: PipelineConfig,
 
     for round_no in range(1, cfg.max_qa_rounds + 2):  # +1 initial pass
         failures: dict[str, NodeFailure] = {}
+        stream_ok = True
         try:
             async for evt in client.aiter_execute_all(job_id):
                 if evt.get("event") != "node_failed":
@@ -419,41 +442,48 @@ async def execute_with_qa(client: AsyncClient, cfg: PipelineConfig,
                     continue
                 failures[nf.node_key] = nf
         except (ScaffoldError, httpx.HTTPError) as e:
-            # SSE dropped mid-flight; the orchestrator keeps running server-
-            # side. Recover the terminal state via status polling.
-            logger.warning("qa.stream_dropped job=%s round=%d cause=%r — recovering",
-                           job_id, round_no, e)
-            break
+            # SSE dropped mid-flight; the orchestrator keeps running server-side.
+            # Still remediate what we collected this round (don't discard the
+            # verifier-false-negatives the module exists to fix), then stop —
+            # re-pumping after an unreliable stream isn't safe; recover by polling.
+            logger.warning("qa.stream_dropped job=%s round=%d cause=%r", job_id, round_no, e)
+            stream_ok = False
 
         if not failures:
             break
 
         # Last allowed round: skip anything still failing rather than looping.
+        # (The range bound + this break terminate the loop; no progress flag needed.)
         last_round = round_no > cfg.max_qa_rounds
-        remediated = False
         for node_key, nf in failures.items():
             verifier_reject = bool(nf.verification_reason)
             can_retry = (not verifier_reject and nf.error
                          and node_key not in tried_retry and not last_round)
-            if can_retry:
-                await _retry_transient(
-                    cfg, f"retry:{node_key}",
-                    lambda nk=node_key: client.jobs.retry(job_id, nk),
-                )
-                tried_retry.add(node_key)
-                remediated = True
-                logger.info("qa.retry job=%s node=%s", job_id, node_key)
-            else:
-                await _retry_transient(
-                    cfg, f"skip:{node_key}",
-                    lambda nk=node_key: client.skip(job_id, nk),
-                )
-                skipped.append(node_key)
-                remediated = True
-                logger.warning("qa.skip job=%s node=%s reason=%s",
-                               job_id, node_key,
-                               nf.verification_reason or nf.error or "unknown")
-        if not remediated:
+            action = "retry" if can_retry else "skip"
+            try:
+                if can_retry:
+                    await _retry_transient(
+                        cfg, f"retry:{node_key}",
+                        lambda nk=node_key: client.jobs.retry(job_id, nk),
+                    )
+                    tried_retry.add(node_key)
+                    logger.info("qa.retry job=%s node=%s", job_id, node_key)
+                else:
+                    await _retry_transient(
+                        cfg, f"skip:{node_key}",
+                        lambda nk=node_key: client.skip(job_id, nk),
+                    )
+                    skipped.append(node_key)
+                    logger.warning("qa.skip job=%s node=%s reason=%s",
+                                   job_id, node_key,
+                                   nf.verification_reason or nf.error or "unknown")
+            except (RequestError, NotFoundError) as e:
+                # A benign 4xx (node raced to terminal / not skippable) must not
+                # crash the whole run — log it and handle the other failures.
+                logger.warning("qa.%s_rejected job=%s node=%s cause=%r",
+                               action, job_id, node_key, e)
+
+        if not stream_ok:
             break
 
     status = await _await_terminal(client, cfg, job_id)
@@ -472,6 +502,7 @@ async def _await_terminal(client: AsyncClient, cfg: PipelineConfig,
     for _ in range(cfg.poll_attempts):
         body = await _retry_transient(
             cfg, "status", lambda: client.jobs.status(job_id),
+            retry_5xx=True,  # GET is idempotent — safe to retry a transient 5xx
         )
         status = _validate(ExecStatus, body, "exec_status")
         if status.job_status in TERMINAL_STATES:

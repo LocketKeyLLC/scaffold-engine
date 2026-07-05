@@ -74,6 +74,37 @@ class TestCompileFailureHttpStatus:
         )
         assert "compile step failed" in result["error"]
 
+    async def test_compile_empty_args_dict_is_fatal(self):
+        """§17.582 — a native-tool provider coerces missing args to {} (not None;
+        openai.py:347/anthropic.py:416), and read_tool_args returns that {}
+        verbatim. The compile guard must treat {} as fatal (falsy check, was the
+        weaker `is None`) rather than advance to 'planning' with an empty plan —
+        the §17.290/§17.463 no-empty-workflow invariant."""
+        claimed = {
+            "research_data": {
+                "feasibility": {"recommended_research_queries": ["RAG"]},
+                "brief": {"title": "test", "domain": "eng"},
+            },
+            "refined_brief": None,
+        }
+        db = _mock_db_for_claim(claimed)
+
+        _mod.search_searxng = AsyncMock(return_value=[])
+        _mod.model_router = MagicMock()
+        # success=True, one tool call, but EMPTY args dict → read_tool_args → {}.
+        _mod.model_router.tool_call = AsyncMock(
+            return_value=_tool_response({}, success=True)
+        )
+        _wrap_async_session_no_op(_mod)
+
+        result = await _mod.research_and_compile(job_id="job-empty-args", db=db)
+
+        assert result["status"] == "failed"
+        assert result["http_status"] == 500, (
+            "§17.582: an empty-args {} compile result must be fatal, not "
+            "advanced to planning with an empty workflow."
+        )
+
     async def test_compile_llm_unsuccess_returns_500(self):
         """Compile LLM call itself fails (resp.success=False, e.g. timeout
         or HTTP error from the model server) — same path, same 500.
