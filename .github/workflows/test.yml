@@ -82,14 +82,24 @@ jobs:
       # ~25 GB of toolchains this docker-build job never uses; dropping them
       # gives ample headroom. Real failure observed on the first §17.426 run:
       # `no space left on device` during "importing to docker".
+      # §17.587 (#99) — the manual rm freed to ~40 GB, but the buildx build
+      # (torch + sentence-transformers + the baked Qwen3-Reranker model, with
+      # cache-to mode=max staging every layer + gha cache round-trip) still
+      # overflowed while writing the reranker blob. Use the maintained
+      # free-disk-space action for a thorough, safe reclaim (~30 GB more: large
+      # apt packages, tool cache, swap, docker). SHA-pinned (post-§17.584
+      # supply-chain caution). mode=max caching stays as-is — that's what kills
+      # the HF-429 cold-pull flake (don't trade it away to save disk).
       - name: Free up runner disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
-                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
-                      /usr/local/share/powershell /usr/local/share/chromium || true
-          sudo docker image prune -af || true
-          df -h /
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
 
       # buildx + GitHub Actions layer cache. The reranker snapshot_download is
       # the last builder layer; on a warm cache (Dockerfile + requirements
