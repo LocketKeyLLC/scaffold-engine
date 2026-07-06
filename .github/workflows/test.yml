@@ -98,15 +98,16 @@ jobs:
       - name: Free up runner disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
         with:
+          # §17.587 — ALL reclaimers on. Measured both ways: large-packages
+          # off (fast) freed too little → OOM at the reranker blob again;
+          # large-packages on freed enough (the build got past OOM). It's ~4 min
+          # slower, which is why the timeout was raised 35→50 (below) — need the
+          # disk AND the time, not one or the other.
           tool-cache: true
           android: true
           dotnet: true
           haskell: true
-          # §17.587 — large-packages (apt-remove of llvm/mongo/etc.) is the slow
-          # reclaim (~4 min) and pushed the job over its budget. tool-cache +
-          # android + dotnet + swap already free ~50 GB — ample for the build —
-          # so skip the slow one.
-          large-packages: false
+          large-packages: true
           docker-images: true
           swap-storage: true
 
