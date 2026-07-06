@@ -30,6 +30,7 @@ import httpx
 from app.config import settings
 from app.providers.base import ModelResponse, Tool, ToolCall  # noqa: F401 — public re-export
 from app.utils.llm_parsing import parse_json_object
+from app.utils.tool_call_args import read_tool_args
 
 logger = logging.getLogger("scaffold.router")
 
@@ -542,6 +543,7 @@ async def tool_call(
     max_tokens: int = 4096,
     tool_choice: str = "auto",
     fallback: str | None = None,
+    draws: int = 3,
 ) -> ModelResponse:
     """Call an LLM with native tool-calling, falling back to JSON-coaxing
     for providers that don't support native tools.
@@ -566,7 +568,52 @@ async def tool_call(
     response against the *first* tool's ``input_schema``. On parse
     failure, ``tool_calls`` stays empty — callers treat that as "no
     tool selected" or a soft failure.
+
+    §17.583 — built-in retry-on-empty-args. A thinking model
+    (``qwen3.5:397b-cloud``) can return ``success=True`` yet no usable tool
+    arguments (reasoning eats the budget; the coax parse finds no JSON). This
+    re-draws up to ``draws`` times on that variance so EVERY caller reading via
+    ``read_tool_args`` gets it uniformly — replacing the per-call-site
+    ``llm_retry.tool_call_until_args`` wrapper. Hard failures
+    (``success=False``) and the empty-``tools`` no-op path return immediately;
+    pass ``draws=1`` to opt out (e.g. a router-style call where "no tool" is a
+    valid answer).
     """
+    resp = None
+    attempts = max(1, draws)
+    for d in range(attempts):
+        resp = await _tool_call_once(
+            messages, tools, model,
+            role=role, overrides=overrides,
+            temperature=temperature, max_tokens=max_tokens,
+            tool_choice=tool_choice, fallback=fallback,
+        )
+        # Only re-draw the "success but no usable tool args" variance. Hard
+        # failures and the empty-tools short-circuit are returned as-is.
+        if not tools or not resp.success or read_tool_args(resp) is not None:
+            return resp
+        if d + 1 < attempts:
+            logger.warning(
+                "tool_call_empty_redraw: model/role=%s draw=%d/%d (no tool args, §17.583)",
+                role or model or settings.model_general, d + 1, attempts,
+            )
+    return resp
+
+
+async def _tool_call_once(
+    messages: list[dict[str, str]],
+    tools: list[Tool],
+    model: str | None = None,
+    *,
+    role: str | None = None,
+    overrides: dict | None = None,
+    temperature: float = 0.7,
+    max_tokens: int = 4096,
+    tool_choice: str = "auto",
+    fallback: str | None = None,
+) -> ModelResponse:
+    """One tool-call draw (native-first-then-coax + telemetry). See ``tool_call``
+    for the retry wrapper (§17.583)."""
     _reject_role_model_collision(role, model)
 
     if role:
