@@ -120,7 +120,11 @@ jobs:
       # The BLOCKING dependency gate is pip-audit in ci.yml (deps we control).
       # ignore-unfixed keeps the report to actionable findings.
       - name: Trivy image scan (report-only)
-        uses: aquasecurity/trivy-action@0.28.0
+        # §17.584 — SHA-pinned to v0.36.0. aquasecurity/trivy-action was
+        # supply-chain-compromised in Mar 2026 (76/77 tags force-pushed to
+        # malware, CVE-2026-33634); the old `@0.28.0` tag no longer resolves.
+        # Pin to the immutable commit SHA rather than a re-pushable tag.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           image-ref: scaffold-orchestrator:ci
           format: table
