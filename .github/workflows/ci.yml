@@ -146,10 +146,18 @@ jobs:
           pip install pip-audit==2.9.0
 
       - name: pip-audit (requirements.txt, requirements-ci.txt, requirements-dev.txt)
+        # §17.585 — torch 2.10.0 carries PYSEC-2026-139 + CVE-2025-3000 with NO
+        # fixed release available (unfixable-upstream). torch is a required,
+        # non-optional transitive of sentence-transformers (the CrossEncoder
+        # reranker). Suppressed via --ignore-vuln (pip-audit's intended
+        # mechanism for unfixable CVEs) so the gate reflects deps we can act on.
+        # REVISIT when a patched torch ships. All other CVEs cleared in §17.585.
         run: |
           for f in requirements.txt requirements-ci.txt requirements-dev.txt; do
             printf '\n== pip-audit -r %s ==\n' "$f"
-            pip-audit --strict -r "$f"
+            pip-audit --strict -r "$f" \
+              --ignore-vuln PYSEC-2026-139 \
+              --ignore-vuln CVE-2025-3000
           done
 
   # ──────────────────────────────────────────────────────────
