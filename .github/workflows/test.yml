@@ -47,7 +47,12 @@ jobs:
     # job was hitting "exceeded 15m0s" and getting cancelled on EVERY run
     # (verified: tests ran 705s and were still going when cut). 35 min gives
     # the full suite room while still failing loud if Postgres/probe hangs.
-    timeout-minutes: 35
+    # §17.587 (#99) — raised 35→50: the 35 assumed a warm-cache ~3-min build,
+    # but a COLD build (torch + model snapshot_download + deps, ~20 min) plus
+    # the full suite overran 35 and got cancelled mid-build — which also meant
+    # cache-to never exported, so the cache stayed cold (vicious cycle). 50 lets
+    # one cold build finish + warm the gha cache; warm runs are back to ~20 min.
+    timeout-minutes: 50
 
     services:
       postgres:
@@ -97,7 +102,11 @@ jobs:
           android: true
           dotnet: true
           haskell: true
-          large-packages: true
+          # §17.587 — large-packages (apt-remove of llvm/mongo/etc.) is the slow
+          # reclaim (~4 min) and pushed the job over its budget. tool-cache +
+          # android + dotnet + swap already free ~50 GB — ample for the build —
+          # so skip the slow one.
+          large-packages: false
           docker-images: true
           swap-storage: true
 
