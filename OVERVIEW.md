@@ -1865,9 +1865,9 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 ## 14. Testing + CI
 
-### 14.1 Test counts (refreshed post-§17.484, 2026-06-12 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
+### 14.1 Test counts (refreshed post-§17.540, 2026-06-17 — local `make test` measured; CI projected, GitHub Actions billing-blocked)
 
-**Current local baseline (`make test`, full dev-image suite):** **3700 passed, 0 failed, 1 skipped** — measured 2026-06-12 across the §17.482→§17.484 merges. Per-§ measured lineage: §17.481 3677 → §17.482 **3678** → §17.483 **3687** → §17.484 **3700** (+108 over §17.471's 3592 across §17.472–484, all no-live-service unit/web tests). The §17.484 full run reported 3699 passed + 1 *transient* live-LLM flake (`tests/integration/test_spec_extractor_live.py::test_extract_spec_live_unambiguous_brief`, an empty-response draw) that **passed on isolated re-run** → 3700 clean. **The 1 skip is `tests/integration/test_topology_select_db.py` self-skipping on a transient live-LLM 409 (empty topology-select response) — NOT a code regression.** Wall-clock dominated by live cloud-model latency on the integration tests (0 deterministic failures).
+**Current local baseline (`make test`, full dev-image suite):** **3971 passed, 0 failed, 0 skipped in 26:22** — measured 2026-06-17 after §17.539–540 (+11 over §17.538's 3960: +10 `test_scaffold_router_assist_chat_routing.py` history-based recovery [§17.539], +1 `test_assist_lazy_imports.py` stale-import guard [§17.540]). Fully clean, 0 skips. Prior baseline **3960 passed, 0 failed, 0 skipped in 23:46** — measured 2026-06-17 after §17.538 (+4 over §17.537's 3956, all from the §17.538 durable-chatmap fix: +4 `test_assist_chatmap_status.py` PUT-durable-write + GET-PG-recovery cases; migration 054 adds no net tests). Fully clean, 0 skips. Prior baseline **3956 passed, 0 failed, 0 skipped in 28:20** — measured 2026-06-16 after §17.537 (+19 over §17.533's 3937, all from the §17.537 assist-aware chat routing fix: +15 `test_scaffold_router_assist_chat_routing.py` + 4 `test_assist_chatmap_status.py`; §17.534–536 were CI/migration/compose changes with no `tests/` delta). Fully clean, 0 skips. Prior baseline **3937 passed, 0 failed, 0 skipped in 26:38** — measured 2026-06-15 after §17.533 (+34 over §17.521's 3903, all from the §17.522–533 distill-fix + task-decomposition arc: §17.522 un-skipped 12 silently-skipped Phase-2 tests + added distill-route assertions, §17.523 +4 triage Components, §17.524 +4 quick_research, §17.526 +7 decomposition, §17.528 +2 umbrella results, §17.529 +0 [recovery coverage existing], §17.530 +3 resurrection guards, §17.531 +3 security guards, §17.532 +4 reaper/render, §17.533 +4 umbrella compile — net reconciles after the §17.527 cleanup-test rename and the Phase-2 un-skip). Fully clean, 0 skips. Prior baseline **3903 passed, 0 failed, 0 skipped in 22:11** — measured 2026-06-14 after §17.521 (+3 net over §17.520's 3900: +2 `test_assist_agent` non-UUID guard, +2 `test_scaffold_router_assist_status` non-UUID, −1 from start-path fixture consolidation). Clean re-run after fixing the 5 start-path tests whose non-UUID fixture ids the §17.521 guard correctly rejected. Prior baseline **3900 passing in 20:48** — measured 2026-06-14 after §17.520 (+4 `test_scaffold_router_assist_status.py` over §17.519's 3896). The run reported 3899 passed / 1 failed: the single failure was `test_codegen_golden_live[dataclass-module]`, a **live-LLM model-variance straggler** (unrelated to §17.520's pipeline-side `/assist status` + triage-wording changes) — **passes on retry** (re-ran green in 59.86s). The §17.488/489 `chat_until_nonempty` guards absorb most such draws; the codegen-golden goldens have no equivalent single-draw guard, so a rare bad draw can still surface. Prior baseline **3896 passed, 0 failed, 0 skipped in 23:40** — measured 2026-06-14 after §17.519 (+5: `compute_deliverable_kind` ×4 + `/logs` deliverable_kind surfacing ×1; the `test_status_logs` `_make_row` default + migration 052 add no net tests). Prior baseline **3891 passed, 0 failed, 0 skipped in 21:25** — measured 2026-06-14 after §17.517–518 (+2 over §17.516's 3889: `test_execution_agent_prompt_build.py::TestGroundingDomainFanout` for §17.517; §17.518 is a flake-fix, no net new tests). §17.518 eliminated the banner-test live-synthesis timeout that flaked the two prior full runs at 3889/2. Prior baseline **3889 passed, 0 failed, 0 skipped in 22:53** — measured 2026-06-14 after §17.514–516 (+9 over §17.513's 3880: §17.514 +2 tuple regressions in `test_execution_codegen_verify.py`, §17.515 +2 domain-enum guards in `test_idea_refinement.py`, §17.516 +5 assist-completed banner in `test_compile_plan_only_banner.py`). These were the pre-deployment dogfood fixes (autonomous CodeGen crash, eng_design misroute, assist-completion summary). Prior baseline **3880 passed, 0 failed, 0 skipped in 22:31** — measured 2026-06-14 after §17.506–513 (+18 over §17.504's 3862: §17.506 +7 `test_compile_plan_only_banner.py`, §17.507 +3 `TestLongNameCoercion`, §17.508/509/512 +8 `test_scaffold_router_audit_fixes.py`+`test_research_summary_antibleed.py`; §17.510/511/513 no net new beyond those). §17.513 made the §17.506 banner integration tests deterministic (disable synthesis) — two prior full runs flaked 3879/1 on them before the fix. Prior baseline **3862** measured 2026-06-14 after §17.504 (+16 `test_scaffold_router_assist_nudge.py`). Prior baseline **3846** measured 2026-06-13 after §17.501–503 (+6 over §17.500's 3840: +3 `test_research_domain_detection.py` for §17.501, +3 `test_research_searxng_engines.py` for §17.503; §17.502 + §17.504 are pipeline-side — §17.502 has no `tests/` delta, §17.504 adds the nudge tests). Prior baseline **3840** measured 2026-06-13 after §17.500 (+5 deep-research tests over §17.499's 3835; §17.499 +10 verbosity; §17.498 model_coder swap no-test-delta; §17.497/495–496's 3825 base). Fully clean (0 skips). Lineage from §17.494 **3810** → §17.495/496 model A/B harness (+13 `test_model_ab.py`, scripts-only) → §17.497 codegen exec-gate fix (+2 `test_codegen_exec_smoke.py`) = **3825**. Earlier per-§ lineage: §17.487 **3764** → §17.488 **3766** → §17.489 **3769** → §17.490 **3779** → §17.491 **3787** → §17.492 **3795** → §17.493 **3807** → §17.494 **3810**. Per-§ measured lineage: §17.488 **3766** → §17.489 **3769** → §17.490 **3779** (+10 auto-learn) → §17.491 **3787** (+8 sandbox-verify) → §17.492 **3795** (+8 destructive-gate) → §17.493 **3807** (+12 streaming) → §17.494 **3810** (+3 sim-stage empty-draw redraw tests). Both chronic live-LLM stragglers stay green via the §17.488/§17.489 `chat_until_nonempty` guards. Wall-clock dominated by live cloud-model latency on the integration tests. (Live integration tests remain subject to model variance — a sustained empty-response spell could still surface, but the empty-guard now absorbs single bad draws across the whole sim pipeline.)
 
 **CI baseline (`test.yml`, the `-k "not integration"` subset):** **~3596 passed (projected), 14 skipped, 91 deselected (the integration tests)** — **no fresh CI run this cycle: GitHub Actions is org-billing-blocked**, so `main` merges (#64/#65/#66) are gated by local `make test` + `make ci-tier-0` instead. Projected from the local measure via the standing reconciliation: 3701 collected − 14 (service-needing, skipped in CI but pass live here) − 91 (integration, deselected in CI) = 3596. Last CI-measured green run was `27311904558` (§17.470, 3473 passed); the §17.472–484 additions are all non-integration unit/web tests, so `deselected` is carried at 91.
 
@@ -1994,7 +1994,7 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 
 4. ✅ **FIXED** — `app/modules/ideation_workflow.py` (mid-Phase-2 `db.close`). The offending `await db.close()` has been removed; `grep db.close` returns zero matches in the file. Session lifecycle restructured so Phase-2 I/O runs inside the same session that claimed the job. (Original audit cited L252.)
 
-5. 🟦 **RETRACTED** — `app/modules/execution_agent.py:642` (failed nodes lose `optimized_prompt`). Audit's cluster D verification confirmed both timeout (L629) and general-exception (L642) paths pass `optimized_prompt=exec_prompt` to `_set_node_status`, which `COALESCE`s the value. Adjacent real gap remains: prompt-build / RAG-injection at L530-L595 is unwrapped, so an exception there leaves the node `'running'` until the 60-min orphan reaper resets it. Flagged for future work.
+5. 🟦 **RETRACTED** — `app/modules/execution_agent.py:642` (failed nodes lose `optimized_prompt`). Audit's cluster D verification confirmed both timeout (L629) and general-exception (L642) paths pass `optimized_prompt=exec_prompt` to `_set_node_status`, which `COALESCE`s the value. Adjacent gap (was flagged for future work): prompt-build / RAG-injection unwrapped, so an exception there left the node `'running'` until the orphan reaper. **✅ CLOSED by Sprint W.4** — the whole assembly path (`_build_prompt` → RAG/SearXNG/Milvus injection → upstream stitching → optimize) at `app/modules/execution_agent.py:1017` is now wrapped in a `try/except build_exc` that calls `_set_node_status(..., "failed", verification_reason=…)` and returns a `failed` result, so an exception there marks the node `failed` (with retry-feedback reason populated) instead of stranding it `running`. Verified 2026-06-18.
 
 #### Tier 2 — auditability / data-integrity gaps
 
@@ -2166,6 +2166,14 @@ Both `Client.jobs.status()` (sync) and `AsyncClient.health()/status()` (async) d
 #### Closure
 
 All 18 original HIGH-severity findings: 15 fixed in code + 3 retracted within the audit. All 10 priority-queue items: fixed in code. All 8 cross-cutting patterns A–H: resolved. Audit coverage of the codebase as it stands today is **closed**.
+
+### 16.7 Post-audit live findings
+
+Discovered during live verification of later work, outside the 2026-05-05 audit scope.
+
+1. ✅ **FIXED (§17.544, 2026-06-18)** — `app/model_router.py:273` (embedding calls got a non-embedding fallback). `_dispatch_with_retry` does `fallback = fallback or _smart_fallback(model, settings.model_fallback)`, which **silently discards the embed callers' explicit `fallback=None`** — both `app/providers/ollama.py:139` and `app/model_router.py:693` pass it deliberately to mean "embeddings have no fallback." The injected `settings.model_fallback` (`qwen3.5:latest`) is a chat model that returns `HTTP 501 "this model does not support embeddings"` on `/api/embed`. **Effect:** when a `/api/embed` call to `nomic-embed-text` fails — e.g. `HTTP 400 "input length exceeds context length"` on an over-long chunk — the router burns a guaranteed-doomed fallback round-trip (501, ~14s on the live smoke) before failing, adding latency + error-log noise. Observed live during the §17.543 research-ingest smoke (request_id `c456316c`, 2026-06-18). **Fixed in §17.544:** `_dispatch_with_retry` now guards the injection by endpoint (`if endpoint != "/api/embed"`), so `/api/embed` honors the callers' `fallback=None` and never attempts the chat-model fallback. The embedder is config-only (invariant), so there is no valid drop-in embedding fallback to inject anyway. **✅ Secondary FIXED (§17.545):** the originating `HTTP 400 input-length` (input exceeded the 2048-token embedder context) no longer drops the entry — both embed payloads now send `truncate=true`, so over-length input head-truncates to the embedder context instead of failing. (Full sub-chunking of over-long docs for complete tail coverage remains a possible future ingest enhancement, not an open bug.)
+
+2. ✅ **FIXED (§17.547, 2026-06-18)** — 100% native tool-call miss on `qwen3.5:397b-cloud` (`role="model_verifier"`). Measured 16/16 misses on the production research-extraction path: the thinking cloud model returns prose/thinking and never populates `message.tool_calls`, but `OllamaProvider.supports_native_tools=True` is provider-wide so every model is forced down the native path → `read_tool_args` returns `None` → silent fallback to non-LLM chunking for every distilled URL. Same miss affected the other `model_verifier` native-tool paths (`gt_extractor`, `execution_verify`, research decompose/gap). **Fixed in §17.547:** a per-model gate (`_model_lacks_native_tools`, `settings.tool_call_coax_models=["qwen3.5"]`) routes such models through the JSON-coaxing fallback, plus a `tool_call_coax_min_tokens=4096` floor so the thinking model's reasoning doesn't starve the JSON (the call site's `max_tokens=1024` was marginal). Live: production path went from 0/16 → 3/3 runs producing entries.
 
 ---
 
@@ -21980,6 +21988,1089 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **Verification.** Full SDK suite — **142 passed** (4 new: sync + async `follow_redirects is False`, stream connect→`ConnectionError`, stream timeout→`TimeoutError` — the missing regression for S2). ci-tier-0 green (no vendored file touched). Coverage honesty: deep-read the 6 core modules + scanned resource wrappers; did not exhaustively read the thin resource method bodies.
 
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
+### §17.584 Security/CI — clear starlette BadHost CVE (fastapi/starlette/otel upgrade) + fix red CI (2026-07-05)
+
+The PR CI had been silently red on three pre-existing counts; fixed all three so the branch can merge green. **(1) starlette CVE (the real one).** `pip-audit --strict` flagged `starlette 0.41.3`: CVE-2026-48710 "BadHost" (host-header auth-**bypass** of path-based auth middleware — which this app runs; fix 1.0.1) + PYSEC-2026-248/249 (fix 1.3.0/1.3.1). starlette was transitive under `fastapi==0.115.6` (capped `<0.42`), so clearing it required a coordinated bump: **fastapi 0.115.6 → 0.139.0** (allows `starlette>=0.46`) + explicit **starlette==1.3.1** pin (requirements.txt + requirements-ci.txt). The starlette 0.41→1.3 major jump was lower-risk than feared — `BaseHTTPMiddleware`/`RequestResponseEndpoint` still exported (all 5 custom middleware import clean). **Cascading break:** fastapi 0.139's new `_IncludedRouter` route type has no `.path`, which `opentelemetry-instrumentation-fastapi==0.50b0` dereferences on every request when `otel_enabled` → `AttributeError`, failing 185 endpoint tests. Fixed by bumping the otel stack in lockstep: **api/sdk/exporter 1.29.0 → 1.43.0, instrumentation-fastapi/httpx/asyncpg 0.50b0 → 0.64b0**. **(2) trivy-action supply-chain compromise.** `aquasecurity/trivy-action@0.28.0` no longer resolves — the action was compromised Mar 2026 (76/77 tags force-pushed to malware, CVE-2026-33634); tags were later republished `v`-prefixed. SHA-pinned to the immutable commit for **v0.36.0** rather than a re-pushable tag. **(3) ci-smoke timeout.** The Tier-1 Smoke job exceeded its 10-min cap (suite grew); raised to 20. **Verification.** Full suite on the rebuilt image: **4122 passed, 0 failed** (was 3937/185 before the otel bump). fastapi/starlette/otel dep-resolution clean (no conflicts); `app.main` imports + instruments under the new stack. `otel_enabled` default stays False.
+
+### §17.582 Fix — code-review findings on the §17.580/581 ideation work (2026-07-05)
+
+Applied 9 of 10 findings from a high-effort review of the §17.580/581 diff (one deferred, below). **Engine (`app/`):** (1) **`read_tool_args` can return `{}` not `None`** — native-tool providers coerce missing args to `{}` (`openai.py:347`, `anthropic.py:416`), which `read_tool_args` returns verbatim; the old `parse_json_object(resp.text)→None` tripped the fatal `if workflow is None` compile guard (§17.290/§17.463 no-empty-workflow invariant), but `{} is None` is False. Compile now guards on `if not workflow` and feasibility on `feasibility_fallback = not feasibility`. Native-provider-gated (the default qwen3.5 coaxing path only sets `tool_calls` on a truthy parse), so latent, not an active break — but load-bearing. (2) **Feasibility asymmetry** — it used raw `tool_call` (no retry, 4096 tokens) while compile got `tool_call_until_args` + 8192; feasibility now uses the same guard + 8192 (a single argless draw would else flip to the fallback verdict, which the SDK example escalates to a human divert). (3) **Dedup** — the three retry-on-empty guards (`generate`/`chat`/`tool_call`, §17.464/465/581) now delegate to one `_redraw_until(call, is_usable, …)` core. **SDK example (`sdk/examples/service_arbitrage_pipeline.py`):** (4) `_retry_transient` no longer retries 5xx on non-idempotent POSTs (`ideate` dup jobs / `confirm` masked-409) — `retry_5xx` opt-in, used only by the idempotent status GET; (5) an SSE mid-stream drop now still remediates the failures collected that round instead of `break`ing past remediation; (6) a benign 4xx from `skip`/`retry` is caught per-node so one un-skippable node can't crash the run; (7) `_check_failure` tests truthiness not key-presence (`error=null`/`errors=[]` no longer false-raises); (8) `TERMINAL_STATES` asserted ⊆ the SDK's canonical `JOB_STATUSES` (fail-fast on drift); (9) dropped the dead `remediated` flag (loop is bounded by the round range + not-failures break). **Deferred (finding #6):** pushing the retry-on-empty-args guard *into* `model_router.tool_call` so all ~9 `read_tool_args` consumers benefit uniformly — a `model_router` + 9-module change that needs its own PR/testing; bundling it here would be the risky broad refactor the conventions warn against. **Verification.** Unit +3 regressions (compile `{}`-fatal; feasibility `{}`-fallback; feasibility redraw-on-empty) — `test_llm_retry` + Phase-1/2 + compile-failure suites 36 passed; SDK example inline-verified (divert / skip+re-pump→completed / skip-4xx tolerated / truthiness). **Live (rebuilt runtime image):** full pipeline ran to `completed` via the reworked feasibility (`tool_call_until_args` + 8192) and compile paths — `conf=0.95 fallback=False`, `phase2_complete`, no fallback/compile-failure/redraw markers; job `3c417a3e`, ~9.5 min.
+
+### §17.581 Hardening — Phase-2 compile pass on native tool-calling (2026-07-05)
+
+Follow-up to §17.580: converts the Phase-2 compile pass (`research_and_compile`) from `generate_until_nonempty` + `parse_json_object` to `tool_call` + `read_tool_args`, so all three ideation LLM calls (refine / feasibility / compile) share one native-tool-call contract. **Not a bug fix** — unlike feasibility, compile was working live (job `4762b957` reached `completed` on the pre-fix path): `parse_json_object` strips `<think>` tags (`llm_parsing.py:69`) and compile already had an 8192-token budget + retry-on-empty, so it tolerated reasoning-model output. The §17.580 feasibility bug was specifically its tight 2048 budget. This change removes the compile pass's reliance on parsing JSON out of prose (native-tool providers now emit structured args directly) and unifies the contract, so a future budget tighten can't reintroduce the §17.580 failure here. New `COMPILE_TOOL` (`emit_execution_plan`, required: compiled_prompt/workflow_steps) + `FEASIBILITY_SYSTEM`-style prose trim on `COMPILE_SYSTEM`. **New guard `tool_call_until_args`** (`llm_retry.py`) — the tool-call sibling of `generate_until_nonempty`/`chat_until_nonempty`: re-draws when `success=True` but `read_tool_args` is None (the empty-args thinking-model variance), surfaces hard failures immediately; compile keeps its 8192 headroom + 3 draws. Compile-failure branch (500 semantics, §17.290) unchanged. Removed now-dead `generate_until_nonempty`/`parse_json_object` imports from `ideation_workflow`. **Verification.** Unit: `test_llm_retry.py` +5 (tool_call_until_args: first-draw / no-args-then-valid redraw / all-argless-exhausts / hard-fail-immediate / forwards-args); Phase-1/2 + compile-failure + retry suites **49 passed, 0 skipped** (loader real-loads providers.base + tool_call_args per §17.580); compile-failure 500 path re-pinned on the tool_call shape; new `test_compile_tool_call_immune_to_reasoning_prose`. **Live (rebuilt runtime image):** full pipeline ran to `outcome: completed` via the new compile path — `phase2_complete` (8 facts extracted/ingested → planning), no `phase2_compile_failed`, no `tool_call_empty_redraw` needed; job `331c23af`, ~10.5 min.
+
+### §17.580 Fix — feasibility pass falls back on reasoning-model prose (2026-07-05)
+
+Phase 1's feasibility assessment (`ideation_workflow.analyze_and_confirm`) called `model_router.generate()` + `parse_json_object(resp.text)`, assuming clean JSON text. But `ideation_model_role → model_general → qwen3.5:397b-cloud` is a **reasoning model** that emits `<think>` prose (and can exhaust `num_predict` before any JSON) — so `parse_json_object` returned `None` and the code silently substituted the fallback assessment (`feasible=True, confidence=0.5, fallback=True`) on **every** job. Observed live: `phase1_feasibility_fallback: llm_success=True` (transport succeeded, parse failed). The refinement step right before it already worked because it uses `model_router.tool_call` with the `emit_refined_brief` Tool — which the §17.547 gate routes to JSON-coaxing (+4096 floor) for qwen3.5; feasibility just never got the same treatment. **Fix:** new `FEASIBILITY_TOOL` (`emit_feasibility_assessment`, required: feasible/confidence/summary) + swap `generate`→`tool_call(messages=[...], tools=[FEASIBILITY_TOOL])` read via `read_tool_args`, mirroring `refine_idea` exactly; trimmed the now-redundant "OUTPUT FORMAT (strict JSON)" prose from `FEASIBILITY_SYSTEM`; bumped `max_tokens` 2048→4096 (reasoning-model headroom). The fallback path is retained for genuine failures. Response shape is unchanged (`feasibility` dict with the same keys), so the SDK/pipeline readers and the `/ideate` contract are untouched. **Verification (live, rebuilt runtime image).** Same intake that fell back pre-fix (`conf=0.50 fallback=True`) now returns `feasible=True conf=0.90 fallback=False`; no `phase1_feasibility_fallback` warning in the orchestrator log. Full pipeline then ran end-to-end via the SDK (intake → confirm → DAG: sequential, 4 tasks → execute) to `outcome: completed` in ~8.75 min, producing a real stdlib `parse_intake` deliverable. job `4762b957`.
+
+### §17.579 Feat — scheduled re-A/B governance (program F5/6) (2026-06-21)
+
+Periodically re-runs the model A/B harness so role swaps stay current as cloud models churn. **S2:** extracted `run_model_ab_task(task, models, *, repeat, ...) -> {task, models, summary, rows}` from `scripts/model_ab.py` (library API sharing `_load_goldens`/`_is_available`/`_run_one`/`_summarize` with the CLI `main()`, which is untouched). **Scheduler:** `_execute_research_job` routes a `topic="model_ab:<task>"` schedule to new `_execute_model_ab_job` — runs `run_model_ab_task` (depth field = comma-separated model list, first = incumbent), then `_log_model_ab_recommendation` emits `model_ab_recommend` when a candidate beats the incumbent **clean** (≥ pass rate, zero errors, faster) else `model_ab_no_change`; updates `scheduled_jobs` like the research path. Reuses the existing schedule infra (APScheduler + `scheduled_jobs`) — **dormant unless a `model_ab:` schedule row exists** (default-off in practice). Scope: existing tasks (codegen/extraction/verifier); new role harnesses (general/router/research) deferred. Tests: `test_model_ab_scheduled.py` (5) — library API returns summary/rows + unknown-task raises; recommendation flags a faster-clean candidate, no-change when incumbent best, no-recommend when candidate errored. model_ab CLI regression intact. (Test-isolation: the test imports `app.scheduler` lazily inside each test — a module-top import at collection time tripped a pre-existing `test_scheduler` `init_scheduler` fragility re the APScheduler SQLAlchemy jobstore's QueuePool `connect` event; production `scheduler.py` is unaffected — `test_scheduler` passes 18/18 isolated.)
+
+### §17.578 Feat — best-of-N for deliverable nodes (program F3/6, opt-in) (2026-06-21)
+
+Generate N candidates concurrently for a deliverable node and keep the best — reuses the parallel pattern + the grounding scorer as judge. `_best_of_n_inference` (`execution_agent.py`): `asyncio.gather` N `_run_inference()` calls, judge each by `score_faithfulness` vs the node's `_upstream_block`, return the highest; the normal verifier then runs on the winner. Hooked at the generation point in `execute_next_node`, gated on **eligibility** = deliverable node (`is_deliverable`/`is_output_node`, fetched only when the valve is on) + non-CodeGen/Shell + has upstream evidence. **Valves:** `best_of_n_enabled=False`, `best_of_n_count=2` (ge2 le4). **Default OFF**; deliverable nodes only bound the N× cost. Fail-soft (all candidates fail → single generation; 1 survivor → no judging). Tests: `test_execution_best_of_n.py` (3) — picks highest grounding / single-candidate skips judging / all-fail falls back. Executor regression 119 passed.
+
+### §17.577 Feat — adaptive escalation ladder (program F2/6, opt-in) (2026-06-21)
+
+When a node fails and is retried, escalate the model per rung; final rung hands off to Assist. Implemented entirely in `retry_failed_node` (`execution_retry.py`) so it works for BOTH the serial and parallel re-execution paths: on reset, set the node's `assigned_model` to `get_model(node_escalation_order[retry-1])` (clamped to the last rung) — both paths re-read `assigned_model`. The exhausted branch, when `node_escalation_to_assist`, calls `start_assist_session` (returns `escalated_to_assist`) instead of just failing. **Valves:** `node_escalation_enabled=False`, `node_escalation_order=["model_cloud_heavy"]`, `node_escalation_to_assist=False`. **Default OFF**, fail-soft (unknown rung role / assist failure → normal behavior). Tests: `test_execution_retry_escalation.py` (5) — off→no model set / on→rung model set / clamp to last rung / exhausted→assist / exhausted+assist-off→normal error; retry regression 18 passed.
+
+### §17.576 Feat — learning flywheel: high-grounding deliverables → RAG exemplars (program F1/6, opt-in) (2026-06-21)
+
+Turns the engine's own best output into retrievable few-shot context — a compounding quality loop reusing RAG + the grounding scores. New `app/modules/flywheel.py` (isolated; hooks just call in):
+- **Ingest** `maybe_ingest_exemplar` — hooked in the executor completion path (after `persist_job_artifacts`): when a job's `jobs.metadata.grounding.score ≥ exemplar_min_grounding` (0.85) and it's not plan_only, ingest the deliverable into RAG tagged `source_type="exemplar"` via `ingest_entries`. Pollution-guarded by the grounding threshold + RAG's existing 3-tier dedup (cosine≥0.95 reject). Fail-soft.
+- **Retrieve** `retrieve_exemplars` — hooked in `dag_generator.generate_dag` before the planner LLM call: over-fetch via `query_rag` then **post-filter on `source_type`** (keeps the RAG hot path untouched), formatting a "Proven prior solutions (ADAPT, don't copy)" few-shot block prepended to the DAG prompt.
+- **Valves** (`config.py`): `exemplar_ingest_enabled=False`, `exemplar_min_grounding=0.85`, `exemplar_retrieval_enabled=False`, `exemplar_retrieval_top_k=2`. **Default OFF both directions** (opt-in).
+
+**Verification.** `test_flywheel.py` (7 passed): ingest gating (disabled/below-threshold/plan_only skip; high-grounding → `source_type="exemplar"` tagged) + retrieval (disabled; post-filter drops non-exemplars; none-found → ""). Targeted regression (dag_generator + executor compile/autocomplete) 122 passed. **Live round-trip (real Milvus):** ingested an exemplar → flushed → `retrieve_exemplars` returned it (marker + header present, `source_type` survived the round-trip) → deleted it (cleanup ok, no pollution). Full suite green.
+
+### §17.575 Fix — REVERT §17.572 model_coder swap (qwen3-coder-next flaky on cli-entrypoint) (2026-06-21)
+
+The §17.572 swap `model_coder` kimi → qwen3-coder-next was reverted. The F6 full suite caught `test_codegen_golden_live[cli-entrypoint]` failing: qwen3-coder-next inlined the argparse logic under `if __name__ == "__main__":` **without defining a module-level `main()`**, failing the golden's `must_define: main`. It's **intermittent** — it passed the A/B's exec-smoke gate 5/5 and §17.572's own suite run, but the stricter live golden test fails it some fraction of the time. This is exactly the §17.498 / memory caution ("qwen3-coder-next … fails cli-entrypoint at runtime"); my A/B's small N (5 repeats) masked the flakiness, and the exec-smoke gate doesn't enforce `must_define`. **Lesson: a 5/5 A/B is too small an N to override a documented runtime caution on a structural-faithfulness failure mode.** Reverted both sites (compose + config) to `kimi-k2.7-code:cloud` (stable on cli-entrypoint across every prior suite). `model_research_extract` stays qwen3-coder-next (§17.566 — extraction has no such structural golden). Memory + index corrected.
+
+### §17.574 Feat — bounded component concurrency (program F4/6) (2026-06-21)
+
+Decomposition components already spawn all-at-once (fire-and-forget) and each child's DAG now runs node-parallel (§17.571), so an N-component umbrella could stack N×inflight inference calls on the host. `run_component_pipeline` now acquires a module semaphore `get_component_sem()` (lazy + resettable, sized by `decompose_component_max_concurrent`, **default 3**); components beyond the cap queue on entry and release in the `finally` (after the umbrella rollup). Distinct from `decompose_max_inflight_components` (throttles NEW decompositions, not inflight execution). **Default ON** — a safety bound on existing *unbounded* fan-out. Tests: `test_decomposition_concurrency.py` (2) — cap=2 over 4 children → ≤2 concurrent; cap=1 → strictly serial.
+
+### §17.573 Feat — quality-telemetry rollup endpoint (program F6/6) (2026-06-21)
+
+First of a 6-feature program recombining this session's infrastructure (see plan). Read-only rollup turning already-recorded signals into a tuning view — no new recording.
+
+- `observability_rollups.quality_rollup(window_minutes, grounding_threshold, db)` + `GET /observability/quality`: per `(tool, node_type)` → total/done/failed/skipped, `pass_rate`, avg verifier `confidence`, avg `retry_count` (from `dag_nodes`, windowed via the parent `jobs.created_at` join); + grounding distribution from `jobs.metadata.grounding` (count scored, avg/min, # auto-corrected, # below threshold). Mirrors the §X.20 rollup pattern (fail-open `data_source`). docs/openapi.json regenerated for the new route.
+
+**Verification.** `test_observability_quality_rollup.py` (5 passed): aggregation (pass_rate 8/(8+2), grounding shape), pass_rate None when undecided, fail-open, endpoint 200 + window validation. Full suite green. Default: always-on read endpoint (no behavior change).
+
+---
+
+### §17.572 Perf — A/B-driven model_coder swap kimi → qwen3-coder-next (40/40 @ 2.4× speed) (2026-06-21)
+
+Continuing the role A/B sweep (after §17.566 extract, §17.567 verify). `model_ab.py --task codegen` (8 exec-verified goldens × 5 repeats) on the 3 viable cloud candidates:
+- **qwen3-coder-next:cloud — 40/40, avg 1.78s** ✓ (incl. cli-entrypoint 5/5, 2 exec=pass)
+- kimi-k2.7-code:cloud (prior) — 40/40, avg 4.3s
+- qwen3.5:397b-cloud — 39/40, avg 26.25s
+
+qwen3-coder-next matches kimi's perfect pass rate at **2.4× the speed** (14.7× vs qwen3.5) and is purpose-built for code. **Swapped `model_coder` kimi → qwen3-coder-next** (both sites: `docker-compose.yml MODEL_CODER` — the decisive source — + `config.py`, per the §17.567 sync rule). This also consolidates on one fast code model (already `model_research_extract` since §17.566).
+
+**Over-elaboration concern (the real §17.498 rejection reason) refuted by a faithfulness spot-check.** §17.498 rejected qwen3-coder-next not for cli-entrypoint (a since-fixed scoring artifact, §17.497) but because it "over-elaborated / parroted the CODEGEN prompt examples." Since the pass/exec gates can't measure that, I generated actual outputs for the minimal-ask goldens: on `signature-stub` ("contract only") qwen3-coder-next produced a clean 4-line stub (117 chars) while **kimi over-elaborated** with a full Args/Returns/Raises docstring (613 chars); on `module-function` they were byte-identical minimal functions. So the over-elaboration is gone (model improved) — qwen3-coder-next is now equally-or-more faithful AND faster. (The goldens' `must_not_contain` guards also caught no CLI-scaffolding bloat: 40/40 incl. cli-entrypoint 5/5.) No test asserts the old `model_coder` default (the `/model reset` test pins only general+verifier), so no test fallout.
+
+---
+
+### §17.571 Feat — promote parallel-frontier DAG execution to default-ON (2026-06-21)
+
+§17.568 shipped parallel-frontier execution as a valve-OFF prototype; it's now proven (unit + integration atomic-claim + live diamond: `pipeline_complete` correct, 2.6× wall-clock when the cloud serves the frontier concurrently), so promote it to default.
+
+- **`config.py`**: `parallel_execution_enabled` default `False → True`; `parallel_execution_max_inflight` default `4 → 2` — host-tuned: Ollama `NUM_PARALLEL=4` split across `execution_global_concurrency=2` concurrent jobs = 2 in-flight nodes/job is the non-contending sweet spot (4 would over-subscribe under 2 live jobs). Operators on stronger hardware can raise it.
+- **`docker-compose.dev.yml`**: pin `PARALLEL_EXECUTION_ENABLED=false` for the DEV/test container so the mock-based serial executor suite (which validates the serial loop's session/keepalive/retry internals) keeps exercising the serial path; the dedicated parallel tests enable it explicitly at runtime, so dev coverage of BOTH paths is intact. Prod (base compose only) takes the config default → parallel.
+- **R6 reaper note**: under heavy contention a node could approach `node_orphan_threshold_minutes` (30); this host's `STALE_THRESHOLD=1560` (26h) covers long phases, and `max_inflight=2` keeps per-node latency bounded — raise the orphan threshold if enabling a high max_inflight on slow hardware.
+
+**Verification.** Full suite green in dev (serial path via the dev pin, unchanged); the parallel path's correctness rests on §17.568's unit + integration + live diamond coverage (that confirm ran `pipeline_complete=True` with max_inflight 4 — the promoted default 2 still covers a diamond's 2-wide sibling frontier, identical code path). Prod post-build confirmed `parallel_execution_enabled=True`.
+
+---
+
+### §17.570 Feat — grounding LOOP: per-node detection (#2) + CoVe correction (#1), composed (2026-06-21)
+
+Builds on §17.569 (which only *flagged* low-grounding deliverables) to close the detect→correct loop, using the existing `cove.py::cove_revise` (draft → verification questions → independent answers → revise; fail-soft), previously wired only into research.
+
+- **Layer A — deliverable self-correction** (`execution_compile._maybe_grounding_gate`, **default ON**): the gate is now detect → **correct** → re-verify → flag-if-still-low. When a synthesized deliverable scores below `grounding_min_score`, it CoVe-revises + re-scores; adopts the revised text; banners ONLY if still low (noting "auto-revision attempted"); records `jobs.metadata.grounding` with `corrected`/`score_before`/`score_after`. Fail-soft — a CoVe/rescore miss falls back to the pre-correction flag behavior. (`_record_grounding_metadata` extracted.)
+- **Layer B — per-node grounding** (`execution_agent._maybe_node_grounding`, **default OFF / opt-in**): on a passing, groundable node (non-CodeGen/Shell, with upstream evidence) score the output against `_upstream_block` (the evidence it was given) and CoVe-revise **in place** before persist — fixing drift at the node that introduced it so the corrected text propagates to downstream nodes. Hooked just before the Phase-3 persist; the existing `_set_node_status(..., output=output)` writes the corrected text. No node-level re-verify after CoVe (it's claim-pruning, not a rewrite; the deliverable gate re-checks the whole). Default-off because it adds ~1 verifier call per groundable node (CPU cost).
+- **Valves** (`config.py`): `grounding_correct_enabled: bool = True`, `node_grounding_enabled: bool = False`. Reuse `grounding_min_score` (0.7) + `cove_model_role` + `faithfulness_model_role`. Config-only (no schema/openapi; compose doesn't override → defaults apply).
+
+**Verification.** `test_execution_compile_grounding.py` (Layer A: correction lifts past threshold → no banner + `corrected:True`; still-low → banner w/ note + corrected text retained; correct-disabled → flag-only, no CoVe) + `test_execution_agent_node_grounding.py` (Layer B: disabled no-op / low→corrects in place / high→unchanged no CoVe / None no-op / CoVe-no-change keeps original) — **14 passed**. Compile + executor regression **104 passed** (existing §17.569 flag-tests pinned `grounding_correct_enabled=False`; per-node default-off → zero exec impact). **Live (real kimi CoVe+faithfulness):** Layer A lifted a 2-hallucination deliverable from **0.33 → 1.0**, `corrected:True` recorded, banner suppressed; Layer B dropped the fabricated claim from a node output in place (`changed=True`). Cleaned up.
+
+---
+
+### §17.569 Feat — grounding gate: flag low-faithfulness synthesized deliverables (default ON, flag-only) (2026-06-21)
+
+The §17.519/§17.522 failure mode: the W.7 LLM **synthesis** pass rewrites the node-output "heuristic" into a coherent deliverable and can introduce claims absent from the source work (hallucination/drift). Nothing checked a *job* deliverable's grounding (the `faithfulness` scorer was wired only into research). This gate closes that — the highest-value remaining quality lever.
+
+- **Gate** (`execution_compile._maybe_grounding_gate`): on a SYNTHESIZED deliverable, `score_faithfulness(synthesized, heuristic)` (RAGAS supported/total) against the source node-work the synthesis drew from. **Flag-only, default ON, fail-soft:** below `grounding_min_score` (0.7) it prepends a ⚠️ banner (with up to 5 unsupported claims) + records `jobs.metadata.grounding` (best-effort, own session) — it **never blocks** delivery, and a scorer miss (None) is a no-op with no DB write. Hooked at the single synthesis chokepoint `_maybe_synthesize`'s `if synthesized:` branch, so it covers every compile strategy and **only** fires on synthesized text — verbatim CodeGen/Shell (which skip synthesis) are auto-excluded (faithfulness on code is meaningless). Reuses `faithfulness_model_role` (= kimi, fast).
+- **Valves** (`config.py`): `grounding_gate_enabled: bool = True`, `grounding_min_score: float = 0.7`. Config-only (no schema/pipeline/openapi impact); compose doesn't override → default-ON applies in prod.
+
+**Verification.** `test_execution_compile_grounding.py` (6 passed): low-score → banner + metadata write; high-score → no banner but records; None → no-op + **no DB write** (keeps mock compile tests untouched); valve-off → scorer not called; threshold boundary (0.70 not flagged, 0.69 flagged); verbatim CodeGen → gate never reached. Compile regression `test_execution_agent_compile` + plan-only/synthesis-override + executor/research-summary suites **123 passed** (default-ON gate is a no-op in mock tests — `score_faithfulness` fails-soft to None without an LLM). **Live (real kimi faithfulness call):** a deliverable with 2 fabricated claims scored **0.33 (1/3 supported)**, both hallucinations correctly listed, ⚠️ banner prepended, `jobs.metadata.grounding` recorded; cleaned up.
+
+---
+
+### §17.568 Feat (prototype) — optional parallel-frontier DAG execution behind a valve (default OFF) (2026-06-20)
+
+A single job's DAG nodes ran strictly serially (`execute_all_nodes` → `execute_next_node` claims+runs one node at a time), so independent branches (e.g. a diamond `T1 → {T2,T3} → T4`) couldn't overlap. Prototype: optionally run the ready frontier (dep-satisfied pending nodes) concurrently, bounded by a cap, **valve-gated default OFF** so the serial path is byte-identical when off.
+
+- **Atomic multi-claim** `_claim_ready_nodes(db, job_id, limit)` (`execution_agent.py`) — implements the exact fix the `_get_next_node` docstring (§17.409) prescribed for same-job parallelism: deps folded into the claim's WHERE (`NOT EXISTS` over unfinished deps) + `FOR UPDATE SKIP LOCKED LIMIT`, so concurrent claims are disjoint and race-free w.r.t. dependency state. (The old `_get_next_node` is a non-atomic two-statement check-then-claim, safe only one-executor-per-job — left untouched for the serial path.)
+- **Reuse, not extraction** (lower-risk than the plan's literal extraction): `execute_next_node` gains an optional `preclaimed_node` param — when set, it skips its own claim + the no-claimable terminal block and runs the existing per-node body; when None (serial + all existing callers) it's byte-identical (one-line change: `node = preclaimed_node if … else await _get_next_node(...)`). The per-node autocomplete is idempotent (`UPDATE … WHERE status!='completed'`), so concurrent workers finishing the last node race safely.
+- **`_run_parallel_frontier`** (module-level async generator, valve-gated branch in `execute_all_nodes`): the LOOP claims (`_claim_ready_nodes`), emits `node_start`, spawns worker tasks (`execute_next_node(preclaimed_node=…)`, each its own session, bounded by `Semaphore(max_inflight)`); results stream via a queue → `node_done`/`node_failed`/`node_retry` + `: keepalive` on idle. The loop **solely owns** the terminal/finalize decision (a no-preclaim call → the existing terminal block → `complete`/`blocked`), made only when nothing is in-flight and nothing claimable — never by a worker (R2). `finally` cancels inflight workers on cancellation/disconnect so none leak onto a dying job (R8). SSE interleaves across nodes; consumers key on `node_key` (R9, no pipeline change).
+- **Valves** (`config.py`): `parallel_execution_enabled` (default **False**) + `parallel_execution_max_inflight` (default 4, ge1 le16). Distinct from `execution_global_concurrency` (caps concurrent *jobs*); this caps *nodes within a job*. On this CPU host both contend for Ollama `NUM_PARALLEL=4`, so the win is workload/DAG-shape dependent — default-OFF, measure per DAG. **Operator note (R6):** with the valve on, parallel CPU contention slows each node, raising the chance a node crosses `node_orphan_threshold_minutes` (cleanup reaper) — raise that threshold if enabling on slow hardware.
+
+**Verification.** `test_execution_agent_parallel.py` (2 passed): diamond DAG proves T2/T3 run concurrently (a 2-party barrier releases; a serial loop would time out → T4 never runs), T4 starts only after both deps done, exactly one loop-owned finalize, `node_done` streamed for all + `pipeline_complete`; + a blocked-terminal test. Full executor suite **201 passed** (serial path unchanged — R1). **Live (real Postgres):** `_claim_ready_nodes` wave test on a seeded diamond → wave1 `[T1]`, wave2 `[T2,T3]`, wave3 `[T4]`, wave4 `[]` (deps-folding + frontier selection correct), cleaned up. Valve stays OFF in prod compose (no env set) → prod behavior unchanged.
+
+**Follow-ups (same day).** (1) **Integration test** `tests/integration/test_claim_ready_nodes_parallel.py` (3 passed, real Postgres): wave-by-wave deps, never-claims-unsatisfied-dep, and **concurrent claimers get a disjoint frontier** (no double-claim under `FOR UPDATE SKIP LOCKED`). (2) **Live diamond execution** (real LLM nodes, valve on vs off) — the run **caught a real terminal-event bug the mocked unit test couldn't**: when the last worker's idempotent autocomplete flips the job to `completed`, the loop's no-preclaim `execute_next_node` finalize hit that function's job-status guard (`'completed'` → not executable) and emitted `error` instead of `pipeline_complete`. **Fix:** the terminal step now checks `_all_nodes_done` DIRECTLY and emits `pipeline_complete` (the worker already compiled), falling back to `execute_next_node` only for the not-all-done blocked case (job still `running`). Unit test updated to patch `_all_nodes_done`. The live run also gave the empirical payoff: parallel **388s vs serial 1019s (~2.6×)** on a diamond, T2/T3 overlap confirmed, both produced a valid compiled deliverable — the win exceeded the modest CPU-host estimate because per-node cloud latency dominates and the two independent branches genuinely overlapped.
+
+---
+
+### §17.567 Feat+Perf — model_ab `verifier` task + A/B-driven model_verifier swap qwen3.5 → kimi (30/30 @ 4.6× speed) (2026-06-20)
+
+Built the long-deferred (§17.557) `verifier` task for the A/B harness, then used it to swap the verifier role.
+
+- **Harness task** (`scripts/model_ab.py`): new `verifier` task = **verdict-match**. Mirrors `execution_verify._verify_output` exactly (`VERIFY_SYSTEM` + `VERIFY_TOOL`/`record_verification`, temp 0.0, `read_tool_args` parse); goldens (`tests/fixtures/verifier_goldens.json`, 6 clear PASS/FAIL cases) carry a known-correct verdict and `passed` iff the model's verdict matches — fail-closed (no tool call → verdict `none`), matching prod. Pure `score_verifier` unit-tested (`test_model_ab.py`, +6, 24 passed).
+- **A/B result** (`--task verifier --repeat 5`, 30 trials/model): `qwen3.5:397b-cloud` (baseline, coaxed) **30/30 @ 6.12s**; **`kimi-k2.7-code:cloud` 30/30 @ 1.34s** ✅ (~4.6× faster, native tool-calls, zero flakiness); `qwen3-coder-next:cloud` 28/30 @ 1.35s; `qwen2.5:7b` 20/30 @ 106s. Cross-task contrast: kimi was *flaky on extraction* (§17.566, 5/10) but *perfect on verify* (30/30) — per-task reliability differs, which is the whole point of measuring per role.
+- **Swap.** `model_verifier` qwen3.5:397b-cloud → kimi-k2.7-code:cloud. The verifier runs **per node**, so the 6.12→1.34s win compounds across a DAG, at identical measured accuracy and on the native (non-coax) path. **Source-of-truth note:** `model_verifier` is env-overridable (unlike `model_research_extract`), so the swap is in THREE places — `docker-compose.yml` `MODEL_VERIFIER` default (decisive for the orchestrator), `app/config.py` (code default for CLI/tests), and the `scaffold_router.py` pipeline valve (sent as a per-job override). `kimi` isn't in `tool_call_coax_models`, so `will_coax=False` (verified in prod). Caveat: the 6 goldens are clear-cut PASS/FAIL — they prove kimi matches accuracy + is far faster, but don't stress *borderline* judgment; the prod verifier is a deliberately lenient presence-checker, so this fits, and borderline goldens are a noted follow-up.
+
+**Verification.** `test_model_ab.py` 24 passed (incl. 6 new `score_verifier`); A/B 120 trials (above); prod after `make build`: `env MODEL_VERIFIER=kimi-k2.7-code:cloud`, `settings.model_verifier=kimi-k2.7-code:cloud`, `will_coax=False`; health green.
+
+---
+
+### §17.566 Perf+Fix — research-extract role: A/B-driven swap kimi → qwen3-coder-next (flaky 5/10 → clean 10/10, 3.5× faster) (2026-06-20)
+
+Throughput/quality pass on the research-extraction role. An objective A/B (`scripts/model_ab.py --task extraction --repeat 5` over the extraction goldens, fallback-rejecting) compared the current `model_research_extract` default against tool-call-native candidates:
+
+| model | pass | avg wall | note |
+|---|---|---|---|
+| `qwen3.5:397b-cloud` (coaxed baseline) | 10/10 | 14.26s | reliable, slow |
+| **`qwen3-coder-next:cloud`** | **10/10** | **4.04s** | native tool-calls, ~3.5× faster |
+| `kimi-k2.7-code:cloud` (**the prior default**) | **5/10** | 3.94s | FLAKY — intermittent `entries=0` |
+| `qwen2.5:7b` (local) | 10/10 | 167s | CPU-bound, unusable hot-path |
+
+The A/B exposed that the **shipping** default (`kimi-k2.7-code:cloud`, set in §17.548) was **flaky on extraction (5/10, intermittent empty `entries`)** — the exact symptom behind research-summary gaps. **Fix:** `app/config.py:model_research_extract` → `qwen3-coder-next:cloud` (config-only; not a pipeline valve). It's absent from `tool_call_coax_models` (`["qwen3.5"]`), so it uses the native tool-call path (`will_coax=False`, verified). Scoped to extraction only — `model_coder` stays `kimi` because `qwen3-coder-next` failed the cli-entrypoint codegen golden at runtime (memory note). Verifier role NOT changed — the harness has no `verifier` task yet (the §17.557 future slot), so it wasn't measured; left as-is rather than blind-swapped.
+
+**Ollama config (the offered "keep-warm" tweak):** `OLLAMA_NUM_PARALLEL=4` is **already set** (plus FLASH_ATTENTION + q8 KV-cache). The remaining lever is `OLLAMA_KEEP_ALIVE=0` (models unload immediately — hurts the local embedder/reranker on the ingest path), but flipping it needs a host systemd edit + `sudo` + an ollama restart, and on this CPU-only/RAM-constrained host `KEEP_ALIVE=0` may be a deliberate OOM-safety choice — so it's left as an operator decision, not shipped.
+
+**Verification.** A/B 60 trials (above). Config loads (`settings.model_research_extract='qwen3-coder-next:cloud'`, `will_coax=False`). **Live cold URL ingest** (`httpbin.org/html`): extraction reached `extraction_complete` in ~1 keepalive (visibly faster), 3 entries, ingested clean, provenance **481→484** (3 rows tied to the session, §17.563/564 path intact). Test data cleaned up afterward.
+
+---
+
+### §17.565 Feat — wire up the vestigial `artifacts` table (write path + REST + SDK + CLI + chat `/results`) (2026-06-20)
+
+Audit found the `artifacts` table fully scaffolded but never wired: table + `Artifact*` schemas + `dag_nodes.output_artifact_id` all existed, but **zero writes/reads, no endpoint, nothing set `output_artifact_id`, 0 rows** — outputs lived only inline (`dag_nodes.output_text` + `jobs.compiled_output`). User chose to implement it (with chat + CLI surfacing).
+
+- **Write path** — new `app/modules/artifacts.py::persist_job_artifacts(job_id, db, *, deliverable_kind)`: writes ONE job-level row from `compiled_output` (`artifact_type` = `plan` if `deliverable_kind=='plan_only'` else `report`) + one per-node `code` row for each completed CodeGen node, setting that node's `output_artifact_id`. **Sole writer** of the table + the column; idempotent via explicit delete-before-insert (the table has no unique constraint). Called (try/except, log-only — never blocks completion) from the 3 `execution_agent.py` finalize sites (complete / blocked-partial / autocomplete) + the `assist_agent.py` completion site. Umbrella rollup deferred (children already produce their own artifacts).
+- **Read path** — new `app/routers/artifacts.py`: `GET /jobs/{job_id}/artifacts` (`ArtifactListResponse`) + `GET /artifacts/{artifact_id}` (`ArtifactRead`), registered in `app/main.py` (auth inherited from the global middleware). New `ArtifactListResponse` schema; `make sync-schemas` + `make openapi-snapshot` regenerated.
+- **Chat** — `pipelines/scaffold_router.py`: `/results` on a completed job appends a **📦 Artifacts** section; new core `/artifacts <id>` command fetches one artifact (or lists a job's, falling back from artifact-id → job-id).
+- **CLI** — `cli/scaffold_cli/main.py`: `scaffold artifacts list <job_id>` + `scaffold artifacts get <artifact_id>`.
+
+**Verification.** Unit (`test_artifacts.py` — write choreography, type mapping, idempotency, empty-output no-op), router (`test_artifacts_router.py`), pipeline (`test_scaffold_router_artifacts.py`) — all green; full router pipeline suite **706 passed**; targeted app sweep **66 + 13 passed**; `check-schemas` + `openapi-check` green. **Live end-to-end (no LLM):** seeded a completed job + CodeGen + LLM nodes → `persist_job_artifacts` wrote **2 artifacts** (1 `report` job-level + 1 `code` per-node; LLM node → none); `GET /jobs/{id}/artifacts` returned both; `GET /artifacts/{id}` returned the code content; `dag_nodes.output_artifact_id` set on CodeGen, NULL on LLM; re-run stayed at 2 (idempotent); `scaffold artifacts list` rendered both. Test data cleaned up (CASCADE on job delete removed artifacts) — KB/jobs back to baseline.
+
+---
+
+### §17.564 Fix — remaining research provenance gaps (PDF mode, topic-fallback) + AST guard hardening (2026-06-20)
+
+Audit follow-up to §17.563: two more producers of the same class still shipped Milvus entries with no `rag_entry_provenance` row, and the §17.563 static guard had a blind spot (it scanned only `research_modes/*.py`, not the topic/url/pdf producers that live in `research_agent.py`).
+
+- **PDF mode** — distill loop (`research_agent.py:1794-1815`) + chunk-fallback (`:1824-1834`) attached no provenance. Fixed via a local `build_provenance` import + `setdefault`/literal `provenance` keyed on the PDF `virtual_url`.
+- **Topic mode extraction-fallback** (`research_agent.py:706-720`) — the LLM-success path already set provenance; the raw-chunk fallback didn't. Fixed.
+- After this, **every** ingest producer (topic success+fallback, URL distill+bypass+fallback, PDF distill+fallback, OpenAPI, GitHub, HF, forum) attaches provenance.
+
+**Guard hardening.** New AST-based guard (`test_research_modes_package.py::TestEntryLiteralsCarryProvenance`) parses `research_agent.py` AND every mode file and flags any ingest-entry **dict literal** (has both `content` and `source` keys, value-of-`content` not itself a dict — so JSON-schema `properties` like `RECORD_ENTRIES_TOOL` are correctly excluded) that lacks a `provenance` key. This catches the per-path omission class the §17.563 presence-scan missed (would have flagged URL-fallback, PDF-fallback, topic-fallback, OpenAPI). The loop-`setdefault` paths (URL/PDF distill, on LLM-parsed dicts) aren't literals, so they're covered by functional tests instead: new `test_research_pdf_mode.py::test_pdf_distill_attaches_provenance` joins the §17.563 URL-distill test.
+
+**Verification.** Research suite **283 passed** (incl. the new AST guard + PDF functional test; the AST guard's first run correctly flagged the `RECORD_ENTRIES_TOOL` schema dict as a false positive, which drove the `content`-value-not-a-dict refinement). **Live cold PDF ingest** (generated a 1-page PDF → `POST /research/pdf`): pypdf extracted, 3 entries distilled, provenance **481 → 484**, all 3 rows tied to the session with `source_ref=pdf://scaffold_prov_test.pdf` (was 0). Test data cleaned up — KB back to baseline (481 provenance, 140 sessions). Research→DB provenance is now complete across all modes.
+
+---
+
+### §17.563 Fix — research provenance gap: URL-distill + OpenAPI ingests wrote no rag_entry_provenance rows (2026-06-20)
+
+A live cold URL ingest (run end-to-end to validate the §17.561/562 work didn't disturb research→DB integration) **caught a real gap the static map missed**: ingesting `https://httpbin.org/html` produced **6 Milvus entries (retrievable) but 0 `rag_entry_provenance` rows**. Root cause: `ingest_entries` only writes a provenance row when `entry.get("provenance")` is set (`rag_pipeline.py:1303/1344`), and two entry-producers never attached one:
+- **URL mode, LLM-distill path** (`research_agent.py:1618-1626`) + its chunk-fallback (`:1642-1650`) — only the `distill_bypass` path set provenance, so the *common* distill case (articles, docs, httpbin) shipped entries with none.
+- **OpenAPI mode** (`research_modes/openapi.py`) — built entries with no provenance at all (didn't even import `build_provenance`).
+
+`topic`, `github`, `hf`, `forum`, and URL-bypass were already correct. Impact was metadata-only (entries are still retrievable via the Milvus `source_url`), but affected entries get a neutral `quality_signal=1.0` in re-rank (`rag_pipeline.py:896-898`) and lack Postgres audit linkage (session_id / source_ref / raw_upstream_hash).
+
+**Fix:** attach `build_provenance(source_ref=...)` in all three spots, mirroring the github/hf/forum pattern.
+
+**Verification.** New `test_research_url_mode.py::test_url_mode_distill_path_attaches_provenance` (drives the distill path, captures ingested entries, asserts every one carries provenance) + a `test_research_modes_package.py::TestEveryModeWritesProvenance` static guard (each mode producer must reference `build_provenance` — catches a whole mode forgetting it, incl. future modes). Targeted research suite **104 passed**. **Live re-run after the fix:** same `httpbin.org/html` ingest → provenance **481 → 487**, all 6 rows tied to the session with `source_ref=https://httpbin.org/html` (was 0). Test data (both runs' sessions + Milvus entries + provenance) cleaned up afterward — KB back to baseline (481 provenance, 140 sessions).
+
+---
+
+### §17.562 Feat — interaction-layer rework, Phase 2 (pipeline): guided/minimal surface + `/here` `/next` `/resume` + always-ask + umbrella guidance (2026-06-20)
+
+Phase 2 (the OWUI-facing half of §17.561) makes the surface small and low-stress, consuming the Phase 1 `GET /work` primitive. User-directed: guided/minimal command surface + always-ask autonomous-vs-assist.
+
+- **Guided/minimal surface.** New `advanced_commands_enabled` valve (default **off**) + `/advanced on|off` toggle. When off, only the `_CORE_COMMANDS` verbs (`/go /run /idea /confirm /execute /here /status /next /resume /results /assist /cancel /help /advanced`) dispatch; every other known command returns a one-line "🔒 advanced command — `/advanced on`" hint (gate in `pipe()`, before the dispatch chain). Unknown commands still fall through to the did-you-mean suggester. `/help` is now context-aware: `_help_core()` (the quick-start) when guided, `_help_full()` (the original ~50-command reference) when advanced.
+- **`/here`, `/next`, `/resume` (DB-derived, no UUID).** New `_fetch_work()` calls `GET /work`; `/here` renders active jobs (phase + top next action) and assist sessions, `/next` gives the single next step, `/resume` jumps into the one in-progress item (assist session → `/assist next`; one job → its next step; many → the `/here` picker; none → friendly empty state). This is the direct fix for "couldn't find/resume my work" and doesn't depend on `chat_id` (which OWUI never delivers). The existing per-chat `_active_job_recall` cache is **unchanged** — the read-only resume path uses `_fetch_work` instead, so the 17 no-arg id-taking command sites and their state-altering confirm-friction keep their hardened behavior.
+- **Always-ask autonomous-vs-assist.** The post-DAG block in `_handle_confirm` now **always** presents the `/execute` vs `/assist` choice with a recommendation (autonomous for text/code/research, assisted when the plan has hands-on/Shell steps) — previously it only surfaced the choice when Shell steps existed and otherwise silently auto-ran, the top "assist-vs-autonomous confusion" complaint. (The `/go` one-shot auto-chain is unchanged — it already gates at the §17.444 brief.)
+- **Umbrella assist guidance.** The vendored `assist_start` now renders the Phase 1d `assist_unavailable` body — "📦 multi-part job; its N components run automatically — watch with `/results`" (with per-child status) instead of the cryptic "⏳ No step ready right now."; `no_dag` jobs get a "build a plan first" hint.
+- **Status footer.** `status_footer_enabled` valve (default on) appends a compact "what's next" line (from `/work`) to lookup-class replies (`/results /cost /logs /rag`) only — never interleaved into an SSE stream (would corrupt the auto-chain).
+- **Guided-surface consistency sweep (follow-up).** The always-shown surfaces no longer point guided-mode users at gated commands (which would hit the 🔒 wall): the first-turn welcome preamble, the assist-intent nudge, and the `/status` empty-state + cross-ref footer now use core verbs (`/here`, `/idea`, `/go`) plus a single "`/advanced on` unlocks `/research`, `/jobs`, …" pointer. Hints *inside* advanced handlers are untouched — they're only reached once advanced mode is on.
+- **Polish round (follow-up).** (a) **`/advanced` persists** — the toggle merge-writes `advanced_commands_enabled` into `valves.json` (other valves preserved) so it survives a pipelines-container restart. (b) **Always-ask everywhere** — the choice is a shared `_execution_choice` helper used by both `/confirm` and the `/go` auto-chain edge path (no silent auto-execute on either). (c) **Completion + ideate next-blocks are guided-aware** — they hide the gated `/cost` / `/jobs rename` / `/exec retry` commands behind the `/advanced` pointer in guided mode, full set in advanced. (d) **`/here`/`/next` skip unfilled `{node_key}`** placeholders (no broken-looking `/skip <id> {node_key}`). (e) **Docs** — README first-run flow + a guided-mode callout; USER_GUIDE gains a "Guided mode & the core commands" section, a two-pause-point flow diagram, and the umbrella note. `/advanced` persist verified live (api_key + all 13 valve keys preserved across the merge-write).
+
+**Verification.** New `test_scaffold_router_guided.py` **26 passed** (gate on/off, `/advanced` toggle, `/here`/`/next`/`/resume`, footer present-but-not-in-SSE, `_FOOTER_COMMANDS`). Full pipeline suite `pytest --noconftest tests/test_scaffold_router_*.py` **696 passed** after updating the tests the deliberate behavior changes touched: advanced-command tests (`/research`, `/jobs`) opt into advanced mode; the full-help-content tests (`test_scaffold_router_help_refresh.py`, `helpers::TestHelp`) enable advanced; `/confirm` and text-DAG tests assert the always-ask choice instead of silent auto-execute. Pipeline module imports clean (all tests load it via importlib). Full suite (`pytest -m "not validate"`) **4014 passed** — the only two initial failures (`test_model_valves.py` `/optimize` + `/rag` payload tests) were the same advanced-gate class and now opt into advanced mode. Live smoke through the reloaded pipelines container: `/here` lists seeded work with phases, `/advanced` toggles the gate, and `/assist <umbrella>` renders the multi-part guidance (1/2 components) instead of "no step ready".
+
+---
+
+### §17.561 Feat — interaction-layer rework, Phase 1 (backend): `GET /work`, `aggregating` enum-drift fix, umbrella assist gate (2026-06-20)
+
+Two real OWUI UX failures motivated a guided-mode interaction rework (user-directed, single-user system): (1) **couldn't resume in-progress work** — recall was chat-scoped via `chat_id`, which OWUI does not reliably deliver to an external pipe, and there was no "show my active work" surface; (2) **`/assist` on an umbrella job rendered the cryptic "⏳ No step ready right now."** — umbrella jobs intentionally have 0 DAG nodes (work runs in autonomous component children), but `start_assist_session` had no gate so it seeded an empty session. Phase 1 ships the orchestrator primitives; the pipeline/router rework is Phase 2.
+
+- **`aggregating` enum drift (real latent bug).** `app/routers/status.py` redeclared its own `JobStatus` Literal + `StatusCounts` that were missing `aggregating` (added to the canonical `app/schemas.py:JobStatus` back in §17.525). Effect: umbrella counts were silently discarded by the `valid_keys` filter in `get_status`, and `GET /status?status=aggregating` 422'd. **Fix:** import `JOB_STATUSES`/`JobStatus` from `app.schemas` (single source of truth) and add `aggregating` to `StatusCounts`. A parity test (`StatusCounts.model_fields == JOB_STATUSES`) makes the drift unrepeatable.
+- **`GET /work` — "my active work" in one call.** Non-terminal jobs (`status NOT IN (completed,failed,cancelled)`, newest first, with node counts) + active/paused assist sessions joined to their job title, each job carrying a human `phase` label and pre-filled `next_actions`. This is the single-user "you-are-here" primitive that lets the pipeline resolve current work from the DB instead of the fragile per-replica `_active_jobs_by_chat` cache + chat-scoped chatmap. No schema change (reads existing columns).
+- **`phase_label_for(status)`** added to `app/web/routes.py` next to `_PIPELINE_STEPS` (reused, not duplicated). Deliberately NOT folded into the `_PIPELINE_STEPS` tuple — that tuple's index positions drive the web stepper's `err_idx=4` heuristic, so inserting "Assemble" would shift Execute. Covers `aggregating`→"Assemble", `assisted_*`, and terminal-error statuses the 6-phase stepper omits.
+- **Umbrella / 0-node assist gate.** `start_assist_session` now fetches `job_type` + a `dag_nodes` count and, BEFORE creating any session row, returns structured `{assist_unavailable, reason: 'umbrella'|'no_dag', children:[…], …}` for umbrella or 0-node jobs — no session, no status flip, no commit. `POST /assist/start` returns it as **HTTP 200** (guidance, not an error); the genuine bad-state `ValueError → 409` path is unchanged. Runs ahead of the status check so an `aggregating` umbrella gets guidance, not a confusing 409.
+
+**Verification.** `test_status_logs.py` 25→ +6 (enum parity, `aggregating` count surfaced, `/work` shape, empty, null-title session); `test_assist_agent.py` +2 (umbrella→`assist_unavailable` no-commit, 0-node→`no_dag`) and 2 existing tests updated for the new SELECT shape. Touched-area regression sweep (`-k web/routes/recovery/status/assist/work/jobs/cancel`): **792 passed, 0 failed**. `make ci-tier-0` green; `make openapi-snapshot` regenerated (`/work` + `aggregating` now in `docs/openapi.json`), `make openapi-check` OK. Live curl on the dev image: `/status?status=aggregating`→200, `/work` returns both lists, and a seeded umbrella `POST /assist/start`→200 `assist_unavailable` with children, **0 session rows created, status unchanged** (seed then removed; DB back to 0 jobs).
+
+---
+
+### §17.560 Fix — faithfulness flakiness: retry the intermittent coax miss + bump budget (2026-06-18)
+
+The grounding half of the §17.558 eval was flaky — `score_faithfulness` returned `None` on ~2/3 topics. **Diagnosed before fixing** (a probe, 4 back-to-back calls on a real summary): NOT a timeout — failures returned in **34–49 s, well under the 90 s budget** — the coaxed qwen3.5 thinking model (`role=model_verifier`) intermittently completes the call but emits prose with **no parseable tool-call JSON** (a coax miss; same "first call works, rest fail" shape as the §17.556 kimi spike). **Fix:** retry the intermittent miss (timeout / no-success / no-claims → up to `_FAITHFULNESS_ATTEMPTS=3` draws; a genuine exception stays fail-soft → `None`, no retry), plus `_FAITHFULNESS_MAX_TOKENS` 2048→8192 so reasoning doesn't crowd out the JSON. Retry is the main lever for intermittency; the budget bump is insurance.
+
+**Verification.** `test_faithfulness_17448.py` **14 passed** (+2: retry-coax-miss-then-succeed asserting `await_count==2`; give-up-after-3 → `None`). Probe post-fix: **4/4 scored** (was 1/4), each 1.00. End-to-end `score_research.py`: **grounding scored 3/3** (was 1/3), mean grounding 100% — the §17.558 baseline is now clean (synthesis 3/3, coverage 100%, grounding 3/3). Cost: retry adds latency on a miss (one probe call hit 175 s across re-rolls), acceptable since faithfulness is default-off in production and an optional eval signal.
+
+---
+
+### §17.559 Fix — research summary empty-content (thinking model budget) — bump to 8192 + retry-on-empty (2026-06-18)
+
+The bug the §17.558 eval caught on its first run. `_generate_summary` called `model_router.generate(..., max_tokens=2048)`; the cloud default `model_verifier` (qwen3.5:397b-cloud) is a **thinking model** that spends `num_predict` on reasoning before emitting content, so 2048 returned `success=True` + **empty text** on some topics — `score_research.py` measured `analog-filters` returning an empty summary **2/2 runs** (an empty research summary is worse than a hallucination). The empty text then flowed through cove/faithfulness/finalize into a near-empty summary instead of the §17.166 fallback. **Fix:** `_SUMMARY_MAX_TOKENS = 8192` (was a 2048 literal) gives the reasoning room to still leave a real summary, plus **retry-on-empty** — `success=True` + empty retries one draw; timeout and genuine `success=False` still fall back immediately (the §17.166 contract preserved, no retry on those). The "thinking model empty content" pattern (generous budget + retry-on-empty).
+
+**Verification.** `test_research_agent_summary.py` **19 passed** (+2: retry-then-succeed, persistent-empty→fallback; existing timeout/success/failure contracts unchanged). Live `score_research.py` post-fix: **synthesis_ok 3/3** (was 2/3) — `analog-filters` went empty → **cov 100% / grounding 83%**; mean coverage 100%. (Grounding still `n/a` on 2/3 this run — the separate §17.558 faithfulness-timeout flakiness under sequential qwen3.5 load, not this fix.)
+
+---
+
+### §17.558 Feat — research-output quality eval (`score_research.py`): grounding + coverage (2026-06-18)
+
+Research synthesis had only "did it run" smoke tests — no measure of **grounding** (is the summary fabricated? the §17.522 failure mode) or **coverage** (are the facets addressed?). "What good is data if it's a hallucination?" New `scripts/score_research.py` scores the synthesis step **in isolation** from golden `{topic, entries, expected_facets}` (so it's repeatable, free of SearXNG/fetch variance):
+- **Coverage** (deterministic, unit-tested) — fraction of `expected_facets` addressed in the summary via case-insensitive AND-substring match (§17.550 shape).
+- **Grounding** — reuses the existing `faithfulness.score_faithfulness(summary, entries_text)` → fraction of summary claims supported by the collected entries (the real anti-hallucination signal, not a term-overlap proxy).
+- Empty summaries are flagged **`synthesis_failed`**, distinct from "low coverage / ungrounded", so means aren't polluted.
+
+Fixture `tests/fixtures/research_goldens.json` (3 topics); `test_score_research.py` **5 passed** (pure coverage scorer). Grounding is LLM-judged (qwen3.5 coaxed) → a measured eval with a soft floor, **not** a byte-deterministic CI gate like the retrieval one.
+
+**Baseline + findings (the eval earned its keep on first run).** 3 topics: x86 cov 100%, rag cov 33–100% (stochastic across runs), grounding 0.67–1.0 when scored. **Two real issues surfaced:**
+1. **`analog-filters` synthesis returns an EMPTY summary, reproducibly (2/2 runs)** — `_generate_summary` (`max_tokens=2048`) lets the qwen3.5 thinking model spend its budget on reasoning and return success+empty (the documented "thinking model empty content" issue). An empty research summary is worse than a hallucination → **follow-up: bump `_generate_summary` budget (→8192) + retry-on-empty.**
+2. Grounding via `faithfulness` (qwen3.5) is slow and occasionally times out under sequential load → grounding `n/a` on some topics; transparent via `grounding_scored/synthesis_ok`. Coverage is stochastic run-to-run (synthesis non-determinism), so this is a **diagnostic**, not a hard gate.
+
+---
+
+### §17.557 Feat — generalize `model_ab.py` to a pluggable `--task` harness (codegen + extraction) (2026-06-18)
+
+`model_ab.py` was CodeGen-only. Generalized it to a `--task` registry so model A/Bs for other roles are first-class, not ad-hoc scripts. Each `Task` supplies a `dispatch` (how to call the model) + a `score` (task-specific verdict); the shared infra (pre-flight `/api/show`, **fallback rejection** so an unavailable candidate is never scored as itself, latency/throughput capture, summary table, JSONL) is reused. Two tasks ship:
+- **codegen** (§17.495, unchanged behavior) — `generate()` → structural goldens + sandbox exec-smoke.
+- **extraction** (new) — `tool_call(DISTILL_*)` → did the model emit a parseable non-empty `entries` tool-call (native or coaxed). This is the objective form of the §17.556 manual spike; new fixture `tests/fixtures/extraction_goldens.json` (2 goldens).
+
+The pure scorers (`score_codegen`, `score_extraction`) and aggregation (`_summarize`/`_avg`) stay import-light + unit-tested. **Verification:** `test_model_ab.py` **18 passed** (existing `_run_one`/fallback-rejection tests updated to the `(task, model, golden)` signature; +5 `score_extraction` cases). `--task extraction --dry-run` loads the fixture; **live A/B reproduced §17.556** — `qwen3.5:397b-cloud` (coaxed) 3/3 (4/6/8 entries) vs `kimi-k2.7-code:cloud` (native) 1/3 (10/0/0). A `verifier` task (verdict-match goldens) is the obvious next registry slot. Why it matters: the §17.556 "measure before switching roles" lesson is now a one-liner (`model_ab.py --task extraction --models A B`), not a throwaway script.
+
+---
+
+### §17.556 Verify — gt_extractor coax path is reliable; native switch would regress (closes the "finish the tool-call role split" idea) (2026-06-18)
+
+A system-review candidate proposed routing the still-coaxed `model_verifier`/`model_router` tool-call paths (`gt_extractor`, `execution_verify`, research decompose/gap) to a native-tool model, mirroring §17.548's research-extraction switch. **Measured it instead of assuming.** Ran the real `gt_extractor.distill_entries` path (`DISTILL_SYSTEM`/`DISTILL_PROMPT` + `RECORD_DISTILLED_ENTRIES_TOOL`, the production call) 5× per role on live cloud:
+
+| Path | Success | Entry counts |
+|---|---|---|
+| Coaxed `model_router`=qwen3.5 (current) | **5/5** | 4,4,4,4,4 |
+| Native `model_research_extract`=kimi (proposed) | **1/5** | 12,0,0,0,0 |
+
+**Conclusion: the switch would be a regression.** The §17.547 coax gate already made this path reliable (5/5); native kimi is flaky on *this* prompt/tool (1/5) even though §17.548 measured it 3/3 on the *research* extraction prompt — i.e. **native-vs-coax reliability is per-prompt, not a blanket property.** The earlier premise ("coaxing is strictly less reliable than native") is false here. Combined with §17.548's deliberate choice to keep judgment paths (verify/faithfulness/CoVe) on coaxed qwen3.5, the whole "finish the role split" item resolves to **leave as-is**. Lesson kept: any future role change must be A/B-measured per prompt (cf. the `model_ab.py` generalization). (The `record_llm_call_failed: password authentication` noise during the spike is the standalone-script telemetry-DB artifact — fail-soft, both roles hit it, qwen3.5 still 5/5.)
+
+---
+
+### §17.555 Feat — wire the coverage gate into CI (`test.yml` unit-test job) (2026-06-18)
+
+Promotes the §17.554 gate from local-only into CI. The `Scaffold Engine CI` → "Unit Tests" job already runs the full `-k "not integration"` suite in `scaffold-orchestrator:ci`; that image is the Dockerfile **`dev` stage** (build-push-action builds the last stage, which copies the builder venv incl. `requirements-dev.txt` → `pytest-cov` is present). So coverage **piggybacks on the run that already happens** — no second ~10-min run added. The step now passes `--cov=app --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=${COVERAGE_MIN}` (workflow env `COVERAGE_MIN=77`) plus `-e COVERAGE_FILE=/tmp/.coverage` (the ci image's `/code` is root-owned vs the container user — same fix as `make coverage`).
+
+**Threshold rationale (measured, not guessed).** test.yml's scope is `-k "not integration"`, *different* from `make coverage`'s `-m "not validate"`. Measured both on the live dev image: `-m "not validate"` = **82%** (3966 passed), `-k "not integration"` = **81%** (3891 passed) — within 1 pt, confirming integration tests add negligible coverage and that 77 has ~4 pts headroom in the CI scope too. **Verification limits (honest):** pytest-cov presence is verified (dev stage), the YAML parses, `--cov-fail-under` is verified to fire both ways (§17.554), and 81% ≥ 77 locally — but the CI job itself is **unverified end-to-end** because GitHub Actions is org-billing-blocked (PR #69). First green CI run after billing is restored is the real confirmation; `COVERAGE_MIN` is a one-line workflow env to retune if the CI scope (no live Milvus/Ollama, only Postgres) lands lower than the local measurement.
+
+---
+
+### §17.554 Feat — turn `make coverage` into a gate at 77% (§17.553 follow-up) (2026-06-18)
+
+Supersedes the "no `--cov-fail-under` gate yet" note in §17.553. `make coverage` now passes `--cov-fail-under=$(COVERAGE_MIN)` (Makefile var, default **77** — ~5 pts under the measured 82% unit baseline: headroom for normal churn, fails on a real drop). Overridable: `COVERAGE_MIN=0 make coverage` for pure reporting, or raise as coverage grows. **Verification:** `make -n coverage` shows `--cov-fail-under=77`; gate exercised both ways in a one-off dev container — floor=0 → 10 passed exit 0; floor=100 → `Coverage failure: total … is less than fail-under=100` (pytest non-zero). At the 82% baseline the gate clears. Still local/dev only — not yet invoked by a CI tier (a follow-up if/when coverage should block merges).
+
+---
+
+### §17.553 Feat — code-coverage measurement (`make coverage`) + baseline (2026-06-18)
+
+**Why.** No coverage tooling existed (no `pytest-cov`/`coverage` in any requirements file) — 3,966 unit tests but no way to quantify what `app/` they exercise. Closes the other half of the "we measure latency/errors but not test/retrieval coverage" gap (cf. §17.550–552 for retrieval).
+
+**What.**
+- `pytest-cov==7.1.0` added to `requirements-dev.txt` (dev-only; `scripts/_prune_dev_deps.py` uninstalls it from the prod runtime image).
+- `[tool.coverage.run]` / `[tool.coverage.report]` in `pyproject.toml` (`source=["app"]`, `branch=true`, exclude `TYPE_CHECKING`/`__main__`/abstractmethods). **`--cov` is deliberately NOT in pytest `addopts`** — cloud `ci-smoke` runs `requirements-ci.txt` (no pytest-cov) and a global `--cov` would crash it with "unrecognized arguments"; coverage is opt-in per-target only.
+- `make coverage` target — `pytest tests/ -m "not validate" --cov=app --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml:/tmp/coverage.xml`, report-only (no gate, per the "not a gate yet" decision).
+- **`COVERAGE_FILE=/tmp/.coverage`** is set in the target (and `data_file` in config): `/code` is root-owned in the dev image but tests run as uid 1000, so coverage's default CWD-relative SQLite DB is unwritable — the env var fixes it independently of the baked pyproject (same class as the `cache_dir`→/tmp fix). Two runs failed on this before the fix.
+
+**Baseline (2026-06-18, dev image, `-m "not validate"`).** **82% line+branch coverage of `app/`** — 15,488 statements (2,420 missed), 4,292 branches (561 partial); 3,966 passed / 16 deselected in 23m44s. **Reads as unit coverage only:** integration/`validate` tests are excluded, so I/O-heavy modules under-report — the lowest are exactly those exercised by integration tier (`routers/specs.py` 31%, `routers/assist.py` 40%, `routers/workflow.py` 42%, `scheduler.py` 74%, `sim/design_pipeline.py` 70%, `providers/anthropic.py` 70%), while pure-logic modules are high (`schemas.py` 95%, `sim/formal_verify.py` 95%, `sim/device_sizing.py` 94%). No `--cov-fail-under` gate yet — deferred until the number is trusted; a fuller picture needs `coverage combine` with the tier-2 integration run (the live stack), a separate follow-up.
+
+---
+
+### §17.552 Feat — wire the corpus golden set into `ci-tier-2` as a retrieval-quality gate (2026-06-18)
+
+**What.** The `make ci-tier-2` golden-retrieval sidecar (step 4/5) previously ran `score_retrieval.py` against the default `golden_set.json` — the 0%-floored historical set (§17.211/§17.229/§17.550) — and only **printed** the numbers. Now it runs against `tests/fixtures/golden_set_corpus.json` (the §17.550 corpus-matched set) **and gates**: the step exits non-zero (failing tier 2) if `coverage_at_5 < RETRIEVAL_MIN_COV5` or `mean_title_mrr < RETRIEVAL_MIN_MRR`. Floors default to **0.70 / 0.55** — conservative vs the as-deployed 0.864 / 0.818 (§17.551) and even the BM25-off counterfactual 0.818 / 0.765, so normal corpus drift won't flake the gate but a real break (reranker down, BM25 dropped, corpus wiped → the 0% scenario) fails it. Both floors are env-overridable (`RETRIEVAL_MIN_COV5` / `RETRIEVAL_MIN_MRR`) for retuning as the corpus grows.
+
+**Verification.** `make -n ci-tier-2` parses clean. Ran the step exactly as the Makefile invokes it (corpus golden set, live stack, full pipeline) → `coverage_at_5=86.4% coverage_at_10=86.4% mean_mrr=0.818`, **gate PASS** (exit 0). Negative check: forcing `RETRIEVAL_MIN_COV5=0.99` → **exit 1** (gate correctly rejects below-floor). The historical `golden_set.json` stays in-tree as archival reference; nothing else in tier 2 changed.
+
+---
+
+### §17.551 Verify — BM25 hybrid retrieval (§17.431) is already live in production; impact quantified (2026-06-18)
+
+**Discovery.** Investigating the "deploy BM25" item (a system review flagged `rag_bm25_enabled` default `False` as "gated, not deployed"), the destructive migration turned out to be **unnecessary — BM25 is already live.** Evidence from the running orchestrator: `toon_v2` already carries the `sparse_bm25` `SPARSE_FLOAT_VECTOR` field **and** the `bm25_canonical_text` BM25 `Function`; `RAG_BM25_ENABLED=true` is in `.env` and reaches the orchestrator via its `env_file` (the §17.536 least-privilege env_file removal applied to OWUI/pipelines, **not** the orchestrator, which keeps `env_file: .env`); so `settings.rag_bm25_enabled=True` **and** `collection_has_bm25()=True` → `_keyword_search` routes to `_bm25_search`. The collection got the BM25 schema because `_auto_create_collection` calls `build_toon_v2_schema()` with no arg, which follows `settings.rag_bm25_enabled` — so any (re)create while the flag was set produced the BM25 schema. The migration script confirmed it: `scripts/migrate_toon_v2_bm25.py` (dry-run) reported `'toon_v2' already has 'sparse_bm25' — already migrated, nothing to do.` The review's "not deployed" was a false negative (read the config default, not `.env` + the live collection). **The committed default stays `False`** (opt-in posture, §17.128-family rationale); this host opts in via `.env`.
+
+**Impact (measured via the §17.550 corpus yardstick, full pipeline: vector + keyword + RRF + CrossEncoder rerank).**
+
+| Config | cov@5 | cov@10 | mean title MRR | misses |
+|---|---|---|---|---|
+| **BM25 ON (as deployed)** | **86.4%** | **86.4%** | **0.818** | 3/22 |
+| BM25 OFF (counterfactual) | 81.8% | 81.8% | 0.765 | 4/22 |
+
+So BM25 is already delivering **+4.6 pts coverage, +0.053 MRR** vs the LIKE-scan keyword leg, fixing the *"Sallen-Key low-pass filter"* keyword-precision miss (miss → rank 1) with **zero regressions** (every prior hit retained; MRR rose from more rank-1 placements). On 22 queries the coverage delta is a single-query flip; the MRR gain is the more robust signal. Remaining 3 misses (interrupt-21h, ISA-design-principles, hallucination-eval-RAG) are tokenization/golden-strictness, not made worse.
+
+**Method (fully non-destructive — `toon_v2` never mutated).** (1) Rehearsed the migration on a throwaway `_bm25_migrate_test` (80 real rows): full flow + the production `upsert`-with-Function path (the script only exercises `insert`) both OK. (2) Built a parallel `toon_v2_bm25_eval` from a dump, ran the golden set against it. (3) Got the as-deployed number by scoring the live `toon_v2` with the production config. (4) Confirmed the BM25-OFF counterfactual by forcing `RAG_BM25_ENABLED=false`. All temp collections dropped; live `toon_v2` row_count 1314 throughout. **Row-count note for any future recreate:** live `row_count`=1314 includes ~32 upsert tombstones; live entities = **1282** (per-domain sum; zero rows outside `VALID_DOMAINS`). The per-domain dump captures the 1282 live rows and the migration's dumped-vs-reinserted check (1282==1282) is the integrity gate — expect post-recreate `row_count` to settle at ~1282 (tombstone compaction), not data loss.
+
+---
+
+### §17.550 Feat — corpus-matched retrieval golden set (a non-zero quality yardstick) (2026-06-18)
+
+**Why.** `tests/fixtures/golden_set.json` (20 queries) has been **floored at 0% coverage** since §17.211/§17.229 — its `expected_entry_ids` (and even the §17.230 title substrings) point at pre-§17.63 content the current corpus no longer holds. Live confirmation this session: `score_retrieval.py` against the live `toon_v2` returned **cov@5/@10 = 0.0%, MRR 0.000** on all 20 queries. Cause is corpus mismatch, not a retrieval bug — the corpus is 8086/BIOS/concept-drift + RAG-paper + digital-circuit content, while the golden queries ask about topological sort / OAuth2 / gRPC / caching. A 0% harness can't measure *any* retrieval change (e.g. the BM25 cutover), so there was no working before/after yardstick.
+
+**What.** New fixture `tests/fixtures/golden_set_corpus.json` (version `corpus-1.0`, 22 pairs) built against the live corpus (1,282 live entries: eng=801, llm=369, rag=52, eng_design=38, prompt=21, spec=1). Every pair targets a title that **exists** in the queried partition, using the §17.230 title-substring AND-match shape (`expected_titles_contain`). Drop-in for `score_retrieval.py` (reads `["pairs"]`; pass `--golden tests/fixtures/golden_set_corpus.json`). Domains assigned per pair so each target sits in its partition; spans all 6 populated domains.
+
+**Verification.** Deterministic pre-check: **22/22** pairs have ≥1 live in-corpus title matching all substrings. Live baseline against `toon_v2` (full pipeline: vector + LIKE keyword + RRF + CrossEncoder rerank, `RAG_BM25_ENABLED` inert pre-migration): **cov@5 = cov@10 = 81.8%, mean title MRR = 0.765**, 4/22 misses (interrupt-21h, ISA-design-principles, Sallen-Key-LP, hallucination-eval-RAG — a mix of keyword-precision gaps and golden strictness, all diagnostic). The old `golden_set.json` is kept as historical reference (not deleted); this fixture is the live yardstick going forward. Not yet wired into `make ci-tier-2` (still references the historical set) — a deliberate separate follow-up so "add yardstick" isn't conflated with "change the CI gate."
+
+---
+
+### §17.549 Feat — broader research sub-topic coverage + soft recency bias (2026-06-18)
+
+**Goal.** Research should (a) cover more distinct sub-topics and (b) favor the most up-to-date information.
+
+**Breadth.**
+- Decompose facet target widened **3–8 → 5–12** (`DECOMPOSE_SYSTEM_V1` + the `plan_research` tool-arg description). Live: a "Kubernetes autoscaling" decompose now returns **12 facets** (was capped at 8).
+- `research_max_queries` **8 → 12**, `research_max_urls_per_iteration` **20 → 30** (config) so the extra facets actually get searched/ingested.
+- Iteration counts (`ResearchState.max_iterations`) **shallow/medium/deep 1/2/4 → 2/3/6** so gap-analysis chases more sub-topics. (Cost/latency rises with depth — the explicit tradeoff.)
+
+**Recency (soft — no hard `time_range` filter, per the chosen design).**
+- **Synthesis side:** `_recency_directive()` prepends today's date to the decompose / gap / extract system prompts so the model prefers current versions/recent sources and favors the newer source on conflict.
+- **Retrieval side:** the model proved **unreliable** at adding recency cues to queries from a prompt instruction (measured 0/12 even with a "MUST" directive), so `_apply_recency_cue()` **deterministically appends the current year** to each search query that doesn't already name one (gated on `research_recency_query_boost`, default on). Live: `"kubernetes autoscaling best practices"` → searched as `"… 2026"`, still 10 results (no recall collapse). It's a soft bias — SearXNG ranks fresh results higher but older ones aren't excluded.
+
+**Verification.** Research suite green — `test_research_agent_core` (incl. `TestSearchQueries` + 3 new `_apply_recency_cue` tests), `_helpers`, `_state_lifecycle`, `_searxng_engines`, `quick_research`, `_topic_bypass` = **50 passed** in the dev image. Live (fresh-process + live services): decompose → 12 facets; `_search_queries` issues the year-appended query and returns results. The 3 pre-existing `TestSearchQueries` dedup tests set `research_recency_query_boost=False` (they test dedup, not recency). **End-to-end** (orchestrator restarted, live `POST /research`): decomposition stream showed **10 facets** and **10/10** SearXNG queries carried the `2026` cue. Honest tradeoff: **2/10** year-tagged queries returned 0 results (appending the year occasionally over-narrows) — covered by the other queries + gap iterations, and `research_recency_query_boost=false` disables it if it hurts a given corpus.
+
+---
+
+### §17.548 Feat — research extraction does native tool-calling (native-first + coaxing fallback) on a tool-capable model (2026-06-18)
+
+**Why.** §17.547 made research extraction *work* (coaxing on `qwen3.5:397b-cloud`), but always via the JSON-coaxing workaround — the thinking model never emits native `tool_calls`. Wanted genuine native tool-calling on a capable model, with coaxing only as a safety net.
+
+**Investigation.** A raw `/api/chat` call with an unambiguous tool task → `kimi-k2.7-code:cloud` and `qwen3-coder-next:cloud` both emit real `tool_calls`, so native tool-calling **does** work in this Ollama. The 100% miss had two prompt/config causes: (a) `EXTRACT_SYSTEM_V1` instructed the model to *output a JSON array in content* — never to call a tool — so models correctly put JSON in `content`, not `tool_calls`; (b) Ollama's `/api/chat` **ignores `tool_choice`** here (`"required"` did not force a call), so the tool can't be compelled — it depends entirely on the prompt.
+
+**Change (3 parts).**
+1. **Native-first + coaxing fallback** (`model_router._native_first_then_coax`): try the native `tool_call`; if it succeeds but returns no `tool_calls` (model answered in prose), auto-fall-back to `_tool_call_via_coaxing`. Tool-capable models keep the clean single native call; anything else still gets structured output. Used by both the role and model dispatch branches.
+2. **Tool-oriented prompt**: `EXTRACT_SYSTEM_V1` now instructs the model to call `record_entries` (the field list is kept as the tool's arg description); the content-JSON `OUTPUT FORMAT` block is gone. The coaxing fallback re-injects a JSON instruction on its own, so the prompt works for both paths.
+3. **Tool-capable extraction model**: new role `model_research_extract` (default `kimi-k2.7-code:cloud`, provider ollama; added to `ROLE_FIELDS` + `validate_models`'s `OLLAMA_ROLES`). The three research extraction call sites (`_extract_entries` + the URL/PDF-mode variants) now use it instead of `model_verifier`, and their `max_tokens` went 1024→4096 (a 5–15-entry tool call doesn't fit in 1024). `model_verifier` stays `qwen3.5:397b-cloud` for verification/faithfulness/CoVe (still coaxed via the §17.547 deny-list).
+
+**Verification.** `test_model_router.py` (+2 native-first tests) + tool_call + config + research extraction = **116 passed** in the dev image; 10 model-override/switchable tests green (new role is switchable, no schema/valves cascade — `SWITCHABLE_ROLE_FIELDS` is only consumed by the runtime-override endpoint). Live (fresh-process + live cloud), production extraction path `role=model_research_extract`: **3/3 runs went NATIVE** (no coax fallback needed) producing 5 entries each — vs the §17.547 measurement of **0/16** on `qwen3.5`. **End-to-end** (orchestrator restarted, full `POST /research` shallow run): ran to `research_complete`; **7/7 extraction batches** produced LLM entries (11/12/10/12/8/10/12 = 75) with **zero** `extraction_no_tool_args`/`_llm_failed`/coax-fallback log lines — every batch went native through the live HTTP path.
+
+---
+
+### §17.547 Fix — per-model native-tools gate: thinking models route to coaxing (fixes 100% tool-call miss) (2026-06-18)
+
+**Measurement (the §17.546 follow-up).** Ran the exact production extraction path (`EXTRACT_*` prompts + `RECORD_ENTRIES_TOOL` + `model_router.tool_call`, `role="model_verifier"`) over 16 controlled calls: **16/16 misses** (0 parseable `entries`) at both `max_tokens=1024` and `4096`. So LLM research extraction was silently falling back to non-LLM chunking for **every** distilled URL.
+
+**Root cause (two compounding factors).**
+1. `role="model_verifier"` resolves to **`qwen3.5:397b-cloud`** — a *thinking* cloud model that returns its answer in content/thinking and never populates `message.tool_calls` over Ollama's `/api/chat`. But `OllamaProvider.supports_native_tools = True` is **provider-wide**, so every model is forced down the native tool path regardless of whether it actually emits tool calls.
+2. Even via the JSON-coaxing fallback, the extraction call's `max_tokens=1024` is marginal for a thinking model — reasoning can consume the whole budget before the JSON is emitted (flaky: 0 entries one run, 3 the next).
+
+**Fix.**
+- **Per-model gate** (`model_router._model_lacks_native_tools`): a model whose id matches `settings.tool_call_coax_models` (default `["qwen3.5"]`, substring/case-insensitive) skips `provider.tool_call` and uses the existing `_tool_call_via_coaxing` (JSON-in-content) path, even though the provider advertises native tools. Applied on both the role and model dispatch branches in `tool_call`.
+- **Token floor** in `_tool_call_via_coaxing`: for those models, `max_tokens` is floored to `settings.tool_call_coax_min_tokens` (default 4096) so reasoning doesn't starve the JSON.
+
+**Verification.** `test_model_router.py` + `_tool_call.py` = **84 passed** in the dev image, incl. 3 new: `_model_lacks_native_tools` matching, coax-routing (deny-listed model skips native), and the token floor. Live (fresh-process + live cloud model), production path `role=model_verifier max_tokens=1024`: **3/3 runs produced 4–5 entries** with `tool_calls=True` (was 0/16).
+
+**Blast radius.** The gate also repairs the other native-tool paths on `model_verifier`/`qwen3.5:397b-cloud` — `gt_extractor`, `execution_verify`, and the research decompose/gap steps (research_agent.py:1539/1709) — which were subject to the same miss. Confirms the recurring lesson (memory `tool_call_needs_tool_objects` / `thinking_model_empty_content`): default-routing + mocks hid a 100%-fail tool-call bug; a live smoke surfaced it.
+
+---
+
+### §17.546 Fix — split the mislabeled `extraction_llm_failed` log (research extractor) (2026-06-18)
+
+**Symptom.** `_extract_entries` (`app/modules/research_agent.py`) logged `extraction_llm_failed: … success=True error=None` at WARNING whenever a batch produced no parseable `entries` tool-call — even when the LLM call itself succeeded. Observed in the §17.543 smoke (batches 11–12). The name implied a transport/LLM failure; the reality is the extractor model returned content with no parseable tool-call, after which the code falls back to non-LLM extraction.
+
+**Change.** The single `else` is now two branches: `extraction_no_tool_args` (`resp.success` true but no parseable `entries` — a tool-calling miss → non-LLM fallback) vs. `extraction_llm_failed` (the genuine `resp is None`/`success=False` case, now logging `success=False`). No control-flow change; the fallback path is unchanged.
+
+**Why it matters beyond cosmetics.** The old name buried a real quality signal: a high `extraction_no_tool_args` rate means the 7b extractor is frequently dropping to the dumber non-LLM fallback, degrading research extraction. The split makes that rate independently greppable so it can be measured (open follow-up — the smoke's 2/12 sample is too small to size).
+
+**Verification.** Research extraction tests green — `test_research_agent_extract_no_entries` + `_core` + `_summary` = **42 passed** in the dev image.
+
+---
+
+### §17.545 Fix — embed payloads set `truncate=true` so over-length input can't 400/drop the entry (closes §16.7 secondary) (2026-06-18)
+
+**Root cause.** Neither embed payload (`app/providers/ollama.py::embed`, the role/ingest path; `app/model_router.py::embed`, the model path) set Ollama's `truncate` flag on `/api/embed`. When an input exceeds the embedder's context (nomic-embed-text = **2048 tokens**, confirmed via `/api/show`: `nomic-bert.context_length=2048`), Ollama can return `HTTP 400 "the input length exceeds the context length"` — which, since embeddings have no fallback (§17.544), drops the entry from ingest. Reproduced exactly: on the live daemon, `truncate=false` → that 400; `truncate` unset or `true` → 200 (head-truncates).
+
+**Change.** Both embed payloads now send `"truncate": True`. Over-length input head-truncates to the embedder's context (Ollama-side, to the model's exact limit — no char-guessing, respects the config-only/dim-locked embedder invariant) instead of failing. No fallback is involved (embed `fallback=None`, §17.544).
+
+**Verification.** `tests/test_finding_b_root_cause.py` + `tests/test_model_router.py` = **81 passed** in the dev image, including new `test_embed_payload_sets_truncate_true` (asserts the dispatched `/api/embed` payload carries `truncate=True`). Live (fresh-process import + live Ollama): a 30 000-char / ~3 600-token input (well over the 2048 ctx) now embeds successfully via the role path (`embedded_ok: True`, 1 vector) instead of 400-ing.
+
+**Residual (not a defect).** This head-truncates very long docs to the first ~2048 tokens; it does **not** sub-chunk a long entry into multiple fully-embedded vectors. Full tail coverage of over-long docs would be a separate ingest enhancement (split → embed each chunk), not tracked as an open bug.
+
+---
+
+### §17.544 Fix — embedding calls no longer get a chat-model fallback injected (closes §16.7) (2026-06-18)
+
+**Root cause.** `_dispatch_with_retry` (`app/model_router.py:273`) did `fallback = fallback or _smart_fallback(model, settings.model_fallback)`, which silently overrode the embed callers' deliberate `fallback=None` (both `app/providers/ollama.py:139` and `app/model_router.py:693`). The injected `settings.model_fallback` (`qwen3.5:latest`) is a chat model that returns `HTTP 501` on `/api/embed`, so any failed embed (e.g. an over-length chunk's `HTTP 400`) burned a guaranteed-doomed fallback round-trip (~14s on the live smoke) before failing. Found during the §17.543 research-ingest smoke.
+
+**Change.** Guard the injection by endpoint — `if endpoint != "/api/embed": fallback = fallback or _smart_fallback(...)`. The embedder is config-only (dim-locked at 512) so there is no valid drop-in embedding fallback to inject; embed calls now honor `fallback=None`. Chat/generate/classify behavior is untouched (they don't hit `/api/embed`, so they keep the smart-fallback default when they pass `None`).
+
+**Verification.** `tests/test_model_router.py` = **74 passed** in the dev image, including two new guards: `test_dispatch_no_fallback_injected_on_embed_endpoint` (embed failure attempts only the embedder, `fallback_used is False`) and `test_dispatch_still_injects_smart_fallback_on_generate` (regression — `/api/generate` with `fallback=None` still falls back). Live (fresh-process import + live Ollama): a forced embed failure now logs `All attempts exhausted for … (fallback: None)` with **no `Falling back` line and no 501** (was `(fallback: qwen3.5:latest)` + 501). **Secondary item from §16.7 — ingest chunks exceeding the embedder context window — remains open** (separate, smaller; see §16.7).
+
+---
+
+### §17.543 Perf — semaphore-bounded concurrent SearXNG fan-out in the research loop (2026-06-17)
+
+**Motivation.** `_search_queries` ran each search serially with `await asyncio.sleep(research_searxng_delay)` (1.5s) after every cache-miss query. With up to `research_max_queries` (8) misses that's ≥12s of wall-clock per research iteration, ×N iterations. (Cache hits already `continue`d before the sleep, so the delay only ever applied to misses — the "even on cache hits" framing in the audit was wrong.)
+
+**Why not just `gather` and drop the delay.** The delay is deliberate politeness — the homelab SearXNG fans out to upstream engines that rate-limit. So the fix keeps the cooldown but stops it being a strict serial barrier.
+
+**Change** (`app/modules/research_agent.py` + `app/config.py`):
+- New config `research_searxng_concurrency` (default 3, 1–8).
+- `_search_queries` restructured into 3 phases: (1) sequential dedup + cache-hit resolution (cheap Redis gets); (2) cache-MISS queries fetched concurrently under `asyncio.Semaphore(concurrency)`, with `asyncio.sleep(delay)` held **inside** each slot as a cooldown (effective rate ≈ concurrency/delay, still polite); (3) URL dedup done sequentially after the gather so `url_history` stays race-free and the winning duplicate is deterministic.
+- `search_history` semantics preserved exactly: added on a received response (200 or non-200), left un-added on exception so a later iteration may retry. Within-batch dup queries are deduped via a `seen_in_batch` set before dispatch.
+
+**Verification.** Research unit suite green — `test_research_agent_core` (incl. `TestSearchQueries`), `_searxng_engines`, `_helpers`, `quick_research`, `_lifecycle`, `_topic_bypass` = **50 passed** in the dev image. The 3 `TestSearchQueries` tests needed `mock_settings.research_searxng_concurrency = 3` added (they patch `settings` wholesale; without it `asyncio.Semaphore(MagicMock)` raised) — a test-mock update, not a logic fix. Live smoke against the real SearXNG (3 distinct queries): 20 unique-URL results, **2.6s vs ≥4.5s+net serial**, no upstream throttling/errors; the 20-result cap (`research_max_urls_per_iteration`) truncation order matches pre-change behavior.
+
+---
+
+### §17.542 Perf — parallelize per-partition Milvus search fan-out (vector / BM25 / LIKE) (2026-06-17)
+
+**Motivation.** Under partition-key isolation `_vector_search`, `_bm25_search`, and `_keyword_search_like` each fan out one `collection.search/query()` per domain partition, but did so **serially** inside a single `_sync()` closure on one executor thread. With `domain=None` (cross-domain retrieval) that's N sequential Milvus round-trips; the common `domain_hint` path is 2 partitions (`{hint, "llm"}`, §17.188).
+
+**Safety basis.** Concurrent `collection.search()` on the *same* `Collection` is already in production — the vector and keyword legs run under one `asyncio.gather` (rag_pipeline.py ~806), each with its own `run_in_executor`. So two concurrent same-Collection searches already happen every query; the per-partition fan-out is strictly more of the same proven pattern, not a new concurrency model.
+
+**Change.** Each of the three functions: the per-domain body was lifted out of the `for d in domains` loop into a `_search_one(d)` helper (per-domain try/except preserved, so one failing partition no longer aborts the rest — it returns `[]` and the others proceed), then dispatched via `asyncio.gather(*[loop.run_in_executor(None, _search_one, d) for d in domains])`. Results are flattened, sorted by score desc, truncated to `top_k` — identical merge semantics to before. Added an early `if collection is None: return []` guard before the gather.
+
+**Verification.** RAG unit suite green — `test_rag_pipeline{,_cache,_smoke}.py` + `test_rag_protocol.py` = **85 passed** in the dev image, running the volume-mounted new code (confirmed container sees `§17.542`). Live end-to-end against real Milvus (`query_rag('…', domain=None)`): `status: ok`, 3 results correctly merged across 3 partitions (`rag`/`eng`/`llm`), no concurrency errors. Note: the long-running uvicorn process holds pre-change code in memory until the next orchestrator restart; the new fan-out has been exercised via fresh-process import + live Milvus, not yet via the live HTTP endpoint.
+
+---
+
+### §17.541 UX — surface real error detail in scaffold_router auto-chain failures; clarify stall/409 recovery (2026-06-17)
+
+**Motivation.** Audit of the OWUI command surface found several auto-chain failure paths that swallowed the orchestrator's actual error and showed a generic line, while a better extraction pattern already existed in-file (research-phase handler, ~line 1696: `r.json().get("message") or r.json().get("detail") or r.text[:200]`). Users hit "I had trouble with that request" / "I wasn't able to plan that" with no HTTP status, no detail, and (for stalls) no sign their work survived.
+
+**Changes** (all in `pipelines/scaffold_router.py`, string-only, no control-flow change):
+- `/go` Phase-1 `/ideate` ≥400 (was ~2302): now extracts `message`/`detail`/`text[:200]` and shows `HTTP {status}: {err}` before "Could you rephrase it?".
+- `/go` Phase-3 `/dag` ≥400 (was ~2378): same extraction, plus the retry hint is pulled to the front and bolded — **"Research is done — retry just this step with `/dag {job_id}`"** — instead of being buried after a generic line.
+- Research-stream `stream_stalled` (was ~2586): now tells the user research may still be running in the background and to check `/jobs`, instead of a bare "Closing."
+- Execute-stream `409` (was ~2712): now names the in-scope `job_id` and points to `/results {job_id}` instead of a context-free "already being processed."
+
+**Verification.** `python3 -m py_compile pipelines/scaffold_router.py` clean; confirmed `job_id` is the first param of `_execute_and_stream` (in scope for the 409 edit) and the error-extraction mirrors the existing line-1696 pattern. **Not yet live-smoked in OWUI** — these are display-only strings on already-exercised error branches; behavior is unchanged.
+
+---
+
+### §17.540 Fix — latent `_sse_with_disconnect_watch` import broke the streaming guide/handoff (HTTP 500) (2026-06-17)
+
+**Symptom.** Once §17.539 first routed a real user into the streaming guide, OWUI showed **HTTP 500**. Orchestrator log: `ImportError: cannot import name '_sse_with_disconnect_watch' from 'app.main'` on `POST /assist/{sid}/guide/stream`.
+
+**Root cause.** The SSE disconnect-watch helper was relocated `app.main → app.utils.sse` (research.py was updated; `app/routers/assist.py` was not). Its two **in-function** imports (`/assist/{sid}/guide/stream` line 271, `/assist/{sid}/handoff` line 440 — deferred to dodge an app.main import cycle) still said `from app.main import _sse_with_disconnect_watch`. Because the imports are lazy (inside the handler), they only blow up at *request* time, and **no unit test drove the real import** — so both the streaming guide (§17.493) and handoff endpoints had been 500ing since the move, latent. §17.539 was the first code to route a live user into the streaming guide, surfacing it.
+
+**Change.** Both imports → `from app.utils.sse import _sse_with_disconnect_watch`. No other `from app.main import` remains anywhere in `app/`. New `tests/test_assist_lazy_imports.py` statically resolves **every** `from app.* import …` in assist.py (module-top AND in-function, submodule-aware) so a moved/renamed symbol fails in CI, not in production.
+
+**Verification.** Live: `POST /assist/{sid}/guide/stream` → **HTTP 200** + SSE stream (was 500); full pipeline consumer path (banner + streamed guide text, no exception) smoke-tested in the `open-webui-pipelines` container against the live orchestrator; regression test green and provably catches the bug (asserts `app.main` lacks the symbol, `app.utils.sse` has it). **User-confirmed working end-to-end in OWUI.**
+
+---
+
+### §17.539 Fix — assist routing made chat_id-independent: recover the active session from conversation history (2026-06-17)
+
+**This is the real fix for the §17.537/538 "still triage" report — and it corrects §17.538's wrong root cause (see the correction box on that entry).**
+
+**Confirmed root cause (live, via §17.539's own observability).** `chat_id` **never reaches the pipeline** in this OWUI setup, so the entire chat_id-keyed design (§17.265 chatmap, §17.307 active-job memory, §17.537 routing) was dead. Three independent reasons, all verified: (1) OWUI `routers/openai.py:1075` does `metadata = payload.pop('metadata', None)` — strips `metadata` (hence `metadata.chat_id`) from the body before sending to any OpenAI-compat endpoint, which is how the pipelines server is wired; (2) the alternative — forwarding `X-OpenWebUI-Chat-Id` as a header — is gated by `ENABLE_FORWARD_USER_INFO_HEADERS` (default `False`, unset here); (3) even if enabled, the open-webui **pipelines server** (`/app/main.py` `generate_openai_chat_completion(form_data)`) takes no `Request`, so it can't read headers and never injects them into `body`. Net: `pipe()` receives `body = form_data.model_dump()` with **no chat_id by any path**. The live `assist_routing skip reason=chat_id_missing` log (added this change) was the smoking gun. Likely broke / was never functional since the §17.439 OWUI 0.8.10→0.9.6 bump.
+
+**Change (`pipelines/scaffold_router.py`).**
+- **Observability (kills "silent").** `_active_assist_session` now logs the precise reason at every fork — `chat_id_missing` / `no_session_for_chat` / `session_not_active` / `match`. The §17.537/538 routing decision was invisible; it took Redis/Postgres forensics + **two wrong root causes** to diagnose. Now every decision is one grep away.
+- **chat_id-independent recovery (the fix).** New `_active_assist_session_via_history(messages)`: the conversation `messages` ARE reliably delivered (full history — that's why `_window_messages` exists), and the assist-start turn carries the session id (`🤝 Assist session started — ⁠`<sid>`⁠`). `_session_id_from_history` extracts the most-recent one (assistant turns only), `_get_assist_session` (`GET /assist/{sid}`) confirms it's `active`, and routing proceeds — **no chat_id needed**. Mirrors §17.444's `_extract_pending_brief` (recover-state-from-history). The routing fork is now `_active_assist_session(cid) or _active_assist_session_via_history(messages)` — chat_id is a fast-path optimization when present, history is the load-bearing signal.
+
+**Scope decision — active-job memory (§17.307) intentionally NOT made history-based.** It has the same dead chat_id dependency, but its 17 recall sites feed **state-altering** commands (`/cancel`, `/skip`, `/execute confirm`), and "which job is active" is ambiguous from history (many job-id render formats, multiple jobs per chat, the 📌 hint echoes its own id). A wrong-job auto-recall on a no-arg `/cancel` is far more dangerous than the current **safe degradation** (recall returns None → command asks for an explicit id + shows the `/jobs` hint). Left safe-degraded by design; documented at `_active_job_recall`.
+
+**Architectural invariant established.** `chat_id` is NOT reliably delivered to an external OWUI pipe on this deployment. Do not build chat-scoped features that depend solely on `chat_id` — recover state from the conversation history (the one reliably-delivered signal) and treat `chat_id`/Redis as best-effort fast paths.
+
+**Verification.** `test_scaffold_router_assist_chat_routing.py` **+10** (`_session_id_from_history` extraction/most-recent/none/user-turn-ignored; `_active_assist_session_via_history` active/terminal/unreachable/no-marker; `pipe()` routes via history with NO chat_id; falls to triage when no marker) — **25 passed** in that file. Regex verified against the user's **actual saved marker**. Live: history recovery against the real orchestrator returned the active session with no chat_id; full pipeline consumer rendered guidance. **User-confirmed working end-to-end in OWUI.** Pairs with §17.540 (the 500 this fix surfaced).
+
+---
+
+### §17.538 Fix — durable chat→session link for the §17.537 chatmap (2026-06-17)
+
+> **⚠️ ROOT-CAUSE CORRECTION (§17.539, 2026-06-17).** The original title/text of this entry blamed **Redis LRU eviction**. That was **wrong** — corrected after closer measurement: `evicted_keys:0`, `used_memory 11 MB / 2 GB`, 6-day uptime (no restart), and a genuine 7-day TTL against a 2.9-day-old session. No eviction or expiry occurred. Critically, there were **zero `assist:chatmap:*` keys for *any* chat** — the chatmap write path had never populated, because **`chat_id` never reaches the pipeline** (confirmed live in §17.539: OWUI pops `metadata` from the body for OpenAI-compat endpoints, header-forwarding is off by default, and the pipelines server passes no request headers to `pipe()`). The §17.538 durability change below is real **defense-in-depth**, but it does not fix a missing `chat_id`. See **§17.539** for the real fix (history-based recovery).
+
+**Symptom (user report).** The user retried in the *same* HomeLab chat after §17.537 shipped and "it was still using triage." Verified live: the §17.537 code was loaded (`_active_assist_session` present, valve on) and the session (`50815e37`, job `915fa635`) was still `active` at step T1 — but `GET /assist/_chatmap/{chat-id}` 404'd and **Redis held zero `assist:chatmap:*` keys**.
+
+**Root cause (as originally — and incorrectly — stated; see the correction box above).** ~~`scaffold-redis` runs `allkeys-lru` shared with the embedding cache → the chatmap key was LRU-evicted.~~ The real cause is the chatmap was **never written** (no `chat_id` reached `assist_remember`). §17.537 gated chat routing solely on the Redis chatmap, which has no durable backing — that part is real and §17.538 addresses it, but eviction was not the trigger.
+
+**Change.**
+- **Migration 054** (`db/migrations/054_assist_session_chat_id.sql`) — `ALTER TABLE assist_sessions ADD COLUMN IF NOT EXISTS chat_id TEXT` (single-statement, idempotent; nullable, backfilled lazily on the next chatmap PUT). No index — assist_sessions is a small table.
+- **`app/routers/assist.py`** — `PUT /assist/_chatmap/{chat_id}` now also writes `assist_sessions.chat_id` (durable link; best-effort — Redis is still set first, so a DB hiccup degrades to Redis-only, never 500s). `GET /assist/_chatmap/{chat_id}` on a Redis miss now **recovers from Postgres** — the most-recently-active session bound to this chat (`WHERE chat_id = :cid AND status = 'active'`) — and **re-seeds Redis (self-heal)** so subsequent reads are fast again. Only `active` sessions are recoverable, so a terminal session can't recapture plain chat. Redis stays the fast path; Postgres is the durable backstop. The pipeline is unchanged — it already reads through the chatmap GET, which both `/assist` subcommands and §17.537 routing share.
+
+**Verification.** `test_assist_chatmap_status.py` extended to **+4** (PUT durable-write committed with the right UPDATE; PUT durable-write failure is soft + rolls back; GET recovers from PG + re-seeds Redis + filters to `active`; GET 404s when no active session / on DB error) — **8 passed** total; assist-agent + session-map **26 passed**; pipeline routing+commands+nudge **144 passed** (`--noconftest`). Migration 054 applied + recorded by the runner at startup (orchestrator healthy). **Live self-heal smoke** on the user's real chat: PUT persisted `chat_id` on the row → deleted the Redis chatmap key (simulated eviction) → `GET` recovered from PG returning `status:active` + re-created the Redis key → the real pipeline `_active_assist_session` in the `open-webui-pipelines` container then routed to guidance **after eviction**. The user's chat (`4874669f…`) is durably linked now.
+
+---
+
+### §17.537 Fix — assist-aware chat routing: plain text in an active assist session no longer bounces to triage (2026-06-16)
+
+**Symptom (user report, root-caused against the OWUI + Postgres DBs).** A user setting up the homelab said the chat "appeared as though it was in triage and not like an actual conversation, with a lot of repeats of information." Verified against the `🏠 Personal HomeLab Setup Plan` chat: the user **correctly** entered Assist Mode (`/assist 915fa635…` → session `50815e37`, still `active`, step **T1 `presented`**, T2–T9 pending). But the *next* ~25 messages were natural-language questions ("can you research and build the network topology?", "what OS should I install?", "no link up detected", …) — **none** were `/assist` subcommands. Command dispatch only matches a slash-prefixed `/assist`, so every bare message fell through to the **triage planner**, which re-emitted the `Scope so far / Options / Gaps / My pick` blocks each turn (the "repeats"). The assist session sat frozen at T1 the entire conversation. This is **distinct from §17.504** (which nudges users who *never* enter assist); here the user *was* in an active session but plain chat had no path into it. The §17.504 nudge even fired mid-session ("Looking for Assist Mode?"), which was now actively misleading.
+
+**Root cause.** `pipe()` had exactly two routes for a non-slash message: the §17.504 assist-intent *nudge* (additive) and the triage planner. It never consulted the per-chat assist chatmap (`chat_id → session_id`), so an active session was invisible to plain-text routing. The engine already has the right conversational surface — `/assist guide` streams grounded, per-step help and accepts a free-text `refine` hint — it just was never wired to bare chat.
+
+**Change.**
+- **Pipeline (`pipelines/scaffold_router.py` + `pipelines/_vendor/_assist_handlers.py`).** New `_active_assist_session(chat_id)` consults the chatmap and returns the entry **only** when the mapped session is `active` (paused/terminal/missing → None, fall through to triage). When active, `pipe()` routes the bare message to a new `assist_chat_turn()` helper *before* the §17.504 nudge: it renders a one-line orienting banner ("In your active assist session — answering for the current step. `/assist next` to advance, `/assist pause` to step back to planning.") then the current step's walkthrough via the existing `/assist guide` dispatch (`refine=<user text>`, node from the recalled `last_node_key`, stream/blocking per the `assist_stream` valve). Gated by new valve **`assist_chat_routing_enabled`** (default `true`); requires `assist_session_memory_enabled` (the chatmap is the signal). Slash commands still dispatch first, so `/jobs`, `/assist next`, etc. are unaffected.
+- **Orchestrator (`app/routers/assist.py`).** `GET /assist/_chatmap/{chat_id}` now joins `assist_sessions` and returns the session's live `status` (best-effort: a purged row or DB error degrades to `status=None`, never 500s the map). This is the active/terminal signal the pipeline gates on — one roundtrip, authoritative, no extra call per message. Added `db=Depends(get_db)` (excluded from OpenAPI) + an extra response key on an already-untyped endpoint → **no schema/snapshot drift**.
+
+**Verification.** New `tests/test_scaffold_router_assist_chat_routing.py` (**+15**: status gating incl. valve-off short-circuit; active → guidance not triage/nudge, passing `refine`+node_key; paused/terminal/miss → triage; slash commands unaffected; end-to-end banner+rendered guidance) and `tests/test_assist_chatmap_status.py` (**+4**: active status surfaced, missing-row → null, DB-error → null not 500, no-map → 404). In the dev container: routing+nudge+commands **144 passed** (`--noconftest`); assist session-map+agent+guide **73 passed**; chatmap-status **4 passed**. **Full suite `make test` — 3956 passed, 0 failed, 0 skipped in 28:20** (= 3937 baseline + 19 new; zero regressions). Pipeline + router syntax-checked. Live deploy: pipelines container reloaded, orchestrator restarted. The frozen `50815e37` session's chat (chatmap still within 7-day TTL) now routes plain text into T1 guidance on the user's next message.
+
+---
+
+### §17.536 DevOps — compose least-privilege: scope env_file, add open-webui/searxng healthchecks (2026-06-16)
+
+**Why.** Two findings from the §17.534 DevOps review. (1) Secret over-sharing: `open-webui` and `pipelines` loaded the *entire* `.env` via `env_file`, so each received `POSTGRES_PASSWORD`, `SCAFFOLD_API_KEY`, `WEBUI_SECRET_KEY`, all `MODEL_*_PROVIDER`, timeouts, etc. that they never read — a least-privilege violation (a compromise of either container hands over the DB password + API key). (2) `open-webui` and `searxng` had no healthcheck, so `restart: always` couldn't detect a hung-but-alive process and nothing could gate on their health.
+
+**Change.**
+- **env_file scoping** (`docker-compose.yml`) — dropped `env_file: .env` from `open-webui` and `pipelines`. Compose still interpolates `${VAR}` from `.env` independently of `env_file`, so the secrets each service genuinely uses still resolve through their explicit `environment:` blocks (`WEBUI_SECRET_KEY` + the pipelines key for OWUI; `SCAFFOLD_API_KEY` + orchestrator/ollama URLs for pipelines). The orchestrator keeps `env_file` — it legitimately consumes many `.env`-only keys (`MODEL_*_PROVIDER`, timeouts, stale thresholds, `RAG_BM25_ENABLED`, …). (`scaffold-postgres` still loads the full `.env` too; same trivially-safe scoping available as a follow-up — left for now since it was out of this task's approved scope.)
+- **healthchecks** — `open-webui`: `curl -f /health` (image ships curl; /health is unauthenticated). `searxng`: the sidecar `python3` urllib pattern against `/healthz` (the searxng image has python3 + wget but **not** curl).
+
+**Verification.** `docker compose config` renders valid; resolved env-key counts drop open-webui ~30 → 7 (only `WEBUI_SECRET_KEY` of the sentinel secrets remains; `POSTGRES_PASSWORD`/`MODEL_*` gone) and pipelines → 5 (only `SCAFFOLD_API_KEY`); orchestrator retains all 59. Both new healthcheck commands run green inside the live containers (`/health` → exit 0; `/healthz` urllib → exit 0). Takes effect on the next `docker compose up -d` (recreates open-webui, pipelines, searxng); no data migration.
+
+---
+
+### §17.535 Fix — fresh-bootstrap migration bug: init.sql was an incomplete baseline (2026-06-16)
+
+**Why.** Surfaced while building the §17.534 migration lint. `db/init.sql`'s header claims "post-migration-033 state," and the runner seeds 002–017 as already-applied, **but init.sql only ever created the 8 core tables** — every non-core table created by migrations 009–032 (dedup_log, research_sessions, scheduled_jobs, prompt_revisions, assist_sessions/steps, model_costs, llm_call_logs, system_alerts) was missing. Reproduced empirically against a throwaway DB: a fresh bootstrap created only the core tables, the runner seeded the table-creating migrations as "applied" without their tables existing, then **halted at 018** (`scheduled_jobs does not exist`) — leaving `research_sessions`, `scheduled_jobs`, `assist_steps`, `llm_call_logs`, `system_alerts`, `model_overrides`, `jobs.parent_job_id`, and everything from 034–053 absent. Established DBs were unaffected (their `schema_migrations` is already fully populated, so seeding never fires), which is why the live host never hit it — but any new install was broken. Root cause: init.sql folded in core-table ALTERs (so 002–033 *must* be skipped) yet omitted the non-core tables those same migrations create (so they *must* run) — a contradiction.
+
+**Change.**
+- `db/init.sql` — declared the 9 missing non-core tables (+ their indexes, FKs, and updated_at triggers) at their through-033 shape, making init.sql a genuinely complete through-033 baseline. `assist_steps` is declared *without* the mig-051 guidance columns (the runner adds them on top, since 051 > 033).
+- `app/migrations.py` — `_PRE_RUNNER_BASELINE` extended 002–017 → **002–033** to match init.sql's actual currency; `_is_established_db` marker re-anchored from `dag_nodes.is_output_node` (017) to `llm_call_logs.call_kind` (033) so it proves the *whole* through-033 baseline is present, not just the old 017 column. On a fresh DB the runner now seeds 002–033 and applies 034–053 normally.
+
+**Verification.** Full throwaway-DB reproduction with the new code (host `app/`+`db/` mounted over the prod image, fresh `scaffold_freshtest`): runner returns `status: ok`, seeds 32, applies 034–053 (20 files), `schema_migrations` = 52, **no errors**. Schema diffed against the live fully-migrated DB: **identical table set** (only runtime-created `apscheduler_jobs` differs), **identical columns** (only a pre-existing unrelated `dag_nodes.tool` varchar/text drift — init.sql matches mig 005, live drifted; left as-is), **identical index set**. Proved the new runner is a **no-op on the live DB** (`applied: []`, still 52 rows) — existing deployments are unaffected; the fix only changes the fresh-install path. init.sql applies clean to an empty DB; `migrations.py` compiles; `lint-migrations` + `ci-tier-0` still green. (Takes effect on the next image rebuild + restart; live schema needs no migration.)
+
+---
+
+### §17.534 DevOps — CI hardening: dep CVE scan, image scan, version pins, migration lint, Dependabot (2026-06-16)
+
+**Why.** A DevOps review found the supply-chain/CI layer was the weakest part of an otherwise strongly-hardened stack: `pip-audit` existed only as a manual `make audit` (operator-only `docker exec`), so CVEs in the strictly-pinned deps accrued silently; nothing reminded anyone to bump the @sha256-pinned images/deps (no Dependabot/Renovate); two workflows used floating versions (`python-version: '3.12'`, `postgres:16`) that could drift from the pinned `3.12.13` / digest the prod stack runs; and the §17.140 single-statement migration rule (real — re-verified live: `exec_driver_sql` rejects multi-command files with *"cannot insert multiple commands into a prepared statement"*) had no static gate, so a multi-statement file fails *silently at lifespan startup* (the runner logs `migration_failed` and returns; lifespan logs but does not abort).
+
+**Change.**
+- **Dependency CVE gate** — new `security` job in `ci.yml` runs `pip-audit --strict` against `requirements{,-ci,-dev}.txt` on every push/PR (blocking; same set `make audit` scans, now cloud-side). Documented `--ignore-vuln` escape for accepted advisories.
+- **Image scan** — `aquasecurity/trivy-action` step in `test.yml` scans the freshly-built `scaffold-orchestrator:ci` image (HIGH/CRITICAL, `ignore-unfixed`, **report-only** `exit-code: 0` — base-layer CVEs are often unfixed-upstream; pip-audit is the blocking gate for deps we control).
+- **Version pins** — `retrieval-quality.yml` `3.12` → `3.12.13`; `test.yml` Postgres service → the exact `postgres:16@sha256:2586e2…` digest the compose stack runs.
+- **Migration lint (ratchet)** — `scripts/lint_migrations.py` (pure-Python dollar-quote/comment/string-aware statement counter) enforces single-statement on every migration `> 033`; migrations `002–033` are folded into the `db/init.sql` baseline (§17.94) and grandfathered. Wired as a `ci-tier-0` prereq + standalone `make lint-migrations`, so it runs at pre-push and in the ci.yml smoke job.
+- **Dependabot** — `.github/dependabot.yml` covers root pip deps, the four sidecar `requirements.txt`, all Dockerfiles + compose digest pins, and GitHub Actions (weekly, grouped). It opens the bump PRs; the CI gates above prove them.
+
+**Verification.** `make lint-migrations` → green (20 post-baseline single-statement, 32 grandfathered ≤ 033); regression-tested it fails (exit 1) on a planted multi-statement `>033` file and passes DO-block / comma-ALTER / quoted-`;` forms. `make ci-tier-0` → green end-to-end with the new prereq (all existing parity gates still pass). All four YAML files parse. Multi-statement rejection re-confirmed live against `scaffold-postgres` via the exact runner path (temp table, rolled back).
+
+**Latent risk surfaced (NOT fixed here — out of scope, needs its own change).** `db/init.sql` is the baked baseline *through migration 033* and the runner only seeds `002–017` (`_PRE_RUNNER_BASELINE`) as applied. On a **fresh** bootstrap the runner therefore tries to (re)apply `018–053`, hits the multi-statement `020` (also `022`, `023`), is rejected, and **halts at the first error** — so `034–053` never apply on a brand-new DB (existing/established DBs are unaffected; their migrations are already recorded). The clean fix is to extend `_PRE_RUNNER_BASELINE` to the full init.sql currency (`002–033`) so a fresh DB seeds the baked range and only runs `034+`. Flagged for a follow-up.
+
+---
+
+### §17.533 Feature — umbrella-level compiled deliverable (the decomposition payoff) (2026-06-15)
+
+**Why.** Until now `/results <umbrella>` only listed child statuses — the components' outputs were never stitched into one result, so a finished decomposition had no unified deliverable. This is the natural completion of the feature.
+
+**Change.** `_rollup_umbrella` (`app/modules/decomposition.py`), when finalizing an umbrella to `completed`, calls new `_compile_umbrella_deliverable` to assemble the children's `compiled_output` (ordered by `component_index`) into one markdown doc (title + a `## Component N: <title> [status]` section per child) and writes it to the umbrella's `jobs.compiled_output`. The finalize UPDATE now uses `RETURNING` + `COALESCE(:co, compiled_output)` so it's single-winner under the race (a losing caller doesn't commit). `execution_handler._umbrella_status` surfaces the umbrella's `compiled_output`; the pipeline `_render_umbrella` appends it below the child list once present.
+
+**Verification.** +4 tests (`_rollup_umbrella` completed → assembles deliverable in the UPDATE; failed → skips compile, `co=None`; lost-race → no commit; `run_component_pipeline` happy path reaches `execute_all_nodes` then rolls up) — `test_decomposition` 17 green. **Live (real Postgres, synthetic completed children — no LLM):** umbrella finalized `completed` with a correctly-assembled deliverable (title + both component sections + bodies); the COALESCE/RETURNING SQL works against asyncpg.
+
+---
+
+### §17.532 Robustness — zero-child umbrella finalize, stranded-component reaper, blocked-child hints (2026-06-15)
+
+**Why.** Three decomposition edge cases left open in earlier parts: an umbrella orphaned to zero children could hang `aggregating` forever; a component child stranded by a process restart only got reaped at 26-72h (umbrella hangs that long); and a `blocked`/`failed` component offered no recovery path in the rollup view.
+
+**Change (`app/modules/cleanup.py` + `pipelines/scaffold_router.py`).**
+- **Zero-child finalize.** `_REAP_STALE_UMBRELLA_SQL` gains an OR clause: an `aggregating` umbrella with **zero** children (e.g. all detached via the migration-053 `ON DELETE SET NULL` FK) that is stale → `failed` (param `:stale_min` = `decompose_component_stale_minutes`). The normal all-children-terminal path still finalizes immediately (no time bound).
+- **Stranded-component reaper (Stage 6.5).** New `_REAP_STRANDED_COMPONENT_SQL` fails a `component` stuck in an early phase (`refining`/`awaiting_confirmation`/`researching`/`planning`) past `decompose_component_stale_minutes` (default 180) — recovers restart-stranded children ~26-72h sooner. Runs **before** the umbrella sweep so the umbrella finalizes the same cycle. `running`/`executing` excluded (the orphan-node + running reapers own those). Returns `components_reaped`.
+- **Blocked-child hint.** `_render_umbrella` appends `→ /results <id> to inspect failed nodes & retry` to each `failed`/`blocked` component line.
+
+**Verification.** `test_cleanup` updated to the 10-stage shape + 3 new tests (zero-child clause, stranded-component SQL targets early phases only, component-sweep-before-umbrella ordering) — 15 green. +1 pipeline test (retry hint on stuck children). No schema/OpenAPI change.
+
+---
+
+### §17.531 Security — decomposition fan-out cap, server kill switch, description bound (2026-06-15)
+
+**Why.** Decomposition's genuinely-new risk is *amplification*: one request spawns up to 5 autonomous pipelines, each making many cloud LLM calls. `MAX_COMPONENTS` bounds one umbrella but nothing bounded the total in flight or gave operators a server-side off switch.
+
+**Change.** Three config settings (`app/config.py`): `decompose_enabled` (default True), `decompose_max_inflight_components` (default 20), `decompose_component_stale_minutes` (default 180 — used by §17.532). `POST /decompose` (`workflow.py`): (1) **kill switch** — if `decompose_enabled=False`, returns `{"decomposed":false,"reason":"disabled"}` before any LLM work (the chat surface can't override it via the `decompose_on_go` valve); (2) **global fan-out cap** — counts non-terminal `component` jobs and **429s** if creating these children would exceed the cap, bounding total autonomous fan-out + cloud cost across ALL umbrellas. `extract_components` (`decomposition.py`): caps each component description to `MAX_COMPONENT_DESC_LEN=4000` (it becomes the child's `input_text` → refine/DAG prompts; mirrors the `MAX_LLM_TEXT_LEN` schema bounds).
+
+**Verification.** +3 `test_decomposition` tests (desc-cap; kill-switch short-circuits with no LLM call; over-cap → 429, nothing created) — 13 green. No schema/OpenAPI change (config + endpoint only).
+
+---
+
+### §17.530 Hardening — decomposition stress-test fixes: resurrection guard, component cap, shielded rollup (2026-06-15)
+
+**Why.** Stress-testing the decomposition subsystem (live multi-component jobs through the OWUI pipeline + an adversarial code review) surfaced real hazards, two HIGH.
+
+**Fixes (`app/modules/decomposition.py` + `app/routers/workflow.py`).**
+- **HIGH — failed-child resurrection (correctness).** `run_component_pipeline` ignored `analyze_and_confirm`/`research_and_compile` return values. Those RETURN a `{"status":"failed"}`/`"conflict"` dict (they don't raise), so a child whose Phase 1/2 failed fell through to `execute_all_nodes`, whose guard `WHERE status NOT IN ('running','completed')` (`execution_agent.py:1651`) flips a `failed`/`blocked`/`cancelled` job back to `running` and re-runs it — it could then complete and **corrupt the umbrella rollup** (umbrella `completed` off a child that actually failed). Now both phases are captured and gated: a `failed` Phase 1 or a `failed`/`conflict` Phase 2 returns early (the `finally` still rolls up; the child stays terminal).
+- **HIGH — unbounded fan-out (resource).** `extract_components` had no ceiling on component count — a model over-split would spawn N full pipelines concurrently (N held DB sessions + N unbounded research bursts on a single-worker process). Added `MAX_COMPONENTS=5` clamp (logged when it fires).
+- **MED — shielded rollup.** The `finally` rollup is now `asyncio.shield`-wrapped so a `CancelledError` landing mid-finally can't skip the umbrella update (per `feedback_cancellederror_basexception`); the Stage-7 reaper sweep remains the backstop.
+- **LOW — extraction signal.** `/decompose`'s not-decomposed response now carries `reason` (`single_focus` vs `extraction_unavailable`) so a silent splitter failure is distinguishable from a genuine single build.
+
+**Verification.** +3 `test_decomposition` tests (caps-at-MAX; Phase-1-failure and Phase-2-conflict each skip `execute_all_nodes` but still roll up) — 10 green. ci-tier-0 green. **Live on the fixed code:** a 3-part dev-suite idea → 3 components created + ran through Phase 1 → injection → grounded Phase 2 cleanly (no `component_pipeline_failed`, no SQL errors); a trivial single-function idea → `decomposed:false, reason:single_focus`. Reviewed-but-not-fixed (lower risk, noted): process-restart can strand a child between Phase 1 and Phase 2 (the 72h awaiting reaper + umbrella sweep recover it); zero-child umbrella orphan via `ON DELETE SET NULL` (very low probability).
+
+---
+
+### §17.529 Fix — recovery NEXT_ACTIONS missing `aggregating` (decomposition follow-up) (2026-06-15)
+
+**Why.** The full `make test` baseline (3921 passed / **2 failed**) caught a gap §17.525 introduced: adding `'aggregating'` to the `JobStatus` Literal without a matching `app/modules/recovery.py::NEXT_ACTIONS` entry. `test_recovery.py::test_registry_covers_every_known_job_status` + `test_every_status_returns_at_least_one_action[aggregating]` assert the registry covers **every** `JOB_STATUSES` member — so the new status failed both. (The targeted per-phase runs didn't include `test_recovery`; the full suite did — the value of the baseline run.)
+
+**Change.** Added an `aggregating` entry: a `wait` action pointing at `/exec/status/{job_id}` (the umbrella child rollup) with `command="/results {job_id}"` and a "component jobs are running; check the rollup" description. No schema/OpenAPI change (registry is server-side, not vendored).
+
+**Verification.** `test_recovery.py` 27 green; ci-tier-0 green. Full-suite baseline now **3923 passed / 0 failed** (the 2 failures resolved). Lesson reinforced: a new `JobStatus` member must land in THREE places — the SQL CHECK (053), the `JobStatus` Literal, AND the recovery `NEXT_ACTIONS` registry.
+
+---
+
+### §17.528 Feature — task decomposition, part 4: umbrella `/results` rollup view (2026-06-15)
+
+**Why.** An umbrella has no DAG, so `/results <umbrella>` previously showed an empty 0-node view. Operators need to watch a decomposition's components from one place.
+
+**Change.** `execution_handler.execution_status` now SELECTs `job_type` and, for an umbrella, returns a rollup via new `_umbrella_status`: `job_type='umbrella'` + `children` (each `{job_id, title, status, component_index}`) + `children_total`/`children_completed`, while keeping the standard keys (`nodes=[]`, `counts={}`, …) so existing SDK/pipeline readers don't KeyError. Pipeline `_handle_results` detects `job_type='umbrella'` and renders `_render_umbrella` — a per-child status list with a `/results <child>` drill-in hint — instead of the node view. `/exec/status` is a plain-dict response (no Pydantic model), so the OpenAPI snapshot is unchanged.
+
+**Verification.** +1 orchestrator test (`execution_status` umbrella → children rollup, `nodes==[]`) + 1 pipeline test (`_render_umbrella` lists children + `N/M completed` + drill-in hint). 13 + 8 green; existing `execution_status` tests unaffected (no `job_type` on their fixtures → `getattr` default `'legacy'` → normal node path). **Live:** `GET /exec/status/<umbrella>` returns `job_type=umbrella`, `children_completed/total 0/2`, both components `executing`.
+
+---
+
+### §17.527 Feature — task decomposition, part 3: umbrella-finalize reaper sweep + full-pipeline validation (2026-06-15)
+
+**Why.** An umbrella sits `aggregating` while children run; normally each child rolls it up on finish (`decomposition._rollup_umbrella` in its `finally`). The gap: if a child is terminated by the stale-job reaper (which doesn't call the rollup), the umbrella could stay `aggregating` forever. Also a backstop for any missed rollup write.
+
+**Change (`app/modules/cleanup.py`).** New `_REAP_STALE_UMBRELLA_SQL` + Stage 7 in `reap_stale_jobs` (returns `umbrellas_finalized`): finalizes any `aggregating` umbrella that has ≥1 child and **no** non-terminal child → `completed` if ≥1 child completed, else `failed`. Runs **last**, after the child reapers in the same transaction, so children reaped this cycle already read as terminal. `aggregating` remains absent from every other reaper whitelist (umbrellas are otherwise inert by design).
+
+**Verification.** `test_cleanup.py` updated for the 9-stage shape (`_db_with_counts` now 9 counts; statement-count tests 9/10; +2 umbrella-sweep tests: SQL-invariant guard + runs-last/count-propagates). 12 green. **Live:** `POST /jobs/cleanup` returns the new `umbrellas_finalized` key and the sweep executes cleanly against Postgres (0 finalized — the in-flight umbrella correctly not touched). **Full-pipeline live validation of the whole feature:** a `/decompose` 2-part idea ran both component children end-to-end through Phase 1 → curated-query injection → **grounded Phase 2** (one child ingested 10 facts; the other distilled 0 and fail-soft-continued — no crash) → **DAG generated** (7 and 5 nodes) → **executing their own DAGs** autonomously. Confirms decomposition produces real, independently-built jobs.
+
+---
+
+### §17.526 Feature — task decomposition, part 2: extraction, `/decompose`, autonomous child runs (2026-06-15)
+
+**Why.** Deliver the capability the user asked for: one multi-part idea becomes several linked, independently-built jobs ("ba2706cc should have spawned its parts"). Builds on the §17.525 schema and the §17.522 grounded-research fix (each child's Phase 2 now actually grounds).
+
+**Change.**
+- **`app/modules/decomposition.py` (new).** `DECOMPOSE_COMPONENTS_TOOL` + `extract_components(idea)` — native tool-call (reuses the §17.522 reliable contract) splitting an idea into normalized `{label, description, domain, research_queries}` components (domain validated against `LLM_SELECTABLE_DOMAINS`, queries capped at 4, bad entries dropped, fails soft to `[]`). `create_and_run_decomposition` inserts the umbrella (`job_type='umbrella'`, `status='aggregating'`, no DAG, never executes) + one child (`job_type='component'`, `parent_job_id`, `component_index`) per part, then spawns `run_component_pipeline` per child. Each child drives itself on its own session: Phase 1 → inject the component's curated research queries → Phase 2 (grounded search+distill+ingest) → `execute_all_nodes` (auto-DAG + run). Any failure marks the child `failed` (never strands it); the `finally` always `_rollup_umbrella`s — umbrella → `completed` once all children terminal with ≥1 completed, else `failed`. Strong task refs (`_COMPONENT_TASKS`) survive GC.
+- **`POST /decompose` (`app/routers/workflow.py`).** Reuses `IdeaInput`. Runs extraction under the ideation slot-sem; `<MIN_COMPONENTS` (2) returns `{"decomposed": false, "components": [...]}` (caller falls back to single-job `/ideate`); otherwise creates+launches and returns the umbrella id + child roll-up immediately.
+- **Pipeline `/go` branch (`pipelines/scaffold_router.py`).** New default-OFF valve `decompose_on_go`; when on, `_auto_chain` first tries `/decompose` (`_try_decompose`), reporting the launched umbrella + components, and falls back transparently to the normal single-job flow on a single-focus idea or any error. Default off because fanning out N full pipelines is heavy on CPU-only inference.
+
+**Verification.** +7 `test_decomposition.py` (extraction normalize/filter/cap; rollup completed/failed/noop-while-running; create-inserts-umbrella+children-and-spawns). **Live `/decompose` smoke:** a 2-part finance-toolkit idea → 2 sensible components ("CLI Expense Tracker with SQLite", "PDF Monthly Report Generator"), umbrella `aggregating` + 2 `component` children correctly linked (`parent_job_id`, `component_index` 0/1), both spawned and running Phase 1. Full child→completion→umbrella-rollup is unit-covered (CPU child runs take 10-30min each); a reaper safety-sweep for reaped-child umbrellas lands in part 3.
+
+---
+
+### §17.525 Feature — task decomposition, part 1: schema (umbrella + component jobs) (2026-06-15)
+
+**Why.** Groundwork for triage-time decomposition (one task → an umbrella job grouping N component child jobs, each running its own DAG). Additive schema only; no behavior change yet, suite stays green.
+
+**Change.** Migration `053_job_decomposition.sql` (single idempotent `DO` block, cf. 043): adds `jobs.parent_job_id UUID` (self-FK, **`ON DELETE SET NULL`** so deleting an umbrella never cascades into live children) + `jobs.component_index INT`; widens `job_type` CHECK to add `'umbrella'`/`'component'`; widens status CHECK to add `'aggregating'` (umbrella-alive-while-children-run); partial index on `parent_job_id`. `app/schemas.py`: `'aggregating'` added to the `JobStatus` Literal (so `JOB_STATUSES`, the /jobs filter, and any status-aware path pick it up automatically); `JobSummary` gains `parent_job_id`/`component_index` (both default None). Vendored to SDK (`make sync-schemas`) + `docs/openapi.json` regenerated (`make openapi-snapshot`).
+
+**Verification.** Migration applied live (schema_migrations has 053; both columns present; job_type CHECK shows the 4-value set). `make ci-tier-0` green (SDK-schema + SSE + next-actions parity all in sync). Schema/jobs/openapi/SDK-parity tests green (16). *Note:* a mixed run that also collected `test_status_logs.py` showed its documented §17.519 `app.database`-stub cross-pollution (ImportError in unrelated files) — not from this change; the same files pass clean without it.
+
+---
+
+### §17.524 Feature — `quick_research` grounded-research primitive (batched-at-/go) (2026-06-15)
+
+**Why.** The user chose grounded standards research wired into the real SearXNG path, run *batched at /go* (one pass per chosen component) rather than the 20-60 min autonomous `/research` SSE loop. Need a fast, synchronous "search → distill grounded facts" call the decomposition fan-out can invoke per component.
+
+**Change (`app/modules/gt_extractor.py::quick_research`).** New helper: `quick_research(queries, *, domain, top_k, ingest, route) -> {entries, results_found, ingested}`. Searches each query via `search_searxng` (dedup by URL, capped at `ideation_max_queries`, `research_searxng_delay` between calls), distills via the §17.522 `distill_entries` native-tool-call primitive (so results are grounded objects, never hallucinated strings), and optionally ingests into Milvus via `ingest_entries`. Fails soft to `entries=[]` — research is best-effort and must never raise into /go. No new HTTP endpoint: research is batched server-side inside the forthcoming `/decompose` (avoids an unused public surface + OpenAPI/SDK churn); a public endpoint can follow if inline triage research is ever wanted.
+
+**Verification.** +4 `test_quick_research.py` (empty-query short-circuit; search→distill→URL-dedup composition with first-query-as-topic; ingest-off never touches RAG; no-results→empty). 16 green with `test_gt_extractor`. Verified-by-composition: both halves (`search_searxng`, `distill_entries`) are the exact functions live-proven in the §17.522 Phase-2 smoke (10 results → 10 distilled entries → 10 ingested).
+
+---
+
+### §17.523 Feature — triage surfaces task Components (decomposition groundwork) (2026-06-15)
+
+**Why.** A user expected a multi-part build to break into several jobs; the engine has no decomposition today. First step toward triage-time decomposition (each component → its own job at /go): make the triage conversation itself *name the components* so the user can decide scope before launch — and do it with minimal token cost.
+
+**Change (`pipelines/scaffold_router.py::TRIAGE_SYSTEM_PROMPT`).** Added an **optional** fifth section, **Components**, placed right after "Scope so far". It is emitted *only* when the build clearly splits into 2-5 independently-buildable parts (`name — one-clause scope` per line) and is omitted entirely — header included — for a single-focus build, so simple tasks pay zero extra tokens. The four required headers (Scope so far / Options / Gaps / My pick) are unchanged; the "no extra headers" rule now whitelists Components as the sole exception. Updated the multi-part worked example (home-lab) to demonstrate it, and the locked-summary close now names the in-scope components and notes each becomes its own job at /go. The authoritative, machine-readable component extraction (synthesis prompt + parser + the `/decompose` consumer) lands with the decomposition feature so the format change stays atomic with its consumer.
+
+**Verification.** +4 `TestComponentsTriage` prompt tests (optional section present; omit-for-single-focus token-economy guidance; "each chosen part becomes its own job"; Components is the only extra header). Full `test_scaffold_router_commands.py` green (111). Pipeline syntax-checked. Live triage dogfood (4b) pending in OWUI.
+
+---
+
+### §17.522 Fix — Phase-2 research distillation silently dropped 100% of results (shape-drift regression) (2026-06-15)
+
+**Symptom (user report → DB/log forensics).** A user reported the engine "isn't operating as it should": a task they expected to decompose into sub-jobs instead produced two duplicate jobs that did nothing. Forensics on the two jobs (`ba2706cc`, `6c1265dc` — both the same BIOS-OS idea, submitted 4h apart; the claimed third job `4005b40` never existed; there is no job-spawning feature) showed the real defect in the logs: **`phase2_distill_shape_drift: raw=10 kept=0 dropped=10`** on every run → `facts_extracted=0, milvus_ingested=0`. Every DAG was being built with **zero grounded research**.
+
+**Root cause (regression).** When `gt_extractor` migrated distillation to native tool-calls (Sprint X.12), the strict "JSON array of objects" output spec was removed from `DISTILL_SYSTEM` and moved into `RECORD_DISTILLED_ENTRIES_TOOL`'s schema (see the comment at `gt_extractor.py:81`). But the ideation Phase-2 path (`ideation_workflow.py::research_and_compile`) was **never migrated** — it still called `model_router.generate(... DISTILL_SYSTEM ...)` + `parse_json_array`. With no object-shape spec in the system prompt, the 4b model returned a JSON array of **strings**; the §17.339 dict-filter then correctly discarded all of them. The §17.464 retry-on-empty guard didn't help — the draw wasn't *empty*, it was the wrong *shape*.
+
+**Fix.** Added a single reliable distill primitive `gt_extractor.distill_entries(results, *, topic, route, max_results)` that uses the proven `model_router.tool_call` + `RECORD_DISTILLED_ENTRIES_TOOL` + `read_tool_args` contract (the same one `extract_ground_truths` already uses), forcing the object shape and failing soft to `[]`. Phase-2 distill now calls it; the route still carries `{role: ideation_model_role, overrides}` so model selection is unchanged. `extract_ground_truths` is deliberately left intact (it returns granular `llm_failed`/`parse_failed`/`empty` statuses the `/gt` UI depends on). Removed the now-unused `DISTILL_PROMPT`/`DISTILL_SYSTEM`/`parse_json_array` imports from `ideation_workflow.py`.
+
+**Verification.** Unit: `test_ideation_workflow_phase2.py` updated to mock `distill_entries` (distill no longer goes through `model_router.generate`); the #6.1 role test now asserts the distill *route* carries the ideation role and compile still uses it. **Live smoke** (mocks hid the original 100%-fail, so this was mandatory): re-ran the BIOS-OS idea through `/ideate`+`/ideate/confirm` on the live orchestrator → `phase2_distill: entry_count=10`, `phase2_ingest stats={'new':10,…}`, `phase2_complete: facts_extracted=10 milvus_ingested=10`, **no shape_drift warning** (was 0/0/dropped=10).
+
+**Also — test-harness heal (skip-cascade).** Surfaced while verifying: the `_ideation_workflow_shared.py` importlib loader never stubbed `app.utils.llm_retry`, so `ideation_workflow.py` had been failing to load and **silently skipping every Phase-2 test** since that import was added (same class as the §17.290 `job_utils` heal). Fixed by loading the *real* (logging-only) `llm_retry` module in the loader so the compile path exercises the actual `generate_until_nonempty` wrapper. 12 previously-skipped Phase-2 tests now run and pass (39 green across the ideation/gt/llm_retry set).
+
+---
+
+### §17.521 Fix — `/assist <title>` (non-UUID job_id) leaked a raw HTTP 500 DataError (2026-06-14)
+
+**Symptom (user report).** `/assist DeFruscio HomeLab` (using the job *title*, not its UUID) returned `❌ Could not start assist session: HTTP 500 {"error":"DBAPIError","message":"…asyncpg.exceptions.DataError… invalid input for query argument $1: 'DeFruscio' (invalid UUID …)"}`. The pipeline took the first token `DeFruscio` as the job_id and POSTed it; `start_assist_session` passed it straight into `SELECT … WHERE id = :id`, where asyncpg's uuid cast raised an uncaught `DataError` → a raw 500 leaking internal DB error details.
+
+**Fix (both layers).** (1) Orchestrator: `start_assist_session` validates `job_id` is a UUID up-front (`uuid.UUID(...)`) and raises a clean `ValueError` → the endpoint's existing `except ValueError` maps it to **HTTP 409** with a helpful message ("not a job id … Job titles aren't accepted — find the id with /jobs"). No more 500, no DBAPIError leak — covers all callers (SDK/curl too). (2) Pipeline: `assist_start` rejects a non-UUID `job_id` via `pipe._UUID_RE` **before** the round-trip, with an actionable hint ("`DeFruscio` isn't a job id … run `/jobs`").
+
+**Verification.** +2 orchestrator tests (non-UUID → ValueError before any query; db.execute not called) + 2 pipeline tests (non-UUID → hint, no POST); 2 pre-existing start tests updated to use real UUIDs (they'd used fake `"abc"`/`"job-1"` ids the new guard correctly rejects). assist suites green (11 + 6). **Live:** `POST /assist/start {job_id:"DeFruscio"}` → HTTP 409 + clean message, no DBAPIError leak (was 500). Found by the user dogfooding `/assist` with a job title. *Follow-up:* the next full `make test` surfaced 5 more start-path tests in `test_scaffold_router_commands.py` (`TestAssistChatMemory` / `TestConfirmCommand`) that used non-UUID fixture ids (`job-1`/`job-77`/`job-99`) the new guard correctly rejects — given valid UUIDs (the guard's intended effect; not a product regression). Lesson: the assist-start guard means every test exercising the start path needs a UUID-shaped fixture job_id.
+
+---
+
+### §17.520 Fix — two LOW audit cleanups: `/assist status` implemented + triage `/go` wording (2026-06-14)
+
+The last two LOW findings from the 2026-06-14 lifecycle audit:
+
+**Dangling `/assist status`.** The mirror-divergence banner (`_assist_handlers.py`) told operators to "Inspect with `/assist status`", but the subcommand was never implemented — it fell through to the help table. Rather than delete the reference, **implemented the command** (the backing `GET /assist/{session_id}` roll-up already existed): new `assist_status()` renders status / job / current step / per-status step counts; wired into `handle_assist`'s subcommand set, `dispatch_assist_sub`, the `/assist` arg allow-list, and the `_ASSIST_HELP` table. Live: `GET /assist/{sid}` → `status=completed, current=T8, step_counts={committed:8}` renders correctly.
+
+**Triage `/go` wording.** The `TRIAGE_SYSTEM_PROMPT` close-out said *"Type `/go` to launch"*, but with `confirm_before_launch=True` (default) `/go` shows a brief and waits for `/go confirm`. Reworded to *"Type `/go` to review the launch brief (then `/go confirm` to start)"* so the promise matches the two-step gate.
+
+**Verification.** New `tests/test_scaffold_router_assist_status.py` (+4: render rollup, 404, dispatch routing, no-session hint); assist + commands + help-refresh suites — **181 passed**. No test pinned the old `/go` wording. Pipelines reloaded; live in OWUI. This closes every audit + dogfood finding (§17.501–520).
+
+---
+
+### §17.519 Feature — machine-readable `deliverable_kind` (plan-only as data, not just banner) (2026-06-14)
+
+**Gap (logged in §17.506).** Whether a completed job's deliverable was actually executed vs. an unexecuted plan/runbook vs. assist-completed was only conveyed by **banner TEXT** inside `compiled_output` (§17.506/§17.516). Programmatic consumers (web UI, SDK, `/jobs` filters, dashboards) couldn't branch on it without string-matching prose.
+
+**Fix.** New queryable column `jobs.deliverable_kind` (migration 052, single-statement `ADD COLUMN IF NOT EXISTS` + CHECK): `'executed'` | `'plan_only'` | `'assist_completed'` | NULL. Computed by `compute_deliverable_kind(job_id, db, *, assist_completed)` in `execution_compile` (mirrors the banner gating: assist→`assist_completed`; done Shell nodes + `not shell_tool_enabled`→`plan_only`; else `executed`) and persisted at all four finalize sites (3 autonomous in `execution_agent`, 1 assist in `assist_agent`). Deliberately does **not** change `_compile_output`'s `(text, synthesized)` return signature (≈25 call sites) — the helper takes a separate cheap COUNT query. Surfaced in the `/logs/{job_id}` response (`LogsResponse.deliverable_kind`); OpenAPI snapshot regenerated (host-side, since the container mounts `docs/` read-only) and `--check` passes.
+
+**Verification.** +5 tests (`compute_deliverable_kind` ×4: assist/plan_only/executed/shell-backend; `/logs` surfacing ×1) + `test_status_logs` `_make_row` defaulted `deliverable_kind=None` (mirrors the §17.445 `last_verification_reason` pattern). Each affected file green in isolation (status_logs 19, banner 16, compile 53, assist 10, prompt_build 6). **Live-validated** via the §17.519 dogfood: an autonomous blue-green job (no Shell nodes) → `deliverable_kind='executed'`; the assist Vaultwarden/homelab jobs → `'assist_completed'` (see §17.516). *Note:* minimal multi-file pytest invocations that import `test_status_logs.py` first hit its module-level `sys.modules.setdefault("app.database", <stub>)` and cross-pollute — a pre-existing, full-suite-safe harness quirk; verify these files individually or via the full suite.
+
+---
+
+### §17.518 Fix (test determinism) — banner tests flaked on a live synthesis LLM call (§17.513 fixed the wrong gate) (2026-06-14)
+
+The full-suite run after §17.517 flaked again: 2 of the `test_compile_plan_only_banner.py` integration tests **timed out (>30s)** under load (a slow 33-min run). Root cause — `_compile_output` synthesis is gated **per-job by `_resolve_synthesis_enabled`** (which reads `jobs.compile_synthesis_override` from the DB), NOT by the global `compile_synthesis_enabled` setting that §17.513 disabled. With the `make_mock_db` fixture, that override read returns junk → resolves synthesis ON → a real `model_router.tool_call` to a cloud model → 30s pytest-timeout. §17.513's synthesis-disable only won when the mock happened to return NULL, so the flake persisted.
+
+**Fix.** Both `_prep` helpers now patch `execution_compile._resolve_synthesis_enabled` → `AsyncMock(return_value=False)`, deterministically forcing the heuristic (no-LLM) compile path regardless of the mock DB or settings-object identity. Verified: the file runs **12 passed in ~2.2s across 3 consecutive runs** (was 28–66s with the live call). Scoped to these tests — the other `_compile_output` tests (`test_execution_agent_compile.py`) already control synthesis explicitly (they patch `model_router.tool_call`) and have been stable. Lesson: a "unit" test over `_compile_output` must stub `_resolve_synthesis_enabled`, not just the global setting.
+
+---
+
+### §17.517 Fix — execution grounding fans out across domains (research→build alignment) (2026-06-14)
+
+**Gap (from the dogfood/audit).** Node execution grounds on RAG via `_fetch_rag_context(... domain=job_domain)` (`execution_agent.py:1030`) — scoped to the job's single ideation-assigned domain. But `/research` ingests under `_detect_domain(topic)` (a separate heuristic). When the two differ (e.g. homelab research binned to `llm` while the job is `eng`), the build silently fails to ground on the very research the user ran for it. §17.501/§17.515 fixed the per-path *defaults* but never reconciled the two — the `domain` partition is a storage bucket, not a relevance boundary.
+
+**Fix.** General grounding now searches **all** partitions (`domain=None` fan-out) by default instead of scoping to `job_domain`, gated by new `settings.execution_grounding_cross_domain` (default True; set False to restore scoping). The existing relevance filters — `rag_cosine_floor` (0.3) + the CrossEncoder reranker — already drop cross-domain noise, so fan-out is strictly more recall-complete. Explicit Milvus-tool nodes keep their per-node `domain` (a deliberate DAG choice); only the auto-grounding path changed.
+
+**Verification.** +2 tests (`test_execution_agent_prompt_build.py::TestGroundingDomainFanout`: default passes `domain=None`, setting False passes the job domain — asserted on the recorded `_fetch_rag_context` call). **Live (real corpus):** homelab research exists in both `eng` and `llm`; a cross-domain (`domain=null`) `/rag` query returns a genuine mix (`llm/portainer` surfaces alongside `eng` entries) that a `domain="eng"` query never sees — confirming fan-out reaches the mis-binned research. Execution suites — **21 passed**. (Side note: `query_rag` leaves `domains_searched` unset even on fan-out — cosmetic metadata gap, logged, functionally irrelevant.)
+
+---
+
+### §17.516 Fix — assist-completed jobs now get a synthesized deliverable summary (2026-06-14)
+
+**Gap (from the §17.514–515 dogfood).** An Assist Mode finalization marked the job `completed` but **never called `_compile_output`**, so `compiled_output` stayed NULL — the default `/results` showed no "here's what you built" summary; the operator's per-step evidence was only reachable via `/results <id> nodes`. After manually executing an 8-step Vaultwarden build, the user got an empty default deliverable.
+
+**Fix.** `_maybe_finalize_session` (`assist_agent.py`) now compiles a deliverable from the mirrored per-node evidence after marking the job completed, persisting `compiled_output` + `compiled_output_synthesized` (best-effort: a compile failure is logged and never blocks finalization). `_compile_output` gains `assist_completed: bool`: when True it (a) forces `runbook_count=0` so the §17.506 PLAN-NOT-EXECUTED banner is **suppressed** — the operator *did* execute the steps — and (b) prepends a positive `_prepend_assist_completed_banner` ("✅ Completed via Assist Mode — you executed and verified N steps…"). The existing strategy logic (deliverable nodes / dominant-leaf / concat) then assembles the evidence summary.
+
+**Verification.** +5 tests (`_prepend_assist_completed_banner` none/present/singular; `_compile_output` assist_completed suppresses-plan-adds-header; default path still gets the plan banner). **Live (real data):** compiling J2 (the dogfood Vaultwarden assist job) → 653-char summary, assist header present, plan banner absent, content drawn from the T5/T6/T8 deliverable evidence; backfilled J2. **Live (real finalize path):** walked a 10-step homelab assist session to completion → `_maybe_finalize_session` auto-populated `compiled_output` with the assist header and no plan banner. Compile + assist regression suites — **91 passed**. Closes the open finding logged in §17.514–515.
+
+---
+
+### §17.514–515 — Pre-deployment dogfood fixes (multi-job end-to-end run) (2026-06-14)
+
+Drove three complex, diverse jobs through the full lifecycle (triage→ideate→DAG→execute/assist) to validate usefulness before deployment: a logmerge CLI (autonomous/CodeGen), a hardened Vaultwarden setup (assist/Shell), and a Node.js blue-green pipeline (autonomous/LLM+CodeGen). Triage briefs were faithful (no fabrication, right ambiguities); DAGs were sensible and correctly tool/path-classified; the **assist** path worked end-to-end (8/8 steps committed → mirrored to dag_nodes → session+job completed; guidance was excellent — `## Prerequisites/Inputs/Risk/Run this/Verify` with a real UFW lockout-hazard callout; §17.506 banner correctly did NOT fire on the assist-completed job). Two real bugs surfaced and fixed:
+
+**§17.514 — autonomous CodeGen crashed on any node with upstream deps.** The logmerge run failed after node 1 with `TypeError: expected string or bytes-like object, got 'tuple'`. `_fetch_upstream_outputs` returns `dict[node_key → (output_text, confidence)]` tuples (since §17.477) and `_format_upstream_block` was updated to unpack them, but `collect_upstream_code` (`execution_verify.py`, called by the §17.429 strict CodeGen verifier) still treated the values as strings → passed the whole tuple to `extract_code_blocks` → crash. This broke **every CodeGen node with a dependency** under the default strict verifier (i.e. essentially all real code jobs). Fix: unpack `val[0] if isinstance(val, tuple) else val`. The existing tests only passed string values, so they never caught the production shape — added tuple-shaped regressions. **Live-confirmed:** re-running logmerge, the two CodeGen nodes (T2/T3) that previously crashed now pass.
+
+**§17.515 — ideation domain classifier leaked software tasks into `eng_design`.** The blue-green job was classified `domain=eng_design` (the circuits/EDA partition, deliberate-write-only with "no classifier route" per the eng/eng_design split) — purely because the refinement tool's `domain` field was a bare `enum: sorted(ALLOWED_DOMAINS)` with **no description**, so the LLM picked on the "design"/"deployment" keyword. Misrouted jobs get empty/wrong RAG grounding at execution (queries the job's domain). Fix: `LLM_SELECTABLE_DOMAINS = ALLOWED_DOMAINS − {eng_design}` for the schema enum + a domain-field description ("'eng' = software/infra/devops/deployment… when unsure choose eng"). `eng_design` stays in `ALLOWED_DOMAINS` for explicit overrides (web-UI dropdown + `/ideate domain=` unaffected).
+
+**Open dogfood findings (logged, not yet fixed):** assist-completed jobs leave `compiled_output` NULL (the assist path never calls `_compile_output`), so the default `/results` view shows no synthesized "here's what you built" summary — the per-node evidence is only visible via `/results <id> nodes`. A proper fix would synthesize an assist completion summary while suppressing the §17.506 banner (assist steps WERE executed). MED usefulness gap.
+
+**Verification.** New tuple regressions in `test_execution_codegen_verify.py` (+2) + domain-enum guard in `test_idea_refinement.py` (+2); affected suites (codegen-verify, idea_refinement, domain_filtering, web_ui) — **131 passed**. Live E2E: assist job (Vaultwarden) fully completed; autonomous job (logmerge) past the prior crash point.
+
+---
+
+### §17.513 Fix (test determinism) — plan-only banner integration tests nondeterministic under full-suite load (2026-06-14)
+
+The full-suite runs after §17.508–512 surfaced **1 failure** in `test_compile_plan_only_banner.py::TestCompileOutputPlanOnly` — but **a different case each run** (first `test_shell_enabled_suppresses_banner`, then `test_shell_runbook_job_gets_banner`), while the file passed green alone, as a file, in the a–c range, and in the first-17 real-collection-order subset. Two distinct contributing factors, both fixed:
+
+1. **Settings-object identity (first run).** The test patched `app.config.settings`, but `test_auth.py`'s `importlib.reload(app.config)` swaps in a fresh `Settings` object while `_compile_output` keeps reading its import-bound one. *Initially mis-attributed as the whole cause* — a diagnostic then proved `execution_compile.settings IS _compile_output.__globals__["settings"]` even after the reload, so the patched object was already correct after switching to it.
+
+2. **Synthesis nondeterminism (second run — the real driver).** These integration tests left `compile_synthesis_enabled` at its default, so `_compile_output` made a **live synthesis LLM call**; under full-suite load (3879 tests, model contention/timing) that path's result transitively perturbed the banner assertions. Lighter contexts (isolation, a–c, first-17) never tripped it.
+
+**Fix.** A `_prep(monkeypatch, **settings)` helper patches `_compile_output.__globals__["settings"]` (the exact object the called function reads — reload-proof) AND sets `compile_synthesis_enabled=False`, so the compile path is fully deterministic with no LLM call. Tests now run faster too (16s vs 47s for the file). Verified: isolation, `test_auth.py`+file (27 passed), first-17 in real collection order (246 passed), and the full-suite re-run (below). Lesson: unit tests over `_compile_output` must disable synthesis — a live LLM in a "unit" path is a latent flake.
+
+---
+
+### §17.508–512 — Full-lifecycle guidance audit remediation (triage→assist) (2026-06-14)
+
+A full audit of the user-facing guidance across the whole lifecycle (5 parallel stage audits, every load-bearing finding verified in code) confirmed each stage individually works but surfaced one structural through-line gap plus several over-claim/dead-end gaps. The verified top-5 are fixed here:
+
+**§17.508 — autonomous-vs-assist choice surfaced for hands-on plans (HIGH).** `/confirm` silently auto-executed autonomously (`assist_after_confirm` valve default False) and never offered the choice — so a hands-on build (e.g. homelab) ran autonomously, generating runbooks-marked-done → "completed" with nothing built (the user's original complaint). Fix (`scaffold_router.py` confirm chain): after the DAG is built, count Shell steps; if any, STOP and present the choice (`/assist <id>` recommended vs `/execute <id>` autonomous-runbook-only) instead of auto-running. Pure text-class DAGs (LLM/CodeGen) still auto-execute — common flow unchanged, both existing confirm tests stay green (their mock DAGs have no Shell tasks). This is the documented "operator picks" intent, now actually implemented per-job instead of via a hidden global valve.
+
+**§17.509 — live ticker stops claiming "✅ complete" for unexecuted runbook nodes (MED).** The `node_done` SSE render said "✅ Step T*n* complete." for Shell/runbook nodes that were never executed (undercutting §17.506's end-of-run banner mid-stream). Fix: orchestrator emits `tool` + `runbook_only` (gated on `shell_tool_enabled`) on `node_done` (`execution_agent.py`); pipeline renders "📋 Step T*n* — runbook generated (not executed; you perform it)." for runbook_only nodes (`scaffold_router.py` `_handle_sse_event`).
+
+**§17.510 — research_complete no longer over-claims the build link (MED).** It said "`/go` to build a project plan from this research," but `/go` (`_synthesize_idea`) uses zero RAG — it synthesizes from chat only. Fix: reworded to point at `/rag` (the real way to use the ingested knowledge, which also grounds builds at execution time) and to describe `/go` honestly as "start a build from your chat description."
+
+**§17.511 — research summary anti-bleed guard (MED).** `SUMMARY_SYSTEM_V1` only said "summarize collected entries" with no scope constraint, and both runtime guards (faithfulness, CoVe) default off — so summaries could bleed unrelated training-data content (the "kubernetes→Svelte" gotcha). Fix: added an always-on "summarize ONLY the provided entries; do not add outside/recalled facts" clause to the prompt.
+
+**§17.512 — assist re-surfaces a presented-but-unsubmitted step (MED).** `get_next_step` claimed only `pending` rows, so a step already `presented` (lost to scroll/reconnect/accidental `/next`) was a dead-end — `/assist next` skipped it or returned "nothing claimable." Fix: when nothing new is claimable, re-surface the current `presented` step (re-assembled, `re_presented=True`) instead of None; pipeline flags it "↩️ Re-showing your current step." Only fires when nothing else is ready, so it never blocks parallel progress. The stale "no claimable step" copy was corrected too.
+
+**Verification.** New `tests/test_scaffold_router_audit_fixes.py` (§17.508 hands-on→choice + text→auto; §17.509 runbook vs executed render; §17.512 re-presented note) + `tests/test_research_summary_antibleed.py` (§17.511); one existing test (`test_research_complete_suggests_go`) updated for the §17.510 reword. **§17.512 verified LIVE** on a real assist session: 1st `/next` claims T1, 2nd `/next` re-surfaces T1 (`re_presented=True`, full prompt) — previously a dead-end. Pipeline + research + assist suites green. **Not fixed (below top-5, logged):** triage "Type /go to launch" vs the `/go confirm` two-step (LOW); the dangling `/assist status` reference in the mirror-divergence banner (LOW).
+
+---
+
+### §17.507 Fix — DAG build hard-failed on a >5-word task name (coerce, don't crash) (2026-06-14)
+
+**Symptom.** Generating a fresh homelab DAG failed with `{"status":"failed","errors":["Task 4: name exceeds 5 words: 'Deploy media AI and game VMs'"]}` and marked the **whole job `failed`** — no nodes inserted. A retry (different non-deterministic LLM draw) succeeded, so the build was effectively a coin-flip on every node name.
+
+**Root cause.** `dag_generator._normalize_tasks` (line ~1030, rule #104) appended a hard **error** (and `continue`d, dropping the task) when `len(name.split()) > 5`. Any non-empty `errors` fails the entire DAG build. But the 5-word cap is a *stylistic guideline* handed to the LLM in the prompt ("Keep task names to max 5 words") — the `dag_nodes.title` column is unbounded. Failing the build over a one-word overage is the bug; the validator's job is to not crash on minor LLM style misses.
+
+**Fix.** Coerce-with-warning instead of erroring: truncate the name to 5 words, `logger.warning` + append to the `warnings` list, keep the task. Consistent with the function's existing unknown-type→`action` / unknown-tool coercions (#26). Full detail still lives in the node's `notes`/description. Genuine structural problems (missing id, missing name, duplicate id, non-object) still hard-error as before.
+
+**Verification.** New `TestLongNameCoercion` (**+3**: 6-word name truncated not errored; exactly-5-word untouched; one long name doesn't drop sibling tasks). Live: the exact failing input `'Deploy media AI and game VMs'` → `'Deploy media AI and game'`, `errors: []`, warning surfaced, sibling task preserved. Full dag_generator + validate_dag + parse-error-diag suites — **77 passed**. Surfaced while building the fresh homelab assist job (§17.505/§17.506 follow-on).
+
+---
+
+### §17.506 Fix — autonomous "completed" on hands-on jobs is hallucinated; add PLAN-NOT-EXECUTED banner (2026-06-14)
+
+**Symptom (user report, validated).** A homelab job ran autonomously and showed `completed`, but nothing was built — the user correctly called it a hallucinated completion. Forensics on job `eb920fc5`: 8 of 9 nodes were `tool=Shell` ("Install Proxmox", "Enable GPU passthrough", "Deploy AI VM"), all `done`, but their `output_text` is **runbooks for a human** (`<PLACEHOLDER>` vars, "power on the hardware, enter BIOS"). Root mechanism: `execution_agent._system_for_tool` returns `EXECUTION_SYSTEM_RUNBOOK` for Shell when `settings.shell_tool_enabled` is False (the default) and there is **no shell backend wired** (line ~908) — so a Shell node only ever *generates instructions*, marks itself `done`, and the job rolls up to `completed`. `compiled_output` then reads like a finished build (placeholders and all). This is the autonomous-vs-assist mismatch: a hands-on-hardware build is **assist-class** (the user is the executor) but ran autonomously, which can only produce text.
+
+**Fix.** `execution_compile._compile_output` now counts `done` Shell/runbook nodes (gated on `not settings.shell_tool_enabled`) and prepends a `_prepend_plan_only_banner` — *"⚠️ PLAN — NOT EXECUTED. This job includes N of M steps that are runbooks … the engine generated them but did not run them … run `/assist <job_id>`"*. Mirrors the existing `_prepend_skipped_banner` (operational metadata, applied in `_finish` AFTER synthesis so it survives LLM rewriting; lands at the very top as the most load-bearing warning). Gated on the flag so a future real shell backend suppresses it. Surfaces everywhere `compiled_output` is read (web `/results`, chat `/results`). Pairs with §17.504/§17.505 (steer to / unbreak Assist Mode).
+
+**Scope note.** This is a *surface* guardrail — it does not change the `completed` job status (high blast radius; lots of code keys off it). A deeper follow-up could add a distinct terminal state or a `plan_only` flag so programmatic consumers (not just humans reading the text) can branch on it.
+
+**Verification.** New `tests/test_compile_plan_only_banner.py` (**+7**: helper zero/none/present/singular; `_compile_output` shell-job→banner, pure-text→none, shell_tool_enabled→suppressed). 3 pre-existing compile tests that asserted exact `==` on Shell-node output relaxed to membership (the banner is additive; their concern is content *selection*) — full compile suite **69 passed**.
+
+---
+
+### §17.505 Fix — Assist Mode 100% broken in production: `sys.modules["scaffold_router"]` KeyError (2026-06-14)
+
+**Symptom (user report).** A correct `/assist <job_id>` in OWUI returned `Response payload is not completed: <TransferEncodingError: 400, message='Not enough data to satisfy transfer length header.'>`. That aiohttp error = the pipeline's chunked response to OWUI was truncated because the generator raised mid-stream.
+
+**Root cause.** `pipelines/_vendor/_assist_handlers.py` resolved scaffold_router's shared `_HTTP_SESSION` / `_SSE` via `sys.modules["scaffold_router"]` (the `_scaffold_router()` / `_ss()` / `_sse_events_const()` helpers, §17.296). But OWUI's pipeline loader (`load_module_from_path` → `importlib.util.spec_from_file_location` + `module_from_spec` + `exec_module`) **does not register loaded pipelines in `sys.modules`**. So the very first `_ss()` call in `assist_start` raised `KeyError: 'scaffold_router'`, crashing the generator. **This means every `/assist` command had been broken in production since the §17.296 vendor split** — corroborated by §17.501-era forensics (`SELECT count(*) FROM assist_sessions` = 0, ever). It passed all tests because the unittest harness (`tests/_scaffold_router_setup.py:41`) DOES register the module under `"scaffold_router"` — a test/prod environment divergence the mocks hid (cf. the "live smoke for default-off/fail-soft features" lesson).
+
+**Fix.** Recover scaffold_router's namespace from the live Pipeline instance: `type(pipe).pipe.__globals__` IS the module's live `__dict__` in both environments and honors test monkeypatches. New `_sr_ns(pipe)`; `_ss`/`_sse_events_const` take `pipe`; all 20 call sites threaded (each already had `pipe` in scope — AST-verified). Removed the `sys.modules` lookup entirely.
+
+**Verification.** Reproduced OWUI's loader inside the `open-webui-pipelines` container (`exec_module`, `'scaffold_router' not in sys.modules`) → old path `KeyError`, new `_ss(pipe)` returns a `requests.Session`. Live: `/assist` on the (completed) homelab job now returns a clean **HTTP 409** ("job … is in status 'completed'; assist mode requires one of …") rendered as a friendly message, not a crash. Pipelines reloaded. Tests: all `test_scaffold_router_*.py` — **627 passed**; assist suite — **205 passed**. Follow-up worth considering: a live OWUI-loader smoke in CI so this class of test/prod divergence can't recur.
+
+---
+
+### §17.504 Fix — assist-intent nudge: free-text "assist with…" routed silently to triage (2026-06-14)
+
+**Symptom (user report, root-caused).** A user believed they were using Assist Mode on the `DeFruscio HomeLab` job, but "the responses were like triage." Verified against the OWUI chat DB: the chat's single user message was *"assist with the completion and implementation of the defruscio homelab using provided components."* — natural language, **not** the `/assist` command. `SELECT count(*) FROM assist_sessions` = **0** (none ever, any job), confirming Assist Mode was never entered. The leading word "assist" is prose; command dispatch only matches a slash-prefixed `/assist` at a word boundary, so it fell through to the triage planner (the 4-section Scope/Options/Gaps/My-pick format). Compounding: the job had already auto-executed to `completed` (default autonomous path after `/confirm`), and `completed` is excluded from `_VALID_START_STATUSES` (`assist_agent.py:38` = planning/executing/blocked/failed/assisted_*), so even the correct `/assist <job_id>` would have been rejected.
+
+**Fix (pipeline-side, scaffold_router.py).** New `_ASSIST_INTENT_RE` + `_looks_like_assist_intent()` detect imperative assist requests ("assist …" at start, "help me <implement/complete/deploy/…>", "step/walk me through") while NOT firing on project *descriptions* that merely mention assist ("build an app that **assists** users"). When a free-text message matches, `pipe()` prepends a one-line `_ASSIST_NUDGE` before the triage reply pointing at `/assist <job_id>` (find via `/jobs`; job must be in progress, not completed). Additive — triage planning still runs. Same discoverability class as §17.502. *Regex note:* the verb group uses stems (`complet`, `configur`) so it carries NO trailing `\b` — caught by the test (`help me complete` failed with `complet\b` because "complete" has no boundary after the stem).
+
+**Verification.** New `tests/test_scaffold_router_assist_nudge.py` (**+16**: real transcript triggers; imperative requests trigger; descriptions/normal-planning do NOT; pipe() emits nudge-then-triage for assist intent, omits it otherwise). Broader scaffold_router suite (welcome + commands + helpers + help-refresh + nudge) — **210 passed** `--noconftest`. Pipelines container reloaded; live in OWUI. No route/schema change.
+
+---
+
+### §17.503 Fix — research SearXNG flooded with MDN noise (`categories`+`engines` conflict + dead engine map) (2026-06-13)
+
+**Symptom.** A homelab `/research` run ingested 31 entries but ~28 were `developer.mozilla.org` noise (CSS `lab()`, devtools panels, "What is a web server?") — only 3 genuinely homelab (jellyfin, portainer, superuser VLAN). The decomposition was *excellent* (facets: control panels / media servers / network security / container orchestration / monitoring; queries like "homelab media server plex jellyfin emby setup"), so the bug was downstream of query generation.
+
+**Root cause (two compounding).** (1) `_search_queries` sent SearXNG **both** `categories=<cat>` **and** a curated `engines` list. SearXNG treats them as ADDITIVE — `categories=it` activates *every* `it`-tagged engine, including **MDN**, which keyword-matches aggressively ("media"→MediaKeys, "container"→Flex_Container, "lab" from homeLAB→CSS lab()), regardless of the engine list. Reproduced: `categories=it`+engines → 10× MDN + 10× dockerhub. (2) The curated `CATEGORY_ENGINES` map pointed at **dead engines** — measured live, `google` = "Suspended: access denied", and `bing`/`stackoverflow`/`pypi`/`crossref`/`semantic_scholar`/`google news`/`bing news` all return 0 on this instance. So even the engine restriction was near-empty; the only results came from the MDN-dragging `categories` fallback.
+
+**Fix.** (1) Send `engines` ONLY (drop `categories`) so the curated list is authoritative. (2) Refresh `CATEGORY_ENGINES` to engines that actually respond (measured 2026-06-13): `it`→`github,duckduckgo,startpage`, `science`→`arxiv,google scholar,duckduckgo`, `news`→`duckduckgo news,duckduckgo`, `general`→`duckduckgo,startpage,brave`; default→`duckduckgo,startpage`. Each carries a reliable general-web backbone plus its specialists.
+
+**Verification.** Live SearXNG with the new `it` list (engines-only): homelab query → **20 results, 0 MDN, 0 unresponsive engines**, all on-topic (reddit, homelabstarter.com, datahoarder.io). New `tests/test_research_searxng_engines.py` (**+3**: no-`categories` in request, no dead engines in map, default backbone) + research suite — green. The 28 pre-existing MDN junk entries were purged from the `llm` partition (3 legit kept). **Note:** engine lists encode measured instance health — revisit if the SearXNG roster changes or google access is restored. Pairs with §17.501 (those junk entries had also mis-routed to `llm`).
+
+---
+
+### §17.502 Fix — `/research` ingestion is discoverable (kickoff + help breadcrumb) (2026-06-13)
+
+**Symptom (user report).** Ran `/research` on a homelab topic; it ingested fine (31 entries) but the user couldn't tell — and when they asked "was it ingested?" the triage LLM bounced them between `/dag` and `/research`, neither of which can show knowledge-base content. The completion message *does* carry a `/rag` hint (scaffold_router.py `research_complete`), but on a long CPU run the SSE stream can drop before completion, so the hint is never seen.
+
+**Root cause.** `/research` ingests into the **global** knowledge base, not the active job — so `/dag`/`/results` legitimately show nothing research-related. The only inspection path is `/rag` (or `/research/list`), and it was surfaced *only* at stream end. The triage prompt knows nothing about `/rag`, so free-text "did it save?" questions got LLM-improvised answers pointing at the wrong commands.
+
+**Fix (pipeline-side, scaffold_router.py).** (1) The `research_started` SSE event — early and reliable — now appends a one-line breadcrumb: *"Ingests into the shared knowledge base — when done, check with `/rag <query>` (searches all domains) or `/research/list`."* So the path survives a dropped stream. (2) `/help` "Common scenarios" gains a "Check what a `/research` run ingested" entry making the global-KB-not-job model explicit.
+
+**Verification.** Pipeline tests (help-refresh + commands + research-mode-discovery + helpers) — **199 passed** `--noconftest`. Syntax-checked. No route/schema change → ci-tier-0 unaffected. Pairs with §17.501 (the homelab entries that prompted this had also mis-routed to the "llm" partition).
+
+---
+
+### §17.501 Fix — `_detect_domain` keyword-less fallback routed to "llm" not "eng" (2026-06-13)
+
+**Symptom.** Homelab research (topic matching no `TOPIC_KEYWORDS`) ingested into the **"llm"** Milvus partition. Silent because cross-domain (`domain=None`) retrieval still found it via fan-out — only a domain-pinned query would miss it.
+
+**Root cause.** `_detect_domain` (research_extractors.py) passed `default=1` to `detect_topic_id`; an unmatched topic returned topic_id 1, and `topic_to_domain[1] == "llm"`. This contradicted `settings.default_domain` ("eng") — whose `.get(topic_id, settings.default_domain)` fallback was **dead code**, since keys 1-6 are all mapped.
+
+**Fix.** Pass `default=0` (a topic_id absent from `topic_to_domain`) so the documented `default_domain` fallback fires → unmatched topics land in "eng". One-line change; makes the existing fallback live. `detect_topic_id`'s own `default=1` signature is untouched (its unit test at `test_topic_detection.py:35` stays valid).
+
+**Verification.** Live `_detect_domain` in-container: homelab→`eng`, gardening→`eng`, "fine-tune an llm with rlhf"→`llm`, "RAG retrieval pipeline"→`rag`. New `tests/test_research_domain_detection.py` (**+3**) + existing domain/research suite (topic_detection, research_verify, forum/hf ingest, ssrf-guard, gt_extractor_module) — **163 passed**. Pre-existing mis-routed homelab entries left in place (retrievable cross-domain); only future ingests are corrected. **Known secondary issue (not fixed here):** the query decomposition for that run produced mostly off-topic web-dev/CSS content (only ~4/31 entries genuinely homelab) — a research-quality bug at the query-generation layer, logged for follow-up.
+
+---
+
+### §17.500 Feature — Assist Mode deep research (fetch + extract pages) (2026-06-13)
+
+The confirm step used SearXNG *snippets* (~200 chars). This adds **page fetch + extract** (trafilatura) for real doc content — reusing `research_agent._fetch_and_extract` (bounded concurrency, fail-soft). **Targeted to where accuracy matters:** `/assist research` and `/assist fix` go deep; the auto-guide pre-pass stays snippet-fast so walkthroughs don't slow down (and existing guide tests stay valid).
+
+**How.** `assist_guide._confirm_query` gains `deep` (default False). Deep → `_deep_web_sources(query, top_n)` = structured SearXNG (`_searxng_structured`) → `_fetch_and_extract` the top-N URLs → `{kind:"web", text:page[:2000], url}` sources; falls back to the snippet path if fetch yields nothing. `_research_prepass(deep=…)` threads it: `generate_fix` → `deep=True`; the two guide generators → `deep=False`; `research_one` (`/assist research`) → `deep=True`. `assist_research_fetch_top_n` (default 2, 0 = snippet-only everywhere) caps pages. Source dicts now carry `url`; `_render_research_block` + pipeline `render_research` surface it.
+
+**Verification.** +7 tests (`_deep_web_sources` fetch/extract + empty; `_confirm_query` deep-uses-pages / deep-falls-back-to-snippet / shallow-never-fetches; research_one deep, hermetically mocked). Existing snippet-path guide tests unchanged (auto-guide is deep=False). **Live: `/assist research` "nginx proxy_pass syntax" → milvus chunk + 2 fetched pages (docs.nginx.com, stackoverflow), ~2000 chars each of real extracted body** vs the old snippets. `make ci-tier-0` green (no new route/schema). Full `make test`: see §14.1.
+
+---
+
+### §17.499 Feature — Assist Mode verbosity / skill-level control (2026-06-13)
+
+Walkthroughs now adapt to the operator: `/assist verbose terse|normal|detailed`. `terse` = commands + one-line whys (expert); `detailed` = explain why each step matters + what to watch for (novice); `normal` = unchanged. Applies to walkthroughs (auto + `/assist guide`, streamed + non-streamed) AND `/assist fix`.
+
+**How.** `assist_guide.apply_verbosity(system, level)` appends a directive to the system prompt (`normal`/unknown → no change). Threaded as a `verbosity` kwarg through `generate_guidance` / `generate_guidance_stream` / `generate_fix` / `ensure_guidance`. Stored per-session in `assist_sessions.metadata.verbosity` (reuses the §17.487 metadata plumbing — no migration); `assist_agent._verbosity_from_metadata` reads it (default `settings.assist_default_verbosity` = `normal`), `set_environment` writes it via the single jsonb merge patch (validates against terse/normal/detailed → 409 on bad). Surface: `AssistEnvInput` gains a `verbosity` field (reuses `PUT /assist/{sid}/env` — no new route, but the request schema changed → openapi snapshot regenerated); `/assist verbose <level>` pipeline command; `render_environment` shows the level.
+
+**Verification.** +12 tests across the layers: `apply_verbosity` (terse/detailed/normal/unknown), guidance + fix thread the directive into the system prompt, `_verbosity_from_metadata`, `set_environment` writes verbosity + rejects bad, `generate_step_guidance` threads it, pipeline `verbose` dispatch + bad-level usage + render. **Live: terse 756 chars vs detailed 2093 (~2.8×) on the same step** — the model honors the directive. `make openapi-check` + `ci-tier-0` green. Full `make test`: see §14.1.
+
+---
+
+### §17.498 Change — model_coder → kimi-k2.7-code:cloud (A/B-backed) (2026-06-13)
+
+The first role swap chosen by the §17.495 harness rather than ad-hoc. 3-way A/B (`scripts/model_ab.py`, 8 CodeGen goldens ×2, with §17.497 fair scoring):
+
+| role candidate | goldens | avg wall_s | brief-fidelity |
+|---|---|---|---|
+| qwen3.5:397b-cloud (was) | 16/16 | 15.6s (2.5–58.8s, thinking-model outliers) | faithful |
+| qwen3-coder-next:cloud | 16/16 | 2.2s | **over-elaborates** (parrots CODEGEN prompt examples — `LANG_EXT`/`--lang`) → rejected |
+| **kimi-k2.7-code:cloud** | **16/16** | **2.9s** (1.5–5.9s, tight) | **faithful to the terse brief** ✓ |
+
+kimi matches the generalist's instruction-discipline at ~5× the speed with no latency outliers, so `model_coder` now runs a coding-specialized model; the other roles (router/general/verifier/cloud_*) stay on the qwen3.5 generalist. **Three aligned default sites** updated (the §17.346 multi-site pattern): `app/config.py` default, `docker-compose.yml` `MODEL_CODER` default, and the `scaffold_router.py` pipeline Valves mirror. `MODEL_CODER_PROVIDER=ollama` unchanged (kimi cloud = ollama provider). Applied live by recreating the orchestrator (`up -d --no-deps` — compose env change needs a recreate, not a restart). Reversible: revert the three defaults + recreate.
+
+**Caveat:** the quality read (brief-fidelity) rests on the cli-entrypoint case + clean golden passes across 8 shapes — strong but not an exhaustive judgment probe. The goldens score structure + executability, not deep reasoning quality; watch real CodeGen-node output after the swap. kimi pulled on the account 2026-06-13.
+
+**Verification.** No test pins `model_coder`'s value (value-referencing tests use `settings.model_coder` dynamically — they follow the change). Live: `get_model('model_coder')` → kimi after recreate + a CodeGen smoke. Full `make test`: see §14.1.
+
+---
+
+### §17.497 Fix — codegen exec-gate: required-arg CLI exit-2 is skip, not fail (2026-06-13)
+
+Inspecting the §17.496 A/B `cli-entrypoint` "failure" (qwen3-coder-next 14/16) found it was a **scoring artifact in the shared §17.434 gate**, not a model defect — and a latent **production** bug. `codegen_exec_smoke` runs `python solution.py` with **no argv**, so ANY correct CLI with required args hits argparse → `SystemExit(2)` ("the following arguments are required") → classified `fail`. Whether a model escaped was pure luck: the baseline (`qwen3.5:397b`) used a sibling import (`from filename_generator import …`) that `ModuleNotFoundError`'d *first* → `skip`; the coder model **inlined** the helper → reached argparse → exit 2 → `fail`. In the autonomous executor this would falsely-fail a legitimate self-contained required-arg CLI node and burn retries.
+
+**Fix.** `app/sandbox/codegen_check._is_cli_args_required(stderr, exit_code)` — argparse's signature (`exit 2` + `usage:` + `error:`) classifies as **skip** ("CLI requires arguments — can't run standalone in the sandbox"), same spirit as the import-miss skip. Narrow: a real error that merely exits 2 without argparse's usage/error lines still `fail`s. Fixes both the executor verify gate and the model A/B harness (which reuses the gate).
+
+**Corrected A/B read.** Re-run with the fix: cli-entrypoint → `skip` for both models. So **`qwen3-coder-next:cloud` is effectively 16/16 with fair scoring** (the two "fails" were the artifact), at **~17× the speed** of the generalist baseline. The remaining real signal from §17.496 stands: qwen3-coder-next over-elaborates by parroting the verbose CODEGEN system-prompt examples (`LANG_EXT`, `--lang/--index`) rather than the terse brief — a judgment call the goldens' structural checks don't capture. **`model_coder` still not swapped** — pending a decision on that over-elaboration tendency (or an A/B of `kimi-k2.7-code:cloud`).
+
+**Verification.** `tests/test_codegen_exec_smoke.py` +2 (required-arg CLI exit-2 → skip; non-argparse exit-2 → still fail); 8 pass. Live re-run confirmed cli-entrypoint now skips for both models. Full `make test`: see §14.1.
+
+---
+
+### §17.496 Tooling+Finding — model_ab pre-flight + first coder A/B result (2026-06-13)
+
+**Pre-flight (`scripts/model_ab.py`).** The §17.495 probe timed out because a not-pulled candidate still burned a 30-60s fallback generation per trial (generate()'s smart-fallback masks the 404). Added `_is_available(model)` — an Ollama `/api/show` check run once per model before the trial loop; a definite 404 skips the model instantly (reported "not pulled — ollama pull required"), any 200/transient-error proceeds (never false-skips). `+3 tests` (200→available / 404→unavailable / transient-error→available); 13 model_ab tests total.
+
+**First real A/B — `qwen3.5:397b-cloud` vs `qwen3-coder-next:cloud`** (8 CodeGen goldens ×2, after `ollama pull qwen3-coder-next:cloud`):
+
+| model | pass | avg wall_s | notes |
+|---|---|---|---|
+| qwen3.5:397b-cloud (baseline) | **16/16** | **31.0s** | thinking model — wildly variable (2.3s–172.9s; the reasoning gap dominates) |
+| qwen3-coder-next:cloud | **14/16** | **1.8s** | non-thinking coder — ~17× faster, tight 0.75–4.6s; **but fails `cli-entrypoint`** |
+
+**Reading:** qwen3-coder-next is **dramatically faster and far more predictable** (no reasoning gap) and nails 6/8 golden shapes, but it **reproducibly fails the `cli-entrypoint` golden** — `structural_failures: []` (parses + defines the right symbols) yet `exec_verdict: fail`: the produced CLI **crashes at runtime** in the sandbox (both draws). The sandbox grounding (§17.491) is exactly what caught it. So it's NOT a clean swap: a 17× latency win on most CodeGen, with a real correctness gap on the runnable-CLI shape. **Recommended next step before swapping `model_coder`:** inspect the cli-entrypoint runtime error (real model weakness vs prompt/harness artifact), and consider a hybrid (coder model for module/decision shapes, keep the generalist for entrypoints) or a larger coder tag. Not yet adopted — this is decision data, not a config change.
+
+**Note:** both §17.495 and §17.496 are scripts-only (no app-code path); the app test baseline stays §17.494's 3810 (model_ab tests add 13). `make ci-tier-0` green.
+
+---
+
+### §17.495 Tooling — model A/B harness for CodeGen-role comparison (2026-06-13)
+
+All six cloud roles point at one generalist (`qwen3.5:397b-cloud`); the catalog has moved on (deepseek-v4, kimi-k2.7-code, glm-5.1, qwen3-coder-next, …) and `model_coder` is the clearest upgrade candidate. The §17.344/346 A/Bs that chose the current models were ad-hoc (code comments). This makes the comparison repeatable and objective.
+
+**`scripts/model_ab.py`** — runs the CodeGen goldens (`tests/fixtures/codegen_goldens.json`, 8) through each `--models` candidate and scores with the SAME deterministic gates the executor uses: structural goldens (`tests/_codegen_golden_checks.check_golden` — ast.parse / must_define / must_not_contain) + the sandbox exec-smoke (`app/sandbox/codegen_check.codegen_exec_smoke`), plus per-trial wall-clock. Emits a side-by-side table + JSONL. Flags: `--models`, `--repeat` (average over stochasticity), `--limit` (quick probe), `--dry-run`. Runs in-container (`docker exec scaffold-orchestrator python scripts/model_ab.py …`).
+
+**Critical correctness property:** `model_router.generate` ALWAYS computes a smart-fallback (`fallback or _smart_fallback(...)`), so an unavailable candidate silently runs on the fallback model. The harness **rejects any fallback / resolved-model mismatch** (`resp.fallback_used` or `resp.model != requested`) and reports the candidate as *unavailable* rather than scoring the fallback as if it were the candidate — without this, every A/B against a not-pulled model would be a lie. (Caught live: `qwen3-coder:480b-cloud` 404'd → fell back to `qwen3.5:397b-cloud` → now correctly reported unavailable, not a false 1/1 pass.)
+
+**Baseline established:** `qwen3.5:397b-cloud` = **8/8 goldens pass, avg 24.5s/trial** (range 2–66s; the thinking-model reasoning gap dominates the slow ones). `ttft_ms`/`tokens_per_sec` come back 0 on the cloud non-stream path, so `wall_s` is the latency metric.
+
+**Verification.** `tests/test_model_ab.py` (10): pure scoring (structural+exec → pass; empty/structural/exec-fail block; exec-skip doesn't), `_summarize`/`_avg` aggregation, and the **fallback-rejection property** (fallback_used → unavailable; model-mismatch → unavailable; matching model → scored). `make ci-tier-0` green. Live baseline + multi-model probe run clean. **Next:** confirm exact pullable candidate tags (the account 404'd `qwen3-coder:480b-cloud`) + A/B a real coder model vs the baseline.
+
+---
+
+### §17.494 Fix — empty-draw guard for the 3 remaining sim-pipeline LLM stages (2026-06-13)
+
+Closes out the §17.465 empty-content straggler class. An audit (grep for bare `model_router.chat(...)`/`generate(...)` consumers) found the last three unguarded stages — all in the sim pipeline, all using `spec_extractor_model_role` (the cloud thinking model) at a bare `max_tokens=4096`, then returning `"empty response"` on a bad draw with no retry, identical to the spec-extractor (§17.488) and topology-select (§17.489) bugs:
+
+- `app/sim/formal_verify.py` — single-shot (highest risk, same shape as spec-extractor).
+- `app/sim/device_sizing.py`, `app/sim/digital_sizing.py` — the LLM call inside each closed-loop sizing iteration (an empty draw wasted a whole propose→simulate→feedback cycle).
+
+**Fix.** Route all three through `chat_until_nonempty` (re-draw on success-but-empty; a true `success=False` returns immediately) with a shared budget: `sim_stage_max_tokens` (default 8192) + `sim_stage_max_draws` (default 3), new in `config.py`. The closed loops are unaffected — the re-draw happens *within* one iteration, orthogonal to the sizing-iteration budget. No behavior change on the success paths.
+
+**Other consumers verified already-guarded** (the §17.453/462/463/464 sweep): `cove`, `prompt_optimizer`, `ideation_workflow` compile, `dag_generator`/`dag_validator` (via `_generate_dag_json`), `research_agent` (fail-soft by design). So §17.488/489/494 close the last of the class — **every LLM free-text/JSON consumer now routes through an empty-guard** (the §17.464 policy fully holds).
+
+**Verification.** +3 tests (one redraw test per stage: empty `success=True` draw → re-draws within the iteration → ok=True, `chat.await_count==2`); 42 sim-stage tests pass. `make ci-tier-0` green. Full `make test`: **3810 passed, 0 failed, 0 skipped** — see §14.1.
+
+---
+
+### §17.493 Feature — Assist Mode streaming walkthrough generation (2026-06-13)
+
+Guidance was a 10–60s blocking call behind a static "Generating walkthrough…" line (deferred in §17.486). This streams the walkthrough token-by-token on both `/assist next` (auto-guide) and `/assist guide`.
+
+**End-to-end stream.** (1) `model_router.stream_chat(messages, *, role, …)` — new role-resolving streaming entry; **first real consumer** of the Sprint-I.1 provider `stream_chat` (content-only, reasoning/thinking filtered). (2) `assist_guide.generate_guidance_stream` — async generator yielding `{"type":"delta","text":…}` per chunk then `{"type":"done","status","guidance_meta","cached"}`; **cache hit (`force=False`) streams the cached text as one delta + done (no model call)**; **empty stream → falls back to non-streamed `chat_until_nonempty`** so streaming can't regress the §17.465 thinking-model empty guard; persists the full text + meta (destructive scan, sources) before `done`. (3) `assist_agent.generate_step_guidance_stream` resolves session/node/env (raises `ValueError` → HTTP before the stream opens). (4) `POST /assist/{sid}/guide/stream` — SSE (`assist_guide_delta`* → `assist_guide_done`), validates up front + wraps in `_sse_with_disconnect_watch` like `/handoff`; non-streaming `/guide` stays for SDK/curl/web. (5) New SSE constants `ASSIST_GUIDE_DELTA`/`ASSIST_GUIDE_DONE` in `app/sse_events.py` + the byte-equal vendor. (6) Pipeline `assist_guide_stream_cmd` consumes the SSE on the handoff thread/queue/keepalive skeleton, yields deltas live, appends the destructive banner + sources on `done`. Valve `assist_stream` (default on) switches `/assist next` + `/assist guide` between stream and the §17.486 non-stream path.
+
+**Caveats (accepted).** The cloud model is a *thinking* model — it reasons silently first, so the stream is quiet through the reasoning phase then content flows (live-measured **first token at ~7.8s**); a real but partial win. The destructive banner + sources are **trailing** on streamed guides (banner-first relaxes — chat renders the full message before the operator acts; cached/non-stream paths keep banner-first). No `_record_call` cost tracking on the stream path (the empty-fallback path records).
+
+**Verification.** +13 tests: `test_model_router.py` (stream_chat role→provider, role+model rejection), `test_assist_guide.py` (stream→done+persist / cache-hit no-model-call / empty→`chat_until_nonempty` fallback / destructive in done meta), `test_assist_agent_guidance.py` (stream resolve+delegate / 404), `test_scaffold_router_assist_guide.py` (stream-by-default vs `assist_stream=off` / dispatch / consumer renders deltas+banner+sources / cache marker / http-error). `make ci-tier-0` (SSE-events parity) + `make openapi-check` green. **Live smoke:** `model_router.stream_chat` against `qwen3.5:397b-cloud` → 7 clean content chunks, first token 7.8s, no reasoning leaked. (The SSE endpoint + pipeline consumer are unit-covered; no startable job existed for a full end-to-end curl this run.) Full `make test`: **3807 passed, 0 failed, 0 skipped** — see §14.1.
+
+---
+
+### §17.492 Feature — Assist Mode destructive-command safety gate (2026-06-13)
+
+The RUNBOOK system prompt *asks* for a `## Risk` section but nothing enforced it. This adds a deterministic backstop: generated walkthroughs and `/assist fix` output are scanned for high-confidence destructive commands, and matches are surfaced as a prominent "review before you run anything" banner ahead of the steps.
+
+**How.** `assist_guide.scan_destructive(text)` — no LLM — matches command-context-anchored patterns (`rm -rf`, `dd if=/of=`, `mkfs`, `wipefs`, `shred`, `fdisk/parted`, `> /dev/sdX`, `chmod -R 777`, destructive `git` (hard reset / force push / clean -f), `docker prune/volume rm`, `kubectl delete`, `DROP/TRUNCATE`, unfiltered `DELETE FROM` (no WHERE), fork bomb). Anchored so a destructive *verb in prose* doesn't trip it ("address"/"perform"/"form" don't match; `DELETE … WHERE` is allowed). Matches are stored in `guidance_meta.destructive` by `generate_guidance` + `generate_fix` (gated by `assist_destructive_scan`, default on); the pipeline `render_destructive_banner` prepends the warning to `render_guidance`/`render_fix`. **Informs, does not block** — the operator is the executor; the banner lists the exact lines + why and reminds them to check paths/placeholders and back up first. Conservative by design (a prereq line naming a destructive tool is flagged too — better over-warn than miss).
+
+**Verification.** `tests/test_assist_guide.py` +5 (flags rm/dd/mkfs/force-push/DROP/DELETE-no-WHERE; no false positive on prose or `DELETE … WHERE`; dedup; attached to meta; disabled→empty), `tests/test_scaffold_router_assist_guide.py` +3 (banner prepended to guidance/fix; absent when clean). **Live smoke (real model):** "wipe and reformat /dev/sdb" → walkthrough with `shred`/`wipefs -a`/`mkfs.ext4 -F` → all flagged. No new routes/migration. Full `make test`: **3795 passed, 0 failed, 0 skipped** — see §14.1.
+
+---
+
+### §17.491 Feature — Assist Mode sandbox-grounded codegen verification (2026-06-13)
+
+§17.487 verified a submitted step by LLM-judging the pasted evidence. For **codegen** steps that's a text judgment of code; this grounds it by **actually running the code** in the `scaffold-coderunner` sandbox (already live: `CODERUNNER_URL` set, `CODEGEN_EXECUTION_CHECK_ENABLED=true`).
+
+**How.** `assist_guide.verify_step_success` gained a sandbox pre-check (codegen-tool only, gated by the existing `codegen_execution_check_enabled` + `coderunner_url` — no new config). It reuses the executor's `app/sandbox/codegen_check.codegen_exec_smoke` classifier (`pass | skip | fail`):
+- **`fail`** (definite runtime error) → authoritatively returns `outcome='failed'`, `grounded_by='sandbox'`, and **skips the LLM call** — a pasted error or broken code is caught deterministically, not by a maybe-judgment.
+- **`pass` / `skip`** → fall through to the LLM verdict (which judges *task-fit* — "it runs" is necessary, not sufficient). A `pass` is recorded as `grounded_by='sandbox+model'` and, on a `succeeded` verdict, the reason notes "code executed cleanly in the sandbox".
+
+Same gate as the executor's verify chain, same fail-soft classifier (sandbox off/unreachable/unresolved-sibling-import/timeout → `skip` → LLM decides). The block path (`assist_block_on_failed_verify`) inherits this for free — a sandbox `fail` is just `outcome='failed'`. Pipeline render distinguishes sandbox-grounded verdicts ("🛑 Ran your code in the sandbox — it failed" / "✓ Verified by running your code in the sandbox").
+
+**Verification.** `tests/test_assist_guide.py` +5 (sandbox fail overrides + skips LLM / pass→LLM as sandbox+model / skip→LLM / non-codegen skips sandbox / disabled skips), `tests/test_scaffold_router_assist_guide.py` +3 (sandbox failed/succeeded/block render). **Live smoke (real sandbox):** broken `print(undefined_var)` → `failed`/`grounded_by=sandbox` with the actual NameError; clean `print("hello")` → ran cleanly → LLM judged (`sandbox+model`). Full `make test`: **3787 passed, 0 failed, 0 skipped** — see §14.1. **Scope: verification only** (testing a `/assist fix`'s proposed code in the sandbox is a possible follow-up — fixes are often partial snippets that would mostly `skip`).
+
+---
+
+### §17.490 Feature — Assist Mode auto-learns substitutions from evidence (2026-06-13)
+
+§17.487 added `/assist env` (manual environment capture → concrete commands). This makes it automatic: when a step is submitted, the engine learns the concrete values the operator actually used and folds them into the session environment, so later walkthroughs are concrete without the operator re-typing `/assist env`.
+
+**How.** On a committed `submit` (gated by `assist_learn_substitutions`, default on), the submit endpoint calls `assist_agent.learn_from_submit`: read the step's cached walkthrough, scan it for `<PLACEHOLDER>` slots (`assist_guide.find_placeholders`), and — only if any exist — run `assist_guide.extract_substitutions` (one `report_values` tool_call that fills the placeholders it can read from the evidence; omits the rest, never guesses). Newly-learned keys merge into `metadata.environment.substitutions` **only-add-new** (an operator-set or previously-learned value always wins over a re-read). Surfaced in the submit reply as `📌 Learned for later steps: HOST_IP=…`.
+
+**Cost/safety.** Zero LLM call when the walkthrough emitted no placeholders (the cheap gate). Fully fail-soft — wrapped in try/except in the endpoint so a learn failure never disturbs the submit. Runs after the commit, so it can't block it.
+
+**Verification.** `tests/test_assist_guide.py` +5 (find_placeholders; extract: no-placeholder-skips-LLM / fills-from-evidence / filters-unknown-keys+empty+brackets / fail-soft), `tests/test_assist_agent_guidance.py` +3 (no-cached-guidance / only-adds-new-keys / nothing-new-skips-write), `tests/test_scaffold_router_assist_guide.py` +2 (learned banner shown / absent). **Live smoke (real model):** guidance with `<HOST_IP>`/`<APP_DIR>` + the operator's SSH/cd output → learned `{HOST_IP: 192.168.4.20, APP_DIR: /opt/myapp}`. Full `make test`: **3779 passed, 0 failed, 0 skipped** — see §14.1.
+
+---
+
+### §17.489 Fix — topology-select empty-draw guard (chat_until_nonempty) (2026-06-13)
+
+The §17.488 sibling for the next straggler §14.1 named: `topology_select.select_topologies` made a bare `model_router.chat(..., max_tokens=4096)` call, and it reuses `spec_extractor_model_role` (the cloud thinking model) while feeding it *larger* prompts (the full RAG-chunk set). Same §17.465 failure: `success=True` + empty content → `LLM call failed: empty response` → the live `test_topology_select_db.py` had been chronically **self-skipping** on the resulting 409.
+
+**Fix.** Route through `chat_until_nonempty` (re-draw on success-but-empty; true `success=False` returns immediately). Budget 4096 → `topology_select_max_tokens` (default 8192) with `topology_select_max_draws` (default 3) — its own knobs (not the spec-extractor's) since its prompts run larger. No behavior change on the success/citation/coverage paths.
+
+**Verification.** `tests/test_topology_select.py` +2 (empty→empty→valid re-draws to ok=True with one persisted row; all-empty → ok=False, no INSERT, no raise) — 15 pass. **The live `test_topology_select_db.py` now PASSES instead of skipping** (after an orchestrator restart so the running server picks up the change — the live test hits the HTTP API, not bind-mounted pytest imports). Full `make test`: **3769 passed, 0 failed, 0 skipped** — fully clean, 0 skips for the first time (see §14.1). **This clears both §14.1 stragglers (§17.488 spec extractor + §17.489 topology-select); the policy (§17.464 — every LLM free-text consumer routes through the empty-guard) now holds across the sim pipeline too.** See [[thinking_model_empty_content]].
+
+---
+
+### §17.488 Fix — spec extractor empty-draw guard (chat_until_nonempty) (2026-06-13)
+
+The §17.487 full-suite run surfaced `test_spec_extractor_live::test_extract_spec_live_unambiguous_brief` failing with `LLM call failed: empty response` (`llm_raw_text=''`) — it took 3 isolated re-runs to draw non-empty. Root cause is the §17.465 class: `spec_extractor.extract_spec` called `model_router.chat(..., max_tokens=4096)` once, and `spec_extractor_model_role=model_general` is the cloud thinking model (`qwen3.5:397b-cloud`) whose `num_predict` is a shared reasoning+content budget — a long chain of thought (or an unlucky draw) returns `success=True` with empty content, which the extractor treated as a hard failure on the first try.
+
+**Fix.** Route the call through `app/utils/llm_retry.py::chat_until_nonempty` (the same guard §17.465 gave the node executor): re-draw on success-but-empty before failing; a true hard failure (`success=False`) still returns immediately. Budget raised 4096 → `spec_extractor_max_tokens` (default 8192) with `spec_extractor_max_draws` (default 3), both new in `config.py`. No behavior change on the success/ambiguity/validation paths.
+
+**Verification.** `tests/test_spec_extractor.py` +2 (empty→empty→valid re-draws to ok=True with one persisted row; all-empty → ok=False, no DB write, no raise) — 16 pass. The live test now passes (the redraw absorbs the empty draw). Full `make test`: **3766 passed, 0 failed, 1 skipped** (+2 over §17.487; the formerly-flaky live test was green this run — see §14.1). **POLICY reminder (§17.464): every consumer of LLM free-text output routes through `chat_until_nonempty`/`generate_until_nonempty` — this was a straggler.** See [[thinking_model_empty_content]].
+
+---
+
+### §17.487 Feature — Assist Mode Tier 1: close the loop (env + verify + fix) (2026-06-13)
+
+§17.486 made the *content* assistive; the loop around it was thin. Tier 1 closes three gaps so Assist Mode gets the user to a *working* result, not just instructions. Plus a defect fix carried over from §17.486.
+
+**Phase 0 — migration renumber (defect).** §17.486's `025_assist_guidance.sql` collided with the pre-existing `025_drop_dead_error_types.sql` (migrations run to 050; the §17.486 plan trusted a wrong "highest=024"). It *functioned* (runner tracks by full filename, both rows recorded, no ordering dependency) but violates convention. `git mv` → `051_assist_guidance.sql`; deleted the orphan `025_assist_guidance.sql` row from `schema_migrations`; restart re-applied `051` idempotently (`ADD COLUMN IF NOT EXISTS`). **Lesson: `ls db/migrations/ | tail` before picking a number** ([[project_migration_runner_single_statement]]).
+
+**Phase 1 — environment capture (`/assist env`).** Stored in the existing `assist_sessions.metadata` JSONB (`{environment:{profile, substitutions}}`) — **no migration**. `set_environment` read-modify-writes via `metadata || jsonb_build_object('environment', …)` (merges substitutions key-by-key, never clobbers other metadata). Threaded into every walkthrough + fix via `assist_guide.render_environment_block` (a "use these concrete values; placeholder ONLY for values not given" block) → commands stop being placeholder-laden. `PUT/GET /assist/{sid}/env`; `/assist env <text>` sets the profile, `/assist env KEY=value` adds a substitution (pipeline regex splits the two), `/assist env` shows current; one-line nudge at session start.
+
+**Phase 2 — success verification on submit.** `assist_guide.verify_step_success` (a `judge_step_outcome` tool_call → `succeeded`|`failed`|`unclear`, conservative, fail-soft → `unclear`). Orchestrated in the **submit endpoint** (not `submit_step` — keeps it pure and avoids holding its row lock during the LLM call): `verify_submit_outcome` runs before `submit_step`, returns None unless the step is `presented`. Warn mode (default): commit + surface the verdict (`⚠️ This may have failed…` → nudge to `/assist fix`). Block mode (`assist_block_on_failed_verify`, default off): on `failed`, do **not** commit — the step stays `presented` for a clean re-submit, and the blocker is logged to friction. Settings `assist_verify_on_submit` (default on) / `assist_block_on_failed_verify` (default off — a false-negative verdict shouldn't hold a real success).
+
+**Phase 3 — interactive troubleshooting (`/assist fix`).** `assist_guide.generate_fix` (new `GUIDE_SYSTEM_FIX`: `## Diagnosis / ## Fix / ## Then / ## If that fails`) — reuses the research pre-pass (the error is folded into the task text so unknown-detection searches it), env block, `chat_until_nonempty` (8192). `run_step_fix` resolves the node, threads env, and **auto-records the error to the friction log**. `POST /assist/{sid}/fix`; `/assist fix <error>` subcommand. Not persisted (conversational, like research).
+
+**Verification.** +35 assist tests across `test_assist_guide.py` (env block, verify ×5, fix ×3), `test_assist_agent_guidance.py` (env merge/get, verify_submit_outcome presented-vs-not, run_step_fix + friction), `test_scaffold_router_assist_guide.py` (env/fix dispatch, render_fix, submit verdict warn/block/quiet). `docs/openapi.json` regenerated for the 3 new routes (`make openapi-check` green); `make ci-tier-0` green. **Live smoke (real model):** a failed `systemctl` paste → verdict `failed` with the right reason; a success paste → `succeeded`; `/assist fix "Unit nginx.service not found"` → diagnosed "nginx is not installed yet" + correct `apt install` commands. **Full `make test`: 3764 passed (effective), 1 skipped, 0 deterministic failures — see §14.1.**
+
+---
+
+### §17.486 Feature — Assist Mode guidance layer: walk the human through each step (2026-06-13)
+
+**Problem.** Assist Mode (the human-in-the-loop DAG walker) showed the operator the raw LLM `prompt_template` (`base_prompt`) on `/assist next` — an execution hint written *for a model* — and said "paste your output." It never produced human-executable guidance and never researched unknowns. Ironically the repo already had a copy-paste runbook generator (`prompt_assembly.EXECUTION_SYSTEM_RUNBOOK`: Prerequisites → Run this → Verify → Rollback, placeholder-first §17.361) wired **only** to the autonomous executor for `Shell` nodes.
+
+**What shipped.** Assist Mode now generates a human walkthrough per claimed step — copy-paste terminal commands for shell/codegen work, numbered step-by-step instructions for non-coding work — and auto-researches unknowns (versions, flags, package names) via the existing SearXNG/Milvus grounding, citing what it confirms.
+
+- **New module `app/modules/assist_guide.py`.** `guide_system_for_tool(tool)` selects a human-facing system prompt (shell → reuses `EXECUTION_SYSTEM_RUNBOOK` + operator framing; codegen → code + `## Run this`/`## Verify`; else → numbered non-coding steps). Research pre-pass: a `model_router.tool_call` (one `Tool()` object, [[tool_call_needs_tool_objects]]) flags unknowns, then `_confirm_query` runs Milvus + SearXNG (deferred-import of `execution_agent._milvus_search`/`_searxng_search`) concurrently via `asyncio.gather`, filtering empty/failure markers. Generation goes through `chat_until_nonempty` (role `assist_guide_model_role` = `model_general`, `max_tokens` 8192) to dodge the [[thinking_model_empty_content]] empty-draw failure. `ensure_guidance(force=False)` short-circuits on a cached `ready` row — a re-view spends no LLM call.
+- **Persistence — migration 051** (`051_assist_guidance.sql`; originally committed as `025` but **renumbered in §17.487** — `025` collided with the pre-existing `025_drop_dead_error_types.sql`, migrations run to 050): `guidance TEXT`, `guidance_meta JSONB`, `guidance_status` (none/generating/ready/failed), `guidance_generated_at` on `assist_steps`, idempotent `ADD COLUMN IF NOT EXISTS`.
+- **`assist_agent.py`:** extracted `_assemble_ctx_for_node` (shared by `get_next_step` + the new path, no drift); added `generate_step_guidance` (resolves node from `current_node_key`) and `run_step_research`; `get_next_step` now returns `guidance_status`.
+- **Endpoints** (`app/routers/assist.py`): `POST /assist/{sid}/guide` and `POST /assist/{sid}/research`. `/next` stays a fast atomic claim — guidance is a separate POST so the 10-60s thinking-model call never blocks step advancement (no SSE: `chat_until_nonempty` returns one final string, so streaming would buy only keepalives).
+- **Pipeline** (`_assist_handlers.py` + `scaffold_router.py`): `/assist next` auto-triggers the walkthrough (valve `assist_auto_guide`, default on; `force=false` so it's cache-aware); `/assist guide [refine…]` regenerates (e.g. "redo for macOS"); `/assist research <q>` returns cited results. `render_step` demotes the raw prompt to a collapsed `<details>`. New valves `assist_auto_guide`/`assist_guide_research`/`assist_guide_timeout` (180s); `_ASSIST_HELP` + delegates updated.
+- **Replan invalidation (sharp edge):** `assist_replan.apply_selective_replan`'s reset now also clears `guidance`/`guidance_status` for affected steps — a regenerated `prompt_template` describes a new task, so the stale walkthrough must not serve a cache hit on the next `/assist next`.
+
+**Cost note.** With `assist_auto_guide` on, each `/assist next` spends one guide call (+ optional tool_call + 2×N searches). Mitigated by the cache (`force=false`) and two off-switch valves (`assist_auto_guide`, `assist_guide_research`).
+
+**Verification.** New: `tests/test_assist_guide.py` (system-prompt routing, research pre-pass collect/inject + research=False skip + fail-soft, the §17.465 empty-pitfall re-draw/all-empty cases, persistence + cache-hit), `tests/test_assist_agent_guidance.py` (node resolution + 404/409), `tests/test_scaffold_router_assist_guide.py` (`--noconftest`: guide/research dispatch, auto-guide on/off, formatters), + a replan guidance-clear assertion in `test_assist_replan_regen.py`. `docs/openapi.json` regenerated for the two new routes (`make openapi-check` green); `make ci-tier-0` green. **Full `make test`: 3734 passed, 1 skipped in 24:52** (+34 over §17.484; the 1 skip is the known transient topology-select 409 — see §14.1). **Live smoke (real cloud model + SearXNG/Milvus):** a `shell`-tool step produced a copy-paste runbook with `<PLACEHOLDER>`s + a Verify section (`status=ready`); `/assist research` returned 2 grounded sources (milvus + searxng) + a cited synthesis. Migration applied idempotently on a live restart (the runner rejects multi-statement files via asyncpg's prepared-statement path — hence the single comma-separated `ALTER TABLE`; file later renumbered 025→051 in §17.487). Research synthesis needed `max_tokens=8192` to clear the thinking model's reasoning budget ([[thinking_model_empty_content]]).
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*` (this entry reworks the assist surface; the deep-review of the existing assist modules is unchanged).
 
 ---
 

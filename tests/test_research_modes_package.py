@@ -20,12 +20,43 @@ These tests pin the package boundary so the next audit pass finds:
 """
 from __future__ import annotations
 
+import ast
 import inspect
+import pathlib
 
 import pytest
 
 
 _MODE_NAMES = ["openapi", "github", "hf", "forum"]
+
+
+def _entry_literals_missing_provenance(path: str) -> list[int]:
+    """Line numbers of ingest-entry dict LITERALS that lack a 'provenance' key.
+
+    §17.564 — heuristic: an ingest-entry literal has BOTH 'content' and
+    'source' keys (LLM message dicts have 'content' but no 'source', so they're
+    not flagged). Catches the per-path omission class (URL/PDF/topic chunk-
+    fallbacks, OpenAPI). Loop-built entries (entry.setdefault('provenance',…)
+    on LLM-parsed dicts) aren't literals and are covered by functional tests.
+    """
+    tree = ast.parse(pathlib.Path(path).read_text(encoding="utf-8"))
+    missing: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        kv = {
+            k.value: v for k, v in zip(node.keys, node.values)
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        }
+        if not ({"content", "source"} <= set(kv)):
+            continue
+        # Skip JSON-schema 'properties' dicts (e.g. RECORD_ENTRIES_TOOL):
+        # there 'content' maps to a {"type": "string"} dict, not a real value.
+        if isinstance(kv["content"], ast.Dict):
+            continue
+        if "provenance" not in kv:
+            missing.append(node.lineno)
+    return missing
 
 
 @pytest.mark.smoke
@@ -162,3 +193,63 @@ class TestSourceShapeRegressionGuard:
                 f"§17.298: alias assignment for {name} mode is missing "
                 f"from research_agent.py. Expected line: {anchor!r}"
             )
+
+
+@pytest.mark.smoke
+class TestEveryModeWritesProvenance:
+    """§17.563 — every research-mode producer must attach provenance to its
+    entries so ingest_entries writes a rag_entry_provenance row. A live cold
+    ingest caught OpenAPI (and the URL distill path) shipping Milvus entries
+    with NO provenance — retrievable but with no audit linkage / quality
+    signal. This static guard fails if a mode file builds entries without ever
+    calling build_provenance (catches a whole mode forgetting it, incl. future
+    modes); the per-entry distill-path case is pinned functionally in
+    test_research_url_mode.py::test_url_mode_distill_path_attaches_provenance."""
+
+    @pytest.mark.parametrize("mode_name", _MODE_NAMES)
+    def test_mode_references_build_provenance(self, mode_name):
+        mod = __import__(
+            f"app.modules.research_modes.{mode_name}",
+            fromlist=["x"],
+        )
+        with open(mod.__file__, encoding="utf-8") as f:
+            src = f.read()
+        assert "build_provenance" in src, (
+            f"§17.563: research_modes/{mode_name}.py builds ingest entries but "
+            f"never calls build_provenance — entries will land in Milvus with "
+            f"no rag_entry_provenance row. Attach "
+            f"`build_provenance(source_ref=...)` to each entry."
+        )
+
+
+@pytest.mark.smoke
+class TestEntryLiteralsCarryProvenance:
+    """§17.564 — AST guard catching PER-PATH provenance omissions (the class the
+    presence-scan misses). Every ingest-entry dict literal (content + source)
+    must include a 'provenance' key — across research_agent.py (topic/url/pdf
+    producers, NOT covered by the research_modes presence scan) and every mode
+    file. Would have caught the URL-fallback, PDF-fallback, topic-fallback, and
+    OpenAPI gaps."""
+
+    def _files(self):
+        from app.modules import research_agent
+        files = [research_agent.__file__]
+        for name in _MODE_NAMES:
+            mod = __import__(
+                f"app.modules.research_modes.{name}", fromlist=["x"],
+            )
+            files.append(mod.__file__)
+        return files
+
+    def test_all_entry_literals_have_provenance(self):
+        offenders: dict[str, list[int]] = {}
+        for f in self._files():
+            missing = _entry_literals_missing_provenance(f)
+            if missing:
+                offenders[f] = missing
+        assert not offenders, (
+            "§17.564: ingest-entry dict literals missing a 'provenance' key "
+            f"(file → line numbers): {offenders}. Each entry must carry "
+            "build_provenance(source_ref=...) so ingest_entries writes a "
+            "rag_entry_provenance row."
+        )

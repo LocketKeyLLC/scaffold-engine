@@ -78,6 +78,19 @@ def _timeout_for(model: str) -> int:
     return settings.cloud_timeout if _is_cloud(model) else settings.local_timeout
 
 
+def _model_lacks_native_tools(model: str) -> bool:
+    """§17.547 — True if ``model`` is known not to emit native ``tool_calls``.
+
+    Ollama's ``supports_native_tools`` flag is provider-wide, but tool-call
+    support is really per-model: qwen3.5 thinking models return their answer in
+    content/thinking and never populate ``message.tool_calls``, yielding a 100%
+    tool-call miss. ``tool_call`` routes these through the JSON-coaxing fallback
+    instead. Substring match (case-insensitive) on ``settings.tool_call_coax_models``.
+    """
+    m = (model or "").lower()
+    return any(sub.lower() in m for sub in settings.tool_call_coax_models)
+
+
 def _smart_fallback(model: str, default_fallback: str) -> str:
     """Map non-existent models to appropriate fallbacks."""
     model_lower = model.lower()
@@ -270,7 +283,13 @@ async def _dispatch_with_retry(
     straight to the fallback — waiting won't fix a 401 or a missing model.
     """
     retries = max_retries if max_retries is not None else settings.max_retries
-    fallback = fallback or _smart_fallback(model, settings.model_fallback)
+    # §16.7 — /api/embed has no valid fallback: the embedder is config-only
+    # (dim-locked at 512) and the global ``model_fallback`` is a chat model that
+    # returns HTTP 501 on /api/embed, so injecting it just burns a doomed
+    # round-trip. Honor the embed callers' explicit ``fallback=None`` instead.
+    # Chat/generate/classify keep the smart-fallback default unchanged.
+    if endpoint != "/api/embed":
+        fallback = fallback or _smart_fallback(model, settings.model_fallback)
 
     # §17.409 (arch-review R4) — shallow-copy so the per-attempt/fallback
     # ``payload["model"] = …`` swaps below never mutate the caller's dict.
@@ -481,6 +500,37 @@ async def chat(
     return await _record_call(resp)
 
 
+async def stream_chat(
+    messages: list[dict[str, str]],
+    *,
+    role: str | None = None,
+    overrides: dict | None = None,
+    model: str | None = None,
+    temperature: float = 0.7,
+    max_tokens: int = 4096,
+):
+    """Role-routed streaming chat — yields content-delta ``str`` chunks.
+
+    Delegates to the resolved provider's ``stream_chat`` (the unified Sprint I.1
+    contract: content-only, reasoning/thinking deltas filtered). First real
+    consumer of that path. Pass ``role=`` (provider-routed, the assist path) or
+    ``model=`` (legacy direct). NOTE: unlike ``chat``, the stream path does NOT
+    ``_record_call`` (token usage isn't available mid-stream); callers that need
+    cost tracking use the non-stream ``chat`` fallback.
+    """
+    _reject_role_model_collision(role, model)
+    if role:
+        resolved_model, provider = _resolve_role(role, overrides)
+    else:
+        from app.providers import get_provider
+        resolved_model = model or settings.model_general
+        provider = get_provider(settings.model_general_provider)
+    async for chunk in provider.stream_chat(
+        resolved_model, messages, temperature=temperature, max_tokens=max_tokens,
+    ):
+        yield chunk
+
+
 async def tool_call(
     messages: list[dict[str, str]],
     tools: list[Tool],
@@ -521,14 +571,15 @@ async def tool_call(
 
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
-        if getattr(provider, "supports_native_tools", False):
-            resp = await provider.tool_call(
-                resolved_model, messages, tools,
+        if (
+            getattr(provider, "supports_native_tools", False)
+            and not _model_lacks_native_tools(resolved_model)
+        ):
+            resp = await _native_first_then_coax(
+                provider, resolved_model, messages, tools,
                 temperature=temperature, max_tokens=max_tokens,
-                tool_choice=tool_choice,
+                tool_choice=tool_choice, role=role, fallback=fallback,
             )
-            if not resp.success:
-                resp.error = _format_provider_error(resp, role)
             return await _record_call(resp)
         coaxed = await _tool_call_via_coaxing(
             provider, resolved_model, messages, tools,
@@ -541,11 +592,14 @@ async def tool_call(
     model = model or settings.model_general
     from app.providers import get_provider
     provider = get_provider("ollama")
-    if getattr(provider, "supports_native_tools", False):
-        resp = await provider.tool_call(
-            model, messages, tools,
+    if (
+        getattr(provider, "supports_native_tools", False)
+        and not _model_lacks_native_tools(model)
+    ):
+        resp = await _native_first_then_coax(
+            provider, model, messages, tools,
             temperature=temperature, max_tokens=max_tokens,
-            tool_choice=tool_choice,
+            tool_choice=tool_choice, role=None, fallback=fallback,
         )
         return await _record_call(resp)
     coaxed = await _tool_call_via_coaxing(
@@ -554,6 +608,47 @@ async def tool_call(
         role=None, fallback=fallback,
     )
     return await _record_call(coaxed)
+
+
+async def _native_first_then_coax(
+    provider,
+    model: str,
+    messages: list[dict[str, str]],
+    tools: list[Tool],
+    *,
+    temperature: float,
+    max_tokens: int,
+    tool_choice: str,
+    role: str | None,
+    fallback: str | None,
+) -> ModelResponse:
+    """§17.548 — native-first tool call with a coaxing fallback.
+
+    Tries the provider's native ``tool_call``. If the model succeeds but emits
+    NO ``tool_calls`` (it answered in prose — common when the prompt doesn't
+    compel the tool, and this Ollama ignores ``tool_choice`` so we can't force
+    it), fall back to the JSON-coaxing path and parse the structured output
+    from content. Tool-capable models that DO call the tool keep the clean,
+    single-call native path; everything else still gets structured output.
+    """
+    resp = await provider.tool_call(
+        model, messages, tools,
+        temperature=temperature, max_tokens=max_tokens, tool_choice=tool_choice,
+    )
+    if tools and resp.success and not resp.tool_calls:
+        logger.info(
+            "tool_call_native_empty_coax_fallback: model=%s role=%s "
+            "(native returned no tool_calls; retrying via coaxing)",
+            model, role,
+        )
+        return await _tool_call_via_coaxing(
+            provider, model, messages, tools,
+            temperature=temperature, max_tokens=max_tokens,
+            role=role, fallback=fallback,
+        )
+    if not resp.success and role:
+        resp.error = _format_provider_error(resp, role)
+    return resp
 
 
 async def _tool_call_via_coaxing(
@@ -596,9 +691,18 @@ async def _tool_call_via_coaxing(
     )
     augmented = [{"role": "system", "content": coaxing_system}] + list(messages)
 
+    # §17.547 — thinking models routed here (qwen3.5 et al.) spend tokens
+    # reasoning before the JSON; floor the budget so a tight caller value
+    # (e.g. research extraction's 1024) isn't consumed by reasoning alone.
+    effective_max = (
+        max(max_tokens, settings.tool_call_coax_min_tokens)
+        if _model_lacks_native_tools(model)
+        else max_tokens
+    )
+
     resp = await provider.chat_completion(
         model, augmented, temperature=temperature,
-        max_tokens=max_tokens, fallback=fallback,
+        max_tokens=effective_max, fallback=fallback,
     )
     if not resp.success:
         if role:
@@ -658,6 +762,9 @@ async def embed(
     payload: dict[str, Any] = {
         "model": model,
         "input": inputs,
+        # §17.545 — see OllamaProvider.embed: truncate to context instead of
+        # 400-ing on over-length input (§16.7).
+        "truncate": True,
     }
     resp = await _dispatch_with_retry("/api/embed", payload, model, fallback=None)
     await _record_call(resp)
@@ -711,6 +818,7 @@ async def validate_models(overrides: dict | None = None) -> Optional[list[str]]:
     OLLAMA_ROLES = [
         "model_general", "model_verifier", "model_coder",
         "model_router", "model_fallback", "model_cloud_alt",
+        "model_research_extract",
     ]
     needed = {role: get_model(role, overrides) for role in OLLAMA_ROLES}
 

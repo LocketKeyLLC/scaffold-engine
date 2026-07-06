@@ -1,6 +1,125 @@
 {
   "components": {
     "schemas": {
+      "ArtifactListResponse": {
+        "properties": {
+          "artifacts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ArtifactRead"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "ArtifactListResponse",
+        "type": "object"
+      },
+      "ArtifactRead": {
+        "properties": {
+          "artifact_type": {
+            "enum": [
+              "dag",
+              "prompt",
+              "toon_file",
+              "plan",
+              "code",
+              "report",
+              "mermaid",
+              "other"
+            ],
+            "title": "Artifact Type",
+            "type": "string"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "file_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Path"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "job_id": {
+            "format": "uuid",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "metadata": {
+            "title": "Metadata",
+            "type": "object"
+          },
+          "mime_type": {
+            "default": "text/plain",
+            "title": "Mime Type",
+            "type": "string"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "artifact_type",
+          "title",
+          "id",
+          "created_at"
+        ],
+        "title": "ArtifactRead",
+        "type": "object"
+      },
       "AssistChatMapInput": {
         "properties": {
           "last_node_key": {
@@ -25,6 +144,66 @@
         "title": "AssistChatMapInput",
         "type": "object"
       },
+      "AssistEnvInput": {
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Free-text environment profile (OS, shell, package manager).",
+            "title": "Profile"
+          },
+          "substitutions": {
+            "description": "Concrete value map, e.g. {HOST_IP: 10.0.0.5}.",
+            "title": "Substitutions",
+            "type": "object"
+          },
+          "verbosity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Walkthrough verbosity: terse | normal | detailed.",
+            "title": "Verbosity"
+          }
+        },
+        "title": "AssistEnvInput",
+        "type": "object"
+      },
+      "AssistFixInput": {
+        "properties": {
+          "error": {
+            "description": "The error / what went wrong while doing the step.",
+            "title": "Error",
+            "type": "string"
+          },
+          "node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Key"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "AssistFixInput",
+        "type": "object"
+      },
       "AssistFrictionInput": {
         "properties": {
           "node_key": {
@@ -41,6 +220,54 @@
           "note"
         ],
         "title": "AssistFrictionInput",
+        "type": "object"
+      },
+      "AssistGuideInput": {
+        "properties": {
+          "force": {
+            "default": true,
+            "description": "Regenerate even if a cached walkthrough exists.",
+            "title": "Force",
+            "type": "boolean"
+          },
+          "node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Defaults to the session's current step.",
+            "title": "Node Key"
+          },
+          "refine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Refinement hint, e.g. 'redo for macOS'.",
+            "title": "Refine"
+          },
+          "research": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Override assist_guide_research for this call.",
+            "title": "Research"
+          }
+        },
+        "title": "AssistGuideInput",
         "type": "object"
       },
       "AssistHandoffInput": {
@@ -63,6 +290,30 @@
           "node_key"
         ],
         "title": "AssistHandoffInput",
+        "type": "object"
+      },
+      "AssistResearchInput": {
+        "properties": {
+          "node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Key"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "title": "AssistResearchInput",
         "type": "object"
       },
       "AssistStartInput": {
@@ -158,7 +409,7 @@
       "Body_research_pdf_endpoint_research_pdf_post": {
         "properties": {
           "file": {
-            "format": "binary",
+            "contentMediaType": "application/octet-stream",
             "title": "File",
             "type": "string"
           }
@@ -1588,6 +1839,17 @@
             ],
             "title": "Compiled Output"
           },
+          "deliverable_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deliverable Kind"
+          },
           "job_id": {
             "title": "Job Id",
             "type": "string"
@@ -2652,6 +2914,11 @@
       },
       "StatusCounts": {
         "properties": {
+          "aggregating": {
+            "default": 0,
+            "title": "Aggregating",
+            "type": "integer"
+          },
           "assisted_executing": {
             "default": 0,
             "title": "Assisted Executing",
@@ -2854,6 +3121,13 @@
       },
       "ValidationError": {
         "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
           "loc": {
             "items": {
               "anyOf": [
@@ -2883,6 +3157,142 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "WorkAssistSession": {
+        "properties": {
+          "current_node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Node Key"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "job_title": {
+            "default": "",
+            "title": "Job Title",
+            "type": "string"
+          },
+          "last_activity_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Activity At"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "job_id",
+          "status"
+        ],
+        "title": "WorkAssistSession",
+        "type": "object"
+      },
+      "WorkJob": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "job_type": {
+            "default": "legacy",
+            "title": "Job Type",
+            "type": "string"
+          },
+          "next_actions": {
+            "default": [],
+            "items": {
+              "type": "object"
+            },
+            "title": "Next Actions",
+            "type": "array"
+          },
+          "node_count": {
+            "default": 0,
+            "title": "Node Count",
+            "type": "integer"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "phase"
+        ],
+        "title": "WorkJob",
+        "type": "object"
+      },
+      "WorkResponse": {
+        "properties": {
+          "assist_sessions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WorkAssistSession"
+            },
+            "title": "Assist Sessions",
+            "type": "array"
+          },
+          "jobs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WorkJob"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp"
+        ],
+        "title": "WorkResponse",
         "type": "object"
       },
       "_LogLevelPatchIn": {
@@ -2970,6 +3380,17 @@
             ],
             "title": "Completed At"
           },
+          "component_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Component Index"
+          },
           "created_at": {
             "title": "Created At",
             "type": "string"
@@ -2982,6 +3403,17 @@
             "default": 0,
             "title": "Node Count",
             "type": "integer"
+          },
+          "parent_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Job Id"
           },
           "status": {
             "title": "Status",
@@ -3022,6 +3454,51 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/artifacts/{artifact_id}": {
+      "get": {
+        "description": "Fetch a single artifact, including its full content.",
+        "operationId": "get_artifact_artifacts__artifact_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Artifact"
+      }
+    },
     "/assist/_chatmap/{chat_id}": {
       "delete": {
         "operationId": "assist_chatmap_delete_assist__chatmap__chat_id__delete",
@@ -3295,6 +3772,161 @@
         ]
       }
     },
+    "/assist/{session_id}/env": {
+      "get": {
+        "operationId": "assist_get_env_assist__session_id__env_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Get Env",
+        "tags": [
+          "Assist"
+        ]
+      },
+      "put": {
+        "description": "Set the operator's environment so walkthroughs use concrete commands.",
+        "operationId": "assist_set_env_assist__session_id__env_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistEnvInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Set Env",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/fix": {
+      "post": {
+        "description": "Diagnose an operator-reported error on a step and return corrected steps.",
+        "operationId": "assist_fix_assist__session_id__fix_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistFixInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Fix",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
     "/assist/{session_id}/friction": {
       "get": {
         "operationId": "assist_friction_list_assist__session_id__friction_get",
@@ -3388,6 +4020,118 @@
           }
         ],
         "summary": "Assist Friction",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/guide": {
+      "post": {
+        "description": "Generate (or return cached) the human walkthrough for a step.\n\nSeparate from `/next` on purpose: this can take 10-60s (a thinking-model\ncall plus an optional research pre-pass), so it must not block the fast\natomic claim. `force=true` (the default; `/assist guide`) regenerates;\nthe auto-guide path calls with `force=false` to hit the cache.",
+        "operationId": "assist_guide_assist__session_id__guide_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistGuideInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Guide",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/guide/stream": {
+      "post": {
+        "description": "§17.493 — streaming variant of `/guide`. SSE: one `assist_guide_delta`\nper content chunk, then a single `assist_guide_done` with status +\nguidance_meta. A cache hit streams the cached text as one delta + done.\nValidates the session up front so bad input is an HTTP error, not a\nhalf-open stream (mirrors `/handoff`).",
+        "operationId": "assist_guide_stream_assist__session_id__guide_stream_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistGuideInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Guide Stream",
         "tags": [
           "Assist"
         ]
@@ -3533,6 +4277,62 @@
           }
         ],
         "summary": "Assist Pause",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/research": {
+      "post": {
+        "description": "Confirm an operator-supplied question via SearXNG/Milvus + a short\ncited synthesis. A side query — not persisted to the step's guidance.",
+        "operationId": "assist_research_assist__session_id__research_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistResearchInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Research",
         "tags": [
           "Assist"
         ]
@@ -3841,6 +4641,48 @@
           }
         ],
         "summary": "Get Dag"
+      }
+    },
+    "/decompose": {
+      "post": {
+        "description": "§17.526 — split a multi-part idea into an umbrella + component child jobs,\neach run autonomously through the normal pipeline (Phase 1 → grounded Phase 2\n→ DAG → execute). Returns the umbrella id + child roll-up immediately.\n\nIf the idea has fewer than ``MIN_COMPONENTS`` separable parts, returns\n``{\"decomposed\": false, \"components\": [...]}`` and creates nothing — the\ncaller (the /go auto-chain) then falls back to the single-job ``POST /ideate``.\nThe model-validation gate runs before any LLM work or row creation.",
+        "operationId": "decompose_endpoint_decompose_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdeaInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Decompose Endpoint"
       }
     },
     "/design": {
@@ -4989,6 +5831,51 @@
         ]
       }
     },
+    "/jobs/{job_id}/artifacts": {
+      "get": {
+        "description": "List a job's artifacts (job-level deliverable first, then per-node).",
+        "operationId": "list_job_artifacts_jobs__job_id__artifacts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Job Artifacts"
+      }
+    },
     "/jobs/{job_id}/cancel": {
       "post": {
         "description": "§17.322 — operator-driven cancel for a non-terminal job.\n\nSymmetric to ``POST /jobs/{job_id}/resume`` (§17.130): resume is\ncancelled→executing; cancel is active→cancelled. Replaces the\nSQL-only drain mechanism §17.321 had to use for the 4 stuck\n``awaiting_confirmation`` jobs.\n\nStatus codes:\n  - 200 + ``CancelJobResult{cancelled=True, was_already_cancelled=False}``\n    on a successful active→cancelled flip (any of pending /\n    refining / awaiting_confirmation / researching / planning /\n    executing / running / blocked / assisted_*)\n  - 200 + ``CancelJobResult{cancelled=True, was_already_cancelled=True}``\n    when the job was already cancelled; idempotent OK\n  - 404 if no job with that ID exists\n  - 409 if the job is in a terminal non-cancellable state\n    (``completed`` or ``failed``); ``current_status`` in detail\n  - 422 on malformed UUID\n\nNo request body. Cancellation reason is operator-context; if a\nstructured reason field becomes useful (audit trail, scheduled\ncancels) a v2 schema can accept it. Pre-v1 the\n``ideation_workflow._cancel_job`` helper writes\n``error_summary='client_disconnect'`` for SSE-disconnect paths and\nis unaffected by this endpoint.",
@@ -5982,6 +6869,74 @@
           }
         ],
         "summary": "Llm Rollup Endpoint",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
+    "/observability/quality": {
+      "get": {
+        "description": "§17.573 — execution-quality rollup over recent jobs.\n\nSurfaces the signals the model-tuning + grounding work tunes against,\naggregated from existing telemetry (no new recording):\n\n- ``by_node_type``: per (tool, node_type) — total/done/failed/skipped,\n  pass_rate, avg verifier confidence, avg retry count. Shows which\n  node kinds are failing, low-confidence, or retry-heavy.\n- ``grounding``: distribution of ``jobs.metadata.grounding.score`` —\n  count scored, avg/min, # auto-corrected (CoVe), # below threshold.\n\nRead-only; fail-open (``data_source`` flags a query error vs empty).",
+        "operationId": "quality_rollup_endpoint_observability_quality_get",
+        "parameters": [
+          {
+            "description": "Job creation window in minutes (default 24h).",
+            "in": "query",
+            "name": "window_minutes",
+            "required": false,
+            "schema": {
+              "default": 1440,
+              "description": "Job creation window in minutes (default 24h).",
+              "maximum": 10080,
+              "minimum": 1,
+              "title": "Window Minutes",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Score below which a deliverable counts as low-grounding.",
+            "in": "query",
+            "name": "grounding_threshold",
+            "required": false,
+            "schema": {
+              "default": 0.7,
+              "description": "Score below which a deliverable counts as low-grounding.",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Grounding Threshold",
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Quality Rollup Endpoint Observability Quality Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Quality Rollup Endpoint",
         "tags": [
           "Observability"
         ]
@@ -7226,7 +8181,8 @@
                     "blocked",
                     "assisted_executing",
                     "assisted_running",
-                    "assisted_paused"
+                    "assisted_paused",
+                    "aggregating"
                   ],
                   "type": "string"
                 },
@@ -7349,6 +8305,30 @@
         "tags": [
           "Specs"
         ]
+      }
+    },
+    "/work": {
+      "get": {
+        "description": "List the user's active (non-terminal) work in one response.\n\nSingle-user \"you-are-here\" primitive backing the pipeline's /here,\n/resume, and /next verbs (§17.561). Returns non-terminal jobs (newest\nfirst) and active/paused assist sessions, each with a human phase label\nand pre-filled next_actions — so the user never needs a UUID to resume.\nReplaces the per-replica, chat-scoped recall the pipeline relied on\n(OWUI doesn't reliably deliver chat_id).",
+        "operationId": "get_work_work_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Work"
       }
     }
   }

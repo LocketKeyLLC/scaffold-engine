@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import AsyncGenerator
@@ -174,7 +175,7 @@ DECOMPOSE_SYSTEM_V1 = """You are a research planner. Decompose the given topic i
 keyword-based search engine queries (3-8 words each, NOT natural language questions).
 
 Rules:
-- Produce 3-8 distinct facets covering DIFFERENT aspects of the topic
+- Produce 5-12 distinct facets covering DIFFERENT aspects of the topic (break the topic into as many genuinely distinct sub-topics as it warrants)
 - Each query targets DIFFERENT information (no overlap)
 - Include the topic's core terms for relevance
 - Mix overview queries with specific detail queries
@@ -204,7 +205,8 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
 }"""
 
 EXTRACT_SYSTEM_V1 = """You are a knowledge extraction engine. Given search results about a topic,
-extract atomic, self-contained factual entries.
+extract atomic, self-contained factual entries and record them by calling the
+`record_entries` tool.
 
 Rules:
 - Each entry is ONE fact that can be understood without surrounding context
@@ -214,18 +216,16 @@ Rules:
 - 5-15 entries per batch
 - Content must NOT contain escaped quotes or backslashes
 
-OUTPUT FORMAT (strict JSON array, no markdown fences):
-[
-  {
-    "title": "Short descriptive title",
-    "content": "Self-contained factual statement. Technically precise.",
-    "tags": "comma,separated,tags",
-    "source": "URL",
-    "confidence_score": 0.85,
-    "source_type": "tech_docs|news|community|official_docs|curated",
-    "facet": "which facet of the topic this covers"
-  }
-]"""
+Call `record_entries` with an `entries` array; each entry has:
+- title: Short descriptive title
+- content: Self-contained factual statement. Technically precise.
+- tags: comma,separated,tags
+- source: the URL the fact came from
+- confidence_score: 0.0-1.0 (see the confidence rule above)
+- source_type: one of tech_docs|news|community|official_docs|curated
+- facet: which facet of the topic this covers
+
+Respond ONLY by calling the tool — do not write a prose answer."""
 
 EXTRACT_PROMPT_V1 = """Extract factual knowledge entries from these search results about: {topic}
 
@@ -261,8 +261,15 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
 SUMMARY_SYSTEM_V1 = """You are a research summarizer. Given collected knowledge entries,
 produce a concise summary organized by facet/theme.
 
-Write in clear prose paragraphs. Include key facts, numbers, and specifics.
-Keep it under 500 words. No markdown headers — just flowing text with topic transitions."""
+CRITICAL: Summarize ONLY the provided entries. Do NOT add facts, names, numbers,
+or claims that are not present in the entries — no outside or recalled knowledge.
+If the entries are thin or off-topic, say so plainly rather than filling the gap
+from memory. (This prevents the summary from bleeding unrelated training-data
+content — e.g. a "kubernetes" run that drifted into a Svelte tutorial.)
+
+Write in clear prose paragraphs. Include key facts, numbers, and specifics
+DRAWN FROM THE ENTRIES. Keep it under 500 words. No markdown headers — just
+flowing text with topic transitions."""
 
 
 # Sprint W.6 — native tool-call schemas. The wrapper falls back to
@@ -291,7 +298,7 @@ PLAN_RESEARCH_TOOL = Tool(
             "facets": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "3-8 distinct facets covering different aspects of the topic",
+                "description": "5-12 distinct facets covering different aspects/sub-topics of the topic",
             },
             "queries": {
                 "type": "array",
@@ -356,6 +363,41 @@ ASSESS_COVERAGE_TOOL = Tool(
 # Decomposition, search, extraction, gap analysis, summary
 # =============================================================================
 
+def _recency_directive() -> str:
+    """§17.549 — soft recency bias at the SYNTHESIS stage (what the model
+    reliably applies): tells it today's date so decompose/extract favor the
+    most up-to-date information. Query-side recency is handled deterministically
+    by ``_apply_recency_cue`` (the model proved unreliable at adding cues to
+    queries). No SearXNG ``time_range`` — older sources aren't hard-filtered."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return (
+        f"Today's date is {today}. Prioritize the most up-to-date information: "
+        f"prefer current stable versions, recent releases, and recent sources; "
+        f"when sources conflict or duplicate, favor the newer one. Treat older "
+        f"information as potentially outdated unless it is foundational."
+    )
+
+
+def _sys(prompt: str) -> str:
+    """Prepend the §17.549 recency directive to a system prompt."""
+    return f"{_recency_directive()}\n\n{prompt}"
+
+
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def _apply_recency_cue(query_text: str) -> str:
+    """§17.549 — soft, deterministic recency: append the current year to a
+    search query that doesn't already name a year, biasing SearXNG toward fresh
+    results without a hard ``time_range`` filter. Gated on
+    ``settings.research_recency_query_boost``."""
+    if not query_text or not settings.research_recency_query_boost:
+        return query_text
+    if _YEAR_RE.search(query_text):
+        return query_text
+    return f"{query_text} {datetime.now(timezone.utc).strftime('%Y')}"
+
+
 async def _decompose_topic(
     topic: str,
     *,
@@ -377,7 +419,7 @@ async def _decompose_topic(
 
     resp = await _bounded_tool_call(
         messages=[
-            {"role": "system", "content": DECOMPOSE_SYSTEM_V1},
+            {"role": "system", "content": _sys(DECOMPOSE_SYSTEM_V1)},
             {"role": "user", "content": prompt},
         ],
         tools=[PLAN_RESEARCH_TOOL],
@@ -399,7 +441,7 @@ async def _decompose_topic(
         )
         retry_resp = await _bounded_tool_call(
             messages=[
-                {"role": "system", "content": DECOMPOSE_SYSTEM_V1},
+                {"role": "system", "content": _sys(DECOMPOSE_SYSTEM_V1)},
                 {"role": "user", "content": retry_prompt},
             ],
             tools=[PLAN_RESEARCH_TOOL],
@@ -429,60 +471,88 @@ async def _search_queries(
     """Run SearXNG searches with URL + case-insensitive query dedup."""
     from app.utils.http_clients import get_searxng_client
 
-    all_results = []
     client = get_searxng_client()
 
+    # §17.543 — Phase 1: dedup queries + resolve cache hits sequentially (cheap
+    # Redis gets). Each result group is (facet, [result dicts]); facet travels
+    # with its results so the concurrent fan-out below stays order-independent.
+    cache_groups: list[tuple[str, list[dict]]] = []
+    pending: list[dict] = []
+    seen_in_batch: set[str] = set()
     for q in queries[:settings.research_max_queries]:
-        query_text = (q["query"] or "").strip()
+        # §17.549 — soft recency: bias the query toward fresh results, and store
+        # it back on q so the Phase-2 fetch + cache key use the same text.
+        q["query"] = _apply_recency_cue((q["query"] or "").strip())
+        query_text = q["query"]
         query_key = query_text.lower()
-        if not query_key or query_key in state.search_history:
+        if not query_key or query_key in state.search_history or query_key in seen_in_batch:
             continue
-
+        seen_in_batch.add(query_key)
         cached = await _searxng_cache_get(query_text)
         if cached is not None:
             logger.info("searxng_cache_hit: query=%s results=%d", query_text, len(cached))
-            for r in cached:
-                url = r.get("url", "")
-                if url and url not in state.url_history:
-                    state.url_history.add(url)
-                    all_results.append({
-                        "title": r.get("title", ""),
-                        "url": url,
-                        "content": r.get("content", ""),
-                        "facet": q.get("facet", ""),
-                    })
             state.search_history.add(query_key)
-            continue
+            cache_groups.append((q.get("facet", ""), cached))
+        else:
+            pending.append(q)
 
-        try:
-            resp = await client.get(
-                "/search",
-                params={
-                    "q": query_text,
-                    "format": "json",
-                    "categories": q.get("search_category", "general"),
-                    "engines": _engines_for_category(q.get("search_category", "general")),
-                },
-            )
-            if resp.status_code == 200:
-                results = resp.json().get("results", [])[:10]
-                await _searxng_cache_set(query_text, results)
-                logger.info("searxng_cache_miss: query=%s results=%d", query_text, len(results))
-                for r in results:
-                    url = r.get("url", "")
-                    if url and url not in state.url_history:
-                        state.url_history.add(url)
-                        all_results.append({
-                            "title": r.get("title", ""),
-                            "url": url,
-                            "content": r.get("content", ""),
-                            "facet": q.get("facet", ""),
-                        })
-            state.search_history.add(query_key)
-        except Exception as e:
-            logger.warning("research_search_failed: query='%s' error=%s", query_text, e)
+    # §17.543 — Phase 2: fetch cache-MISS queries concurrently, bounded by a
+    # semaphore. The per-query delay is held INSIDE the slot as a cooldown, so
+    # the effective request rate stays ~concurrency/delay — politeness to the
+    # upstream engines SearXNG fans out to, just no longer a strict serial wait.
+    sem = asyncio.Semaphore(settings.research_searxng_concurrency)
 
-        await asyncio.sleep(settings.research_searxng_delay)
+    async def _fetch_one(q: dict) -> tuple[str, list[dict]]:
+        query_text = (q["query"] or "").strip()
+        query_key = query_text.lower()
+        async with sem:
+            try:
+                # §17.503 — send ONLY `engines`, NOT `categories`. SearXNG treats
+                # the two as ADDITIVE: passing `categories=it` activates *every*
+                # engine tagged `it` (including MDN, which keyword-matches
+                # aggressively) regardless of the curated `engines` list, so a
+                # clean homelab query flooded with developer.mozilla.org pages.
+                # Engines-only makes the curated list authoritative.
+                resp = await client.get(
+                    "/search",
+                    params={
+                        "q": query_text,
+                        "format": "json",
+                        "engines": _engines_for_category(q.get("search_category", "general")),
+                    },
+                )
+                if resp.status_code == 200:
+                    results = resp.json().get("results", [])[:10]
+                    await _searxng_cache_set(query_text, results)
+                    logger.info("searxng_cache_miss: query=%s results=%d", query_text, len(results))
+                    state.search_history.add(query_key)
+                    return q.get("facet", ""), results
+                # Non-200: mark attempted (matches pre-§17.543 behavior) but no results.
+                state.search_history.add(query_key)
+            except Exception as e:
+                # Exception leaves query_key un-added so a later iteration may retry.
+                logger.warning("research_search_failed: query='%s' error=%s", query_text, e)
+            finally:
+                await asyncio.sleep(settings.research_searxng_delay)
+        return q.get("facet", ""), []
+
+    miss_groups = await asyncio.gather(*[_fetch_one(q) for q in pending]) if pending else []
+
+    # §17.543 — Phase 3: dedup URLs sequentially across all groups. Done after
+    # the gather (single coroutine) so url_history stays race-free and the
+    # winning duplicate is deterministic (cache hits first, then misses).
+    all_results: list[dict] = []
+    for facet, results in [*cache_groups, *miss_groups]:
+        for r in results:
+            url = r.get("url", "")
+            if url and url not in state.url_history:
+                state.url_history.add(url)
+                all_results.append({
+                    "title": r.get("title", ""),
+                    "url": url,
+                    "content": r.get("content", ""),
+                    "facet": facet,
+                })
 
     return all_results[:settings.research_max_urls_per_iteration]
 
@@ -491,7 +561,7 @@ async def _extract_entries(
     results: list[dict],
     topic: str,
     *,
-    role: str = "model_verifier",
+    role: str = "model_research_extract",
     overrides: dict | None = None,
     session_id: str | None = None,
 ) -> list[dict]:
@@ -585,11 +655,11 @@ async def _extract_entries(
         )
         resp = await _bounded_tool_call(
             messages=[
-                {"role": "system", "content": EXTRACT_SYSTEM_V1},
+                {"role": "system", "content": _sys(EXTRACT_SYSTEM_V1)},
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=topic, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],
-            role=role, overrides=overrides, temperature=0.1, max_tokens=1024,
+            role=role, overrides=overrides, temperature=0.1, max_tokens=4096,
             session_id=session_id,
         )
 
@@ -614,10 +684,22 @@ async def _extract_entries(
                     "extraction_parse_failed: batch=%d raw_len=%d",
                     i // batch_size + 1, len(resp.text),
                 )
+        elif resp and resp.success:
+            # The LLM call succeeded but returned no parseable `entries`
+            # tool-call — a tool-calling miss, NOT a transport/LLM failure.
+            # Mislabeling this as extraction_llm_failed (with success=True)
+            # obscured a real signal: a high rate here means the extractor
+            # model is dropping to the non-LLM fallback. (§17.546)
+            logger.warning(
+                "extraction_no_tool_args: batch=%d (LLM responded but emitted "
+                "no parseable `entries` tool-call; using non-LLM fallback)",
+                i // batch_size + 1,
+            )
         else:
             logger.warning(
                 "extraction_llm_failed: batch=%d success=%s error=%s",
-                i // batch_size + 1, resp.success,
+                i // batch_size + 1,
+                resp.success if resp else False,
                 resp.error if resp else "no-resp",
             )
 
@@ -633,6 +715,9 @@ async def _extract_entries(
                         "confidence_score": _score_source(r.get("url", "")),
                         "source_type": "community",
                         "facet": r.get("facet", ""),
+                        # §17.564 — provenance on the topic extraction-fallback
+                        # path (the LLM-success path above already sets it).
+                        "provenance": build_provenance(source_ref=r.get("url", "")),
                     })
                     logger.info("extraction_fallback: url='%s'", r.get("url", ""))
 
@@ -672,7 +757,7 @@ async def _analyze_gaps(
     for attempt in range(2):
         resp = await _bounded_tool_call(
             messages=[
-                {"role": "system", "content": GAP_SYSTEM_V1},
+                {"role": "system", "content": _sys(GAP_SYSTEM_V1)},
                 {"role": "user", "content": prompt},
             ],
             tools=[ASSESS_COVERAGE_TOOL],
@@ -766,6 +851,14 @@ _SUMMARY_PROMPT_BUDGET_CHARS = 6000
 # without letting a wedged Ollama hold the session running for the
 # full 30-min HTTP local_timeout.
 _SUMMARY_PROMPT_TIMEOUT_S = 120
+# §17.559 — output budget for the summary generation. Was 2048; the cloud
+# default model_verifier (qwen3.5:397b-cloud) is a THINKING model that spends
+# num_predict on reasoning before emitting content, so 2048 returned
+# success=True + EMPTY text on some topics (score_research.py §17.558 caught
+# `analog-filters` empty 2/2 runs). 8192 gives the reasoning room to still
+# leave a real summary; paired with retry-on-empty below. See the
+# "thinking model empty content" issue.
+_SUMMARY_MAX_TOKENS = 8192
 
 
 # §17.445 (Phase A / A2) — research summaries were an UN-ATTRIBUTED synthesis:
@@ -921,39 +1014,56 @@ async def _generate_summary(
         + _build_summary_prompt_body(state)
     )
 
-    try:
-        resp = await asyncio.wait_for(
-            model_router.generate(
-                prompt, role=role, overrides=overrides, system=SUMMARY_SYSTEM_V1,
-                temperature=0.3, max_tokens=2048,
-            ),
-            timeout=_SUMMARY_PROMPT_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
-        logger.warning(
-            "summary_timeout: topic=%s entries=%d budget_s=%d — falling back",
-            state.topic, len(state.all_entries), _SUMMARY_PROMPT_TIMEOUT_S,
-        )
+    def _fallback() -> str:
         return _attach_sources_block(
             f"Research collected {len(state.all_entries)} entries on '{state.topic}'.",
             state,
         )
 
-    if resp.success:
-        summary_text = resp.text.strip()
-        # §17.452 (Phase C / CoVe) — revise the summary against the sources FIRST,
-        # so the faithfulness score below reflects the revised text (default-off).
-        summary_text = await _maybe_cove_revise(summary_text, state, overrides)
-        # §17.448 (Phase B / B1) — score the (possibly revised) summary against
-        # the collected sources (default-off, fail-soft → None when disabled).
-        state.faithfulness = await _maybe_score_faithfulness(
-            summary_text, state, overrides,
+    # §17.559 — retry-on-empty. A thinking model can return success=True with
+    # EMPTY content (budget spent on reasoning); one extra draw usually lands a
+    # real summary. Timeout and genuine success=False fall back immediately (no
+    # retry) — preserving the §17.166 fallback contract. Only the empty-success
+    # case retries.
+    summary_text = ""
+    for attempt in range(2):
+        try:
+            resp = await asyncio.wait_for(
+                model_router.generate(
+                    prompt, role=role, overrides=overrides, system=SUMMARY_SYSTEM_V1,
+                    temperature=0.3, max_tokens=_SUMMARY_MAX_TOKENS,
+                ),
+                timeout=_SUMMARY_PROMPT_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "summary_timeout: topic=%s entries=%d budget_s=%d — falling back",
+                state.topic, len(state.all_entries), _SUMMARY_PROMPT_TIMEOUT_S,
+            )
+            return _fallback()
+        if not resp.success:
+            return _fallback()
+        summary_text = (resp.text or "").strip()
+        if summary_text:
+            break
+        logger.warning(
+            "summary_empty_content: topic=%s attempt=%d max_tokens=%d — %s",
+            state.topic, attempt, _SUMMARY_MAX_TOKENS,
+            "retrying" if attempt == 0 else "falling back",
         )
-        return _finalize_summary_text(summary_text, state)
-    return _attach_sources_block(
-        f"Research collected {len(state.all_entries)} entries on '{state.topic}'.",
-        state,
+
+    if not summary_text:
+        return _fallback()
+
+    # §17.452 (Phase C / CoVe) — revise the summary against the sources FIRST,
+    # so the faithfulness score below reflects the revised text (default-off).
+    summary_text = await _maybe_cove_revise(summary_text, state, overrides)
+    # §17.448 (Phase B / B1) — score the (possibly revised) summary against
+    # the collected sources (default-off, fail-soft → None when disabled).
+    state.faithfulness = await _maybe_score_faithfulness(
+        summary_text, state, overrides,
     )
+    return _finalize_summary_text(summary_text, state)
 
 
 # =============================================================================
@@ -1488,14 +1598,14 @@ async def _run_research_url_mode(
         # age out via the §17.85 reaper, not get spuriously kept alive.
         task = asyncio.create_task(_bounded_tool_call(
             messages=[
-                {"role": "system", "content": EXTRACT_SYSTEM_V1},
+                {"role": "system", "content": _sys(EXTRACT_SYSTEM_V1)},
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=prompt_topic, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],
-            role="model_verifier",
+            role="model_research_extract",
             overrides=overrides,
             temperature=0.1,
-            max_tokens=1024,
+            max_tokens=4096,
             session_id=session_id,
         ))
         async for hb in _await_with_heartbeat(
@@ -1516,6 +1626,10 @@ async def _run_research_url_mode(
                 )
                 entry["facet"] = "direct_url"
                 entry.setdefault("source_type", "community")
+                # §17.563 — attach provenance so ingest_entries writes a
+                # rag_entry_provenance row (the distill path previously omitted
+                # it, so distilled URL entries had no provenance/audit linkage).
+                entry.setdefault("provenance", build_provenance(source_ref=src_url))
             entries.extend(batch_entries)
         else:
             # Audit Finding A — distinguish "model declined to use the
@@ -1540,6 +1654,8 @@ async def _run_research_url_mode(
                         "confidence_score": _score_source(url),
                         "source_type": "community",
                         "facet": "direct_url",
+                        # §17.563 — provenance on the chunk-fallback path too.
+                        "provenance": build_provenance(source_ref=url),
                     })
                     fallback_count += 1
             logger.info(
@@ -1592,6 +1708,7 @@ async def _run_research_pdf_mode(
     t0: float,
 ) -> AsyncGenerator[str, None]:
     """PDF-mode: extract bytes via pypdf (or plumber fallback), distill, ingest."""
+    from app.modules.provenance import build_provenance
     if len(pdf_bytes) > settings.research_max_pdf_bytes:
         cap_mb = settings.research_max_pdf_bytes // (1024 * 1024)
         raise RuntimeError(
@@ -1658,14 +1775,14 @@ async def _run_research_pdf_mode(
         # §17.209 — same gating as URL-mode (§17.208 + comment at line 1840).
         task = asyncio.create_task(_bounded_tool_call(
             messages=[
-                {"role": "system", "content": EXTRACT_SYSTEM_V1},
+                {"role": "system", "content": _sys(EXTRACT_SYSTEM_V1)},
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=filename, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],
-            role="model_verifier",
+            role="model_research_extract",
             overrides=overrides,
             temperature=0.1,
-            max_tokens=1024,
+            max_tokens=4096,
             session_id=session_id,
         ))
         async for hb in _await_with_heartbeat(
@@ -1696,6 +1813,11 @@ async def _run_research_pdf_mode(
                     entry["confidence_score"] = pdf_default_confidence
                 entry["facet"] = "direct_pdf"
                 entry["source_type"] = entry.get("source_type") or "tech_docs"
+                # §17.564 — provenance so ingest_entries writes a
+                # rag_entry_provenance row for PDF distill entries too.
+                entry.setdefault(
+                    "provenance", build_provenance(source_ref=virtual_url)
+                )
             entries.extend(batch_entries)
         else:
             # Audit Finding A — same wording fix as the URL-mode site.
@@ -1716,6 +1838,8 @@ async def _run_research_pdf_mode(
                         "confidence_score": pdf_default_confidence,
                         "source_type": "tech_docs",
                         "facet": "direct_pdf",
+                        # §17.564 — provenance on the PDF chunk-fallback path.
+                        "provenance": build_provenance(source_ref=virtual_url),
                     })
 
     yield _sse("extraction_complete", {

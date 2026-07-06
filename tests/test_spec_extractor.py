@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.config import settings
 from app.providers.base import ModelResponse
 from app.sim.spec_extractor import extract_spec
 from tests.conftest import make_mock_db
@@ -191,6 +192,42 @@ async def test_extract_spec_empty_response(monkeypatch):
     assert result.ok is False
     assert result.errors
     assert db.execute.await_count == 0
+
+
+@pytest.mark.smoke
+async def test_extract_spec_redraws_past_empty_then_succeeds(monkeypatch):
+    """§17.487 — the cloud thinking model can return success=True + empty
+    content; chat_until_nonempty must re-draw before treating it as a failure.
+    Two empty draws then a valid one → ok=True with one persisted row."""
+    mock = AsyncMock(side_effect=[
+        _llm_response(""),
+        _llm_response("   "),
+        _llm_response(json.dumps({"spec": _VALID_SPEC})),
+    ])
+    monkeypatch.setattr("app.sim.spec_extractor.model_router.chat", mock)
+    db = make_mock_db(scalar=uuid.uuid4())
+
+    result = await extract_spec("Build an RC low-pass...", db=db)
+
+    assert result.ok is True
+    assert result.spec is not None
+    assert mock.await_count == 3            # re-drew past the two empties
+    assert db.execute.await_count == 1
+
+
+@pytest.mark.smoke
+async def test_extract_spec_all_empty_draws_fails_softly(monkeypatch):
+    """All draws empty → ok=False, no DB write, no raise (fail-soft)."""
+    mock = AsyncMock(return_value=_llm_response(""))
+    monkeypatch.setattr("app.sim.spec_extractor.model_router.chat", mock)
+    db = make_mock_db()
+
+    result = await extract_spec("...", db=db)
+
+    assert result.ok is False
+    assert result.errors
+    assert db.execute.await_count == 0
+    assert mock.await_count == settings.spec_extractor_max_draws
 
 
 @pytest.mark.smoke

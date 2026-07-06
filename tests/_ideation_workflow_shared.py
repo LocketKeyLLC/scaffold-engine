@@ -43,7 +43,7 @@ def _load_module():
         "app", "app.config", "app.model_router",
         "app.modules", "app.modules.idea_refinement",
         "app.modules.gt_extractor", "app.modules.rag_pipeline",
-        "app.database",
+        "app.database", "app.providers",
         # §17.290 — added ``app.utils.job_utils`` (host of ``fail_job``)
         # because ideation_workflow.py imports from it; without this stub
         # the loader hit ``ModuleNotFoundError: No module named
@@ -71,6 +71,38 @@ def _load_module():
     mock_logger.bind.return_value = mock_logger
     stubs["structlog"].stdlib.get_logger.return_value = mock_logger
 
+    # §17.x — load the REAL app.utils.llm_retry (lightweight; imports only
+    # ``logging``) so the Phase-2 compile path exercises the actual
+    # generate_until_nonempty retry wrapper. Without this, the module-level
+    # ``from app.utils.llm_retry import generate_until_nonempty`` raised
+    # ModuleNotFoundError ('app.utils' stubbed as MagicMock → not a package),
+    # which the loader caught and turned into a silent skip of EVERY Phase-2
+    # test (skip-cascade; same class of bug as the §17.290 job_utils heal).
+    _retry_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "app", "utils", "llm_retry.py")
+    )
+    _retry_spec = importlib.util.spec_from_file_location(
+        "app.utils.llm_retry", _retry_path
+    )
+    _retry_mod = importlib.util.module_from_spec(_retry_spec)
+    _retry_spec.loader.exec_module(_retry_mod)
+    stubs["app.utils.llm_retry"] = _retry_mod
+
+    # §17.580 — real-load app.providers.base (Tool dataclass) and
+    # app.utils.tool_call_args (read_tool_args); both are stdlib-only. The
+    # feasibility pass now imports them, and a bare MagicMock stub for the
+    # parent packages would ModuleNotFoundError the ``from ... import`` lines
+    # and skip-cascade every Phase-1/2 test (same class as the §17.290 heal).
+    for _real_name, _rel in [
+        ("app.providers.base", ("app", "providers", "base.py")),
+        ("app.utils.tool_call_args", ("app", "utils", "tool_call_args.py")),
+    ]:
+        _p = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", *_rel))
+        _s = importlib.util.spec_from_file_location(_real_name, _p)
+        _m = importlib.util.module_from_spec(_s)
+        _s.loader.exec_module(_m)
+        stubs[_real_name] = _m
+
     with patch.dict(sys.modules, stubs):
         spec = importlib.util.spec_from_file_location("ideation_workflow", _MODULE_PATH)
         mod = importlib.util.module_from_spec(spec)
@@ -93,6 +125,23 @@ def _llm_response(text_content: str, success: bool = True):
     resp = MagicMock()
     resp.success = success
     resp.text = text_content
+    return resp
+
+def _tool_response(arguments, success: bool = True):
+    """Fake model_router.tool_call() response — object with .success and
+    .tool_calls[0].arguments, matching read_tool_args's read path (§17.580).
+
+    ``arguments=None`` yields an empty ``tool_calls`` list so read_tool_args
+    returns None (the genuine-failure → fallback path).
+    """
+    resp = MagicMock()
+    resp.success = success
+    if arguments is None:
+        resp.tool_calls = []
+    else:
+        call = MagicMock()
+        call.arguments = arguments
+        resp.tool_calls = [call]
     return resp
 
 def _mock_db_for_claim(claimed_row, existing_row_after_fail=None):
@@ -134,4 +183,4 @@ def _mock_db_for_claim(claimed_row, existing_row_after_fail=None):
     return db
 
 
-__all__ = ['AsyncMock', 'MagicMock', '_MODULE_PATH', '_llm_response', '_load_module', '_mock_db_for_claim', '_mod', 'importlib', 'json', 'os', 'patch', 'pytest', 'pytestmark', 'sys']
+__all__ = ['AsyncMock', 'MagicMock', '_MODULE_PATH', '_llm_response', '_tool_response', '_load_module', '_mock_db_for_claim', '_mod', 'importlib', 'json', 'os', 'patch', 'pytest', 'pytestmark', 'sys']

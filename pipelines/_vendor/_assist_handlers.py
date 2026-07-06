@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import queue as _q
+import re
 import sys
 import threading as _th
 from typing import Generator
@@ -39,21 +40,33 @@ from typing import Generator
 import requests
 
 
-# §17.296 — lazy globals accessor. Captures scaffold_router's module
-# globals each call so any unittest patch lands here too without the
-# vendor module needing to re-import after monkeypatch.
-def _scaffold_router():
-    return sys.modules["scaffold_router"]
+# §17.505 — recover scaffold_router's module namespace from the live Pipeline
+# instance instead of `sys.modules["scaffold_router"]`.
+#
+# OWUI's pipeline loader (`load_module_from_path` → importlib `exec_module`)
+# does NOT register loaded pipelines in `sys.modules`, so the old
+# `sys.modules["scaffold_router"]` lookup raised `KeyError: 'scaffold_router'`
+# in production — crashing the assist generator mid-stream (OWUI surfaced it as
+# `TransferEncodingError: Not enough data to satisfy transfer length header`).
+# It only ever worked under the unittest harness, which DOES register the
+# module under that name — so every assist test passed while live `/assist`
+# always crashed (hence: zero assist sessions ever created).
+#
+# A Pipeline method's `__globals__` IS scaffold_router's live module `__dict__`
+# in both environments, and reads through it honor any test monkeypatch on the
+# module. Every caller already has the `pipe` instance in scope.
+def _sr_ns(pipe):
+    return type(pipe).pipe.__globals__
 
 
-def _ss():
+def _ss(pipe):
     """The shared ``requests.Session`` from scaffold_router."""
-    return _scaffold_router()._HTTP_SESSION
+    return _sr_ns(pipe)["_HTTP_SESSION"]
 
 
-def _sse_events_const():
+def _sse_events_const(pipe):
     """The ``_SSE`` vendor module reference (event-name constants)."""
-    return _scaffold_router()._SSE
+    return _sr_ns(pipe)["_SSE"]
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +83,7 @@ def assist_remember(
     if not chat_id or not pipe.valves.assist_session_memory_enabled:
         return
     try:
-        _ss().put(
+        _ss(pipe).put(
             f"{pipe.valves.orchestrator_url}/assist/_chatmap/{chat_id}",
             json={"session_id": session_id, "last_node_key": last_node_key},
             headers=pipe._auth_headers(),
@@ -84,7 +97,7 @@ def assist_recall(pipe, chat_id: str | None) -> dict | None:
     if not chat_id or not pipe.valves.assist_session_memory_enabled:
         return None
     try:
-        r = _ss().get(
+        r = _ss(pipe).get(
             f"{pipe.valves.orchestrator_url}/assist/_chatmap/{chat_id}",
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
@@ -101,7 +114,7 @@ def assist_forget(pipe, chat_id: str | None) -> None:
     if not chat_id or not pipe.valves.assist_session_memory_enabled:
         return
     try:
-        _ss().delete(
+        _ss(pipe).delete(
             f"{pipe.valves.orchestrator_url}/assist/_chatmap/{chat_id}",
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
@@ -165,11 +178,16 @@ def render_step(step: dict) -> str:
     if not step.get("node_key"):
         counts = step.get("step_counts", {})
         counts_str = ", ".join(f"{k}={v}" for k, v in counts.items()) or "n/a"
+        # §17.512 — a presented-but-unsubmitted step is now re-surfaced by the
+        # orchestrator, so reaching here means nothing is ready: either every
+        # step is submitted/skipped (session about to finalize) or the rest are
+        # waiting on dependencies.
         return (
-            f"⏳ **No claimable step right now.**\n\n"
+            f"⏳ **No step ready right now.**\n\n"
             f"Step roll-up: {counts_str}\n\n"
-            f"Some steps may already be presented to you and waiting on submit. "
-            f"Use `/assist next` again after you submit."
+            f"Either all steps are submitted/skipped, or the remaining ones are "
+            f"waiting on dependencies. Use `/assist done` to finish, or check "
+            f"`/jobs` for status."
         )
     upstream = step.get("upstream_outputs") or {}
     upstream_block = ""
@@ -180,13 +198,25 @@ def render_step(step: dict) -> str:
             upstream_block += f"_{nk}:_\n```\n{preview}\n```\n\n"
     deps = step.get("depends_on") or []
     deps_str = ", ".join(deps) if deps else "(none)"
+    # §17.512 — when the orchestrator re-surfaces an already-presented step
+    # (nothing new claimable), tell the user this is their current step, not a
+    # new one — so re-running `/assist next` reads as recovery, not a skip.
+    re_shown = (
+        "↩️ _Re-showing your current step (submit or `/assist skip` it to "
+        "move on)._\n\n" if step.get("re_presented") else ""
+    )
     return (
+        f"{re_shown}"
         f"### Step `{step['node_key']}` — {step.get('title', '?')}\n\n"
         f"**Tool:** `{step.get('tool', 'LLM')}`  |  "
         f"**Domain:** `{step.get('domain') or 'n/a'}`  |  "
         f"**Depends on:** {deps_str}\n\n"
         f"{upstream_block}"
-        f"**Task prompt:**\n\n```\n{step.get('base_prompt', '')}\n```\n\n"
+        # §17.486 — the human-facing walkthrough (generated separately) is now
+        # the primary content; the raw LLM task prompt is demoted to a
+        # collapsed block for operators who want the underlying instruction.
+        f"<details>\n<summary>Raw task prompt (underlying instruction)</summary>\n\n"
+        f"```\n{step.get('base_prompt', '')}\n```\n\n</details>\n\n"
         f"**When done, submit your evidence:**\n\n"
         f"```\n"
         f"/assist submit\n"
@@ -195,6 +225,110 @@ def render_step(step: dict) -> str:
         f"_Code fences (```) are optional. Content after the command "
         f"line is captured as-is._\n"
     )
+
+
+def render_destructive_banner(meta: dict | None) -> str:
+    """§17.492 — a prominent 'review before running' block listing the
+    destructive commands the safety gate flagged. Empty string when none."""
+    items = (meta or {}).get("destructive") or []
+    if not items:
+        return ""
+    lines = [
+        "> ⚠️ **Destructive commands detected — review before you run anything:**",
+        ">",
+    ]
+    for it in items[:8]:
+        lines.append(f"> - `{it.get('line', '')}` — {it.get('why', '')}")
+    if len(items) > 8:
+        lines.append(f"> - …and {len(items) - 8} more")
+    lines.append(">")
+    lines.append(
+        "> Double-check paths and `<PLACEHOLDER>` values, and back up anything "
+        "important first."
+    )
+    return "\n".join(lines) + "\n\n"
+
+
+def render_guidance(d: dict) -> str:
+    """§17.486 — format a /assist/{sid}/guide response as the human walkthrough.
+
+    On a failed/empty generation, degrade gracefully to a pointer at the raw
+    task prompt rather than a blank section."""
+    node_key = d.get("node_key", "?")
+    if d.get("status") != "ready" or not d.get("guidance"):
+        return (
+            f"⚠️ Couldn't generate a walkthrough for `{node_key}` right now. "
+            f"Work from the raw task prompt above, or retry with `/assist guide`."
+        )
+    meta = d.get("guidance_meta") or {}
+    sources = meta.get("research_sources") or []
+    out = render_destructive_banner(meta) + f"## 🧭 How to do this step\n\n{d['guidance']}\n"
+    if sources:
+        cites = ", ".join(
+            f"`{s.get('kind')}`: {s.get('query')}" for s in sources
+        )
+        out += f"\n_Confirmed via research — {cites}._\n"
+    if d.get("cached"):
+        out += "\n_(cached walkthrough — run `/assist guide` to regenerate)_\n"
+    return out
+
+
+def render_fix(d: dict) -> str:
+    """§17.487 — format a /assist/{sid}/fix response (diagnosis + corrected steps)."""
+    node_key = d.get("node_key", "?")
+    if d.get("status") != "ready" or not d.get("fix"):
+        return (
+            f"⚠️ Couldn't generate a fix for `{node_key}` right now. "
+            f"Try `/assist research <the error>` for raw sources, or rephrase."
+        )
+    out = render_destructive_banner(d.get("guidance_meta")) + f"## 🔧 Troubleshooting `{node_key}`\n\n{d['fix']}\n"
+    meta = d.get("guidance_meta") or {}
+    sources = meta.get("research_sources") or []
+    if sources:
+        cites = ", ".join(f"`{s.get('kind')}`: {s.get('query')}" for s in sources)
+        out += f"\n_Confirmed via research — {cites}._\n"
+    return out
+
+
+def render_environment(env: dict | None) -> str:
+    """§17.487 — show the session's operator environment (+ §17.499 verbosity)."""
+    env = env or {}
+    profile = (env.get("profile") or "").strip()
+    subs = env.get("substitutions") or {}
+    verbosity = env.get("verbosity") or "normal"
+    if not profile and not subs and verbosity == "normal":
+        return (
+            "_No environment set._ Set one so walkthroughs use concrete commands:\n"
+            "`/assist env Ubuntu 24.04, apt, bash` or `/assist env HOST_IP=10.0.0.5`.\n"
+            "_Verbosity:_ `normal` (change with `/assist verbose terse|detailed`)."
+        )
+    out = "**Operator environment**\n\n"
+    if profile:
+        out += f"- Profile: {profile}\n"
+    for k, v in subs.items():
+        out += f"- `{k}` = `{v}`\n"
+    out += f"- Verbosity: `{verbosity}`\n"
+    return out
+
+
+def render_research(d: dict) -> str:
+    """§17.486 — format a /assist/{sid}/research response."""
+    q = d.get("question", "?")
+    sources = d.get("sources") or []
+    if not sources:
+        return f"🔍 No results found for: _{q}_. Try rephrasing the question."
+    out = f"### 🔍 Research: {q}\n\n"
+    answer = d.get("answer")
+    if answer:
+        out += f"{answer}\n\n"
+    out += "**Sources:**\n\n"
+    for i, s in enumerate(sources, 1):
+        body = s.get("text", "")
+        preview = body if len(body) <= 600 else body[:600] + f"\n… [{len(body) - 600} more chars]"
+        # §17.500 — deep web sources carry the page URL; show it.
+        label = f"{s.get('kind')} — {s['url']}" if s.get("url") else s.get("kind")
+        out += f"_[{i}] ({label})_\n```\n{preview}\n```\n\n"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +359,9 @@ def handle_assist(
             yield pipe._ASSIST_HELP; return
         arg1 = parts[1]
         # /assist <subcommand> ... — route to subcommand handler
-        if arg1 in ("next", "submit", "skip", "handoff", "pause", "resume", "done", "friction"):
+        if arg1 in ("next", "submit", "skip", "handoff", "pause", "resume",
+                    "done", "friction", "guide", "research", "env", "fix",
+                    "verbose", "status"):
             yield from dispatch_assist_sub(
                 pipe, arg1, parts[2:], fenced,
                 chat_id=chat_id, raw_head=head,
@@ -243,6 +379,39 @@ def handle_assist(
         ); return
 
     yield pipe._ASSIST_HELP
+
+
+def assist_status(pipe, session_id: str) -> Generator[str, None, None]:
+    """§17.520 — render an assist session roll-up (status, job, current step,
+    per-status step counts). Backs `/assist status`, which the mirror-divergence
+    banner already pointed at but was never implemented (dangling reference).
+    GET /assist/{session_id} returns the session + step_counts."""
+    try:
+        r = _ss(pipe).get(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}",
+            headers=pipe._auth_headers(),
+            timeout=pipe.valves.request_timeout,
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code == 404:
+        yield f"❌ No assist session `{session_id}`."; return
+    if r.status_code >= 400:
+        yield f"❌ Could not fetch session: HTTP {r.status_code} {r.text[:200]}"
+        return
+    try:
+        d = r.json()
+    except ValueError:
+        yield f"❌ Session status: non-JSON reply; raw: {r.text[:200]}"; return
+    counts = d.get("step_counts") or {}
+    counts_str = ", ".join(f"{k}={v}" for k, v in counts.items()) or "n/a"
+    yield (
+        f"🔎 **Assist session `{session_id}`**\n\n"
+        f"- Status: `{d.get('status', '?')}`\n"
+        f"- Job: `{d.get('job_id', '?')}`\n"
+        f"- Current step: `{d.get('current_node_key') or '(none)'}`\n"
+        f"- Steps: {counts_str}\n"
+    )
 
 
 def dispatch_assist_sub(
@@ -313,6 +482,10 @@ def dispatch_assist_sub(
         if not sid:
             yield no_session_msg("resume"); return
         yield from assist_simple_post(pipe, sid, "resume"); return
+    if sub == "status":
+        if not sid:
+            yield no_session_msg("status"); return
+        yield from assist_status(pipe, sid); return
     if sub == "done":
         if not sid:
             yield no_session_msg("done"); return
@@ -336,6 +509,66 @@ def dispatch_assist_sub(
                 "`/assist friction <node_key> <note>`."
             ); return
         yield from assist_friction(pipe, sid, node_key, note); return
+    if sub == "guide":
+        if not sid:
+            yield no_session_msg("guide"); return
+        # The node defaults to the session's current step (resolved
+        # server-side); chat-memory's last_node_key is a hint. Everything
+        # after the (optional) session id — fence or remaining words — is
+        # the refine hint, e.g. `/assist guide redo for macOS`.
+        refine = fenced or (" ".join(rest).strip() if rest else None)
+        recalled = assist_recall(pipe, chat_id)
+        node_key = (recalled or {}).get("last_node_key")
+        _cmd = (assist_guide_stream_cmd
+                if getattr(pipe.valves, "assist_stream", True) else assist_guide_cmd)
+        yield from _cmd(
+            pipe, sid, node_key=node_key, refine=refine,
+            research=pipe.valves.assist_guide_research, force=True,
+            chat_id=chat_id,
+        ); return
+    if sub == "research":
+        if not sid:
+            yield no_session_msg("research"); return
+        question = (fenced or " ".join(rest)).strip()
+        if not question:
+            yield "Usage: `/assist research [<session_id>] <question>`"; return
+        recalled = assist_recall(pipe, chat_id)
+        node_key = (recalled or {}).get("last_node_key")
+        yield from assist_research_cmd(
+            pipe, sid, question, node_key=node_key, chat_id=chat_id,
+        ); return
+    if sub == "env":
+        if not sid:
+            yield no_session_msg("env"); return
+        text_arg = (fenced or " ".join(rest)).strip()
+        if not text_arg:
+            yield from assist_env_cmd(pipe, sid, show=True, chat_id=chat_id); return
+        # Pull out KEY=value substitutions; the remaining free text is the
+        # profile. `/assist env Ubuntu 24.04 HOST_IP=10.0.0.5` → profile +1 sub.
+        subs = dict(re.findall(r"([A-Za-z_]\w*)=(\S+)", text_arg))
+        profile_text = re.sub(r"[A-Za-z_]\w*=\S+", "", text_arg).strip(" ,\t") or None
+        yield from assist_env_cmd(
+            pipe, sid, profile=profile_text, substitutions=subs or None,
+            chat_id=chat_id,
+        ); return
+    if sub == "verbose":
+        if not sid:
+            yield no_session_msg("verbose"); return
+        level = (rest[0].lower() if rest else "").strip()
+        if level not in ("terse", "normal", "detailed"):
+            yield "Usage: `/assist verbose [<session_id>] terse|normal|detailed`"; return
+        yield from assist_env_cmd(pipe, sid, verbosity=level, chat_id=chat_id); return
+    if sub == "fix":
+        if not sid:
+            yield no_session_msg("fix"); return
+        error_text = (fenced or " ".join(rest)).strip()
+        if not error_text:
+            yield "Usage: `/assist fix [<session_id>] <error / what went wrong>`"; return
+        recalled = assist_recall(pipe, chat_id)
+        node_key = (recalled or {}).get("last_node_key")
+        yield from assist_fix_cmd(
+            pipe, sid, error_text, node_key=node_key, chat_id=chat_id,
+        ); return
     yield pipe._ASSIST_HELP
 
 
@@ -347,8 +580,19 @@ def dispatch_assist_sub(
 def assist_start(
     pipe, job_id: str, *, chat_id: str | None = None,
 ) -> Generator[str, None, None]:
+    # §17.521 — reject a non-UUID job_id (e.g. a pasted job TITLE like
+    # "DeFruscio HomeLab" → only "DeFruscio" reaches here) before the
+    # round-trip, with an actionable hint. Otherwise it 4xx's server-side
+    # (and pre-§17.521 surfaced as a raw HTTP 500 DataError).
+    if not pipe._UUID_RE.match((job_id or "").strip()):
+        yield (
+            f"❌ `{job_id}` isn't a job id. `/assist` needs the job's **UUID**, "
+            f"not its title — run `/jobs` to find it, then "
+            f"`/assist <job_id>`."
+        )
+        return
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/start",
             json={
                 "job_id": job_id,
@@ -366,6 +610,43 @@ def assist_start(
         d = r.json()
     except ValueError as e:
         yield f"❌ Assist start: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+    # §17.561/562 — umbrella / 0-node guard. The orchestrator returns HTTP 200
+    # with assist_unavailable instead of seeding a phantom empty session (which
+    # used to render the cryptic "⏳ No step ready right now."). Surface clear
+    # guidance: umbrella work runs autonomously in component children; a 0-node
+    # job needs a plan first.
+    if isinstance(d, dict) and d.get("assist_unavailable"):
+        if d.get("reason") == "umbrella":
+            kids = d.get("children") or []
+            done = sum(1 for c in kids if c.get("status") == "completed")
+            lines = [
+                f"📦 **This is a multi-part job** — its {len(kids)} component(s) "
+                f"run **automatically**. There's nothing to step through here.",
+                "",
+                f"Progress: **{done}/{len(kids)}** components completed.",
+                "",
+            ]
+            for c in kids:
+                icon = "✅" if c.get("status") == "completed" else (
+                    "❌" if c.get("status") in ("failed", "cancelled", "blocked")
+                    else "⏳")
+                lines.append(
+                    f"- {icon} {c.get('title', '')} — `{c.get('status', '')}`"
+                )
+            lines += [
+                "",
+                f"Watch progress or read the assembled result with "
+                f"`/results {d.get('job_id', '')}`.",
+            ]
+            yield "\n".join(lines)
+            return
+        # reason == 'no_dag'
+        yield (
+            "ℹ️ This job has no execution plan yet, so there's nothing to "
+            "assist with. Build a plan first with `/confirm <job_id>`, then "
+            "`/assist <job_id>`."
+        )
+        return
     sid = d.get("session_id") if isinstance(d, dict) else None
     if not sid:
         yield f"❌ Assist start: orchestrator reply missing `session_id`; raw: {str(d)[:200]}"; return
@@ -375,6 +656,9 @@ def assist_start(
     yield (
         f"🤝 **Assist session started** — `{sid}`\n\n"
         f"Job `{resp_job_id}` is now in `assisted_executing` ({pending} pending step(s)).\n\n"
+        f"💡 Tip: set your environment with `/assist env <OS, shell, tools>` "
+        f"(e.g. `/assist env Ubuntu 24.04, apt, bash`) so walkthroughs use concrete "
+        f"commands. Hit an error on any step? `/assist fix <the error>`.\n\n"
         f"Fetching first step...\n\n---\n\n"
     )
     yield from assist_next(pipe, sid, chat_id=chat_id)
@@ -384,7 +668,7 @@ def assist_next(
     pipe, session_id: str, *, chat_id: str | None = None,
 ) -> Generator[str, None, None]:
     try:
-        r = _ss().get(
+        r = _ss(pipe).get(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/next",
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
@@ -411,6 +695,19 @@ def assist_next(
             pipe, chat_id, session_id=session_id, last_node_key=step["node_key"],
         )
     yield render_step(step)
+    # §17.486 — auto-generate the human walkthrough for the claimed step.
+    # Separate POST so the slow LLM call doesn't block the fast /next claim;
+    # force=False hits the cache when this step was already guided.
+    if step.get("node_key") and getattr(pipe.valves, "assist_auto_guide", True):
+        _cmd = (assist_guide_stream_cmd
+                if getattr(pipe.valves, "assist_stream", True) else assist_guide_cmd)
+        if _cmd is assist_guide_cmd:
+            yield "\n_Generating walkthrough…_\n\n"
+        yield from _cmd(
+            pipe, session_id, node_key=step["node_key"],
+            research=getattr(pipe.valves, "assist_guide_research", True),
+            force=False, chat_id=chat_id,
+        )
 
 
 def assist_submit(
@@ -423,7 +720,7 @@ def assist_submit(
         yield (f"❌ Evidence is {len(evidence)} chars; cap is "
                f"{pipe.valves.assist_max_evidence_chars}. Trim and resend."); return
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/submit",
             json={
                 "node_key": node_key,
@@ -461,6 +758,23 @@ def assist_submit(
         # the banner when status is omitted from a non-standard reply.
         status_val = d.get("status", "?")
         yield f"ℹ️ Step `{node_key}` already `{status_val}`. No change."; return
+    # §17.487 — hard-block path: the success-check judged this a failure and
+    # `assist_block_on_failed_verify` is on, so the node was NOT marked done.
+    if d.get("status") == "verification_failed":
+        v = d.get("success_verdict") or {}
+        ran = "sandbox" in (v.get("grounded_by") or "")
+        head = (
+            f"🛑 Ran your code in the sandbox — it **failed**. `{node_key}` not marked done."
+            if ran else
+            f"🛑 Step `{node_key}` looks like it **failed** — not marked done."
+        )
+        msg = f"{head}\n\n_{v.get('reason', '')}_\n\n"
+        if v.get("suggestion"):
+            msg += f"Suggested next move: {v['suggestion']}\n\n"
+        msg += (
+            "Fix it and resubmit, or get help: `/assist fix <the error>`."
+        )
+        yield msg; return
     next_nk = d.get("next_node_key")
     # Update remembered node so the next `/assist submit` (no args) is
     # right. None on terminal => clear it so we don't suggest a
@@ -484,6 +798,29 @@ def assist_submit(
             "the assist step, but the DAG node was NOT overwritten by this "
             "call. Inspect with `/assist status` and re-run if needed."
         )
+    # §17.487 — warn mode: surface the success verdict without blocking.
+    # §17.491 — when grounded_by includes 'sandbox', the code was actually run.
+    verdict = d.get("success_verdict") or {}
+    outcome = verdict.get("outcome")
+    ran = "sandbox" in (verdict.get("grounded_by") or "")
+    if outcome == "failed":
+        head = ("🛑 **Ran your code in the sandbox — it errored.**" if ran
+                else "⚠️ **This may have failed.**")
+        msg += (
+            f"\n\n{head} {verdict.get('reason', '')}\n"
+            f"Run `/assist fix <the error>` or re-do and resubmit."
+        )
+    elif outcome == "succeeded" and ran:
+        msg += "\n\n✓ _Verified by running your code in the sandbox._"
+    elif (outcome == "unclear" and verdict.get("reason")
+          and verdict["reason"] != "verification unavailable"):
+        msg += f"\n\n_Couldn't confirm success: {verdict['reason']}_"
+    # §17.490 — concrete values learned from this step's evidence; surfaced so
+    # the operator sees later steps will use them instead of placeholders.
+    learned = d.get("learned_substitutions") or {}
+    if learned:
+        pairs = ", ".join(f"`{k}`=`{v}`" for k, v in learned.items())
+        msg += f"\n\n📌 Learned for later steps: {pairs}"
     yield msg
 
 
@@ -491,7 +828,7 @@ def assist_skip(
     pipe, session_id: str, node_key: str, *, chat_id: str | None = None,
 ) -> Generator[str, None, None]:
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/submit",
             json={"node_key": node_key, "output": "", "action": "skip"},
             headers=pipe._auth_headers(),
@@ -558,7 +895,7 @@ def stream_sse_with_keepalive(
         daemon=True,
     )
     reader.start()
-    sse_const = _sse_events_const()
+    sse_const = _sse_events_const(pipe)
     try:
         while True:
             try:
@@ -614,11 +951,249 @@ def stream_sse_with_keepalive(
         reader.join(timeout=5)
 
 
+def assist_guide_cmd(
+    pipe, session_id: str, *, node_key: str | None = None,
+    refine: str | None = None, research: bool | None = None,
+    force: bool = True, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.486 — POST /assist/{sid}/guide and render the walkthrough.
+
+    Uses the dedicated `assist_guide_timeout` valve (not `request_timeout`):
+    generation is an 8192-token thinking-model call plus an optional research
+    pre-pass, well beyond the fast-call default."""
+    try:
+        r = _ss(pipe).post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/guide",
+            json={
+                "node_key": node_key,
+                "refine": refine,
+                "research": research,
+                "force": force,
+            },
+            headers=pipe._auth_headers(),
+            timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code >= 400:
+        yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+    try:
+        d = r.json()
+    except ValueError as e:
+        yield f"❌ Assist guide: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+    if not isinstance(d, dict):
+        yield f"❌ Assist guide: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
+    yield render_guidance(d)
+
+
+def assist_guide_stream_cmd(
+    pipe, session_id: str, *, node_key: str | None = None,
+    refine: str | None = None, research: bool | None = None,
+    force: bool = True, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.493 — stream the walkthrough from /assist/{sid}/guide/stream.
+
+    Consumes the SSE stream (assist_guide_delta* → assist_guide_done) on the
+    same thread/queue/keepalive skeleton as the handoff consumer. Yields the
+    content live; the destructive banner + sources footnote are appended on
+    `done` (trailing — we don't know them until generation completes). A cache
+    hit arrives as one delta + done(cached) and renders instantly."""
+    url = f"{pipe.valves.orchestrator_url}/assist/{session_id}/guide/stream"
+    body = {"node_key": node_key, "refine": refine, "research": research, "force": force}
+    q: _q.Queue = _q.Queue()
+    stop_event = _th.Event()
+    r_holder: list = []
+    reader = _th.Thread(
+        target=pipe._stream_sse_to_queue,
+        args=(url, body, q),
+        kwargs={"stop_event": stop_event, "r_holder": r_holder},
+        daemon=True,
+    )
+    reader.start()
+    sse_const = _sse_events_const(pipe)
+    started = False
+    got_text = False
+    try:
+        while True:
+            try:
+                msg_type, f1, f2 = q.get(timeout=pipe.valves.keepalive_interval)
+            except _q.Empty:
+                yield "​"; continue
+            if msg_type == "connected":
+                continue
+            if msg_type == "heartbeat":
+                yield "​"; continue
+            if msg_type == "http_error":
+                yield f"❌ HTTP {f1}: {(f2 or '')[:200]}"; return
+            if msg_type == "error":
+                yield f"\n❌ Connection error: {f1}"; return
+            if msg_type == "done":
+                break
+            event_type, data = f1, f2
+            try:
+                payload = json.loads(data)
+            except Exception:
+                continue
+            if event_type == sse_const.ASSIST_GUIDE_DELTA:
+                if not started:
+                    yield "## 🧭 How to do this step\n\n"
+                    started = True
+                txt = payload.get("text", "")
+                if txt:
+                    got_text = True
+                    yield txt
+            elif event_type == sse_const.ASSIST_GUIDE_DONE:
+                meta = payload.get("guidance_meta") or {}
+                if payload.get("status") != "ready" and not got_text:
+                    yield (
+                        "⚠️ Couldn't generate a walkthrough right now. Work from "
+                        "the raw task prompt above, or retry with `/assist guide`."
+                    ); return
+                banner = render_destructive_banner(meta)
+                if banner:
+                    yield "\n\n" + banner
+                sources = meta.get("research_sources") or []
+                if sources:
+                    cites = ", ".join(
+                        f"`{s.get('kind')}`: {s.get('query')}" for s in sources
+                    )
+                    yield f"\n_Confirmed via research — {cites}._\n"
+                if payload.get("cached"):
+                    yield "\n_(cached walkthrough — run `/assist guide` to regenerate)_\n"
+                return
+            elif event_type == sse_const.ERROR:
+                yield f"\n❌ {payload.get('detail') or payload}\n"; return
+    finally:
+        stop_event.set()
+        if r_holder:
+            try:
+                r_holder[0].close()
+            except Exception:
+                pass
+        reader.join(timeout=5)
+
+
+def assist_chat_turn(
+    pipe, session_id: str, refine: str, *,
+    node_key: str | None = None, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.537 — a plain-language chat turn inside an ACTIVE assist session.
+
+    The router calls this when a chat with an active assist session receives
+    bare (non-command) text. Rather than bouncing to the triage planner (the
+    DeFruscio HomeLab symptom — frozen session + repeating Scope/Options/Gaps),
+    the message is treated as a `refine` hint and answered with the current
+    step's walkthrough. Mirrors the `/assist guide` dispatch: streamed when the
+    `assist_stream` valve is on, blocking otherwise. A one-line banner orients
+    the user (they typed a question and got step guidance, not a planner reply)
+    and points at the commands to advance or step out."""
+    yield (
+        "_💬 In your active assist session — answering for the current step. "
+        "Use `/assist next` to advance, `/assist pause` to step back to "
+        "planning._\n\n"
+    )
+    _cmd = (assist_guide_stream_cmd
+            if getattr(pipe.valves, "assist_stream", True) else assist_guide_cmd)
+    yield from _cmd(
+        pipe, session_id, node_key=node_key, refine=refine,
+        research=pipe.valves.assist_guide_research, force=True,
+        chat_id=chat_id,
+    )
+
+
+def assist_research_cmd(
+    pipe, session_id: str, question: str, *,
+    node_key: str | None = None, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.486 — POST /assist/{sid}/research and render cited results."""
+    try:
+        r = _ss(pipe).post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/research",
+            json={"question": question, "node_key": node_key},
+            headers=pipe._auth_headers(),
+            timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code >= 400:
+        yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+    try:
+        d = r.json()
+    except ValueError as e:
+        yield f"❌ Assist research: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+    if not isinstance(d, dict):
+        yield f"❌ Assist research: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
+    yield render_research(d)
+
+
+def assist_env_cmd(
+    pipe, session_id: str, *, profile: str | None = None,
+    substitutions: dict | None = None, verbosity: str | None = None,
+    show: bool = False, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.487 — GET/PUT the session's operator environment (+ §17.499 verbosity)."""
+    base = f"{pipe.valves.orchestrator_url}/assist/{session_id}/env"
+    try:
+        if show:
+            r = _ss(pipe).get(base, headers=pipe._auth_headers(),
+                          timeout=pipe.valves.request_timeout)
+        else:
+            r = _ss(pipe).put(
+                base,
+                json={"profile": profile, "substitutions": substitutions or {},
+                      "verbosity": verbosity},
+                headers=pipe._auth_headers(),
+                timeout=pipe.valves.request_timeout,
+            )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code == 404:
+        yield f"❌ Session `{session_id}` not found."; return
+    if r.status_code >= 400:
+        yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+    try:
+        d = r.json()
+    except ValueError as e:
+        yield f"❌ Assist env: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+    if not isinstance(d, dict):
+        yield f"❌ Assist env: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
+    env_block = render_environment(d.get("environment"))
+    if show:
+        yield env_block
+    else:
+        yield f"✅ Environment updated.\n\n{env_block}"
+
+
+def assist_fix_cmd(
+    pipe, session_id: str, error_text: str, *,
+    node_key: str | None = None, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.487 — POST /assist/{sid}/fix and render the diagnosis + fix."""
+    try:
+        r = _ss(pipe).post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/fix",
+            json={"error": error_text, "node_key": node_key},
+            headers=pipe._auth_headers(),
+            timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code >= 400:
+        yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+    try:
+        d = r.json()
+    except ValueError as e:
+        yield f"❌ Assist fix: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+    if not isinstance(d, dict):
+        yield f"❌ Assist fix: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
+    yield render_fix(d)
+
+
 def assist_simple_post(
     pipe, session_id: str, action: str,
 ) -> Generator[str, None, None]:
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/{action}",
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
@@ -642,7 +1217,7 @@ def assist_done(
 ) -> Generator[str, None, None]:
     # Pull session, then job's compiled_output via /exec/status.
     try:
-        r = _ss().get(
+        r = _ss(pipe).get(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}",
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
@@ -662,7 +1237,7 @@ def assist_done(
         assist_forget(pipe, chat_id)
     job_id = sess.get("job_id")
     try:
-        r2 = _ss().get(
+        r2 = _ss(pipe).get(
             f"{pipe.valves.orchestrator_url}/exec/status/{job_id}",
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
@@ -706,7 +1281,7 @@ def assist_friction(
     pipe, session_id: str, node_key: str, note: str,
 ) -> Generator[str, None, None]:
     try:
-        r = _ss().post(
+        r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/friction",
             json={"node_key": node_key, "note": note},
             headers=pipe._auth_headers(),

@@ -1,0 +1,33 @@
+{
+  "version": "corpus-1.0",
+  "note": "Corpus-matched golden set built 2026-06-18 against the live toon_v2 (1314 entries: eng=801, llm=369, rag=52, eng_design=38, prompt=21, spec=1). Unlike golden_set.json (whose expected_entry_ids point at pre-§17.63 content the corpus no longer holds — §17.211/§17.229, floored at 0%), every pair here targets a title that EXISTS in the current corpus. expected_titles_contain is a case-insensitive AND of substrings (§17.230 matching). Domains assigned so each target sits in the queried partition. Purpose: a non-zero before/after yardstick for retrieval changes (e.g. BM25 cutover).",
+  "pairs": [
+    {"query": "How does the 8086 compute a physical address from a segment register and offset?", "domain": "eng", "expected_titles_contain": ["8086", "Physical Address Calculation"], "expected_entry_ids": []},
+    {"query": "What does the DOS interrupt 21h do and how is it called?", "domain": "eng", "expected_titles_contain": ["interrupt 21"], "expected_entry_ids": []},
+    {"query": "How do I read a keystroke using the BIOS keyboard services?", "domain": "eng", "expected_titles_contain": ["keyboard", "services"], "expected_entry_ids": []},
+    {"query": "What is a BIOS interrupt call?", "domain": "eng", "expected_titles_contain": ["BIOS interrupt call"], "expected_entry_ids": []},
+    {"query": "How do you detect concept drift in a machine learning model?", "domain": "eng", "expected_titles_contain": ["concept drift"], "expected_entry_ids": []},
+    {"query": "What are best practices for memory architecture?", "domain": "eng", "expected_titles_contain": ["Memory Architecture", "Best Practices"], "expected_entry_ids": []},
+    {"query": "What are the core principles of instruction set architecture design?", "domain": "eng", "expected_titles_contain": ["ISA Design Principles"], "expected_entry_ids": []},
+    {"query": "Give an overview of the 8086 microprocessor architecture.", "domain": "eng", "expected_titles_contain": ["8086 Microprocessor Architecture"], "expected_entry_ids": []},
+
+    {"query": "How do I safely cross clock domains using a synchronizer?", "domain": "eng_design", "expected_titles_contain": ["synchronizer", "clock-domain"], "expected_entry_ids": []},
+    {"query": "Design a carry-lookahead adder.", "domain": "eng_design", "expected_titles_contain": ["Carry-lookahead adder"], "expected_entry_ids": []},
+    {"query": "How do I build a Sallen-Key low-pass filter?", "domain": "eng_design", "expected_titles_contain": ["Sallen-Key", "low-pass"], "expected_entry_ids": []},
+    {"query": "What is a Moore-style finite state machine?", "domain": "eng_design", "expected_titles_contain": ["Moore", "finite state machine"], "expected_entry_ids": []},
+    {"query": "How does an asynchronous FIFO for clock-domain crossing work?", "domain": "eng_design", "expected_titles_contain": ["Asynchronous FIFO"], "expected_entry_ids": []},
+
+    {"query": "How do I do hybrid search combining BM25 and dense vectors with RRF?", "domain": "rag", "expected_titles_contain": ["Hybrid retrieval", "BM25"], "expected_entry_ids": []},
+    {"query": "How do I find the nearest neighbor of a sparse vector?", "domain": "rag", "expected_titles_contain": ["nearest neighbor", "sparse vector"], "expected_entry_ids": []},
+    {"query": "What is the difference between hashing and indexing?", "domain": "rag", "expected_titles_contain": ["hashing", "indexing"], "expected_entry_ids": []},
+
+    {"query": "How is hallucination evaluated in retrieval-augmented generation pipelines?", "domain": "llm", "expected_titles_contain": ["Hallucination Evaluation", "RAG"], "expected_entry_ids": []},
+    {"query": "How do I fine-tune the DPR retriever inside a RAG architecture?", "domain": "llm", "expected_titles_contain": ["Fine-tune", "DPR retriever"], "expected_entry_ids": []},
+    {"query": "How do I add millions of embeddings to a Faiss index?", "domain": "llm", "expected_titles_contain": ["embeddings", "Faiss Index"], "expected_entry_ids": []},
+    {"query": "How does the JavaScript Function.prototype.apply method work?", "domain": "llm", "expected_titles_contain": ["Function.prototype.apply"], "expected_entry_ids": []},
+
+    {"query": "Describe the LLM function-calling tool-use request and response loop.", "domain": "prompt", "expected_titles_contain": ["function-calling", "request/response loop"], "expected_entry_ids": []},
+
+    {"query": "What is the TOON v2 entry format specification?", "domain": "spec", "expected_titles_contain": ["TOON v2", "entry format specification"], "expected_entry_ids": []}
+  ]
+}

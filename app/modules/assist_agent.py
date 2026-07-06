@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid as _uuid
 from dataclasses import asdict
 from typing import Any, AsyncGenerator, Optional
 
@@ -55,18 +56,81 @@ async def start_assist_session(
     Idempotent on job_id (UNIQUE in the schema). If a session already
     exists, return its id without re-seeding steps.
 
-    Side effects (all in one transaction):
+    Umbrella jobs and any job with 0 DAG nodes return early with
+    ``{"assist_unavailable": True, ...}`` and NO side effects (§17.561).
+
+    Side effects (all in one transaction) for assistable jobs:
       - INSERT assist_sessions row (or no-op if it exists)
       - UPDATE jobs.status -> 'assisted_executing'
       - INSERT one assist_steps row per `dag_nodes` row in pending status
     """
+    # §17.521 — validate job_id is a UUID BEFORE it reaches the query. A
+    # non-UUID (e.g. a pasted job TITLE like "DeFruscio HomeLab") otherwise
+    # hits asyncpg's uuid cast and surfaces as a raw HTTP 500 DBAPIError
+    # ("invalid input for query argument $1 … invalid UUID"). Raise a clean
+    # ValueError → the endpoint maps it to a friendly 4xx with a helpful hint.
+    try:
+        _uuid.UUID(str(job_id))
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError(
+            f"invalid job_id {job_id!r}: not a job id (expected a UUID). "
+            f"Job titles aren't accepted — find the id with /jobs."
+        )
+
     # 1. Validate job state.
     row = (await db.execute(
-        text("SELECT id, status FROM jobs WHERE id = :id"),
+        text("""
+            SELECT j.id, j.status, j.job_type,
+                   (SELECT COUNT(*) FROM dag_nodes WHERE job_id = j.id)
+                       AS node_count
+              FROM jobs j WHERE j.id = :id
+        """),
         {"id": job_id},
     )).mappings().first()
     if not row:
         raise ValueError(f"job not found: {job_id}")
+
+    # §17.561 — umbrella / 0-node guard. Umbrella jobs (multi-part
+    # decompositions) intentionally have NO DAG nodes of their own — the work
+    # runs in autonomous component children. Before the gate, starting assist
+    # on one seeded an empty session and `/assist next` rendered the cryptic
+    # "⏳ No step ready right now." Detect it BEFORE creating any session row
+    # and return structured guidance the router surfaces as a friendly 200
+    # ("components run automatically; watch with /results"), not an error.
+    # Runs ahead of the status check so an 'aggregating' umbrella also gets the
+    # guidance rather than a confusing 409.
+    if row["job_type"] == "umbrella" or row["node_count"] == 0:
+        children: list[dict] = []
+        if row["job_type"] == "umbrella":
+            child_rows = (await db.execute(
+                text("""
+                    SELECT id, title, status, component_index
+                      FROM jobs WHERE parent_job_id = :u
+                     ORDER BY component_index
+                """),
+                {"u": job_id},
+            )).mappings().all()
+            children = [{
+                "job_id": str(c["id"]),
+                "title": c["title"],
+                "status": c["status"],
+                "component_index": c["component_index"],
+            } for c in child_rows]
+        reason = "umbrella" if row["job_type"] == "umbrella" else "no_dag"
+        logger.info(
+            "assist_unavailable job_id=%s reason=%s job_type=%s nodes=%d",
+            job_id, reason, row["job_type"], row["node_count"],
+        )
+        return {
+            "assist_unavailable": True,
+            "reason": reason,
+            "job_id": job_id,
+            "job_type": row["job_type"],
+            "job_status": row["status"],
+            "children": children,
+            "children_total": len(children),
+        }
+
     if row["status"] not in _VALID_START_STATUSES:
         raise ValueError(
             f"job {job_id} is in status {row['status']!r}; "
@@ -216,13 +280,52 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
                 LIMIT 1
              )
              AND status = 'pending'
-            RETURNING id, node_key
+            RETURNING id, node_key, guidance_status
         """),
         {"sid": session_id},
     )).mappings().first()
     if not claimed:
         await db.commit()
-        return None
+        # §17.512 — no pending step is claimable. Before reporting "nothing to
+        # do", re-surface a step already PRESENTED to this user but not yet
+        # submitted, so a lost / scrolled-away / reconnect walkthrough is
+        # recoverable via `/assist next` instead of being a dead-end. Only
+        # fires when nothing new is claimable, so it never blocks forward
+        # progress on parallel/ready steps.
+        presented = (await db.execute(
+            text("""
+                SELECT s.node_key, s.guidance_status
+                  FROM assist_steps s
+                  JOIN dag_nodes d
+                    ON d.job_id = s.job_id AND d.node_key = s.node_key
+                 WHERE s.session_id = :sid AND s.status = 'presented'
+                 ORDER BY d.execution_order NULLS LAST, s.node_key
+                 LIMIT 1
+            """),
+            {"sid": session_id},
+        )).mappings().first()
+        if not presented:
+            return None
+        node_row, ctx = await _assemble_ctx_for_node(
+            db=db, job_id=job_id, node_key=presented["node_key"],
+        )
+        return {
+            "session_id": session_id,
+            "job_id": job_id,
+            "node_key": ctx.node_key,
+            "title": ctx.title,
+            "description": node_row.get("description"),
+            "tool": ctx.tool,
+            "domain": ctx.domain,
+            "depends_on": list(node_row.get("depends_on") or []),
+            "system_prompt": ctx.system_prompt,
+            "base_prompt": ctx.base_prompt,
+            "upstream_outputs": ctx.upstream_outputs,
+            "upstream_truncated_keys": ctx.upstream_truncated_keys,
+            "assembled_prompt": ctx.assembled_prompt,
+            "guidance_status": presented.get("guidance_status") or "none",
+            "re_presented": True,
+        }
 
     node_key = claimed["node_key"]
     await db.execute(
@@ -244,27 +347,8 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
     # Build the human-facing context (no grounding fetch by default; the
     # human already has the knowledge — pre-fetching just adds noise
     # unless explicitly requested via a future include_grounding flag).
-    node_row = (await db.execute(
-        text("""
-            SELECT node_key, title, description, prompt_template, depends_on,
-                   tool, domain, execution_order
-              FROM dag_nodes
-             WHERE job_id = :jid AND node_key = :nk
-        """),
-        {"jid": job_id, "nk": node_key},
-    )).mappings().first()
-    job_row = (await db.execute(
-        text("SELECT refined_brief FROM jobs WHERE id = :id"),
-        {"id": job_id},
-    )).mappings().first()
-    brief = (job_row or {}).get("refined_brief") or {}
-
-    ctx: StepContext = await assemble_step_context(
-        db=db,
-        job_id=job_id,
-        node=dict(node_row),
-        brief=brief,
-        fetch_grounding=None,
+    node_row, ctx = await _assemble_ctx_for_node(
+        db=db, job_id=job_id, node_key=node_key,
     )
 
     return {
@@ -281,10 +365,456 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
         "upstream_outputs": ctx.upstream_outputs,
         "upstream_truncated_keys": ctx.upstream_truncated_keys,
         "assembled_prompt": ctx.assembled_prompt,
+        # §17.486 — cache state so the client knows whether a cached
+        # walkthrough already exists or one will be generated on demand.
+        "guidance_status": claimed.get("guidance_status") or "none",
     }
 
 
+async def _assemble_ctx_for_node(
+    *, db, job_id: str, node_key: str,
+) -> tuple[dict, "StepContext"]:
+    """Fetch a node + brief and assemble the upstream-last StepContext.
+
+    Shared by ``get_next_step`` (claim path) and ``generate_step_guidance``
+    (guidance path) so the two cannot drift in what they consider "the step".
+    Returns ``(node_row_dict, ctx)``. ``fetch_grounding=None`` — the human's
+    walkthrough is grounded by the assist_guide research pre-pass, not here.
+    """
+    node_row = (await db.execute(
+        text("""
+            SELECT node_key, title, description, prompt_template, depends_on,
+                   tool, domain, execution_order
+              FROM dag_nodes
+             WHERE job_id = :jid AND node_key = :nk
+        """),
+        {"jid": job_id, "nk": node_key},
+    )).mappings().first()
+    if not node_row:
+        raise ValueError(f"node not found: {job_id}/{node_key}")
+    job_row = (await db.execute(
+        text("SELECT refined_brief FROM jobs WHERE id = :id"),
+        {"id": job_id},
+    )).mappings().first()
+    brief = (job_row or {}).get("refined_brief") or {}
+
+    ctx = await assemble_step_context(
+        db=db,
+        job_id=job_id,
+        node=dict(node_row),
+        brief=brief,
+        fetch_grounding=None,
+    )
+    return dict(node_row), ctx
+
+
+# ── Guidance generation (§17.486 — human walkthrough per step) ────────────
+
+
+async def generate_step_guidance(
+    *,
+    session_id: str,
+    node_key: str | None = None,
+    refine: str | None = None,
+    research: bool | None = None,
+    force: bool = False,
+    db,
+) -> dict:
+    """Generate (or return cached) the human walkthrough for a step.
+
+    Resolves ``node_key`` from the session's ``current_node_key`` when omitted.
+    Delegates generation + caching to ``assist_guide.ensure_guidance``. The
+    walkthrough is human-executable instructions (copy-paste commands for
+    shell/codegen work, numbered steps for non-coding work), optionally
+    grounded by a research pre-pass.
+    """
+    from app.config import settings
+    from app.modules import assist_guide
+
+    sess = (await db.execute(
+        text("""
+            SELECT id, job_id, status, current_node_key, metadata
+              FROM assist_sessions WHERE id = :sid
+        """),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    if sess["status"] not in ("active", "paused"):
+        raise ValueError(f"session status {sess['status']!r} cannot generate guidance")
+    job_id = str(sess["job_id"])
+    nk = node_key or sess["current_node_key"]
+    if not nk:
+        raise ValueError(
+            "no node_key supplied and session has no current step; "
+            "claim one with /assist next first"
+        )
+
+    if research is None:
+        research = settings.assist_guide_research
+
+    environment = _environment_from_metadata(sess.get("metadata"))
+    verbosity = _verbosity_from_metadata(sess.get("metadata"))
+    node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
+
+    res = await assist_guide.ensure_guidance(
+        session_id=session_id,
+        node_key=nk,
+        ctx=ctx,
+        node_description=node_row.get("description"),
+        research=research,
+        refine_hint=refine,
+        force=force,
+        domain=node_row.get("domain"),
+        environment=environment,
+        verbosity=verbosity,
+        db=db,
+    )
+    return {
+        "session_id": session_id,
+        "job_id": job_id,
+        "node_key": nk,
+        "title": ctx.title,
+        "tool": ctx.tool,
+        **res,
+    }
+
+
+async def generate_step_guidance_stream(
+    *,
+    session_id: str,
+    node_key: str | None = None,
+    refine: str | None = None,
+    research: bool | None = None,
+    force: bool = False,
+    db,
+):
+    """Streaming sibling of ``generate_step_guidance`` (§17.493).
+
+    Resolves session/node/env (raises ``ValueError`` for a bad session/node so
+    the endpoint can map it to HTTP **before** opening the SSE stream), then
+    yields the event dicts from ``assist_guide.generate_guidance_stream``.
+    """
+    from app.config import settings
+    from app.modules import assist_guide
+
+    sess = (await db.execute(
+        text("""
+            SELECT id, job_id, status, current_node_key, metadata
+              FROM assist_sessions WHERE id = :sid
+        """),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    if sess["status"] not in ("active", "paused"):
+        raise ValueError(f"session status {sess['status']!r} cannot generate guidance")
+    job_id = str(sess["job_id"])
+    nk = node_key or sess["current_node_key"]
+    if not nk:
+        raise ValueError(
+            "no node_key supplied and session has no current step; "
+            "claim one with /assist next first"
+        )
+    if research is None:
+        research = settings.assist_guide_research
+
+    environment = _environment_from_metadata(sess.get("metadata"))
+    verbosity = _verbosity_from_metadata(sess.get("metadata"))
+    node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
+
+    async for ev in assist_guide.generate_guidance_stream(
+        session_id=session_id,
+        node_key=nk,
+        ctx=ctx,
+        node_description=node_row.get("description"),
+        research=research,
+        refine_hint=refine,
+        force=force,
+        domain=node_row.get("domain"),
+        environment=environment,
+        verbosity=verbosity,
+        db=db,
+    ):
+        yield ev
+
+
+async def run_step_research(
+    *,
+    session_id: str,
+    node_key: str | None = None,
+    question: str,
+    db,
+) -> dict:
+    """Confirm an operator-supplied question via the research helpers.
+
+    A side query — not persisted to the step's guidance. Resolves the node's
+    domain (when a node is in scope) to bias Milvus retrieval.
+    """
+    from app.modules import assist_guide
+
+    if not (question or "").strip():
+        raise ValueError("research question is empty")
+    sess = (await db.execute(
+        text("""
+            SELECT id, job_id, status, current_node_key
+              FROM assist_sessions WHERE id = :sid
+        """),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    nk = node_key or sess["current_node_key"]
+    domain = None
+    if nk:
+        drow = (await db.execute(
+            text("SELECT domain FROM dag_nodes WHERE job_id = :jid AND node_key = :nk"),
+            {"jid": str(sess["job_id"]), "nk": nk},
+        )).mappings().first()
+        domain = (drow or {}).get("domain")
+    res = await assist_guide.research_one(
+        question=question, node_key=nk or "?", domain=domain,
+    )
+    return {"session_id": session_id, "node_key": nk, **res}
+
+
+async def run_step_fix(
+    *,
+    session_id: str,
+    node_key: str | None = None,
+    error: str,
+    research: bool | None = None,
+    db,
+) -> dict:
+    """Diagnose an operator-reported error on a step and return corrected steps.
+
+    Resolves the node from ``current_node_key`` when omitted, threads the
+    session environment, and auto-records the error to the friction log so
+    real blockers are captured for the post-mortem.
+    """
+    from app.config import settings
+    from app.modules import assist_guide
+
+    if not (error or "").strip():
+        raise ValueError("error text is empty")
+    sess = (await db.execute(
+        text("""
+            SELECT id, job_id, status, current_node_key, metadata
+              FROM assist_sessions WHERE id = :sid
+        """),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    if sess["status"] not in ("active", "paused"):
+        raise ValueError(f"session status {sess['status']!r} cannot run fix")
+    job_id = str(sess["job_id"])
+    nk = node_key or sess["current_node_key"]
+    if not nk:
+        raise ValueError(
+            "no node_key supplied and session has no current step; "
+            "claim one with /assist next first"
+        )
+    if research is None:
+        research = settings.assist_guide_research
+
+    environment = _environment_from_metadata(sess.get("metadata"))
+    verbosity = _verbosity_from_metadata(sess.get("metadata"))
+    node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
+
+    res = await assist_guide.generate_fix(
+        ctx=ctx,
+        error_text=error,
+        research=research,
+        environment=environment,
+        node_key=nk,
+        domain=node_row.get("domain"),
+        verbosity=verbosity,
+    )
+    # Capture the blocker on the friction trail (best-effort).
+    try:
+        await record_friction(
+            session_id=session_id, node_key=nk,
+            note=f"hit error: {error.strip()[:200]}", db=db,
+        )
+    except Exception as exc:  # never fail the fix on a friction-log hiccup
+        logger.warning("assist_fix_friction_record_failed: %s", exc)
+    return {"session_id": session_id, "node_key": nk, "title": ctx.title, **res}
+
+
+# ── Environment capture (§17.487 — concrete commands, not placeholders) ────
+
+
+def _environment_from_metadata(metadata: Any) -> dict:
+    """Pull the `environment` sub-object out of a session's metadata JSONB.
+
+    Tolerates None / str (asyncpg usually hands back a dict for jsonb, but a
+    string body is decoded defensively) and always returns a dict with the
+    `profile`/`substitutions` shape so callers don't branch.
+    """
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (ValueError, TypeError):
+            metadata = {}
+    env = (metadata or {}).get("environment") if isinstance(metadata, dict) else None
+    if not isinstance(env, dict):
+        return {"profile": "", "substitutions": {}}
+    return {
+        "profile": env.get("profile") or "",
+        "substitutions": env.get("substitutions") or {},
+    }
+
+
+_VERBOSITY_LEVELS = ("terse", "normal", "detailed")
+
+
+def _verbosity_from_metadata(metadata: Any) -> str:
+    """§17.499 — the session's walkthrough verbosity (default 'normal')."""
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (ValueError, TypeError):
+            metadata = {}
+    v = (metadata or {}).get("verbosity") if isinstance(metadata, dict) else None
+    return v if v in _VERBOSITY_LEVELS else "normal"
+
+
+async def get_environment(*, session_id: str, db) -> Optional[dict]:
+    """Return the session's environment profile + substitutions + verbosity. None if no session."""
+    sess = (await db.execute(
+        text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        return None
+    env = _environment_from_metadata(sess.get("metadata"))
+    env["verbosity"] = _verbosity_from_metadata(sess.get("metadata"))
+    return env
+
+
+async def set_environment(
+    *,
+    session_id: str,
+    profile: str | None = None,
+    substitutions: dict | None = None,
+    verbosity: str | None = None,
+    db,
+) -> dict:
+    """Merge environment facts into `assist_sessions.metadata`.
+
+    `profile` replaces the free-text profile when provided. `substitutions`
+    are merged key-by-key (so `/assist env KEY=value` adds one without
+    clobbering the rest). `verbosity` (§17.499) sets metadata.verbosity. Read-
+    modify-write under the row so we never drop other `metadata` keys.
+    """
+    if verbosity is not None and verbosity not in _VERBOSITY_LEVELS:
+        raise ValueError(f"verbosity must be one of {_VERBOSITY_LEVELS}, got {verbosity!r}")
+    sess = (await db.execute(
+        text("SELECT metadata FROM assist_sessions WHERE id = :sid FOR UPDATE"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    current = _environment_from_metadata(sess.get("metadata"))
+    if profile is not None:
+        current["profile"] = profile
+    if substitutions:
+        merged = dict(current.get("substitutions") or {})
+        merged.update(substitutions)
+        current["substitutions"] = merged
+    # Single jsonb merge patch — environment always, verbosity when given.
+    patch: dict[str, Any] = {"environment": current}
+    if verbosity is not None:
+        patch["verbosity"] = verbosity
+    await db.execute(
+        text("""
+            UPDATE assist_sessions
+               SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb),
+                   updated_at = NOW()
+             WHERE id = :sid
+        """),
+        {"sid": session_id, "patch": json.dumps(patch)},
+    )
+    await db.commit()
+    current["verbosity"] = verbosity or _verbosity_from_metadata(sess.get("metadata"))
+    return current
+
+
+async def learn_from_submit(
+    *, session_id: str, node_key: str, evidence: str, db,
+) -> dict:
+    """§17.490 — fold concrete values from a submit into the session environment.
+
+    Reads the step's cached walkthrough; if it emitted ``<PLACEHOLDER>`` slots,
+    extracts the values the operator actually used from their evidence and
+    merges the **new** ones into ``metadata.environment.substitutions`` (never
+    overwriting an operator-set or previously-learned value). Returns the dict
+    of newly-learned values (for the caller to surface). Best-effort: any
+    failure returns ``{}`` and never disturbs the submit.
+    """
+    from app.modules import assist_guide
+
+    cached = await assist_guide.read_cached_guidance(
+        session_id=session_id, node_key=node_key, db=db,
+    )
+    if not cached or not cached.get("guidance"):
+        return {}
+    extracted = await assist_guide.extract_substitutions(
+        guidance_text=cached["guidance"], evidence=evidence,
+    )
+    if not extracted:
+        return {}
+    current = await get_environment(session_id=session_id, db=db) or {}
+    existing = current.get("substitutions") or {}
+    # Only-add-new: an operator-set or already-learned key wins over a re-read.
+    new = {k: v for k, v in extracted.items() if k not in existing}
+    if not new:
+        return {}
+    await set_environment(session_id=session_id, substitutions=new, db=db)
+    logger.info(
+        "assist_learned_substitutions session_id=%s node_key=%s keys=%s",
+        session_id, node_key, ",".join(new.keys()),
+    )
+    return new
+
+
 # ── Submit / commit human evidence ───────────────────────────────────────
+
+
+async def verify_submit_outcome(
+    *, session_id: str, node_key: str, evidence: str, db,
+) -> Optional[dict]:
+    """Judge whether the pasted evidence shows the step succeeded.
+
+    Called by the submit endpoint BEFORE ``submit_step`` so the slow LLM call
+    never holds the submit transaction's row lock, and so ``submit_step`` stays
+    pure. Reads node + env in a single non-locking query. Returns None when the
+    step isn't claimable ('presented') — the endpoint then just calls
+    ``submit_step``, which surfaces the real must-claim / no-op path — or a
+    verdict dict otherwise. Fail-soft (the underlying verifier never raises).
+    """
+    row = (await db.execute(
+        text("""
+            SELECT s.status, ss.metadata,
+                   d.title, d.prompt_template, d.tool
+              FROM assist_steps s
+              JOIN assist_sessions ss ON ss.id = s.session_id
+              JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+             WHERE s.session_id = :sid AND s.node_key = :nk
+        """),
+        {"sid": session_id, "nk": node_key},
+    )).mappings().first()
+    if not row or row["status"] != "presented":
+        return None
+    from app.modules import assist_guide
+    return await assist_guide.verify_step_success(
+        title=row["title"] or node_key,
+        task_prompt=row["prompt_template"] or "",
+        tool=row["tool"] or "LLM",
+        evidence=evidence,
+        environment=_environment_from_metadata(row["metadata"]),
+    )
 
 
 async def submit_step(
@@ -549,6 +1079,44 @@ async def _maybe_finalize_session(*, session_id: str, db) -> None:
         """),
         {"jid": sess["job_id"]},
     )
+    # §17.516 — synthesize a deliverable from the mirrored per-node evidence so
+    # the default /results shows a "here's what you built" summary. Before this,
+    # the assist path never called _compile_output, leaving compiled_output NULL
+    # (the deliverable was only reachable via `/results <id> nodes`).
+    # assist_completed=True suppresses the §17.506 PLAN-NOT-EXECUTED banner (the
+    # operator DID execute these steps) and prepends a positive assist header.
+    # Best-effort: a compile failure must not block session finalization.
+    try:
+        from app.modules.execution_compile import (
+            _compile_output, compute_deliverable_kind,
+        )
+        compiled, synthesized = await _compile_output(
+            str(sess["job_id"]), db, assist_completed=True,
+        )
+        if compiled:
+            kind = await compute_deliverable_kind(  # §17.519 → 'assist_completed'
+                str(sess["job_id"]), db, assist_completed=True,
+            )
+            await db.execute(
+                text(
+                    "UPDATE jobs SET compiled_output = :co, "
+                    "compiled_output_synthesized = :syn, "
+                    "deliverable_kind = :dk, updated_at = NOW() "
+                    "WHERE id = :jid"
+                ),
+                {"co": compiled, "syn": synthesized,
+                 "dk": kind, "jid": sess["job_id"]},
+            )
+            # §17.565 — persist the assist deliverable as artifact rows.
+            from app.modules.artifacts import persist_job_artifacts
+            await persist_job_artifacts(
+                str(sess["job_id"]), db, deliverable_kind=kind,
+            )
+    except Exception as e:  # noqa: BLE001 — finalization must survive compile errors
+        logger.warning(
+            "assist_compile_failed session_id=%s job_id=%s err=%s",
+            session_id, sess["job_id"], e,
+        )
     await db.commit()
     logger.info("assist_session_completed session_id=%s job_id=%s",
                 session_id, sess["job_id"])

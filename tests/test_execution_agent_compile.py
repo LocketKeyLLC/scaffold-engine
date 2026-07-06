@@ -389,7 +389,9 @@ class TestCompileOutputDominantLeaf:
         ])
         from app.modules.execution_agent import _compile_output
         result, _was_syn = await _compile_output("job-1", db)
-        assert result == "REAL_DELIVERABLE"
+        # §17.506 — D is a done Shell node, so a plan-only banner is prepended;
+        # assert content selection (the test's concern) via membership.
+        assert "REAL_DELIVERABLE" in result
         assert "DEAD_END_BRANCH" not in result
 
     async def test_coequal_leaves_both_kept(self):
@@ -925,7 +927,9 @@ class TestShellGuardForSynthesis:
              patch("app.model_router.tool_call", new=synth_call):
             result, was_syn = await _compile_output("job-1", db)
         # Runbook preserved verbatim — placeholders intact, no rewriting.
-        assert result == runbook
+        # §17.506 — a plan-only banner is prepended (T1 is a done Shell node),
+        # so assert the runbook body is present rather than exact-equal.
+        assert runbook in result
         assert "<PROXMOX_HOST_IP>" in result
         assert was_syn is False
         synth_call.assert_not_called()
@@ -982,7 +986,9 @@ class TestShellGuardForSynthesis:
                  )),
              ):
             result, was_syn = await _compile_output("job-1", db)
-        assert result == "Synthesized narrative covering install and documentation."
+        # §17.506 — T1 is a done Shell node → plan-only banner prepended;
+        # synthesis still ran (was_syn) and its narrative is present.
+        assert "Synthesized narrative covering install and documentation." in result
         assert was_syn is True
 
 

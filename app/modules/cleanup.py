@@ -166,6 +166,58 @@ _REAP_PAUSED_RESEARCH_SQL = """
 """
 
 
+# §17.527 — umbrella-finalize sweep (task decomposition). An umbrella stays
+# 'aggregating' while children run; normally a child rolls it up on finish
+# (decomposition._rollup_umbrella). This is the SAFETY NET for when a child is
+# terminated by the reaper above (which doesn't call the rollup) — and a
+# backstop for any missed rollup write. Runs AFTER the child reapers in the same
+# transaction so children failed this cycle already read as terminal. Umbrellas
+# are otherwise inert: 'aggregating' is in NO other reaper whitelist by design.
+_REAP_STALE_UMBRELLA_SQL = """
+    UPDATE jobs u
+    SET status = CASE
+            WHEN EXISTS (
+                SELECT 1 FROM jobs c
+                WHERE c.parent_job_id = u.id AND c.status = 'completed'
+            ) THEN 'completed' ELSE 'failed' END,
+        updated_at = NOW()
+    WHERE u.job_type = 'umbrella'
+      AND u.status = 'aggregating'
+      AND (
+          -- normal: has children and they're all terminal -> finalize now
+          (EXISTS (SELECT 1 FROM jobs c WHERE c.parent_job_id = u.id)
+           AND NOT EXISTS (
+               SELECT 1 FROM jobs c
+               WHERE c.parent_job_id = u.id
+                 AND c.status NOT IN ('completed', 'failed', 'cancelled', 'blocked')
+           ))
+          -- §17.532 — orphan: ZERO children (e.g. all detached via the 053
+          -- ON DELETE SET NULL FK) and stale -> 'failed' instead of hanging forever
+          OR (NOT EXISTS (SELECT 1 FROM jobs c WHERE c.parent_job_id = u.id)
+              AND u.updated_at < NOW() - make_interval(mins => :stale_min))
+      )
+    RETURNING id
+"""
+
+# §17.532 — stranded-component sweep. A component child whose driving background
+# task died (process restart) sits in an early phase with nothing advancing it.
+# The generic reapers only catch these at 26-72h; this fails them far sooner
+# (decompose_component_stale_minutes, default 180) so the umbrella sweep — which
+# runs right after — can finalize the umbrella promptly. 'running'/'executing'
+# are deliberately excluded (the orphan-node + running reapers handle those).
+_REAP_STRANDED_COMPONENT_SQL = """
+    UPDATE jobs
+    SET status = 'failed',
+        error_summary = COALESCE(error_summary,
+            'component stranded in early phase (likely process restart); reaped'),
+        updated_at = NOW()
+    WHERE job_type = 'component'
+      AND status IN ('refining', 'awaiting_confirmation', 'researching', 'planning')
+      AND updated_at < NOW() - make_interval(mins => :stale_min)
+    RETURNING id
+"""
+
+
 async def reap_stale_jobs(db: AsyncSession) -> dict:
     """Unified stale-job reaper. Returns counts of reaped jobs.
 
@@ -257,20 +309,40 @@ async def reap_stale_jobs(db: AsyncSession) -> dict:
     )
     assist_abandoned = len(r6.fetchall())
 
+    # Stage 6.5 — fail stranded component children (process-restart recovery)
+    # BEFORE the umbrella sweep so their umbrellas finalize the same cycle.
+    component_stale_min = settings.decompose_component_stale_minutes
+    r6b = await db.execute(
+        text(_REAP_STRANDED_COMPONENT_SQL),
+        {"stale_min": component_stale_min},
+    )
+    components_reaped = len(r6b.fetchall())
+
+    # Stage 7 — finalize umbrellas whose children are now all terminal (covers
+    # the reaped-child case the per-child rollup can't reach) + orphan umbrellas
+    # with zero children. Runs last so the child reapers above are reflected.
+    r7 = await db.execute(
+        text(_REAP_STALE_UMBRELLA_SQL),
+        {"stale_min": component_stale_min},
+    )
+    umbrellas_finalized = len(r7.fetchall())
+
     await db.commit()
 
     if (orphan_nodes_reset or running_failed or long_phase_failed
             or planning_cancelled or awaiting_cancelled or research_failed
-            or paused_cancelled or assist_abandoned):
+            or paused_cancelled or assist_abandoned or components_reaped
+            or umbrellas_finalized):
         logger.info(
             "stale_jobs_reaped orphan_nodes_reset=%d running_to_failed=%d "
             "long_phase_to_failed=%d planning_to_cancelled=%d "
             "awaiting_to_cancelled=%d "
             "research_to_failed=%d paused_to_cancelled=%d "
-            "assist_abandoned=%d",
+            "assist_abandoned=%d components_reaped=%d umbrellas_finalized=%d",
             orphan_nodes_reset, running_failed, long_phase_failed,
             planning_cancelled, awaiting_cancelled, research_failed,
-            paused_cancelled, assist_abandoned,
+            paused_cancelled, assist_abandoned, components_reaped,
+            umbrellas_finalized,
         )
 
     return {
@@ -282,6 +354,8 @@ async def reap_stale_jobs(db: AsyncSession) -> dict:
         "research_to_failed": research_failed,
         "paused_to_cancelled": paused_cancelled,
         "assist_abandoned": assist_abandoned,
+        "components_reaped": components_reaped,
+        "umbrellas_finalized": umbrellas_finalized,
     }
 
 

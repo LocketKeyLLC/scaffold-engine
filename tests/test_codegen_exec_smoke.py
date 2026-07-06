@@ -70,3 +70,34 @@ async def test_runtime_error_is_fail(monkeypatch):
     r = await codegen_check.codegen_exec_smoke("```python\nprint(undefined)\n```")
     assert r.verdict == "fail"
     assert "§17.434" in r.reason and "NameError" in r.reason
+
+
+# ── §17.497 — required-arg CLI invoked with no argv is skip, not fail ────────
+
+
+@pytest.mark.asyncio
+async def test_cli_required_args_is_skip(monkeypatch):
+    """A correct CLI run with no argv exits 2 via argparse — that's 'can't run
+    standalone without args', not a code defect (mirrors the import-miss skip)."""
+    _patch_run(monkeypatch, CodeRunResult(
+        ok=False, exit_code=2,
+        stderr=("usage: solution.py [-h] --prefix PREFIX --ext EXT\n"
+                "solution.py: error: the following arguments are required: --prefix, --ext"),
+    ))
+    r = await codegen_check.codegen_exec_smoke(
+        "```python\nimport argparse\np=argparse.ArgumentParser()\n"
+        "p.add_argument('--prefix',required=True)\np.parse_args()\n```")
+    assert r.verdict == "skip"
+    assert "requires arguments" in r.reason
+
+
+@pytest.mark.asyncio
+async def test_non_argparse_exit_2_still_fails(monkeypatch):
+    """A real error that happens to exit 2 (no argparse usage/error) must still
+    fail — the skip is narrow to argparse's required-args signature."""
+    _patch_run(monkeypatch, CodeRunResult(
+        ok=False, exit_code=2,
+        stderr="Traceback (most recent call last):\n  ...\nValueError: bad config",
+    ))
+    r = await codegen_check.codegen_exec_smoke("```python\nraise ValueError('bad config')\n```")
+    assert r.verdict == "fail"

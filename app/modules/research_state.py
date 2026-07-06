@@ -76,7 +76,8 @@ class ResearchState:
 
     @property
     def max_iterations(self) -> int:
-        return {"shallow": 1, "medium": 2, "deep": 4}.get(self.depth, 2)
+        # §17.549 — deeper gap-analysis coverage of more sub-topics.
+        return {"shallow": 2, "medium": 3, "deep": 6}.get(self.depth, 3)
 
 
 # =============================================================================

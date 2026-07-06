@@ -101,6 +101,19 @@ NEXT_ACTIONS: dict[str, list[dict[str, Any]]] = {
             "node_specific": False,
         },
     ],
+    # §17.529 — umbrella (task decomposition) parent: alive while its component
+    # children run. It has no DAG of its own; /exec/status returns the child
+    # rollup. Finalizes to completed/failed when all children are terminal.
+    "aggregating": [
+        {
+            "action": "wait",
+            "command": "/results {job_id}",
+            "endpoint": "/exec/status/{job_id}",
+            "method": "GET",
+            "description": "Component jobs are running; check the rollup with /results.",
+            "node_specific": False,
+        },
+    ],
     "executing": [
         {
             "action": "wait",

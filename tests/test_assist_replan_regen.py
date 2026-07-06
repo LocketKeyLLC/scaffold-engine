@@ -570,3 +570,39 @@ async def test_full_policy_replans_all_pending_not_just_downstream():
     assert captured["affected_override"] == ["T2", "T3", "T4"]  # all pending, not downstream
     assert captured["scope"] == "full"
     assert result["scope"] == "full"
+
+
+@pytest.mark.smoke
+async def test_replan_reset_clears_cached_guidance():
+    """§17.486 — the reset that resets affected steps to pending must also
+    clear their cached guidance, so a regenerated prompt_template never serves
+    a stale walkthrough on the next /assist next."""
+    from app.modules import assist_replan
+
+    async def fake_downstream(*, db, job_id, root_node_key):
+        return ["T2", "T3"]
+
+    async def fake_regen(*, job_id, root_node_key, root_evidence,
+                         affected_keys, db, model_overrides=None):
+        return {"regenerated": 2, "errors": []}
+
+    db = AsyncMock()
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+
+    with patch.object(assist_replan, "downstream_node_keys", fake_downstream), \
+         patch("app.modules.dag_generator.regenerate_subgraph", fake_regen):
+        await assist_replan.apply_selective_replan(
+            db=db, session_id="sid", job_id="jid", root_node_key="T1",
+            root_evidence="Use Rust", divergence={"severity": "major", "reason": "pivot"},
+            model_overrides=None,
+        )
+
+    step_resets = [
+        c for c in db.execute.await_args_list
+        if "UPDATE assist_steps" in str(c.args[0]) and "guidance" in str(c.args[0])
+    ]
+    assert step_resets, "expected an assist_steps reset that touches guidance"
+    sql = str(step_resets[0].args[0])
+    assert "guidance = NULL" in sql
+    assert "guidance_status = 'none'" in sql

@@ -23,6 +23,13 @@ from app.utils.tool_call_args import read_tool_args
 logger = logging.getLogger("scaffold.refine")
 
 ALLOWED_DOMAINS = {"prompt", "rag", "llm", "spec", "eng", "eng_design"}  # §17.330 — eng_design closes the §17.329 gap; /ideate must accept it as a domain override
+# §17.515 — domains the refinement LLM may auto-select. eng_design is the
+# circuits/EDA partition (deliberate-write-only, "no classifier route" per the
+# eng/eng_design split); it must stay an explicit override only, NOT something
+# the model picks — otherwise software tasks like "blue-green DEPLOYMENT" leak
+# into it on the "design" keyword and then get empty/wrong RAG grounding at
+# execution. It remains in ALLOWED_DOMAINS so an explicit override is accepted.
+LLM_SELECTABLE_DOMAINS = ALLOWED_DOMAINS - {"eng_design"}
 
 # ---------------------------------------------------------------------------
 # Refinement prompt + tool schema (Sprint X.11)
@@ -65,7 +72,15 @@ REFINE_BRIEF_TOOL = Tool(
             },
             "domain": {
                 "type": "string",
-                "enum": sorted(ALLOWED_DOMAINS),
+                "enum": sorted(LLM_SELECTABLE_DOMAINS),
+                "description": (
+                    "Knowledge domain for retrieval grounding. "
+                    "'eng' = software engineering — the default for code, "
+                    "infrastructure, devops, deployment, CLI tools, servers. "
+                    "'llm' = LLM/ML/model work. 'rag' = retrieval/search/"
+                    "embeddings. 'prompt' = prompt engineering. 'spec' = specs/"
+                    "standards/protocols. When unsure, choose 'eng'."
+                ),
             },
             "goals": {
                 "type": "array",

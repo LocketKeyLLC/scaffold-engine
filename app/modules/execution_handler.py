@@ -31,7 +31,7 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
             "SELECT id, title, status, compiled_output, "
             "       compiled_output_synthesized, "
             "       compile_synthesis_override, "
-            "       error_summary, completed_at "
+            "       error_summary, completed_at, job_type "
             "FROM jobs WHERE id = :job_id"
         ),
         {"job_id": str(job_id)}
@@ -39,6 +39,11 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
     job = job_result.fetchone()
     if not job:
         return {"error": f"Job {job_id} not found"}
+
+    # §17.528 — an umbrella (task decomposition) has no DAG; report the
+    # rollup of its component children instead of an empty node view.
+    if getattr(job, "job_type", "legacy") == "umbrella":
+        return await _umbrella_status(job_id, job, db)
 
     # All nodes
     nodes_result = await db.execute(
@@ -155,6 +160,52 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         "next_actions": actions,
         "nodes": nodes,
         "costs": cost_totals,
+    }
+
+
+async def _umbrella_status(job_id: UUID, job, db: AsyncSession) -> dict:
+    """§17.528 — rollup view for an umbrella (decomposition parent): its
+    component children and their live statuses. Keeps the standard
+    ``execution_status`` keys (nodes=[], counts={}, …) so existing SDK/pipeline
+    readers don't KeyError, and adds ``job_type='umbrella'`` + ``children``."""
+    rows = (await db.execute(
+        text("""
+            SELECT id, title, status, component_index
+            FROM jobs WHERE parent_job_id = :u
+            ORDER BY component_index
+        """),
+        {"u": str(job_id)},
+    )).fetchall()
+    children = [{
+        "job_id": str(r.id),
+        "title": r.title,
+        "status": r.status,
+        "component_index": r.component_index,
+    } for r in rows]
+    return {
+        "job_id": str(job_id),
+        "job_title": job.title,
+        "job_status": job.status,
+        "job_type": "umbrella",
+        "error_summary": getattr(job, "error_summary", None),
+        "completed_at": (
+            _completed_at.isoformat()
+            if (_completed_at := getattr(job, "completed_at", None))
+            else None
+        ),
+        # §17.533 — the assembled umbrella deliverable (set by _rollup_umbrella
+        # on completion); None until the umbrella finalizes to 'completed'.
+        "compiled_output": getattr(job, "compiled_output", None),
+        "synthesized": False,
+        "synthesis_override": None,
+        "children": children,
+        "children_total": len(children),
+        "children_completed": sum(1 for c in children if c["status"] == "completed"),
+        "counts": {},
+        "total_nodes": 0,
+        "next_node": None,
+        "next_actions": [],
+        "nodes": [],
     }
 
 

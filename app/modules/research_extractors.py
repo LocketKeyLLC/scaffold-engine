@@ -59,11 +59,19 @@ DOMAIN_SCORES: dict[str, float] = {
 }
 DEFAULT_SOURCE_SCORE = 0.50
 
+# §17.503 — engine lists refreshed to engines that actually respond on this
+# SearXNG instance (measured 2026-06-13). The prior lists leaned on `google`
+# (Suspended: access denied), `bing`, `stackoverflow`, `pypi`, `crossref`,
+# `semantic_scholar`, `google news`, `bing news` — all returning 0 here — so
+# `it`/`science`/`news` research got near-zero curated results and fell back to
+# whatever the (now-removed) `categories` param dragged in (MDN). Each category
+# now carries a reliable general-web backbone (duckduckgo + startpage) plus its
+# specialist engines. Revisit if the SearXNG engine roster changes.
 CATEGORY_ENGINES: dict[str, str] = {
-    "it": "github,stackoverflow,pypi,google",
-    "science": "arxiv,crossref,semantic_scholar,google",
-    "news": "google news,bing news",
-    "general": "google,bing,duckduckgo,brave",
+    "it": "github,duckduckgo,startpage",
+    "science": "arxiv,google scholar,duckduckgo",
+    "news": "duckduckgo news,duckduckgo",
+    "general": "duckduckgo,startpage,brave",
 }
 
 _EXTRACT_BATCH_FULL_PAGE = 5
@@ -95,8 +103,18 @@ def _score_source(url: str) -> float:
 
 
 def _detect_domain(topic: str) -> str:
-    """Map research topic to Milvus partition domain via keyword scoring."""
-    topic_id = detect_topic_id(topic, TOPIC_KEYWORDS, default=1)
+    """Map research topic to Milvus partition domain via keyword scoring.
+
+    §17.501 — pass ``default=0`` (a topic_id NOT in ``topic_to_domain``,
+    whose keys are 1-6) so a topic that matches NO keywords falls through
+    to ``settings.default_domain`` ("eng") via the ``.get`` fallback below.
+    Previously ``default=1`` routed every keyword-less topic to topic_id 1
+    → the "llm" partition, contradicting the documented ``default_domain``
+    and stranding e.g. homelab/infra research in "llm" where domain-pinned
+    queries miss it. (Cross-domain ``domain=None`` retrieval still found it,
+    which is why the mis-routing was silent.)
+    """
+    topic_id = detect_topic_id(topic, TOPIC_KEYWORDS, default=0)
     return settings.topic_to_domain.get(topic_id, settings.default_domain)
 
 
@@ -586,7 +604,9 @@ async def _searxng_cache_set(query: str, results) -> None:
 
 
 def _engines_for_category(category: str) -> str:
-    return CATEGORY_ENGINES.get(category, "google,bing,duckduckgo")
+    # §17.503 — default to the reliable general-web backbone (google/bing are
+    # dead on this instance) for any unmapped category.
+    return CATEGORY_ENGINES.get(category, "duckduckgo,startpage")
 
 
 # =============================================================================

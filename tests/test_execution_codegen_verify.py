@@ -92,6 +92,28 @@ def test_collect_empty():
     assert collect_upstream_code({"T1": ""}) == []
 
 
+# §17.514 — regression: _fetch_upstream_outputs returns (output_text, confidence)
+# TUPLES (since §17.477), not strings. collect_upstream_code must unpack the
+# text. Pre-fix, passing the tuple to extract_code_blocks raised
+# "TypeError: expected string or bytes-like object, got 'tuple'", crashing every
+# CodeGen node with upstream deps under the strict verifier. The prior tests
+# only used string values, so they never caught the production shape.
+
+def test_collect_handles_tuple_values_from_fetch_upstream():
+    ups = {
+        "T1": ("prose only, no code", 0.9),
+        "T2": ("```python\ndef f(): ...\n```", None),
+        "T3": ("```js\nconst x = 1;\n```", 0.5),
+    }
+    got = collect_upstream_code(ups)
+    assert [k for k, _ in got] == ["T2"]
+    assert "def f()" in got[0][1]
+
+
+def test_collect_tuple_with_empty_text():
+    assert collect_upstream_code({"T1": ("", 0.8)}) == []
+
+
 # ---------------------------------------------------------------------------
 # _verify_codegen_output
 # ---------------------------------------------------------------------------

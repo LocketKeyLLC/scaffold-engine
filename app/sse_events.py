@@ -49,6 +49,12 @@ NODE_FAILED = "node_failed"
 ASSIST_HANDOFF_STARTED = "assist_handoff_started"
 ASSIST_HANDOFF_DONE = "assist_handoff_done"
 
+# §17.493 — streamed walkthrough generation: one ASSIST_GUIDE_DELTA per content
+# chunk, then a single ASSIST_GUIDE_DONE carrying the final status +
+# guidance_meta (destructive scan, research sources, cached flag).
+ASSIST_GUIDE_DELTA = "assist_guide_delta"
+ASSIST_GUIDE_DONE = "assist_guide_done"
+
 
 # ---------------------------------------------------------------------------
 # Research-agent events (app/modules/research_agent.py)
@@ -140,6 +146,7 @@ ALL_EVENT_NAMES = frozenset({
     NODE_START, NODE_DONE, NODE_RETRY, NODE_FAILED,
     # assist
     ASSIST_HANDOFF_STARTED, ASSIST_HANDOFF_DONE,
+    ASSIST_GUIDE_DELTA, ASSIST_GUIDE_DONE,
     # research
     RESEARCH_STARTED, RESEARCH_RESUMED, RESEARCH_COMPLETE,
     SEARCH_COMPLETE, EXTRACTION_COMPLETE, INGESTION_COMPLETE,

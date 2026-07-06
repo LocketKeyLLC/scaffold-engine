@@ -26,8 +26,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
+from app.config import settings
 from app.database import get_db
 from app.modules.dag_generator import generate_dag as _generate_dag
+from app.modules.decomposition import (
+    MIN_COMPONENTS,
+    create_and_run_decomposition,
+    extract_components,
+)
 from app.modules.execution_agent import (
     execute_next_node,
     skip_node,
@@ -108,6 +114,55 @@ async def ideate_start_endpoint(body: IdeaInput, db=Depends(get_db)):
         model_overrides=body.model_overrides,
     )
     return {"job_id": job_id, "status": "refining"}
+
+
+@router.post("/decompose")
+async def decompose_endpoint(body: IdeaInput, db=Depends(get_db)):
+    """§17.526 — split a multi-part idea into an umbrella + component child jobs,
+    each run autonomously through the normal pipeline (Phase 1 → grounded Phase 2
+    → DAG → execute). Returns the umbrella id + child roll-up immediately.
+
+    If the idea has fewer than ``MIN_COMPONENTS`` separable parts, returns
+    ``{"decomposed": false, "components": [...]}`` and creates nothing — the
+    caller (the /go auto-chain) then falls back to the single-job ``POST /ideate``.
+    The model-validation gate runs before any LLM work or row creation."""
+    # §17.531 — server-side kill switch. Operators can disable decomposition
+    # regardless of the pipeline's decompose_on_go valve; the caller falls back
+    # to the single-job path (no LLM work wasted).
+    if not settings.decompose_enabled:
+        return {"decomposed": False, "reason": "disabled"}
+    await _require_valid_models(body.model_overrides)
+    async with get_ideation_slot_sem():
+        components = await extract_components(
+            body.idea, model_overrides=body.model_overrides,
+        )
+    if len(components) < MIN_COMPONENTS:
+        # §17.530 — distinguish "genuinely one focused build" from "the splitter
+        # LLM failed" so the caller/logs aren't blind to an extraction error.
+        reason = "single_focus" if components else "extraction_unavailable"
+        return {"decomposed": False, "components": components, "reason": reason}
+    # §17.531 — global fan-out cap: bound the total number of autonomous
+    # component pipelines in flight across ALL umbrellas (cost / DoS guard).
+    inflight = (await db.execute(
+        text("""
+            SELECT count(*) FROM jobs
+            WHERE job_type = 'component'
+              AND status NOT IN ('completed', 'failed', 'cancelled', 'blocked')
+        """),
+    )).scalar_one()
+    if inflight + len(components) > settings.decompose_max_inflight_components:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"decomposition capacity reached ({inflight} components in flight, "
+                f"cap {settings.decompose_max_inflight_components}); try again later"
+            ),
+        )
+    result = await create_and_run_decomposition(
+        body.idea, db, components=components, model_overrides=body.model_overrides,
+    )
+    result["decomposed"] = True
+    return result
 
 
 @router.post("/ideate/confirm")

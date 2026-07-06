@@ -8,6 +8,33 @@ For setup, install, and your literal first run, see [README.md](./README.md). Fo
 
 ---
 
+## Guided mode & the core commands
+
+The chat starts in **guided mode**: a small set of core commands is active, and the ~45 power commands are tucked behind a one-line toggle so a new user isn't overwhelmed.
+
+**Core commands** (always available):
+
+| Command | What it does |
+|---|---|
+| `/go` | Turn the chat into a plan and launch. |
+| `/idea <text>` | Skip the chat — send an idea straight to Phase 1. |
+| `/confirm <id>` | Approve a refined idea → research + plan. |
+| `/execute <id>` / `/assist <id>` | After planning, run the plan autonomously, or walk it yourself with the engine guiding. |
+| `/here` | **Where am I?** Everything in progress + the next step for each. |
+| `/next` | The single highest-priority next step. |
+| `/resume` | Jump back into whatever you were doing — no ID needed. |
+| `/results [id]` | Output, live progress, or failure detail. |
+| `/cancel [id]` | Stop a running job. |
+| `/help` | The core list (the full reference once advanced is on). |
+
+**Unlock everything** with **`/advanced on`** (it persists across restarts): `/research`, `/jobs`, `/model`, `/schedule`, `/rag`, `/config`, `/cost`, `/logs`, and more. `/advanced off` returns to guided. Typing a power command while guided gives a one-line "type `/advanced on`" hint, not an error.
+
+> **You rarely need a job ID.** `/here`, `/next`, `/resume`, `/results`, and `/cancel` all default to your most recent job. IDs are an optional override for when you're juggling several.
+
+> **Multi-part builds.** A big "build me a whole homelab" request can fan out into an *umbrella* job whose components run automatically. `/assist` on an umbrella tells you so and points you at `/results` to watch — the assistable work lives in the component jobs, not the umbrella.
+
+---
+
 ## Table of contents
 
 1. [How a project flows through the system](#how-a-project-flows-through-the-system)
@@ -42,15 +69,21 @@ You type /go             System refines the idea + checks feasibility
                           Read the plan; type /confirm <job_id>
                                        │
                                        ▼
-                          System auto-runs Phase 2 + DAG + execution:
-                          research → ingest → plan → execute → compile
-                                  (~10–60 minutes total)
+                          System runs Phase 2 + DAG:
+                          research → ingest → plan
+                                       │
+                                       ▼
+                          ⏸  HALT — how do you want to run it?
+                          /execute (autonomous)  or  /assist (you drive)
+                                       │
+                                       ▼
+                          Execution → compile  (~10–60 minutes total)
                                        │
                                        ▼
                           Final compiled output appears in chat
 ```
 
-**One pause point.** The confirmation gate is the only deliberate stop. Everything before and after auto-chains.
+**Two pause points.** (1) The confirmation gate after refining, and (2) the run-mode choice after planning — the system always asks whether to run autonomously (`/execute`) or walk it yourself (`/assist`), with a recommendation based on the plan. Everything else auto-chains.
 
 **`/idea <text>` is a fast path.** If you already know exactly what you want and don't need triage chat, type `/idea Your full description here` instead of just chatting + `/go`.
 

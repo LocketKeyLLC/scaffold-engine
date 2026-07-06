@@ -32,6 +32,10 @@ env:
   HF_HUB_DISABLE_TELEMETRY: "1"
   TOKENIZERS_PARALLELISM: "false"
   PYTHONPATH: /code
+  # §17.555 — app/ coverage floor for the unit-test job. 77 = ~4-5 pts under
+  # the measured baselines (81% in this exact `-k "not integration"` scope,
+  # 82% for `-m "not validate"`); headroom for churn, fails on a real drop.
+  COVERAGE_MIN: "77"
 
 jobs:
   unit-tests:
@@ -47,7 +51,10 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # §17.534 — pin to the same digest the compose stack runs
+        # (docker-compose.yml scaffold-postgres) so CI exercises the exact
+        # Postgres build prod uses, not a floating postgres:16 tag.
+        image: postgres:16@sha256:2586e2a95d1c9b31cb2967feb562948f7d364854453d703039b6efa45fe48417
         env:
           POSTGRES_DB: scaffold_engine
           POSTGRES_USER: scaffold
@@ -106,7 +113,32 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
 
-      - name: Run unit tests
+      # §17.534 — image vulnerability scan of the freshly-built orchestrator
+      # image. REPORT-ONLY (exit-code 0): OS/base-layer CVEs are frequently
+      # unfixed-upstream and shouldn't block a merge, but surfacing HIGH/CRITICAL
+      # here gives a standing signal for when to bump the digest-pinned base.
+      # The BLOCKING dependency gate is pip-audit in ci.yml (deps we control).
+      # ignore-unfixed keeps the report to actionable findings.
+      - name: Trivy image scan (report-only)
+        # §17.584 — SHA-pinned to v0.36.0. aquasecurity/trivy-action was
+        # supply-chain-compromised in Mar 2026 (76/77 tags force-pushed to
+        # malware, CVE-2026-33634); the old `@0.28.0` tag no longer resolves.
+        # Pin to the immutable commit SHA rather than a re-pushable tag.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: scaffold-orchestrator:ci
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
+
+      # §17.555 — runs the unit suite AND gates app/ coverage at COVERAGE_MIN%.
+      # pytest-cov rides in via the dev build stage (requirements-dev.txt).
+      # COVERAGE_FILE under /tmp: the ci image's /code is root-owned but the
+      # container's default user differs, so coverage's CWD-relative SQLite DB
+      # is unwritable (same fix as `make coverage`). --cov-fail-under exits
+      # non-zero on a coverage drop, failing the job.
+      - name: Run unit tests + coverage gate
         run: |
           docker run --rm \
             --network host \
@@ -116,9 +148,13 @@ jobs:
             -e SEARXNG_URL=$SEARXNG_URL \
             -e SCAFFOLD_API_KEY=$SCAFFOLD_API_KEY \
             -e PYTHONPATH=/code:/code/sdk \
+            -e COVERAGE_FILE=/tmp/.coverage \
             scaffold-orchestrator:ci \
             pytest tests/ --timeout=30 -v \
-              -k "not integration"
+              -k "not integration" \
+              --cov=app --cov-branch \
+              --cov-report=term-missing:skip-covered \
+              --cov-fail-under=${COVERAGE_MIN}
 
   # Full integration tests require Ollama + Milvus + SearXNG.
   # Enable this job on a self-hosted runner with GPU/CPU inference.

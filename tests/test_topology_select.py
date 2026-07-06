@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.config import settings
 from app.providers.base import ModelResponse
 from app.sim import topology_select as ts_mod
 from app.sim.spec_store import SpecRow
@@ -178,6 +179,53 @@ async def test_select_topologies_happy_path_persists_row(
     persisted_cites = [c.citations for c in insert_kwargs["candidates"]]
     assert ["chunk-A"] in persisted_cites
     assert ["chunk-C"] in persisted_cites
+
+
+@pytest.mark.smoke
+async def test_select_topologies_redraws_past_empty(
+    monkeypatch, confirmed_spec_row, spec_id,
+):
+    """§17.489 — the cloud thinking model can return success=True + empty
+    content; chat_until_nonempty re-draws before treating it as a failure.
+    Two empty draws then a valid one → ok=True with one persisted row."""
+    _patch_require_confirmed(monkeypatch, confirmed_spec_row)
+    _patch_rag(monkeypatch, results=_three_chunks())
+
+    def _resp(text, success=True):
+        return ModelResponse(text=text, model="m", success=success)
+
+    chat = AsyncMock(side_effect=[
+        _resp(""), _resp("   "), _resp(json.dumps(_valid_llm_body())),
+    ])
+    monkeypatch.setattr("app.sim.topology_select.model_router.chat", chat)
+    insert_mock = _patch_insert(monkeypatch)
+    db = make_mock_db()
+
+    result = await select_topologies(spec_id, db=db)
+
+    assert result.ok is True
+    assert chat.await_count == 3            # re-drew past the two empties
+    assert insert_mock.await_count == 1
+
+
+@pytest.mark.smoke
+async def test_select_topologies_all_empty_draws_no_row(
+    monkeypatch, confirmed_spec_row, spec_id,
+):
+    """All draws empty → ok=False, no INSERT, no raise (fail-soft)."""
+    _patch_require_confirmed(monkeypatch, confirmed_spec_row)
+    _patch_rag(monkeypatch, results=_three_chunks())
+    chat = AsyncMock(return_value=ModelResponse(text="", model="m", success=True))
+    monkeypatch.setattr("app.sim.topology_select.model_router.chat", chat)
+    insert_mock = _patch_insert(monkeypatch)
+    db = make_mock_db()
+
+    result = await select_topologies(spec_id, db=db)
+
+    assert result.ok is False
+    assert result.errors
+    assert insert_mock.await_count == 0
+    assert chat.await_count == settings.topology_select_max_draws
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
 from app.config import settings
+from app.utils.llm_retry import chat_until_nonempty
 from app.sim.device_sizing import (
     CandidateIndexError,
     TopologySelectionNotFoundError,
@@ -335,11 +336,15 @@ async def _call_llm_propose_sv(
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": "\n".join(user_lines)},
     ]
-    resp = await model_router.chat(
-        messages=messages,
-        role=role,
+    # §17.494 — retry-on-empty (cloud thinking model, §17.465 class).
+    resp = await chat_until_nonempty(
+        model_router.chat,
+        messages,
+        {"role": role},
         temperature=0.0,
-        max_tokens=4096,
+        max_tokens=settings.sim_stage_max_tokens,
+        draws=settings.sim_stage_max_draws,
+        label="digital_sizing",
     )
     if not resp.success or not (resp.text or "").strip():
         return None, resp.text or "", resp.model or role, (

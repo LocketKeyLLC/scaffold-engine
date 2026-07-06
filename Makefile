@@ -4,6 +4,10 @@
 CONTAINER := scaffold-orchestrator
 COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
+# §17.554 — coverage floor for `make coverage`. 77 = ~5 pts under the §17.553
+# 82% unit baseline (headroom for normal churn; catches a real drop). Override:
+# `COVERAGE_MIN=0 make coverage` for pure reporting, or raise as coverage grows.
+COVERAGE_MIN ?= 77
 API_URL   ?= http://localhost:8000
 
 .PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit
@@ -31,6 +35,17 @@ _ensure_dev:
 
 test: _ensure_dev ## Run all tests in dev image (~1340 passing, ~8 skipped post-§17.63)
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v
+
+coverage: _ensure_dev ## §17.553/554 — app/ unit coverage in dev image; gates at COVERAGE_MIN% (default 77). Excludes validate/integration, so I/O-heavy modules under-report.
+	# COVERAGE_FILE under /tmp: /code is root-owned in the dev image but tests
+	# run as uid 1000, so coverage's default CWD-relative .coverage SQLite DB
+	# is unwritable (X.28, same as cache_dir). Env var beats config + survives
+	# a stale baked pyproject.
+	docker exec -e COVERAGE_FILE=/tmp/.coverage $(CONTAINER) pytest tests/ -m "not validate" --timeout=30 -q \
+		--cov=app --cov-branch \
+		--cov-report=term-missing:skip-covered \
+		--cov-report=xml:/tmp/coverage.xml \
+		--cov-fail-under=$(COVERAGE_MIN)
 
 test-cli: _ensure_dev ## Run scaffold CLI tests (cli/tests/) inside the dev container
 	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m pytest tests/ --timeout=10 -v"
@@ -133,7 +148,7 @@ ci: _ensure_dev ## Run CI-safe tests (no live services; dev image) + bench regre
 	@printf '\n--- Audit I4: bench regression gates ---\n'
 	$(MAKE) bench-check
 
-ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The 4 prereqs are byte-equal/grep gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
+ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift lint-migrations ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The 5 prereqs are byte-equal/grep/lint gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
 	@printf '\033[1m▶ static-scan inventory tests (host pytest, --noconftest)\033[0m\n'
 	@if command -v pytest >/dev/null 2>&1; then \
 		PYTHONPATH=$(CURDIR):$(CURDIR)/sdk pytest \
@@ -144,6 +159,9 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 		printf '\033[1;33m⚠ host pytest not found — skipped the 2 inventory scans (byte-equal gates above still ran). Full coverage: make test\033[0m\n'; \
 	fi
 	@printf '\033[1;32m✓ ci-tier-0 passed (static parity gates green)\033[0m\n'
+
+lint-migrations: ## §17.534 — enforce the single-statement migration rule (§17.140) on every new migration (>033). Pure-Python static gate; no docker, no DB. Part of ci-tier-0.
+	@python3 scripts/lint_migrations.py
 
 audit: _ensure_dev ## §17.97 — CVE scan against pinned deps via pip-audit (dev image). Scans requirements.txt + requirements-ci.txt + requirements-dev.txt. Non-zero exit on a known vulnerability; pass a tag through ARGS to ignore one (e.g. ARGS="--ignore-vuln GHSA-xxxx").
 	@for f in requirements.txt requirements-ci.txt requirements-dev.txt; do \
@@ -303,7 +321,7 @@ check-next-actions: ## §17.195 — Verify pipelines/_vendor/_next_actions.py is
 	fi
 	@echo "✓ pipelines/_vendor/_next_actions.py is in sync with sdk/scaffold_client/next_actions.py."
 
-ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + golden retrieval sidecar + bench regression gates (§17.352). Runs locally OR via self-hosted CI; requires the orchestrator + Milvus + Postgres + Redis + Ollama stack to be live.
+ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + golden retrieval gate (§17.550 corpus set, floors cov5>=70%/mrr>=0.55) + bench regression gates (§17.352). Runs locally OR via self-hosted CI; requires the orchestrator + Milvus + Postgres + Redis + Ollama stack to be live.
 	@set -euo pipefail; \
 	printf '\033[1;36m== §17.247 tier 2 — full-stack integration ==\033[0m\n'; \
 	printf '\033[1;36m-- step 1/5: orchestrator /health --\033[0m\n'; \
@@ -331,10 +349,17 @@ ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + g
 		-w /code \
 		scaffold-engine:dev \
 		python3 scripts/score_retrieval.py \
+			--golden tests/fixtures/golden_set_corpus.json \
 			--output /host-tmp/retrieval_report_ci_tier_2.json \
 		2>&1 | grep -vE "reranker_decision|provenance_fetch_failed|Loading weights" | tail -15; \
-	python3 -c "import json,sys; d=json.load(open('/tmp/ci-tier-2/retrieval_report_ci_tier_2.json')); \
-	print(f\"  ✓ coverage_at_5={d['coverage_at_5']:.1%}  coverage_at_10={d['coverage_at_10']:.1%}  mean_mrr={d['mean_title_mrr']:.3f}\")"; \
+	python3 -c "import json,sys,os; \
+	d=json.load(open('/tmp/ci-tier-2/retrieval_report_ci_tier_2.json')); \
+	c5=d['coverage_at_5']; c10=d['coverage_at_10']; mrr=d['mean_title_mrr']; \
+	min5=float(os.environ.get('RETRIEVAL_MIN_COV5','0.70')); \
+	minmrr=float(os.environ.get('RETRIEVAL_MIN_MRR','0.55')); \
+	print('  coverage_at_5=%.1f%%  coverage_at_10=%.1f%%  mean_mrr=%.3f  (§17.550 corpus set; floors cov5>=%.0f%% mrr>=%.2f)' % (c5*100,c10*100,mrr,min5*100,minmrr)); \
+	sys.exit(0 if (c5>=min5 and mrr>=minmrr) else 1)" \
+	|| { printf '\033[1;31m✗ retrieval quality below floor — corpus golden set §17.550 (override: RETRIEVAL_MIN_COV5 / RETRIEVAL_MIN_MRR)\033[0m\n'; exit 1; }; \
 	printf '\033[1;36m-- step 5/5: bench regression gates (§17.352) --\033[0m\n'; \
 	$(MAKE) bench-check; \
 	printf '\033[1;32mAll tier 2 checks passed.\033[0m\n'

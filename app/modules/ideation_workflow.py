@@ -29,19 +29,19 @@ from app.database import async_session
 from app import model_router
 from app.config import settings
 from app.modules.gt_extractor import (
-    DISTILL_PROMPT,
-    DISTILL_SYSTEM,
     TOPIC_KEYWORDS,
     TOPIC_MAP,
+    distill_entries,
     format_toon_rows,
     push_to_github as gt_push_to_github,
     search_searxng,
 )
 from app.modules.idea_refinement import create_ideation_job, refine_idea
 from app.modules.rag_pipeline import ingest_entries
+from app.providers.base import Tool
 from app.utils.job_utils import fail_job as _fail_job
-from app.utils.llm_retry import generate_until_nonempty
-from app.utils.llm_parsing import parse_json_array, parse_json_object
+from app.utils.llm_retry import tool_call_until_args
+from app.utils.tool_call_args import read_tool_args
 from app.utils.topic_detection import detect_topic_id
 
 logger = logging.getLogger("scaffold.ideation")
@@ -136,33 +136,113 @@ FEASIBILITY_SYSTEM = (
     "1. Is this achievable with local CPU-only LLM infrastructure (Ollama, Milvus, SearXNG)?\n"
     "2. What are the risks or unknowns?\n"
     "3. What clarifications would improve the plan?\n\n"
-    "OUTPUT FORMAT (strict JSON, no markdown fences):\n"
-    '{\n'
-    '  "feasible": true,\n'
-    '  "confidence": 0.8,\n'
-    '  "risks": ["risk1"],\n'
-    '  "clarifications_needed": ["question1"],\n'
-    '  "recommended_research_queries": ["query1", "query2"],\n'
-    '  "summary": "one paragraph assessment"\n'
-    '}'
+    "Emit your assessment via the emit_feasibility_assessment tool."
+)
+
+# §17.580 — native tool-call schema for the feasibility pass. Mirrors
+# idea_refinement.REFINE_BRIEF_TOOL: model_router.tool_call parses structured
+# args on native-tool providers and falls back to JSON-coaxing internally on
+# non-native providers (e.g. the qwen3.5:397b-cloud reasoning model routed
+# through model_general), so this pass no longer silently falls back when the
+# model emits <think> prose instead of a bare JSON object. Replaces the legacy
+# generate() + parse_json_object() path that assumed clean JSON text.
+FEASIBILITY_TOOL = Tool(
+    name="emit_feasibility_assessment",
+    description=(
+        "Emit a structured technical-feasibility assessment for a refined brief."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "feasible": {
+                "type": "boolean",
+                "description": "Whether the idea is achievable on local CPU-only infra",
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Confidence in the assessment, 0.0-1.0",
+            },
+            "risks": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Risks or unknowns",
+            },
+            "clarifications_needed": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Questions that would improve the plan",
+            },
+            "recommended_research_queries": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Search queries to ground the plan in Phase 2",
+            },
+            "summary": {
+                "type": "string",
+                "description": "One-paragraph assessment",
+            },
+        },
+        "required": ["feasible", "confidence", "summary"],
+    },
 )
 
 COMPILE_SYSTEM = (
     "You are a prompt architect. Given a refined brief and researched facts, produce:\n"
     "1. An optimal prompt for executing this idea via a DAG of LLM nodes\n"
     "2. A step-by-step workflow the user should follow\n\n"
-    "OUTPUT FORMAT (strict JSON, no markdown fences):\n"
-    '{\n'
-    '  "compiled_prompt": "the full prompt text ready for DAG generation",\n'
-    '  "workflow_steps": [\n'
-    '    {"step": 1, "action": "what to do", "tool": "LLM|CodeGen|SearXNG|Milvus", "notes": "details"}\n'
-    '  ],\n'
-    '  "configuration": {\n'
-    '    "temperature": 0.3,\n'
-    '    "domain": "prompt|rag|llm|spec|eng",\n'
-    '    "estimated_nodes": 3\n'
-    '  }\n'
-    '}'
+    "Emit the plan via the emit_execution_plan tool."
+)
+
+# §17.581 — native tool-call schema for the Phase-2 compile pass. Same fix as
+# §17.580's feasibility tool: model_general → qwen3.5:397b-cloud is a reasoning
+# model, and the legacy generate() + parse_json_object() path silently produced
+# a compile failure whenever it emitted <think> prose. model_router.tool_call
+# parses structured args natively / via coaxing; tool_call_until_args re-draws
+# on the empty-args thinking-model variance (compile failure is fatal).
+COMPILE_TOOL = Tool(
+    name="emit_execution_plan",
+    description=(
+        "Emit an execution plan (DAG-ready prompt + workflow steps) for a brief."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "compiled_prompt": {
+                "type": "string",
+                "description": "Full prompt text ready for DAG generation",
+            },
+            "workflow_steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "step": {"type": "integer"},
+                        "action": {"type": "string"},
+                        "tool": {
+                            "type": "string",
+                            "enum": ["LLM", "CodeGen", "SearXNG", "Milvus", "Shell"],
+                        },
+                        "notes": {"type": "string"},
+                    },
+                    "required": ["step", "action"],
+                },
+                "description": "Ordered steps the user should follow",
+            },
+            "configuration": {
+                "type": "object",
+                "properties": {
+                    "temperature": {"type": "number"},
+                    "domain": {
+                        "type": "string",
+                        "enum": ["prompt", "rag", "llm", "spec", "eng"],
+                    },
+                    "estimated_nodes": {"type": "integer"},
+                },
+                "description": "Suggested DAG configuration",
+            },
+        },
+        "required": ["compiled_prompt", "workflow_steps"],
+    },
 )
 
 
@@ -216,16 +296,32 @@ async def analyze_and_confirm(
         {"model": model} if model
         else {"role": settings.ideation_model_role, "overrides": model_overrides}
     )
-    resp = await model_router.generate(
-        "Assess this brief:\n" + json.dumps(brief, indent=2),
-        system=FEASIBILITY_SYSTEM,
+    # §17.582 — feasibility gets the SAME retry-on-empty-args guard + 8192
+    # headroom as the compile pass (§17.581), closing the review's asymmetry
+    # finding: model_general → qwen3.5 spends tokens on <think> before the tool
+    # call, and a single argless draw would else silently flip to the fallback
+    # verdict (the SDK example even diverts to a human on fallback=True).
+    resp = await tool_call_until_args(
+        model_router.tool_call,
+        [
+            {"role": "system", "content": FEASIBILITY_SYSTEM},
+            {
+                "role": "user",
+                "content": "Assess this brief:\n" + json.dumps(brief, indent=2),
+            },
+        ],
+        [FEASIBILITY_TOOL],
+        route_kwargs,
         temperature=0.2,
-        max_tokens=2048,
-        **route_kwargs,
+        max_tokens=8192,
+        label="phase1_feasibility",
     )
 
-    feasibility = parse_json_object(resp.text) if resp.success else None
-    feasibility_fallback = feasibility is None
+    # §17.582 — treat an empty-args dict ({}) as a failed assessment, not just
+    # None: native-tool providers coerce missing args to {} (openai.py:347,
+    # anthropic.py:416), which `read_tool_args` returns verbatim.
+    feasibility = read_tool_args(resp)
+    feasibility_fallback = not feasibility
     if feasibility_fallback:
         logger.warning(
             "phase1_feasibility_fallback: job_id=%s llm_success=%s",
@@ -372,47 +468,28 @@ async def research_and_compile(
                 job_id, q, len(results),
             )
 
-        # Step 2: LLM distillation (router/4b)
+        # Step 2: LLM distillation (router/4b) via the shared native-tool-call
+        # primitive. §17.x — the legacy generate + parse_json_array path here
+        # dropped 100% of results (phase2_distill_shape_drift: raw=10 kept=0
+        # dropped=10) because DISTILL_SYSTEM no longer carries an object-shape
+        # spec — that moved into RECORD_DISTILLED_ENTRIES_TOOL when gt_extractor
+        # switched to native tool-calls, but this path was never migrated. The
+        # 4b model returned an array of strings and the §17.339 dict-filter
+        # discarded all of them. distill_entries forces the object shape via the
+        # tool schema (and keeps the §17.464 fail-soft-on-empty contract).
         entries: list[dict] = []
         distill_cap = settings.ideation_max_distill_results
         if all_results:
-            results_text = "\n\n".join(
-                f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['content']}"
-                for r in all_results[:distill_cap]
-            )
-            topic_str = brief.get("title", "unknown")
             distill_route = (
                 {"model": model} if model
                 else {"role": settings.ideation_model_role, "overrides": model_overrides}
             )
-            # §17.464 — retry-on-empty (thinking-model guard). An empty distill
-            # draw silently dropped a whole research round's entries (fail-soft
-            # `or []`); re-draw with 8192-token headroom first.
-            resp = await generate_until_nonempty(
-                model_router.generate,
-                DISTILL_PROMPT.format(topic=topic_str, results=results_text),
-                distill_route,
-                system=DISTILL_SYSTEM,
-                temperature=0.2,
-                max_tokens=8192,
-                label="phase2_distill",
+            entries = await distill_entries(
+                all_results,
+                topic=brief.get("title", "unknown"),
+                route=distill_route,
+                max_results=distill_cap,
             )
-            if resp.success:
-                raw_entries = parse_json_array(resp.text) or []
-                entries = [e for e in raw_entries if isinstance(e, dict)]
-                dropped = len(raw_entries) - len(entries)
-                if dropped:
-                    # §17.339 — distill LLM occasionally emits a JSON array
-                    # of strings (or mixed types) instead of objects. Filter
-                    # to dicts so downstream format_toon_rows / ingest_entries
-                    # can rely on the documented shape. Drop rather than
-                    # coerce: a string entry has no title/source/tags, and
-                    # synthesizing those would pollute Milvus with provenance-
-                    # free rows.
-                    logger.warning(
-                        "phase2_distill_shape_drift: job_id=%s raw=%d kept=%d dropped=%d",
-                        job_id, len(raw_entries), len(entries), dropped,
-                    )
             logger.info(
                 "phase2_distill: job_id=%s entry_count=%d", job_id, len(entries),
             )
@@ -450,24 +527,38 @@ async def research_and_compile(
             {"model": model} if model
             else {"role": settings.ideation_model_role, "overrides": model_overrides}
         )
-        # §17.464 — retry-on-empty (thinking-model guard). This is the critical
-        # one: an empty compile draw made parse_json_object → None → _fail_job,
-        # i.e. "research completed but compile failed" — the twin of the §17.463
-        # DAG bug, one step earlier. Re-draw with 8192-token headroom first.
-        resp = await generate_until_nonempty(
-            model_router.generate,
-            "Compile an execution plan from this context:\n"
-            + compile_context
-            + feedback_section,
+        # §17.581 — native tool-call compile (was generate + parse_json_object).
+        # model_general → qwen3.5:397b-cloud emits <think> prose that
+        # parse_json_object couldn't read, silently producing "research
+        # completed but compile failed" (the twin of the §17.463 DAG bug and
+        # §17.580's feasibility bug, one step later). tool_call reads structured
+        # args; tool_call_until_args keeps the §17.464 retry-on-empty guard —
+        # here it re-draws on the empty-ARGS thinking-model variance, with
+        # 8192-token headroom. Compile failure is fatal, so the guard matters.
+        resp = await tool_call_until_args(
+            model_router.tool_call,
+            [
+                {"role": "system", "content": COMPILE_SYSTEM},
+                {
+                    "role": "user",
+                    "content": "Compile an execution plan from this context:\n"
+                    + compile_context
+                    + feedback_section,
+                },
+            ],
+            [COMPILE_TOOL],
             compile_route,
-            system=COMPILE_SYSTEM,
             temperature=0.3,
             max_tokens=8192,
             label="phase2_compile",
         )
 
-        workflow = parse_json_object(resp.text) if resp.success else None
-        if workflow is None:
+        # §17.582 — falsy guard (not just `is None`): native-tool providers
+        # coerce missing tool args to {} (openai.py:347, anthropic.py:416), and
+        # read_tool_args returns that {} verbatim — advancing to 'planning' with
+        # an empty workflow would violate the §17.290/§17.463 no-empty invariant.
+        workflow = read_tool_args(resp)
+        if not workflow:
             # Compile failure is fatal — do not emit empty workflow_steps.
             # §17.290 — uniform 500 for all in-band Phase 2 failures.
             # Pre-§17.290 this branch returned 502 (Bad Gateway, on the

@@ -40,9 +40,10 @@ class TestCompileFailureHttpStatus:
     """§17.290 — the load-bearing UX-4 fix."""
 
     async def test_compile_parse_failure_returns_500(self):
-        """workflow=None from `parse_json_object(resp.text)` → 500.
-        Pre-§17.290 this returned 502; standardized so the operator-
-        facing code matches the rest of Phase 2's in-band failures."""
+        """workflow=None from `read_tool_args(resp)` → 500 (§17.581: compile is
+        now tool_call; success but no parseable tool args is the reasoning-model
+        failure mode). Pre-§17.290 this returned 502; standardized so the
+        operator-facing code matches the rest of Phase 2's in-band failures."""
         claimed = {
             "research_data": {
                 "feasibility": {"recommended_research_queries": ["RAG"]},
@@ -53,13 +54,12 @@ class TestCompileFailureHttpStatus:
         db = _mock_db_for_claim(claimed)
 
         # SearXNG empty → no distill needed; compile is the only LLM call.
+        # success=True but NO tool args (all redraws argless) → read_tool_args None.
         _mod.search_searxng = AsyncMock(return_value=[])
         _mod.model_router = MagicMock()
-        _mod.model_router.generate = AsyncMock(
-            return_value=_llm_response("not-valid-json-but-success", success=True)
+        _mod.model_router.tool_call = AsyncMock(
+            return_value=_tool_response(None, success=True)
         )
-        # Force compile-parse to fail.
-        _mod.parse_json_object = MagicMock(return_value=None)
         _wrap_async_session_no_op(_mod)
 
         result = await _mod.research_and_compile(job_id="job-compile-fail", db=db)
@@ -73,6 +73,37 @@ class TestCompileFailureHttpStatus:
             "with no UX gain."
         )
         assert "compile step failed" in result["error"]
+
+    async def test_compile_empty_args_dict_is_fatal(self):
+        """§17.582 — a native-tool provider coerces missing args to {} (not None;
+        openai.py:347/anthropic.py:416), and read_tool_args returns that {}
+        verbatim. The compile guard must treat {} as fatal (falsy check, was the
+        weaker `is None`) rather than advance to 'planning' with an empty plan —
+        the §17.290/§17.463 no-empty-workflow invariant."""
+        claimed = {
+            "research_data": {
+                "feasibility": {"recommended_research_queries": ["RAG"]},
+                "brief": {"title": "test", "domain": "eng"},
+            },
+            "refined_brief": None,
+        }
+        db = _mock_db_for_claim(claimed)
+
+        _mod.search_searxng = AsyncMock(return_value=[])
+        _mod.model_router = MagicMock()
+        # success=True, one tool call, but EMPTY args dict → read_tool_args → {}.
+        _mod.model_router.tool_call = AsyncMock(
+            return_value=_tool_response({}, success=True)
+        )
+        _wrap_async_session_no_op(_mod)
+
+        result = await _mod.research_and_compile(job_id="job-empty-args", db=db)
+
+        assert result["status"] == "failed"
+        assert result["http_status"] == 500, (
+            "§17.582: an empty-args {} compile result must be fatal, not "
+            "advanced to planning with an empty workflow."
+        )
 
     async def test_compile_llm_unsuccess_returns_500(self):
         """Compile LLM call itself fails (resp.success=False, e.g. timeout
@@ -90,11 +121,10 @@ class TestCompileFailureHttpStatus:
 
         _mod.search_searxng = AsyncMock(return_value=[])
         _mod.model_router = MagicMock()
-        # success=False → workflow stays None.
-        bad_resp = _llm_response("", success=False)
+        # success=False → read_tool_args None → workflow stays None.
+        bad_resp = _tool_response(None, success=False)
         bad_resp.error = "model timeout"
-        _mod.model_router.generate = AsyncMock(return_value=bad_resp)
-        _mod.parse_json_object = MagicMock(return_value=None)
+        _mod.model_router.tool_call = AsyncMock(return_value=bad_resp)
         _wrap_async_session_no_op(_mod)
 
         result = await _mod.research_and_compile(job_id="job-compile-timeout", db=db)

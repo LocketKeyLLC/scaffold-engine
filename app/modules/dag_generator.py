@@ -507,9 +507,24 @@ async def _generate_dag_with_validator(
 
     dag_data: dict | None = None
 
+    # §17.576 — learning flywheel: inject similar high-grounding exemplars as
+    # few-shot "proven prior solutions" (opt-in; "" when disabled or none found).
+    # Computed once outside the retry loop; fail-soft inside retrieve_exemplars.
+    _exemplar_block = ""
+    try:
+        from app.modules.flywheel import retrieve_exemplars
+        _ex_query = ""
+        if isinstance(brief_data, dict):
+            _ex_query = str(brief_data.get("description") or brief_data.get("title") or "")
+        _exemplar_block = await retrieve_exemplars(_ex_query or json.dumps(brief_data)[:500])
+    except Exception:
+        _exemplar_block = ""
+
     for attempt in range(1, max_attempts + 1):
         prompt_body = DAG_PROMPT.format(brief=json.dumps(brief_data, indent=2))
         prompt = (corrections_block + "\n\n" + prompt_body) if corrections_block else prompt_body
+        if _exemplar_block:
+            prompt = _exemplar_block + prompt
 
         # §17.463 — retry-on-empty around the generator call (thinking-model
         # empty-content guard). 8192-token headroom + up to 3 re-draws.
@@ -1027,9 +1042,23 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str], list[str
         if not name:
             errors.append(f"Task {i}: missing 'name'")
             continue  # #99
-        if len(name.split()) > 5:  # #104
-            errors.append(f"Task {i}: name exceeds 5 words: '{name}'")
-            continue
+        # §17.507 — the 5-word cap (#104) is a stylistic guideline given to the
+        # LLM, not a data constraint (the `title` column is unbounded). A
+        # non-deterministic model occasionally returns a 6-7 word name; failing
+        # the ENTIRE DAG build over one aesthetic miss (and marking the job
+        # `failed`) is wrong. Coerce-with-warning instead — truncate to 5 words
+        # — consistent with the unknown-type/tool coercions below. Full detail
+        # still lives in the node's `notes`/description.
+        name_words = name.split()
+        if len(name_words) > 5:  # #104
+            truncated = " ".join(name_words[:5])
+            msg = (
+                f"Task {task_id or i}: name >5 words, truncated "
+                f"{name!r} -> {truncated!r}"
+            )
+            logger.warning(msg)
+            warnings.append(msg)
+            name = truncated
         if task_type not in VALID_TASK_TYPES:
             msg = f"Task {task_id}: unknown type '{task_type}', coercing to 'action'"  # #26
             logger.warning(msg)

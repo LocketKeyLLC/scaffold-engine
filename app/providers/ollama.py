@@ -132,6 +132,13 @@ class OllamaProvider(LLMProvider):
         payload: dict[str, Any] = {
             "model": model,
             "input": texts,
+            # §17.545 — explicitly truncate to the model's context. Ollama's
+            # /api/embed default is normally truncate=true, but a context-length
+            # 400 ("input length exceeds the context length") was seen in prod
+            # (§16.7); truncate=false reproduces that exact error. Setting it
+            # true makes over-length inputs head-truncate to the embedder's
+            # context instead of failing the embed (and dropping the entry).
+            "truncate": True,
         }
         try:
             resp = await asyncio.wait_for(

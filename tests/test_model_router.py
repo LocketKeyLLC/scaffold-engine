@@ -57,6 +57,139 @@ def test_smart_fallback_returns_default_for_non_code():
 
 
 # ---------------------------------------------------------------------------
+# §17.547 — per-model native-tools gate (qwen3.5 thinking models → coaxing)
+# ---------------------------------------------------------------------------
+@pytest.mark.smoke
+def test_model_lacks_native_tools_flags_qwen35():
+    # Default deny-list is ["qwen3.5"] — the measured 100%-miss thinking model.
+    assert model_router._model_lacks_native_tools("qwen3.5:397b-cloud") is True
+    assert model_router._model_lacks_native_tools("qwen3.5:latest") is True
+    assert model_router._model_lacks_native_tools("QWEN3.5:foo") is True  # case-insensitive
+    assert model_router._model_lacks_native_tools("qwen2.5-coder:7b") is False
+    assert model_router._model_lacks_native_tools("") is False
+
+
+@pytest.mark.smoke
+async def test_tool_call_routes_coax_model_through_coaxing():
+    """A deny-listed model must skip the native provider path and use coaxing,
+    even though the Ollama provider advertises supports_native_tools=True."""
+    from app.providers import get_provider
+
+    provider = get_provider("ollama")
+    native = AsyncMock()  # must NOT be called for a coax-listed model
+
+    async def _coax(*a, **k):
+        return model_router.ModelResponse(
+            model="qwen3.5:397b-cloud", success=True, text="ok",
+        )
+
+    tool = model_router.Tool(
+        name="record", description="x",
+        input_schema={"type": "object", "properties": {}},
+    )
+    with patch.object(provider, "tool_call", native), \
+         patch.object(model_router, "_tool_call_via_coaxing", side_effect=_coax) as coax_mock, \
+         patch.object(model_router, "_record_call", AsyncMock(side_effect=lambda r: r)):
+        resp = await model_router.tool_call(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[tool], model="qwen3.5:397b-cloud",
+        )
+    assert resp.success is True
+    native.assert_not_called()
+    coax_mock.assert_called_once()
+
+
+@pytest.mark.smoke
+async def test_coaxing_floors_max_tokens_for_thinking_model():
+    """§17.547 — coaxed tool calls on a thinking model get max_tokens floored
+    (so reasoning doesn't consume the whole budget before the JSON); other
+    coaxed models keep the caller's value."""
+    from app.config import settings
+
+    captured: dict = {}
+
+    class FakeProvider:
+        async def chat_completion(self, model, messages, *, temperature, max_tokens, fallback):
+            captured["max_tokens"] = max_tokens
+            return model_router.ModelResponse(model=model, success=True, text='{"entries": []}')
+
+    tool = model_router.Tool(
+        name="record", description="x",
+        input_schema={"type": "object", "properties": {}},
+    )
+    msgs = [{"role": "user", "content": "hi"}]
+
+    # Thinking model: caller's tight 1024 is floored up.
+    await model_router._tool_call_via_coaxing(
+        FakeProvider(), "qwen3.5:397b-cloud", msgs, [tool],
+        temperature=0.1, max_tokens=1024, role=None, fallback=None,
+    )
+    assert captured["max_tokens"] == settings.tool_call_coax_min_tokens
+
+    # Non-thinking model: caller's value is preserved.
+    await model_router._tool_call_via_coaxing(
+        FakeProvider(), "qwen2.5:7b", msgs, [tool],
+        temperature=0.1, max_tokens=1024, role=None, fallback=None,
+    )
+    assert captured["max_tokens"] == 1024
+
+
+# ---------------------------------------------------------------------------
+# §17.548 — native-first tool call with coaxing fallback
+# ---------------------------------------------------------------------------
+_TOOL = None
+
+
+def _mk_tool():
+    return model_router.Tool(
+        name="record", description="x",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+
+@pytest.mark.smoke
+async def test_native_first_keeps_native_when_tool_calls_present():
+    """A tool-capable model that emits tool_calls keeps the single native call —
+    no coaxing fallback."""
+    class P:
+        async def tool_call(self, model, messages, tools, *, temperature, max_tokens, tool_choice):
+            return model_router.ModelResponse(
+                model=model, success=True,
+                tool_calls=[model_router.ToolCall(id="t0", name="record", arguments={"entries": [1]})],
+            )
+
+    with patch.object(model_router, "_tool_call_via_coaxing", AsyncMock()) as coax:
+        resp = await model_router._native_first_then_coax(
+            P(), "kimi-k2.7-code:cloud", [{"role": "user", "content": "hi"}], [_mk_tool()],
+            temperature=0.1, max_tokens=100, tool_choice="auto", role=None, fallback=None,
+        )
+    assert resp.tool_calls and resp.tool_calls[0].name == "record"
+    coax.assert_not_called()
+
+
+@pytest.mark.smoke
+async def test_native_first_falls_back_to_coax_on_prose():
+    """Native success but NO tool_calls (model answered in prose) → coaxing."""
+    class P:
+        async def tool_call(self, model, messages, tools, *, temperature, max_tokens, tool_choice):
+            return model_router.ModelResponse(model=model, success=True, text="prose", tool_calls=[])
+
+    async def _coax(*a, **k):
+        return model_router.ModelResponse(
+            model="kimi-k2.7-code:cloud", success=True,
+            tool_calls=[model_router.ToolCall(id="coaxed_0", name="record", arguments={"entries": [1, 2]})],
+        )
+
+    with patch.object(model_router, "_tool_call_via_coaxing", side_effect=_coax) as coax:
+        resp = await model_router._native_first_then_coax(
+            P(), "kimi-k2.7-code:cloud", [{"role": "user", "content": "hi"}], [_mk_tool()],
+            temperature=0.1, max_tokens=100, tool_choice="auto", role=None, fallback=None,
+        )
+    coax.assert_called_once()
+    assert resp.tool_calls and resp.tool_calls[0].id == "coaxed_0"
+
+
+# ---------------------------------------------------------------------------
 # _call_ollama — response parsing + error paths
 # ---------------------------------------------------------------------------
 def _mk_response(status: int, payload: dict | None = None, text: str = ""):
@@ -176,6 +309,56 @@ async def test_dispatch_skips_fallback_when_same_as_primary():
         )
     assert resp.success is False
     assert call_log == ["same", "same"]  # only 2 attempts, no 3rd for fallback
+
+
+@pytest.mark.smoke
+async def test_dispatch_no_fallback_injected_on_embed_endpoint():
+    """§16.7 — /api/embed must NOT get the chat-model smart fallback injected,
+    even when the caller passes fallback=None. A failing embed should not burn a
+    doomed round-trip to settings.model_fallback (a chat model that 501s)."""
+    call_log = []
+
+    async def fake_call(endpoint, payload, model, timeout):
+        call_log.append(model)
+        return model_router.ModelResponse(
+            model=model, success=False,
+            error="HTTP 400: input length exceeds context length",  # fail-fast
+        )
+
+    with patch.object(model_router, "_call_ollama", side_effect=fake_call), \
+         patch.object(model_router, "_sleep_for_attempt", AsyncMock()):
+        resp = await model_router._dispatch_with_retry(
+            "/api/embed", {}, "nomic-embed-text", fallback=None, max_retries=3,
+        )
+    assert resp.success is False
+    assert resp.fallback_used is False
+    # Only the embedder was called — no second model (no qwen3.5:latest 501).
+    assert call_log == ["nomic-embed-text"]
+
+
+@pytest.mark.smoke
+async def test_dispatch_still_injects_smart_fallback_on_generate():
+    """Regression guard: non-embed endpoints keep the smart-fallback default
+    when fallback=None — the §16.7 fix must not touch chat/generate behavior."""
+    from app.config import settings
+    call_log = []
+
+    async def fake_call(endpoint, payload, model, timeout):
+        call_log.append(model)
+        ok = model == settings.model_fallback
+        return model_router.ModelResponse(
+            model=model, success=ok, text="ok" if ok else None,
+            error=None if ok else "HTTP 500: boom",  # transient → retries then falls back
+        )
+
+    with patch.object(model_router, "_call_ollama", side_effect=fake_call), \
+         patch.object(model_router, "_sleep_for_attempt", AsyncMock()):
+        resp = await model_router._dispatch_with_retry(
+            "/api/generate", {}, "qwen3:4b", fallback=None, max_retries=2,
+        )
+    assert resp.success is True
+    assert resp.fallback_used is True
+    assert settings.model_fallback in call_log
 
 
 # ---------------------------------------------------------------------------
@@ -839,3 +1022,31 @@ async def test_record_call_swallows_import_error_and_logs(caplog):
         "record_call_import_failed" in r.message
         for r in caplog.records
     ), "missing cost_tracking should produce a distinct WARNING"
+
+
+# ── §17.493: stream_chat (role-routed streaming) ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_role_delegates_to_provider():
+    """stream_chat resolves role→provider and yields the provider's deltas."""
+    async def _provider_stream(model, messages, *, temperature, max_tokens):
+        assert model == "resolved-model"
+        for c in ["alpha ", "beta"]:
+            yield c
+
+    fake_provider = SimpleNamespace(stream_chat=_provider_stream)
+    with patch.object(model_router, "_resolve_role",
+                      return_value=("resolved-model", fake_provider)):
+        out = [c async for c in model_router.stream_chat(
+            [{"role": "user", "content": "x"}], role="model_general",
+            temperature=0.3, max_tokens=8192)]
+    assert out == ["alpha ", "beta"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_rejects_role_and_model_together():
+    with pytest.raises(ValueError):
+        async for _ in model_router.stream_chat(
+            [{"role": "user", "content": "x"}], role="model_general", model="m"):
+            pass

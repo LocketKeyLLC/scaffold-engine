@@ -1,0 +1,41 @@
+{
+  "_comment": "§17.567 — verdict-match goldens for the model_ab.py 'verifier' task. Each golden is a (task, output) pair with an unambiguous known-correct verdict ('pass' or 'fail'), mirroring app/modules/execution_verify.py VERIFY_SYSTEM (lenient presence-checker: PASS if the required functionality is present even partially; FAIL only if missing or fundamentally incorrect). A good model_verifier candidate matches `expected` on all of them.",
+  "goldens": [
+    {
+      "id": "sorts-present-pass",
+      "task": "List three sorting algorithms.",
+      "output": "Three common sorting algorithms are bubble sort, merge sort, and quicksort.",
+      "expected": "pass"
+    },
+    {
+      "id": "sorts-missing-fail",
+      "task": "List three sorting algorithms.",
+      "output": "Bubble sort is a simple comparison-based algorithm that repeatedly steps through the list and swaps adjacent out-of-order elements.",
+      "expected": "fail"
+    },
+    {
+      "id": "factorial-impl-pass",
+      "task": "Write a Python function that returns the factorial of n.",
+      "output": "def factorial(n):\n    return 1 if n <= 1 else n * factorial(n - 1)",
+      "expected": "pass"
+    },
+    {
+      "id": "factorial-explanation-only-fail",
+      "task": "Write a Python function that returns the factorial of n.",
+      "output": "A factorial is the product of all positive integers up to n. For example, 5! = 5 * 4 * 3 * 2 * 1 = 120.",
+      "expected": "fail"
+    },
+    {
+      "id": "pooling-summary-pass",
+      "task": "Provide a one-paragraph summary of the benefits of database connection pooling.",
+      "output": "Connection pooling keeps a set of established database connections open and reuses them across requests, eliminating the per-request cost of opening and tearing down TCP + auth handshakes. This lowers latency, bounds the number of concurrent connections the database must serve, and smooths load spikes.",
+      "expected": "pass"
+    },
+    {
+      "id": "rest-endpoint-missing-fail",
+      "task": "Define a REST endpoint to create a user — give the HTTP method and path.",
+      "output": "REST APIs commonly use HTTP verbs such as GET to read and POST to write, and they exchange JSON payloads over HTTPS.",
+      "expected": "fail"
+    }
+  ]
+}

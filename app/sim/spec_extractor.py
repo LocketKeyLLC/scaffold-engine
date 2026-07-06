@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
 from app.config import settings
+from app.utils.llm_retry import chat_until_nonempty
 from app.sim.spec import (
     SCHEMA,
     SCHEMA_VERSION,
@@ -213,11 +214,18 @@ async def extract_spec(
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": f"Brief: {nl_text.strip()}"},
     ]
-    resp = await model_router.chat(
-        messages=messages,
-        role=role,
+    # §17.487 — retry-on-empty. The cloud thinking model spends num_predict on
+    # reasoning first, so a tight cap (or an unlucky draw) returns success=True
+    # with empty content. chat_until_nonempty re-draws before we treat it as a
+    # hard failure; a true hard failure (success=False) returns immediately.
+    resp = await chat_until_nonempty(
+        model_router.chat,
+        messages,
+        {"role": role},
         temperature=0.0,
-        max_tokens=4096,
+        max_tokens=settings.spec_extractor_max_tokens,
+        draws=settings.spec_extractor_max_draws,
+        label="spec_extractor",
     )
 
     if not resp.success or not (resp.text or "").strip():

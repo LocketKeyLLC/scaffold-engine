@@ -105,6 +105,34 @@ async def recent_jobs_endpoint(
     )
 
 
+@router.get("/observability/quality")
+async def quality_rollup_endpoint(
+    window_minutes: int = Query(1440, ge=1, le=10080,
+        description="Job creation window in minutes (default 24h)."),
+    grounding_threshold: float = Query(0.7, ge=0.0, le=1.0,
+        description="Score below which a deliverable counts as low-grounding."),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """§17.573 — execution-quality rollup over recent jobs.
+
+    Surfaces the signals the model-tuning + grounding work tunes against,
+    aggregated from existing telemetry (no new recording):
+
+    - ``by_node_type``: per (tool, node_type) — total/done/failed/skipped,
+      pass_rate, avg verifier confidence, avg retry count. Shows which
+      node kinds are failing, low-confidence, or retry-heavy.
+    - ``grounding``: distribution of ``jobs.metadata.grounding.score`` —
+      count scored, avg/min, # auto-corrected (CoVe), # below threshold.
+
+    Read-only; fail-open (``data_source`` flags a query error vs empty).
+    """
+    return await observability_rollups.quality_rollup(
+        window_minutes=window_minutes,
+        grounding_threshold=grounding_threshold,
+        db=db,
+    )
+
+
 @router.patch(
     "/observability/errors/{error_id}",
     response_model=ErrorLogResolveResponse,

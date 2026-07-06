@@ -291,51 +291,59 @@ async def _vector_search(
     """
     domains = _iter_search_domains(domain, hint=domain_hint)
 
-    def _sync() -> list[RagResult]:
+    def _search_one(d: str) -> list[RagResult]:
+        # §17.542 — one partition per executor thread so the fan-out runs
+        # concurrently (vector+keyword legs already prove same-Collection
+        # concurrent search is safe; this is more of the same). Per-domain
+        # try/except isolates a failing partition without aborting the rest.
         if collection is None:
             return []
-        all_hits: list[RagResult] = []
-        for d in domains:
-            try:
-                search_kwargs: dict[str, Any] = dict(
-                    data=[query_embedding],
-                    anns_field="dense_vector",
-                    param={"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}},
-                    limit=top_k,
-                    expr=f'domain == "{_escape_literal(d)}"',
-                    output_fields=[
-                        "canonical_text", "title", "domain_tags", "source_url",
-                        "entry_id", "domain", "confidence_score", "version",
-                        "supersedes_id", "source_type",
-                    ],
-                )
-                results = collection.search(**search_kwargs)
-                for hit in results[0]:
-                    entity = hit.entity
-                    tags_list = entity.get("domain_tags", [])
-                    tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
-                    all_hits.append(RagResult(
-                        content=entity.get("canonical_text", ""),
-                        title=entity.get("title", ""),
-                        tags=tags_str,
-                        source_url=entity.get("source_url", ""),
-                        entry_id=entity.get("entry_id", ""),
-                        domain=entity.get("domain", ""),
-                        vector_score=float(hit.score),
-                        version=entity.get("version", 1),
-                        supersedes_id=entity.get("supersedes_id", ""),
-                        confidence_score=float(entity.get("confidence_score", 0.0) or 0.0),
-                        source_type=entity.get("source_type", ""),
-                    ))
-            except Exception as e:
-                logger.warning("Vector search failed (domain=%s): %s", d, e)
-                continue
-        # Merge across partitions: sort by score desc, keep top_k
-        all_hits.sort(key=lambda r: r.vector_score, reverse=True)
-        return all_hits[:top_k]
+        hits: list[RagResult] = []
+        try:
+            search_kwargs: dict[str, Any] = dict(
+                data=[query_embedding],
+                anns_field="dense_vector",
+                param={"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}},
+                limit=top_k,
+                expr=f'domain == "{_escape_literal(d)}"',
+                output_fields=[
+                    "canonical_text", "title", "domain_tags", "source_url",
+                    "entry_id", "domain", "confidence_score", "version",
+                    "supersedes_id", "source_type",
+                ],
+            )
+            results = collection.search(**search_kwargs)
+            for hit in results[0]:
+                entity = hit.entity
+                tags_list = entity.get("domain_tags", [])
+                tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
+                hits.append(RagResult(
+                    content=entity.get("canonical_text", ""),
+                    title=entity.get("title", ""),
+                    tags=tags_str,
+                    source_url=entity.get("source_url", ""),
+                    entry_id=entity.get("entry_id", ""),
+                    domain=entity.get("domain", ""),
+                    vector_score=float(hit.score),
+                    version=entity.get("version", 1),
+                    supersedes_id=entity.get("supersedes_id", ""),
+                    confidence_score=float(entity.get("confidence_score", 0.0) or 0.0),
+                    source_type=entity.get("source_type", ""),
+                ))
+        except Exception as e:
+            logger.warning("Vector search failed (domain=%s): %s", d, e)
+        return hits
 
+    if collection is None:
+        return []
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _sync)
+    per_domain = await asyncio.gather(
+        *[loop.run_in_executor(None, _search_one, d) for d in domains]
+    )
+    # Merge across partitions: sort by score desc, keep top_k
+    all_hits = [h for hits in per_domain for h in hits]
+    all_hits.sort(key=lambda r: r.vector_score, reverse=True)
+    return all_hits[:top_k]
 
 
 # ---------------------------------------------------------------------------
@@ -390,49 +398,54 @@ async def _bm25_search(
         return []
     domains = _iter_search_domains(domain, hint=domain_hint)
 
-    def _sync() -> list[RagResult]:
+    def _search_one(d: str) -> list[RagResult]:
+        # §17.542 — per-partition executor fan-out (see _vector_search).
         if collection is None:
             return []
-        all_hits: list[RagResult] = []
-        for d in domains:
-            try:
-                results = collection.search(
-                    data=[query],
-                    anns_field=BM25_SPARSE_FIELD,
-                    param={"metric_type": "BM25"},
-                    limit=top_k,
-                    expr=f'domain == "{_escape_literal(d)}"',
-                    output_fields=[
-                        "canonical_text", "title", "domain_tags", "source_url",
-                        "entry_id", "domain", "version", "supersedes_id",
-                        "confidence_score", "source_type",
-                    ],
-                )
-                for hit in results[0]:
-                    entity = hit.entity
-                    tags_list = entity.get("domain_tags", [])
-                    tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
-                    all_hits.append(RagResult(
-                        content=entity.get("canonical_text", ""),
-                        title=entity.get("title", ""),
-                        tags=tags_str,
-                        source_url=entity.get("source_url", ""),
-                        entry_id=entity.get("entry_id", ""),
-                        domain=entity.get("domain", ""),
-                        keyword_score=float(hit.score),
-                        version=entity.get("version", 1),
-                        supersedes_id=entity.get("supersedes_id", ""),
-                        confidence_score=float(entity.get("confidence_score", 0.0) or 0.0),
-                        source_type=entity.get("source_type", ""),
-                    ))
-            except Exception as e:
-                logger.warning("BM25 search failed (domain=%s): %s", d, e)
-                continue
-        all_hits.sort(key=lambda r: r.keyword_score, reverse=True)
-        return all_hits[:top_k]
+        hits: list[RagResult] = []
+        try:
+            results = collection.search(
+                data=[query],
+                anns_field=BM25_SPARSE_FIELD,
+                param={"metric_type": "BM25"},
+                limit=top_k,
+                expr=f'domain == "{_escape_literal(d)}"',
+                output_fields=[
+                    "canonical_text", "title", "domain_tags", "source_url",
+                    "entry_id", "domain", "version", "supersedes_id",
+                    "confidence_score", "source_type",
+                ],
+            )
+            for hit in results[0]:
+                entity = hit.entity
+                tags_list = entity.get("domain_tags", [])
+                tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
+                hits.append(RagResult(
+                    content=entity.get("canonical_text", ""),
+                    title=entity.get("title", ""),
+                    tags=tags_str,
+                    source_url=entity.get("source_url", ""),
+                    entry_id=entity.get("entry_id", ""),
+                    domain=entity.get("domain", ""),
+                    keyword_score=float(hit.score),
+                    version=entity.get("version", 1),
+                    supersedes_id=entity.get("supersedes_id", ""),
+                    confidence_score=float(entity.get("confidence_score", 0.0) or 0.0),
+                    source_type=entity.get("source_type", ""),
+                ))
+        except Exception as e:
+            logger.warning("BM25 search failed (domain=%s): %s", d, e)
+        return hits
 
+    if collection is None:
+        return []
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _sync)
+    per_domain = await asyncio.gather(
+        *[loop.run_in_executor(None, _search_one, d) for d in domains]
+    )
+    all_hits = [h for hits in per_domain for h in hits]
+    all_hits.sort(key=lambda r: r.keyword_score, reverse=True)
+    return all_hits[:top_k]
 
 
 async def _keyword_search_like(
@@ -467,50 +480,55 @@ async def _keyword_search_like(
 
     domains = _iter_search_domains(domain, hint=domain_hint)
 
-    def _sync() -> list[RagResult]:
+    def _search_one(d: str) -> list[RagResult]:
+        # §17.542 — per-partition executor fan-out (see _vector_search).
         if collection is None:
             return []
-        all_hits: list[RagResult] = []
-        for d in domains:
-            expr = f'domain == "{_escape_literal(d)}" and ({keyword_expr})'
-            try:
-                results = collection.query(
-                    expr=expr,
-                    output_fields=[
-                        "canonical_text", "title", "domain_tags", "source_url",
-                        "entry_id", "domain", "version", "supersedes_id",
-                        "confidence_score", "source_type",
-                    ],
-                    limit=top_k,
-                )
-                for r in results:
-                    content_lower = r.get("canonical_text", "").lower()
-                    title_lower = r.get("title", "").lower()
-                    match_count = sum(1 for w in words if w in content_lower or w in title_lower)
-                    score = match_count / len(words) if words else 0.0
-                    tags_list = r.get("domain_tags", [])
-                    tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
-                    all_hits.append(RagResult(
-                        content=r.get("canonical_text", ""),
-                        title=r.get("title", ""),
-                        tags=tags_str,
-                        source_url=r.get("source_url", ""),
-                        entry_id=r.get("entry_id", ""),
-                        domain=r.get("domain", ""),
-                        keyword_score=score,
-                        version=r.get("version", 1),
-                        supersedes_id=r.get("supersedes_id", ""),
-                        confidence_score=float(r.get("confidence_score", 0.0) or 0.0),
-                        source_type=r.get("source_type", ""),
-                    ))
-            except Exception as e:
-                logger.warning("Keyword search failed (domain=%s): %s", d, e)
-                continue
-        all_hits.sort(key=lambda r: r.keyword_score, reverse=True)
-        return all_hits[:top_k]
+        hits: list[RagResult] = []
+        expr = f'domain == "{_escape_literal(d)}" and ({keyword_expr})'
+        try:
+            results = collection.query(
+                expr=expr,
+                output_fields=[
+                    "canonical_text", "title", "domain_tags", "source_url",
+                    "entry_id", "domain", "version", "supersedes_id",
+                    "confidence_score", "source_type",
+                ],
+                limit=top_k,
+            )
+            for r in results:
+                content_lower = r.get("canonical_text", "").lower()
+                title_lower = r.get("title", "").lower()
+                match_count = sum(1 for w in words if w in content_lower or w in title_lower)
+                score = match_count / len(words) if words else 0.0
+                tags_list = r.get("domain_tags", [])
+                tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
+                hits.append(RagResult(
+                    content=r.get("canonical_text", ""),
+                    title=r.get("title", ""),
+                    tags=tags_str,
+                    source_url=r.get("source_url", ""),
+                    entry_id=r.get("entry_id", ""),
+                    domain=r.get("domain", ""),
+                    keyword_score=score,
+                    version=r.get("version", 1),
+                    supersedes_id=r.get("supersedes_id", ""),
+                    confidence_score=float(r.get("confidence_score", 0.0) or 0.0),
+                    source_type=r.get("source_type", ""),
+                ))
+        except Exception as e:
+            logger.warning("Keyword search failed (domain=%s): %s", d, e)
+        return hits
 
+    if collection is None:
+        return []
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _sync)
+    per_domain = await asyncio.gather(
+        *[loop.run_in_executor(None, _search_one, d) for d in domains]
+    )
+    all_hits = [h for hits in per_domain for h in hits]
+    all_hits.sort(key=lambda r: r.keyword_score, reverse=True)
+    return all_hits[:top_k]
 
 
 # ---------------------------------------------------------------------------

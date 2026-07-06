@@ -1,0 +1,25 @@
+{
+  "version": "extraction-1.0",
+  "note": "§17.557 — goldens for `model_ab.py --task extraction`. Each item feeds gt_extractor's DISTILL_SYSTEM/DISTILL_PROMPT + RECORD_DISTILLED_ENTRIES_TOOL (the production distill path). Scoring is reliability, not correctness: did the model emit a parseable non-empty `entries` tool-call (native or coaxed). Use it to A/B a role/model change before shipping it (cf. §17.556 — coaxed qwen3.5 5/5 vs native kimi 1/5 on this prompt).",
+  "goldens": [
+    {
+      "id": "x86-real-mode",
+      "topic": "x86 real-mode programming",
+      "results": [
+        {"title": "8086 Memory Segmentation Explained", "url": "https://ex.com/8086-seg", "content": "The 8086 uses a segmented memory model. A 20-bit physical address is formed by shifting the 16-bit segment register left 4 bits and adding the 16-bit offset, yielding a 1 MB address space from 16-bit registers."},
+        {"title": "DOS INT 21h Services", "url": "https://ex.com/int21", "content": "INT 21h is the primary DOS API interrupt. AH selects the function: 01h read char, 02h write char, 09h print string, 4Ch terminate. Parameters pass in registers."},
+        {"title": "BIOS Keyboard Interrupt 16h", "url": "https://ex.com/int16", "content": "INT 16h provides BIOS keyboard services. AH=00h waits for and reads a keystroke (scan code in AH, ASCII in AL); AH=01h checks status without blocking."},
+        {"title": "Real Mode vs Protected Mode", "url": "https://ex.com/modes", "content": "Real mode uses segment:offset addressing with a 1 MB limit. Protected mode (80286+) adds descriptor tables, privilege levels, and access to extended memory beyond 1 MB."}
+      ]
+    },
+    {
+      "id": "rag-retrieval",
+      "topic": "retrieval-augmented generation",
+      "results": [
+        {"title": "Hybrid retrieval: dense + sparse fusion", "url": "https://ex.com/hybrid", "content": "Hybrid search combines a dense vector leg (semantic embeddings) with a sparse leg (BM25 lexical scoring) and fuses the two rank lists with Reciprocal Rank Fusion (RRF), which is robust to differing score scales."},
+        {"title": "Reranking with cross-encoders", "url": "https://ex.com/rerank", "content": "A cross-encoder reranker jointly encodes the query and each candidate document, producing a relevance score. It is more accurate than bi-encoder retrieval but quadratically more expensive, so it is applied only to the top-k candidates."},
+        {"title": "Chunking strategies for RAG", "url": "https://ex.com/chunk", "content": "Document chunking trades recall against precision: small chunks improve precision but fragment context; overlap between chunks preserves cross-boundary context at the cost of redundancy."}
+      ]
+    }
+  ]
+}

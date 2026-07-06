@@ -21,6 +21,32 @@ import logging
 logger = logging.getLogger("scaffold.llm_retry")
 
 
+async def _redraw_until(call, is_usable, *, draws, label, detail,
+                        event="llm_empty_redraw"):
+    """§17.582 — core retry-on-empty loop shared by the three public guards.
+
+    ``call`` is a zero-arg coroutine factory that performs one draw; ``is_usable``
+    inspects the response and returns True when it's worth keeping. A hard
+    failure (``success=False``) returns immediately; otherwise re-draw up to
+    ``draws`` times, returning the last response so the caller's existing
+    empty-handling still applies. Consolidates the previously-triplicated loop
+    in ``generate_until_nonempty`` / ``chat_until_nonempty`` /
+    ``tool_call_until_args`` (§17.464/465/581) so a future policy change (jitter,
+    wall-time cap, metrics) lands in one place.
+    """
+    resp = None
+    for d in range(draws):
+        resp = await call()
+        if not resp.success:
+            return resp
+        if is_usable(resp):
+            return resp
+        logger.warning(
+            "%s: label=%s draw=%d/%d (%s)", event, label or "?", d + 1, draws, detail,
+        )
+    return resp
+
+
 async def generate_until_nonempty(
     generate,
     prompt: str,
@@ -55,24 +81,15 @@ async def generate_until_nonempty(
         immediately; otherwise the first non-empty draw, or the last empty one if
         all ``draws`` are exhausted (the caller then handles the empty as before).
     """
-    resp = None
-    for d in range(draws):
-        resp = await generate(
-            prompt,
-            system=system,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **route_kwargs,
-        )
-        if not resp.success:
-            return resp
-        if (resp.text or "").strip():
-            return resp
-        logger.warning(
-            "llm_empty_redraw: label=%s draw=%d/%d (thinking-model empty content, §17.464)",
-            label or "?", d + 1, draws,
-        )
-    return resp
+    return await _redraw_until(
+        lambda: generate(
+            prompt, system=system, temperature=temperature,
+            max_tokens=max_tokens, **route_kwargs,
+        ),
+        lambda r: bool((r.text or "").strip()),
+        draws=draws, label=label,
+        detail="thinking-model empty content, §17.464",
+    )
 
 
 async def chat_until_nonempty(
@@ -116,20 +133,68 @@ async def chat_until_nonempty(
         immediately; otherwise the first non-empty draw, or the last empty one if
         all ``draws`` are exhausted (the caller handles the empty as before).
     """
-    resp = None
-    for d in range(draws):
-        resp = await chat(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **route_kwargs,
-        )
-        if not resp.success:
-            return resp
-        if (resp.text or "").strip():
-            return resp
-        logger.warning(
-            "llm_empty_redraw: label=%s draw=%d/%d (thinking-model empty content, §17.465)",
-            label or "?", d + 1, draws,
-        )
-    return resp
+    return await _redraw_until(
+        lambda: chat(
+            messages=messages, temperature=temperature,
+            max_tokens=max_tokens, **route_kwargs,
+        ),
+        lambda r: bool((r.text or "").strip()),
+        draws=draws, label=label,
+        detail="thinking-model empty content, §17.465",
+    )
+
+
+async def tool_call_until_args(
+    tool_call,
+    messages: list[dict],
+    tools: list,
+    route_kwargs: dict,
+    *,
+    temperature: float,
+    max_tokens: int,
+    draws: int = 3,
+    label: str = "",
+):
+    """``tool_call()`` variant of the retry-on-empty guard (§17.581).
+
+    The tool-call analogue of the §17.464 problem: a thinking model
+    (``qwen3.5:397b-cloud``) can return ``success=True`` yet produce **no usable
+    tool arguments** — reasoning eats the budget and the coaxing fallback finds
+    no JSON to parse, so ``tool_calls`` comes back empty. Every consumer reading
+    via ``read_tool_args`` then sees ``None`` and degrades or hard-fails on that
+    single draw. This re-draws on a success-but-no-args response (the variance
+    almost always lands parseable on a fresh draw) and surfaces hard failures
+    (``success=False``) immediately. Callers read args via ``read_tool_args`` as
+    before.
+
+    Args:
+        tool_call: The ``model_router.tool_call`` coroutine, dependency-injected
+            so the caller's (and test-patched) reference is used — see the
+            ``generate_until_nonempty`` docstring for why injection matters.
+        messages: Full message list (system + user), forwarded verbatim.
+        tools: Tool list forwarded verbatim.
+        route_kwargs: Routing kwargs forwarded verbatim — ``{"role": ...,
+            "overrides": ...}`` or ``{"model": ...}``.
+        temperature, max_tokens: Standard params. Pass generous ``max_tokens``
+            (8192) for thinking models — a tight budget is what makes them
+            overrun reasoning into empty/argless content.
+        draws: Max independent attempts (default 3).
+        label: Short tag for the redraw warning log line.
+
+    Returns:
+        The last response. A hard failure returns immediately; otherwise the
+        first draw with usable args, or the last argless one if all ``draws`` are
+        exhausted (the caller then handles the ``None`` from ``read_tool_args``
+        as before).
+    """
+    from app.utils.tool_call_args import read_tool_args
+
+    return await _redraw_until(
+        lambda: tool_call(
+            messages=messages, tools=tools, temperature=temperature,
+            max_tokens=max_tokens, **route_kwargs,
+        ),
+        lambda r: read_tool_args(r) is not None,
+        draws=draws, label=label,
+        detail="no tool args, §17.581", event="tool_call_empty_redraw",
+    )

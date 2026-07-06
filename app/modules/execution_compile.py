@@ -295,6 +295,98 @@ async def _resolve_synthesis_enabled(job_id: str, db) -> bool:
     return bool(override)
 
 
+def _format_grounding_banner(verdict: dict, *, corrected: bool = False) -> str:
+    """§17.569 — the ⚠️ low-grounding banner prepended to a synthesized
+    deliverable whose claims aren't supported by the source node-work.
+    §17.570 — when ``corrected`` a CoVe auto-revision ran but couldn't lift
+    grounding past the threshold; note it so the reader knows it was attempted."""
+    pct = int(round(verdict.get("score", 0.0) * 100))
+    note = " (an auto-revision was attempted but couldn't fully ground it)" if corrected else ""
+    lines = [
+        f"> ⚠️ **Grounding check:** only {pct}% of this deliverable's claims "
+        f"({verdict.get('supported', 0)}/{verdict.get('total', 0)}) are supported "
+        f"by the source work{note} — treat the unsupported claims below with caution.",
+    ]
+    for c in (verdict.get("unsupported_claims") or [])[:5]:
+        lines.append(f"> - _unsupported:_ {c}")
+    return "\n".join(lines) + "\n\n"
+
+
+async def _record_grounding_metadata(job_id: str, record: dict) -> None:
+    """Best-effort write of jobs.metadata.grounding (own session — never
+    touches the caller's transaction; never breaks compile)."""
+    try:
+        from app.database import async_session
+        async with async_session() as mdb:
+            await mdb.execute(
+                text(
+                    "UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) "
+                    "|| jsonb_build_object('grounding', CAST(:v AS jsonb)) "
+                    "WHERE id = :jid"
+                ),
+                {"v": json.dumps(record), "jid": job_id},
+            )
+            await mdb.commit()
+    except Exception as exc:  # best-effort metric — never break compile
+        logger.warning("grounding_metadata_write_failed: job=%s err=%s", job_id, exc)
+
+
+async def _maybe_grounding_gate(
+    job_id: str, text_value: str, evidence: str,
+) -> str:
+    """§17.569/§17.570 — grounding LOOP on a synthesized deliverable: detect
+    (faithfulness) → correct (CoVe) → re-verify → flag-if-still-low. Default
+    ON, fail-soft, NEVER blocks. A scorer miss (None) is a no-op (no DB write).
+    When ``grounding_correct_enabled`` and the deliverable scores below
+    ``grounding_min_score``, it CoVe-revises + re-scores before deciding to
+    banner — so a low deliverable auto-corrects rather than merely warning.
+    """
+    if not settings.grounding_gate_enabled:
+        return text_value
+    from app.modules.faithfulness import score_faithfulness  # circular-safe
+    verdict = await score_faithfulness(
+        text_value, evidence, role=settings.faithfulness_model_role,
+    )
+    if verdict is None:
+        return text_value  # not scored → no-op (no DB write, no banner)
+    score_before = verdict.get("score", 1.0)
+    corrected = False
+
+    # §17.570 — when low, CoVe-revise + re-score before deciding to banner.
+    if score_before < settings.grounding_min_score and settings.grounding_correct_enabled:
+        try:
+            from app.modules.cove import cove_revise  # circular-safe
+            rev = await cove_revise(
+                text_value, evidence, role=settings.cove_model_role,
+            )
+            if rev and rev.get("changed") and rev.get("revised"):
+                rescore = await score_faithfulness(
+                    rev["revised"], evidence, role=settings.faithfulness_model_role,
+                )
+                text_value = rev["revised"]
+                corrected = True
+                if rescore is not None:
+                    verdict = rescore
+        except Exception as exc:  # fail-soft — keep the pre-correction text
+            logger.warning("grounding_correct_failed: job=%s err=%s", job_id, exc)
+
+    score_after = verdict.get("score", 1.0)
+    record = dict(verdict)
+    record["corrected"] = corrected
+    if corrected:
+        record["score_before"] = score_before
+        record["score_after"] = score_after
+    await _record_grounding_metadata(job_id, record)
+    logger.info(
+        "grounding_scored: job=%s score=%.2f supported=%d/%d corrected=%s",
+        job_id, score_after, verdict.get("supported", 0),
+        verdict.get("total", 0), corrected,
+    )
+    if score_after < settings.grounding_min_score:
+        return _format_grounding_banner(verdict, corrected=corrected) + text_value
+    return text_value
+
+
 async def _maybe_synthesize(
     *, job_id: str, heuristic: str | None,
     strategy: str, source_tool: str | None, db,
@@ -322,7 +414,10 @@ async def _maybe_synthesize(
         source_strategy=strategy, source_tool=source_tool, db=db,
     )
     if synthesized:
-        return synthesized, True
+        # §17.569 — grounding gate: the synthesis can introduce claims absent
+        # from the source work; flag (never block) when unsupported.
+        annotated = await _maybe_grounding_gate(job_id, synthesized, heuristic)
+        return annotated, True
     return heuristic, False
 
 
@@ -341,6 +436,93 @@ def _prepend_skipped_banner(text: str | None, skipped_count: int, total: int) ->
     banner = (
         f"_Note: {skipped_count} of {total} {plural} were skipped during "
         f"execution; the deliverable below covers the verified tasks only._"
+        f"\n\n---\n\n"
+    )
+    return banner + text
+
+
+def _prepend_plan_only_banner(
+    text: str | None, runbook_count: int, total: int, job_id: str,
+) -> str | None:
+    """§17.506 — when N nodes are Shell/runbook steps the engine did NOT
+    execute (``shell_tool_enabled`` False, the default), prepend a banner
+    making clear the deliverable is a *plan to perform on real systems*, not
+    a completed build — and steer the user to Assist Mode, which walks each
+    step and records real per-step completion.
+
+    Why: autonomous execution of a hands-on-hardware job (install Proxmox,
+    configure a firewall, …) only generates runbooks and marks the nodes
+    ``done``, so the job rolls up to ``completed`` and the compiled output
+    reads like a finished build when nothing was actually executed. The
+    banner closes that "hallucinated completion" gap at the surface the user
+    reads. Sits AFTER synthesis (like ``_prepend_skipped_banner``) so it
+    survives any LLM rewriting — operational metadata, not narrative.
+
+    Returns the input unchanged when ``text`` is None or ``runbook_count`` is 0.
+    """
+    if text is None or runbook_count <= 0:
+        return text
+    plural = "step" if runbook_count == 1 else "steps"
+    verb = "is a runbook" if runbook_count == 1 else "are runbooks"
+    banner = (
+        f"> ⚠️ **PLAN — NOT EXECUTED.** This job includes {runbook_count} of "
+        f"{total} {plural} that {verb} of actions to perform on real systems; "
+        f"the engine generated them but did **not** run them, so nothing has "
+        f"been built or changed. To carry them out with the engine guiding and "
+        f"verifying each step, run `/assist {job_id}`."
+        f"\n\n---\n\n"
+    )
+    return banner + text
+
+
+async def compute_deliverable_kind(
+    job_id: str, db, *, assist_completed: bool = False,
+) -> str:
+    """§17.519 — machine-readable companion to the §17.506/§17.516 banners.
+
+    Returns one of: 'assist_completed' (operator executed via Assist Mode),
+    'plan_only' (autonomous run produced unexecuted Shell runbooks, i.e.
+    `shell_tool_enabled` False with done Shell nodes), or 'executed' (real
+    autonomous output). Lets consumers branch without parsing banner text.
+    Mirrors the banner gating in `_compile_output`; persisted to
+    `jobs.deliverable_kind` by the finalize sites.
+    """
+    if assist_completed:
+        return "assist_completed"
+    try:
+        row = await db.execute(
+            text(
+                "SELECT COUNT(*) FROM dag_nodes WHERE job_id = :jid "
+                "AND status = 'done' AND lower(tool) = 'shell'"
+            ),
+            {"jid": job_id},
+        )
+        shell_done = row.scalar() or 0
+    except Exception:  # noqa: BLE001 — never block finalize on this read
+        shell_done = 0
+    if shell_done and not settings.shell_tool_enabled:
+        return "plan_only"
+    return "executed"
+
+
+def _prepend_assist_completed_banner(
+    text: str | None, step_count: int,
+) -> str | None:
+    """§17.516 — positive header for a deliverable compiled from an Assist Mode
+    run. The operator executed and verified each step on their own systems, so
+    (unlike autonomous runbook output) this is a *record of work actually done*
+    — and the §17.506 PLAN-NOT-EXECUTED banner must be suppressed for it. The
+    deliverable below is synthesized from the evidence the operator submitted.
+
+    Returns the input unchanged when ``text`` is None.
+    """
+    if text is None:
+        return text
+    plural = "step" if step_count == 1 else "steps"
+    banner = (
+        f"> ✅ **Completed via Assist Mode** — you executed and verified "
+        f"{step_count} {plural} on your own systems. The summary below is "
+        f"compiled from the evidence you submitted."
         f"\n\n---\n\n"
     )
     return banner + text
@@ -458,8 +640,15 @@ def _select_dominant_leaves(explicit: list, all_nodes: list) -> tuple[list, list
     return survivors, dropped
 
 
-async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
+async def _compile_output(
+    job_id: str, db, *, assist_completed: bool = False,
+) -> tuple[str | None, bool]:
     """Compile node outputs into a single deliverable.
+
+    §17.516 — ``assist_completed=True`` marks an Assist Mode finalization: the
+    operator executed the steps themselves, so the §17.506 PLAN-NOT-EXECUTED
+    banner is suppressed and a positive "Completed via Assist Mode" header is
+    prepended instead.
 
     Returns ``(text, was_synthesized)``:
       - ``text`` is ``None`` when no done node contributed output.
@@ -490,12 +679,34 @@ async def _compile_output(job_id: str, db) -> tuple[str | None, bool]:
     skipped_count = sum(1 for n in nodes if n["status"] == "skipped")
     total_count = len(nodes)
 
+    # §17.506 — count Shell/runbook nodes the engine did NOT execute. When
+    # `shell_tool_enabled` is False (default) a Shell node only ever produces
+    # a runbook for the human to run, yet is marked `done` — so the job can
+    # roll up to `completed` with nothing actually built. Gate on the flag so
+    # a future real shell backend (shell_tool_enabled=True) suppresses it.
+    # §17.516 — in an Assist Mode finalization the operator executed every step,
+    # so there is no "unexecuted runbook" — force runbook_count to 0 so the
+    # PLAN-NOT-EXECUTED banner never fires (a positive assist header is used).
+    runbook_count = (
+        sum(1 for n in nodes
+            if n["status"] == "done" and (n["tool"] or "").lower() == "shell")
+        if (not settings.shell_tool_enabled and not assist_completed) else 0
+    )
+    done_count = sum(1 for n in nodes if n["status"] == "done")
+
     async def _finish(text_value: str | None, was_synthesized: bool) -> tuple[str | None, bool]:
-        """Apply the X.2 skipped banner + return."""
-        return (
-            _prepend_skipped_banner(text_value, skipped_count, total_count),
-            was_synthesized,
-        )
+        """Apply the X.2 skipped banner + §17.506 plan-only / §17.516 assist
+        banner + return. The top banner is applied last so it lands first —
+        either the plan-only warning (autonomous, unexecuted) or the positive
+        assist-completed header (operator executed it), never both."""
+        banner_text = _prepend_skipped_banner(text_value, skipped_count, total_count)
+        if assist_completed:
+            banner_text = _prepend_assist_completed_banner(banner_text, done_count)
+        else:
+            banner_text = _prepend_plan_only_banner(
+                banner_text, runbook_count, total_count, job_id,
+            )
+        return (banner_text, was_synthesized)
 
     # Strategy 0 — explicit DELIVERABLE marker (§17.475) is the primary
     # signal: the DAG generator named exactly which node(s) produce the

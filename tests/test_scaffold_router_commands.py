@@ -59,10 +59,11 @@ class TestHandleCommand:
         assert "/help" in result
 
     def test_help_command(self, pipe):
-        """'/help' should return help text without making any HTTP call."""
+        """'/help' should return help text without making any HTTP call.
+        §17.562 — default (guided) help lists the core verbs."""
         result = pipe._handle_command("/help")
         assert "/go" in result
-        assert "/status" in result
+        assert "/here" in result
 
     @patch("scaffold_router._HTTP_SESSION.post")
     def test_idea_command(self, mock_post, pipe):
@@ -273,23 +274,26 @@ class TestConfirmCommand:
 
 
     @patch("pipelines.scaffold_router._HTTP_SESSION.post")
-    def test_confirm_invokes_execute_all(self, mock_post, pipe):
-        """/confirm must auto-chain into /execute/all (regression for known issue #14)."""
+    def test_confirm_chains_research_dag_then_offers_choice(self, mock_post, pipe):
+        """§17.562 — /confirm auto-chains research → DAG, then ALWAYS presents
+        the autonomous-vs-assist choice (was: silently auto-ran /execute/all
+        unless the plan had Shell steps). Silent auto-run was a top assist-vs-
+        autonomous confusion complaint; the user now picks explicitly."""
         from unittest.mock import MagicMock
         confirm_resp = MagicMock(status_code=200)
         confirm_resp.json.return_value = {"status": "planning", "job_id": "job-42"}
         dag_resp = MagicMock(status_code=200)
         dag_resp.json.return_value = {"task_count": 3, "tasks": []}
-        exec_resp = MagicMock(status_code=200)
-        exec_resp.iter_lines.return_value = iter([])
-        exec_resp.close = MagicMock()
-        mock_post.side_effect = [confirm_resp, dag_resp, exec_resp]
+        mock_post.side_effect = [confirm_resp, dag_resp]
         messages = [{"role": "user", "content": "/confirm job-42"}]
-        list(pipe.pipe("/confirm job-42", "test-model", messages, {}))
+        out = "".join(pipe.pipe("/confirm job-42", "test-model", messages, {}))
         urls = [c.args[0] for c in mock_post.call_args_list]
         assert any("/ideate/confirm" in u for u in urls)
         assert any("/dag" in u for u in urls)
-        assert any("/execute/all" in u for u in urls), f"/execute/all never called — got {urls}"
+        # No silent auto-execute — the choice is presented instead.
+        assert not any("/execute/all" in u for u in urls), \
+            f"/execute/all should NOT auto-fire — got {urls}"
+        assert "/execute job-42" in out and "/assist job-42" in out
 
     def test_confirm_into_assist_carries_chat_id(self, pipe, monkeypatch):
         """When valves.assist_after_confirm=True, /confirm auto-chains into
@@ -300,13 +304,13 @@ class TestConfirmCommand:
         pipe.valves.assist_after_confirm = True
         log, responses = _http_call_log(monkeypatch)
         responses[("post", "/ideate/confirm")] = _make_response(
-            200, {"status": "planning", "job_id": "job-77"},
+            200, {"status": "planning", "job_id": "12121212-1212-4121-8121-121212121212"},
         )
         responses[("post", "/dag")] = _make_response(
             200, {"task_count": 2, "tasks": []},
         )
         responses[("post", "/assist/start")] = _make_response(
-            200, {"session_id": _UUID_A, "job_id": "job-77", "pending_steps": 2},
+            200, {"session_id": _UUID_A, "job_id": "12121212-1212-4121-8121-121212121212", "pending_steps": 2},
         )
         responses[("get", f"/assist/{_UUID_A}/next")] = _make_response(
             200, {"session_id": _UUID_A, "node_key": "T1", "title": "step",
@@ -315,7 +319,7 @@ class TestConfirmCommand:
         responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
 
         body = {"metadata": {"chat_id": "chat-confirm-into-assist"}}
-        list(pipe.pipe("/confirm job-77", "m", [{"role": "user", "content": "/confirm job-77"}], body))
+        list(pipe.pipe("/confirm 12121212-1212-4121-8121-121212121212", "m", [{"role": "user", "content": "/confirm 12121212-1212-4121-8121-121212121212"}], body))
 
         puts = [
             e for e in log
@@ -564,9 +568,10 @@ class TestModelCommand:
         assert "general" in result
         assert pipe.valves.model_general == "qwen3.5:397b-cloud"
         # §17.346: model_verifier default flipped qwen2.5:7b → cloud;
-        # §17.440: cloud model migrated qwen3-vl:235b-instruct-cloud → qwen3.5:397b-cloud
-        # (instruct variant retires 2026-06-16)
-        assert pipe.valves.model_verifier == "qwen3.5:397b-cloud"
+        # §17.440: migrated qwen3-vl:235b-instruct-cloud → qwen3.5:397b-cloud;
+        # §17.567: A/B-driven swap qwen3.5:397b-cloud → kimi-k2.7-code:cloud
+        # (verify verdict-match 30/30 @ 1.34s vs 6.12s).
+        assert pipe.valves.model_verifier == "kimi-k2.7-code:cloud"
 
     @patch("scaffold_router._HTTP_SESSION.get")
     def test_model_available(self, mock_get, pipe):
@@ -593,6 +598,12 @@ class TestModelCommand:
 
 class TestResearchCommand:
     """Tests for /research command parsing and dispatch."""
+
+    @pytest.fixture(autouse=True)
+    def _enable_advanced(self, pipe):
+        # §17.562 — /research is an advanced command; enable the full surface
+        # so these parsing/dispatch tests exercise the handler, not the gate.
+        pipe.valves.advanced_commands_enabled = True
 
     def test_research_usage_error(self, pipe):
         """'/research' with no topic yields the §17.310 mode-discovery
@@ -785,7 +796,11 @@ class TestResearchCommand:
 
         output = "".join(pipe._research_and_stream("Docker networking", "medium"))
         assert "/go" in output
-        assert "build a project plan" in output
+        # §17.510 — research_complete still suggests /go, but no longer claims
+        # /go builds "from this research" (it doesn't read the KB); it points
+        # users to /rag for the ingested knowledge instead.
+        assert "from this research" not in output
+        assert "/rag" in output
         assert "Research Complete" in output
 
     def test_awaiting_reply_renders_paused_block(self, pipe, monkeypatch):
@@ -1151,7 +1166,9 @@ class TestU8DCommands:
         assert "✅" in out and "❌" in out
 
     def test_help_lists_new_commands(self, pipe):
-        """The help text should advertise the new U.8.D commands."""
+        """The full (advanced) help should advertise the U.8.D commands.
+        §17.562 — these live under the advanced surface now."""
+        pipe.valves.advanced_commands_enabled = True
         out = pipe._handle_command("/help")
         for cmd in ("/health", "/logs", "/exec retry", "/cleanup", "/config"):
             assert cmd in out, f"expected `{cmd}` in /help output"
@@ -1250,6 +1267,7 @@ class TestCostCommand:
         assert "/cost" in KNOWN_COMMANDS
 
     def test_help_advertises_cost(self, pipe):
+        pipe.valves.advanced_commands_enabled = True  # §17.562 — /cost is advanced
         out = pipe._handle_command("/help")
         assert "/cost" in out
 
@@ -1321,7 +1339,7 @@ class TestAssistChatMemory:
         )
         responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
 
-        list(pipe.pipe("/assist job-1", "m", [], self._body_with_chat("chat-A")))
+        list(pipe.pipe("/assist 12121212-1212-4121-8121-121212121212", "m", [], self._body_with_chat("chat-A")))
         puts = [e for e in log if e[0] == "put" and "_chatmap/chat-A" in e[1]]
         assert puts, f"expected PUT to /assist/_chatmap/chat-A, got: {log}"
         assert puts[0][2] == {"session_id": _UUID_A, "last_node_key": "T1"} or \
@@ -1436,7 +1454,7 @@ class TestAssistChatMemory:
         _log, responses = _http_call_log(monkeypatch)
         responses[("post", "/assist/start")] = _make_response(200, "not json at all")
 
-        out = "".join(pipe.pipe("/assist job-1", "m", [], self._body_with_chat("chat-G")))
+        out = "".join(pipe.pipe("/assist 12121212-1212-4121-8121-121212121212", "m", [], self._body_with_chat("chat-G")))
         assert "❌" in out and "non-JSON" in out, \
             f"expected JSON-parse error yield; got: {out!r}"
 
@@ -1450,7 +1468,7 @@ class TestAssistChatMemory:
             200, {"job_id": "job-1", "pending_steps": 3},  # no session_id
         )
 
-        out = "".join(pipe.pipe("/assist job-1", "m", [], self._body_with_chat("chat-H")))
+        out = "".join(pipe.pipe("/assist 12121212-1212-4121-8121-121212121212", "m", [], self._body_with_chat("chat-H")))
         assert "❌" in out and "session_id" in out, \
             f"expected missing-session_id error yield; got: {out!r}"
 
@@ -1470,10 +1488,10 @@ class TestAssistChatMemory:
         )
         responses[("put", "/assist/_chatmap/")] = _make_response(200, {"stored": True})
 
-        out = "".join(pipe.pipe("/assist job-99", "m", [], self._body_with_chat("chat-I")))
+        out = "".join(pipe.pipe("/assist 12121212-1212-4121-8121-121212121212", "m", [], self._body_with_chat("chat-I")))
         # Session-started banner should still render, falling back to input job_id
         # and showing "?" for the unknown pending-steps count.
-        assert "job-99" in out, f"expected input job_id fallback; got: {out!r}"
+        assert "12121212-1212-4121-8121-121212121212" in out, f"expected input job_id fallback; got: {out!r}"
         assert "? pending" in out, f"expected '?' for unknown pending count; got: {out!r}"
 
     # -- §17.268: extend §17.259 JSON-parse hardening to /next and /submit --
@@ -1599,6 +1617,7 @@ class TestSyncActionJsonGuards:
     ValueError up the stack, surfacing as 'Internal pipeline error' in OWUI."""
 
     def test_jobs_list_action_handles_non_json_body(self, pipe, monkeypatch):
+        pipe.valves.advanced_commands_enabled = True  # §17.562 — /jobs is advanced
         _log, responses = _http_call_log(monkeypatch)
         responses[("get", "/jobs")] = _make_response(200, "not json at all")
 
@@ -1725,3 +1744,71 @@ class TestInfoGainTriage:
         p = _mod.TRIAGE_SYSTEM_PROMPT
         for header in ("Scope so far", "Options", "Gaps", "My pick"):
             assert header in p
+
+
+class TestComponentsTriage:
+    """§17.x — triage breaks a multi-part task into named Components so each can
+    become its own job at /go. Optional by design: omitted for a single-focus
+    build to keep per-turn output (and tokens) minimal."""
+
+    def test_prompt_defines_optional_components_section(self):
+        p = _mod.TRIAGE_SYSTEM_PROMPT
+        assert "**Components:**" in p
+        assert "OPTIONAL" in p
+
+    def test_prompt_components_omitted_for_single_focus(self):
+        # Token economy: a single-focus build must not carry the section.
+        p = _mod.TRIAGE_SYSTEM_PROMPT
+        assert "single-focus build" in p
+
+    def test_prompt_components_each_becomes_a_job(self):
+        p = _mod.TRIAGE_SYSTEM_PROMPT
+        assert "each chosen part becomes its own job" in p
+
+    def test_components_is_the_only_extra_header_allowed(self):
+        # The four required headers stay mandatory; Components is the sole add.
+        p = _mod.TRIAGE_SYSTEM_PROMPT
+        assert "optional Components header" in p
+        for header in ("Scope so far", "Options", "Gaps", "My pick"):
+            assert header in p
+
+
+class TestUmbrellaResults:
+    """§17.528 — /results on a decomposition umbrella shows the child rollup."""
+
+    def test_render_umbrella_lists_children_and_rollup(self):
+        data = {
+            "job_type": "umbrella",
+            "job_status": "aggregating",
+            "children_total": 2,
+            "children_completed": 1,
+            "children": [
+                {"job_id": "c0", "title": "Auth", "status": "completed",
+                 "component_index": 0},
+                {"job_id": "c1", "title": "Billing", "status": "executing",
+                 "component_index": 1},
+            ],
+        }
+        # _render_umbrella uses no instance state, so an unbound call is fine.
+        out = _mod.Pipeline._render_umbrella(None, "umb", data)
+        assert "Umbrella" in out and "umb" in out
+        assert "1/2 components completed" in out
+        assert "`c0`" in out and "Auth" in out
+        assert "`c1`" in out and "Billing" in out
+        assert "/results <its job_id>" in out
+
+    def test_render_umbrella_surfaces_retry_for_stuck_children(self):
+        # §17.532 — failed/blocked components get an inline recovery hint.
+        data = {
+            "job_type": "umbrella", "job_status": "aggregating",
+            "children_total": 2, "children_completed": 0,
+            "children": [
+                {"job_id": "c0", "title": "X", "status": "blocked",
+                 "component_index": 0},
+                {"job_id": "c1", "title": "Y", "status": "failed",
+                 "component_index": 1},
+            ],
+        }
+        out = _mod.Pipeline._render_umbrella(None, "u", data)
+        assert "`/results c0` to inspect failed nodes & retry" in out
+        assert "`/results c1` to inspect failed nodes & retry" in out

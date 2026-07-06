@@ -109,7 +109,10 @@ class TestIdeateSuccessRendering:
         assert "Feasibility check failed" in out
 
     def test_next_block_has_all_four_pre_filled_commands(self, pipe):
-        """The 4 canonical next commands — each with the REAL id."""
+        """The 4 canonical next commands — each with the REAL id.
+        §17.562 — /cost is an advanced command; enable advanced so the full
+        next-block renders (guided mode hides /cost — see guided test below)."""
+        pipe.valves.advanced_commands_enabled = True
         out = pipe._render_ideate_response(_resp(200, _success_payload()))
         for cmd_prefix in ("/confirm", "/results", "/cost"):
             # Each prefix should appear with the real job_id immediately
@@ -118,6 +121,15 @@ class TestIdeateSuccessRendering:
                 f"§17.303: Next-block must include `{cmd_prefix} <real-id>`. "
                 f"Missing or using a placeholder."
             )
+
+    def test_guided_next_block_hides_cost(self, pipe):
+        """§17.562 — guided mode (default) keeps the core /confirm + /results
+        next steps but hides the gated /cost."""
+        pipe.valves.advanced_commands_enabled = False
+        out = pipe._render_ideate_response(_resp(200, _success_payload()))
+        assert f"/confirm {_SAMPLE_JOB_ID}" in out
+        assert f"/results {_SAMPLE_JOB_ID}" in out
+        assert "/cost" not in out
 
     def test_next_block_distinguishes_confirm_vs_confirm_feedback(self, pipe):
         """Both `/confirm <id>` (proceed as-is) and `/confirm <id>

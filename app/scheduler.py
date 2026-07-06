@@ -453,9 +453,95 @@ async def remove_schedule(schedule_id: int) -> None:
         )
 
 
+def _log_model_ab_recommendation(task_name: str, models: list[str], summary: dict) -> None:
+    """§17.578 — emit a recommendation when a candidate beats the incumbent
+    (models[0]) clean: equal-or-better pass rate, zero errors, and faster."""
+    def _rate(m: str) -> float:
+        s = summary.get(m, {})
+        scored = s.get("trials", 0) - s.get("errors", 0)
+        return (s.get("passed", 0) / scored) if scored else 0.0
+
+    def _wall(m: str) -> float:
+        ws = summary.get(m, {}).get("wall_s", [])
+        return (sum(ws) / len(ws)) if ws else 0.0
+
+    incumbent = models[0]
+    inc_rate, inc_wall = _rate(incumbent), _wall(incumbent)
+    best = max(models, key=lambda m: (_rate(m), -_wall(m)))
+    if (best != incumbent and summary.get(best, {}).get("errors", 0) == 0
+            and _rate(best) >= inc_rate and _wall(best) < inc_wall and inc_wall > 0):
+        logger.warning(
+            'event="model_ab_recommend" task=%s incumbent=%s candidate=%s '
+            'incumbent_rate=%.2f candidate_rate=%.2f speedup=%.2fx',
+            task_name, incumbent, best, inc_rate, _rate(best),
+            inc_wall / _wall(best) if _wall(best) else 0.0,
+        )
+    else:
+        logger.info(
+            'event="model_ab_no_change" task=%s incumbent=%s rate=%.2f',
+            task_name, incumbent, inc_rate,
+        )
+
+
+async def _execute_model_ab_job(schedule_id: int, topic: str, depth: str) -> None:
+    """§17.578 — scheduled re-A/B governance job. ``topic='model_ab:<task>'``,
+    ``depth`` = comma-separated model list (first = incumbent). Re-runs the A/B
+    harness and logs a recommendation when a candidate wins clean. Fail-soft;
+    updates scheduled_jobs like the research path."""
+    started = datetime.now(timezone.utc)
+    status = "success"
+    try:
+        task_name = topic.split(":", 1)[1].strip() or "codegen"
+        models = [m.strip() for m in (depth or "").split(",") if m.strip()]
+        if len(models) < 2:
+            logger.warning(
+                'event="model_ab_schedule_skipped" reason="need 2+ models" schedule_id=%s',
+                schedule_id)
+            status = "failed"
+        else:
+            from app.utils.http_clients import init_clients
+            init_clients()
+            from scripts.model_ab import run_model_ab_task
+            result = await asyncio.wait_for(
+                run_model_ab_task(task_name, models, repeat=3),
+                timeout=settings.scheduler_job_timeout,
+            )
+            _log_model_ab_recommendation(task_name, models, result["summary"])
+    except asyncio.TimeoutError:
+        status = "timeout"
+        logger.error('event="model_ab_timeout" schedule_id=%s', schedule_id)
+    except Exception as exc:  # noqa: BLE001 — fail-soft governance job
+        status = "failed"
+        logger.exception('event="model_ab_failed" schedule_id=%s err=%s', schedule_id, exc)
+    finally:
+        next_run: Optional[datetime] = None
+        if _scheduler is not None:
+            job = _scheduler.get_job(f"schedule_{schedule_id}")
+            if job is not None:
+                next_run = job.next_run_time
+        try:
+            async with async_session() as db:
+                await db.execute(text("""
+                    UPDATE scheduled_jobs
+                    SET last_run_at = :ts, last_status = :st,
+                        run_count = run_count + 1,
+                        failure_count = failure_count + CASE WHEN :st IN ('failed','timeout') THEN 1 ELSE 0 END,
+                        next_run_at = :nr, updated_at = NOW()
+                    WHERE id = :id
+                """), {"ts": started, "st": status, "nr": next_run, "id": schedule_id})
+                await db.commit()
+        except Exception:
+            logger.exception('event="model_ab_result_write_failed" schedule_id=%s', schedule_id)
+
+
 async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> None:
     """APScheduler entrypoint. Runs research with timeout, captures real session_id (#79),
-    converts epoch next_run_time → TIMESTAMPTZ correctly (#7), enforces timeout (#80)."""
+    converts epoch next_run_time → TIMESTAMPTZ correctly (#7), enforces timeout (#80).
+
+    §17.578 — a ``model_ab:<task>`` topic routes to the scheduled re-A/B job instead."""
+    if topic.startswith("model_ab:"):
+        await _execute_model_ab_job(schedule_id, topic, depth)
+        return
     from app.modules.research_agent import run_research
 
     started = datetime.now(timezone.utc)

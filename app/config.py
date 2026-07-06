@@ -32,6 +32,7 @@ ROLE_FIELDS = frozenset({
     "model_coder",
     "model_general",
     "model_verifier",
+    "model_research_extract",
     "model_cloud_heavy",
     "model_cloud_alt",
     "model_fallback",
@@ -244,11 +245,15 @@ class Settings(BaseSettings):
     # §17.346 — model_router / model_coder / model_verifier defaults flipped
     # to the same cloud model that §17.344 chose for triage. Justified per-role:
     #   model_router: same model + same arg as §17.344 — cloud 287× faster + better discipline
-    #   model_coder:  verified A/B on a CodeGen-shape task (line-count CLI) —
-    #                 cloud 21× faster (2.4s vs 50.8s on this CPU) AND followed
-    #                 the "no markdown fences" instruction that the specialized
-    #                 qwen2.5-coder:7b ignored. The specialized-coder advantage
-    #                 didn't materialize on this workload shape.
+    #   model_coder:  §17.498 — A/B'd (scripts/model_ab.py) vs the generalist on
+    #                 the 8 CodeGen goldens ×2 AFTER the §17.497 fair-scoring fix:
+    #                 kimi-k2.7-code:cloud = 16/16, avg 2.9s (vs generalist 16/16,
+    #                 avg 15.6s — ~5× faster, tight 1.5-5.9s, no thinking-model
+    #                 latency outliers) AND followed the terse brief faithfully
+    #                 (qwen3-coder-next was equally fast but OVER-elaborated by
+    #                 parroting the CODEGEN prompt examples — rejected). So the
+    #                 coder role now runs a coding-specialized model; the other
+    #                 roles stay on the qwen3.5 generalist.
     #   model_verifier: §17.344 reasoning extends — judgment-heavy ("is X correct?"),
     #                   larger model wins, latency benefits identical.
     # model_fallback stays local on purpose — fallback should be DIFFERENT from
@@ -257,7 +262,7 @@ class Settings(BaseSettings):
     model_router: str = "qwen3.5:397b-cloud"
     model_embedder_pipeline: str = "nomic-embed-text"
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-    model_coder: str = "qwen3.5:397b-cloud"
+    model_coder: str = "kimi-k2.7-code:cloud"  # §17.575 — reverted §17.572 (see docker-compose.yml MODEL_CODER, decisive)
     model_general: str = "qwen3.5:397b-cloud"
     # Ideation phase model role (Apr 26 2026): which ROLE_FIELDS entry to
     # use for analyze/distill/compile. "model_router" = local 4b (audit
@@ -270,6 +275,27 @@ class Settings(BaseSettings):
     # local models tend to drift. Operators with strict offline
     # requirements can override to model_router or model_verifier.
     spec_extractor_model_role: str = "model_general"
+    # §17.487 — the extractor runs a cloud thinking model (model_general =
+    # qwen3.5:397b-cloud) whose num_predict is a shared reasoning+content
+    # budget; the old 4096 cap starved long reasoning → success=True + empty
+    # content (the §17.465 failure mode, observed live as the
+    # test_spec_extractor_live empty-draw flake). Generous budget + a few
+    # retry-on-empty draws via chat_until_nonempty.
+    spec_extractor_max_tokens: int = Field(default=8192, ge=512, le=16384)
+    spec_extractor_max_draws: int = Field(default=3, ge=1, le=6)
+    # §17.489 — topology-select reuses spec_extractor_model_role (the cloud
+    # thinking model) and feeds it large RAG-chunk prompts, so it hit the same
+    # §17.465 empty-content failure mode (the test_topology_select_db live skip).
+    # Its own budget/draw knobs since its prompts run larger than the extractor's.
+    topology_select_max_tokens: int = Field(default=8192, ge=512, le=16384)
+    topology_select_max_draws: int = Field(default=3, ge=1, le=6)
+    # §17.494 — the remaining sim-pipeline LLM stages (formal_verify,
+    # device_sizing, digital_sizing) reuse spec_extractor_model_role (the cloud
+    # thinking model) at a bare 4096 cap — the same §17.465 empty-content
+    # straggler class. Shared budget + retry-on-empty draws via
+    # chat_until_nonempty (these three feed sim feedback to one judgment call).
+    sim_stage_max_tokens: int = Field(default=8192, ge=512, le=16384)
+    sim_stage_max_draws: int = Field(default=3, ge=1, le=6)
     # §17.147 — Closed-loop device-sizing budget. The stage proposes
     # parameters, runs ngspice, feeds the measurement gap back to the
     # LLM, and repeats until convergence or the budget is exhausted.
@@ -278,10 +304,46 @@ class Settings(BaseSettings):
     # one refinement → safety net, without making a non-convergent
     # design wait for an expensive 10-iter futile loop.
     device_sizing_max_iterations: int = Field(default=3, ge=1, le=10)
-    model_verifier: str = "qwen3.5:397b-cloud"
+    # §17.567 — model_verifier qwen3.5:397b-cloud → kimi-k2.7-code:cloud after
+    # an objective A/B (scripts/model_ab.py --task verifier, repeat=5 over the
+    # verdict-match goldens): kimi matched the baseline's perfect accuracy
+    # (30/30) at ~4.6× the speed (1.34s vs 6.12s) with native tool-calls (no
+    # coax) and zero flakiness. The verifier runs per-node, so the latency win
+    # compounds. (kimi was flaky on EXTRACTION (§17.566) but perfect on the
+    # lenient presence-check verify task — per-task reliability differs.) Not in
+    # tool_call_coax_models, so it uses the native path.
+    model_verifier: str = "kimi-k2.7-code:cloud"
+    # §17.548 — research extraction (record_entries tool call) points at a
+    # tool-CAPABLE model (native tool_calls) rather than the thinking
+    # model_verifier (qwen3.5, which never does — see §17.547), so the
+    # native-first path in tool_call fires; coaxing still catches prose batches.
+    # §17.566 — swapped kimi-k2.7-code:cloud → qwen3-coder-next:cloud after an
+    # objective A/B (scripts/model_ab.py --task extraction, repeat=5 on the
+    # extraction goldens): kimi was FLAKY (5/10, intermittent entries=0) while
+    # qwen3-coder-next was 10/10 AND ~3.5× faster (4.0s vs 14.3s baseline).
+    # It's NOT in tool_call_coax_models, so it uses the native path. (Scoped to
+    # extraction only — qwen3-coder-next failed the cli-entrypoint codegen
+    # golden at runtime, so model_coder stays kimi.)
+    model_research_extract: str = "qwen3-coder-next:cloud"
     model_cloud_heavy: str = "qwen3.5:397b-cloud"
     model_cloud_alt: str = "qwen3.5:397b-cloud"
     model_fallback: str = "qwen3.5:latest"
+
+    # §17.547 — models that do NOT reliably emit native `tool_calls`. qwen3.5
+    # thinking models put their answer in content/thinking and never populate
+    # message.tool_calls over Ollama's /api/chat, so a 100% tool-call miss was
+    # measured for research extraction (role=model_verifier=qwen3.5:397b-cloud).
+    # model_router.tool_call routes any model whose id contains one of these
+    # substrings (case-insensitive) through the JSON-coaxing fallback instead of
+    # the native path, even though the Ollama provider advertises
+    # supports_native_tools=True (that flag is provider-wide, not per-model).
+    tool_call_coax_models: list[str] = Field(default_factory=lambda: ["qwen3.5"])
+    # §17.547 — min token budget for coaxed tool calls on a thinking model. Such
+    # models spend tokens reasoning before emitting the JSON, so a tight caller
+    # budget (research extraction passes 1024) can be consumed by reasoning
+    # alone → empty output → entries=0. Floor it so the JSON survives. Only
+    # applied to tool_call_coax_models; other coaxed calls keep the caller value.
+    tool_call_coax_min_tokens: int = Field(default=4096, ge=512, le=32768)
 
     # Per-role provider routing (Sprint E). Each role names which backend
     # serves it; default "ollama" preserves pre-Sprint-E behavior. Override
@@ -295,6 +357,7 @@ class Settings(BaseSettings):
     # of silently returning ProviderError at first dispatch.
     model_general_provider: ProviderName = "ollama"
     model_verifier_provider: ProviderName = "ollama"
+    model_research_extract_provider: ProviderName = "ollama"
     model_coder_provider: ProviderName = "ollama"
     model_router_provider: ProviderName = "ollama"
     model_fallback_provider: ProviderName = "ollama"
@@ -384,11 +447,19 @@ class Settings(BaseSettings):
 
     # Research agent
     research_max_iterations: int = Field(default=3, ge=1, le=20)
-    research_max_queries: int = Field(default=8, ge=1, le=50)
+    research_max_queries: int = Field(default=12, ge=1, le=50)
     ideation_max_queries: int = Field(default=5, ge=1, le=50)
     ideation_max_distill_results: int = Field(default=15, ge=1, le=200)
-    research_max_urls_per_iteration: int = Field(default=20, ge=1, le=200)
+    research_max_urls_per_iteration: int = Field(default=30, ge=1, le=200)
     research_searxng_delay: float = Field(default=1.5, ge=0.0, le=60.0)
+    # §17.549 — soft recency: append the current year to search queries that
+    # don't already name one, biasing SearXNG toward fresh results without a
+    # hard time_range filter. Set false to restore pre-§17.549 query text.
+    research_recency_query_boost: bool = True
+    # §17.543 — max concurrent SearXNG searches per iteration. The delay above
+    # is held inside each slot as a cooldown, so effective request rate is
+    # ~concurrency / delay. Keep small to stay polite to upstream engines.
+    research_searxng_concurrency: int = Field(default=3, ge=1, le=8)
     research_chunk_size: int = Field(default=1500, ge=100, le=50000)
     research_timeout: int = Field(default=3600, ge=1, le=86400)
     github_token: str = ""
@@ -436,6 +507,53 @@ class Settings(BaseSettings):
     # behaviour. faithfulness_model_role picks which role scores it.
     faithfulness_check_enabled: bool = False
     faithfulness_model_role: str = "model_verifier"
+    # §17.569 — grounding gate: faithfulness-score the SYNTHESIZED job
+    # deliverable against the source node-work (the W.7 synthesis can introduce
+    # claims not in the work — the §17.522 drift). Default ON, FLAG-ONLY: when
+    # score < grounding_min_score it prepends a ⚠️ banner + records
+    # jobs.metadata.grounding; it NEVER blocks delivery, and is fail-soft (a
+    # scorer miss → no banner). Only runs on synthesized text (verbatim
+    # CodeGen/Shell skip synthesis). Reuses faithfulness_model_role for scoring.
+    grounding_gate_enabled: bool = True
+    grounding_min_score: float = Field(default=0.7, ge=0.0, le=1.0)
+    # §17.570 — grounding LOOP (detect → correct). Upgrades the §17.569 gate
+    # from flag-only to self-correcting via CoVe (cove_revise).
+    # grounding_correct_enabled (default ON): when the deliverable scores below
+    # grounding_min_score, CoVe-revise it + re-score before deciding to banner —
+    # so a low deliverable auto-corrects rather than just warning. Fail-soft.
+    # node_grounding_enabled (default OFF, opt-in): per-node detect+correct pass
+    # — score each groundable node's output against its upstream evidence and
+    # CoVe-revise in place when it drifts, fixing it before it propagates
+    # downstream. Adds ~1 verifier call per groundable node (CPU-bound cost), so
+    # default-off. Both reuse grounding_min_score + cove_model_role.
+    grounding_correct_enabled: bool = True
+    node_grounding_enabled: bool = False
+    # §17.576 — learning flywheel (opt-in, default OFF both directions). When a
+    # job completes with grounding ≥ exemplar_min_grounding, its deliverable is
+    # ingested into RAG tagged source_type="exemplar"; at DAG-plan time, similar
+    # exemplars are retrieved + injected as few-shot "proven prior solutions".
+    # Pollution guard: the grounding threshold + RAG's 3-tier dedup. Fail-soft.
+    exemplar_ingest_enabled: bool = False
+    exemplar_min_grounding: float = Field(default=0.85, ge=0.0, le=1.0)
+    exemplar_retrieval_enabled: bool = False
+    exemplar_retrieval_top_k: int = Field(default=2, ge=1, le=10)
+    # §17.577 — adaptive escalation ladder (opt-in, default OFF). When a node
+    # fails and is retried, escalate the model per retry rung: retry N uses
+    # node_escalation_order[N-1] (clamped to the last rung). Implemented in
+    # retry_failed_node (sets the node's assigned_model on reset), so it works
+    # for BOTH the serial and parallel re-execution paths. node_escalation_to_assist:
+    # when retries are exhausted, hand the job to Assist Mode (final human rung)
+    # instead of just failing. Both fail-soft.
+    node_escalation_enabled: bool = False
+    node_escalation_order: list[str] = Field(default_factory=lambda: ["model_cloud_heavy"])
+    node_escalation_to_assist: bool = False
+    # §17.578 — best-of-N for DELIVERABLE nodes (opt-in, default OFF). Generate N
+    # candidates concurrently, judge each by grounding (faithfulness vs the node's
+    # upstream evidence), keep the best; the normal verifier then runs on the
+    # winner. Deliverable nodes only (few) to bound the N× cost; non-CodeGen/Shell
+    # with upstream evidence. Fail-soft (any error → single candidate).
+    best_of_n_enabled: bool = False
+    best_of_n_count: int = Field(default=2, ge=2, le=4)
     # §17.452 (Phase C) — Chain-of-Verification revision of research summaries
     # (draft → verification questions → independent answers → revise). Where
     # faithfulness *scores*, CoVe *corrects*. Default-OFF: it adds ~3 LLM calls
@@ -507,6 +625,66 @@ class Settings(BaseSettings):
     # known to be sufficient).
     assist_replan_regen_enabled: bool = True
     assist_replan_regen_max_tokens: int = Field(default=2048, ge=512, le=8192)
+    # §17.486 — Assist Mode guidance layer. When a human claims a step, the
+    # engine generates a human-executable walkthrough (copy-paste terminal
+    # commands for shell/codegen work, step-by-step instructions for
+    # non-coding work) instead of showing only the raw LLM prompt_template.
+    #   assist_auto_guide          — generate on every /assist next (cached;
+    #                                a re-view does not re-spend). Off = the
+    #                                walkthrough is generated only on demand
+    #                                via /assist guide.
+    #   assist_guide_research      — run a SearXNG/Milvus pre-pass to confirm
+    #                                unknowns (versions, flags, package names)
+    #                                and cite them. Fail-soft: any failure
+    #                                degrades to guidance without research.
+    #   assist_guide_model_role    — role resolved by model_router (cloud /
+    #                                thinking model by default, like the
+    #                                executor). Server-authoritative — not a
+    #                                per-request override.
+    #   assist_guide_max_tokens    — generous so a thinking model's reasoning
+    #                                budget does not starve the content (the
+    #                                §17.465 empty-content failure mode).
+    assist_auto_guide: bool = True
+    assist_guide_research: bool = True
+    assist_guide_model_role: str = "model_general"
+    assist_guide_max_tokens: int = Field(default=8192, ge=512, le=16384)
+    assist_guide_max_research_queries: int = Field(default=3, ge=0, le=8)
+    # §17.487 — Tier 1 "close the loop". On /assist submit, judge whether the
+    # pasted evidence shows the step actually succeeded (catches a pasted
+    # error/traceback being recorded as success). Adds one sync tool_call per
+    # submit; disable to skip it. When assist_block_on_failed_verify is also
+    # true, a 'failed' verdict does NOT mark the node done — the step stays
+    # claimable until a clean re-submit. Default off (a false-negative verdict
+    # could wrongly hold a real success); the verdict is always surfaced so the
+    # user can act on it regardless.
+    assist_verify_on_submit: bool = True
+    assist_block_on_failed_verify: bool = False
+    # §17.490 — after a submit, extract the concrete values the operator
+    # actually used (the IP/path/name they filled into a <PLACEHOLDER> the
+    # walkthrough emitted) from their evidence and fold them into the session
+    # environment, so later steps' walkthroughs are concrete instead of
+    # re-emitting the same placeholder. Only fires when the step's cached
+    # guidance actually contained placeholders (no LLM call otherwise);
+    # fail-soft; only-add-new (never overwrites a value the operator set or a
+    # previously-learned one).
+    assist_learn_substitutions: bool = True
+    # §17.499 — default walkthrough verbosity (terse | normal | detailed).
+    # Per-session override via /assist verbose. terse = commands + one-line
+    # whys (expert); detailed = explain why each step matters + what to watch
+    # for (novice); normal = current behavior (no directive).
+    assist_default_verbosity: str = "normal"
+    # §17.500 — deep research: for /assist research + /assist fix, fetch & extract
+    # the top-N SearXNG result pages (trafilatura, via the research-agent helper)
+    # for real doc content instead of search snippets. The auto-guide pre-pass
+    # stays snippet-fast (not deep) so walkthroughs don't slow down. 0 = snippet-
+    # only everywhere.
+    assist_research_fetch_top_n: int = Field(default=2, ge=0, le=5)
+    # §17.492 — deterministic scan of generated walkthroughs / fixes for
+    # high-confidence destructive commands (rm -rf, dd, mkfs, DROP TABLE, force
+    # push, …); matches are surfaced as a prominent "review before running"
+    # banner ahead of the steps. No LLM, no blocking — the operator is the
+    # executor; this informs. Default on.
+    assist_destructive_scan: bool = True
     # #2 — orphan detection: dag_nodes stuck in 'running' past this threshold
     # are treated as orphaned (executor died) and reset to 'pending' for
     # automatic re-execution. Sprint X.1 tightened 60→30 min: the audit
@@ -558,6 +736,15 @@ class Settings(BaseSettings):
     upstream_confidence_ranking_enabled: bool = True
     rag_cosine_floor: float = Field(default=0.3, ge=0.0, le=1.0)
     verifier_top_k: int = Field(default=5, ge=1, le=50)
+    # §17.517 — general node grounding (_fetch_rag_context) fans out across ALL
+    # domain partitions instead of scoping to the job's single domain. The
+    # `domain` partition is a heuristic storage bucket, not a relevance boundary:
+    # `/research` ingests under `_detect_domain(topic)` while a job carries its
+    # own ideation-assigned domain, so scoping silently dropped relevant research
+    # binned into a different partition. The cosine floor (rag_cosine_floor) +
+    # reranker already filter cross-domain noise, so fan-out is strictly more
+    # recall-complete. Set False to restore the old job-domain-scoped behavior.
+    execution_grounding_cross_domain: bool = True
     # §17.188 — cap for ``_lookup_superseded`` so a brief-flood scenario
     # (filtered result count × 4) can't unboundedly inflate the Milvus
     # query limit. 128 is generous: typical retrieval returns ≤ 5 results
@@ -615,6 +802,21 @@ class Settings(BaseSettings):
     # poorly (each additional concurrent job further carves the cores).
     # Operators on stronger inference hardware can raise via env override.
     execution_global_concurrency: int = Field(default=2, ge=1, le=32)
+    # §17.568 — parallel-frontier execution WITHIN one job (independent
+    # dep-satisfied nodes run concurrently). §17.571 — PROMOTED to default ON
+    # after the prototype proved out: unit + integration (atomic claim) + live
+    # diamond (pipeline_complete correct; 2.6× wall-clock when the cloud serves
+    # the frontier concurrently). max_inflight DEFAULT LOWERED 4 → 2 to match
+    # this host's budget: Ollama NUM_PARALLEL=4 split across
+    # execution_global_concurrency=2 concurrent jobs = 2 in-flight nodes/job is
+    # the non-contending sweet spot (4 would over-subscribe under 2 live jobs).
+    # max_inflight caps concurrent nodes per job (distinct from
+    # execution_global_concurrency, which caps concurrent jobs). Operators on
+    # stronger inference hardware can raise it. R6: under heavy contention a node
+    # could approach node_orphan_threshold_minutes (30) — raise that if enabling
+    # a high max_inflight on slow hardware (this host's STALE_THRESHOLD=1560).
+    parallel_execution_enabled: bool = Field(default=True)
+    parallel_execution_max_inflight: int = Field(default=2, ge=1, le=16)
     # §17.442 — bound concurrent ideation requests (/ideas + /ideate). Unlike
     # execution, ideation had NO cap: the §17.441 stress test fired 6 concurrent
     # /ideate and all 6 hit the cloud at once (latency 33→81 s). The cap queues
@@ -622,6 +824,28 @@ class Settings(BaseSettings):
     # until a slot frees. Default 4 (ideation is cloud-bound, not CPU-bound like
     # execution, so a higher cap than execution's 2 is fine).
     ideation_global_concurrency: int = Field(default=4, ge=1, le=32)
+    # §17.531 — task-decomposition controls.
+    # decompose_enabled: server-side kill switch. When false, POST /decompose
+    #   415-rejects regardless of the pipeline's decompose_on_go valve (operator
+    #   override that the chat surface can't bypass).
+    # decompose_max_inflight_components: global ceiling on non-terminal component
+    #   jobs. /decompose rejects (429) if creating its children would exceed it —
+    #   bounds the total autonomous fan-out (and cloud cost) across ALL umbrellas,
+    #   not just within one (MAX_COMPONENTS bounds a single umbrella).
+    # decompose_component_stale_minutes: a component child stuck in an early phase
+    #   (refining/awaiting_confirmation/researching/planning) past this is reaped
+    #   to failed — recovers children stranded by a process restart far sooner
+    #   than the generic 26h sweep, so umbrellas don't hang.
+    decompose_enabled: bool = Field(default=True)
+    decompose_max_inflight_components: int = Field(default=20, ge=1, le=500)
+    decompose_component_stale_minutes: int = Field(default=180, ge=10, le=43200)
+    # §17.574 — cap how many component pipelines EXECUTE concurrently within a
+    # decomposition. They already spawn all-at-once and each child's DAG now runs
+    # node-parallel (§17.571), so an N-component umbrella could otherwise stack
+    # N×inflight inference calls on the host. ON by default (a safety bound on
+    # existing unbounded fan-out); the rest queue. Distinct from
+    # decompose_max_inflight_components (which throttles NEW decompositions).
+    decompose_component_max_concurrent: int = Field(default=3, ge=1, le=20)
     # Max queue wait when the cap is full. 0 = wait forever; otherwise
     # the run emits a 503-shaped SSE error and bails. Default 1800s
     # matches scheduler_job_timeout so a queued run can't outlive the

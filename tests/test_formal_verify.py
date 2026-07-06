@@ -428,3 +428,28 @@ def test_system_prompt_enforces_no_weakening_and_formal_top():
     assert "does NOT support concurrent" in prompt     # the v2 ERROR lesson
     assert "Do NOT generate a clock" in prompt         # the clock-gen lesson
     assert "$display" in prompt                         # told NOT to use it
+
+
+# ---------------------------------------------------------------------------
+# §17.494 — empty-draw guard (chat_until_nonempty)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.smoke
+async def test_verify_redraws_past_empty_llm_draw(monkeypatch):
+    """A success=True + empty-content draw (the §17.465 thinking-model failure)
+    must re-draw inside one iteration, not fail the verify."""
+    _patch_digital_sizing(monkeypatch)
+    _patch_topology_fetch(monkeypatch)
+    _patch_require_confirmed(monkeypatch, _spec_row())
+    chat = _patch_chat(monkeypatch, [
+        ModelResponse(text="", model="m", success=True),   # empty draw
+        _llm(),                                            # valid redraw
+    ])
+    _patch_sby(monkeypatch, [_sby("PASS", depth_reached=20)])
+    _patch_insert(monkeypatch)
+    db = make_mock_db()
+
+    result = await verify_design(DSID, db=db)
+    assert result.ok is True
+    assert result.verdict == "PASS"
+    assert chat.await_count == 2   # re-drew past the empty draw in one iteration

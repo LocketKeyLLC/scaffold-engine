@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.database import async_session
 from app import model_router
 from app.config import settings, get_model
-from app.modules.execution_compile import _compile_output  # re-exported for test patches
+from app.modules.execution_compile import _compile_output, compute_deliverable_kind  # re-exported for test patches
 from app.modules.execution_verify import (
     VERIFY_SYSTEM, _verify_output,  # re-exported for test patches
     _verify_codegen_output,  # §17.429 — stricter CodeGen verifier
@@ -65,11 +65,18 @@ from app.modules.prompt_assembly import (  # noqa: F401  re-exported for callers
     EXECUTION_SYSTEM_CODEGEN,
     EXECUTION_SYSTEM_RUNBOOK,
 )
+from app.modules.artifacts import persist_job_artifacts  # §17.565
 from app.modules.rag_pipeline import query_rag
 from app.utils.cost_tracking import current_job_id, current_node_id
 from app.utils.llm_retry import chat_until_nonempty  # §17.465
 
 logger = logging.getLogger(__name__)
+
+
+def _sse_event(event: str, data: dict) -> str:
+    """§17.568 — module-level SSE formatter (byte-identical to the nested
+    `_sse` in execute_all_nodes) so `_run_parallel_frontier` can emit frames."""
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 # ---------------------------------------------------------------------------
 # Sprint X.24 — process-wide cap on concurrent execute_all_nodes runs.
@@ -328,6 +335,50 @@ async def _get_next_node(db: AsyncSession, job_id: str) -> dict | None:
     await db.commit()
     return dict(claimed) if claimed else None
 
+
+async def _claim_ready_nodes(
+    db: AsyncSession, job_id: str, limit: int,
+) -> list[dict]:
+    """§17.568 — atomically claim up to ``limit`` dep-satisfied pending nodes
+    for parallel-frontier execution. This is the atomic claim the
+    ``_get_next_node`` docstring (§17.409) prescribes for same-job parallelism:
+    the dep-satisfied predicate is folded into the claim's WHERE as a NOT EXISTS
+    over unfinished deps, and ``FOR UPDATE SKIP LOCKED`` makes concurrent claims
+    disjoint and race-free w.r.t. dependency state. Flips the claimed rows to
+    'running' and returns them with the same column shape as ``_get_next_node``.
+    """
+    if limit <= 0:
+        return []
+    claimed = await db.execute(
+        text("""
+            UPDATE dag_nodes SET status = 'running', started_at = NOW()
+            WHERE id IN (
+                SELECT n.id FROM dag_nodes n
+                WHERE n.job_id = :jid AND n.status = 'pending'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM unnest(COALESCE(n.depends_on, ARRAY[]::text[])) AS dep(k)
+                      WHERE NOT EXISTS (
+                          SELECT 1 FROM dag_nodes d
+                          WHERE d.job_id = :jid AND d.node_key = dep.k
+                            AND d.status IN ('done', 'skipped')
+                      )
+                  )
+                ORDER BY n.execution_order ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT :lim
+            )
+            RETURNING id, node_key, title, node_type, depends_on,
+                      assigned_model, prompt_template, execution_order, tool, domain,
+                      retry_count, last_verification_reason
+        """),
+        {"jid": job_id, "lim": limit},
+    )
+    rows = [dict(r) for r in claimed.mappings()]
+    await db.commit()
+    return rows
+
+
 async def _set_node_status(
     db: AsyncSession,
     node_id: str,
@@ -529,6 +580,78 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "") -> str:
     )
 
 
+async def _maybe_node_grounding(
+    job_id: str, node_id: str, output: str, evidence: str, *, tool: str | None,
+) -> str:
+    """§17.570 — per-node grounding loop (opt-in, default OFF). Score this
+    node's output against the upstream evidence it was given; when it drifts
+    below ``grounding_min_score``, CoVe-revise it IN PLACE so the corrected
+    text is what gets persisted + consumed downstream — fixing drift at the
+    node that introduced it. Fail-soft: a scorer/CoVe miss returns the original.
+    The caller gates on groundable nodes (non-CodeGen/Shell, with evidence).
+    """
+    if not settings.node_grounding_enabled:
+        return output
+    from app.modules.faithfulness import score_faithfulness  # circular-safe
+    verdict = await score_faithfulness(
+        output, evidence, role=settings.faithfulness_model_role,
+    )
+    if verdict is None:
+        return output
+    score = verdict.get("score", 1.0)
+    logger.info(
+        "node_grounding_scored: job=%s node=%s score=%.2f supported=%d/%d tool=%s",
+        job_id, node_id, score, verdict.get("supported", 0),
+        verdict.get("total", 0), tool,
+    )
+    if score < settings.grounding_min_score:
+        try:
+            from app.modules.cove import cove_revise  # circular-safe
+            rev = await cove_revise(
+                output, evidence, role=settings.cove_model_role,
+            )
+            if rev and rev.get("changed") and rev.get("revised"):
+                logger.info(
+                    "node_grounding_corrected: job=%s node=%s score_before=%.2f",
+                    job_id, node_id, score,
+                )
+                return rev["revised"]
+        except Exception as exc:  # fail-soft — keep the original output
+            logger.warning("node_grounding_correct_failed: node=%s err=%s", node_id, exc)
+    return output
+
+
+async def _best_of_n_inference(gen_fn, evidence: str, node_key: str) -> str:
+    """§17.578 — generate ``best_of_n_count`` candidates concurrently and return
+    the one best grounded in ``evidence`` (faithfulness score). Fail-soft: if all
+    generations fail, falls back to a single generation; scoring misses count 0."""
+    n = settings.best_of_n_count
+    results = await asyncio.gather(
+        *[gen_fn() for _ in range(n)], return_exceptions=True
+    )
+    cands = [r for r in results if isinstance(r, str) and r.strip()]
+    if not cands:
+        return await gen_fn()           # all failed → normal single path (may raise)
+    if len(cands) == 1:
+        return cands[0]
+    from app.modules.faithfulness import score_faithfulness
+    verdicts = await asyncio.gather(
+        *[score_faithfulness(c, evidence, role=settings.faithfulness_model_role)
+          for c in cands],
+        return_exceptions=True,
+    )
+    scored = []
+    for c, v in zip(cands, verdicts):
+        s = v.get("score", 0.0) if isinstance(v, dict) else 0.0
+        scored.append((s, c))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    logger.info(
+        "best_of_n: node=%s candidates=%d best_score=%.2f",
+        node_key, len(cands), scored[0][0],
+    )
+    return scored[0][1]
+
+
 async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = None) -> str:
     """Query RAG pipeline and format results as grounding context."""
     try:
@@ -699,6 +822,7 @@ async def execute_next_node(
     skip_optimize: bool = False,
     skip_verify: bool = False,
     model_overrides: dict | None = None,
+    preclaimed_node: dict | None = None,
 ) -> dict:
     """Execute the next pending node in the DAG.
 
@@ -706,6 +830,17 @@ async def execute_next_node(
     async sessions around each DB phase. Long LLM work (optimize/execute/
     verify) runs with NO session open — connections are not held across
     10+ minute model calls.
+
+    §17.568 — ``preclaimed_node`` supports parallel-frontier execution: when
+    the caller (``_run_parallel_frontier``) has already atomically claimed a
+    node via ``_claim_ready_nodes`` (status flipped to 'running'), it passes
+    the node row here to execute that specific node, SKIPPING this function's
+    own claim + the no-claimable terminal/finalize block. When None (the
+    serial path and all existing callers), behavior is byte-identical: it
+    claims the next ready node itself. The terminal block stays reachable for
+    finalization via a no-preclaim call. The all-done autocomplete at the end
+    of the per-node body is idempotent (UPDATE ... WHERE status!='completed'),
+    so concurrent workers finishing the last node race safely.
     """
     # ---- Phase 1 (fast session): validate + claim next node ----
     async with async_session() as db:
@@ -715,7 +850,12 @@ async def execute_next_node(
         if job["status"] not in ("running", "executing", "planning"):
             return {"status": "error", "message": f"Job status is '{job['status']}' — not executable"}
 
-        node = await _get_next_node(db, job_id)
+        # §17.568 — parallel path passes an already-claimed node; serial path
+        # (preclaimed_node None) claims here, byte-identical to before.
+        node = (
+            preclaimed_node if preclaimed_node is not None
+            else await _get_next_node(db, job_id)
+        )
         if node is None:
             if await _all_nodes_done(db, job_id):
                 result = await db.execute(
@@ -732,14 +872,40 @@ async def execute_next_node(
                     # X.2: _compile_output now returns (text, was_synthesized).
                     compiled, was_synthesized = await _compile_output(job_id, db)
                     if compiled:
+                        kind = await compute_deliverable_kind(job_id, db)  # §17.519
                         await db.execute(
                             text(
                                 "UPDATE jobs SET compiled_output = :co, "
-                                "compiled_output_synthesized = :syn WHERE id = :jid"
+                                "compiled_output_synthesized = :syn, "
+                                "deliverable_kind = :dk WHERE id = :jid"
                             ),
-                            {"co": compiled, "syn": was_synthesized, "jid": job_id},
+                            {"co": compiled, "syn": was_synthesized,
+                             "dk": kind, "jid": job_id},
                         )
+                        # §17.565 — persist deliverable(s) as artifact rows.
+                        # Best-effort: never let an artifact write break completion.
+                        try:
+                            await persist_job_artifacts(job_id, db, deliverable_kind=kind)
+                        except Exception:
+                            logger.exception("persist_job_artifacts failed (complete) job=%s", job_id)
                         await db.commit()
+                        # §17.576 — learning flywheel (opt-in): a high-grounding
+                        # deliverable becomes a retrievable exemplar. No-op when
+                        # the valve is off or grounding is below threshold.
+                        try:
+                            _grow = await db.execute(
+                                text("SELECT metadata->'grounding'->>'score' FROM jobs WHERE id = :jid"),
+                                {"jid": job_id},
+                            )
+                            _gscore = _grow.scalar()
+                            from app.modules.flywheel import maybe_ingest_exemplar
+                            await maybe_ingest_exemplar(
+                                job_id=job_id, compiled_output=compiled,
+                                deliverable_kind=kind,
+                                grounding_score=float(_gscore) if _gscore is not None else None,
+                            )
+                        except Exception:
+                            logger.exception("exemplar_ingest hook failed job=%s", job_id)
                 return {"status": "complete", "message": "All nodes done. Job complete."}
 
             # Partial compile for blocked jobs (#22, cached)
@@ -762,14 +928,22 @@ async def execute_next_node(
                     # X.2: tuple return; persist synthesized flag too.
                     partial_result, partial_synthesized = await _compile_output(job_id, db)
                     if partial_result:
+                        kind = await compute_deliverable_kind(job_id, db)  # §17.519
                         await db.execute(
                             text(
                                 "UPDATE jobs SET compiled_output = :co, "
                                 "compiled_output_synthesized = :syn, "
+                                "deliverable_kind = :dk, "
                                 "status = 'blocked' WHERE id = :jid"
                             ),
-                            {"co": partial_result, "syn": partial_synthesized, "jid": job_id},
+                            {"co": partial_result, "syn": partial_synthesized,
+                             "dk": kind, "jid": job_id},
                         )
+                        # §17.565 — persist partial deliverable as artifacts.
+                        try:
+                            await persist_job_artifacts(job_id, db, deliverable_kind=kind)
+                        except Exception:
+                            logger.exception("persist_job_artifacts failed (blocked) job=%s", job_id)
                     else:
                         await db.execute(
                             text("UPDATE jobs SET status = 'blocked' WHERE id = :jid"),
@@ -1016,6 +1190,10 @@ async def execute_next_node(
         project_goal = " ".join(brief.get("goals", [])) if brief else ""
         rag_query = f"{project_goal}: {title}" if project_goal else title
         job_domain = brief.get("domain") if brief else None
+        # §17.517 — general grounding fans out across all domains by default so
+        # research ingested under a different (heuristic) partition than the
+        # job's domain is still found. The cosine floor + reranker filter noise.
+        grounding_domain = None if settings.execution_grounding_cross_domain else job_domain
 
         if tool_lower == "milvus":
             rag_block = await _milvus_search(title, node_key=node_key, domain=node_snapshot.get("domain"))
@@ -1027,7 +1205,7 @@ async def execute_next_node(
             raw_prompt = f"{raw_prompt}\n\n## Web Search Results\n{search_results}"
             logger.info("searxng_context_injected: chars=%d node='%s'", len(search_results), title)
         else:
-            rag_context = await _fetch_rag_context(rag_query, top_k=settings.verifier_top_k, domain=job_domain)
+            rag_context = await _fetch_rag_context(rag_query, top_k=settings.verifier_top_k, domain=grounding_domain)
             if rag_context:
                 raw_prompt = f"{raw_prompt}\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}"
                 logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
@@ -1088,6 +1266,26 @@ async def execute_next_node(
             "message": "Prompt build failed. Review brief, RAG sources, or upstream outputs; retry when fixed.",
         }
 
+    # §17.578 — best-of-N eligibility: deliverable text node with upstream
+    # evidence to judge against. Fetch is_deliverable only when the valve is on
+    # (no cost otherwise). Gates the N-candidate generate below.
+    _best_of_n_eligible = False
+    if (settings.best_of_n_enabled and _upstream_block
+            and (tool or "") not in ("CodeGen", "Shell")):
+        try:
+            async with async_session() as _dbn:
+                _r = await _dbn.execute(
+                    text(
+                        "SELECT COALESCE(is_deliverable, FALSE) "
+                        "OR COALESCE(is_output_node, FALSE) "
+                        "FROM dag_nodes WHERE id = :id"
+                    ),
+                    {"id": node_id},
+                )
+                _best_of_n_eligible = bool(_r.scalar())
+        except Exception:
+            _best_of_n_eligible = False
+
     # Execute with timeout guard.
     _node_t0 = time.monotonic()
     try:
@@ -1119,7 +1317,14 @@ async def execute_next_node(
                 raise RuntimeError(resp.error or "Model returned failure")
             return resp.text.strip()
 
-        output = await asyncio.wait_for(_run_inference(), timeout=settings.node_timeout_seconds)
+        if _best_of_n_eligible:
+            # §17.578 — generate N candidates, keep the best-grounded one.
+            output = await asyncio.wait_for(
+                _best_of_n_inference(_run_inference, _upstream_block, node_key),
+                timeout=settings.node_timeout_seconds,
+            )
+        else:
+            output = await asyncio.wait_for(_run_inference(), timeout=settings.node_timeout_seconds)
     except asyncio.TimeoutError:
         elapsed = round(time.monotonic() - _node_t0, 1)
         timeout_msg = (
@@ -1352,6 +1557,16 @@ async def execute_next_node(
     verified = (verify_status == "pass")
     db_confidence = confidence if (verify_status != "skipped" and confidence > 0.0) else None
 
+    # §17.570 — per-node grounding loop (opt-in, default OFF): on a passing,
+    # groundable node (non-CodeGen/Shell, with upstream evidence) score the
+    # output against the evidence it was given and CoVe-revise IN PLACE if it
+    # drifted, so the corrected text is what gets persisted (line below) +
+    # consumed by downstream nodes. Fail-soft + no-op when the valve is off.
+    if verify_status == "pass" and _upstream_block and (tool or "") not in ("CodeGen", "Shell"):
+        output = await _maybe_node_grounding(
+            job_id, node_id, output, _upstream_block, tool=tool,
+        )
+
     # ---- Phase 3 (fast session): persist + atomic autocomplete ----
     job_complete = False
     async with async_session() as db:
@@ -1408,13 +1623,21 @@ async def execute_next_node(
                 # Returns None text when no done node contributed (e.g.,
                 # every node was skipped). Store NULL in that case.
                 compiled, was_synthesized = await _compile_output(job_id, db)
+                kind = await compute_deliverable_kind(job_id, db) if compiled else None  # §17.519
                 await db.execute(
                     text(
                         "UPDATE jobs SET compiled_output = :out, "
-                        "compiled_output_synthesized = :syn WHERE id = :jid"
+                        "compiled_output_synthesized = :syn, "
+                        "deliverable_kind = :dk WHERE id = :jid"
                     ),
-                    {"out": compiled, "syn": was_synthesized, "jid": job_id},
+                    {"out": compiled, "syn": was_synthesized, "dk": kind, "jid": job_id},
                 )
+                if compiled:
+                    # §17.565 — persist deliverable(s) as artifacts.
+                    try:
+                        await persist_job_artifacts(job_id, db, deliverable_kind=kind)
+                    except Exception:
+                        logger.exception("persist_job_artifacts failed (autocomplete) job=%s", job_id)
                 await db.commit()
                 logger.info(
                     "compiled_output_stored: chars=%s synthesized=%s job=%s",
@@ -1533,6 +1756,169 @@ async def _peek_next_node(job_id: str) -> dict | None:
         if all(d in done_keys for d in deps):
             return c
     return None
+
+
+async def _run_parallel_frontier(
+    job_id: str,
+    *,
+    model_overrides: dict | None,
+    t0: float,
+    retry_budget: int,
+) -> AsyncGenerator[str, None]:
+    """§17.568 — PROTOTYPE parallel-frontier executor (valve-gated).
+
+    Runs the ready frontier (dep-satisfied pending nodes) concurrently, bounded
+    by ``parallel_execution_max_inflight``. The LOOP atomically claims nodes
+    (``_claim_ready_nodes``) and owns the terminal/finalize decision; per-node
+    work runs in worker tasks via ``execute_next_node(preclaimed_node=...)``
+    (each its own session). SSE events stream as workers complete; ordering
+    interleaves across nodes (consumers key on node_key). On cancellation the
+    finally cancels all inflight workers so none leak onto a dying job (R8).
+    """
+    _sse = _sse_event
+    cap = settings.parallel_execution_max_inflight
+    sem = asyncio.Semaphore(cap)
+    results_q: asyncio.Queue = asyncio.Queue()
+    inflight: set[asyncio.Task] = set()
+    node_results: list[dict] = []
+
+    async def _worker(node: dict) -> None:
+        async with sem:
+            try:
+                res = await execute_next_node(
+                    job_id, model_overrides=model_overrides, preclaimed_node=node,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — surface as a failed node
+                res = {
+                    "status": "failed", "node_key": node.get("node_key"),
+                    "title": node.get("title"), "error": f"worker error: {e}",
+                }
+            await results_q.put(res)
+
+    def _reap() -> None:
+        for t in [t for t in inflight if t.done()]:
+            inflight.discard(t)
+
+    try:
+        while True:
+            # 1. Refill the frontier up to the cap.
+            free = cap - len(inflight)
+            if free > 0:
+                async with async_session() as db:
+                    claimed = await _claim_ready_nodes(db, job_id, free)
+                for n in claimed:
+                    yield _sse("node_start", {
+                        "job_id": job_id, "node_key": n["node_key"],
+                        "title": n["title"], "tool": n.get("tool", "LLM"),
+                    })
+                    inflight.add(asyncio.create_task(_worker(n)))
+
+            # 2. Terminal — ONLY the loop finalizes, only when nothing is
+            #    running and nothing was claimable. Decide all-done DIRECTLY:
+            #    the last worker's idempotent autocomplete may have already
+            #    flipped the job to 'completed' (+ compiled), and a no-preclaim
+            #    execute_next_node call would then hit its 'not executable'
+            #    status guard and wrongly return 'error' instead of complete
+            #    (caught by the §17.568 live diamond probe). For the not-all-done
+            #    (blocked) case the job is still 'running', so execute_next_node
+            #    runs its terminal/partial-compile + blocked-cause logic.
+            if not inflight:
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                async with async_session() as _term_db:
+                    all_done = await _all_nodes_done(_term_db, job_id)
+                if all_done:
+                    summary = await _build_pipeline_summary(
+                        job_id, node_results, elapsed_ms, async_session,
+                        extra_fields={"status": "completed"},
+                    )
+                    logger.info(
+                        "pipeline_completed(parallel): job=%s total=%s passed=%s "
+                        "failed=%s duration_ms=%s", job_id, summary["total_nodes"],
+                        summary["passed"], summary["failed"], elapsed_ms,
+                    )
+                    yield _sse("pipeline_complete", summary)
+                    return
+                # Not all done → blocked. Job is still 'running' (no worker
+                # autocompleted), so execute_next_node runs its blocked-cause +
+                # partial-compile terminal path and returns 'blocked'/'error'.
+                fin = await execute_next_node(job_id, model_overrides=model_overrides)
+                status = fin.get("status", "unknown")
+                fin["nodes_completed"] = len(node_results)
+                fin["duration_ms"] = elapsed_ms
+                yield _sse(status if status in ("blocked", "error") else "error", fin)
+                return
+
+            # 3. Drain one worker result; keepalive on idle.
+            try:
+                res = await asyncio.wait_for(
+                    results_q.get(), timeout=settings.sse_keepalive_seconds,
+                )
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                _reap()
+                continue
+            _reap()
+
+            # 4. Emit + auto-retry. A retried node resets to 'pending' and is
+            #    re-claimed on the next refill (no pop/continue needed).
+            status = res.get("status", "unknown")
+            if status == "done":
+                node_results.append(res)
+                _done_tool = (res.get("tool") or "").lower()
+                yield _sse("node_done", {
+                    "job_id": job_id,
+                    "node_key": res.get("node_key"),
+                    "title": res.get("title"),
+                    "output": res.get("output"),
+                    "verified": res.get("verified"),
+                    "confidence": res.get("confidence"),
+                    "model_used": res.get("model_used"),
+                    "tool": res.get("tool"),
+                    "runbook_only": _done_tool == "shell" and not settings.shell_tool_enabled,
+                })
+            elif status == "failed":
+                _failed_key = res.get("node_key", "")
+                _retried = False
+                if retry_budget > 0:
+                    try:
+                        async with async_session() as _retry_db:
+                            rr = await retry_failed_node(job_id, _failed_key, _retry_db)
+                            if rr.get("status") == "reset":
+                                _retried = True
+                                retry_budget -= 1
+                                yield _sse("node_retry", {
+                                    "job_id": job_id, "node_key": _failed_key,
+                                    "title": res.get("title"),
+                                    "retry_count": rr.get("retry_count", 0),
+                                    "budget_remaining": retry_budget,
+                                    "message": "Auto-retrying failed node",
+                                })
+                    except Exception as _retry_exc:
+                        logger.warning("auto_retry_failed(parallel): node=%s error=%s",
+                                       _failed_key, _retry_exc)
+                if not _retried:
+                    node_results.append(res)
+                    yield _sse("node_failed", {
+                        "job_id": job_id, "node_key": _failed_key,
+                        "title": res.get("title"), "error": res.get("error"),
+                        "verification_reason": res.get("verification_reason"),
+                        "model_used": res.get("model_used"),
+                        "retries_exhausted": not _retried,
+                    })
+            else:
+                # skipped / unexpected per-node status — record, keep going.
+                node_results.append(res)
+                logger.info("parallel_node_status=%s job=%s node=%s",
+                            status, job_id, res.get("node_key"))
+    finally:
+        # R8 — cancel any inflight workers so none keep writing to a dying job.
+        for t in list(inflight):
+            t.cancel()
+        if inflight:
+            await asyncio.gather(*inflight, return_exceptions=True)
+
 
 async def execute_all_nodes(
     job_id: str,
@@ -1716,7 +2102,19 @@ async def execute_all_nodes(
                     yield _sse("error", {"message": f"DAG generation failed: {exc}"})
                     return
 
-        # ---- Main execute loop ----
+        # §17.568 — PROTOTYPE parallel-frontier path (valve, default OFF).
+        # When off, the serial loop below runs unchanged (byte-identical). The
+        # branch shares this function's outer try/except/finally (slot release +
+        # cleanup); _run_parallel_frontier cancels its own inflight workers.
+        if settings.parallel_execution_enabled:
+            async for _ev in _run_parallel_frontier(
+                job_id, model_overrides=model_overrides, t0=t0,
+                retry_budget=retry_budget,
+            ):
+                yield _ev
+            return
+
+        # ---- Main execute loop (serial) ----
         while True:
             # ---- Session 4 (short peek only; execute_next_node owns its own sessions) ----
             node = await _peek_next_node(job_id)
@@ -1821,6 +2219,10 @@ async def execute_all_nodes(
             node_results.append(result)
 
             if status == "done":
+                # §17.509 — a Shell node with no real backend only generated a
+                # runbook; flag it so the live ticker doesn't render "✅ complete"
+                # for work that was never executed (matches the §17.506 banner).
+                _done_tool = (result.get("tool") or "").lower()
                 yield _sse("node_done", {
                     "job_id": job_id,
                     "node_key": result.get("node_key"),
@@ -1829,6 +2231,8 @@ async def execute_all_nodes(
                     "verified": result.get("verified"),
                     "confidence": result.get("confidence"),
                     "model_used": result.get("model_used"),
+                    "tool": result.get("tool"),
+                    "runbook_only": _done_tool == "shell" and not settings.shell_tool_enabled,
                 })
             elif status == "failed":
                 _failed_key = result.get("node_key", "")

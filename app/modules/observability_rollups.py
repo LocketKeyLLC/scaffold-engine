@@ -240,6 +240,116 @@ _JOBS_COSTS_SQL = """
 """
 
 
+# ── 4. Quality rollup (§17.573) ──────────────────────────────────────
+#
+# Aggregates already-recorded execution-quality signals so operators can
+# see WHICH tool/node-type is failing, low-confidence, or retry-heavy, and
+# the grounding-score distribution across recent deliverables — the data
+# the model A/B + grounding work tunes against. Windowed by the parent
+# job's created_at (same wall-clock basis as recent_jobs_costs). Fail-open.
+
+_NODE_QUALITY_SQL = """
+    SELECT
+        COALESCE(n.tool, '')      AS tool,
+        COALESCE(n.node_type, '') AS node_type,
+        COUNT(*)                                       AS total,
+        COUNT(*) FILTER (WHERE n.status = 'done')      AS done,
+        COUNT(*) FILTER (WHERE n.status = 'failed')    AS failed,
+        COUNT(*) FILTER (WHERE n.status = 'skipped')   AS skipped,
+        COALESCE(AVG(n.confidence)
+                 FILTER (WHERE n.confidence IS NOT NULL), 0) AS avg_confidence,
+        COALESCE(AVG(n.retry_count), 0)                AS avg_retry_count
+    FROM dag_nodes n
+    JOIN jobs j ON j.id = n.job_id
+    WHERE j.created_at >= NOW() - make_interval(mins => :window_minutes)
+    GROUP BY n.tool, n.node_type
+    ORDER BY total DESC
+"""
+
+_GROUNDING_DIST_SQL = """
+    SELECT
+        COUNT(*)                                                       AS jobs_scored,
+        COALESCE(AVG((metadata->'grounding'->>'score')::float), 0)     AS avg_score,
+        COALESCE(MIN((metadata->'grounding'->>'score')::float), 0)     AS min_score,
+        COUNT(*) FILTER (
+            WHERE COALESCE((metadata->'grounding'->>'corrected')::boolean, FALSE)
+        )                                                              AS corrected,
+        COUNT(*) FILTER (
+            WHERE (metadata->'grounding'->>'score')::float < :min_score
+        )                                                              AS below_threshold
+    FROM jobs
+    WHERE metadata ? 'grounding'
+      AND created_at >= NOW() - make_interval(mins => :window_minutes)
+"""
+
+
+async def quality_rollup(
+    *,
+    window_minutes: int,
+    grounding_threshold: float = 0.7,
+    db,
+) -> dict[str, Any]:
+    """Execution-quality rollup over recent jobs' nodes + grounding scores.
+
+    ``by_node_type``: per (tool, node_type) — total/done/failed/skipped,
+    pass_rate (done / (done+failed)), avg confidence, avg retry count.
+    ``grounding``: distribution of ``jobs.metadata.grounding.score`` —
+    count scored, avg/min, # auto-corrected, # below threshold.
+    Fail-open: zero/empty shapes + ``data_source='error'`` on any DB error.
+    """
+    data_source = "ok"
+    node_records: list = []
+    grounding_row: dict | None = None
+    try:
+        rows = await db.execute(
+            text(_NODE_QUALITY_SQL), {"window_minutes": window_minutes},
+        )
+        node_records = rows.mappings().all()
+        grow = await db.execute(
+            text(_GROUNDING_DIST_SQL),
+            {"window_minutes": window_minutes, "min_score": grounding_threshold},
+        )
+        grounding_row = grow.mappings().first()
+    except Exception as exc:
+        logger.debug(
+            "quality_rollup_failed: window=%dm err=%s (returning empty)",
+            window_minutes, exc,
+        )
+        data_source = "error"
+
+    by_node_type = []
+    for r in node_records:
+        done, failed = int(r["done"] or 0), int(r["failed"] or 0)
+        decided = done + failed
+        by_node_type.append({
+            "tool": r["tool"],
+            "node_type": r["node_type"],
+            "total": int(r["total"] or 0),
+            "done": done,
+            "failed": failed,
+            "skipped": int(r["skipped"] or 0),
+            "pass_rate": round(done / decided, 3) if decided else None,
+            "avg_confidence": round(float(r["avg_confidence"] or 0.0), 3),
+            "avg_retry_count": round(float(r["avg_retry_count"] or 0.0), 3),
+        })
+
+    g = grounding_row or {}
+    grounding = {
+        "jobs_scored": int(g.get("jobs_scored", 0) or 0),
+        "avg_score": round(float(g.get("avg_score", 0.0) or 0.0), 3),
+        "min_score": round(float(g.get("min_score", 0.0) or 0.0), 3),
+        "corrected": int(g.get("corrected", 0) or 0),
+        "below_threshold": int(g.get("below_threshold", 0) or 0),
+        "threshold": grounding_threshold,
+    }
+    return {
+        "window_minutes": window_minutes,
+        "by_node_type": by_node_type,
+        "grounding": grounding,
+        "data_source": data_source,
+    }
+
+
 async def recent_jobs_costs(
     *,
     window_minutes: int,
