@@ -19,7 +19,7 @@ requests==2.33.1
 # sentence-transformers 5.x is softly-breaking vs 4.x; we only use
 # CrossEncoder(...).predict(...) which is API-stable (#86).
 sentence-transformers==5.3.0
-setuptools==71.1.0
+setuptools==83.0.0  # §17.585 — was 71.1.0 (PYSEC-2025-49); also bumped in Dockerfile
 sqlalchemy[asyncio]==2.0.36
 structlog==25.5.0
 trafilatura==2.0.0
@@ -28,9 +28,12 @@ uvicorn[standard]==0.34.0
 psycopg2-binary==2.9.9
 
 # --- PDF ingestion (4.5b) ---
-pypdf==5.1.0
-pdfplumber==0.11.4
-python-multipart==0.0.17
+# §17.585 — pypdf 5.1.0→6.14.2 (major; clears ~30 GHSAs). Code uses only the
+# stable modern API (PdfReader/.pages/.extract_text() at research_extractors.py
+# + forum_ingest.py), unaffected by the 6.0 removals.
+pypdf==6.14.2
+pdfplumber==0.11.10  # §17.585 — was 0.11.4; pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
+python-multipart==0.0.32  # §17.585 — was 0.0.17 (GHSA); fastapi form/file parsing
 # §17.458 — server-side markdown rendering for the web UI's compiled_output.
 # Already present transitively via rich; pinned explicitly now that app code is
 # a direct consumer. Used with html=False (raw HTML escaped) — see app/web/routes.py.
@@ -38,7 +41,7 @@ markdown-it-py==4.2.0
 
 # --- OpenAPI ingestion (4.5d) ---
 openapi-spec-validator==0.7.1
-jinja2==3.1.4
+jinja2==3.1.6  # §17.585 — was 3.1.4 (GHSA-q2x7-8rv6-6q7h)
 prance==25.4.8.0
 
 # --- Observability (X.26) ---
