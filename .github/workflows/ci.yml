@@ -30,7 +30,10 @@ jobs:
   smoke:
     name: "Tier 1 · Smoke (unit tests)"
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # §17.584 — raised 10→20: the smoke suite grew past the 10-min budget
+    # (was timing out mid-run and canceling the job). ~681 tests at §17.102;
+    # more now. 20 gives headroom without masking a genuine hang.
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4

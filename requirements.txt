@@ -1,6 +1,10 @@
 apscheduler==3.10.4
 asyncpg==0.30.0
-fastapi==0.115.6
+fastapi==0.139.0
+# §17.584 — pin starlette explicitly (fastapi 0.139 allows >=0.46). 1.3.1 clears
+# CVE-2026-48710 "BadHost" host-header auth-bypass (fix 1.0.1) + PYSEC-2026-248/
+# 249 (fix 1.3.0/1.3.1). fastapi bumped 0.115.6→0.139.0 to permit starlette 1.x.
+starlette==1.3.1
 # §17.143 — JSON Schema validation for spec-capture (engineering-design track).
 # Pure-Python, validates app/sim/spec_schema.json against incoming spec
 # payloads. No optional deps pulled in.
@@ -41,12 +45,15 @@ prance==25.4.8.0
 # Prometheus metrics surface; always loaded so `/metrics` is on by default.
 prometheus-client==0.21.1
 # OpenTelemetry — strictly opt-in (gated by settings.otel_enabled).
-# Pinned to the 1.29.0 line so the API/SDK/exporter/instrumentation
-# packages stay compatible. Importing these at process start is cheap
-# (~50ms); the SDK only initializes when init_tracing() actually runs.
-opentelemetry-api==1.29.0
-opentelemetry-sdk==1.29.0
-opentelemetry-exporter-otlp-proto-http==1.29.0
-opentelemetry-instrumentation-fastapi==0.50b0
-opentelemetry-instrumentation-httpx==0.50b0
-opentelemetry-instrumentation-asyncpg==0.50b0
+# §17.584 — bumped 1.29.0/0.50b0 → 1.43.0/0.64b0 in lockstep with the fastapi
+# 0.139 upgrade: instrumentation-fastapi 0.50b0 crashes on fastapi 0.139's new
+# `_IncludedRouter` route type (AttributeError: no attribute 'path') on every
+# request when otel_enabled. API/SDK/exporter (1.43.0) + instrumentation
+# (0.64b0) must move together. Importing at process start stays cheap; the SDK
+# only initializes when init_tracing() actually runs.
+opentelemetry-api==1.43.0
+opentelemetry-sdk==1.43.0
+opentelemetry-exporter-otlp-proto-http==1.43.0
+opentelemetry-instrumentation-fastapi==0.64b0
+opentelemetry-instrumentation-httpx==0.64b0
+opentelemetry-instrumentation-asyncpg==0.64b0
