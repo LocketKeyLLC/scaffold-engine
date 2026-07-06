@@ -55,6 +55,17 @@ if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
         "test_execution_agent_concurrency.py",
         "test_execution_agent_feedback.py",
         "test_execution_agent_retry.py",
+        # §17.586 (#95) — these exercise execute_all_nodes / execute_next_node,
+        # which open their OWN short-lived async_session() internally (not the
+        # test's mock db), so they need a live Postgres. Fine in `make test`
+        # (dev container has it); in cloud ci-smoke there are no services, so
+        # the internal DB calls hang until pytest-timeout kills them (was 31
+        # spurious "timeout" failures). Same rationale as the sibling
+        # test_execution_agent_* entries above.
+        "test_execution_agent_compile.py",
+        "test_execution_agent_sse.py",
+        "test_sse_streaming.py",
+        "test_compile_synthesis_override.py",
         "test_github_ingest_cache.py",
         "test_gt_browser_module.py",
         "test_gt_extractor.py",
