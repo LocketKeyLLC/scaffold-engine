@@ -19,7 +19,7 @@ structlog==25.5.0
 prometheus-client==0.21.1
 redis==7.4.0
 trafilatura==2.0.0
-pypdf==5.1.0
+pypdf==6.14.2
 pdfplumber==0.11.4
 apscheduler==3.10.4
 tzlocal==5.2

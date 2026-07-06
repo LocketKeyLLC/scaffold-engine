@@ -28,7 +28,7 @@ uvicorn[standard]==0.34.0
 psycopg2-binary==2.9.9
 
 # --- PDF ingestion (4.5b) ---
-pypdf==5.1.0
+pypdf==6.14.2
 pdfplumber==0.11.4
 python-multipart==0.0.17
 # §17.458 — server-side markdown rendering for the web UI's compiled_output.
