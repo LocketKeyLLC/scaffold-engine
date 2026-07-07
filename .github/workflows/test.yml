@@ -140,6 +140,11 @@ jobs:
       # The BLOCKING dependency gate is pip-audit in ci.yml (deps we control).
       # ignore-unfixed keeps the report to actionable findings.
       - name: Trivy image scan (report-only)
+        # §17.587 (#99) — report-only means the SCAN result never gates, but the
+        # ACTION can still fail the job on infra (trivy DB pull from ghcr flakes/
+        # rate-limits), which aborted the run *before* the unit tests. Make it
+        # truly non-blocking so a trivy DB hiccup can't fail Unit Tests.
+        continue-on-error: true
         # §17.584 — SHA-pinned to v0.36.0. aquasecurity/trivy-action was
         # supply-chain-compromised in Mar 2026 (76/77 tags force-pushed to
         # malware, CVE-2026-33634); the old `@0.28.0` tag no longer resolves.
