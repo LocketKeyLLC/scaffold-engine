@@ -174,6 +174,10 @@ jobs:
       # bind-mount set; /code/.cache (baked reranker) and /opt/venv (deps) are
       # NOT mounted over, so they come from the image. COVERAGE_FILE under /tmp
       # (image /code is root-owned; container user differs — same as make coverage).
+      # §17.589 — pipelines/ is mounted READ-WRITE (not :ro): the pipeline valve
+      # bootstrap writes valves.json into pipelines/<name>/, and a fresh CI
+      # checkout has none (valves.json is gitignored runtime state), so it must
+      # be creatable. (Locally it passes because the dev host already has them.)
       - name: Run unit tests + coverage gate
         run: |
           docker run --rm \
@@ -191,7 +195,7 @@ jobs:
             -v "$PWD/sdk:/code/sdk:ro" \
             -v "$PWD/scripts:/code/scripts:ro" \
             -v "$PWD/db:/code/db:ro" \
-            -v "$PWD/pipelines:/code/pipelines:ro" \
+            -v "$PWD/pipelines:/code/pipelines" \
             -v "$PWD/docs:/code/docs:ro" \
             -v "$PWD/pyproject.toml:/code/pyproject.toml:ro" \
             scaffold-orchestrator:ci \
