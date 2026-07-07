@@ -180,6 +180,10 @@ jobs:
       # be creatable. (Locally it passes because the dev host already has them.)
       - name: Run unit tests + coverage gate
         run: |
+          # §17.589 — the container runs as uid 1000 (scaffold) but the mounted
+          # pipelines/ dir is owned by the runner uid; make it group/other
+          # writable so the valve bootstrap can create valves.json.
+          chmod -R a+w pipelines || true
           docker run --rm \
             --network host \
             -e DATABASE_URL=$DATABASE_URL \
@@ -189,6 +193,7 @@ jobs:
             -e SCAFFOLD_API_KEY=$SCAFFOLD_API_KEY \
             -e PYTHONPATH=/code:/code/sdk \
             -e COVERAGE_FILE=/tmp/.coverage \
+            -e SCAFFOLD_CI_SMOKE_MODE=1 \
             -v "$PWD/app:/code/app:ro" \
             -v "$PWD/tests:/code/tests:ro" \
             -v "$PWD/cli:/code/cli:ro" \
