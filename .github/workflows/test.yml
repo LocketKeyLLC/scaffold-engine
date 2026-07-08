@@ -1,20 +1,19 @@
 name: Scaffold Engine CI
 
 on:
-  # §17.587 (#99) — this job builds the FULL orchestrator image (torch +
-  # sentence-transformers + the baked 0.6B reranker) just to run the unit
-  # suite + coverage gate. That build is too heavy/slow to build+cache within a
-  # PR CI budget: a cold build runs ~50 min and times out, and restoring the
-  # multi-GB `mode=max` gha cache isn't much faster — so it was chronically red
-  # on PRs+main for weeks (independent of any feature work). Taken OFF the
-  # PR/push critical path and run nightly + on-demand only. PR-time coverage is
-  # provided by Tier-1 Smoke (ci.yml, host, `-m smoke`) + local `make test`
-  # (4121/0). Restore push/PR triggers once the build is CI-viable (lighter CI
-  # image or a prebuilt-image pull) — follow-up tracked off #99.
-  #
-  # §17.404 — (when triggered) skip docs-only changes via paths-ignore.
-  schedule:
-    - cron: '0 7 * * *'   # 07:00 UTC nightly full-image suite
+  # §17.588 (#102) — PR/push gating RESTORED. This job no longer BUILDS the
+  # heavy image per-PR (§17.587/#99 took it off the critical path because the
+  # ~50-min 2-core build timed out). It now PULLS the prebuilt
+  # scaffold-orchestrator-ci image (built on main by build-ci-image.yml) and
+  # runs the PR's checked-out code mounted over it — a fast pull, not a build.
+  # Dep-change PRs (requirements*/Dockerfile) fall back to a local build so
+  # they never test against stale deps. §17.404 — skip docs-only changes.
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  pull_request:
+    branches: [main]
+    paths-ignore: ['**.md']
   workflow_dispatch:
 
 # §17.399 — cancel superseded runs. This job is a ~20-min full-suite build
@@ -47,17 +46,15 @@ jobs:
   unit-tests:
     name: Unit Tests (no live services)
     runs-on: ubuntu-latest
-    # §17.399 — raised 15→35. The §17.276 cap of 15 assumed a "well under
-    # 5 min" suite, but it has since grown to ~3230 non-integration tests
-    # that build the image (~3 min) + run on a 2-core private runner — the
-    # job was hitting "exceeded 15m0s" and getting cancelled on EVERY run
-    # (verified: tests ran 705s and were still going when cut). 35 min gives
-    # the full suite room while still failing loud if Postgres/probe hangs.
-    # §17.587 (#99) — raised 35→50: the 35 assumed a warm-cache ~3-min build,
-    # but a COLD build (torch + model snapshot_download + deps, ~20 min) plus
-    # the full suite overran 35 and got cancelled mid-build — which also meant
-    # cache-to never exported, so the cache stayed cold (vicious cycle). 50 lets
-    # one cold build finish + warm the gha cache; warm runs are back to ~20 min.
+    permissions:
+      contents: read
+      packages: read   # §17.588 — pull the prebuilt CI image from ghcr
+    # §17.588 (#102) — the common path now PULLS the prebuilt image (fast, ~15
+    # min incl. the full suite), no build. The 50-min budget is the ceiling for
+    # the RARE dep-change fallback that still builds locally (torch+model,
+    # ~45 min on the 2-core runner). Pull-path PRs finish well under it.
+    # History: §17.399 raised 15→35, §17.587 raised 35→50 when this job still
+    # built per-PR (before the prebuilt-pull redesign).
     timeout-minutes: 50
 
     services:
@@ -79,36 +76,62 @@ jobs:
           --health-retries 5
 
     steps:
+      # §17.588 — fetch-depth: 0 so the dep-change diff below can compare
+      # against the PR base / previous push SHA.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Apply DB schema
         run: PGPASSWORD=scaffold_ci_pw psql -h localhost -U scaffold -d scaffold_engine -f db/init.sql
 
-      # §17.426 — reclaim runner disk before the buildx build. `cache-to:
-      # type=gha,mode=max` (needed to cache the builder's reranker-download
-      # layer) + `load: true` (needed so the next step's `docker run` finds the
-      # image) write the ~3-4 GB image to disk several times over, which
-      # overflows the ubuntu-latest ~14 GB free disk (the prior plain
-      # `docker build` kept a single copy and fit). ubuntu-latest preinstalls
-      # ~25 GB of toolchains this docker-build job never uses; dropping them
-      # gives ample headroom. Real failure observed on the first §17.426 run:
-      # `no space left on device` during "importing to docker".
-      # §17.587 (#99) — the manual rm freed to ~40 GB, but the buildx build
-      # (torch + sentence-transformers + the baked Qwen3-Reranker model, with
-      # cache-to mode=max staging every layer + gha cache round-trip) still
-      # overflowed while writing the reranker blob. Use the maintained
-      # free-disk-space action for a thorough, safe reclaim (~30 GB more: large
-      # apt packages, tool cache, swap, docker). SHA-pinned (post-§17.584
-      # supply-chain caution). mode=max caching stays as-is — that's what kills
-      # the HF-429 cold-pull flake (don't trade it away to save disk).
+      # §17.588 (#102) — lowercase ghcr ref for the prebuilt image.
+      - name: Compute CI image ref
+        id: img
+        run: |
+          owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "ref=ghcr.io/${owner}/scaffold-orchestrator-ci" >> "$GITHUB_OUTPUT"
+
+      # If this PR/push changes the dep/build inputs, the prebuilt image (built
+      # from main's deps) is stale → build locally for this run so we never test
+      # against wrong deps. Otherwise (the common case) pull the prebuilt image.
+      - name: Decide pull vs build
+        id: deps
+        run: |
+          base='${{ github.event.pull_request.base.sha }}'
+          [ -z "$base" ] && base='${{ github.event.before }}'
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"   # dispatch / first push → build to be safe
+          elif git diff --name-only "$base" HEAD -- requirements.txt requirements-ci.txt requirements-dev.txt Dockerfile | grep -q .; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Fast path: pull the prebuilt image (deps unchanged) ---
+      - name: Pull prebuilt CI image
+        if: steps.deps.outputs.build == 'false'
+        run: |
+          if docker pull "${{ steps.img.outputs.ref }}:latest"; then
+            docker tag "${{ steps.img.outputs.ref }}:latest" scaffold-orchestrator:ci
+          else
+            echo "::warning::prebuilt image not found — falling back to local build"
+            echo "BUILD_FALLBACK=1" >> "$GITHUB_ENV"
+          fi
+
+      # --- Slow path (rare): deps changed in this PR, or no prebuilt image ---
+      # §17.587 reclaim — only needed when we actually build here.
       - name: Free up runner disk space
+        if: steps.deps.outputs.build == 'true' || env.BUILD_FALLBACK == '1'
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
         with:
-          # §17.587 — ALL reclaimers on. Measured both ways: large-packages
-          # off (fast) freed too little → OOM at the reranker blob again;
-          # large-packages on freed enough (the build got past OOM). It's ~4 min
-          # slower, which is why the timeout was raised 35→50 (below) — need the
-          # disk AND the time, not one or the other.
           tool-cache: true
           android: true
           dotnet: true
@@ -117,19 +140,12 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      # buildx + GitHub Actions layer cache. The reranker snapshot_download is
-      # the last builder layer; on a warm cache (Dockerfile + requirements
-      # unchanged) the whole builder stage is a layer-cache HIT, so
-      # snapshot_download never runs and never round-trips to the HF Hub —
-      # killing the recurring 429 build flake (issue #3; the bare `docker build`
-      # did a cold HF pull on every run). The §17.423 in-Dockerfile retry stays
-      # as the fallback for the rarer cache-miss case (a requirements change
-      # invalidates the download layer). `load: true` puts the built image into
-      # the docker daemon so the next step's `docker run` finds it.
       - name: Set up Docker Buildx
+        if: steps.deps.outputs.build == 'true' || env.BUILD_FALLBACK == '1'
         uses: docker/setup-buildx-action@v3
 
-      - name: Build orchestrator image
+      - name: Build orchestrator image (deps changed / no prebuilt)
+        if: steps.deps.outputs.build == 'true' || env.BUILD_FALLBACK == '1'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -139,22 +155,11 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
 
-      # §17.534 — image vulnerability scan of the freshly-built orchestrator
-      # image. REPORT-ONLY (exit-code 0): OS/base-layer CVEs are frequently
-      # unfixed-upstream and shouldn't block a merge, but surfacing HIGH/CRITICAL
-      # here gives a standing signal for when to bump the digest-pinned base.
-      # The BLOCKING dependency gate is pip-audit in ci.yml (deps we control).
-      # ignore-unfixed keeps the report to actionable findings.
+      # §17.534 — report-only image scan. §17.587 — continue-on-error so a
+      # trivy DB-pull flake can't fail the job. §17.584 — SHA-pinned v0.36.0
+      # (action was supply-chain-compromised Mar 2026; pin to the commit).
       - name: Trivy image scan (report-only)
-        # §17.587 (#99) — report-only means the SCAN result never gates, but the
-        # ACTION can still fail the job on infra (trivy DB pull from ghcr flakes/
-        # rate-limits), which aborted the run *before* the unit tests. Make it
-        # truly non-blocking so a trivy DB hiccup can't fail Unit Tests.
         continue-on-error: true
-        # §17.584 — SHA-pinned to v0.36.0. aquasecurity/trivy-action was
-        # supply-chain-compromised in Mar 2026 (76/77 tags force-pushed to
-        # malware, CVE-2026-33634); the old `@0.28.0` tag no longer resolves.
-        # Pin to the immutable commit SHA rather than a re-pushable tag.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           image-ref: scaffold-orchestrator:ci
@@ -163,14 +168,27 @@ jobs:
           ignore-unfixed: true
           exit-code: '0'
 
-      # §17.555 — runs the unit suite AND gates app/ coverage at COVERAGE_MIN%.
-      # pytest-cov rides in via the dev build stage (requirements-dev.txt).
-      # COVERAGE_FILE under /tmp: the ci image's /code is root-owned but the
-      # container's default user differs, so coverage's CWD-relative SQLite DB
-      # is unwritable (same fix as `make coverage`). --cov-fail-under exits
-      # non-zero on a coverage drop, failing the job.
+      # §17.555 — full unit suite + app/ coverage gate at COVERAGE_MIN%.
+      # §17.588 — mount THIS PR's source over the (pulled) image so tests run
+      # against the PR's code + the image's deps. Mirrors docker-compose.dev.yml's
+      # bind-mount set; /code/.cache (baked reranker) and /opt/venv (deps) are
+      # NOT mounted over, so they come from the image. COVERAGE_FILE under /tmp
+      # (image /code is root-owned; container user differs — same as make coverage).
+      # §17.589 — pipelines/ is mounted READ-WRITE (not :ro): the pipeline valve
+      # bootstrap writes valves.json into pipelines/<name>/, and a fresh CI
+      # checkout has none (valves.json is gitignored runtime state), so it must
+      # be creatable. (Locally it passes because the dev host already has them.)
       - name: Run unit tests + coverage gate
         run: |
+          # §17.589 — the container runs as uid 1000 (scaffold) but the mounted
+          # pipelines/ dir is owned by the runner uid; make it group/other
+          # writable so the valve bootstrap can create valves.json.
+          chmod -R a+w pipelines || true
+          # §17.589 — --ignore ONLY the modules that need live services this
+          # no-services job lacks (Redis/Milvus/Ollama for execute_all_nodes);
+          # they pass locally + in the nightly full stack. Everything else runs
+          # on just Postgres, keeping coverage ~80% (the broad
+          # SCAFFOLD_CI_SMOKE_MODE excluded ~52 modules → 70%, under the gate).
           docker run --rm \
             --network host \
             -e DATABASE_URL=$DATABASE_URL \
@@ -180,9 +198,21 @@ jobs:
             -e SCAFFOLD_API_KEY=$SCAFFOLD_API_KEY \
             -e PYTHONPATH=/code:/code/sdk \
             -e COVERAGE_FILE=/tmp/.coverage \
+            -v "$PWD/app:/code/app:ro" \
+            -v "$PWD/tests:/code/tests:ro" \
+            -v "$PWD/cli:/code/cli:ro" \
+            -v "$PWD/sdk:/code/sdk:ro" \
+            -v "$PWD/scripts:/code/scripts:ro" \
+            -v "$PWD/db:/code/db:ro" \
+            -v "$PWD/pipelines:/code/pipelines" \
+            -v "$PWD/docs:/code/docs:ro" \
+            -v "$PWD/pyproject.toml:/code/pyproject.toml:ro" \
             scaffold-orchestrator:ci \
             pytest tests/ --timeout=30 -v \
               -k "not integration" \
+              --ignore=tests/test_execution_agent_sse.py \
+              --ignore=tests/test_execution_agent_concurrency.py \
+              --ignore=tests/test_sse_streaming.py \
               --cov=app --cov-branch \
               --cov-report=term-missing:skip-covered \
               --cov-fail-under=${COVERAGE_MIN}
