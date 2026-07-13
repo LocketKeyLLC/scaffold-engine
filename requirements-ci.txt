@@ -11,7 +11,7 @@ asyncpg==0.31.0
 pydantic==2.13.4
 pydantic-settings==2.14.2
 httpx==0.28.1
-pymilvus==2.5.18
+pymilvus==3.0.0
 setuptools==83.0.0  # §17.585
 json_repair==0.61.4
 requests==2.34.2
