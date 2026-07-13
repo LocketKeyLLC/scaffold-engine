@@ -15,7 +15,7 @@ pymilvus==2.5.18
 setuptools==83.0.0  # §17.585
 json_repair==0.61.4
 requests==2.34.2
-structlog==25.5.0
+structlog==26.1.0
 prometheus-client==0.25.0
 redis==7.4.0
 trafilatura==2.1.0
