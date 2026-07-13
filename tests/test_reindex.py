@@ -65,11 +65,13 @@ class _FakeCollection:
         self._pages = {d: list(p) for d, p in pages_by_domain.items()}
         self.upsert_calls: list[dict] = []
 
-    def query(self, *, expr: str, output_fields=None, limit=None):
+    def query(self, *, collection_name=None, filter: str = "", output_fields=None,
+              limit=None, **kwargs):
+        # §17.591 — MilvusClient signature (filter= replaces expr=).
         # Pull the domain out of the expression so we can return the right pages.
         domain = None
         for d in self._pages:
-            if f'domain == "{d}"' in expr:
+            if f'domain == "{d}"' in filter:
                 domain = d
                 break
         if domain is None:
@@ -79,8 +81,9 @@ class _FakeCollection:
             return []
         return bucket.pop(0)
 
-    def upsert(self, rows):
-        for row in rows:
+    def upsert(self, *, collection_name=None, data=None, **kwargs):
+        # §17.591 — MilvusClient signature (data= replaces the positional rows).
+        for row in (data or []):
             self.upsert_calls.append(row)
 
 

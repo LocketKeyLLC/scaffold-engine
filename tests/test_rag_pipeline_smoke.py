@@ -3,7 +3,7 @@
 Three small queries that exercise the orchestration in ``query_rag``
 without needing live Milvus / Ollama / cross-encoder. Mocked
 ``_embed_query``, ``_vector_search``, ``_keyword_search``, and
-``_get_collection``; rerank skipped via ``skip_rerank=True``.
+``_get_client``; rerank skipped via ``skip_rerank=True``.
 
 Designed to catch regressions to:
   - RRF fusion (overlap → boosted scores + dedup; disjoint → both surface)
@@ -42,7 +42,7 @@ def _result(entry_id: str, *, vector_score: float = 0.0,
 
 @pytest.fixture
 def fake_collection():
-    """Mock Milvus collection — only present so _get_collection() doesn't
+    """Mock Milvus collection — only present so _get_client() doesn't
     short-circuit with a 'collection_unavailable' error."""
     return MagicMock()
 
@@ -56,7 +56,7 @@ def _patch_pipeline(*, fake_collection, vector_hits: list[RagResult],
     `contextlib.ExitStack` or chain them via `with X(), Y(), Z():`.
     """
     return [
-        patch("app.modules.rag_pipeline._get_collection",
+        patch("app.modules.rag_pipeline._get_client",
               return_value=fake_collection),
         patch("app.modules.rag_pipeline._embed_query",
               new=AsyncMock(return_value=[0.1] * 512)),

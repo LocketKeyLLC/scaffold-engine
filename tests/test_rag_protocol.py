@@ -205,7 +205,7 @@ async def test_query_rag_error_path_matches_typed_shape(monkeypatch):
     fake_cache.put = AsyncMock()
 
     with patch.object(rp, "get_rag_result_cache", return_value=fake_cache), \
-         patch.object(rp, "_get_collection", return_value=None):
+         patch.object(rp, "_get_client", return_value=None):
         resp = await rp.query_rag("q", domain="eng")
     assert resp["status"] == "error"
     # The error path omits query / result_count — validator must accept that.

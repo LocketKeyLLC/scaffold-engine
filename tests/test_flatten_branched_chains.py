@@ -38,7 +38,10 @@ def _make_stateful_collection(initial_rows: list[dict]):
     collection = MagicMock()
     rows_by_eid: dict[str, dict] = {r["entry_id"]: dict(r) for r in initial_rows}
 
-    def _stateful_query(expr, output_fields=None, limit=None, offset=0, **kw):
+    def _stateful_query(*, collection_name=None, filter="", output_fields=None,
+                        limit=None, offset=0, **kw):
+        # §17.591 — MilvusClient signature (filter= replaces expr=).
+        expr = filter
         # domain-wide scan
         m_dom_only = _re.fullmatch(r'domain == "([^"]+)"', expr)
         if m_dom_only:
@@ -71,8 +74,9 @@ def _make_stateful_collection(initial_rows: list[dict]):
 
     upserted_rows: list[dict] = []
 
-    def _stateful_upsert(rows):
-        for r in rows:
+    def _stateful_upsert(*, collection_name=None, data=None, **kw):
+        # §17.591 — MilvusClient signature (data= replaces positional rows).
+        for r in (data or []):
             eid = r["entry_id"]
             upserted_rows.append(dict(r))
             # Mutate the stored row so subsequent queries see the new state.
@@ -336,11 +340,12 @@ async def test_apply_logs_upsert_failure_but_continues(caplog):
     real_upsert_side_effect = collection.upsert.side_effect
     call_count = {"n": 0}
 
-    def _failing_then_ok(rows_in):
+    def _failing_then_ok(*, collection_name=None, data=None, **kw):
+        # §17.591 — MilvusClient upsert signature (kwargs).
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("milvus transient")
-        return real_upsert_side_effect(rows_in)
+        return real_upsert_side_effect(collection_name=collection_name, data=data, **kw)
 
     collection.upsert.side_effect = _failing_then_ok
 

@@ -173,11 +173,11 @@ async def _run_one_query_decomposed(query: str, domain: str) -> dict | None:
     """
     from app.modules.rag_pipeline import (
         _embed_query, _vector_search, _keyword_search,
-        _rrf_fuse, _rerank, _get_collection,
+        _rrf_fuse, _rerank, _get_client,
     )
 
     loop = asyncio.get_running_loop()
-    collection = await loop.run_in_executor(None, _get_collection)
+    collection = await loop.run_in_executor(None, _get_client)
     if collection is None:
         return None
 

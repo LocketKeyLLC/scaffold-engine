@@ -37,11 +37,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
-from pymilvus import Collection
+from pymilvus import MilvusClient
 
 if TYPE_CHECKING:
     from app.modules._rag_protocol import IngestStatsDict, RagResponseDict
-from app.utils.milvus_utils import get_collection
+from app.utils.milvus_utils import get_client
 from app.utils.rag_result_cache import get_rag_result_cache
 from app.rerankers import rerank as cross_encoder_rerank
 
@@ -105,7 +105,9 @@ class RagResult:
     source_type: str = ""
 
 
-_get_collection = get_collection
+# §17.591 — `collection` locals below now hold a MilvusClient (see get_client);
+# the toon_v2 name is passed per-call as collection_name=COLLECTION_NAME.
+_get_client = get_client
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +275,7 @@ async def _embed_contents_batch(texts: list[str]) -> list[list[float] | None]:
 # ---------------------------------------------------------------------------
 
 async def _vector_search(
-    collection: Collection,
+    collection: "MilvusClient",
     query_embedding: list[float],
     top_k: int,
     domain: str | None = None,
@@ -301,11 +303,12 @@ async def _vector_search(
         hits: list[RagResult] = []
         try:
             search_kwargs: dict[str, Any] = dict(
+                collection_name=COLLECTION_NAME,
                 data=[query_embedding],
                 anns_field="dense_vector",
-                param={"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}},
+                search_params={"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}},
                 limit=top_k,
-                expr=f'domain == "{_escape_literal(d)}"',
+                filter=f'domain == "{_escape_literal(d)}"',
                 output_fields=[
                     "canonical_text", "title", "domain_tags", "source_url",
                     "entry_id", "domain", "confidence_score", "version",
@@ -314,7 +317,7 @@ async def _vector_search(
             )
             results = collection.search(**search_kwargs)
             for hit in results[0]:
-                entity = hit.entity
+                entity = hit["entity"]
                 tags_list = entity.get("domain_tags", [])
                 tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
                 hits.append(RagResult(
@@ -324,7 +327,7 @@ async def _vector_search(
                     source_url=entity.get("source_url", ""),
                     entry_id=entity.get("entry_id", ""),
                     domain=entity.get("domain", ""),
-                    vector_score=float(hit.score),
+                    vector_score=float(hit["distance"]),
                     version=entity.get("version", 1),
                     supersedes_id=entity.get("supersedes_id", ""),
                     confidence_score=float(entity.get("confidence_score", 0.0) or 0.0),
@@ -351,7 +354,7 @@ async def _vector_search(
 # ---------------------------------------------------------------------------
 
 async def _keyword_search(
-    collection: Collection,
+    collection: "MilvusClient",
     query: str,
     top_k: int,
     domain: str | None = None,
@@ -378,7 +381,7 @@ async def _keyword_search(
 
 
 async def _bm25_search(
-    collection: Collection,
+    collection: "MilvusClient",
     query: str,
     top_k: int,
     domain: str | None = None,
@@ -405,11 +408,12 @@ async def _bm25_search(
         hits: list[RagResult] = []
         try:
             results = collection.search(
+                collection_name=COLLECTION_NAME,
                 data=[query],
                 anns_field=BM25_SPARSE_FIELD,
-                param={"metric_type": "BM25"},
+                search_params={"metric_type": "BM25"},
                 limit=top_k,
-                expr=f'domain == "{_escape_literal(d)}"',
+                filter=f'domain == "{_escape_literal(d)}"',
                 output_fields=[
                     "canonical_text", "title", "domain_tags", "source_url",
                     "entry_id", "domain", "version", "supersedes_id",
@@ -417,7 +421,7 @@ async def _bm25_search(
                 ],
             )
             for hit in results[0]:
-                entity = hit.entity
+                entity = hit["entity"]
                 tags_list = entity.get("domain_tags", [])
                 tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
                 hits.append(RagResult(
@@ -427,7 +431,7 @@ async def _bm25_search(
                     source_url=entity.get("source_url", ""),
                     entry_id=entity.get("entry_id", ""),
                     domain=entity.get("domain", ""),
-                    keyword_score=float(hit.score),
+                    keyword_score=float(hit["distance"]),
                     version=entity.get("version", 1),
                     supersedes_id=entity.get("supersedes_id", ""),
                     confidence_score=float(entity.get("confidence_score", 0.0) or 0.0),
@@ -449,7 +453,7 @@ async def _bm25_search(
 
 
 async def _keyword_search_like(
-    collection: Collection,
+    collection: "MilvusClient",
     query: str,
     top_k: int,
     domain: str | None = None,
@@ -488,7 +492,8 @@ async def _keyword_search_like(
         expr = f'domain == "{_escape_literal(d)}" and ({keyword_expr})'
         try:
             results = collection.query(
-                expr=expr,
+                collection_name=COLLECTION_NAME,
+                filter=expr,
                 output_fields=[
                     "canonical_text", "title", "domain_tags", "source_url",
                     "entry_id", "domain", "version", "supersedes_id",
@@ -696,7 +701,7 @@ async def _rerank(
 # ---------------------------------------------------------------------------
 
 async def _lookup_superseded(
-    collection: Collection, entry_ids: list[str]
+    collection: "MilvusClient", entry_ids: list[str]
 ) -> set[str]:
     """Return the subset of entry_ids that are superseded by some other row.
 
@@ -726,7 +731,8 @@ async def _lookup_superseded(
     def _sync() -> set[str]:
         try:
             rows = collection.query(
-                expr=expr,
+                collection_name=COLLECTION_NAME,
+                filter=expr,
                 output_fields=["supersedes_id"],
                 limit=effective_limit,
             )
@@ -803,7 +809,7 @@ async def query_rag(
         return response
 
     loop = asyncio.get_running_loop()
-    collection = await loop.run_in_executor(None, _get_collection)
+    collection = await loop.run_in_executor(None, _get_client)
     if collection is None:
         return {
             "status": "error",
@@ -1058,7 +1064,7 @@ async def _predecessor_lock(predecessor_eid: str):
 
 
 async def _walk_to_latest_version(
-    collection: Collection,
+    collection: "MilvusClient",
     entry_id: str,
     version: int,
     safe_domain: str,
@@ -1074,7 +1080,8 @@ async def _walk_to_latest_version(
         def _sync(eid=safe_eid) -> list[dict]:
             try:
                 return collection.query(
-                    expr=f'supersedes_id == "{eid}" and domain == "{safe_domain}"',
+                    collection_name=COLLECTION_NAME,
+                    filter=f'supersedes_id == "{eid}" and domain == "{safe_domain}"',
                     output_fields=["entry_id", "version"],
                     limit=1,
                 )
@@ -1113,7 +1120,7 @@ async def ingest_entries(
         raise ValueError('domain="" is not allowed for ingest')
 
     loop = asyncio.get_running_loop()
-    collection = await loop.run_in_executor(None, _get_collection)
+    collection = await loop.run_in_executor(None, _get_client)
     if collection is None:
         logger.error("ingest_entries: collection not available")
         return stats
@@ -1159,7 +1166,8 @@ async def ingest_entries(
             existing = await loop.run_in_executor(
                 None,
                 lambda h=ch: collection.query(
-                    expr=f'content_hash == "{h}" and domain == "{safe_domain}"',
+                    collection_name=COLLECTION_NAME,
+                    filter=f'content_hash == "{h}" and domain == "{safe_domain}"',
                     output_fields=["entry_id"],
                     limit=1,
                 ),
@@ -1210,17 +1218,18 @@ async def ingest_entries(
             sim_results = await loop.run_in_executor(
                 None,
                 lambda v=vector: collection.search(
+                    collection_name=COLLECTION_NAME,
                     data=[v],
                     anns_field="dense_vector",
-                    param={"metric_type": "COSINE", "params": {"ef": 32}},
+                    search_params={"metric_type": "COSINE", "params": {"ef": 32}},
                     limit=5,
-                    expr=f'domain == "{safe_domain}"',
+                    filter=f'domain == "{safe_domain}"',
                     output_fields=["entry_id", "content_hash", "version", "supersedes_id"],
                 ),
             )
             if sim_results and sim_results[0]:
                 top_hit = sim_results[0][0]
-                sim_score = float(top_hit.score)
+                sim_score = float(top_hit["distance"])
 
                 if sim_score >= dedup_threshold:
                     # The Pass 1 exact-hash filter (search above for
@@ -1232,7 +1241,7 @@ async def ingest_entries(
                     # unconditionally here so the racing duplicate doesn't slip
                     # into the version-chain branch. §17.265 — replaced the
                     # pre-§17.265 "L738-750" line reference; line numbers rot.
-                    existing_eid = top_hit.entity.get("entry_id", str(top_hit.id))
+                    existing_eid = top_hit["entity"].get("entry_id", str(top_hit["id"]))
                     logger.info(
                         "dedup_rejected: sim=%.4f title='%s' existing='%s'",
                         sim_score, p["title"][:50], existing_eid,
@@ -1252,8 +1261,8 @@ async def ingest_entries(
                     # the chain stays LINEAR instead of branching.
                     # `continue` at the end of the lock block skips the
                     # common upsert path below; new-entry path falls through.
-                    candidate_eid = top_hit.entity.get("entry_id", str(top_hit.id))
-                    candidate_version = int(top_hit.entity.get("version", 1))
+                    candidate_eid = top_hit["entity"].get("entry_id", str(top_hit["id"]))
+                    candidate_version = int(top_hit["entity"].get("version", 1))
                     version_sim_score = sim_score
                     async with _predecessor_lock(candidate_eid):
                         # Authoritative walk happens HERE, inside the lock.
@@ -1291,7 +1300,7 @@ async def ingest_entries(
                         }]
                         try:
                             await loop.run_in_executor(
-                                None, lambda r=row: collection.upsert(r)
+                                None, lambda r=row: collection.upsert(collection_name=COLLECTION_NAME, data=r)
                             )
                             stats["versioned"] += 1
                             # §17.172 — dedup_log 'versioned' append happens
@@ -1338,7 +1347,7 @@ async def ingest_entries(
 
         try:
             await loop.run_in_executor(
-                None, lambda r=row: collection.upsert(r)
+                None, lambda r=row: collection.upsert(collection_name=COLLECTION_NAME, data=r)
             )
             stats["new"] += 1
             if p["provenance"] or p["raw_upstream_hash"]:
@@ -1348,7 +1357,7 @@ async def ingest_entries(
 
     inserted = stats["new"] + stats["versioned"]
     if inserted > 0:
-        await loop.run_in_executor(None, collection.flush)
+        await loop.run_in_executor(None, lambda: collection.flush(collection_name=COLLECTION_NAME))
         logger.info(
             "ingested %d (new=%d versioned=%d rejected=%d hash_skipped=%d) into toon_v2",
             inserted, stats["new"], stats["versioned"], stats["rejected"], stats["skipped_hash"],

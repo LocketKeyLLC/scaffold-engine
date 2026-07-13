@@ -10,11 +10,11 @@ import logging
 import re
 
 from fastapi import HTTPException
-from pymilvus import Collection
+from pymilvus import MilvusClient
 
 from app.config import settings, VALID_DOMAINS
 from app.utils.embedding import embed_query
-from app.utils.milvus_utils import get_collection
+from app.utils.milvus_utils import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +73,9 @@ def validate_domain(s: str | None) -> str | None:
     return s
 
 
-def _get_collection() -> Collection:
-    """Connect to Milvus and return the collection handle."""
-    return get_collection(raise_on_missing=True)  # type: ignore[return-value]
+def _get_client() -> "MilvusClient":
+    """Connect to Milvus and return the shared client (§17.591)."""
+    return get_client(raise_on_missing=True)  # type: ignore[return-value]
 
 
 def _domain_expr_clause(d: str) -> str:
@@ -109,7 +109,7 @@ def _join_expr(*parts: str) -> str:
 
 def _count_entries(col) -> int:
     """Accurate row count via count(*) query (vs col.num_entities which lags flush)."""
-    res = col.query(expr="", output_fields=["count(*)"])
+    res = col.query(collection_name=COLLECTION_NAME, filter="", output_fields=["count(*)"])
     if res and isinstance(res, list):
         return int(res[0].get("count(*)", 0))
     return 0
@@ -131,7 +131,7 @@ async def gt_list(
 
     @_milvus_safe
     def _sync() -> dict:
-        col = _get_collection()
+        col = _get_client()
         offset = (page - 1) * per_page
         total = _count_entries(col)
 
@@ -142,7 +142,8 @@ async def gt_list(
         )
 
         results = col.query(
-            expr=expr,
+            collection_name=COLLECTION_NAME,
+            filter=expr,
             output_fields=OUTPUT_FIELDS,
             limit=per_page,
             offset=offset,
@@ -198,7 +199,7 @@ async def gt_search(
 
     @_milvus_safe
     def _sync() -> dict:
-        col = _get_collection()
+        col = _get_client()
         search_params = {"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}}
         merged: dict[str, dict] = {}
         for d in domains_to_search:
@@ -207,18 +208,19 @@ async def gt_search(
                 _supersede_clause(include_history),
             )
             results = col.search(
+                collection_name=COLLECTION_NAME,
                 data=[vector],
                 anns_field="dense_vector",
-                param=search_params,
+                search_params=search_params,
                 limit=top_k,
                 output_fields=OUTPUT_FIELDS,
-                expr=expr,
+                filter=expr,
             )
             for hits in results:
                 for hit in hits:
-                    entity = hit.entity
+                    entity = hit["entity"]
                     eid = entity.get("entry_id", "")
-                    score = round(hit.score, 4)
+                    score = round(hit["distance"], 4)
                     if eid in merged and merged[eid]["score"] >= score:
                         continue
                     tags_list = entity.get("domain_tags", [])
@@ -256,9 +258,10 @@ async def gt_detail(entry_id: str) -> dict:
 
     @_milvus_safe
     def _sync() -> dict:
-        col = _get_collection()
+        col = _get_client()
         results = col.query(
-            expr=f'entry_id == "{entry_id}"',
+            collection_name=COLLECTION_NAME,
+            filter=f'entry_id == "{entry_id}"',
             output_fields=OUTPUT_FIELDS,
         )
 
@@ -297,7 +300,7 @@ async def gt_stats() -> dict:
     """
     @_milvus_safe
     def _sync() -> dict:
-        col = _get_collection()
+        col = _get_client()
         total = _count_entries(col)
         limit = settings.gt_stats_scan_limit
 
@@ -321,7 +324,8 @@ async def gt_stats() -> dict:
                 break
 
             page = col.query(
-                expr="entry_id != ''",
+                collection_name=COLLECTION_NAME,
+                filter="entry_id != ''",
                 output_fields=["title", "domain", "domain_tags", "source_type"],
                 limit=limit,
                 offset=offset,

@@ -6,8 +6,7 @@ import threading
 import time
 
 from pymilvus import (
-    Collection, MilvusClient, DataType, Function, FunctionType,
-    connections, utility,
+    MilvusClient, DataType, Function, FunctionType,
 )
 
 from app.config import settings
@@ -24,14 +23,19 @@ BM25_FUNCTION_NAME = "bm25_canonical_text"
 
 
 # ---------------------------------------------------------------------------
-# get_collection() cache (#40, #41)
-# Liveness/has_collection/load RPCs are redundant after first success.
-# Cache handle for CACHE_TTL seconds, invalidate on any error.
+# get_client() cache (#40, #41)
+# has_collection/load RPCs are redundant after first success.
+# Cache the MilvusClient for CACHE_TTL seconds, invalidate on any error.
 # Double-checked locking prevents thundering herd on cold load.
+#
+# §17.591 — migrated off the deprecated ORM API (connections/utility/
+# Collection, removed in PyMilvus 3.1) to the MilvusClient API. The client is
+# itself the connection handle, so the cache holds one shared client (the ORM
+# path shared a "default" connection alias + a cached Collection; same shape).
 # ---------------------------------------------------------------------------
 _CACHE_TTL_S = 30.0
-_cached_collection: "Collection | None" = None
-_cached_at: float = 0.0
+_cached_client: "MilvusClient | None" = None
+_verified_at: float = 0.0
 _cache_lock = threading.Lock()
 
 
@@ -46,15 +50,31 @@ def escape_milvus_literal(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _close_client(client: "MilvusClient | None") -> None:
+    """Best-effort close of a MilvusClient (releases its gRPC channel)."""
+    if client is None:
+        return
+    try:
+        client.close()
+    except Exception as e:
+        logger.debug("MilvusClient.close() failed: %s", e)
+
+
+def close_client() -> None:
+    """Drop + close the cached MilvusClient. Called at lifespan shutdown."""
+    global _cached_client, _verified_at
+    with _cache_lock:
+        _close_client(_cached_client)
+        _cached_client = None
+        _verified_at = 0.0
+
+
 def _invalidate_cache() -> None:
-    """Drop cached Collection so next get_collection() re-verifies.
+    """Drop cached client so next get_client() re-verifies.
 
     Caller MUST NOT hold _cache_lock (threading.Lock is non-reentrant).
     """
-    global _cached_collection, _cached_at
-    with _cache_lock:
-        _cached_collection = None
-        _cached_at = 0.0
+    close_client()
 
 
 def _bm25_default(bm25: bool | None) -> bool:
@@ -139,7 +159,7 @@ def build_toon_v2_index_params(client: MilvusClient, *, bm25: bool | None = None
     return index_params
 
 
-def collection_has_bm25(col: "Collection") -> bool:
+def collection_has_bm25(client: "MilvusClient") -> bool:
     """§17.431 — True if the live collection carries the BM25 sparse field.
 
     Used by the keyword-search dispatcher to fall back to the LIKE path when
@@ -147,7 +167,8 @@ def collection_has_bm25(col: "Collection") -> bool:
     flipping rag_bm25_enabled before running the migration can't break search).
     """
     try:
-        return any(f.name == BM25_SPARSE_FIELD for f in col.schema.fields)
+        desc = client.describe_collection(COLLECTION_NAME)
+        return any(f.get("name") == BM25_SPARSE_FIELD for f in desc.get("fields", []))
     except Exception:
         return False
 
@@ -174,58 +195,66 @@ def _auto_create_collection() -> None:
             logger.debug("MilvusClient.close() failed: %s", e)
 
 
-def _assert_schema_invariants(col: Collection) -> None:
+def _assert_schema_invariants(client: "MilvusClient") -> None:
     """Verify dim and primary key invariants on cold load. Raises on mismatch."""
-    schema = col.schema
-    primaries = [f.name for f in schema.fields if getattr(f, "is_primary", False)]
+    desc = client.describe_collection(COLLECTION_NAME)
+    fields = desc.get("fields", [])
+    primaries = [
+        f.get("name") for f in fields
+        if f.get("is_primary") or f.get("is_primary_key")
+    ]
     if primaries != [PRIMARY_FIELD]:
         raise RuntimeError(
             f"schema invariant violated: expected primary={PRIMARY_FIELD!r}, got {primaries}"
         )
-    vec = next((f for f in schema.fields if f.name == VECTOR_FIELD), None)
+    vec = next((f for f in fields if f.get("name") == VECTOR_FIELD), None)
     if vec is None:
         raise RuntimeError(
             f"schema invariant violated: missing field {VECTOR_FIELD!r}"
         )
-    dim = (vec.params or {}).get("dim")
+    raw_dim = (vec.get("params") or {}).get("dim")
+    dim = int(raw_dim) if raw_dim is not None else None
     if dim != DIM:
         raise RuntimeError(
             f"schema invariant violated: expected {VECTOR_FIELD} dim={DIM}, got {dim}"
         )
 
 
-def get_collection(*, raise_on_missing: bool = False) -> Collection | None:
-    """Get the toon_v2 Milvus collection, auto-creating if missing.
+def get_client(*, raise_on_missing: bool = False) -> "MilvusClient | None":
+    """Get a live MilvusClient for toon_v2, auto-creating the collection if missing.
 
     Uses double-checked locking so only one thread performs the cold load
-    while others wait on the lock and then pick up the cached handle.
+    (has_collection + load) while others wait on the lock and then pick up the
+    cached, verified client.
 
     ⚠️  With ``raise_on_missing=False`` (default), callers MUST check for
     ``None`` before use.
+
+    §17.591 — replaces the ORM-era ``get_collection()``; returns a MilvusClient
+    keyed to ``COLLECTION_NAME`` rather than a bound ``Collection`` handle.
     """
-    global _cached_collection, _cached_at
+    global _cached_client, _verified_at
 
     # Fast path — lock-free cache read
-    cached = _cached_collection
-    cached_at = _cached_at
-    if cached is not None and (time.monotonic() - cached_at) < _CACHE_TTL_S:
+    cached = _cached_client
+    verified_at = _verified_at
+    if cached is not None and (time.monotonic() - verified_at) < _CACHE_TTL_S:
         return cached
 
     # Slow path — serialize to prevent thundering herd on cold load
     with _cache_lock:
         # Double-check: another thread may have populated the cache while we waited
-        if _cached_collection is not None and (time.monotonic() - _cached_at) < _CACHE_TTL_S:
-            return _cached_collection
+        if _cached_client is not None and (time.monotonic() - _verified_at) < _CACHE_TTL_S:
+            return _cached_client
 
+        client = _cached_client
         try:
-            # Ensure connection
-            try:
-                utility.list_collections()
-            except Exception:
-                connections.connect(alias="default", uri=settings.milvus_uri)
+            # The client IS the connection; construct once, reuse across refreshes.
+            if client is None:
+                client = MilvusClient(settings.milvus_uri)
 
             # Auto-create if missing
-            if not utility.has_collection(COLLECTION_NAME):
+            if not client.has_collection(COLLECTION_NAME):
                 logger.warning(
                     "Collection '%s' not found — attempting auto-create",
                     COLLECTION_NAME,
@@ -233,33 +262,34 @@ def get_collection(*, raise_on_missing: bool = False) -> Collection | None:
                 _auto_create_collection()
 
             # Final presence check
-            if not utility.has_collection(COLLECTION_NAME):
+            if not client.has_collection(COLLECTION_NAME):
                 msg = f"Collection '{COLLECTION_NAME}' not found and auto-creation failed"
-                _cached_collection = None
-                _cached_at = 0.0
+                _close_client(client)
+                _cached_client = None
+                _verified_at = 0.0
                 if raise_on_missing:
                     raise RuntimeError(msg)
                 logger.error(msg)
                 return None
 
-            col = Collection(COLLECTION_NAME)
-
             # Cold-load schema invariant check (dim==512, primary=='entry_id')
-            _assert_schema_invariants(col)
+            _assert_schema_invariants(client)
 
-            col.load()
+            client.load_collection(COLLECTION_NAME)
 
-            _cached_collection = col
-            _cached_at = time.monotonic()
-            return col
+            _cached_client = client
+            _verified_at = time.monotonic()
+            return client
         except RuntimeError:
-            _cached_collection = None
-            _cached_at = 0.0
+            _close_client(client)
+            _cached_client = None
+            _verified_at = 0.0
             raise
         except Exception as e:
-            _cached_collection = None
-            _cached_at = 0.0
-            msg = f"Failed to get Milvus collection: {e}"
+            _close_client(client)
+            _cached_client = None
+            _verified_at = 0.0
+            msg = f"Failed to get Milvus client: {e}"
             if raise_on_missing:
                 raise RuntimeError(msg) from e
             logger.error(msg)

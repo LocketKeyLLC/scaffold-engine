@@ -23,21 +23,23 @@ def get_collection_entry_count(name: str = "toon_v2") -> int:
     "collection empty" — the test should skip rather than fail.
     """
     try:
-        from pymilvus import Collection, connections, utility
+        from pymilvus import MilvusClient
 
         from app.config import settings
 
+        # §17.591 — MilvusClient API (ORM connections/utility/Collection
+        # removed in PyMilvus 3.1). The client is its own connection handle.
+        client = MilvusClient(settings.milvus_uri)
         try:
-            connections.connect(alias="default", uri=settings.milvus_uri)
-        except Exception:
-            # Idempotent if already connected; if connect fails outright,
-            # the list_collections() call below will raise and we land in
-            # the broad except.
-            pass
-
-        if name not in utility.list_collections():
-            return 0
-        return Collection(name).num_entities
+            if name not in client.list_collections():
+                return 0
+            stats = client.get_collection_stats(name)
+            return int(stats.get("row_count", 0))
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
     except Exception:
         return 0
 
