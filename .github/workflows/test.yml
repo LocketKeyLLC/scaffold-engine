@@ -142,7 +142,7 @@ jobs:
 
       - name: Set up Docker Buildx
         if: steps.deps.outputs.build == 'true' || env.BUILD_FALLBACK == '1'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build orchestrator image (deps changed / no prebuilt)
         if: steps.deps.outputs.build == 'true' || env.BUILD_FALLBACK == '1'
