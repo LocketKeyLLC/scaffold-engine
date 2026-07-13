@@ -30,7 +30,7 @@ class TestGtDetail404:
     async def test_missing_entry_raises_404(self):
         fake_col = MagicMock()
         fake_col.query.return_value = []
-        with patch.object(gt_browser, "_get_collection", return_value=fake_col):
+        with patch.object(gt_browser, "_get_client", return_value=fake_col):
             with pytest.raises(HTTPException) as exc:
                 await gt_browser.gt_detail("nonexistent-id")
         assert exc.value.status_code == 404
@@ -45,7 +45,7 @@ class TestGtDetail404:
             "source_url": "", "confidence_score": 0.9,
             "source_type": "tech_docs", "supersedes_id": "",
         }]
-        with patch.object(gt_browser, "_get_collection", return_value=fake_col):
+        with patch.object(gt_browser, "_get_client", return_value=fake_col):
             result = await gt_browser.gt_detail("e1")
         assert result["found"] is True
         assert result["entry_id"] == "e1"
@@ -58,9 +58,9 @@ class TestSupersedeFilter:
         fake_col = MagicMock()
         fake_col.num_entities = 2
         fake_col.query.return_value = []
-        with patch.object(gt_browser, "_get_collection", return_value=fake_col):
+        with patch.object(gt_browser, "_get_client", return_value=fake_col):
             await gt_browser.gt_list(page=1, per_page=20)
-        expr = fake_col.query.call_args.kwargs["expr"]
+        expr = fake_col.query.call_args.kwargs["filter"]
         assert 'supersedes_id == ""' in expr
 
     @pytest.mark.asyncio
@@ -68,19 +68,19 @@ class TestSupersedeFilter:
         fake_col = MagicMock()
         fake_col.num_entities = 2
         fake_col.query.return_value = []
-        with patch.object(gt_browser, "_get_collection", return_value=fake_col):
+        with patch.object(gt_browser, "_get_client", return_value=fake_col):
             await gt_browser.gt_list(page=1, per_page=20, include_history=True)
-        expr = fake_col.query.call_args.kwargs["expr"]
+        expr = fake_col.query.call_args.kwargs["filter"]
         assert "supersedes_id" not in expr
 
     @pytest.mark.asyncio
     async def test_gt_search_default_hides_superseded(self):
         fake_col = MagicMock()
         fake_col.search.return_value = [[]]
-        with patch.object(gt_browser, "_get_collection", return_value=fake_col), \
+        with patch.object(gt_browser, "_get_client", return_value=fake_col), \
              patch.object(gt_browser, "embed_query", AsyncMock(return_value=[0.1] * 512)):
             await gt_browser.gt_search(query="x", top_k=5)
-        expr = fake_col.search.call_args.kwargs["expr"]
+        expr = fake_col.search.call_args.kwargs["filter"]
         assert expr is not None and 'supersedes_id == ""' in expr
 
 
@@ -94,7 +94,7 @@ class TestStatsTruncation:
             for i in range(16384)
         ]
         fake_col.query.return_value = page
-        with patch.object(gt_browser, "_get_collection", return_value=fake_col), \
+        with patch.object(gt_browser, "_get_client", return_value=fake_col), \
              patch.object(gt_browser, "_count_entries", return_value=500_000), \
              patch.object(gt_browser.settings, "gt_stats_scan_limit", 16384):
             result = await gt_browser.gt_stats()
@@ -108,7 +108,7 @@ class TestStatsTruncation:
         fake_col.query.return_value = [
             {"title": "t", "domain": "rag", "domain_tags": ["x"], "source_type": "tech_docs"}
         ] * 100
-        with patch.object(gt_browser, "_get_collection", return_value=fake_col), \
+        with patch.object(gt_browser, "_get_client", return_value=fake_col), \
              patch.object(gt_browser, "_count_entries", return_value=100):
             result = await gt_browser.gt_stats()
         assert result["truncated"] is False

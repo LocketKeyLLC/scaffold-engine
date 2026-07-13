@@ -55,7 +55,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.sim.device_sizing import DEFAULT_TOLERANCE_PCT, _is_measurable_kind
-from app.utils.milvus_utils import escape_milvus_literal, get_collection
+from app.utils.milvus_utils import escape_milvus_literal, get_client
 
 logger = logging.getLogger("scaffold")
 
@@ -330,15 +330,16 @@ async def _fetch_chunk_content(
         return {}
     try:
         loop = asyncio.get_running_loop()
-        collection = await loop.run_in_executor(None, get_collection)
-        if collection is None:
+        client = await loop.run_in_executor(None, get_client)
+        if client is None:
             return {}
         quoted = [f'"{escape_milvus_literal(e)}"' for e in entry_ids]
         expr = f"entry_id in [{', '.join(quoted)}]"
 
         def _sync():
-            return collection.query(
-                expr=expr,
+            return client.query(
+                collection_name="toon_v2",
+                filter=expr,
                 output_fields=["entry_id", "title", "canonical_text", "source_url"],
                 limit=max(1, len(entry_ids) * 2),
             )

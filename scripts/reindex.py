@@ -53,7 +53,7 @@ from typing import Any
 from app import model_router  # noqa: E402
 from app.config import VALID_DOMAINS, settings  # noqa: E402
 from app.utils.embedding_cache import truncate_and_normalize  # noqa: E402
-from app.utils.milvus_utils import COLLECTION_NAME, get_collection  # noqa: E402
+from app.utils.milvus_utils import COLLECTION_NAME, get_client  # noqa: E402
 
 logger = logging.getLogger("scaffold.reindex")
 
@@ -125,7 +125,8 @@ async def reindex_partition(
             expr = f'{expr} and entry_id > "{cursor}"'
 
         page = collection.query(
-            expr=expr,
+            collection_name=COLLECTION_NAME,
+            filter=expr,
             output_fields=list(_PRESERVED_FIELDS),
             limit=batch_size,
         )
@@ -212,7 +213,10 @@ def _default_upsert_fn(collection):
     loop = asyncio.get_event_loop()
 
     async def _upsert(row: dict) -> None:
-        await loop.run_in_executor(None, lambda: collection.upsert([row]))
+        await loop.run_in_executor(
+            None,
+            lambda: collection.upsert(collection_name=COLLECTION_NAME, data=[row]),
+        )
     return _upsert
 
 
@@ -245,10 +249,10 @@ async def reindex_all(
 
     Returns ``{domain: stats}`` for the caller to render. ``collection`` is
     injectable for testing; production passes ``None`` and we resolve via
-    ``get_collection``.
+    ``get_client``.
     """
     if collection is None:
-        collection = get_collection(raise_on_missing=True)
+        collection = get_client(raise_on_missing=True)
 
     targets = [domain] if domain else sorted(VALID_DOMAINS)
     now_ms = int(time.time() * 1000)

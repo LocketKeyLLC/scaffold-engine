@@ -26,7 +26,10 @@ from app.schemas import (
     ConfigResponse,
     HealthCheckResponse,
 )
-from pymilvus import connections as milvus_connections, utility, Collection
+from app.utils.milvus_utils import (
+    get_client as get_milvus_client,
+    close_client as close_milvus_client,
+)
 from sqlalchemy import text
 from app.model_router import close_client
 
@@ -259,19 +262,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("ollama_connection_failed: url=%s error=%s", settings.ollama_base_url, e)
 
-    # Verify Milvus — PyMilvus is sync; wrap so the event loop is not
-    # blocked during the (potentially slow) initial connect handshake.
-    # asyncio.wait_for caps the await; the underlying thread may still
-    # be running after timeout but that's acceptable for a one-shot
-    # lifespan call (orchestrator is starting up — a zombie thread is
-    # harmless until process exit).
+    # Verify Milvus — MilvusClient construction + collection load is sync
+    # (§17.591); wrap so the event loop is not blocked during the
+    # (potentially slow) initial connect handshake. asyncio.wait_for caps
+    # the await; the underlying thread may still be running after timeout
+    # but that's acceptable for a one-shot lifespan call (orchestrator is
+    # starting up — a zombie thread is harmless until process exit).
+    # get_milvus_client() warms + caches the shared client so the first
+    # real request doesn't pay the cold-load cost.
     try:
         loop = asyncio.get_running_loop()
         await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: milvus_connections.connect(alias="default", uri=settings.milvus_uri),
-            ),
+            loop.run_in_executor(None, get_milvus_client),
             timeout=_STARTUP_PROBE_TIMEOUT_S,
         )
         logger.info("milvus_connected: uri=%s", settings.milvus_uri)
@@ -475,13 +477,11 @@ async def lifespan(app: FastAPI):
     await close_client()
     from app.utils.http_clients import close_clients
     await close_clients()
-    # PyMilvus disconnect is sync; wrap on the same async-first principle
-    # as the startup connect above.
+    # MilvusClient.close() is sync; wrap on the same async-first principle
+    # as the startup connect above (§17.591).
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, lambda: milvus_connections.disconnect("default"),
-        )
+        await loop.run_in_executor(None, close_milvus_client)
     except Exception as exc:
         logger.warning('event="milvus_disconnect_failed" error=%s', exc)
     try:
@@ -666,11 +666,14 @@ async def health():
         try:
             loop = asyncio.get_running_loop()
             def _sync():
-                colls = utility.list_collections()
+                client = get_milvus_client()
+                if client is None:
+                    return 0, 0
+                colls = client.list_collections()
                 entry_count = 0
                 if "toon_v2" in colls:
-                    col = Collection("toon_v2")
-                    entry_count = col.num_entities
+                    stats = client.get_collection_stats("toon_v2")
+                    entry_count = int(stats.get("row_count", 0))
                 return len(colls), entry_count
             coll_count, entries = await asyncio.wait_for(
                 loop.run_in_executor(None, _sync), timeout=5.0

@@ -57,15 +57,20 @@ def _milvus_collection_fields() -> set[str] | None:
     failure propagates as a test failure: masking those would re-create
     the §17.319 silent-failure mode this whole file exists to prevent.
     """
-    from pymilvus import Collection, connections
+    # §17.591 — MilvusClient API (ORM connections/Collection removed in 3.1).
+    from pymilvus import MilvusClient
     try:
-        connections.connect(alias="schema_parity_probe", uri=settings.milvus_uri)
+        client = MilvusClient(settings.milvus_uri)
     except Exception:
         return None
     try:
-        return {f.name for f in Collection("toon_v2", using="schema_parity_probe").schema.fields}
+        desc = client.describe_collection("toon_v2")
+        return {f.get("name") for f in desc.get("fields", [])}
     finally:
-        connections.disconnect("schema_parity_probe")
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 def _scan_output_fields_literals() -> list[tuple[Path, int, str]]:

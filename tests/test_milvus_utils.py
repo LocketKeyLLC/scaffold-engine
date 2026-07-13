@@ -58,101 +58,91 @@ def test_build_toon_v2_index_params_includes_hnsw_and_scalar_indexes():
 # ---------------------------------------------------------------------------
 # Schema invariant assertion (new)
 # ---------------------------------------------------------------------------
-def _fake_col_with_schema(dim: int = 512, primary: str = "entry_id", vec_field: str = "dense_vector"):
-    """Build a MagicMock collection whose .schema.fields survives _assert_schema_invariants."""
-    primary_field = MagicMock(name=primary, params={})
-    primary_field.name = primary
-    primary_field.is_primary = True
-    vec = MagicMock(name=vec_field, params={"dim": dim})
-    vec.name = vec_field
-    vec.is_primary = False
-    col = MagicMock(name="Collection")
-    col.schema.fields = [primary_field, vec]
-    return col
+def _fake_client_with_schema(dim: int = 512, primary: str = "entry_id", vec_field: str = "dense_vector"):
+    """Build a MagicMock MilvusClient whose describe_collection() survives
+    _assert_schema_invariants (§17.591 — MilvusClient describe_collection dict)."""
+    client = MagicMock(name="MilvusClient")
+    client.describe_collection.return_value = {
+        "fields": [
+            {"name": primary, "is_primary": True, "params": {}},
+            {"name": vec_field, "is_primary": False, "params": {"dim": dim}},
+        ]
+    }
+    return client
 
 
 @pytest.mark.smoke
 def test_assert_schema_invariants_passes_on_valid_schema():
-    col = _fake_col_with_schema(dim=512, primary="entry_id")
-    milvus_utils._assert_schema_invariants(col)  # should not raise
+    client = _fake_client_with_schema(dim=512, primary="entry_id")
+    milvus_utils._assert_schema_invariants(client)  # should not raise
 
 
 @pytest.mark.smoke
 def test_assert_schema_invariants_raises_on_wrong_dim():
-    col = _fake_col_with_schema(dim=768)
+    client = _fake_client_with_schema(dim=768)
     with pytest.raises(RuntimeError, match="dim"):
-        milvus_utils._assert_schema_invariants(col)
+        milvus_utils._assert_schema_invariants(client)
 
 
 @pytest.mark.smoke
 def test_assert_schema_invariants_raises_on_wrong_primary():
-    col = _fake_col_with_schema(primary="id")
+    client = _fake_client_with_schema(primary="id")
     with pytest.raises(RuntimeError, match="primary"):
-        milvus_utils._assert_schema_invariants(col)
+        milvus_utils._assert_schema_invariants(client)
 
 
 @pytest.mark.smoke
 def test_assert_schema_invariants_raises_on_missing_vector_field():
-    # Build a schema with only a primary field and no dense_vector
-    primary = MagicMock()
-    primary.name = "entry_id"
-    primary.is_primary = True
-    col = MagicMock()
-    col.schema.fields = [primary]
+    # describe_collection with only a primary field and no dense_vector
+    client = MagicMock()
+    client.describe_collection.return_value = {
+        "fields": [{"name": "entry_id", "is_primary": True, "params": {}}]
+    }
     with pytest.raises(RuntimeError, match="dense_vector"):
-        milvus_utils._assert_schema_invariants(col)
+        milvus_utils._assert_schema_invariants(client)
 
 
 # ---------------------------------------------------------------------------
-# get_collection cache behaviour (#40, #41)
+# get_client cache behaviour (#40, #41; §17.591)
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
-def test_get_collection_returns_cached_handle_on_second_call(_bypass_schema_assert):
-    fake_col = MagicMock(name="Collection")
-    with patch.object(milvus_utils, "utility") as util, \
-         patch.object(milvus_utils, "Collection", return_value=fake_col):
-        util.list_collections.return_value = ["toon_v2"]
-        util.has_collection.return_value = True
+def test_get_client_returns_cached_handle_on_second_call(_bypass_schema_assert):
+    fake_client = MagicMock(name="MilvusClient")
+    fake_client.has_collection.return_value = True
+    with patch.object(milvus_utils, "MilvusClient", return_value=fake_client):
+        first = milvus_utils.get_client()
+        second = milvus_utils.get_client()
 
-        first = milvus_utils.get_collection()
-        second = milvus_utils.get_collection()
-
-    assert first is second is fake_col
+    assert first is second is fake_client
     # First call: 2x has_collection (missing-check + post-auto-create verify) + 1x load.
     # Second call: cache hit, no extra RPCs.
-    assert util.has_collection.call_count == 2
-    assert fake_col.load.call_count == 1
+    assert fake_client.has_collection.call_count == 2
+    assert fake_client.load_collection.call_count == 1
 
 
 @pytest.mark.smoke
-def test_get_collection_cache_expires_after_ttl(_bypass_schema_assert):
-    fake_col = MagicMock(name="Collection")
-    with patch.object(milvus_utils, "utility") as util, \
-         patch.object(milvus_utils, "Collection", return_value=fake_col), \
+def test_get_client_cache_expires_after_ttl(_bypass_schema_assert):
+    fake_client = MagicMock(name="MilvusClient")
+    fake_client.has_collection.return_value = True
+    with patch.object(milvus_utils, "MilvusClient", return_value=fake_client), \
          patch.object(milvus_utils, "_CACHE_TTL_S", 0.0):  # expire immediately
-        util.list_collections.return_value = ["toon_v2"]
-        util.has_collection.return_value = True
-
-        milvus_utils.get_collection()
+        milvus_utils.get_client()
         time.sleep(0.01)
-        milvus_utils.get_collection()
+        milvus_utils.get_client()
 
-    assert util.has_collection.call_count == 4
+    assert fake_client.has_collection.call_count == 4
 
 
 @pytest.mark.smoke
 def test_invalidate_cache_forces_reverify(_bypass_schema_assert):
-    fake_col = MagicMock(name="Collection")
-    with patch.object(milvus_utils, "utility") as util, \
-         patch.object(milvus_utils, "Collection", return_value=fake_col):
-        util.list_collections.return_value = ["toon_v2"]
-        util.has_collection.return_value = True
-
-        milvus_utils.get_collection()
+    fake_client = MagicMock(name="MilvusClient")
+    fake_client.has_collection.return_value = True
+    with patch.object(milvus_utils, "MilvusClient", return_value=fake_client):
+        milvus_utils.get_client()
         milvus_utils._invalidate_cache()
-        milvus_utils.get_collection()
+        milvus_utils.get_client()
 
-    assert util.has_collection.call_count == 4
+    assert fake_client.has_collection.call_count == 4
 
 
 # ---------------------------------------------------------------------------
@@ -160,18 +150,15 @@ def test_invalidate_cache_forces_reverify(_bypass_schema_assert):
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
 def test_double_checked_locking_prevents_thundering_herd(_bypass_schema_assert):
-    fake_col = MagicMock(name="Collection")
+    fake_client = MagicMock(name="MilvusClient")
+    fake_client.has_collection.return_value = True
     barrier = threading.Barrier(4)
     results = []
 
-    with patch.object(milvus_utils, "utility") as util, \
-         patch.object(milvus_utils, "Collection", return_value=fake_col):
-        util.list_collections.return_value = ["toon_v2"]
-        util.has_collection.return_value = True
-
+    with patch.object(milvus_utils, "MilvusClient", return_value=fake_client):
         def worker():
             barrier.wait()
-            results.append(milvus_utils.get_collection())
+            results.append(milvus_utils.get_client())
 
         threads = [threading.Thread(target=worker) for _ in range(4)]
         for t in threads:
@@ -180,47 +167,41 @@ def test_double_checked_locking_prevents_thundering_herd(_bypass_schema_assert):
             t.join(timeout=5.0)
 
     assert len(results) == 4
-    assert all(r is fake_col for r in results)
+    assert all(r is fake_client for r in results)
     # Only one cold load should have happened even with 4 concurrent callers.
-    assert fake_col.load.call_count == 1
+    assert fake_client.load_collection.call_count == 1
 
 
 # ---------------------------------------------------------------------------
 # raise_on_missing contract (#126)
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
-def test_get_collection_returns_none_when_missing_and_raise_false():
-    with patch.object(milvus_utils, "utility") as util, \
+def test_get_client_returns_none_when_missing_and_raise_false():
+    fake_client = MagicMock(name="MilvusClient")
+    fake_client.has_collection.return_value = False
+    with patch.object(milvus_utils, "MilvusClient", return_value=fake_client), \
          patch.object(milvus_utils, "_auto_create_collection"):
-        util.list_collections.return_value = []
-        util.has_collection.return_value = False
-
-        result = milvus_utils.get_collection(raise_on_missing=False)
+        result = milvus_utils.get_client(raise_on_missing=False)
     assert result is None
 
 
 @pytest.mark.smoke
-def test_get_collection_raises_when_missing_and_raise_true():
-    with patch.object(milvus_utils, "utility") as util, \
+def test_get_client_raises_when_missing_and_raise_true():
+    fake_client = MagicMock(name="MilvusClient")
+    fake_client.has_collection.return_value = False
+    with patch.object(milvus_utils, "MilvusClient", return_value=fake_client), \
          patch.object(milvus_utils, "_auto_create_collection"):
-        util.list_collections.return_value = []
-        util.has_collection.return_value = False
-
         with pytest.raises(RuntimeError):
-            milvus_utils.get_collection(raise_on_missing=True)
+            milvus_utils.get_client(raise_on_missing=True)
 
 
 @pytest.mark.smoke
-def test_get_collection_invalidates_cache_on_error():
-    with patch.object(milvus_utils, "utility") as util:
-        util.list_collections.side_effect = ConnectionError("dead")
-        util.has_collection.side_effect = ConnectionError("dead")
-        with patch.object(milvus_utils.connections, "connect",
-                          side_effect=ConnectionError("no network")):
-            result = milvus_utils.get_collection(raise_on_missing=False)
-        assert result is None
-
-    assert milvus_utils._cached_collection is None
+def test_get_client_invalidates_cache_on_error():
+    with patch.object(milvus_utils, "MilvusClient",
+                      side_effect=ConnectionError("no network")):
+        result = milvus_utils.get_client(raise_on_missing=False)
+    assert result is None
+    assert milvus_utils._cached_client is None
 
 
 # ---------------------------------------------------------------------------

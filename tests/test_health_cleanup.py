@@ -39,7 +39,8 @@ def _call_health(pg_up=True, ollama_up=True, milvus_up=True):
         a client whose ``.get(url, timeout=...)`` resolves to a fake
         ``httpx.Response`` (was ``app.main.httpx.AsyncClient`` pre-X.17 —
         Ollama check was migrated to the shared http-client registry).
-      - Milvus: ``app.main.utility.list_collections`` + ``Collection``.
+      - Milvus: ``app.main.get_milvus_client`` (MilvusClient list_collections
+        + get_collection_stats).
       - Redis: ``app.utils.embedding_cache.get_cache`` returning a cache
         whose ``stats`` is a dict and ``_get_redis()`` resolves to a
         connection with ``ping`` + ``dbsize``.
@@ -75,15 +76,14 @@ def _call_health(pg_up=True, ollama_up=True, milvus_up=True):
         )
 
     # ── Milvus mock ────────────────────────────────────────────────────────
-    mock_utility = MagicMock()
-    mock_collection_cls = MagicMock()
+    # §17.591 — health now uses MilvusClient (get_milvus_client) instead of
+    # the ORM utility/Collection: list_collections() + get_collection_stats().
+    mock_milvus_client = MagicMock()
     if milvus_up:
-        mock_utility.list_collections.return_value = ["toon_v2"]
-        mock_col_instance = MagicMock()
-        mock_col_instance.num_entities = 8
-        mock_collection_cls.return_value = mock_col_instance
+        mock_milvus_client.list_collections.return_value = ["toon_v2"]
+        mock_milvus_client.get_collection_stats.return_value = {"row_count": 8}
     else:
-        mock_utility.list_collections.side_effect = ConnectionError("Milvus down")
+        mock_milvus_client.list_collections.side_effect = ConnectionError("Milvus down")
 
     # ── Redis / embedding-cache mock ───────────────────────────────────────
     mock_cache = MagicMock()
@@ -107,8 +107,7 @@ def _call_health(pg_up=True, ollama_up=True, milvus_up=True):
                  "app.utils.http_clients.get_ollama_client",
                  return_value=mock_ollama_client,
              ), \
-             patch("app.main.utility", mock_utility), \
-             patch("app.main.Collection", mock_collection_cls), \
+             patch("app.main.get_milvus_client", return_value=mock_milvus_client), \
              patch(
                  "app.utils.embedding_cache.get_cache",
                  return_value=mock_cache,
@@ -228,12 +227,10 @@ def _call_health_with_sidecars(*, ngspice_up=True, verilator_up=True, symbiyosys
     mock_ollama_client = MagicMock()
     mock_ollama_client.get = AsyncMock(return_value=mock_ollama_resp)
 
-    mock_utility = MagicMock()
-    mock_collection_cls = MagicMock()
-    mock_utility.list_collections.return_value = ["toon_v2"]
-    mock_col_instance = MagicMock()
-    mock_col_instance.num_entities = 8
-    mock_collection_cls.return_value = mock_col_instance
+    # §17.591 — MilvusClient-based health (see get_milvus_client).
+    mock_milvus_client = MagicMock()
+    mock_milvus_client.list_collections.return_value = ["toon_v2"]
+    mock_milvus_client.get_collection_stats.return_value = {"row_count": 8}
 
     mock_cache = MagicMock()
     mock_cache.stats = {"hits": 5, "misses": 2}
@@ -262,8 +259,7 @@ def _call_health_with_sidecars(*, ngspice_up=True, verilator_up=True, symbiyosys
     async def do_call():
         with patch("app.main.engine", mock_engine), \
              patch("app.utils.http_clients.get_ollama_client", return_value=mock_ollama_client), \
-             patch("app.main.utility", mock_utility), \
-             patch("app.main.Collection", mock_collection_cls), \
+             patch("app.main.get_milvus_client", return_value=mock_milvus_client), \
              patch("app.utils.embedding_cache.get_cache", return_value=mock_cache), \
              patch(
                  "app.utils.http_clients.get_ngspice_client",
@@ -400,12 +396,10 @@ def _call_health_with_calibration(*, last_row=None, db_raises=False):
     mock_ollama_client = MagicMock()
     mock_ollama_client.get = AsyncMock(return_value=mock_ollama_resp)
 
-    mock_utility = MagicMock()
-    mock_collection_cls = MagicMock()
-    mock_utility.list_collections.return_value = ["toon_v2"]
-    mock_col_instance = MagicMock()
-    mock_col_instance.num_entities = 8
-    mock_collection_cls.return_value = mock_col_instance
+    # §17.591 — MilvusClient-based health (see get_milvus_client).
+    mock_milvus_client = MagicMock()
+    mock_milvus_client.list_collections.return_value = ["toon_v2"]
+    mock_milvus_client.get_collection_stats.return_value = {"row_count": 8}
 
     mock_cache = MagicMock()
     mock_cache.stats = {"hits": 5, "misses": 2}
@@ -441,8 +435,7 @@ def _call_health_with_calibration(*, last_row=None, db_raises=False):
                  "app.utils.http_clients.get_ollama_client",
                  return_value=mock_ollama_client,
              ), \
-             patch("app.main.utility", mock_utility), \
-             patch("app.main.Collection", mock_collection_cls), \
+             patch("app.main.get_milvus_client", return_value=mock_milvus_client), \
              patch(
                  "app.utils.embedding_cache.get_cache",
                  return_value=mock_cache,
@@ -586,12 +579,10 @@ def _call_health_with_oom(*, rows=None, host_rows=None, db_raises=False, window_
     mock_ollama_client = MagicMock()
     mock_ollama_client.get = AsyncMock(return_value=mock_ollama_resp)
 
-    mock_utility = MagicMock()
-    mock_collection_cls = MagicMock()
-    mock_utility.list_collections.return_value = ["toon_v2"]
-    mock_col_instance = MagicMock()
-    mock_col_instance.num_entities = 8
-    mock_collection_cls.return_value = mock_col_instance
+    # §17.591 — MilvusClient-based health (see get_milvus_client).
+    mock_milvus_client = MagicMock()
+    mock_milvus_client.list_collections.return_value = ["toon_v2"]
+    mock_milvus_client.get_collection_stats.return_value = {"row_count": 8}
 
     mock_cache = MagicMock()
     mock_cache.stats = {"hits": 5, "misses": 2}
@@ -653,8 +644,7 @@ def _call_health_with_oom(*, rows=None, host_rows=None, db_raises=False, window_
                      "app.utils.http_clients.get_ollama_client",
                      return_value=mock_ollama_client,
                  ), \
-                 patch("app.main.utility", mock_utility), \
-                 patch("app.main.Collection", mock_collection_cls), \
+                 patch("app.main.get_milvus_client", return_value=mock_milvus_client), \
                  patch(
                      "app.utils.embedding_cache.get_cache",
                      return_value=mock_cache,

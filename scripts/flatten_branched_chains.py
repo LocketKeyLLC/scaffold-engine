@@ -41,7 +41,7 @@ from collections import deque
 from typing import Any
 
 from app.config import VALID_DOMAINS
-from app.utils.milvus_utils import get_collection
+from app.utils.milvus_utils import COLLECTION_NAME, get_client
 from app.modules.rag_pipeline import _predecessor_lock
 
 logger = logging.getLogger("scaffold.flatten_branched_chains")
@@ -69,7 +69,8 @@ async def _query_all_rows(collection: Any, domain: str) -> list[dict]:
         page = await loop.run_in_executor(
             None,
             lambda o=offset: collection.query(
-                expr=f'domain == "{domain}"',
+                collection_name=COLLECTION_NAME,
+                filter=f'domain == "{domain}"',
                 output_fields=["entry_id", "version", "supersedes_id", "created_at"],
                 limit=_MILVUS_QUERY_LIMIT,
                 offset=o,
@@ -92,7 +93,8 @@ async def _fetch_full_row(collection: Any, entry_id: str, domain: str) -> dict |
     page = await loop.run_in_executor(
         None,
         lambda: collection.query(
-            expr=f'entry_id == "{entry_id}" and domain == "{domain}"',
+            collection_name=COLLECTION_NAME,
+            filter=f'entry_id == "{entry_id}" and domain == "{domain}"',
             output_fields=["*"],  # everything we need to upsert back
             limit=1,
         ),
@@ -139,7 +141,8 @@ async def _apply_rewrite(
         full["updated_at"] = int(time.time())
         try:
             await loop.run_in_executor(
-                None, lambda r=[full]: collection.upsert(r),
+                None,
+                lambda r=[full]: collection.upsert(collection_name=COLLECTION_NAME, data=r),
             )
         except Exception as e:
             logger.error(
@@ -252,7 +255,7 @@ async def flatten_domain(
 
 
 async def _async_main(args: argparse.Namespace) -> int:
-    collection = get_collection(raise_on_missing=False)
+    collection = get_client(raise_on_missing=False)
     if collection is None:
         logger.error("flatten: Milvus collection not available — aborting")
         return 3

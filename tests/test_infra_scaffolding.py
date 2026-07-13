@@ -52,14 +52,15 @@ class TestMilvusHealthBehavior:
             if isinstance(node, ast.Attribute) and node.attr == "flush":
                 pytest.fail(f"flush attribute access found at line {node.lineno}")
 
-    def test_reads_num_entities(self, check_milvus_fn):
-        """Body must read .num_entities."""
+    def test_reads_row_count(self, check_milvus_fn):
+        """Body must read the entry count via MilvusClient.get_collection_stats
+        (§17.591 — replaced the ORM ``Collection.num_entities`` property)."""
         import ast
         found = any(
-            isinstance(node, ast.Attribute) and node.attr == "num_entities"
+            isinstance(node, ast.Attribute) and node.attr == "get_collection_stats"
             for node in ast.walk(check_milvus_fn)
         )
-        assert found, "num_entities attribute access not found"
+        assert found, "get_collection_stats attribute access not found"
 
     def test_targets_toon_v2_collection(self, check_milvus_fn):
         """Body must reference the literal string 'toon_v2'."""

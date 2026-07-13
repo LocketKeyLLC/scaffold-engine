@@ -25,21 +25,15 @@ async def test_near_duplicate_rejected():
     # Exact hash check — no match, so we proceed to semantic check.
     collection.query.return_value = []
 
-    # Semantic search — return a hit above threshold.
-    top_hit = MagicMock()
-    top_hit.score = 0.98
-    top_hit.id = "milvus-pk-42"
-    top_hit.entity.get = lambda field, default="": {
-        "entry_id": "scaffold-existing-entry-abc12345",
-        "content_hash": "different_hash",
-        "version": 1,
-        "supersedes_id": "",
-    }.get(field, default)
-    search_result_group = MagicMock()
-    search_result_group.__getitem__ = lambda self, idx: top_hit
-    search_result_group.__len__ = lambda self: 1
-    search_result_group.__bool__ = lambda self: True
-    collection.search.return_value = [search_result_group]
+    # Semantic search — return a hit above threshold (MilvusClient shape).
+    collection.search.return_value = [[
+        {"distance": 0.98, "id": "milvus-pk-42", "entity": {
+            "entry_id": "scaffold-existing-entry-abc12345",
+            "content_hash": "different_hash",
+            "version": 1,
+            "supersedes_id": "",
+        }},
+    ]]
 
     # Mock DB session for dedup_log write.
     mock_session = AsyncMock()
@@ -57,7 +51,7 @@ async def test_near_duplicate_rejected():
     async def fake_batch(texts):
         return [[0.1] * 512 for _ in texts]
 
-    with patch("app.modules.rag_pipeline._get_collection", return_value=collection), \
+    with patch("app.modules.rag_pipeline._get_client", return_value=collection), \
          patch("app.modules.rag_pipeline._embed_contents_batch",
                new_callable=AsyncMock, side_effect=fake_batch), \
          patch("app.modules.rag_pipeline.async_session", return_value=mock_session):
@@ -87,20 +81,14 @@ def _make_collection_with_supersede_match(sim_score: float = 0.92):
     semantic path is exercised."""
     collection = MagicMock()
     collection.query.return_value = []  # no exact-hash hit → semantic path
-    top_hit = MagicMock()
-    top_hit.score = sim_score
-    top_hit.id = "milvus-pk-100"
-    top_hit.entity.get = lambda field, default="": {
-        "entry_id": "scaffold-existing-old-version-abc12345",
-        "content_hash": "different_hash",
-        "version": 1,
-        "supersedes_id": "",
-    }.get(field, default)
-    search_result_group = MagicMock()
-    search_result_group.__getitem__ = lambda self, idx: top_hit
-    search_result_group.__len__ = lambda self: 1
-    search_result_group.__bool__ = lambda self: True
-    collection.search.return_value = [search_result_group]
+    collection.search.return_value = [[
+        {"distance": sim_score, "id": "milvus-pk-100", "entity": {
+            "entry_id": "scaffold-existing-old-version-abc12345",
+            "content_hash": "different_hash",
+            "version": 1,
+            "supersedes_id": "",
+        }},
+    ]]
     return collection
 
 
@@ -130,7 +118,7 @@ async def test_version_chain_writes_dedup_log_after_upsert_succeeds():
     async def fake_batch(texts):
         return [[0.1] * 512 for _ in texts]
 
-    with patch("app.modules.rag_pipeline._get_collection", return_value=collection), \
+    with patch("app.modules.rag_pipeline._get_client", return_value=collection), \
          patch("app.modules.rag_pipeline._embed_contents_batch",
                new_callable=AsyncMock, side_effect=fake_batch), \
          patch("app.modules.rag_pipeline.async_session", return_value=mock_session):
@@ -177,7 +165,7 @@ async def test_version_chain_skips_dedup_log_when_upsert_fails():
     async def fake_batch(texts):
         return [[0.1] * 512 for _ in texts]
 
-    with patch("app.modules.rag_pipeline._get_collection", return_value=collection), \
+    with patch("app.modules.rag_pipeline._get_client", return_value=collection), \
          patch("app.modules.rag_pipeline._embed_contents_batch",
                new_callable=AsyncMock, side_effect=fake_batch), \
          patch("app.modules.rag_pipeline.async_session", return_value=mock_session):
@@ -214,20 +202,15 @@ async def test_rejected_dedup_log_uses_batched_commit():
     # check that the batched commit pattern is in effect.
     collection = MagicMock()
     collection.query.return_value = []
-    top_hit = MagicMock()
-    top_hit.score = 0.98  # above dedup threshold → rejection branch
-    top_hit.id = "milvus-pk-1"
-    top_hit.entity.get = lambda field, default="": {
-        "entry_id": "scaffold-existing-abc12345",
-        "content_hash": "h",
-        "version": 1,
-        "supersedes_id": "",
-    }.get(field, default)
-    grp = MagicMock()
-    grp.__getitem__ = lambda self, idx: top_hit
-    grp.__len__ = lambda self: 1
-    grp.__bool__ = lambda self: True
-    collection.search.return_value = [grp]
+    # above dedup threshold → rejection branch (MilvusClient shape)
+    collection.search.return_value = [[
+        {"distance": 0.98, "id": "milvus-pk-1", "entity": {
+            "entry_id": "scaffold-existing-abc12345",
+            "content_hash": "h",
+            "version": 1,
+            "supersedes_id": "",
+        }},
+    ]]
 
     mock_session = AsyncMock()
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
@@ -236,7 +219,7 @@ async def test_rejected_dedup_log_uses_batched_commit():
     async def fake_batch(texts):
         return [[0.1] * 512 for _ in texts]
 
-    with patch("app.modules.rag_pipeline._get_collection", return_value=collection), \
+    with patch("app.modules.rag_pipeline._get_client", return_value=collection), \
          patch("app.modules.rag_pipeline._embed_contents_batch",
                new_callable=AsyncMock, side_effect=fake_batch), \
          patch("app.modules.rag_pipeline.async_session", return_value=mock_session):
@@ -354,7 +337,7 @@ async def test_concurrent_ingest_branches_version_chain():
     async def fake_batch(texts):
         return [[0.1] * 512 for _ in texts]
 
-    with patch("app.modules.rag_pipeline._get_collection", return_value=collection), \
+    with patch("app.modules.rag_pipeline._get_client", return_value=collection), \
          patch("app.modules.rag_pipeline._embed_contents_batch",
                new_callable=AsyncMock, side_effect=fake_batch), \
          patch("app.modules.rag_pipeline.async_session", return_value=mock_session):
@@ -381,8 +364,8 @@ async def test_concurrent_ingest_branches_version_chain():
     )
     supersedes_ids = []
     for c in upsert_calls:
-        # upsert was called with positional row arg: [{...}]
-        row = c.args[0][0]
+        # §17.591 — upsert called as upsert(collection_name=…, data=[{...}])
+        row = c.kwargs["data"][0]
         supersedes_ids.append(row["supersedes_id"])
 
     # LOAD-BEARING ASSERTION (documents the bug):
@@ -395,7 +378,7 @@ async def test_concurrent_ingest_branches_version_chain():
         f"the same predecessor (the bug); got {supersedes_ids}"
     )
     # And both at version=2 (each independently concluded latest+1).
-    versions = [c.args[0][0]["version"] for c in upsert_calls]
+    versions = [c.kwargs["data"][0]["version"] for c in upsert_calls]
     assert versions == [2, 2], (
         f"expected both at version=2 (the branch); got {versions}"
     )
@@ -487,28 +470,25 @@ def _make_stateful_collection_with_supersede_match(sim_score: float = 0.92):
     collection = MagicMock()
     upserted_rows: list[dict] = []
 
-    # Semantic search — always returns existing entry A as top hit.
-    top_hit = MagicMock()
-    top_hit.score = sim_score
-    top_hit.id = "milvus-pk-100"
-    top_hit.entity.get = lambda field, default="": {
-        "entry_id": "scaffold-entry-A",
-        "content_hash": "different_hash",
-        "version": 1,
-        "supersedes_id": "",
-    }.get(field, default)
-    search_result_group = MagicMock()
-    search_result_group.__getitem__ = lambda self, idx: top_hit
-    search_result_group.__len__ = lambda self: 1
-    search_result_group.__bool__ = lambda self: True
-    collection.search.return_value = [search_result_group]
+    # Semantic search — always returns existing entry A as top hit
+    # (MilvusClient shape).
+    collection.search.return_value = [[
+        {"distance": sim_score, "id": "milvus-pk-100", "entity": {
+            "entry_id": "scaffold-entry-A",
+            "content_hash": "different_hash",
+            "version": 1,
+            "supersedes_id": "",
+        }},
+    ]]
 
-    def stateful_query(expr, output_fields=None, limit=None, **kwargs):
+    def stateful_query(*, collection_name=None, filter="", output_fields=None,
+                       limit=None, **kwargs):
+        # §17.591 — MilvusClient signature (filter= replaces expr=).
         # Exact-hash query (Pass 1) — always [] so we exercise the semantic path.
-        if "content_hash" in expr:
+        if "content_hash" in filter:
             return []
         # Walk query — match upserted rows whose supersedes_id equals the target.
-        m = _re.search(r'supersedes_id == "([^"]+)"', expr)
+        m = _re.search(r'supersedes_id == "([^"]+)"', filter)
         if not m:
             return []
         target = m.group(1)
@@ -521,9 +501,9 @@ def _make_stateful_collection_with_supersede_match(sim_score: float = 0.92):
 
     collection.query.side_effect = stateful_query
 
-    def stateful_upsert(rows):
-        # `rows` is list[dict] per the ingest_entries upsert call.
-        upserted_rows.extend(rows)
+    def stateful_upsert(*, collection_name=None, data=None, **kwargs):
+        # §17.591 — MilvusClient signature (data= replaces positional rows).
+        upserted_rows.extend(data or [])
 
     collection.upsert.side_effect = stateful_upsert
     collection._upserted_rows = upserted_rows  # for assertions
@@ -570,7 +550,7 @@ async def test_sequential_ingest_produces_linear_chain_post_fix():
     async def fake_batch(texts):
         return [[0.1] * 512 for _ in texts]
 
-    with patch("app.modules.rag_pipeline._get_collection", return_value=collection), \
+    with patch("app.modules.rag_pipeline._get_client", return_value=collection), \
          patch("app.modules.rag_pipeline._embed_contents_batch",
                new_callable=AsyncMock, side_effect=fake_batch), \
          patch("app.modules.rag_pipeline.async_session", return_value=mock_session):

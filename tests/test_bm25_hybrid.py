@@ -50,9 +50,13 @@ def test_schema_default_follows_settings(monkeypatch):
 # --- collection_has_bm25 detector ---
 
 def _fake_collection(field_names):
-    return SimpleNamespace(
-        schema=SimpleNamespace(fields=[SimpleNamespace(name=n) for n in field_names])
-    )
+    # §17.591 — collection_has_bm25 now introspects via MilvusClient
+    # describe_collection() (dict of {"fields": [{"name": ...}]}).
+    client = SimpleNamespace()
+    client.describe_collection = lambda name: {
+        "fields": [{"name": n} for n in field_names]
+    }
+    return client
 
 
 def test_collection_has_bm25_true():

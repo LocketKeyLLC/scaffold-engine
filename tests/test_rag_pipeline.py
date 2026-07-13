@@ -89,7 +89,7 @@ def _patch_rag_deps(
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
     return {
-        "_get_collection": MagicMock(return_value=mock_collection),
+        "_get_client": MagicMock(return_value=mock_collection),
         "_embed_query": AsyncMock(return_value=embedding),
         "_vector_search": AsyncMock(return_value=vector_results),
         "_keyword_search": AsyncMock(return_value=keyword_results),
@@ -1022,7 +1022,7 @@ class TestIngestContract:
         async def fake_batch(texts):
             return [[0.0] * 512 for _ in texts]
 
-        with patch.object(rp, "_get_collection", MagicMock(return_value=fake_col)), \
+        with patch.object(rp, "_get_client", MagicMock(return_value=fake_col)), \
              patch.object(rp, "_embed_contents_batch", AsyncMock(side_effect=fake_batch)):
             _run(rp.ingest_entries(
                 [{"title": "t", "content": "hello world", "tags": []}],

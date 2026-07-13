@@ -14,7 +14,7 @@ import asyncio
 import logging
 import time
 
-from app.utils.milvus_utils import escape_milvus_literal, get_collection
+from app.utils.milvus_utils import escape_milvus_literal, get_client
 from app.config import settings, TTL_POLICY, DEFAULT_TTL_SECONDS
 
 logger = logging.getLogger("scaffold.staleness")
@@ -29,8 +29,8 @@ async def sweep_expired() -> dict:
     if a batch's ``flush()`` lags behind the subsequent query.
     """
     loop = asyncio.get_running_loop()
-    col = await loop.run_in_executor(None, get_collection)
-    if col is None:
+    client = await loop.run_in_executor(None, get_client)
+    if client is None:
         return {"status": "error", "error": "collection not available"}
     now = int(time.time())
 
@@ -53,8 +53,9 @@ async def sweep_expired() -> dict:
                 f'expires_at > 0 and expires_at < {now} '
                 f'and entry_id > "{escape_milvus_literal(last_id)}"'
             )
-            expired = col.query(
-                expr=expr,
+            expired = client.query(
+                collection_name="toon_v2",
+                filter=expr,
                 output_fields=["entry_id", "title", "source_type", "expires_at"],
                 limit=_PAGE_SIZE,
             )
@@ -68,8 +69,8 @@ async def sweep_expired() -> dict:
                 '"' + eid.replace('\\', '\\\\').replace('"', '\\"') + '"'
                 for eid in ids
             )
-            col.delete(expr=f"entry_id in [{quoted}]")
-            col.flush()
+            client.delete(collection_name="toon_v2", filter=f"entry_id in [{quoted}]")
+            client.flush(collection_name="toon_v2")
 
             total_ids.extend(ids)
             total_titles.extend(e.get("title", "unknown") for e in expired)

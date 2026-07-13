@@ -54,7 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import VALID_DOMAINS
 from app.modules.provenance import get_provenance_for_session
-from app.utils.milvus_utils import get_collection
+from app.utils.milvus_utils import get_client
 
 logger = logging.getLogger("scaffold.research.verify")
 
@@ -76,8 +76,8 @@ def _milvus_lookup_entries(entry_ids: list[str]) -> dict[str, dict[str, Any]]:
     """
     if not entry_ids:
         return {}
-    collection = get_collection()
-    if collection is None:
+    client = get_client()
+    if client is None:
         logger.warning("milvus_unavailable_in_verify")
         return {}
 
@@ -88,8 +88,9 @@ def _milvus_lookup_entries(entry_ids: list[str]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for d in sorted(VALID_DOMAINS):
         try:
-            rows = collection.query(
-                expr=f'domain == "{d}" and ({id_filter})',
+            rows = client.query(
+                collection_name="toon_v2",
+                filter=f'domain == "{d}" and ({id_filter})',
                 output_fields=fields,
                 limit=len(entry_ids) + 10,
             )
@@ -120,16 +121,17 @@ def _milvus_lookup_supersedors(entry_ids: list[str]) -> dict[str, str]:
     """
     if not entry_ids:
         return {}
-    collection = get_collection()
-    if collection is None:
+    client = get_client()
+    if client is None:
         return {}
     quoted = [_quote_id(eid) for eid in entry_ids]
     expr_id = f"supersedes_id in [{','.join(quoted)}]"
     out: dict[str, str] = {}
     for d in sorted(VALID_DOMAINS):
         try:
-            rows = collection.query(
-                expr=f'domain == "{d}" and ({expr_id})',
+            rows = client.query(
+                collection_name="toon_v2",
+                filter=f'domain == "{d}" and ({expr_id})',
                 output_fields=["entry_id", "supersedes_id"],
                 limit=len(entry_ids) * 2 + 10,
             )

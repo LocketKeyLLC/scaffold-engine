@@ -638,8 +638,8 @@ def test_fetch_chunk_content_requests_canonical_text_from_milvus(monkeypatch):
     captured: dict[str, object] = {}
 
     class _FakeCollection:
-        def query(self, *, expr, output_fields, limit):
-            captured["expr"] = expr
+        def query(self, *, collection_name=None, filter=None, output_fields, limit, **kwargs):
+            captured["expr"] = filter
             captured["output_fields"] = list(output_fields)
             captured["limit"] = limit
             return [
@@ -652,7 +652,7 @@ def test_fetch_chunk_content_requests_canonical_text_from_milvus(monkeypatch):
             ]
 
     monkeypatch.setattr(
-        "app.sim.report.get_collection", lambda: _FakeCollection()
+        "app.sim.report.get_client", lambda: _FakeCollection()
     )
 
     result = asyncio.run(report_mod._fetch_chunk_content(["chunk-X"]))
@@ -680,11 +680,11 @@ def test_fetch_chunk_content_handles_missing_canonical_text(monkeypatch):
     import asyncio
 
     class _FakeCollection:
-        def query(self, *, expr, output_fields, limit):
+        def query(self, *, collection_name=None, filter=None, output_fields, limit, **kwargs):
             return [{"entry_id": "chunk-Y", "title": "T", "source_url": "u"}]
 
     monkeypatch.setattr(
-        "app.sim.report.get_collection", lambda: _FakeCollection()
+        "app.sim.report.get_client", lambda: _FakeCollection()
     )
 
     result = asyncio.run(report_mod._fetch_chunk_content(["chunk-Y"]))
