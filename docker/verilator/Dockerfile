@@ -19,7 +19,7 @@ ARG VERILATOR_VERSION=v5.024
 # is needed at build time anyway (Verilator's configure invokes it).
 # Discarded once the runtime stage is built.
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.12.13-slim@sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa77ba265bc3a2fe AS builder
+FROM python:3.14.6-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS builder
 
 ARG VERILATOR_VERSION
 
@@ -49,7 +49,7 @@ RUN autoconf \
 # Stage 2: runtime — verilator binary + the toolchain its generated C++
 # needs at runtime (g++, make, perl). Plus FastAPI for the HTTP surface.
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.12.13-slim@sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa77ba265bc3a2fe AS runtime
+FROM python:3.14.6-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS runtime
 
 ARG VERILATOR_VERSION
 ENV DEBIAN_FRONTEND=noninteractive

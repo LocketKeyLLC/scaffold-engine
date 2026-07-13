@@ -21992,6 +21992,10 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.592 Deps — EDA sidecar bumps: python 3.14 + pydantic/uvicorn/pytest (2026-07-13)
+
+Clears the 13 open Dependabot sidecar PRs (#75–88 range, minus root #74) in one validated batch: the 4 EDA sidecars (`docker/{coderunner,ngspice,symbiyosys,verilator}`) go **python 3.12.13-slim → 3.14.6-slim** (base digest), **pydantic 2.10.3 → 2.13.4**, **uvicorn[standard] 0.34.0 → 0.50.0**, and coderunner **pytest 9.0.2 → 9.1.1**. Consolidated rather than merged individually to avoid the rebase-cascade (multiple overlapping PRs per sidecar Dockerfile/requirements). **The python-3.14 jump was the real risk** — `uvicorn[standard]` pulls uvloop/httptools (C exts) and pydantic-core is a Rust ext, so cp314 wheel availability was the gate. **Verification:** canary `pip install` on `python:3.14.6-slim` resolved all cp314 wheels (pydantic_core-2.46.4, uvloop-0.22.1, httptools-0.8.0, watchfiles, websockets) with zero source builds; then **all 4 sidecar images built clean** (incl. verilator's from-source v5.024 compile + symbiyosys's oss-cad-suite) and coderunner+verilator **boot-smoked** green under 3.14 (uvicorn 0.50 startup complete, `/health` → 200). Root Dockerfile #74 (orchestrator python 3.14) stays **held** — it genuinely fails Unit Tests (torch/pymilvus cp314 exposure differs from these thin FastAPI sidecars). Supersedes #71-adjacent sidecar PRs on merge.
+
 ### §17.591 Migration — PyMilvus ORM → MilvusClient API (pymilvus 3.0, #90) (2026-07-13)
 
 Dependabot #90 bumps **pymilvus 2.5.18 → 3.0.0**. 3.0 still works on the ORM API (`connections`/`utility`/`Collection.search`/`.query`/`.upsert`/`.num_entities`) but emits `PyMilvusDeprecationWarning` across the codebase — **that ORM surface is removed in 3.1**. Rather than merge the bump onto a deprecation clock (a future 3.1 bump would break), this lands 3.0 **already 3.1-ready** by migrating every call site to the `MilvusClient` API. Validated first that the raw bump passes (`make test` 4121/0 on pymilvus 3.0), so this is a clean API port, not a bug fix.
