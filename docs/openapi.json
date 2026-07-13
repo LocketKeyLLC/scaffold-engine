@@ -74,6 +74,7 @@
             "type": "string"
           },
           "metadata": {
+            "additionalProperties": true,
             "title": "Metadata",
             "type": "object"
           },
@@ -159,6 +160,7 @@
             "title": "Profile"
           },
           "substitutions": {
+            "additionalProperties": true,
             "description": "Concrete value map, e.g. {HOST_IP: 10.0.0.5}.",
             "title": "Substitutions",
             "type": "object"
@@ -375,6 +377,7 @@
             "type": "string"
           },
           "evidence_meta": {
+            "additionalProperties": true,
             "title": "Evidence Meta",
             "type": "object"
           },
@@ -543,6 +546,7 @@
           "model_overrides": {
             "anyOf": [
               {
+                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -583,6 +587,7 @@
           "model_overrides": {
             "anyOf": [
               {
+                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -1199,6 +1204,7 @@
           "model_overrides": {
             "anyOf": [
               {
+                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -1514,6 +1520,7 @@
             "type": "boolean"
           },
           "checks": {
+            "additionalProperties": true,
             "title": "Checks",
             "type": "object"
           },
@@ -1574,6 +1581,7 @@
           "model_overrides": {
             "anyOf": [
               {
+                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -2233,6 +2241,7 @@
           "model_overrides": {
             "anyOf": [
               {
+                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -2470,6 +2479,7 @@
           "model_overrides": {
             "anyOf": [
               {
+                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -2495,6 +2505,7 @@
           "model_overrides": {
             "anyOf": [
               {
+                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -2634,6 +2645,7 @@
           "model_overrides": {
             "anyOf": [
               {
+                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -2675,6 +2687,7 @@
           "model_overrides": {
             "anyOf": [
               {
+                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -2894,6 +2907,7 @@
             "type": "string"
           },
           "spec_json": {
+            "additionalProperties": true,
             "title": "Spec Json",
             "type": "object"
           },
@@ -3223,6 +3237,7 @@
           "next_actions": {
             "default": [],
             "items": {
+              "additionalProperties": true,
               "type": "object"
             },
             "title": "Next Actions",
@@ -3329,6 +3344,7 @@
           "next_actions": {
             "default": [],
             "items": {
+              "additionalProperties": true,
               "type": "object"
             },
             "title": "Next Actions",
@@ -6537,6 +6553,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
                   "title": "Response List Alerts Endpoint Observability Alerts Get",
                   "type": "object"
                 }
@@ -6629,6 +6646,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
                   "title": "Response Recent Errors Endpoint Observability Errors Get",
                   "type": "object"
                 }
@@ -6755,6 +6773,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
                   "title": "Response Recent Jobs Endpoint Observability Jobs Get",
                   "type": "object"
                 }
@@ -6845,6 +6864,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
                   "title": "Response Llm Rollup Endpoint Observability Llm Get",
                   "type": "object"
                 }
@@ -6913,6 +6933,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
                   "title": "Response Quality Rollup Endpoint Observability Quality Get",
                   "type": "object"
                 }
