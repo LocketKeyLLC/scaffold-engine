@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60   # heavy build on a 2-core runner; not gating any PR
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Same reclaim as §17.587 — the full torch+reranker build needs the disk.
       - name: Free up runner disk space

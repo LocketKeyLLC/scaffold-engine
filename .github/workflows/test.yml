@@ -78,7 +78,7 @@ jobs:
     steps:
       # §17.588 — fetch-depth: 0 so the dep-change diff below can compare
       # against the PR base / previous push SHA.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -223,7 +223,7 @@ jobs:
   #   name: Integration Tests (full stack)
   #   runs-on: self-hosted
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v7
   #     - name: Start full stack
   #       run: docker compose up -d --build
   #     - name: Wait for services
