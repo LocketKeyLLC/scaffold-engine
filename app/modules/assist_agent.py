@@ -1293,11 +1293,68 @@ async def handoff_step(
     })
 
     # Defer import to avoid a heavy module-level dep on execution_agent.
-    from app.modules.execution_agent import execute_all_nodes
+    from app.modules.execution_agent import execute_all_nodes, execute_next_node
 
     try:
-        async for ev in execute_all_nodes(job_id):
-            yield ev
+        if mode == "single":
+            # §17.594 — single handoff must run EXACTLY the one node, not the
+            # whole remaining DAG. Previously this called the unscoped
+            # execute_all_nodes(job_id), which autonomously drained every other
+            # 'pending' node — the opposite of "delegate this one step". Claim
+            # the target node atomically (pending -> running) and drive it
+            # through the per-node autonomous executor via `preclaimed_node`,
+            # which skips execute_next_node's own claim. That executor
+            # auto-completes the job only if this node was the last remaining
+            # one; otherwise the other pending nodes are left untouched and
+            # control returns to assist via the restore below. The presented
+            # step handed off here is dep-satisfied by assist's DAG walk.
+            async with async_session() as dbc:
+                claimed = (await dbc.execute(
+                    text("""
+                        UPDATE dag_nodes
+                           SET status = 'running', started_at = NOW()
+                         WHERE job_id = :jid AND node_key = :nk
+                           AND status = 'pending'
+                        RETURNING id, node_key, title, node_type, depends_on,
+                                  assigned_model, prompt_template, execution_order,
+                                  tool, domain, retry_count, last_verification_reason
+                    """),
+                    {"jid": job_id, "nk": node_key},
+                )).mappings().first()
+                await dbc.commit()
+
+            if claimed is None:
+                # Node already ran or isn't pending — nothing to hand off.
+                yield _sse("assist_handoff_noop", {
+                    "session_id": session_id,
+                    "node_key": node_key,
+                    "reason": "node not pending",
+                })
+            else:
+                yield _sse("node_start", {
+                    "node_key": node_key,
+                    "title": claimed.get("title"),
+                })
+                result = await execute_next_node(
+                    job_id, preclaimed_node=dict(claimed),
+                )
+                if result.get("status") in ("done", "skipped"):
+                    yield _sse("node_done", {
+                        "node_key": node_key,
+                        "title": result.get("title"),
+                        "verified": result.get("verified", True),
+                        "job_complete": result.get("job_complete", False),
+                    })
+                else:
+                    yield _sse("node_failed", {
+                        "node_key": node_key,
+                        "title": result.get("title"),
+                        "error": result.get("error") or result.get("message"),
+                        "reason": result.get("reason"),
+                    })
+        else:
+            async for ev in execute_all_nodes(job_id):
+                yield ev
     finally:
         # On return, restore assist mode unless all_remaining took over.
         if mode == "single":

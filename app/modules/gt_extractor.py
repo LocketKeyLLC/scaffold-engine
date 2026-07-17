@@ -688,7 +688,10 @@ async def extract_ground_truths(
     }
 
     if push_to_github:
-        gh_result = await push_to_github(
+        # The `push_to_github: bool` parameter shadows the module-level
+        # `async def push_to_github`; call the module alias so `await` targets
+        # the coroutine, not the boolean flag. (§17.594)
+        gh_result = await _push_to_github(
             toon_rows,
             target_file,
             topic,

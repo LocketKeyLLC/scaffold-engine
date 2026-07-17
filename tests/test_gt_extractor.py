@@ -107,6 +107,34 @@ class TestDistillationUsesRouterModel:
         assert tc.call_args.kwargs.get("role") == "model_router"
         assert "model" not in tc.call_args.kwargs
 
+    @pytest.mark.asyncio
+    async def test_push_to_github_true_awaits_coroutine(self):
+        """§17.594 — the `push_to_github: bool` parameter shadowed the
+        module-level `async def push_to_github`, so `await push_to_github(...)`
+        with the flag True invoked the boolean -> TypeError, aborting every
+        opt-in GitHub push. The fix calls the module alias `_push_to_github`."""
+        fake_search = [{"title": "t", "url": "https://x.test/1", "content": "c"}]
+        fake_call = MagicMock()
+        fake_call.arguments = {
+            "entries": [
+                {"title": "fact", "content": "c", "tags": "a", "source": "u"},
+            ],
+        }
+        fake_resp = MagicMock(
+            success=True, text="", model="qwen3:4b",
+            total_duration_ms=1, error=None, tool_calls=[fake_call],
+        )
+        push = AsyncMock(return_value={"category": "ok", "committed": True})
+        with patch.object(gt, "search_searxng", AsyncMock(return_value=fake_search)), \
+             patch.object(gt.model_router, "tool_call", AsyncMock(return_value=fake_resp)), \
+             patch.object(gt, "_push_to_github", push):
+            result = await gt.extract_ground_truths(
+                "rag systems", push_to_github=True,
+            )
+
+        push.assert_awaited_once()
+        assert result["github"] == {"category": "ok", "committed": True}
+
 
 @pytest.mark.smoke
 class TestGitHubTargetConfig:

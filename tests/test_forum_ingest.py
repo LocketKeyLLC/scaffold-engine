@@ -431,7 +431,7 @@ async def test_fetch_arxiv_full_happy_path(fake_cache_miss):
     fake_reader.pages = [fake_page1, fake_page2]
 
     with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client), \
-         patch("pypdf.PdfReader", return_value=fake_reader):
+         patch("app.modules.research_extractors.PdfReader", return_value=fake_reader):
         out = await forum_ingest.fetch_arxiv_full("2310.06825")
 
     assert len(out) >= 1
@@ -444,6 +444,30 @@ async def test_fetch_arxiv_full_happy_path(fake_cache_miss):
     combined = " ".join(c["content"] for c in out)
     assert "This paper shows X." in combined
     assert "We do Y." in combined
+
+
+@pytest.mark.asyncio
+async def test_fetch_arxiv_full_extract_timeout_returns_empty(fake_cache_miss):
+    """§17.594 — the blocking pypdf parse now runs off the event loop via
+    research_extractors' bounded extractor (asyncio.to_thread + wall-clock
+    wait_for). A timeout surfaces as RuntimeError, which fetch_arxiv_full
+    catches and turns into an empty result instead of hanging the loop."""
+    from app.utils import forum_ingest
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"%PDF-1.4 fake bytes"
+    client = MagicMock()
+    client.get = AsyncMock(return_value=mock_resp)
+
+    async def _boom(fn, pdf_bytes):
+        raise RuntimeError("PDF text extraction exceeded 120s")
+
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client), \
+         patch("app.modules.research_extractors._bounded_extract", _boom):
+        out = await forum_ingest.fetch_arxiv_full("2310.06825")
+
+    assert out == []
 
 
 @pytest.mark.asyncio
@@ -491,7 +515,7 @@ async def test_fetch_arxiv_full_cache_hit_skips_network():
 
     with patch("app.utils.forum_ingest.get_fetch_cache", return_value=cache), \
          patch("app.utils.forum_ingest.get_generic_http_client", return_value=client), \
-         patch("pypdf.PdfReader", return_value=fake_reader):
+         patch("app.modules.research_extractors.PdfReader", return_value=fake_reader):
         out = await forum_ingest.fetch_arxiv_full("2310.06825")
 
     client.get.assert_not_called()
@@ -530,7 +554,7 @@ async def test_fetch_arxiv_full_stamps_raw_upstream_hash(fake_cache_miss):
     fake_reader.pages = [fake_page1, fake_page2]
 
     with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client), \
-         patch("pypdf.PdfReader", return_value=fake_reader):
+         patch("app.modules.research_extractors.PdfReader", return_value=fake_reader):
         out = await forum_ingest.fetch_arxiv_full("2310.06825")
 
     expected = hashlib.sha256(pdf_bytes).hexdigest()

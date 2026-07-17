@@ -718,8 +718,6 @@ async def fetch_arxiv_full(arxiv_id: str) -> list[dict[str, Any]]:
     """
     if settings.arxiv_max_sections <= 0:
         return []
-    import io
-    import pypdf
 
     pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
     abs_url = f"https://arxiv.org/abs/{arxiv_id}"
@@ -760,12 +758,14 @@ async def fetch_arxiv_full(arxiv_id: str) -> list[dict[str, Any]]:
         except Exception as exc:
             logger.debug("arxiv_full_cache_put_failed: %s", exc)
 
+    # §17.594 — run the blocking pypdf parse off the event loop with a
+    # wall-clock bound. Reuses the same helpers /research/pdf uses so a large
+    # or adversarial arXiv PDF can't stall the single uvicorn loop (or hang
+    # forever). `_bounded_extract` raises RuntimeError on timeout, caught below.
+    from app.modules.research_extractors import _bounded_extract, _extract_pypdf
     try:
-        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-        text_parts: list[str] = []
-        for page in reader.pages:
-            text_parts.append(page.extract_text() or "")
-        text = "\n\n".join(text_parts).strip()
+        text, _pages = await _bounded_extract(_extract_pypdf, pdf_bytes)
+        text = text.strip()
     except Exception as exc:
         logger.warning("arxiv_full_pdf_extract_failed: id=%s err=%s", arxiv_id, exc)
         return []

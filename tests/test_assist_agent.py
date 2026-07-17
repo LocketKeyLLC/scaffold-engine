@@ -234,11 +234,19 @@ async def test_submit_step_rejects_non_claimable_non_pending():
 # asyncio.shield; a client disconnect mid-handoff must NOT leave the job
 # stranded in 'executing'.
 # ---------------------------------------------------------------------------
-class _FakeSession:
-    """Module-level async_session() stand-in that records execute/commit."""
+_CLAIMED_T1 = {"id": "n1", "node_key": "T1", "title": "Node T1"}
 
-    def __init__(self, rec):
+
+class _FakeSession:
+    """Module-level async_session() stand-in that records execute/commit.
+
+    Serves all three async_session() blocks in single-mode handoff: the
+    job->'executing' flip, the scoped node claim (reads .mappings().first()),
+    and the restore-to-'assisted_executing' (reads .scalar())."""
+
+    def __init__(self, rec, claimed=_CLAIMED_T1):
         self._rec = rec
+        self._claimed = claimed
 
     async def __aenter__(self):
         return self
@@ -250,6 +258,7 @@ class _FakeSession:
         self._rec.append(("execute", str(stmt), params))
         r = MagicMock()
         r.scalar.return_value = "active"  # db3 SELECT sees an active session
+        r.mappings.return_value.first.return_value = self._claimed  # claim row
         return r
 
     async def commit(self):
@@ -266,16 +275,141 @@ def _handoff_db():
     return db
 
 
+def _fake_session_factory(rec, claimed=_CLAIMED_T1):
+    return lambda: _FakeSession(rec, claimed)
+
+
 @pytest.mark.asyncio
-async def test_handoff_single_restores_assist_mode(monkeypatch):
+async def test_handoff_single_runs_only_one_node(monkeypatch):
+    """§17.594 — single handoff must execute EXACTLY the claimed node via the
+    per-node executor, and must NOT fall through to execute_all_nodes (which
+    drains the whole remaining DAG — the original bug)."""
     rec: list = []
-    monkeypatch.setattr(assist_agent, "async_session", lambda: _FakeSession(rec))
+    monkeypatch.setattr(
+        assist_agent, "async_session", _fake_session_factory(rec),
+    )
+
+    all_nodes_called = {"hit": False}
 
     async def _fake_exec_all(job_id):
+        all_nodes_called["hit"] = True
         yield 'event: node\ndata: {}\n\n'
+
+    next_calls: list = []
+
+    async def _fake_exec_next(job_id, preclaimed_node=None):
+        next_calls.append((job_id, preclaimed_node))
+        return {
+            "status": "done", "node_key": preclaimed_node["node_key"],
+            "title": preclaimed_node["title"], "verified": True,
+            "job_complete": False,
+        }
 
     monkeypatch.setattr(
         "app.modules.execution_agent.execute_all_nodes", _fake_exec_all,
+    )
+    monkeypatch.setattr(
+        "app.modules.execution_agent.execute_next_node", _fake_exec_next,
+    )
+
+    events = [
+        ev async for ev in assist_agent.handoff_step(
+            session_id="sess-1", node_key="T1", mode="single", db=_handoff_db(),
+        )
+    ]
+
+    assert all_nodes_called["hit"] is False, \
+        "single handoff drained the whole DAG via execute_all_nodes (§17.594)"
+    assert len(next_calls) == 1, "single handoff must run exactly one node"
+    assert next_calls[0][1]["node_key"] == "T1"
+    # The claim is scoped to the target node_key only.
+    claim = [c for c in rec if c[0] == "execute" and "node_key = :nk" in c[1]]
+    assert claim and claim[0][2]["nk"] == "T1"
+    assert any("node_done" in e for e in events)
+    assert any("assist_handoff_done" in e for e in events)
+
+
+@pytest.mark.asyncio
+async def test_handoff_single_noop_when_node_not_pending(monkeypatch):
+    """§17.594 — if the target node isn't 'pending' (already ran), the claim
+    returns nothing: emit a no-op and never invoke the executor."""
+    rec: list = []
+    monkeypatch.setattr(
+        assist_agent, "async_session", _fake_session_factory(rec, claimed=None),
+    )
+
+    called = {"next": False}
+
+    async def _fake_exec_next(job_id, preclaimed_node=None):
+        called["next"] = True
+        return {"status": "done"}
+
+    monkeypatch.setattr(
+        "app.modules.execution_agent.execute_next_node", _fake_exec_next,
+    )
+
+    events = [
+        ev async for ev in assist_agent.handoff_step(
+            session_id="sess-1", node_key="T1", mode="single", db=_handoff_db(),
+        )
+    ]
+    assert called["next"] is False
+    assert any("assist_handoff_noop" in e for e in events)
+
+
+@pytest.mark.asyncio
+async def test_handoff_all_remaining_uses_execute_all_nodes(monkeypatch):
+    """all_remaining mode still delegates the whole rest of the DAG."""
+    rec: list = []
+    monkeypatch.setattr(
+        assist_agent, "async_session", _fake_session_factory(rec),
+    )
+
+    all_called = {"hit": False}
+
+    async def _fake_exec_all(job_id):
+        all_called["hit"] = True
+        yield 'event: node\ndata: {}\n\n'
+
+    next_called = {"hit": False}
+
+    async def _fake_exec_next(job_id, preclaimed_node=None):
+        next_called["hit"] = True
+        return {"status": "done"}
+
+    monkeypatch.setattr(
+        "app.modules.execution_agent.execute_all_nodes", _fake_exec_all,
+    )
+    monkeypatch.setattr(
+        "app.modules.execution_agent.execute_next_node", _fake_exec_next,
+    )
+
+    events = [
+        ev async for ev in assist_agent.handoff_step(
+            session_id="sess-1", node_key="T1", mode="all_remaining",
+            db=_handoff_db(),
+        )
+    ]
+    assert all_called["hit"] is True
+    assert next_called["hit"] is False
+    assert any("assist_handoff_done" in e for e in events)
+
+
+@pytest.mark.asyncio
+async def test_handoff_single_restores_assist_mode(monkeypatch):
+    rec: list = []
+    monkeypatch.setattr(
+        assist_agent, "async_session", _fake_session_factory(rec),
+    )
+
+    async def _fake_exec_next(job_id, preclaimed_node=None):
+        return {
+            "status": "done", "node_key": "T1", "title": "Node T1",
+            "verified": True, "job_complete": False,
+        }
+
+    monkeypatch.setattr(
+        "app.modules.execution_agent.execute_next_node", _fake_exec_next,
     )
 
     events = [
@@ -291,15 +425,20 @@ async def test_handoff_single_restores_assist_mode(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handoff_single_restore_survives_cancellation(monkeypatch):
+    # §17.410 — the finally restore is asyncio.shield-wrapped; a client
+    # disconnect mid-handoff (now during the per-node executor) must NOT
+    # leave the job stranded in 'executing'.
     rec: list = []
-    monkeypatch.setattr(assist_agent, "async_session", lambda: _FakeSession(rec))
+    monkeypatch.setattr(
+        assist_agent, "async_session", _fake_session_factory(rec),
+    )
 
-    async def _fake_exec_all(job_id):
-        yield 'event: node\ndata: {}\n\n'
-        await asyncio.sleep(10)  # block so we can cancel mid-stream
+    async def _fake_exec_next(job_id, preclaimed_node=None):
+        await asyncio.sleep(10)  # block so we can cancel mid-execution
+        return {"status": "done"}
 
     monkeypatch.setattr(
-        "app.modules.execution_agent.execute_all_nodes", _fake_exec_all,
+        "app.modules.execution_agent.execute_next_node", _fake_exec_next,
     )
 
     async def _drive():
@@ -309,7 +448,7 @@ async def test_handoff_single_restore_survives_cancellation(monkeypatch):
             pass
 
     task = asyncio.create_task(_drive())
-    await asyncio.sleep(0.05)  # let it reach the blocking execute_all_nodes
+    await asyncio.sleep(0.05)  # let it reach the blocking executor call
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
