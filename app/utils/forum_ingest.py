@@ -106,6 +106,38 @@ def _query_hash(query: str) -> str:
 # Stack Overflow
 # ---------------------------------------------------------------------------
 
+async def _fetch_so_nonaccepted_answers(client, question_ids: list[str]) -> list[dict]:
+    """§17.622 (audit #16) — fetch ALL answers (accepted + non-accepted) for the
+    given questions via the StackExchange ``/questions/{ids}/answers`` endpoint,
+    sorted by votes, with bodies. Used only when ``include_disputed=True`` to
+    surface the below-gate, non-accepted answers the disputed-claim ingest needs
+    (the primary path only fetches each question's accepted answer). Returns the
+    raw answer items ({answer_id, question_id, score, is_accepted, body, link}).
+    Fail-soft: any error / rate-limit returns ``[]``.
+    """
+    if not question_ids:
+        return []
+    ids_str = ";".join(question_ids[:100])
+    url = f"{_SE_BASE}/questions/{ids_str}/answers"
+    params = {
+        "site": "stackoverflow",
+        "filter": "withbody",
+        "sort": "votes",
+        "order": "desc",
+        "pagesize": 100,
+    }
+    try:
+        r = await client.get(url, params=params)
+        if r.status_code == 429:
+            logger.warning("so_disputed_rate_limited")
+            return []
+        r.raise_for_status()
+        return r.json().get("items", []) or []
+    except Exception as exc:
+        logger.debug("so_disputed_fetch_failed: %s", exc)
+        return []
+
+
 async def fetch_so_answers(
     query: str, limit: int, min_score: int,
     stats: dict | None = None,
@@ -262,6 +294,51 @@ async def fetch_so_answers(
                         "tags": q.get("tags") or [],
                     },
                 })
+
+    # §17.622 (audit #16) — the loop above only ever sees each question's
+    # ACCEPTED answer (is_accepted always True → passes_gate always True), so the
+    # disputed branch never fired and so_min_score was a no-op on SO. When
+    # include_disputed, fetch the questions' NON-accepted answers and route the
+    # below-gate ones to disputed_out so "commonly cited but disputed" content is
+    # actually ingested (as LOW-confidence negative knowledge).
+    if include_disputed and len(disputed_out) < limit:
+        qids = [str(q.get("question_id")) for q in questions if q.get("question_id")]
+        seen_aids = {q.get("accepted_answer_id") for q in questions}
+        others = await _fetch_so_nonaccepted_answers(client, qids)
+        qtitle_by_id = {q.get("question_id"): q.get("title", "") for q in questions}
+        for ans in others:
+            if len(disputed_out) >= limit:
+                break
+            aid = ans.get("answer_id")
+            if not aid or aid in seen_aids:
+                continue  # skip the accepted answer (already handled above)
+            if bool(ans.get("is_accepted")):
+                continue
+            score = int(ans.get("score", 0))
+            if score >= min_score:
+                continue  # high-score non-accepted isn't "disputed"
+            body_text = _strip_pii(_strip_html(ans.get("body", ""))).strip()
+            if not body_text:
+                continue
+            filtered_score += 1
+            q_title = qtitle_by_id.get(ans.get("question_id"), "")
+            link = ans.get("link", f"https://stackoverflow.com/a/{aid}")
+            disputed_out.append({
+                "path": f"so/disputed/answer-{aid}",
+                "content": (
+                    f"# Q: {q_title}\n\n"
+                    f"[DISPUTED — score={score}, not accepted]\n\n{body_text}"
+                ),
+                "source_type": "disputed_claim",
+                "source_url": link,
+                "source_ref": f"answer-{aid}",
+                "quality_signal": {
+                    "score": score,
+                    "is_accepted": False,
+                    "filter_reason": "below_min_score",
+                    "question_id": ans.get("question_id", 0),
+                },
+            })
 
     out.extend(disputed_out)
     if stats is not None:

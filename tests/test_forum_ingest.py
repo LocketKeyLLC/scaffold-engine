@@ -241,6 +241,51 @@ async def test_fetch_so_answers_low_score_unaccepted_filtered(fake_cache_miss):
 
 
 @pytest.mark.asyncio
+async def test_fetch_so_answers_disputed_ingests_below_gate_nonaccepted(fake_cache_miss):
+    """§17.622 (audit #16) — with include_disputed, below-gate NON-accepted
+    answers (fetched via the extra /questions/{ids}/answers pass) become
+    disputed_claim entries. Previously the disputed branch was unreachable
+    because only each question's ACCEPTED answer was ever fetched."""
+    from app.utils import forum_ingest
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=[
+        # /search/advanced → 1 question w/ an accepted answer
+        _make_response(json_data={"items": [
+            {"question_id": 100, "title": "How do X?", "accepted_answer_id": 1001,
+             "score": 50, "tags": ["python"]},
+        ]}),
+        # /answers/{ids} → the accepted answer (normal 'so_answer' entry)
+        _make_response(json_data={"items": [
+            {"answer_id": 1001, "score": 40, "is_accepted": True,
+             "body": "<p>the accepted way</p>", "link": "https://stackoverflow.com/a/1001"},
+        ]}),
+        # §17.622 /questions/{ids}/answers → all answers incl. a below-gate,
+        # non-accepted one (the disputed candidate)
+        _make_response(json_data={"items": [
+            {"answer_id": 1001, "question_id": 100, "score": 40, "is_accepted": True,
+             "body": "<p>the accepted way</p>", "link": "https://stackoverflow.com/a/1001"},
+            {"answer_id": 2002, "question_id": 100, "score": 1, "is_accepted": False,
+             "body": "<p>a disputed hack</p>", "link": "https://stackoverflow.com/a/2002"},
+        ]}),
+    ])
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client):
+        out = await forum_ingest.fetch_so_answers(
+            "foo", limit=10, min_score=10, include_disputed=True,
+        )
+
+    by_ref = {e["source_ref"]: e for e in out}
+    assert "answer-1001" in by_ref  # accepted → normal so_answer
+    assert by_ref["answer-1001"]["source_type"] == "so_answer"
+    assert "answer-2002" in by_ref  # below-gate non-accepted → disputed
+    assert by_ref["answer-2002"]["source_type"] == "disputed_claim"
+    assert "DISPUTED" in by_ref["answer-2002"]["content"]
+    # the accepted answer must NOT be double-emitted into the disputed pass
+    assert sum(1 for e in out if e["source_ref"] == "answer-1001") == 1
+    # third HTTP call = the /questions/{ids}/answers disputed pass
+    assert client.get.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_fetch_so_answers_uses_answer_cache():
     """Cached answer bodies skip the /answers/{ids} batch call entirely."""
     from app.utils import forum_ingest

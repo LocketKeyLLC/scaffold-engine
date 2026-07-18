@@ -22035,6 +22035,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.622 Fix — resolves deferred #16: StackOverflow disputed-claim ingest now works (2026-07-18)
+
+Picks up audit #16 (the last deferral). `fetch_so_answers` searched with `accepted:True` and fetched only each question's `accepted_answer_id`, so `is_accepted` was always True, `passes_gate` was unconditionally True, `so_min_score` was a no-op on SO, and the §17.125 disputed-claim branch was unreachable (`disputed_out` stayed empty even with `forum_ingest_disputed=True` — operators got disputed ingest from Reddit but never from SO).
+
+- **Fix (`app/utils/forum_ingest.py`):** additive, default-path-preserving. When `include_disputed=True`, a new `_fetch_so_nonaccepted_answers` helper fetches the questions' full answer list via the StackExchange `/questions/{ids}/answers?sort=votes` endpoint; the below-gate, non-accepted answers (skipping the already-emitted accepted one) are routed to `disputed_out` as `source_type=disputed_claim`. The default (`include_disputed=False`) path is byte-for-byte unchanged — no extra HTTP call. Caller wiring already passes `include_disputed=settings.forum_ingest_disputed`.
+
+**Verification:** unit — `tests/test_forum_ingest.py` +1 (`test_..._disputed_ingests_below_gate_nonaccepted`, asserts the disputed entry + the 3rd HTTP call + no double-emit of the accepted answer), 83 passed. **Live StackExchange API smoke** — `fetch_so_answers("python list comprehension", include_disputed=True)` returned `so_answer: 5, disputed_claim: 5` with `kept_disputed=5, filtered_low_score=5` (was always 0 before). #16 **resolved** — this closes ALL four 2026-07-18 audit deferrals (#12/§17.619, #32/§17.620, #20/§17.621, #16/§17.622).
+
 ### §17.621 Fix — resolves deferred #20: assist handoff_policy auto-handoff is now consumed (2026-07-18)
 
 Picks up audit #20. `handoff_policy`'s `auto_on_skip` / `auto_all_remaining` values were accepted, stored, and echoed but never read — a session started with `auto_on_skip` behaved identically to `manual`. The deferral flagged the architecture question (how does auto-handoff surface, given `/submit` returns JSON while `handoff_step` is a streaming executor generator).
