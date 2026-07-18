@@ -81,9 +81,18 @@ async def _fetch_raw_file_cached(
         return "", b""
     _check_response(r, f"raw {repo_kind}/{id_}@{revision}/{path}")
     body = r.content
+    # §17.604 — pin the immutable 30-day TTL to IMMUTABLE refs only. A commit
+    # SHA is content-addressed (immutable), but "main" is a moving pointer
+    # (used as the sha-missing fallback in fetch_hf_model/dataset), so caching a
+    # card fetched at revision='main' for 30 days served stale cards up to a
+    # month. Use the short default TTL for the mutable ref.
+    ttl = (
+        settings.fetch_cache_ttl_default_seconds if revision == "main"
+        else settings.fetch_cache_ttl_immutable_seconds
+    )
     await cache.put(
         "hf", revision, f"{repo_kind}/{id_}/{path}",
-        body, ttl_seconds=settings.fetch_cache_ttl_immutable_seconds,
+        body, ttl_seconds=ttl,
     )
     return body.decode("utf-8", errors="replace"), body
 

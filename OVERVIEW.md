@@ -21994,6 +21994,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.604 Fix — Low audit findings: cache-key + pagination + TTL correctness (2026-07-18)
+
+Three latent cache/sweep correctness bugs.
+
+- **`rag_result_cache` key omitted `domain_hint`** (`app/utils/rag_result_cache.py` + `rag_pipeline.py`). `domain_hint` narrows the search fan-out (`_iter_search_domains`) so two calls with the same `(query, domain)` but different hints retrieve from different partition sets → different results, yet it wasn't in the key (`domain=None, hint='eng'` collided with `hint=None`). **Fix:** thread `domain_hint` through `_canonical_payload`/`make_key`/`get`/`put` (same `default=None` pattern as `max_candidates`/`doc_truncate`) and pass it from `query_rag`'s cache calls.
+- **Staleness sweep skipped rows via a `max(entry_id)` cursor** (`app/utils/staleness.py`). `client.query()` returns rows unordered, so advancing the cursor to `max(ids)` and querying `entry_id > max` skipped any expired id that sorted below max but wasn't on the (capped, unordered) page — they survived to the next cycle. **Fix:** drop the cursor; delete each batch (shrinking the expired set) and dedup via a `seen` set to absorb delete-consistency lag. (Removed the now-unused `escape_milvus_literal` import.)
+- **HF card cached 30-day-immutable even at `revision='main'`** (`app/utils/hf_ingest.py`). `_fetch_raw_file_cached` always used `fetch_cache_ttl_immutable_seconds`, but `main` is a moving pointer (the sha-missing fallback), so cards fetched there went stale up to a month. **Fix:** short `fetch_cache_ttl_default_seconds` for `main`, immutable TTL for a pinned SHA.
+
+**Verification:** `test_rag_result_cache.py` + `test_staleness.py` + `test_hf_ingest.py` = **76 passed** — new: `test_domain_hint_change_changes_key`, `test_sweep_expired_no_max_id_cursor`, `test_fetch_raw_file_ttl_by_ref_immutability`.
+
 ### §17.603 Fix — Low audit findings: /config + /health operator-surface robustness (2026-07-18)
 
 Two `app/main.py` diagnostic-endpoint bugs.

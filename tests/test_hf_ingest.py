@@ -503,3 +503,27 @@ async def test_check_response_maps_429_to_rate_limit():
     from app.utils import hf_ingest
     with pytest.raises(hf_ingest.HFRateLimitError):
         hf_ingest._check_response(_make_response(status_code=429), "ctx")
+
+
+# ---------------------------------------------------------------------------
+# §17.604 — HF raw-file cache TTL keyed on ref immutability
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_fetch_raw_file_ttl_by_ref_immutability():
+    """revision='main' (mutable pointer) gets the short default TTL; a pinned
+    commit SHA (immutable) gets the 30-day immutable TTL. Caching a 'main' card
+    for 30 days served stale cards."""
+    from app.utils import hf_ingest
+    from app.config import settings
+
+    cache = MagicMock()
+    cache.get = AsyncMock(return_value=None)
+    cache.put = AsyncMock(return_value=True)
+    client = MagicMock()
+    client.get = AsyncMock(return_value=_make_response(content=b"# Card"))
+
+    with patch("app.utils.hf_ingest.get_fetch_cache", return_value=cache):
+        await hf_ingest._fetch_raw_file_cached(client, "models", "o/r", "main", "README.md")
+        assert cache.put.call_args.kwargs["ttl_seconds"] == settings.fetch_cache_ttl_default_seconds
+        await hf_ingest._fetch_raw_file_cached(client, "models", "o/r", "abc123sha", "README.md")
+        assert cache.put.call_args.kwargs["ttl_seconds"] == settings.fetch_cache_ttl_immutable_seconds

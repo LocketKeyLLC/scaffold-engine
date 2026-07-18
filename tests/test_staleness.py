@@ -108,6 +108,26 @@ async def test_sweep_expired_paginates():
 
 @pytest.mark.smoke
 @pytest.mark.asyncio
+async def test_sweep_expired_no_max_id_cursor():
+    """§17.604 — must NOT paginate via a max(entry_id) cursor. client.query()
+    is unordered, so `entry_id > max(ids)` skipped lower expired ids; the sweep
+    now deletes each batch + dedups via a seen-set. Assert no query filter
+    carries an entry_id-comparison cursor and both ids are deleted regardless
+    of order ('a' < 'z' would have been skipped by a max(ids)='z' cursor)."""
+    fake_col = MagicMock()
+    fake_col.query.side_effect = [
+        [{"entry_id": "z", "title": "Z"}, {"entry_id": "a", "title": "A"}],
+        [],
+    ]
+    with patch.object(staleness, "get_client", return_value=fake_col):
+        result = await staleness.sweep_expired()
+    assert set(result["deleted"]) == {"Z", "A"}
+    for call in fake_col.query.call_args_list:
+        assert "entry_id >" not in call.kwargs.get("filter", "")
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
 async def test_sweep_expired_caps_titles_at_50():
     fake_col = MagicMock()
     entries = [{"entry_id": f"id{i}", "title": f"T{i}"} for i in range(120)]

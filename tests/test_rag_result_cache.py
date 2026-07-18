@@ -78,6 +78,13 @@ class TestMakeKey:
         b = make_key("q", "eng", 5, 0.5, False, False, "general")
         assert a != b
 
+    # §17.604 — domain_hint narrows the search fan-out, so it's part of the
+    # key. domain=None,hint='eng' must NOT collide with domain=None,hint=None.
+    def test_domain_hint_change_changes_key(self):
+        a = make_key("q", None, 5, 0.3, False, False, "general", domain_hint=None)
+        b = make_key("q", None, 5, 0.3, False, False, "general", domain_hint="eng")
+        assert a != b
+
     # §17.234 — max_candidates is part of the key. A request with
     # max_candidates=5 must NOT hit a cached entry from a request with
     # max_candidates=32 (different reranker shortlist → different results).

@@ -14,7 +14,7 @@ import asyncio
 import logging
 import time
 
-from app.utils.milvus_utils import escape_milvus_literal, get_client
+from app.utils.milvus_utils import get_client
 from app.config import settings, TTL_POLICY, DEFAULT_TTL_SECONDS
 
 logger = logging.getLogger("scaffold.staleness")
@@ -41,29 +41,31 @@ async def sweep_expired() -> dict:
         total_ids: list[str] = []
         total_titles: list[str] = []
         hit_cap = True
-        last_id = ""  # all stringly-typed entry_ids sort after the empty string
+        seen: set[str] = set()  # §17.604 — dedup across pages
 
         for _ in range(_MAX_PAGES):
-            # #49 cursor pagination: entry_id > last_id prevents re-seeing rows
-            # whose delete hasn't been flushed yet.
-            # §17.409 (arch-review R3) — escape the cursor literal per the
-            # Milvus expr-safety invariant; entry_ids are slug/hash today, but
-            # this keeps the raw-interpolation contract uniform with rag_pipeline.
-            expr = (
-                f'expires_at > 0 and expires_at < {now} '
-                f'and entry_id > "{escape_milvus_literal(last_id)}"'
-            )
+            # §17.604 — delete-as-you-go pagination WITHOUT a max(entry_id)
+            # cursor. client.query() returns rows in no guaranteed order, so
+            # advancing the cursor to max(ids) skipped any expired entry_id that
+            # sorted below max but wasn't on this (capped, unordered) page —
+            # those survived until the next sweep cycle. Instead we delete the
+            # whole batch each iteration (shrinking the expired set) and dedup
+            # via `seen` to absorb delete-consistency lag (a just-deleted row
+            # re-surfacing before the flush propagates). #49's cursor existed to
+            # avoid re-seeing unflushed deletes; `seen` covers that case too.
+            expr = f'expires_at > 0 and expires_at < {now}'
             expired = client.query(
                 collection_name="toon_v2",
                 filter=expr,
                 output_fields=["entry_id", "title", "source_type", "expires_at"],
                 limit=_PAGE_SIZE,
             )
-            if not expired:
+            fresh = [e for e in expired if e["entry_id"] not in seen]
+            if not fresh:
                 hit_cap = False
                 break
 
-            ids = [e["entry_id"] for e in expired]
+            ids = [e["entry_id"] for e in fresh]
             # #48 IN expression with explicit double-quoted, escaped IDs
             quoted = ",".join(
                 '"' + eid.replace('\\', '\\\\').replace('"', '\\"') + '"'
@@ -72,10 +74,9 @@ async def sweep_expired() -> dict:
             client.delete(collection_name="toon_v2", filter=f"entry_id in [{quoted}]")
             client.flush(collection_name="toon_v2")
 
+            seen.update(ids)
             total_ids.extend(ids)
-            total_titles.extend(e.get("title", "unknown") for e in expired)
-            # Advance cursor to the max entry_id in this batch.
-            last_id = max(ids)
+            total_titles.extend(e.get("title", "unknown") for e in fresh)
 
             if len(expired) < _PAGE_SIZE:
                 hit_cap = False

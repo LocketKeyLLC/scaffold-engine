@@ -811,6 +811,7 @@ async def query_rag(
         skip_rerank, include_history, query_intent,
         max_candidates=max_candidates,
         doc_truncate=doc_truncate,
+        domain_hint=domain_hint,  # §17.604 — part of the cache key
     )
     if cached is not None:
         # §17.264 — defensive shallow copy. The current Redis-backed
@@ -1014,6 +1015,7 @@ async def query_rag(
         response,
         max_candidates=max_candidates,
         doc_truncate=doc_truncate,
+        domain_hint=domain_hint,  # §17.604 — part of the cache key
     )
     return response
 
