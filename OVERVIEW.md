@@ -2011,7 +2011,10 @@ A second full audit run as a **multi-agent workflow**: 66 agents — one correct
 - ✅ §17.616 RAG/provenance batching: one batched exact-hash dedup query + multi-row provenance INSERT (2026-07-18 audit #31/33); #32 fetch_cache SCAN deferred (needs shared-Redis infra change).
 - ✅ §17.617 wired half-wired features: JobSummary parent_job_id/component_index populated + status.py class rename, assist divergence_count surfaced (2026-07-18 audit #19/13); #16 SO disputed-claim + #20 handoff_policy deferred (unverifiable feature work).
 - ✅ §17.618 CLOSEOUT of the 2026-07-18 multi-agent audit: 34 confirmed + #42 doc-drift resolved (§17.608–617), 4 deferred (#12/16/20/32), #41 reviewed-intentional. Ledger in AUDIT_2026-07-18.md.
-- ✅ §17.619 resolved deferred #12: single `db.commit()` releases the pooled connection before compile-synthesis's LLM call (no session-across-LLM); live-LLM verified. Remaining deferrals: #16/20/32.
+- ✅ §17.619 resolved deferred #12: single `db.commit()` releases the pooled connection before compile-synthesis's LLM call (no session-across-LLM); live-LLM verified.
+- ✅ §17.620 resolved deferred #32: fetch_cache counts via O(1) `DBSIZE` on a dedicated Redis DB (db1); live Redis verified (caught a `from_url(db=)` gotcha).
+- ✅ §17.621 resolved deferred #20: assist `handoff_policy` auto values delegate to the autonomous executor on skip via a background handoff; live wiring verified.
+- ✅ §17.622 resolved deferred #16: StackOverflow disputed-claim ingest fetches non-accepted answers; live StackExchange verified (disputed_claim now produced). **All four 2026-07-18 audit deferrals now closed; only #41 stands as reviewed-intentional.**
 
 **Process note:** mid-audit, running two full `make test` suites concurrently briefly stressed Milvus and produced spurious retrieval-golden failures — a diagnostic detour, not a code regression (the corpus gap was pre-existing; §17.595 fixed the real cause). One-command corpus-restore after a wipe: `docker exec scaffold-orchestrator python scripts/seed_corpus_remainder.py` (§17.595, seeds all 5 curated golden docs).
 
@@ -22080,12 +22083,13 @@ Picks up the audit #12 deferral (see §17.615/§17.618). On investigation the fi
 - §17.614 node prompt-edit #11 · §17.615 node/execution #14/26/27/35/36 · §17.616 RAG/provenance batching #31/33 · §17.617 wired features #13/19
 - **#42 (contested doc-drift):** two docstring corrections — `app/sim/report.py` now states the report is deliberately criticality-blind where `_check_constraints`'s convergence gate is not (not a mirror-mismatch bug); `app/modules/dag_generator.py` scopes its "validation logic" line to the structural dependency/dead-end checks that exist (dropped the overstated "I/O contract auditing").
 
-**#12 — RESOLVED in §17.619** (was deferred): compile-synthesis no longer holds a pooled DB connection across the LLM call. The feared 3-path refactor turned out to be a single `db.commit()` after the last read; verified with a live-LLM smoke.
+**ALL FOUR DEFERRALS SUBSEQUENTLY RESOLVED (§17.619–622), each live-verified:**
+- **#12 → §17.619** — compile-synthesis releases the pooled DB connection before the LLM call (single `db.commit()`; live-LLM smoke).
+- **#32 → §17.620** — fetch_cache counts via O(1) `DBSIZE` on a dedicated Redis logical DB (live Redis smoke; caught + fixed a `from_url(db=)` gotcha).
+- **#20 → §17.621** — assist `handoff_policy` auto values now delegate to the autonomous executor on skip via a background handoff (live wiring smoke).
+- **#16 → §17.622** — StackOverflow disputed-claim ingest fetches non-accepted answers (live StackExchange smoke: disputed_claim entries produced, was 0).
 
-**Deferred (3) — genuine work needing verification/decisions I would not ship unverified:**
-- **#32** fetch_cache SCANs the shared 2GB Redis keyspace to count keys — accurate fix needs a dedicated Redis counter/logical-DB (infra change) validated against the live shared instance; current SCAN is throttled/non-blocking/fail-open.
-- **#16** StackOverflow disputed-claim ingest — needs a second live-StackExchange unaccepted-answers fetch pass, unverifiable offline.
-- **#20** assist `handoff_policy` auto-handoff — `handoff_step` is a streaming executor generator; auto-invoking it from the transactional `submit_step` is an architectural decision (background vs streaming surface) needing assist-flow integration testing.
+The feared blockers (big refactor / infra guess / external API / architecture decision) each turned out tractable once investigated; live verification caught a real db-index bug in #32 that unit tests alone would have missed.
 
 **Reviewed, no change — #41 (contested, deliberate):** DAG generation's `SELECT ... FOR UPDATE OF j` held across LLM round-trips is load-bearing (makes the check-then-insert idempotency guard race-free) and row-scoped (only blocks another writer to a job row that doesn't exist mid-generation). The skeptic split favored "intentional"; the "fix" is the same risky transaction-split as #12. Left as designed.
 
