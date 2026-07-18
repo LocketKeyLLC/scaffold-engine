@@ -2009,6 +2009,7 @@ A second full audit run as a **multi-agent workflow**: 66 agents — one correct
 - ✅ §17.614 node prompt edits honored: prompt_template (not optimized_prompt) is the editable+invalidating field (2026-07-18 audit #11).
 - ✅ §17.615 node/execution cluster: topology-aware truncation, sizing convergence evidence guard, size stage_error on non-persist, async confirm off the threadpool, decompose TOCTOU advisory lock (2026-07-18 audit #14/26/27/35/36); #12 DB-session-across-LLM deferred (default-off, needs live-LLM verify).
 - ✅ §17.616 RAG/provenance batching: one batched exact-hash dedup query + multi-row provenance INSERT (2026-07-18 audit #31/33); #32 fetch_cache SCAN deferred (needs shared-Redis infra change).
+- ✅ §17.617 wired half-wired features: JobSummary parent_job_id/component_index populated + status.py class rename, assist divergence_count surfaced (2026-07-18 audit #19/13); #16 SO disputed-claim + #20 handoff_policy deferred (unverifiable feature work).
 
 **Process note:** mid-audit, running two full `make test` suites concurrently briefly stressed Milvus and produced spurious retrieval-golden failures — a diagnostic detour, not a code regression (the corpus gap was pre-existing; §17.595 fixed the real cause). One-command corpus-restore after a wipe: `docker exec scaffold-orchestrator python scripts/seed_corpus_remainder.py` (§17.595, seeds all 5 curated golden docs).
 
@@ -22031,6 +22032,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
 
 ---
+
+### §17.617 Fix — wire up half-wired features: JobSummary decomposition fields + assist divergence (2026-07-18)
+
+2026-07-18 audit batch 9 — the user elected to WIRE UP the half-wired features rather than drop them. Two wired, two deferred as genuine feature work.
+
+- **#19 `JobSummary.parent_job_id`/`component_index` always serialized null** (`app/routers/jobs.py`). The §17.525 decomposition fields existed on the schema but neither construction site SELECTed them. **Fix:** added `j.parent_job_id, j.component_index` to the list + rename queries and passed them through, so clients can now distinguish umbrella/component jobs. Also **renamed the colliding `status.py` `JobSummary` → `RecentJobSummary`** — the two same-named classes had forced FastAPI to emit ugly disambiguated component names (`app__schemas__JobSummary`, `app__routers__status__JobSummary`) in the OpenAPI contract; they're now clean `JobSummary` / `RecentJobSummary`.
+- **#13 assist divergence flag was write-only** (`app/modules/assist_agent.py`). The `context_only` default replan policy fire-and-forgets a verifier LLM call per submit that sets `assist_steps.divergence=TRUE`, but no production read consumed it. **Fix:** `get_session`'s roll-up now returns `divergence_count` so an operator can see how many steps diverged — the verifier spend now has a visible outcome.
+
+**Deferred — #16 (StackOverflow disputed-claim ingest) and #20 (assist `handoff_policy`).** Both are genuine feature additions, not wire-ups, and neither is verifiable offline:
+- #16 (`forum_ingest.py`): the SE search is hard-constrained to `accepted:True` and only fetches accepted answers, so `so_min_score`/disputed-claim are unreachable. Making disputed ingest work requires a SECOND unaccepted-answers fetch pass against the live StackExchange API — a real fetch-pattern change whose correctness can't be validated without hitting the API.
+- #20 (`assist_agent.py`): `handoff_policy`'s `auto_on_skip`/`auto_all_remaining` values are stored but never read. `handoff_step` is a streaming async generator that drives the autonomous executor; auto-invoking it from the transactional `submit_step` is an architectural change (how does auto-handoff surface — background task? streaming response?), needing integration testing of the assist flow.
+Both deferred rather than shipped unverified; documented here for a focused follow-up.
+
+**Verification:** `make test` subset — assist_agent/replan_divergence/status_logs/jobs/jobs_list_ux = **84 passed**; `make openapi-snapshot` regenerated (JobSummary rename + decomposition fields; diff scoped); `make ci-tier-0` static parity gates green.
 
 ### §17.616 Fix — RAG/provenance batching (2 audit findings) + #32 deferred (2026-07-18)
 

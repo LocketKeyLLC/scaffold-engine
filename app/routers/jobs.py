@@ -226,7 +226,7 @@ async def list_jobs(
     params["offset"] = offset
     rows = await db.execute(text(f"""
         SELECT j.id, j.title, j.status, j.created_at, j.updated_at,
-               j.completed_at,
+               j.completed_at, j.parent_job_id, j.component_index,
                COALESCE(n.cnt, 0) AS node_count
         FROM jobs j
         LEFT JOIN (SELECT job_id, COUNT(*) AS cnt FROM dag_nodes GROUP BY job_id) n
@@ -244,6 +244,10 @@ async def list_jobs(
             created_at=r.created_at.isoformat(),
             updated_at=r.updated_at.isoformat(),
             completed_at=r.completed_at.isoformat() if r.completed_at else None,
+            # §17.617 (audit #19) — populate the §17.525 decomposition fields so
+            # clients can distinguish umbrella/component jobs (were always null).
+            parent_job_id=str(r.parent_job_id) if r.parent_job_id else None,
+            component_index=r.component_index,
         )
         for r in rows.fetchall()
     ]
@@ -279,6 +283,7 @@ async def rename_job(job_id: str, body: JobRenameInput, db: AsyncSession = Depen
         UPDATE jobs SET title = :title, updated_at = NOW()
         WHERE id = :id
         RETURNING id, title, status, created_at, updated_at, completed_at,
+                  parent_job_id, component_index,
                   (SELECT COUNT(*) FROM dag_nodes WHERE job_id = :id) AS node_count
     """), {"id": job_id, "title": body.title})
     row = r.fetchone()
@@ -291,6 +296,9 @@ async def rename_job(job_id: str, body: JobRenameInput, db: AsyncSession = Depen
         created_at=row.created_at.isoformat(),
         updated_at=row.updated_at.isoformat(),
         completed_at=row.completed_at.isoformat() if row.completed_at else None,
+        # §17.617 (audit #19) — carry the decomposition fields on the rename response too.
+        parent_job_id=str(row.parent_job_id) if row.parent_job_id else None,
+        component_index=row.component_index,
     )
 
 

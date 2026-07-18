@@ -58,7 +58,7 @@ class StatusCounts(BaseModel):
     aggregating: int = 0
 
 
-class JobSummary(BaseModel):
+class RecentJobSummary(BaseModel):
     id: str
     title: str = ""
     status: str
@@ -71,7 +71,7 @@ class JobSummary(BaseModel):
 class StatusResponse(BaseModel):
     status_counts: StatusCounts
     total_jobs: int
-    recent_jobs: list[JobSummary]
+    recent_jobs: list[RecentJobSummary]
     timestamp: str
 
 
@@ -184,7 +184,7 @@ async def get_status(
 
     jobs_result = await db.execute(text(query), params)
     recent_jobs = [
-        JobSummary(
+        RecentJobSummary(
             id=str(row.id),
             title=row.title or "",
             status=row.status,

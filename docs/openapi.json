@@ -1748,7 +1748,7 @@
         "properties": {
           "jobs": {
             "items": {
-              "$ref": "#/components/schemas/app__schemas__JobSummary"
+              "$ref": "#/components/schemas/JobSummary"
             },
             "title": "Jobs",
             "type": "array"
@@ -1786,6 +1786,77 @@
           "title"
         ],
         "title": "JobRenameInput",
+        "type": "object"
+      },
+      "JobSummary": {
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "component_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Component Index"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "node_count": {
+            "default": 0,
+            "title": "Node Count",
+            "type": "integer"
+          },
+          "parent_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Job Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "JobSummary",
         "type": "object"
       },
       "JobSynthesisOverrideInput": {
@@ -2464,6 +2535,65 @@
         "title": "RagInput",
         "type": "object"
       },
+      "RecentJobSummary": {
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "next_actions": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Next Actions",
+            "type": "array"
+          },
+          "node_count": {
+            "default": 0,
+            "title": "Node Count",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "title": "RecentJobSummary",
+        "type": "object"
+      },
       "ResearchInput": {
         "properties": {
           "depth": {
@@ -3022,7 +3152,7 @@
         "properties": {
           "recent_jobs": {
             "items": {
-              "$ref": "#/components/schemas/app__routers__status__JobSummary"
+              "$ref": "#/components/schemas/RecentJobSummary"
             },
             "title": "Recent Jobs",
             "type": "array"
@@ -3333,136 +3463,6 @@
           "level"
         ],
         "title": "_LogLevelPatchIn",
-        "type": "object"
-      },
-      "app__routers__status__JobSummary": {
-        "properties": {
-          "created_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Created At"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "next_actions": {
-            "default": [],
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "title": "Next Actions",
-            "type": "array"
-          },
-          "node_count": {
-            "default": 0,
-            "title": "Node Count",
-            "type": "integer"
-          },
-          "status": {
-            "title": "Status",
-            "type": "string"
-          },
-          "title": {
-            "default": "",
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Updated At"
-          }
-        },
-        "required": [
-          "id",
-          "status"
-        ],
-        "title": "JobSummary",
-        "type": "object"
-      },
-      "app__schemas__JobSummary": {
-        "properties": {
-          "completed_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Completed At"
-          },
-          "component_index": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Component Index"
-          },
-          "created_at": {
-            "title": "Created At",
-            "type": "string"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "node_count": {
-            "default": 0,
-            "title": "Node Count",
-            "type": "integer"
-          },
-          "parent_job_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Parent Job Id"
-          },
-          "status": {
-            "title": "Status",
-            "type": "string"
-          },
-          "title": {
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "title": "Updated At",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "status",
-          "created_at",
-          "updated_at"
-        ],
-        "title": "JobSummary",
         "type": "object"
       }
     },
@@ -5830,7 +5830,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/app__schemas__JobSummary"
+                  "$ref": "#/components/schemas/JobSummary"
                 }
               }
             },

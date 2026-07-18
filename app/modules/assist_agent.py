@@ -220,9 +220,22 @@ async def get_session(*, session_id: str, db) -> Optional[dict]:
         """),
         {"sid": session_id},
     )).mappings().all()
+    # §17.617 (audit #13) — surface the divergence flag maybe_replan writes. The
+    # context_only DEFAULT replan_policy fire-and-forgets a verifier LLM call per
+    # submit that sets assist_steps.divergence=TRUE on major divergence, but NO
+    # production read consumed it — the run paid for a write-only flag. Now the
+    # session roll-up reports how many steps diverged so an operator can see it.
+    divergence_count = (await db.execute(
+        text("""
+            SELECT COUNT(*) FROM assist_steps
+             WHERE session_id = :sid AND divergence = TRUE
+        """),
+        {"sid": session_id},
+    )).scalar() or 0
     return {
         **{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in dict(sess).items()},
         "step_counts": {r["status"]: r["cnt"] for r in rollup},
+        "divergence_count": int(divergence_count),
     }
 
 
