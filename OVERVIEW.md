@@ -21994,6 +21994,10 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.601 Fix — Low audit findings: llm_parsing raw-first JSON parse (2026-07-18)
+
+First of the Low-severity audit batch. Both `parse_json_object` and `parse_json_array` (`app/utils/llm_parsing.py`) ran `strip_think_tags` + `_strip_markdown_fences` on the raw text BEFORE `json.loads`. Two silent-corruption paths: the think-tag OPEN regex (`<(?:think|thinking)>.*` DOTALL) deletes from a literal `<think>` substring to end-of-text, and the fence stripper removes ```` ``` ```` anywhere — both can legitimately appear INSIDE a JSON string value (a code sample, a literal tag), so already-valid JSON got mangled. **Fix:** try `json.loads(raw)` verbatim first; only fall through to the strip+repair chain when the raw text doesn't parse. Mirrored the fast path in `diagnose_json_object_parse` so its error reporting stays consistent. **Verification:** `test_llm_parsing.py` = **20 passed** (+4: literal-`<think>`/backticks-in-value preserved for object+array; fence/think strip still works when raw is invalid).
+
 ### §17.600 Fix — Medium audit findings, group 5/5: data provenance / correctness (2026-07-18)
 
 The final five Medium findings — closes the 14-item Medium set from the 2026-07-17 audit.

@@ -105,3 +105,31 @@ def test_parse_array_rejects_object_root():
 @pytest.mark.smoke
 def test_parse_array_returns_none_on_garbage():
     assert parse_json_array("definitely not json") is None
+
+
+# ---------------------------------------------------------------------------
+# §17.601 — raw-first fast path: don't corrupt valid JSON whose string values
+# legitimately contain "<think>" or triple-backticks
+# ---------------------------------------------------------------------------
+def test_parse_object_preserves_literal_think_substring_in_value():
+    raw = '{"code": "if flag: print(\\"<think>\\")", "ok": true}'
+    result = parse_json_object(raw)
+    assert result == {"code": 'if flag: print("<think>")', "ok": True}
+
+
+def test_parse_object_preserves_backticks_in_value():
+    raw = '{"snippet": "run ```py``` here", "ok": true}'
+    result = parse_json_object(raw)
+    assert result == {"snippet": "run ```py``` here", "ok": True}
+
+
+def test_parse_array_preserves_literal_think_substring_in_value():
+    raw = '["<think>not-a-tag", "b"]'
+    assert parse_json_array(raw) == ["<think>not-a-tag", "b"]
+
+
+def test_parse_object_still_strips_fences_when_raw_invalid():
+    # Regression guard: the fence/think strip path still works when the raw
+    # text isn't valid JSON verbatim.
+    assert parse_json_object("```json\n{\"a\": 1}\n```") == {"a": 1}
+    assert parse_json_object("<think>reasoning</think>{\"ok\": true}") == {"ok": True}

@@ -66,6 +66,16 @@ def _extract_by_brackets(text: str, open_b: str, close_b: str):
 
 def parse_json_object(raw: str):
     """Parse a JSON object from raw LLM output (4-step chain)."""
+    # §17.601 — try the raw text verbatim FIRST. The think-tag OPEN regex
+    # (deletes from a literal "<think>" to end-of-text) and the markdown-fence
+    # stripper both mutate content that can legitimately appear INSIDE a JSON
+    # string value, so pre-stripping can corrupt already-valid JSON.
+    try:
+        result = json.loads(raw)
+        if isinstance(result, dict):
+            return result
+    except json.JSONDecodeError:
+        pass
     cleaned = strip_think_tags(raw)
     cleaned = _strip_markdown_fences(cleaned)
     try:
@@ -118,6 +128,13 @@ def diagnose_json_object_parse(raw: str) -> dict | None:
     only the first one, which is the most diagnostic for the operator
     (it pinpoints where the LLM first deviated from valid JSON).
     """
+    # §17.601 — mirror parse_json_object's raw-first fast path: if the raw
+    # text parses verbatim, parse_json_object would too, so report no error.
+    try:
+        if isinstance(json.loads(raw), dict):
+            return None
+    except json.JSONDecodeError:
+        pass
     cleaned = strip_think_tags(raw)
     cleaned = _strip_markdown_fences(cleaned)
     try:
@@ -139,6 +156,13 @@ def diagnose_json_object_parse(raw: str) -> dict | None:
 
 def parse_json_array(raw: str):
     """Parse a JSON array from raw LLM output (4-step chain)."""
+    # §17.601 — raw verbatim first (see parse_json_object).
+    try:
+        result = json.loads(raw)
+        if isinstance(result, list):
+            return result
+    except json.JSONDecodeError:
+        pass
     cleaned = strip_think_tags(raw)
     cleaned = _strip_markdown_fences(cleaned)
     try:
