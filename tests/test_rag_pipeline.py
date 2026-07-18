@@ -732,7 +732,7 @@ class TestRerankMaxCandidatesOverride:
         results = self._make_results(15)
 
         captured_docs = []
-        def capture(query, docs, top_k):
+        def capture(query, docs, top_k, max_pairs=None):
             captured_docs.extend(docs)
             return fake_rr
 
@@ -754,7 +754,7 @@ class TestRerankMaxCandidatesOverride:
         # 50 input results so the cap matters regardless of settings value
         results = self._make_results(50)
         captured_docs = []
-        def capture(query, docs, top_k):
+        def capture(query, docs, top_k, max_pairs=None):
             captured_docs.extend(docs)
             return fake_rr
 
@@ -783,7 +783,7 @@ class TestRerankMaxCandidatesOverride:
 
         results = self._make_results(3)
         captured_docs = []
-        def capture(query, docs, top_k):
+        def capture(query, docs, top_k, max_pairs=None):
             captured_docs.extend(docs)
             return fake_rr
 
@@ -791,6 +791,35 @@ class TestRerankMaxCandidatesOverride:
             _run(_rerank("q", results, top_k=10, max_candidates=999))
 
         assert len(captured_docs) == 3  # Python list[:999] just stops at len(results)
+
+    def test_max_candidates_over_20_not_silently_disabled(self):
+        """§17.608 regression — max_candidates > the reranker's old _MAX_PAIRS=20
+        must pass the full shortlist as max_pairs so the reranker scores all of
+        it. Previously the reranker capped at 20 and the len(items)<len(docs)
+        guard misread that as a partial failure and disabled reranking entirely.
+        """
+        from app.modules.rag_pipeline import _rerank
+        from app.rerankers import RerankedItem, RerankResult
+
+        results = self._make_results(30)
+        captured = {}
+
+        def capture(query, docs, top_k, max_pairs=None):
+            captured["max_pairs"] = max_pairs
+            captured["n_docs"] = len(docs)
+            # Reranker honors max_pairs → returns one item per doc (full result).
+            items = [RerankedItem(index=i, score=1.0 - i * 0.01, text=d)
+                     for i, d in enumerate(docs)]
+            return RerankResult(items=items, backend="mock", latency_ms=1.0)
+
+        with patch("app.modules.rag_pipeline.cross_encoder_rerank", side_effect=capture):
+            ranked, meta = _run(_rerank("q", results, top_k=10, max_candidates=30))
+
+        # The whole shortlist is handed to the reranker as max_pairs...
+        assert captured["max_pairs"] == captured["n_docs"] == 30
+        # ...and reranking is NOT skipped (the guard no longer misfires).
+        assert meta["skipped_rerank"] is False
+        assert meta["backend"] == "mock"
 
 
 # ===========================================================================
@@ -825,7 +854,7 @@ class TestRerankDocTruncateOverride:
         results = self._make_long_results(5, 1000)
         captured_docs = []
 
-        def capture(query, docs, top_k):
+        def capture(query, docs, top_k, max_pairs=None):
             captured_docs.extend(docs)
             return fake_rr
 
@@ -852,7 +881,7 @@ class TestRerankDocTruncateOverride:
         results = self._make_long_results(3, settings.rerank_doc_truncate + 500)
         captured_docs = []
 
-        def capture(query, docs, top_k):
+        def capture(query, docs, top_k, max_pairs=None):
             captured_docs.extend(docs)
             return fake_rr
 
@@ -877,7 +906,7 @@ class TestRerankDocTruncateOverride:
         results = self._make_long_results(3, 50)
         captured_docs = []
 
-        def capture(query, docs, top_k):
+        def capture(query, docs, top_k, max_pairs=None):
             captured_docs.extend(docs)
             return fake_rr
 
@@ -900,7 +929,7 @@ class TestRerankDocTruncateOverride:
         results = self._make_long_results(20, 1000)
         captured_docs = []
 
-        def capture(query, docs, top_k):
+        def capture(query, docs, top_k, max_pairs=None):
             captured_docs.extend(docs)
             return fake_rr
 

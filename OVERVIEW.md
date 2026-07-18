@@ -2000,6 +2000,7 @@ A second full audit run as a **multi-agent workflow**: 66 agents — one correct
 - ✅ §17.605 SSE fragment collapses newlines; triage strips `<think>` (shared helper).
 - ✅ §17.606 `classify` gets a generous budget + empty-guard; skipped-human node marked `verified`; `to_milvus` emits `title`.
 - ✅ §17.607 SDK gains `ConflictError` (409); CLI `_stream_research` uses the real `_stream` (dead `_aiter_sse` ref removed).
+- ✅ §17.608 rerank cap mismatch fixed: `max_pairs` plumbed through so `RERANK_MAX_CANDIDATES > 20` no longer silently disables reranking (2026-07-18 audit #1).
 
 **Process note:** mid-audit, running two full `make test` suites concurrently briefly stressed Milvus and produced spurious retrieval-golden failures — a diagnostic detour, not a code regression (the corpus gap was pre-existing; §17.595 fixed the real cause). One-command corpus-restore after a wipe: `docker exec scaffold-orchestrator python scripts/seed_corpus_remainder.py` (§17.595, seeds all 5 curated golden docs).
 
@@ -22022,6 +22023,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
 
 ---
+
+### §17.608 Fix — rerank cap mismatch silently disabled reranking for max_candidates > 20 (2026-07-18)
+
+**Opens the 2026-07-18 whole-repo multi-agent improvement audit** (15 subsystem finders × 4 dimensions, two adversarial skeptics per finding, 40 confirmed of 55 raw). #1 by leverage.
+
+- **`RERANK_MAX_CANDIDATES > 20` silently turned reranking OFF** (`app/modules/rag_pipeline.py`, `app/rerankers.py`, `app/config.py`). `_rerank` builds `docs = results[:max_cand]` (config/schema bound `ge=1 le=512`) and asks the CrossEncoder to rank all of them, but the public `rerank()` always used its internal `_MAX_PAIRS=20` default — so any shortlist > 20 was silently truncated to 20 scored items. The §17.260 partial-result guard (`len(rr.items) < len(docs)`) then misread that healthy truncation as corruption, set `skipped_rerank=True`, and rebuilt **every** result on the RRF scale — reranking off for the whole query while still paying the CrossEncoder cost. The `config.py:185` comment explicitly invited operators to raise the cap "for a deeper rerank," which did the exact opposite.
+- **Fix (reconcile the two caps into one):** plumb `max_pairs` through `rerank()` → `rerank_cross_encoder()` and have `_rerank` pass `max_pairs=len(docs)`, so the reranker scores the whole shortlist the pipeline already bounded via `rerank_max_candidates`. `_MAX_PAIRS=20` remains the safe default for bare `rerank()` callers. The `le=512` bound is now the authoritative, honestly-honored ceiling. Default behavior (`max_candidates=10`) is unchanged.
+
+**Verification:** `make test` subset `tests/test_rerankers.py tests/test_rag_pipeline.py` = **88 passed** (updated 7 capture mocks for the new 4th positional arg; +1 regression test `test_max_candidates_over_20_not_silently_disabled` asserting `max_pairs == len(docs)` and `skipped_rerank is False`).
 
 ### §17.607 Fix — Low audit findings: SDK ConflictError + CLI dead ref (closes the audit) (2026-07-18)
 

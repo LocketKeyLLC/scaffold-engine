@@ -634,7 +634,15 @@ async def _rerank(
     docs = [r.content[:doc_trunc] for r in results[:max_cand]]
 
     loop = asyncio.get_running_loop()
-    rr = await loop.run_in_executor(None, cross_encoder_rerank, query, docs, len(docs))
+    # §17.608 — pass max_pairs=len(docs) so the CrossEncoder scores the WHOLE
+    # shortlist we just built. Previously the reranker used its internal
+    # _MAX_PAIRS=20 default, so any max_cand > 20 was silently truncated to 20
+    # items; the len(rr.items) < len(docs) guard below then misread that healthy
+    # truncation as a partial-failure and disabled reranking entirely (rebuilding
+    # every result on the RRF scale) while still paying the CrossEncoder cost.
+    # The config/schema le=512 bound on rerank_max_candidates is the authoritative
+    # ceiling; the reranker now honors it end-to-end.
+    rr = await loop.run_in_executor(None, cross_encoder_rerank, query, docs, len(docs), len(docs))
 
     meta["backend"] = getattr(rr, "backend", None)
 

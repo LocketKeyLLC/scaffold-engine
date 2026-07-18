@@ -183,6 +183,10 @@ class Settings(BaseSettings):
     # reordering; the top-10 by RRF is usually a strong shortlist already).
     # Operators wanting the deeper rerank can raise via
     # RERANK_MAX_CANDIDATES in .env (no code change required).
+    # §17.608 — this promise is now honored end-to-end: previously the
+    # CrossEncoder's internal _MAX_PAIRS=20 silently truncated any value
+    # > 20, and the partial-result guard then disabled reranking entirely.
+    # The reranker now scores the full shortlist this bound defines.
     rerank_max_candidates: int = Field(default=10, ge=1, le=512)
     # §17.235 — rerank_doc_truncate default 2000 → 500. Empirical sweep
     # (scripts/eval_doc_truncate.py against tests/fixtures/golden_set.json,

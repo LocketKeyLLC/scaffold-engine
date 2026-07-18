@@ -271,9 +271,17 @@ def rerank(
     query: str,
     documents: list[str],
     top_k: int = 5,
+    max_pairs: int = _MAX_PAIRS,
 ) -> RerankResult:
-    """Rerank documents. Uses CrossEncoder if available, else RRF."""
-    result = rerank_cross_encoder(query, documents, top_k=top_k)
+    """Rerank documents. Uses CrossEncoder if available, else RRF.
+
+    §17.608 — ``max_pairs`` is now plumbed through so callers that have
+    already bounded their shortlist (the RAG pipeline caps at
+    ``settings.rerank_max_candidates``, ge=1 le=512) can have every
+    shortlisted candidate scored instead of being silently truncated to
+    the ``_MAX_PAIRS`` default. Bare callers keep the safe default.
+    """
+    result = rerank_cross_encoder(query, documents, top_k=top_k, max_pairs=max_pairs)
     if result is not None:
         return result
 
