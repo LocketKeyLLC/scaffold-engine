@@ -410,3 +410,51 @@ async def test_list_models_returns_ids(fake_client):
     p = AnthropicProvider()
     out = await p.list_models()
     assert out == ["claude-opus-4-7", "claude-sonnet-4-6"]
+
+
+# ---------------------------------------------------------------------------
+# §17.610 (audit #38) — mid-stream error frames must propagate
+# ---------------------------------------------------------------------------
+class _FakeStreamResp:
+    def __init__(self, status_code=200, lines=None):
+        self.status_code = status_code
+        self._lines = lines or []
+
+    async def aread(self):
+        return b""
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+
+class _FakeStreamCtx:
+    def __init__(self, resp):
+        self._resp = resp
+
+    async def __aenter__(self):
+        return self._resp
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_raises_on_midstream_error_after_partial(fake_client):
+    """A mid-stream {type:'error', overloaded_error} frame on a 200 stream must
+    raise ProviderUnavailableError — NOT be silently swallowed so a consumer
+    accepts truncated partial content as a complete response."""
+    lines = [
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}',
+        'data: {"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}',
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"lo"}}',
+    ]
+    fake_client.stream = lambda *a, **k: _FakeStreamCtx(_FakeStreamResp(200, lines))
+
+    p = AnthropicProvider()
+    collected = []
+    with pytest.raises(ProviderUnavailableError, match="overloaded"):
+        async for chunk in p.stream_chat("claude-opus-4-7", [{"role": "user", "content": "x"}]):
+            collected.append(chunk)
+    # The partial content before the error was yielded; the post-error delta was not.
+    assert collected == ["Hel"]

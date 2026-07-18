@@ -313,6 +313,16 @@ class AnthropicProvider(LLMProvider):
                     chunk = _json.loads(data_str)
                 except ValueError:
                     continue
+                if chunk.get("type") == "error":
+                    # §17.610 (audit #38) — Anthropic can deliver a mid-stream
+                    # error frame (e.g. overloaded_error) on a 200 stream. Without
+                    # this branch the loop `continue`s past it and the generator
+                    # ends silently, so a consumer that already received partial
+                    # content accepts a truncated result as complete. Propagate it
+                    # like the non-stream error path.
+                    err = chunk.get("error") or {}
+                    msg = err.get("message") or err.get("type") or "unknown error"
+                    raise ProviderUnavailableError(f"anthropic stream error: {msg}")
                 if chunk.get("type") != "content_block_delta":
                     continue
                 delta = chunk.get("delta") or {}

@@ -447,6 +447,62 @@ def test_classify_failure_retries_on_malformed_http_error():
     assert model_router._classify_failure(resp) == "retry"
 
 
+# ---------------------------------------------------------------------------
+# §17.610 — provider-agnostic retry cascade for the role-routed cloud path
+# ---------------------------------------------------------------------------
+@pytest.mark.smoke
+def test_classify_failure_529_overloaded_is_retryable():
+    """Anthropic's 529 overloaded_error is transient — must retry."""
+    resp = model_router.ModelResponse(model="m", success=False, error="HTTP 529: overloaded")
+    assert model_router._classify_failure(resp) == "retry"
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("err,expected", [
+    ("openai HTTP 503: brownout", "retry"),
+    ("anthropic HTTP 529: overloaded_error", "retry"),
+    ("anthropic HTTP 401: bad key", "fail_fast"),
+    ("openai HTTP 404: no such model", "fail_fast"),
+])
+def test_classify_failure_handles_provider_prefixed_http(err, expected):
+    """§17.610 — provider errors carry an 'openai '/'anthropic ' prefix before
+    'HTTP <code>'; the regex classifier must still extract the code."""
+    resp = model_router.ModelResponse(model="m", success=False, error=err)
+    assert model_router._classify_failure(resp) == expected
+
+
+@pytest.mark.smoke
+async def test_retry_provider_call_retries_transient_then_succeeds():
+    """A transient provider failure is retried; the second attempt succeeds."""
+    calls = []
+
+    async def call():
+        calls.append(1)
+        if len(calls) == 1:
+            return model_router.ModelResponse(model="m", success=False, error="HTTP 529: overloaded")
+        return model_router.ModelResponse(model="m", success=True, text="ok")
+
+    with patch.object(model_router, "_sleep_for_attempt", AsyncMock()):
+        resp = await model_router._retry_provider_call(call, model="m", max_retries=3)
+    assert resp.success is True
+    assert len(calls) == 2
+
+
+@pytest.mark.smoke
+async def test_retry_provider_call_fail_fast_on_deterministic_error():
+    """A deterministic 401 is NOT retried — one attempt only."""
+    calls = []
+
+    async def call():
+        calls.append(1)
+        return model_router.ModelResponse(model="m", success=False, error="anthropic HTTP 401: bad key")
+
+    with patch.object(model_router, "_sleep_for_attempt", AsyncMock()):
+        resp = await model_router._retry_provider_call(call, model="m", max_retries=3)
+    assert resp.success is False
+    assert len(calls) == 1
+
+
 @pytest.mark.smoke
 def test_backoff_seconds_is_bounded_by_cap():
     """Across 1000 samples at a high attempt index, no value exceeds the

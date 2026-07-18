@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import time
 from typing import Any, Optional
 
@@ -195,7 +196,14 @@ async def _call_ollama(
 
 # HTTP status codes worth retrying. Everything else (auth, validation, 404)
 # won't recover by waiting — bail to fallback immediately.
-_RETRYABLE_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+# 529 = Anthropic "overloaded_error" (returned on hosted-API brownouts); it is
+# transient and retryable just like 429/5xx (§17.610).
+_RETRYABLE_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504, 529})
+
+# Extracts the HTTP status from an error string. Matches both the Ollama path's
+# "HTTP 429: ..." and the provider-prefixed "openai HTTP 429: ..." /
+# "anthropic HTTP 529: ..." forms (§17.610), so cloud errors classify correctly.
+_HTTP_CODE_RE = re.compile(r"HTTP (\d{3})")
 
 # Full-jitter exponential backoff: sleep ∈ [0, min(BASE * 2^attempt, CAP)].
 # Base 0.5s / cap 8s gives windows of [0,0.5], [0,1], [0,2], [0,4], [0,8] —
@@ -217,14 +225,12 @@ def _classify_failure(resp: ModelResponse) -> str:
     err = resp.error or ""
     if err.startswith("Timeout"):
         return "retry"
-    if err.startswith("HTTP "):
-        try:
-            code = int(err.split(None, 2)[1].rstrip(":"))
-        except (IndexError, ValueError):
-            return "retry"
+    m = _HTTP_CODE_RE.search(err)
+    if m:
+        code = int(m.group(1))
         return "retry" if code in _RETRYABLE_HTTP_CODES else "fail_fast"
-    # Generic exception path (httpx connect errors, RST, DNS, etc.) —
-    # almost always transient, so retry.
+    # Generic exception path (httpx connect errors, RST, DNS, etc.) — and
+    # unparseable HTTP strings — are almost always transient, so retry.
     return "retry"
 
 
@@ -349,6 +355,47 @@ async def _dispatch_with_retry(
     return last_resp
 
 
+async def _retry_provider_call(
+    call: "Callable[[], Any]",  # () -> Awaitable[ModelResponse]  # noqa: F821
+    *,
+    model: str,
+    max_retries: int | None = None,
+) -> ModelResponse:
+    """§17.610 — provider-agnostic retry cascade for the role-routed path.
+
+    The legacy Ollama path gets its retry/backoff from ``_dispatch_with_retry``,
+    but role-routed cloud calls (openai/anthropic) previously issued a single
+    provider POST with no retry — so a transient 429/5xx/529 hard-failed the
+    whole LLM call. Hosted APIs throttle MORE than a local Ollama yet had the
+    LEAST resilience.
+
+    This wraps any coroutine returning a ``ModelResponse`` in the same
+    full-jitter backoff + ``_classify_failure`` branching. It does NOT do the
+    ``_dispatch_with_retry`` model-swap fallback: the provider owns its own
+    ``fallback`` kwarg semantics, and swapping models across providers is out
+    of scope here.
+    """
+    retries = max_retries if max_retries is not None else settings.max_retries
+    retries = max(1, retries)
+    last_resp = ModelResponse(model=model, success=False, error="no attempt")
+    for attempt in range(retries):
+        last_resp = await call()
+        if last_resp.success:
+            last_resp.retries = attempt
+            return last_resp
+        classification = _classify_failure(last_resp)
+        logger.warning(
+            "Provider attempt %d/%d failed for %s [%s]: %s",
+            attempt + 1, retries, model, classification, last_resp.error,
+        )
+        if classification == "fail_fast":
+            break
+        if attempt + 1 < retries:
+            await _sleep_for_attempt(attempt)
+    last_resp.retries = retries - 1
+    return last_resp
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -420,6 +467,12 @@ def _format_provider_error(resp: ModelResponse, role: str) -> str:
             f" — {provider} rate-limit or quota exceeded. Back off, "
             f"or switch MODEL_{role_env}_PROVIDER to a different backend."
         )
+    elif "529" in base or "overloaded" in lower:
+        hint = (
+            f" — {provider} is temporarily overloaded (retried with backoff). "
+            f"Retry shortly, or switch MODEL_{role_env}_PROVIDER to a different "
+            f"backend if it persists."
+        )
     elif "timeout" in lower:
         if provider == "openai":
             hint = " — call exceeded OPENAI_TIMEOUT. Raise it in .env (or shrink the prompt)."
@@ -454,10 +507,13 @@ async def generate(
     _reject_role_model_collision(role, model)
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
-        resp = await provider.generate(
-            resolved_model, prompt,
-            system=system, temperature=temperature, max_tokens=max_tokens,
-            fallback=fallback,
+        resp = await _retry_provider_call(
+            lambda: provider.generate(
+                resolved_model, prompt,
+                system=system, temperature=temperature, max_tokens=max_tokens,
+                fallback=fallback,
+            ),
+            model=resolved_model,
         )
         if not resp.success:
             resp.error = _format_provider_error(resp, role)
@@ -490,10 +546,13 @@ async def chat(
     _reject_role_model_collision(role, model)
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
-        resp = await provider.chat_completion(
-            resolved_model, messages,
-            temperature=temperature, max_tokens=max_tokens,
-            fallback=fallback,
+        resp = await _retry_provider_call(
+            lambda: provider.chat_completion(
+                resolved_model, messages,
+                temperature=temperature, max_tokens=max_tokens,
+                fallback=fallback,
+            ),
+            model=resolved_model,
         )
         if not resp.success:
             resp.error = _format_provider_error(resp, role)
@@ -687,9 +746,12 @@ async def _native_first_then_coax(
     from content. Tool-capable models that DO call the tool keep the clean,
     single-call native path; everything else still gets structured output.
     """
-    resp = await provider.tool_call(
-        model, messages, tools,
-        temperature=temperature, max_tokens=max_tokens, tool_choice=tool_choice,
+    resp = await _retry_provider_call(
+        lambda: provider.tool_call(
+            model, messages, tools,
+            temperature=temperature, max_tokens=max_tokens, tool_choice=tool_choice,
+        ),
+        model=model,
     )
     if tools and resp.success and not resp.tool_calls:
         logger.info(
@@ -697,6 +759,10 @@ async def _native_first_then_coax(
             "(native returned no tool_calls; retrying via coaxing)",
             model, role,
         )
+        # §17.610 (audit #29) — the native call above is a real billable request.
+        # Record its cost/latency before the coax fallback, else it's lost from
+        # llm_call_logs (the caller only records the returned coax response).
+        await _record_call(resp)
         return await _tool_call_via_coaxing(
             provider, model, messages, tools,
             temperature=temperature, max_tokens=max_tokens,
@@ -730,9 +796,12 @@ async def _tool_call_via_coaxing(
     injection) so the wrapper is a no-op for the empty-tools case.
     """
     if not tools:
-        return await provider.chat_completion(
-            model, messages, temperature=temperature,
-            max_tokens=max_tokens, fallback=fallback,
+        return await _retry_provider_call(
+            lambda: provider.chat_completion(
+                model, messages, temperature=temperature,
+                max_tokens=max_tokens, fallback=fallback,
+            ),
+            model=model,
         )
 
     primary = tools[0]
@@ -756,9 +825,12 @@ async def _tool_call_via_coaxing(
         else max_tokens
     )
 
-    resp = await provider.chat_completion(
-        model, augmented, temperature=temperature,
-        max_tokens=effective_max, fallback=fallback,
+    resp = await _retry_provider_call(
+        lambda: provider.chat_completion(
+            model, augmented, temperature=temperature,
+            max_tokens=effective_max, fallback=fallback,
+        ),
+        model=model,
     )
     if not resp.success:
         if role:

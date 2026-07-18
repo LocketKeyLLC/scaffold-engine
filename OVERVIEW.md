@@ -2002,6 +2002,7 @@ A second full audit run as a **multi-agent workflow**: 66 agents — one correct
 - ✅ §17.607 SDK gains `ConflictError` (409); CLI `_stream_research` uses the real `_stream` (dead `_aiter_sse` ref removed).
 - ✅ §17.608 rerank cap mismatch fixed: `max_pairs` plumbed through so `RERANK_MAX_CANDIDATES > 20` no longer silently disables reranking (2026-07-18 audit #1).
 - ✅ §17.609 web SSE lifecycle: terminal `close` frame + `sse-close` stops the reconnect-storm; heartbeats forwarded; stall counter uses true per-cycle time (2026-07-18 audit #2/#39/#9).
+- ✅ §17.610 cloud role-routed calls get retry/backoff via `_retry_provider_call` (+529 retryable, regex classifier); native-tool telemetry recorded; Anthropic mid-stream errors propagate (2026-07-18 audit #3/#29/#38).
 
 **Process note:** mid-audit, running two full `make test` suites concurrently briefly stressed Milvus and produced spurious retrieval-golden failures — a diagnostic detour, not a code regression (the corpus gap was pre-existing; §17.595 fixed the real cause). One-command corpus-restore after a wipe: `docker exec scaffold-orchestrator python scripts/seed_corpus_remainder.py` (§17.595, seeds all 5 curated golden docs).
 
@@ -22024,6 +22025,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
 
 ---
+
+### §17.610 Fix — provider-agnostic retry/backoff for cloud role-routed calls + 2 provider bugs (2026-07-18)
+
+2026-07-18 audit #3 (High) + #29 + #38 — the model-router/provider seam.
+
+- **Cloud calls had zero retry/backoff** (`app/model_router.py`). The headline "3× retry → fallback swap" cascade lived only in `_dispatch_with_retry`, which is Ollama-only. Role-routed `generate`/`chat`/`tool_call` called the provider directly — a single transient OpenAI 429/5xx or Anthropic 529 hard-failed the whole call. The asymmetry was backwards: hosted APIs throttle MORE than a local Ollama yet had the LEAST resilience. **Fix:** new `_retry_provider_call()` wraps any `() -> Awaitable[ModelResponse]` in the same full-jitter backoff + `_classify_failure` branching (no model-swap — the provider owns `fallback`). Wrapped the role-path `provider.generate`/`chat_completion`/`tool_call` (native + coax) sites; this also gives the legacy `tool_call` coax path retry it never had. Added `529` to `_RETRYABLE_HTTP_CODES` and a 529 "overloaded" hint to `_format_provider_error`. Made `_classify_failure` regex-based (`HTTP (\d{3})`) so provider-prefixed errors (`openai HTTP 401`, `anthropic HTTP 529`) classify correctly instead of falling through to a blind retry. Reachability was config-gated (all roles default to `provider=ollama`), so this bit only operators binding a role to a cloud provider.
+- **#29 — native tool call dropped from telemetry** (`_native_first_then_coax`). On the native-success-but-empty-tool_calls path the native (billable) call's tokens/latency were never written to `llm_call_logs` — only the returned coax response was recorded. **Fix:** `_record_call(resp)` on the native response before the coax fallback.
+- **#38 — Anthropic mid-stream errors swallowed** (`app/providers/anthropic.py`). The SSE loop `continue`d past everything except `content_block_delta`, including a mid-stream `{type:'error', overloaded_error}` frame Anthropic sends on a 200 stream — so a consumer that already got partial content accepted a truncated result as complete. **Fix:** a `type=='error'` branch raises `ProviderUnavailableError` like the non-stream path.
+
+**Verification:** `make test` subset — `tests/test_model_router.py`, `tests/test_model_router_tool_call.py`, `tests/test_provider_anthropic.py` = **123 passed** (+6 regression: 529 retryable, provider-prefixed classify ×4, retry-then-succeed, fail-fast-on-401, mid-stream-error-raises). Provider/tool_call sweep 229 passed.
 
 ### §17.609 Fix — web SSE run-stream reconnect-storm + heartbeats + stall-counter 3× undercount (2026-07-18)
 
