@@ -28,11 +28,14 @@ logger = logging.getLogger("scaffold.node_editor")
 # Fields a PATCH /nodes edit may change. title/description/is_deliverable are
 # metadata (no output invalidation); the INVALIDATING set changes what the
 # node produces, so editing them on an already-run node resets it + downstream.
+# §17.614 (audit #11) — prompt_template (not optimized_prompt) is editable: it is
+# the field _build_prompt consumes on re-execution. Editing optimized_prompt was a
+# no-op the executor overwrote, silently discarding the operator's prompt fix.
 EDITABLE_FIELDS = {
-    "title", "description", "optimized_prompt", "tool",
+    "title", "description", "prompt_template", "tool",
     "depends_on", "assigned_model", "is_deliverable",
 }
-INVALIDATING_FIELDS = {"optimized_prompt", "tool", "depends_on"}
+INVALIDATING_FIELDS = {"prompt_template", "tool", "depends_on"}
 _TERMINAL = ("done", "failed", "skipped")
 
 
@@ -231,7 +234,7 @@ async def edit_node(
     params: dict = {"j": job_id, "nk": node_key}
     col_map = {
         "title": "title", "description": "description",
-        "optimized_prompt": "optimized_prompt", "tool": "tool",
+        "prompt_template": "prompt_template", "tool": "tool",
         "assigned_model": "assigned_model", "is_deliverable": "is_deliverable",
         "depends_on": "depends_on",
     }

@@ -840,8 +840,11 @@ async def web_node_edit_form(
     except (ValueError, TypeError):
         return HTMLResponse('<div class="node-output empty">(invalid job)</div>')
     row = (await db.execute(
+        # §17.614 (audit #11) — prefill with prompt_template (the editable field)
+        # so the operator edits what execution actually consumes, falling back to
+        # optimized_prompt only when the template is empty.
         _sql("SELECT title, tool, COALESCE(is_deliverable, FALSE) AS is_deliverable, "
-             "depends_on, COALESCE(optimized_prompt, prompt_template, '') AS prompt, "
+             "depends_on, COALESCE(prompt_template, optimized_prompt, '') AS prompt, "
              "edit_version FROM dag_nodes WHERE job_id = :j AND node_key = :k"),
         {"j": job_id, "k": node_key},
     )).mappings().first()
@@ -861,15 +864,17 @@ async def web_node_edit_form(
 async def web_node_edit(
     request: Request, job_id: str, node_key: str,
     title: str = Form(""), tool: str = Form(""),
-    depends_on: str = Form(""), optimized_prompt: str = Form(""),
+    depends_on: str = Form(""), prompt_template: str = Form(""),
     is_deliverable: str = Form(""), expected_version: int = Form(None),
     db=Depends(get_db),
 ):
     from app.modules import node_editor
+    # §17.614 (audit #11) — edit prompt_template (the field execution consumes),
+    # not optimized_prompt (which the executor regenerates every run).
     fields = {
         "title": title.strip(),
         "tool": tool.strip(),
-        "optimized_prompt": optimized_prompt,
+        "prompt_template": prompt_template,
         "depends_on": [d.strip() for d in depends_on.split(",") if d.strip()],
         "is_deliverable": is_deliverable == "on",
     }

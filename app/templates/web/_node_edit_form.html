@@ -12,7 +12,7 @@
     <label class="check"><input type="checkbox" name="is_deliverable" {% if node.is_deliverable %}checked{% endif %}> Deliverable</label>
   </div>
   <label class="prompt-label">Prompt
-    <textarea name="optimized_prompt" rows="4">{{ node.prompt }}</textarea>
+    <textarea name="prompt_template" rows="4">{{ node.prompt }}</textarea>
   </label>
   <div class="edit-actions">
     <button type="submit" class="btn btn-small btn-primary">Save</button>

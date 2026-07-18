@@ -113,6 +113,22 @@ class TestEdit:
             r = await node_editor.edit_node("j", "T1", {"title": "new"}, db=_db())
         assert r["status"] == "ok" and r["reset"] == []   # title is metadata
 
+    async def test_prompt_template_is_editable_and_invalidating(self):
+        """§17.614 (audit #11) — prompt_template (the field execution consumes)
+        is editable and invalidating, so a prompt edit actually takes effect."""
+        nodes = [_node("T1", status="done"), _node("T2", status="done", deps=["T1"])]
+        with _patch_load(nodes):
+            r = await node_editor.edit_node("j", "T1", {"prompt_template": "new prompt"}, db=_db())
+        assert r["status"] == "ok"
+        assert r["reset"] == ["T1", "T2"]   # invalidating → resets node + downstream
+
+    async def test_optimized_prompt_no_longer_editable(self):
+        """§17.614 (audit #11) — editing optimized_prompt alone is now a 400
+        (it was a silent no-op the executor overwrote); operators aren't misled."""
+        with _patch_load([_node("T1")]):
+            r = await node_editor.edit_node("j", "T1", {"optimized_prompt": "x"}, db=_db())
+        assert r["http_status"] == 400
+
 
 # ---------------------------------------------------------------------------
 # insert / delete / reorder / reset

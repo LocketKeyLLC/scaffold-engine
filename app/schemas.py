@@ -599,6 +599,12 @@ class NodeEditInput(BaseModel):
     (omit for last-write-wins)."""
     title: str | None = None
     description: str | None = None
+    # §17.614 (audit #11) — prompt_template is the field execution actually
+    # consumes (_build_prompt reads it, then re-optimizes). optimized_prompt was
+    # accepted+invalidating but the executor overwrites it every run, so a prompt
+    # edit was silently discarded. Kept in the schema for back-compat but no
+    # longer in node_editor.EDITABLE_FIELDS (editing it alone now 400s).
+    prompt_template: str | None = None
     optimized_prompt: str | None = None
     tool: str | None = None
     depends_on: list[str] | None = None

@@ -1985,6 +1985,17 @@
             ],
             "title": "Optimized Prompt"
           },
+          "prompt_template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Template"
+          },
           "title": {
             "anyOf": [
               {

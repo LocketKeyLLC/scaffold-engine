@@ -22029,6 +22029,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.614 Fix — node prompt edits were silently discarded on re-execution (2026-07-18)
+
+2026-07-18 audit #11 (Medium). `node_editor` exposed `optimized_prompt` as editable+invalidating — editing it bumped `edit_version`, reset the node + downstream, and returned 200 — but the executor never reads `optimized_prompt`: `_build_prompt` builds from `prompt_template` and re-runs `optimize_prompt`, overwriting the column. So an operator's prompt fix was regenerated away, while `prompt_template` (the field execution consumes) wasn't editable at all.
+
+- **Fix:** make `prompt_template` the editable + invalidating field. `node_editor.EDITABLE_FIELDS`/`INVALIDATING_FIELDS`/`col_map` now use `prompt_template`; the web edit route + form textarea submit `prompt_template`; the edit-form prefill coalesces `prompt_template` first so the operator edits what execution uses. `optimized_prompt` stays in `NodeEditInput` for API back-compat but is no longer in `EDITABLE_FIELDS` (editing it alone now 400s rather than misleading). On re-run the edited template is rebuilt + re-optimized, so the operator's content takes effect.
+- Schema touched (`NodeEditInput` gains `prompt_template`) → `make sync-schemas` + `make openapi-snapshot` regenerated; `docs/openapi.json` diff is exactly the new optional field.
+
+**Verification:** `make test` subset — `tests/test_node_editor.py` (+2 regression: prompt_template editable+invalidating, optimized_prompt now 400) + `tests/test_web_ui.py` = **115 passed**; `make ci-tier-0` static parity gates green.
+
 ### §17.613 Fix — sibling defensive-guard divergence cluster (7 audit findings) (2026-07-18)
 
 2026-07-18 audit batch 6 — near-identical code paths that diverged because a hardening pattern was adopted in one place and not its twin.
