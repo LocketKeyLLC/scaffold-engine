@@ -216,6 +216,15 @@ async def emit(
                 alert_id = str(row.scalar())
                 await db.commit()
             except Exception as exc:
+                # §17.598 — roll back so a failed INSERT doesn't leave the
+                # (possibly caller-shared) session in a PendingRollbackError
+                # state that fail-opens every later read/emit in the same
+                # evaluate_thresholds tick. Defensive: rollback may itself fail
+                # on a dead connection.
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
                 logger.warning(
                     "alert_db_insert_failed: kind=%s err=%s (other sinks still fired)",
                     kind, exc,

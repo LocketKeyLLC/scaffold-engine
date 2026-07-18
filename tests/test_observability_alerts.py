@@ -122,6 +122,28 @@ class TestEmit:
         assert result["emitted"] is True
         assert result["id"] is None
 
+    async def test_emit_db_insert_failure_rolls_back(self):
+        """§17.598 — a failed INSERT must roll back so the (possibly
+        caller-shared) session isn't left in a PendingRollbackError state that
+        fail-opens every later read/emit in the same evaluate_thresholds tick."""
+        async def _execute(sql, params=None):
+            sql_text = str(sql)
+            if "FROM system_alerts" in sql_text and "WHERE dedup_key" in sql_text:
+                r = MagicMock()
+                r.first.return_value = None
+                return r
+            raise RuntimeError("deadlock detected")
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=_execute)
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+        result = await _alerts.emit(
+            kind="t", severity="info", message="x", db=db,
+        )
+        assert result["emitted"] is True
+        db.rollback.assert_awaited_once()
+
 
 @pytest.mark.smoke
 class TestAlertsEndpoint:

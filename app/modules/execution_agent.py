@@ -882,13 +882,20 @@ async def execute_next_node(
                             {"co": compiled, "syn": was_synthesized,
                              "dk": kind, "jid": job_id},
                         )
-                        # §17.565 — persist deliverable(s) as artifact rows.
-                        # Best-effort: never let an artifact write break completion.
+                        # §17.598 — commit the deliverable BEFORE persisting
+                        # artifacts, and run artifacts in their OWN session. The
+                        # artifact INSERT shares the deliverable's transaction
+                        # otherwise, so a DBAPI error there (e.g. a NUL byte in
+                        # node output) aborts the tx and the trailing commit
+                        # silently loses compiled_output on an already-'completed'
+                        # job. Best-effort: never let an artifact write break it.
+                        await db.commit()
                         try:
-                            await persist_job_artifacts(job_id, db, deliverable_kind=kind)
+                            async with async_session() as _adb:
+                                await persist_job_artifacts(job_id, _adb, deliverable_kind=kind)
+                                await _adb.commit()
                         except Exception:
                             logger.exception("persist_job_artifacts failed (complete) job=%s", job_id)
-                        await db.commit()
                         # §17.576 — learning flywheel (opt-in): a high-grounding
                         # deliverable becomes a retrievable exemplar. No-op when
                         # the valve is off or grounding is below threshold.
@@ -939,9 +946,14 @@ async def execute_next_node(
                             {"co": partial_result, "syn": partial_synthesized,
                              "dk": kind, "jid": job_id},
                         )
-                        # §17.565 — persist partial deliverable as artifacts.
+                        # §17.598 — commit the partial deliverable first, then
+                        # persist artifacts in their own session (see the
+                        # 'complete' path above for the isolation rationale).
+                        await db.commit()
                         try:
-                            await persist_job_artifacts(job_id, db, deliverable_kind=kind)
+                            async with async_session() as _adb:
+                                await persist_job_artifacts(job_id, _adb, deliverable_kind=kind)
+                                await _adb.commit()
                         except Exception:
                             logger.exception("persist_job_artifacts failed (blocked) job=%s", job_id)
                     else:
@@ -1632,13 +1644,16 @@ async def execute_next_node(
                     ),
                     {"out": compiled, "syn": was_synthesized, "dk": kind, "jid": job_id},
                 )
+                # §17.598 — persist the deliverable first, then artifacts in
+                # their own session (see the 'complete' path for the rationale).
+                await db.commit()
                 if compiled:
-                    # §17.565 — persist deliverable(s) as artifacts.
                     try:
-                        await persist_job_artifacts(job_id, db, deliverable_kind=kind)
+                        async with async_session() as _adb:
+                            await persist_job_artifacts(job_id, _adb, deliverable_kind=kind)
+                            await _adb.commit()
                     except Exception:
                         logger.exception("persist_job_artifacts failed (autocomplete) job=%s", job_id)
-                await db.commit()
                 logger.info(
                     "compiled_output_stored: chars=%s synthesized=%s job=%s",
                     len(compiled) if compiled else 0, was_synthesized, job_id,

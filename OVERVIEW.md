@@ -21994,6 +21994,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.598 Fix — Medium audit findings, group 3/5: transaction/cancellation durability (2026-07-18)
+
+Two spots where "best-effort" cleanup silently dropped a durable write by sharing a poisoned transaction.
+
+- **`persist_job_artifacts` failure rolled back the `compiled_output` write** (`app/modules/execution_agent.py`, 3 sites: the complete / blocked-partial / autocomplete paths). Each ran `UPDATE jobs SET compiled_output=…` and then `persist_job_artifacts(job_id, db)` in the **same** transaction, committed together at the end. A DBAPI error in the artifact INSERT (e.g. a NUL byte in an LLM CodeGen output) aborts that transaction; the surrounding `except Exception` gives false isolation, and the trailing `commit()` then can't persist the deliverable — the job is already durably `completed`/`blocked` with NULL/stale `compiled_output`. **Fix:** `commit()` the deliverable UPDATE first, then run `persist_job_artifacts` in its **own** `async_session()` with its own commit (the function reads `compiled_output` back from the row, so it sees the committed value). A failed artifact write now aborts only its own tx.
+- **`alerts.emit()` swallowed DB errors without rollback, poisoning the shared tick session** (`app/observability/alerts.py`). A transient error in the `INSERT INTO system_alerts` was log-and-swallowed with no `rollback()`, leaving the (caller-shared) `evaluate_thresholds` session in a failed-tx state; every later read/emit in the same tick then raised `PendingRollbackError` and fail-opened — so cost/latency/cache alerts silently didn't persist, precisely under the DB stress that triggers them. **Fix:** `await db.rollback()` (defensive try/except) in the INSERT `except` handler.
+
+**Verification:** `test_artifacts.py` + `test_observability_alerts.py` + `test_execution_agent_autocomplete.py` + `test_execution_agent_blocked_cause.py` + `test_execution_agent_compile.py` = **101 passed** — new `test_emit_db_insert_failure_rolls_back` asserts the rollback; the artifact-isolation fix is structural (separate committed transaction) and the complete/blocked/autocomplete paths regress-clean.
+
 ### §17.597 Fix — Medium audit findings, group 2/5: event-loop-blocking I/O (2026-07-18)
 
 Two ASYNC-FIRST violations where a blocking call ran inline on the single uvicorn loop.
