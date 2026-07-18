@@ -435,7 +435,10 @@ async def _fetch_url_bounded(url: str, max_bytes: int | None = None) -> str | No
     # §17.93 — SSRF guard. The fetch helper is the choke point for every
     # /research url:, /research openapi:, and pre-fetch path; rejecting
     # here covers all three without forcing per-caller validation.
-    ok, reason = _is_public_host(url)
+    # §17.597 — the SSRF guard does a blocking socket.getaddrinfo DNS lookup;
+    # run it off the event loop so a slow/timed-out resolution can't stall the
+    # single uvicorn loop (this fetch path fans out under a semaphore).
+    ok, reason = await asyncio.to_thread(_is_public_host, url)
     if not ok:
         logger.warning("url_fetch_rejected_ssrf: url=%s reason=%s", url, reason)
         return None
@@ -455,7 +458,7 @@ async def _fetch_url_bounded(url: str, max_bytes: int | None = None) -> str | No
             # the pre-check. resp.url is the post-redirect-chain URL.
             final_url = str(resp.url)
             if final_url != url:
-                ok2, reason2 = _is_public_host(final_url)
+                ok2, reason2 = await asyncio.to_thread(_is_public_host, final_url)
                 if not ok2:
                     logger.warning(
                         "url_fetch_rejected_ssrf_after_redirect: "

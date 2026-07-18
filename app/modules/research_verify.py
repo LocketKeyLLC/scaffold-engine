@@ -163,7 +163,9 @@ async def _recheck_one_url(
     # tampered with; rejecting private-IP rebinds here matches the
     # original §17.93 contract on _fetch_url_bounded.
     from app.modules.research_extractors import _is_public_host
-    ok, _reason = _is_public_host(url)
+    # §17.597 — off-loop: _is_public_host does a blocking DNS lookup and this
+    # runs fanned-out under a semaphore.
+    ok, _reason = await asyncio.to_thread(_is_public_host, url)
     if not ok:
         return {"state": "error", "status": None}
     body: bytes | None = None

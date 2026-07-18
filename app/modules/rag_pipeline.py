@@ -353,6 +353,25 @@ async def _vector_search(
 # Keyword search — §17.431 BM25 sparse (preferred) with LIKE-scan fallback
 # ---------------------------------------------------------------------------
 
+# §17.597 — cache BM25-field presence per client so the keyword-search
+# dispatcher doesn't fire a synchronous describe_collection gRPC on the event
+# loop for every query. Presence only changes via a schema migration (which
+# requires a restart), so a per-client memo is safe. Keyed by id(client);
+# tests clear it via the routed fixture.
+_bm25_present_cache: dict[int, bool] = {}
+
+
+async def _collection_has_bm25_cached(collection: "MilvusClient") -> bool:
+    key = id(collection)
+    cached = _bm25_present_cache.get(key)
+    if cached is None:
+        from app.utils.milvus_utils import collection_has_bm25
+        # Off-loop: describe_collection is a blocking PyMilvus gRPC call.
+        cached = await asyncio.to_thread(collection_has_bm25, collection)
+        _bm25_present_cache[key] = cached
+    return cached
+
+
 async def _keyword_search(
     collection: "MilvusClient",
     query: str,
@@ -366,11 +385,10 @@ async def _keyword_search(
     LIKE scan. Both return RagResult lists with keyword_score set; the score
     SCALE differs but _rrf_fuse is rank-based so fusion is unaffected (§17.431).
     """
-    from app.utils.milvus_utils import collection_has_bm25
     if (
         settings.rag_bm25_enabled
         and collection is not None
-        and collection_has_bm25(collection)
+        and await _collection_has_bm25_cached(collection)
     ):
         return await _bm25_search(
             collection, query, top_k, domain, domain_hint=domain_hint,

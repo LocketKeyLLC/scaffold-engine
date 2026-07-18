@@ -21994,6 +21994,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.597 Fix — Medium audit findings, group 2/5: event-loop-blocking I/O (2026-07-18)
+
+Two ASYNC-FIRST violations where a blocking call ran inline on the single uvicorn loop.
+
+- **Blocking `socket.getaddrinfo()` in the async SSRF guard** (`app/modules/research_extractors.py` + `research_verify.py`). `_is_public_host()` does a synchronous, timeout-less DNS lookup; it's called on the request/SSE path from `_fetch_url_bounded` (every url/openapi fetch, pre- and post-redirect) and from `research_verify._recheck_one_url` (fanned out under a semaphore). A slow/hanging resolver stalled the whole loop. **Fix:** wrap the 3 call sites in `await asyncio.to_thread(_is_public_host, …)`. The function stays sync (its direct unit tests are unchanged); only the DNS blocks off-loop now.
+- **BM25 dispatch fired a blocking `describe_collection` gRPC per query** (`app/modules/rag_pipeline.py`). `_keyword_search` (async) called the synchronous PyMilvus `collection_has_bm25()` on every query when `rag_bm25_enabled=True`, stalling the concurrent vector+keyword gather. **Fix:** new `_collection_has_bm25_cached()` runs the probe via `asyncio.to_thread` and memoizes the result per client (`id(client)` → bool) — BM25-field presence only changes via a migration (restart), so the memo is safe; the dispatch tests clear it in the `routed` fixture.
+
+**Verification:** `test_bm25_hybrid.py` + `test_research_ssrf_guard.py` + `test_research_verify.py` = **61 passed** — new `test_bm25_presence_cached_across_calls` asserts the probe runs once per client; the existing SSRF + dispatch suites confirm behavior is preserved through the off-loop wrap.
+
 ### §17.596 Fix — Medium audit findings, group 1/5: auth/config correctness (2026-07-18)
 
 First of five commits closing the 14 Medium findings from the 2026-07-17 whole-repo audit. Three auth/config fixes, one file each + regression tests.

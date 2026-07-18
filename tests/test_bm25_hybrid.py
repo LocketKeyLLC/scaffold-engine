@@ -82,6 +82,9 @@ def routed(monkeypatch):
     like = AsyncMock(return_value=["LIKE"])
     monkeypatch.setattr(rag_pipeline, "_bm25_search", bm25)
     monkeypatch.setattr(rag_pipeline, "_keyword_search_like", like)
+    # §17.597 — dispatch is now gated by the per-client BM25-presence cache;
+    # clear it so each test's fresh object() collection re-evaluates.
+    rag_pipeline._bm25_present_cache.clear()
     return bm25, like
 
 
@@ -116,6 +119,26 @@ async def test_dispatch_to_like_when_not_migrated(routed, monkeypatch):
     assert out == ["LIKE"]
     like.assert_awaited_once()
     bm25.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bm25_presence_cached_across_calls(routed, monkeypatch):
+    """§17.597 — the blocking describe_collection probe runs once per client
+    (memoized off-loop), not re-fired on every query."""
+    bm25, like = routed
+    monkeypatch.setattr(settings, "rag_bm25_enabled", True)
+    calls = {"n": 0}
+
+    def _probe(c):
+        calls["n"] += 1
+        return True
+
+    monkeypatch.setattr(milvus_utils, "collection_has_bm25", _probe)
+    col = object()
+    await rag_pipeline._keyword_search(col, "q1", 5, "eng")
+    await rag_pipeline._keyword_search(col, "q2", 5, "eng")
+    assert calls["n"] == 1, "describe_collection probe should be cached per client"
+    assert bm25.await_count == 2
 
 
 @pytest.mark.asyncio
