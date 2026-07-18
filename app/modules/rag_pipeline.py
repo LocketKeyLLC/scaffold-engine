@@ -52,7 +52,7 @@ from app.utils.embedding_cache import get_cache, truncate_and_normalize, normali
 from app.modules.provenance import (
     confidence_for,
     get_provenance_batch,
-    write_provenance,
+    write_provenance_batch,
 )
 
 from sqlalchemy import text
@@ -1169,7 +1169,10 @@ async def ingest_entries(
     dedup_log_writes: list[tuple[str, str, float, str]] = []
 
     # ---- Pass 1: normalize + exact-hash filter ----
-    prepared: list[dict] = []
+    # §17.616 (audit #31) — all entries in a call share safe_domain, so the
+    # exact-hash dedup collapses to ONE `content_hash in [...] and domain == D`
+    # query instead of one sequential Milvus round-trip per entry.
+    candidates: list[dict] = []
     for entry in entries:
         norm = _normalize_entry(entry)
         content = norm["content"]
@@ -1190,35 +1193,45 @@ async def ingest_entries(
         raw_upstream_hash = entry.get("raw_upstream_hash")
         ch = _content_hash(content)
 
-        try:
-            existing = await loop.run_in_executor(
-                None,
-                lambda h=ch: collection.query(
-                    collection_name=COLLECTION_NAME,
-                    filter=f'content_hash == "{h}" and domain == "{safe_domain}"',
-                    output_fields=["entry_id"],
-                    limit=1,
-                ),
-            )
-            if existing:
-                logger.debug("dedup_skip: exact hash match for '%s'", title[:50])
-                stats["skipped_hash"] += 1
-                continue
-        except Exception as e:
-            logger.debug("dedup_check_failed: %s", e)
-
         embed_text = _build_embedding_text({
             "title": title,
             "domain_tags": domain_tags,
             "canonical_text": content,
         })
-        prepared.append({
+        candidates.append({
             "title": title, "content": content, "domain_tags": domain_tags,
             "source_url": source_url, "source_type": source_type,
             "confidence": confidence, "ch": ch, "embed_text": embed_text,
             "provenance": provenance,
             "raw_upstream_hash": raw_upstream_hash,
         })
+
+    # One batched exact-hash lookup for the whole call.
+    present_hashes: set[str] = set()
+    if candidates:
+        hashes = list({c["ch"] for c in candidates})
+        in_list = ", ".join(f'"{h}"' for h in hashes)
+        try:
+            existing = await loop.run_in_executor(
+                None,
+                lambda: collection.query(
+                    collection_name=COLLECTION_NAME,
+                    filter=f'content_hash in [{in_list}] and domain == "{safe_domain}"',
+                    output_fields=["content_hash"],
+                    limit=len(hashes),
+                ),
+            )
+            present_hashes = {r.get("content_hash") for r in (existing or [])}
+        except Exception as e:
+            logger.debug("dedup_check_failed: %s", e)
+
+    prepared: list[dict] = []
+    for c in candidates:
+        if c["ch"] in present_hashes:
+            logger.debug("dedup_skip: exact hash match for '%s'", c["title"][:50])
+            stats["skipped_hash"] += 1
+            continue
+        prepared.append(c)
 
     if not prepared:
         return stats
@@ -1394,12 +1407,11 @@ async def ingest_entries(
     if provenance_writes:
         try:
             async with async_session() as session:
-                for eid, prov, raw_hash in provenance_writes:
-                    await write_provenance(
-                        session, eid, prov,
-                        session_id=session_id,
-                        raw_upstream_hash=raw_hash,
-                    )
+                # §17.616 (audit #33) — one multi-row INSERT for the whole batch
+                # instead of N single-row round-trips.
+                await write_provenance_batch(
+                    session, provenance_writes, session_id=session_id,
+                )
                 await session.commit()
         except Exception as e:
             logger.error("provenance_batch_write_failed: %s n=%d", e, len(provenance_writes))

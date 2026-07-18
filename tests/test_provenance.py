@@ -102,6 +102,38 @@ async def test_write_provenance_executes_upsert():
 
 
 @pytest.mark.asyncio
+async def test_write_provenance_batch_single_multirow_insert():
+    """§17.616 (audit #33) — one multi-row INSERT for N rows, deduped by
+    entry_id (last wins) so a repeated id can't double-affect ON CONFLICT."""
+    from app.modules.provenance import write_provenance_batch
+    session = AsyncMock()
+    rows = [
+        ("e1", {"source_ref": "a"}, "h1"),
+        ("e2", {"source_ref": "b"}, None),
+        ("e1", {"source_ref": "a2"}, "h1b"),  # duplicate id → last wins
+    ]
+    await write_provenance_batch(session, rows, session_id=None)
+
+    session.execute.assert_called_once()
+    args, _ = session.execute.call_args
+    sql_obj, params = str(args[0]), args[1]
+    assert "INSERT INTO rag_entry_provenance" in sql_obj
+    assert "ON CONFLICT (entry_id) DO UPDATE" in sql_obj
+    # Two distinct entry_ids → two VALUES tuples (e1 deduped to the last).
+    assert params["eid0"] == "e1" and params["ref0"] == "a2"
+    assert params["eid1"] == "e2"
+    assert "eid2" not in params  # the duplicate collapsed
+
+
+@pytest.mark.asyncio
+async def test_write_provenance_batch_empty_short_circuits():
+    from app.modules.provenance import write_provenance_batch
+    session = AsyncMock()
+    await write_provenance_batch(session, [])
+    session.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_get_provenance_batch_empty_short_circuits():
     session = AsyncMock()
     out = await get_provenance_batch(session, [])

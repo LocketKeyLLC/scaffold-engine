@@ -2008,6 +2008,7 @@ A second full audit run as a **multi-agent workflow**: 66 agents — one correct
 - ✅ §17.613 sibling defensive-guard cluster: rm-gate anchoring, gt drift-filter, case-insensitive CodeGen/Shell, assist_done JSON guards, gap-analysis-failure retry, model_ab rowcount audit, deduped provenance warning (2026-07-18 audit #7/15/24/25/28/30/34).
 - ✅ §17.614 node prompt edits honored: prompt_template (not optimized_prompt) is the editable+invalidating field (2026-07-18 audit #11).
 - ✅ §17.615 node/execution cluster: topology-aware truncation, sizing convergence evidence guard, size stage_error on non-persist, async confirm off the threadpool, decompose TOCTOU advisory lock (2026-07-18 audit #14/26/27/35/36); #12 DB-session-across-LLM deferred (default-off, needs live-LLM verify).
+- ✅ §17.616 RAG/provenance batching: one batched exact-hash dedup query + multi-row provenance INSERT (2026-07-18 audit #31/33); #32 fetch_cache SCAN deferred (needs shared-Redis infra change).
 
 **Process note:** mid-audit, running two full `make test` suites concurrently briefly stressed Milvus and produced spurious retrieval-golden failures — a diagnostic detour, not a code regression (the corpus gap was pre-existing; §17.595 fixed the real cause). One-command corpus-restore after a wipe: `docker exec scaffold-orchestrator python scripts/seed_corpus_remainder.py` (§17.595, seeds all 5 curated golden docs).
 
@@ -22030,6 +22031,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
 
 ---
+
+### §17.616 Fix — RAG/provenance batching (2 audit findings) + #32 deferred (2026-07-18)
+
+2026-07-18 audit batch 8 — throughput cleanups on the ingest hot path.
+
+- **#31 Pass-1 exact-hash dedup did N sequential Milvus round-trips** (`app/modules/rag_pipeline.py`). One `collection.query(content_hash==H and domain==D)` per entry, serially — dozens of gRPC round-trips before embedding even starts. All entries share `safe_domain`, so **Fix:** normalize all first, then ONE batched `content_hash in [...] and domain==D` query building a present-set to skip matches.
+- **#33 provenance ingest writes were single-row, looped by the caller** (`app/modules/provenance.py`, caller `rag_pipeline.py`). N `INSERT ... ON CONFLICT` round-trips per batch. **Fix:** new `write_provenance_batch(session, rows)` builds one multi-row `INSERT ... VALUES (...),(...) ON CONFLICT DO UPDATE`, deduped by entry_id (last wins) to avoid Postgres's "ON CONFLICT cannot affect row a second time"; `write_provenance` kept for incremental callers.
+
+**Deferred — #32 (fetch_cache cardinality counter SCANs the whole shared Redis keyspace).** `_key_count` uses `scan_iter(match='fetchv1:*')`, which still walks the entire 2GB allkeys-lru instance (dominated by millions of `embedv3:*` keys) to count a handful of fetch keys. The accurate fixes — a dedicated Redis counter (drifts under LRU eviction, which never DECRs) or isolating fetch keys into their own logical Redis DB + `DBSIZE` — are infra changes to the shared Redis config that can't be validated without the live shared instance. The current SCAN is throttled (30s), cursor-based/non-blocking, and fails open, so impact is bounded. Deferred rather than shipped unverified.
+
+**Verification:** `make test` subset — `-k 'ingest or dedup or provenance'` = **240 passed**; provenance = **28 passed** (+2 regression: `write_provenance_batch` multi-row + dedup, empty short-circuit).
 
 ### §17.615 Fix — node/execution reliability cluster (5 audit findings) + #12 deferred (2026-07-18)
 

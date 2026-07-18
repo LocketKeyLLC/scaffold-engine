@@ -145,6 +145,54 @@ async def write_provenance(
     )
 
 
+async def write_provenance_batch(
+    session: AsyncSession,
+    rows: list[tuple[str, dict[str, Any], str | None]],
+    session_id: str | None = None,
+) -> None:
+    """§17.616 (audit #33) — one multi-row ``INSERT ... ON CONFLICT`` for a batch
+    of provenance rows instead of N single-row round-trips looped by the caller.
+
+    ``rows`` is ``[(entry_id, provenance, raw_upstream_hash), ...]``. Same upsert
+    semantic as :func:`write_provenance` (re-ingest overwrites); caller commits.
+    Rows are deduped by ``entry_id`` (last wins) so a repeated id in one batch
+    can't trigger Postgres's "ON CONFLICT cannot affect row a second time".
+    :func:`write_provenance` is kept for incremental single-row callers.
+    """
+    if not rows:
+        return
+    deduped: dict[str, tuple[dict[str, Any], str | None]] = {}
+    for entry_id, provenance, raw_upstream_hash in rows:
+        deduped[entry_id] = (provenance or {}, raw_upstream_hash)
+
+    value_clauses: list[str] = []
+    params: dict[str, Any] = {"sid": str(session_id) if session_id else None}
+    for i, (entry_id, (provenance, raw_upstream_hash)) in enumerate(deduped.items()):
+        value_clauses.append(
+            f"(:eid{i}, :ref{i}, :fa{i}, CAST(:qs{i} AS jsonb), CAST(:sid AS uuid), :rh{i})"
+        )
+        params[f"eid{i}"] = entry_id
+        params[f"ref{i}"] = str(provenance.get("source_ref", ""))
+        params[f"fa{i}"] = int(provenance.get("fetched_at", time.time()))
+        params[f"qs{i}"] = json.dumps(provenance.get("quality_signal", {}))
+        params[f"rh{i}"] = raw_upstream_hash
+
+    await session.execute(
+        text(
+            "INSERT INTO rag_entry_provenance "
+            "(entry_id, source_ref, fetched_at, quality_signal, session_id, raw_upstream_hash) "
+            "VALUES " + ", ".join(value_clauses) + " "
+            "ON CONFLICT (entry_id) DO UPDATE SET "
+            "source_ref = EXCLUDED.source_ref, "
+            "fetched_at = EXCLUDED.fetched_at, "
+            "quality_signal = EXCLUDED.quality_signal, "
+            "session_id = EXCLUDED.session_id, "
+            "raw_upstream_hash = EXCLUDED.raw_upstream_hash"
+        ),
+        params,
+    )
+
+
 async def get_provenance_for_session(
     session: AsyncSession,
     session_id: str,
