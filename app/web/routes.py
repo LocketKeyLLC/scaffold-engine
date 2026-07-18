@@ -956,7 +956,13 @@ def _render_event_html(event_name: str, data: dict) -> str:
     multi-line continuation. ``html.escape`` defends against operator-
     supplied node titles / errors that might contain ``<`` / ``>``.
     """
-    esc = _html_lib.escape
+    # §17.605 — html.escape does NOT encode newlines, but a raw \n/\r in an
+    # operator-supplied node title/error truncates the SSE `data:` field (SSE
+    # frames are newline-delimited), corrupting the fragment. Collapse CR/LF to
+    # spaces on every escaped dynamic value; the static template parts below are
+    # already single-line.
+    def esc(s: str) -> str:
+        return _html_lib.escape(s).replace("\r", " ").replace("\n", " ")
 
     if event_name == "node_start":
         node_key = esc(str(data.get("node_key", "")))

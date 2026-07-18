@@ -21994,6 +21994,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.605 Fix — Low audit findings: SSE-frame + triage think-tag leaks (2026-07-18)
+
+Two output-rendering hygiene bugs.
+
+- **SSE run-stream frame broke on a newline in a node error/title** (`app/web/routes.py`). `_render_event_html` escapes dynamic values with `html.escape`, which does NOT encode `\n`/`\r` — and SSE frames are newline-delimited, so a raw newline in an operator-supplied node title/error truncated the `data:` field and corrupted the frame. **Fix:** the local `esc` helper now also collapses `\r`/`\n` to spaces (the static template parts are already single-line), so every rendered fragment stays single-line.
+- **Triage leaked raw `<think>` reasoning to chat** (`pipelines/scaffold_router.py`). `_call_triage` returned the thinking-model reply verbatim while `_synthesize_idea` stripped `<think>` — same model, inconsistent handling. **Fix:** shared `_strip_think` helper (closed + open/truncated tags), used by both, with an empty-after-strip guard in triage.
+
+**Verification:** `test_web_ui.py::test_render_event_html_collapses_newlines_in_dynamic_values` (1 passed) + `test_scaffold_router_helpers.py` (**59 passed**, incl. new `TestStripThink` + `TestCallTriageStripsThink`).
+
 ### §17.604 Fix — Low audit findings: cache-key + pagination + TTL correctness (2026-07-18)
 
 Three latent cache/sweep correctness bugs.

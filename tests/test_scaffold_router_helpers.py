@@ -666,3 +666,29 @@ class TestPostWithKeepaliveProgressMarkers:
             ))
         assert all("⏳" not in c for c in chunks)
 
+
+
+# ---------------------------------------------------------------------------
+# §17.605 — triage must strip <think> reasoning (like synthesis already does)
+# ---------------------------------------------------------------------------
+class TestStripThink:
+    def test_strips_closed_think(self, pipe):
+        assert pipe._strip_think("<think>reasoning</think>Answer") == "Answer"
+
+    def test_strips_open_think(self, pipe):
+        assert pipe._strip_think("Visible<think>truncated reasoning") == "Visible"
+
+    def test_no_think_unchanged(self, pipe):
+        assert pipe._strip_think("plain answer") == "plain answer"
+
+
+class TestCallTriageStripsThink:
+    def test_triage_strips_think_tags(self, pipe):
+        resp = _make_response(
+            200, {"choices": [{"message": {"content": "<think>hmm</think>Launch it"}}]}
+        )
+        with patch.object(_mod, "_HTTP_SESSION") as sess:
+            sess.post.return_value = resp
+            out = pipe._call_triage([{"role": "user", "content": "hi"}])
+        assert "<think>" not in out and "hmm" not in out
+        assert "Launch it" in out

@@ -1033,6 +1033,16 @@ class Pipeline:
             return tail
         return [messages[first_user_idx]] + tail
 
+    @staticmethod
+    def _strip_think(text: str) -> str:
+        """§17.605 — remove <think>/<thinking> reasoning blocks (closed OR
+        open/truncated) from a thinking-model response. triage_model is a
+        thinking model, so without this the raw chain-of-thought leaked to chat
+        (synthesis already stripped; triage didn't)."""
+        text = re.sub(r"<think(?:ing)?>.*?</think(?:ing)?>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<think(?:ing)?>.*", "", text, flags=re.DOTALL)
+        return text.strip()
+
     def _call_triage(self, messages: List[dict]) -> str:
         clean = self._window_messages(self._clean_messages(messages))
         payload = {
@@ -1047,7 +1057,14 @@ class Pipeline:
                 timeout=self.valves.triage_timeout,
             )
             if r.status_code == 200:
-                return r.json()["choices"][0]["message"]["content"]
+                content = self._strip_think(
+                    r.json()["choices"][0]["message"]["content"]
+                )
+                # Guard empty-after-strip (reasoning consumed the whole reply).
+                return content or (
+                    "⚠️ Triage produced no visible output. "
+                    "Type `/go` to launch directly."
+                )
             return f"⚠️ Triage model error (HTTP {r.status_code}). Type `/go` to launch directly."
         except requests.exceptions.ConnectionError:
             return "⚠️ Cannot reach Ollama for triage. Type `/go` to launch directly."
@@ -1094,10 +1111,7 @@ class Pipeline:
             if r.status_code == 200:
                 raw = r.json()["choices"][0]["message"]["content"].strip()
                 self.logger.info("Synthesis raw (%d chars): %s", len(raw), raw[:200])
-                cleaned = re.sub(
-                    r"<think(?:ing)?>.*?</think(?:ing)?>",
-                    "", raw, flags=re.DOTALL,
-                ).strip()
+                cleaned = self._strip_think(raw)  # §17.605 — shared helper
                 if cleaned:
                     return cleaned, False
                 self.logger.info("Synthesis cleaned to empty, using fallback")

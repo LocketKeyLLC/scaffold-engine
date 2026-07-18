@@ -24,11 +24,23 @@ from app.auth import require_api_key
 from app.main import app
 from app.web.routes import (
     _pipeline_steps,
+    _render_event_html,
     _render_markdown,
     get_sdk_async_long_client,
     get_sdk_client,
     get_sdk_long_client,
 )
+
+
+def test_render_event_html_collapses_newlines_in_dynamic_values():
+    """§17.605 — html.escape doesn't encode newlines; a raw \\n in a node
+    error/title would truncate the SSE `data:` field and corrupt the frame.
+    The rendered fragment must be single-line."""
+    html = _render_event_html(
+        "node_start", {"node_key": "T1", "title": "bad\r\nmulti\nline title"}
+    )
+    assert "\n" not in html and "\r" not in html
+    assert "multi line title" in html  # newlines collapsed to spaces
 
 
 @pytest.fixture
