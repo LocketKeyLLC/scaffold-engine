@@ -364,6 +364,34 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
     # call never holds submit_step's row lock, and submit_step stays pure).
     # Only for action='submit'; verify_submit_outcome returns None unless the
     # step is genuinely claimable ('presented').
+    # §17.621 (audit #20) — consume handoff_policy. On a SKIP with a non-manual
+    # policy, delegate to the autonomous executor instead of leaving the step
+    # skipped: auto_on_skip hands off THIS step (mode=single, then back to
+    # assist); auto_all_remaining hands off the step + the rest of the DAG
+    # (mode=all_remaining). The node is still 'pending'/'presented' here (the
+    # skip hasn't been committed), so handoff_step can claim it. Runs as a
+    # background task (own session) so /submit still returns JSON immediately.
+    if body.action == "skip":
+        _sess = await assist_agent.get_session(session_id=session_id, db=db)
+        if _sess and _sess.get("status") == "active":
+            _policy = _sess.get("handoff_policy", "manual")
+            if _policy in ("auto_on_skip", "auto_all_remaining"):
+                _mode = "all_remaining" if _policy == "auto_all_remaining" else "single"
+                assist_agent.spawn_handoff_background(
+                    session_id=session_id, node_key=body.node_key, mode=_mode,
+                )
+                return {
+                    "session_id": session_id,
+                    "node_key": body.node_key,
+                    "status": "auto_handoff",
+                    "committed": False,
+                    "no_op": False,
+                    "next_node_key": None,
+                    "handoff_policy": _policy,
+                    "handoff_mode": _mode,
+                    "mirror_divergence": False,
+                }
+
     verdict = None
     if body.action == "submit" and settings.assist_verify_on_submit:
         verdict = await assist_agent.verify_submit_outcome(

@@ -22035,6 +22035,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.621 Fix — resolves deferred #20: assist handoff_policy auto-handoff is now consumed (2026-07-18)
+
+Picks up audit #20. `handoff_policy`'s `auto_on_skip` / `auto_all_remaining` values were accepted, stored, and echoed but never read — a session started with `auto_on_skip` behaved identically to `manual`. The deferral flagged the architecture question (how does auto-handoff surface, given `/submit` returns JSON while `handoff_step` is a streaming executor generator).
+
+- **Design (owner-chosen):** on an operator SKIP with a non-manual policy, delegate to the autonomous executor instead of leaving the step skipped — `auto_on_skip` hands off just that step (`mode=single`, then control returns to assist); `auto_all_remaining` hands off the step + the rest of the DAG (`mode=all_remaining`). Runs as an event-loop background task so `/submit` still returns immediately (`status: auto_handoff`).
+- **Impl:** router branch in `assist_submit` (`app/routers/assist.py`) fires BEFORE the skip commits (the node is still pending/presented so `handoff_step` can claim it). New `spawn_handoff_background` (`app/modules/assist_agent.py`) drives `handoff_step` to completion on its OWN short-lived session — safe because `handoff_step` touches the passed `db` only briefly at the start (commits, releasing the connection) then runs the long execution on independent sessions. Mirrors the §17.615 confirm-background pattern (strong-ref set + done-callback, fail-soft).
+
+**Verification:** unit — `tests/test_assist_handoff_policy.py` (4 cases: auto_on_skip→single, auto_all_remaining→all_remaining, manual→normal skip, submit-action never auto-handoffs); assist suites 34 passed. Live wiring smoke — `spawn_handoff_background` drove `handoff_step` to clean completion (no exception) against a non-pending node (noop path, no LLM), with the correct job lifecycle (`assisted_executing`→`executing`→restored to `assisted_executing`) + session preserved. The autonomous node-execution path itself is the production-proven `/handoff` code. #20 **resolved**; remaining deferral: #16.
+
 ### §17.620 Fix — resolves deferred #32: fetch_cache cardinality via O(1) DBSIZE on a dedicated Redis DB (2026-07-18)
 
 Picks up audit #32. `fetch_cache._key_count` used `scan_iter(match='fetchv1:*')`, which walks the ENTIRE shared 2GB allkeys-lru keyspace (db0, dominated by millions of `embedv3:*` keys) to count a handful of fetch keys on every refresh.

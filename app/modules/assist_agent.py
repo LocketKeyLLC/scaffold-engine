@@ -1446,6 +1446,42 @@ async def handoff_step(
     })
 
 
+# §17.621 (audit #20) — strong refs to fire-and-forget auto-handoff tasks so
+# they survive GC (mirrors web.routes / research_agent background-task sets).
+_HANDOFF_BACKGROUND_TASKS: set = set()
+
+
+def spawn_handoff_background(*, session_id: str, node_key: str, mode: str) -> "asyncio.Task":
+    """§17.621 (audit #20) — drive ``handoff_step`` to completion on the event
+    loop in a background task, consuming (and discarding) its SSE frames.
+
+    This is what makes the ``handoff_policy`` auto values do something: on an
+    operator skip with ``auto_on_skip`` / ``auto_all_remaining``, the router
+    hands the step to the autonomous executor without blocking the JSON /submit
+    response. Uses its OWN short-lived session — ``handoff_step`` only touches
+    the passed ``db`` briefly at the start (it commits, releasing the connection)
+    and runs the long execution on independent sessions, so nothing is pinned.
+    Fire-and-forget + fail-soft: an executor error is logged, never raised.
+    """
+    async def _run() -> None:
+        try:
+            async with async_session() as hdb:
+                async for _ in handoff_step(
+                    session_id=session_id, node_key=node_key, mode=mode, db=hdb,
+                ):
+                    pass
+        except Exception:
+            logger.exception(
+                "auto_handoff_background_failed: session=%s node=%s mode=%s",
+                session_id, node_key, mode,
+            )
+
+    task = asyncio.create_task(_run())
+    _HANDOFF_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_HANDOFF_BACKGROUND_TASKS.discard)
+    return task
+
+
 def _sse(event_type: str, payload: dict) -> str:
     """SSE wire format. Same shape as research_agent / execution_agent."""
     return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
