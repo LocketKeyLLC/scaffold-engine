@@ -1091,3 +1091,26 @@ async def test_stream_chat_rejects_role_and_model_together():
         async for _ in model_router.stream_chat(
             [{"role": "user", "content": "x"}], role="model_general", model="m"):
             pass
+
+
+# ---------------------------------------------------------------------------
+# §17.606 — classify() uses a generous budget + empty-guard (thinking model)
+# ---------------------------------------------------------------------------
+@pytest.mark.smoke
+async def test_classify_uses_generous_budget_not_256(monkeypatch):
+    """model_router defaults to a thinking model; the old max_tokens=256 was
+    consumed by reasoning → empty content with no retry. classify now routes
+    through generate_until_nonempty with a generous budget."""
+    from app.providers.base import ModelResponse
+    captured = {}
+
+    async def _fake_generate(prompt, model=None, **kwargs):
+        captured["max_tokens"] = kwargs.get("max_tokens")
+        captured["role"] = kwargs.get("role")
+        return ModelResponse(model="m", success=True, text="label", provider="ollama")
+
+    monkeypatch.setattr(model_router, "generate", _fake_generate)
+    resp = await model_router.classify("classify this text")
+    assert resp.success and resp.text == "label"
+    assert captured["max_tokens"] and captured["max_tokens"] > 256
+    assert captured["role"] == "model_router"

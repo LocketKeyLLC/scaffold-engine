@@ -110,7 +110,12 @@ class IngestEntry(BaseModel):
         """Serialize to the Milvus-storage shape (long-name keys)."""
         return {
             "canonical_text": self.content,
-            "topic": self.title,
+            # §17.606 — the toon_v2 schema field is "title" (milvus_utils.py);
+            # the old "topic" key is not a schema field, and with
+            # enable_dynamic_field=False a real upsert would reject the row
+            # (and drop the title). Latent today — only the round-trip test
+            # consumed this — but wrong for any direct-upsert caller.
+            "title": self.title,
             "domain_tags": self.domain_tags,
             "source_url": self.source_url,
             "source_type": self.source_type,

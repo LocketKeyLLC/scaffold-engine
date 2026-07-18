@@ -21994,6 +21994,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.606 Fix — Low audit findings: classify budget + human-node count + to_milvus key (2026-07-18)
+
+Three small correctness bugs.
+
+- **`classify()` starved a thinking model at `max_tokens=256`** (`app/model_router.py`). It defaults to the `model_router` role — a thinking model (qwen3.5) whose `num_predict` is a shared reasoning+content budget — so 256 was consumed by the chain-of-thought, returning empty content with no retry. **Fix:** route through the shared `generate_until_nonempty` empty-guard with a generous budget (the §17.465 pattern), so reasoning + the short classification answer coexist and an empty draw is retried.
+- **Skipped human nodes miscounted as failed** (`app/modules/execution_agent.py`). The `human`/`human_review` short-circuit (H3) returned `passed=True` but no `verified` key, while the `pipeline_complete` summary counts passes via `r.get("verified")` — so a successfully-skipped human node dragged the run to `partial`. **Fix:** add `"verified": True` to the short-circuit dict.
+- **`IngestEntry.to_milvus()` emitted the non-schema key `"topic"`** (`app/modules/_rag_entry.py`). The `toon_v2` schema field is `title` (milvus_utils.py); with `enable_dynamic_field=False` a direct upsert would reject the row (and lose the title). Latent (only the round-trip test consumed it). **Fix:** emit `"title"`.
+
+**Verification:** `test_model_router.py` + `test_rag_entry.py` + `test_execution_agent_tools.py` = green — new: `test_classify_uses_generous_budget_not_256`, `test_to_milvus_emits_schema_title_key` (+ existing `test_to_milvus_uses_long_names` corrected to `title`), `TestHumanNodeSummaryVerified`.
+
 ### §17.605 Fix — Low audit findings: SSE-frame + triage think-tag leaks (2026-07-18)
 
 Two output-rendering hygiene bugs.

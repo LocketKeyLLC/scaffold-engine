@@ -844,10 +844,23 @@ async def classify(
         # settings.model_router) — but go through the provider seam so
         # callers benefit from per-role provider routing when configured.
         role = "model_router"
-    return await generate(
-        prompt, model,
-        role=role, overrides=overrides,
-        temperature=0.1, max_tokens=256, fallback=None,
+    # §17.606 — model_router defaults to a thinking model (qwen3.5): num_predict
+    # is a SHARED reasoning+content budget, so the old max_tokens=256 was
+    # consumed by the chain-of-thought and returned empty content with no
+    # retry. Route through the shared empty-guard with a generous budget so the
+    # reasoning and the short classification answer can coexist (§17.465).
+    from app.utils.llm_retry import generate_until_nonempty
+    route_kwargs = (
+        {"role": role, "overrides": overrides} if role else {"model": model}
+    )
+    return await generate_until_nonempty(
+        generate,
+        prompt,
+        route_kwargs,
+        system="",
+        temperature=0.1,
+        max_tokens=2048,
+        label="classify",
     )
 
 

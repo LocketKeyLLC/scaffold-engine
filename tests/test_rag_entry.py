@@ -143,9 +143,10 @@ def test_to_milvus_uses_long_names():
         title="T", content="C", domain_tags=["a"],
         source_url="S", source_type="news", confidence=0.5,
     )
+    # §17.606 — schema field is "title", not "topic".
     assert e.to_milvus() == {
         "canonical_text": "C",
-        "topic": "T",
+        "title": "T",
         "domain_tags": ["a"],
         "source_url": "S",
         "source_type": "news",
@@ -189,3 +190,15 @@ def test_from_milvus_alias_for_from_input():
     row = {"topic": "T", "canonical_text": "C", "domain_tags": ["x"]}
     assert IngestEntry.from_milvus(row).title == "T"
     assert IngestEntry.from_milvus(row).content == "C"
+
+
+# ---------------------------------------------------------------------------
+# §17.606 — to_milvus() emits the schema field "title" (not "topic")
+# ---------------------------------------------------------------------------
+def test_to_milvus_emits_schema_title_key():
+    """The toon_v2 schema field is 'title'; 'topic' is not a schema field, so
+    a direct upsert with enable_dynamic_field=False would reject the row."""
+    e = IngestEntry.from_input({"title": "Reranker", "content": "c"})
+    row = e.to_milvus()
+    assert row["title"] == "Reranker"
+    assert "topic" not in row

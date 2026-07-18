@@ -579,3 +579,35 @@ class TestSystemPromptRouting:
         # The §17.381 marker on the rationale comment.
         assert "§17.381" in src
 
+
+
+class TestHumanNodeSummaryVerified:
+    """§17.606 — the human/human_review short-circuit must set verified=True so
+    the pipeline_complete summary (which counts r.get('verified')) doesn't
+    miscount a successfully-skipped human node as failed/partial."""
+
+    async def test_human_short_circuit_marks_verified(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.modules import execution_agent as ea
+
+        db = AsyncMock()
+        db.execute = AsyncMock()
+        db.commit = AsyncMock()
+        sess_ctx = MagicMock()
+        sess_ctx.__aenter__ = AsyncMock(return_value=db)
+        sess_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        node = {
+            "id": "n1", "node_key": "T1", "title": "Human check",
+            "tool": "human", "node_type": "task", "assigned_model": "",
+            "depends_on": [], "prompt_template": None, "domain": None,
+            "retry_count": 0, "last_verification_reason": None,
+        }
+        with patch.object(ea, "async_session", lambda: sess_ctx), \
+             patch.object(ea, "_get_job", AsyncMock(
+                 return_value={"status": "running", "refined_brief": {}})), \
+             patch.object(ea, "_log_execution", AsyncMock()):
+            result = await ea.execute_next_node("job-1", preclaimed_node=node)
+
+        assert result["status"] == "done"
+        assert result["verified"] is True

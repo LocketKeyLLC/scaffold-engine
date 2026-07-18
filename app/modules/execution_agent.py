@@ -1117,6 +1117,11 @@ async def execute_next_node(
                 "title": title,
                 "output": skip_msg,
                 "passed": True,
+                # §17.606 — the pipeline_complete summary counts passes via
+                # r.get("verified") (not "passed"), so without this a
+                # successfully-skipped human/human_review node was miscounted as
+                # failed and the run reported 'partial'.
+                "verified": True,
                 "reason": "Tool dispatch: node skipped",
                 "confidence": 1.0,
                 "model_used": "none (skipped)",
