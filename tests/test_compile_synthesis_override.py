@@ -184,3 +184,40 @@ class TestExecutionStatusSurface:
 
         assert result["synthesis_override"] is None
         assert result["synthesized"] is False
+
+
+@pytest.mark.smoke
+class TestSynthesisReleasesConnectionBeforeLLM:
+    """§17.619 (audit #12) — _synthesize_compiled_output must release the pooled
+    DB connection (db.commit) BEFORE the synthesis LLM round-trip, so the
+    connection is not pinned across a multi-minute model call."""
+
+    async def test_commits_before_tool_call(self):
+        order: list[str] = []
+
+        db = AsyncMock()
+        brief_row = MagicMock()
+        brief_row.mappings.return_value.first.return_value = {
+            "refined_brief": {"description": "a goal"}
+        }
+        db.execute = AsyncMock(return_value=brief_row)
+        db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+
+        async def _tool_call(*a, **k):
+            order.append("tool_call")
+            return SimpleNamespace(
+                success=True, text="",
+                tool_calls=[SimpleNamespace(arguments={"summary": "narrative"})],
+            )
+
+        with patch("app.model_router.tool_call", new=AsyncMock(side_effect=_tool_call)):
+            out = await execution_compile._synthesize_compiled_output(
+                job_id="jid", heuristic="raw body",
+                source_strategy="0_single_leaf", source_tool="LLM", db=db,
+            )
+
+        assert out == "narrative"
+        # The connection release must precede the LLM call.
+        assert order == ["commit", "tool_call"], (
+            f"db connection must be released before the synthesis LLM call, got {order}"
+        )

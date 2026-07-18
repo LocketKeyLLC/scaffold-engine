@@ -154,6 +154,19 @@ async def _synthesize_compiled_output(
         text("SELECT refined_brief FROM jobs WHERE id = :jid"),
         {"jid": job_id},
     )).mappings().first()
+    # §17.619 (audit #12) — release the pooled DB connection BEFORE the
+    # multi-minute synthesis LLM call (and the faithfulness/CoVe grounding gate
+    # that follows in _maybe_synthesize, which uses its own session). This
+    # refined_brief SELECT is the LAST DB read in the compile path — the node
+    # read (_compile_output), the synthesis-override read
+    # (_resolve_synthesis_enabled), and this one are all SELECT-only, and every
+    # caller commits its writes before invoking _compile_output. Committing here
+    # therefore finalizes a read-only transaction and returns the connection to
+    # the pool instead of pinning it across the model round-trip (the
+    # no-session-across-LLM policy the §17.598 artifact isolation established).
+    # The caller re-acquires a connection for its compiled_output UPDATE after
+    # _compile_output returns.
+    await db.commit()
     raw_brief = (row or {}).get("refined_brief") or {}
     if isinstance(raw_brief, str):
         try:
