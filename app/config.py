@@ -966,12 +966,18 @@ class Settings(BaseSettings):
     # Cardinality cap. The body-bytes cap above bounds individual entry
     # size; this bounds the key COUNT to prevent a /research over a
     # monorepo (e.g. github:huge/repo walking 50k files) from blowing
-    # out Redis. 0 disables the check entirely. The count is sampled
-    # via SCAN MATCH fetchv1:* at most once per fetch_cache_count_interval_s
-    # — the cached count gates puts in between samples, so a burst at
-    # most exceeds the cap by one interval's worth of writes.
+    # out Redis. 0 disables the check entirely. §17.620 (audit #32) — the
+    # count is now an O(1) DBSIZE against the fetch cache's own logical Redis
+    # DB (fetch_cache_redis_db) rather than a SCAN over the shared keyspace.
     fetch_cache_max_keys: int = Field(default=50_000, ge=0, le=10_000_000)
     fetch_cache_count_interval_s: int = Field(default=30, ge=5, le=3600)
+    # §17.620 (audit #32) — isolate fetch bodies in their own Redis logical DB
+    # so the cardinality count is an exact, O(1) DBSIZE instead of a SCAN over
+    # the shared 2GB allkeys-lru keyspace (dominated by millions of embedv3:*
+    # keys). db0 holds the embedding/verifier/rag caches; db1 is free. Eviction
+    # is still instance-wide under allkeys-lru, so this only isolates the
+    # keyspace for counting, not the 2GB memory budget.
+    fetch_cache_redis_db: int = Field(default=1, ge=0, le=15)
 
     # Verifier-verdict cache (llmverifyv1: prefix in Redis). Default OFF
     # because the verifier path is fail-closed and a stale cache hit could

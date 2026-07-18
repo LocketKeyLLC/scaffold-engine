@@ -22035,6 +22035,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.620 Fix — resolves deferred #32: fetch_cache cardinality via O(1) DBSIZE on a dedicated Redis DB (2026-07-18)
+
+Picks up audit #32. `fetch_cache._key_count` used `scan_iter(match='fetchv1:*')`, which walks the ENTIRE shared 2GB allkeys-lru keyspace (db0, dominated by millions of `embedv3:*` keys) to count a handful of fetch keys on every refresh.
+
+- **Fix (`app/utils/fetch_cache.py`, `app/config.py`):** isolate fetch bodies in their own Redis logical DB (`fetch_cache_redis_db`, default 1 — verified free; only db0 was in use) and count with an exact O(1) `DBSIZE`. Eviction stays instance-wide under allkeys-lru, so this isolates the keyspace for *counting*, not the 2GB memory budget.
+- **Gotcha caught by live verification:** a `db=` kwarg to `aioredis.from_url` does NOT take effect — `ConnectionPool.from_url` lets the URL's `/0` path override kwargs, so the connection stayed on db0 (the first live smoke showed `REDIS_DB_INDEX 0`, key in db0, count 3085). Fixed by rewriting the URL's db path via `urlsplit`/`urlunsplit`; the re-check showed `REDIS_DB_INDEX 1`, isolated `DBSIZE=1`, put/get roundtrip OK, key in db1 / none in db0.
+
+**Verification:** `tests/test_fetch_cache.py` + `tests/test_fetch_cache_cardinality.py` = **42 passed** (cardinality tests rewritten to mock `dbsize`); live Redis smoke confirmed isolation + O(1) count as above. #32 **resolved**; remaining deferrals: #16, #20.
+
 ### §17.619 Fix — resolves deferred #12: compile-synthesis no longer holds a DB connection across the LLM call (2026-07-18)
 
 Picks up the audit #12 deferral (see §17.615/§17.618). On investigation the fix was far smaller than the deferral feared — the unit tests inject a mock `db` into `_compile_output`/`_synthesize_compiled_output`, so the "open its own session" refactor would have broken ~40 test call sites; but the actual root cause is narrow.

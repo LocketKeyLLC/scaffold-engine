@@ -84,7 +84,15 @@ class FetchCache:
 
     async def _get_redis(self) -> aioredis.Redis:
         if self._redis is None:
-            self._redis = aioredis.from_url(self.redis_url, decode_responses=False)
+            # §17.620 (audit #32) — bind to the fetch cache's own logical DB so
+            # the cardinality count can be an O(1) DBSIZE (only fetch keys live
+            # there) instead of a SCAN over the shared keyspace. NOTE: a `db=`
+            # kwarg to from_url does NOT win — ConnectionPool.from_url lets the
+            # URL's db path override kwargs — so we rewrite the URL's db path.
+            from urllib.parse import urlsplit, urlunsplit
+            parts = urlsplit(self.redis_url)
+            url = urlunsplit(parts._replace(path=f"/{settings.fetch_cache_redis_db}"))
+            self._redis = aioredis.from_url(url, decode_responses=False)
         return self._redis
 
     async def get(self, source_type: str, ref: str, path: str) -> bytes | None:
@@ -107,16 +115,20 @@ class FetchCache:
         return None
 
     async def _key_count(self, force: bool = False) -> int:
-        """Return an estimate of fetchv1:* keys in Redis.
+        """Return the count of fetch keys in Redis.
 
-        Result is cached for ``settings.fetch_cache_count_interval_s``
-        seconds; only one concurrent caller actually runs SCAN (others
-        await the lock and read the refreshed value). Pass ``force=True``
-        to bypass the time cache.
+        §17.620 (audit #32) — an exact O(1) ``DBSIZE`` against the fetch
+        cache's dedicated logical DB (``fetch_cache_redis_db``), where fetch
+        bodies are the ONLY keys, rather than a ``SCAN MATCH fetchv1:*`` that
+        walked the entire shared 2GB allkeys-lru keyspace on every refresh.
 
-        Returns ``-1`` on SCAN failure — callers must treat that as
-        "unknown" and NOT block puts on a Redis hiccup (a hiccup is not
-        a cardinality breach; blocking would be strictly worse).
+        The result is still cached for ``fetch_cache_count_interval_s`` seconds
+        (DBSIZE is cheap, but the throttle bounds round-trips under a put
+        burst). Pass ``force=True`` to bypass the time cache.
+
+        Returns ``-1`` on Redis failure — callers must treat that as
+        "unknown" and NOT block puts on a hiccup (a hiccup is not a
+        cardinality breach; blocking would be strictly worse).
         """
         now = time.monotonic()
         interval = settings.fetch_cache_count_interval_s
@@ -129,9 +141,7 @@ class FetchCache:
                 return self._last_count
             try:
                 r = await self._get_redis()
-                count = 0
-                async for _ in r.scan_iter(match=f"{_KEY_PREFIX}:*", count=1000):
-                    count += 1
+                count = int(await r.dbsize())
                 self._last_count = count
                 self._last_count_ts = now
                 return count
