@@ -1976,6 +1976,35 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 
 ## 16. Known issues
 
+### 2026-07-17 whole-repo correctness audit — ✅ FULLY RESOLVED (fixed 2026-07-18)
+
+A second full audit run as a **multi-agent workflow**: 66 agents — one correctness reviewer per subsystem (bootstrap, model_router, execution, research, rag, dag, assist, scheduler, ingest, routers, gt/prompt, migrations, caches, sim, observability, web, pipelines, cli/sdk) plus 6 cross-cutting invariant sweeps (stale pymilvus-ORM, multi-statement migrations, cancellation safety, sync-in-async, logger divergence, Milvus schema parity) — with **every finding adversarially re-verified** against the code (defaults to false-positive when unproven). **35 findings confirmed, 6 candidates refuted → 33 unique root causes, all fixed** with regression tests + dated §-entries. `make test` grew **4121 → 4160 (+39 tests)**, 0 failures; SDK 143 / CLI 165 green. Every fix pushed to `origin/main`, each push gated green by `make ci-tier-0`.
+
+**3 High** (§17.594; §17.595 re-seeded the golden corpus to restore the suite):
+- ✅ Assist `single`-mode handoff ran the ENTIRE remaining DAG (called unscoped `execute_all_nodes`) — now claims exactly the one node via `execute_next_node(preclaimed_node=…)`.
+- ✅ `push_to_github=True` crashed GT extraction — the `bool` param shadowed the module-level `push_to_github` coroutine; call the `_push_to_github` alias.
+- ✅ Blocking `pypdf` parse on the event loop in `fetch_arxiv_full` — routed through `research_extractors._bounded_extract` (thread + timeout).
+
+**14 Medium** (§17.596–600):
+- ✅ §17.596 auth/config — non-ASCII `X-API-Key` → 401 (was `TypeError`→500); `_is_cloud` matches `:cloud`; `validate_models` filters to ollama-provider roles.
+- ✅ §17.597 event-loop I/O — SSRF-guard `getaddrinfo` and BM25 `describe_collection` probe moved off-loop (+ per-client BM25 memo).
+- ✅ §17.598 transaction durability — `persist_job_artifacts` isolated in its own committed session; `alerts.emit` rolls back on INSERT failure.
+- ✅ §17.599 assist/handoff — session finalized when a handoff completes the job; recovery links render the real `session_id` (not `job_id`).
+- ✅ §17.600 provenance — snapshot serializes `source` (not `source_url`); `get_design_state` unions digital sizings; SO/HN URLs encoded; TOON append renumbers ids; `insert_node` re-opens a terminal job.
+
+**16 Low** (§17.601–607):
+- ✅ §17.601 `llm_parsing` — try `json.loads(raw)` first (think-tag/fence strip corrupted valid JSON string values).
+- ✅ §17.602 cancellation shields — `research_and_compile` cancel-write and the scheduled model-A/B result-write.
+- ✅ §17.603 `/config` resolves `default_factory` defaults; `/health` guards pg/ollama/milvus `BaseException`.
+- ✅ §17.604 rag-cache key includes `domain_hint`; staleness sweep drops the unordered-`max(id)` cursor; HF card TTL keyed on ref immutability.
+- ✅ §17.605 SSE fragment collapses newlines; triage strips `<think>` (shared helper).
+- ✅ §17.606 `classify` gets a generous budget + empty-guard; skipped-human node marked `verified`; `to_milvus` emits `title`.
+- ✅ §17.607 SDK gains `ConflictError` (409); CLI `_stream_research` uses the real `_stream` (dead `_aiter_sse` ref removed).
+
+**Process note:** mid-audit, running two full `make test` suites concurrently briefly stressed Milvus and produced spurious retrieval-golden failures — a diagnostic detour, not a code regression (the corpus gap was pre-existing; §17.595 fixed the real cause). One-command corpus-restore after a wipe: `docker exec scaffold-orchestrator python scripts/seed_corpus_remainder.py` (§17.595, seeds all 5 curated golden docs).
+
+---
+
 > Captured by the 2026-05-05 architecture audit (`review/*.md`, since absorbed here). 135 distinct findings across ~20k LOC. Each finding cites `file:line` for independent verification.
 >
 > **Re-verified against live code on 2026-05-07** (post-Sprint-J.1, commits `e6f318d` / `a409ea3` and following). Of the original 18 HIGH items: **15 are fully fixed**, 3 were retracted within the audit itself. **All 10 items in the original priority queue are fixed in code.** All 8 cross-cutting patterns A–H are now resolved. Each item below is marked with its verified status:
