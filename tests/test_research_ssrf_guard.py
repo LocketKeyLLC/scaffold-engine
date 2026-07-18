@@ -203,3 +203,34 @@ class TestFetchShortCircuit:
             result = await _fetch_url_bounded("http://localhost:8000/health")
         assert result is None
         client_mock.stream.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# §17.612 (audit #6) — topic-mode fetch routes through the hardened helper
+# ---------------------------------------------------------------------------
+class TestTopicFetchRoutesThroughGuard:
+    """_fetch_and_extract must fetch via _fetch_url_bounded (SSRF pre/post-redirect
+    check + byte cap), NOT a raw client.get that could buffer an unbounded body
+    and follow a redirect to a private IP."""
+
+    @pytest.mark.asyncio
+    async def test_uses_fetch_url_bounded(self):
+        from app.modules import research_agent
+        calls = []
+
+        async def fake_bounded(url, *a, **k):
+            calls.append(url)
+            # Simulate the guard rejecting one URL and allowing the other.
+            return None if "private" in url else "x" * 500
+
+        with patch.object(research_agent, "_fetch_url_bounded", side_effect=fake_bounded), \
+             patch.object(research_agent.trafilatura, "extract", return_value="y" * 200):
+            out = await research_agent._fetch_and_extract([
+                {"url": "http://public.example.com/a"},
+                {"url": "http://private.internal/b"},
+            ])
+
+        # Both URLs went through the guarded helper...
+        assert set(calls) == {"http://public.example.com/a", "http://private.internal/b"}
+        # ...and only the allowed one produced content (the rejected one → None → dropped).
+        assert [o["url"] for o in out] == ["http://public.example.com/a"]

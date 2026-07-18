@@ -195,6 +195,17 @@ async def _recheck_one_url(
                     follow_redirects=True,
                 )
             status = r.status_code
+        # §17.612 (audit #6) — re-validate the FINAL host after the redirect
+        # chain. The pre-check above only validated the initial url; with
+        # follow_redirects=True a public source_url could 3xx to a private/
+        # metadata IP, turning ?recheck/?compare_hash into an internal
+        # reachability/status/hash oracle. Mirrors _fetch_url_bounded's
+        # post-redirect check.
+        final_url = str(r.url)
+        if final_url != url:
+            ok2, _r2 = await asyncio.to_thread(_is_public_host, final_url)
+            if not ok2:
+                return {"state": "error", "status": None, "body": None}
     except Exception as e:
         logger.debug("verify_recheck_error: url=%s err=%s", url, e)
         return {"state": "error", "status": None, "body": None}

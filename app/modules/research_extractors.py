@@ -430,8 +430,15 @@ def _is_public_host(url: str) -> tuple[bool, str]:
     return True, "public_host"
 
 
-async def _fetch_url_bounded(url: str, max_bytes: int | None = None) -> str | None:
-    """Stream-fetch with hard byte cap. Returns text or None on failure/cap."""
+async def _fetch_url_bounded(
+    url: str, max_bytes: int | None = None, timeout: float | None = None,
+) -> str | None:
+    """Stream-fetch with hard byte cap. Returns text or None on failure/cap.
+
+    §17.612 — ``timeout`` overrides ``settings.research_url_fetch_timeout`` so
+    callers with a tighter budget (topic-mode fetch uses research_fetch_timeout)
+    can route through this single hardened choke point without loosening it.
+    """
     # §17.93 — SSRF guard. The fetch helper is the choke point for every
     # /research url:, /research openapi:, and pre-fetch path; rejecting
     # here covers all three without forcing per-caller validation.
@@ -449,7 +456,7 @@ async def _fetch_url_bounded(url: str, max_bytes: int | None = None) -> str | No
         async with client.stream(
             "GET", url,
             headers={"User-Agent": "ScaffoldEngine/1.0"},
-            timeout=settings.research_url_fetch_timeout,
+            timeout=timeout if timeout is not None else settings.research_url_fetch_timeout,
         ) as resp:
             # §17.93 — re-validate the FINAL URL after any redirects.
             # The generic client has follow_redirects=True for normal API

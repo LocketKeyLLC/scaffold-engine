@@ -34,7 +34,9 @@ from app.config import settings, get_model
 from app.database import async_session
 from app.modules.rag_pipeline import ingest_entries
 from app.providers.base import ModelResponse, Tool
-from app.utils.http_clients import get_generic_http_client
+# noqa: F401 — re-exported so research_extractors._fetch_url_bounded reaches it
+# via _ra().get_generic_http_client(); also the patch target for url-mode tests.
+from app.utils.http_clients import get_generic_http_client  # noqa: F401
 from app.utils.llm_parsing import parse_json_array, parse_json_object  # noqa: F401 — kept for back-compat re-exports
 from app.utils.tool_call_args import read_tool_args
 
@@ -140,18 +142,20 @@ async def _fetch_and_extract(results: list[dict]) -> list[dict]:
     sem = asyncio.Semaphore(settings.research_fetch_concurrency)
     urls = [r["url"] for r in results if r.get("url")]
 
-    # Item 12 — shared persistent client; per-call timeout override.
-    client = get_generic_http_client()
-
     async def _fetch_one(url: str) -> dict | None:
         async with sem:
             try:
-                resp = await client.get(url, timeout=settings.research_fetch_timeout)
-                if resp.status_code != 200 or not resp.text:
+                # §17.612 (audit #6) — route through the §17.93 hardened fetch
+                # (SSRF pre/post-redirect host check + streamed research_max_url_bytes
+                # cap) instead of a raw client.get whose full body buffered into
+                # orchestrator RAM and whose follow_redirects could reach a
+                # private/metadata IP. Keep the tighter topic-fetch timeout.
+                html = await _fetch_url_bounded(url, timeout=settings.research_fetch_timeout)
+                if not html:
                     return None
                 text_out = await asyncio.to_thread(
                     trafilatura.extract,
-                    resp.text,
+                    html,
                     output_format="txt",
                     with_metadata=False,
                 )

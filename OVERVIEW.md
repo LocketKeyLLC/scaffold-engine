@@ -2004,6 +2004,7 @@ A second full audit run as a **multi-agent workflow**: 66 agents — one correct
 - ✅ §17.609 web SSE lifecycle: terminal `close` frame + `sse-close` stops the reconnect-storm; heartbeats forwarded; stall counter uses true per-cycle time (2026-07-18 audit #2/#39/#9).
 - ✅ §17.610 cloud role-routed calls get retry/backoff via `_retry_provider_call` (+529 retryable, regex classifier); native-tool telemetry recorded; Anthropic mid-stream errors propagate (2026-07-18 audit #3/#29/#38).
 - ✅ §17.611 API/router quick-win cluster: /config int-redaction, /logs ordering, gt_list count, recent_jobs_costs window, artifact list projection, partial-results count, dead const, double-parse, dup query, node-action UUID guard, /health probe timeouts (2026-07-18 audit #4/5/8/10/17/18/21/22/23/37/40).
+- ✅ §17.612 SSRF drift closed: topic-mode fetch + verify-recheck now route through / re-check the §17.93 hardened fetch guard (byte cap + post-redirect host check) (2026-07-18 audit #6).
 
 **Process note:** mid-audit, running two full `make test` suites concurrently briefly stressed Milvus and produced spurious retrieval-golden failures — a diagnostic detour, not a code regression (the corpus gap was pre-existing; §17.595 fixed the real cause). One-command corpus-restore after a wipe: `docker exec scaffold-orchestrator python scripts/seed_corpus_remainder.py` (§17.595, seeds all 5 curated golden docs).
 
@@ -22026,6 +22027,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
 
 ---
+
+### §17.612 Fix — SSRF/fetch-guard drift: two research fetch paths bypassed the §17.93 guard (2026-07-18)
+
+2026-07-18 audit #6 (Medium, security) — two URL-fetch paths skipped the hardened `_fetch_url_bounded` helper (`research_extractors.py`), re-opening the exact bypass class §17.93 closed. `source_url`/search URLs are attacker-influenceable via ingested pages.
+
+- **Topic-mode `_fetch_and_extract`** (`app/modules/research_agent.py`) did a raw `client.get` + `resp.text` with no byte cap and `follow_redirects=True` — an adversarial body buffered fully into orchestrator RAM (×`research_fetch_concurrency`), and a public search-result URL could 3xx-redirect to a private/metadata IP with no post-redirect host check. **Fix:** route through `_fetch_url_bounded` (streamed `research_max_url_bytes` cap + SSRF pre/post-redirect `_is_public_host`). Added an optional `timeout` param to the helper so the topic path keeps its tighter `research_fetch_timeout`.
+- **Verify-recheck `_recheck_one_url`** (`app/modules/research_verify.py`) validated `source_url` once with `_is_public_host` but then issued HEAD/GET with `follow_redirects=True` and never re-validated the final host — making `?recheck`/`?compare_hash` an internal reachability/status/hash oracle. **Fix:** re-validate `str(r.url)` after the redirect chain (mirrors the helper), returning `error` on a private final host.
+
+**Verification:** `make test` subset — full research suite (`-k research`) = **315 passed**; SSRF guard = **32 passed** (+1 regression: `test_uses_fetch_url_bounded` proving the topic path routes through the guard). Note: `get_generic_http_client` is deliberately re-exported from `research_agent` — `_fetch_url_bounded` reaches it via `_ra().get_generic_http_client()` and the url-mode tests patch it there.
 
 ### §17.611 Fix — API/router quick-win cluster (11 audit findings) (2026-07-18)
 
