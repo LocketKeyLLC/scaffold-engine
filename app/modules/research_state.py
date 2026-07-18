@@ -203,7 +203,7 @@ async def _guard_and_create_session(
 def _build_snapshot(state: ResearchState) -> dict:
     """JSON-safe snapshot of ResearchState for persistence.
 
-    Persists FULL entries (content, source_url, confidence_score, title,
+    Persists FULL entries (content, source, confidence_score, title,
     content_hash) so resume can regenerate a faithful summary. The legacy
     ``entries_projection`` field is retained for read-side back-compat only.
     """
@@ -215,7 +215,11 @@ def _build_snapshot(state: ResearchState) -> dict:
         full_entries.append({
             "title": e.get("title", ""),
             "content": e.get("content", ""),
-            "source_url": e.get("source_url"),
+            # §17.600 — every research producer stores the URL under "source"
+            # (research_agent.py); the old "source_url" key always read null,
+            # so resumed entries silently lost their URL and dropped out of the
+            # Sources block. Serialize the real key.
+            "source": e.get("source"),
             "confidence_score": e.get("confidence_score"),
             "content_hash": h,
         })
@@ -344,7 +348,7 @@ def _rehydrate_state(row: dict) -> ResearchState:
 
     Supports schema_version:
       - missing / 1 : legacy ``entries_projection`` (title + content_hash only)
-      - 2           : full ``entries`` with content/source_url/confidence_score
+      - 2           : full ``entries`` with content/source/confidence_score
     """
     snap = row.get("state_snapshot") or {}
     if isinstance(snap, str):
@@ -366,6 +370,12 @@ def _rehydrate_state(row: dict) -> ResearchState:
 
     if version >= 2:
         state.all_entries = list(snap.get("entries", []))
+        # §17.600 — pre-fix snapshots serialized the URL under "source_url"
+        # (always null due to the key mismatch); normalize either shape to the
+        # "source" key that consumers read.
+        for _e in state.all_entries:
+            if isinstance(_e, dict) and not _e.get("source") and _e.get("source_url"):
+                _e["source"] = _e["source_url"]
     else:
         # v1 legacy: projection-only, lossy. Summary on resume will be degraded
         # but the session still completes rather than crashing on KeyError.

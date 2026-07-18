@@ -312,6 +312,11 @@ async def insert_node(
     ordered = [n["node_key"] for n in nodes] + [node_key]
     await _renumber(db, job_id, ordered)
     await _audit(db, job_id, node_key, "insert", None, spec, edited_by)
+    # §17.600 — re-open a terminal job so the newly-inserted 'pending' node is
+    # actually scheduled. edit/delete/reset_node all do this; insert_node
+    # didn't, so inserting into a completed/failed/blocked/cancelled job left
+    # it terminal and the new node never ran (with a misleading 200 'ok').
+    await _reopen_job(db, job_id)
     await db.commit()
     logger.info("node_insert job=%s node=%s deps=%s", job_id, node_key, new_deps)
     return {"status": "ok", "node_key": node_key}

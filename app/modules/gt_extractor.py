@@ -452,10 +452,20 @@ def _append_toon_row(file_content: str, row: str) -> str:
     current_count = int(match.group(2))
     new_count = current_count + 1
 
-    if clean_row.strip().startswith("AUTO,"):
-        clean_row = clean_row.replace("AUTO,", f"{new_count},", 1)
-        if not clean_row.startswith("  "):
-            clean_row = f"  {clean_row}"
+    # §17.600 — always renumber the appended row's leading id to the new header
+    # count. format_toon_rows emits literal ids restarting at 1 (for display /
+    # fresh-file blocks), and the old code only renumbered rows prefixed
+    # "AUTO," — a sentinel that's never emitted — so every append to a
+    # non-empty file collided ids. Rewrite the leading id (digits or the legacy
+    # AUTO sentinel) in place.
+    clean_row = re.sub(
+        r"^(\s*)(?:\d+|AUTO)(,)",
+        rf"\g<1>{new_count}\g<2>",
+        clean_row,
+        count=1,
+    )
+    if not clean_row.startswith("  "):
+        clean_row = f"  {clean_row}"
 
     file_content = re.sub(pattern, f"\\g<1>{new_count}\\g<3>", file_content)
 

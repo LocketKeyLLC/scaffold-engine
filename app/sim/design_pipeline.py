@@ -814,8 +814,13 @@ async def get_design_state(
         await _fetch_latest_topology_selection(db, spec["id"])
         if spec else None
     )
+    # §17.600 — union both sizing tables. _fetch_latest_device_sizing reads
+    # only device_sizings (analog), so every digital_logic design reported
+    # device_sizing_id=None even with a converged digital sizing (and a
+    # formal_verdict=PASS). _fetch_latest_sizing_any_kind returns the same
+    # {id, converged} shape across device_sizings + digital_sizings.
     sizing = (
-        await _fetch_latest_device_sizing(db, sel["id"])
+        await _fetch_latest_sizing_any_kind(db, sel["id"])
         if sel else None
     )
     formal = (

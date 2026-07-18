@@ -199,3 +199,46 @@ def test_detect_topic_id_returns_int_for_any_input():
     # just that the wrapper returns an int and has a default.
     assert isinstance(gx._detect_topic_id("anything"), int)
     assert isinstance(gx._detect_topic_id(""), int)
+
+
+# ---------------------------------------------------------------------------
+# §17.600 — _append_toon_row renumbers ids so appends don't collide (#12)
+# ---------------------------------------------------------------------------
+def test_append_toon_row_renumbers_leading_id():
+    """format_toon_rows emits literal ids restarting at 1; _append_toon_row
+    must renumber each appended row from the header count so appending to a
+    non-empty file never produces duplicate ids."""
+    header = gx._new_toon_header("knowledge/x.toon")  # count starts at 0
+    content = header
+    rows = gx.format_toon_rows([
+        {"title": "a", "content": "ca", "tags": "t1", "source": "u1"},
+        {"title": "b", "content": "cb", "tags": "t2", "source": "u2"},
+        {"title": "c", "content": "cc", "tags": "t3", "source": "u3"},
+    ])
+    # All three carry literal id "1","2","3" — appending naively would collide.
+    for row in rows:
+        content = gx._append_toon_row(content, row)
+    import re
+    ids = re.findall(r"^\s*(\d+),", content, re.MULTILINE)
+    assert ids == ["1", "2", "3"], ids
+    assert len(ids) == len(set(ids)), f"duplicate ids: {ids}"
+
+
+def test_append_toon_row_continues_from_nonzero_header():
+    """Appending to a file that already has N entries continues at N+1."""
+    header = gx._new_toon_header("knowledge/x.toon")
+    content = header
+    # Seed two entries.
+    for row in gx.format_toon_rows([
+        {"title": "a", "content": "ca", "tags": "", "source": "u1"},
+        {"title": "b", "content": "cb", "tags": "", "source": "u2"},
+    ]):
+        content = gx._append_toon_row(content, row)
+    # A second batch (its literal ids also restart at 1) must not collide.
+    for row in gx.format_toon_rows([
+        {"title": "c", "content": "cc", "tags": "", "source": "u3"},
+    ]):
+        content = gx._append_toon_row(content, row)
+    import re
+    ids = re.findall(r"^\s*(\d+),", content, re.MULTILINE)
+    assert ids == ["1", "2", "3"], ids

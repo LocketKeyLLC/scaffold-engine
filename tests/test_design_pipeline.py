@@ -555,6 +555,36 @@ async def test_get_design_state_full_chain(monkeypatch):
 
 
 @pytest.mark.smoke
+async def test_get_design_state_reports_digital_sizing(monkeypatch):
+    """§17.600 — digital designs store sizing in digital_sizings; get_design_state
+    must union both tables. Was device_sizings-only, so every digital design
+    reported device_sizing_id=None even with a converged sizing (+ formal PASS)."""
+    _patch_chain(
+        monkeypatch,
+        job=_job_row(status="completed"),
+        spec=_spec_row(),
+        sel={"id": SEL_ID},
+        formal={"id": FORMAL_ID, "verdict": "PASS", "converged": True},
+    )
+
+    # Analog-only lookup finds nothing; the any-kind union returns the digital
+    # sizing. Override the unified fakes _patch_chain set.
+    async def _device_only(db, sid):
+        return None
+
+    async def _any_kind(db, sid):
+        return {"id": SIZING_ID, "converged": True, "kind": "digital"}
+
+    monkeypatch.setattr("app.sim.design_pipeline._fetch_latest_device_sizing", _device_only)
+    monkeypatch.setattr("app.sim.design_pipeline._fetch_latest_sizing_any_kind", _any_kind)
+    db = make_mock_db()
+    state = await get_design_state(JOB_ID, db=db)
+    assert state.device_sizing_id == SIZING_ID
+    assert state.device_sizing_converged is True
+    assert state.formal_verdict == "PASS"
+
+
+@pytest.mark.smoke
 async def test_get_design_state_only_extract_done(monkeypatch):
     _patch_chain(
         monkeypatch,

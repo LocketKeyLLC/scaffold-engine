@@ -126,13 +126,21 @@ async def fetch_so_answers(
 
     # 1. Search questions. `filter=withbody` returns question text but not
     #    answer bodies — we still need an answer-batch call below.
-    search_url = (
-        f"{_SE_BASE}/search/advanced"
-        f"?order=desc&sort=votes&q={httpx.QueryParams({'q': query})['q']}"
-        f"&site=stackoverflow&accepted=True&pagesize={min(limit * 2, 50)}"
-        f"&filter=withbody"
-    )
-    r = await client.get(search_url)
+    # §17.600 — pass query params via httpx so they're URL-ENCODED. The old
+    # f-string interpolated QueryParams(...)[k] (the DECODED value), so a query
+    # like "C#", "C++", ".NET", or "A & B" put its #/& into the URL and
+    # corrupted the site/accepted/pagesize params (they landed in the fragment).
+    search_url = f"{_SE_BASE}/search/advanced"
+    search_params = {
+        "order": "desc",
+        "sort": "votes",
+        "q": query,
+        "site": "stackoverflow",
+        "accepted": "True",
+        "pagesize": min(limit * 2, 50),
+        "filter": "withbody",
+    }
+    r = await client.get(search_url, params=search_params)
     if r.status_code == 429:
         logger.warning("so_rate_limited: %s", r.headers.get("Retry-After"))
         return []
@@ -297,10 +305,9 @@ async def fetch_hn_items(
             "numericFilters": f"points>={min_points}",
             "hitsPerPage": str(min(limit * 2, 50)),
         }
-        url = f"{_HN_BASE}/search?" + "&".join(
-            f"{k}={httpx.QueryParams({k: v})[k]}" for k, v in params.items()
-        )
-        r = await client.get(url)
+        # §17.600 — let httpx URL-encode the params; the old manual join
+        # interpolated the DECODED value, corrupting queries with #/&/+ etc.
+        r = await client.get(f"{_HN_BASE}/search", params=params)
         r.raise_for_status()
         data = r.json()
         try:

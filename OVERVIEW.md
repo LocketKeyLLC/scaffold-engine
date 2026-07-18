@@ -21994,6 +21994,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.600 Fix — Medium audit findings, group 5/5: data provenance / correctness (2026-07-18)
+
+The final five Medium findings — closes the 14-item Medium set from the 2026-07-17 audit.
+
+- **Paused-research snapshot dropped every source URL** (`app/modules/research_state.py`). Every producer stores an entry's URL under `"source"` (research_agent.py), but `_build_snapshot` serialized `e.get("source_url")` — always null — so after pause→resume all pre-pause entries lost their URL and vanished from the **Sources** block. **Fix:** serialize `e.get("source")`; rehydrate normalizes a legacy `source_url` back to `source`.
+- **`get_design_state` reported null sizing for every digital design** (`app/sim/design_pipeline.py`). It used `_fetch_latest_device_sizing` (analog `device_sizings` only); digital designs store in `digital_sizings`, so a converged digital sizing showed `device_sizing_id=None` while `formal_verdict=PASS`. **Fix:** use the existing `_fetch_latest_sizing_any_kind` (unions both tables, same `{id, converged}` shape).
+- **SO/HN search URLs interpolated un-encoded query values** (`app/utils/forum_ingest.py`). Both fetchers indexed `httpx.QueryParams(...)[k]` (the DECODED value) into the URL, so `C#`, `C++`, `.NET`, `A & B` put their `#`/`&` into the URL and corrupted the site/pagesize params — silently wrong/empty results. **Fix:** pass `params=` to `client.get` so httpx encodes them (matching the reddit/arxiv/wiki fetchers).
+- **Repeated TOON pushes produced duplicate entry ids** (`app/modules/gt_extractor.py`). `format_toon_rows` emits literal ids restarting at 1; `_append_toon_row` only renumbered rows prefixed `AUTO,` — a sentinel never emitted — so every append to a non-empty file collided ids. **Fix:** `_append_toon_row` now always rewrites the leading id (digits or the legacy `AUTO`) to the incremented header count.
+- **`insert_node` didn't re-open a terminal job** (`app/modules/node_editor.py`). Unlike `edit_node`/`delete_node`/`reset_node`, it never called `_reopen_job`, so inserting into a completed/failed/blocked/cancelled job left it terminal and the new `pending` node was never scheduled (misleading 200 `ok`). **Fix:** `await _reopen_job(db, job_id)` before commit.
+
+**Verification:** `test_node_editor.py` + `test_gt_extractor_module.py` + `test_forum_ingest.py` + `test_design_pipeline.py` + `test_research_state_lifecycle.py` + `test_research_pause_resume.py` = **147 passed** (+8 new regression tests, one or two per finding).
+
 ### §17.599 Fix — Medium audit findings, group 4/5: assist/handoff subsystem (2026-07-18)
 
 Two assist-mode defects (companions to the §17.594 H1 single-handoff-scope fix).

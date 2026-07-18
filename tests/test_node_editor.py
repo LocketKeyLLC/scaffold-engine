@@ -235,3 +235,27 @@ class TestRouterDispatch:
                           AsyncMock(return_value={"status": "ok", "node_key": "T1"})):
             out = await nr.node_reset(_JID, "T1", NodeResetInput(), db=_db())
         assert out["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# §17.600 — insert_node re-opens a terminal job (audit finding #8)
+# ---------------------------------------------------------------------------
+@pytest.mark.smoke
+async def test_insert_node_reopens_terminal_job():
+    """insert_node must re-open a terminal job so the new 'pending' node is
+    scheduled — edit/delete/reset_node all do this; insert_node didn't, so the
+    node never ran despite a 200 'ok'."""
+    db = _db()
+    existing = [_node("T1", order=0), _node("T2", deps=["T1"], order=1)]
+    with _patch_load(existing):
+        r = await node_editor.insert_node(
+            "job-1",
+            {"node_key": "T3", "title": "New", "depends_on": ["T2"]},
+            db=db,
+        )
+    assert r.get("status") == "ok"
+    sqls = [str(c.args[0]) for c in db.execute.call_args_list]
+    assert any(
+        "SET status = 'executing'" in s and "compiled_output = NULL" in s
+        for s in sqls
+    ), "insert_node did not call _reopen_job"

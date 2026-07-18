@@ -1048,3 +1048,33 @@ async def test_fetch_forum_dispatches_reddit_and_wiki():
             forum_ingest.settings.reddit_min_comments,
         )
         wk.assert_awaited_once_with("transformer", forum_ingest.settings.wiki_max_pages)
+
+
+# ---------------------------------------------------------------------------
+# §17.600 — SO/HN search queries must be URL-encoded via params= (#11)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_fetch_so_answers_encodes_special_char_query(fake_cache_miss):
+    """A query with #/& must go through httpx params= (encoded), not be
+    interpolated raw into the URL where the #/& corrupt site/pagesize."""
+    from app.utils import forum_ingest
+    client = MagicMock()
+    client.get = AsyncMock(return_value=_make_response(json_data={"items": []}))
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client):
+        await forum_ingest.fetch_so_answers("C# generics & .NET", limit=10, min_score=10)
+    call = client.get.call_args_list[0]
+    assert "?" not in call.args[0] and "#" not in call.args[0], call.args[0]
+    assert call.kwargs["params"]["q"] == "C# generics & .NET"
+    assert call.kwargs["params"]["site"] == "stackoverflow"
+
+
+@pytest.mark.asyncio
+async def test_fetch_hn_items_encodes_special_char_query(fake_cache_miss):
+    from app.utils import forum_ingest
+    client = MagicMock()
+    client.get = AsyncMock(return_value=_make_response(json_data={"hits": []}))
+    with patch("app.utils.forum_ingest.get_generic_http_client", return_value=client):
+        await forum_ingest.fetch_hn_items("C++ & rust", limit=10, min_points=10)
+    call = client.get.call_args_list[0]
+    assert "?" not in call.args[0], call.args[0]
+    assert call.kwargs["params"]["query"] == "C++ & rust"

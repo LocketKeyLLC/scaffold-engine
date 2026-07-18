@@ -155,3 +155,39 @@ class TestRunWithSessionLifecycle:
         # actually hit the await — depends on test scheduling. We don't
         # require it as a strict assertion; the load-bearing contract is
         # the finalize-completion assert in the prior test.
+
+
+# ---------------------------------------------------------------------------
+# §17.600 — snapshot serializes the real "source" key, not "source_url" (#5)
+# ---------------------------------------------------------------------------
+def test_build_snapshot_serializes_source_key():
+    """Every research producer stores the URL under 'source'; _build_snapshot
+    used 'source_url' (always null), so resumed entries silently lost their URL
+    and dropped out of the Sources block."""
+    from app.modules.research_state import _build_snapshot, ResearchState
+    state = ResearchState(topic="t", depth="medium", domain="eng")
+    state.all_entries = [
+        {"title": "A", "content": "c", "source": "https://example.com/a",
+         "confidence_score": 0.9},
+    ]
+    snap = _build_snapshot(state)
+    entry = snap["entries"][0]
+    assert entry["source"] == "https://example.com/a"
+
+
+def test_rehydrate_normalizes_legacy_source_url_key():
+    """Legacy snapshots that stored the URL under 'source_url' are normalized
+    back to 'source' on resume so consumers reading e['source'] still work."""
+    from app.modules import research_agent as ra
+    row = {
+        "id": "s1", "topic": "t", "depth": "medium", "domain": "eng",
+        "state_snapshot": {
+            "schema_version": 2,
+            "entries": [
+                {"title": "A", "content": "c",
+                 "source_url": "https://legacy.example/a"},
+            ],
+        },
+    }
+    state = ra._rehydrate_state(row)
+    assert state.all_entries[0]["source"] == "https://legacy.example/a"
