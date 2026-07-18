@@ -31,6 +31,13 @@ class NotFoundError(ScaffoldError):
     """HTTP 404 — the resource (job, schedule, session, …) does not exist."""
 
 
+class ConflictError(ScaffoldError):
+    """HTTP 409 — the request conflicts with the resource's current state.
+
+    §17.607 — e.g. resuming a job that isn't ``cancelled``, or confirming one
+    that isn't awaiting confirmation. ``aiter_resume_job`` documents this."""
+
+
 class RateLimitError(ScaffoldError):
     """HTTP 429 — the orchestrator throttled this caller."""
 

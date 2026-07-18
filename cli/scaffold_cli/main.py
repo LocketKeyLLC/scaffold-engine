@@ -1396,7 +1396,10 @@ def _stream_research(api_url: str, api_key: str | None, payload: dict, path: str
                 if path == "/research":
                     stream = c.aiter_research(**payload)
                 else:
-                    stream = c._aiter_sse(path, json=payload)  # generic fallback
+                    # §17.607 — AsyncClient exposes _stream (POST + SSE parse);
+                    # the old _aiter_sse never existed on it (this fallback
+                    # branch is only reached for non-/research paths).
+                    stream = c._stream("POST", path, json=payload)
                 async for evt in stream:
                     name = evt.get("event", "?")
                     data = evt.get("data", {})

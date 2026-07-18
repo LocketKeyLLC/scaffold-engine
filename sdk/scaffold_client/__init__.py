@@ -18,6 +18,7 @@ from .async_client import AsyncClient
 from .client import Client
 from .errors import (
     AuthenticationError,
+    ConflictError,
     ConnectionError,
     NotFoundError,
     OrchestratorError,
@@ -38,6 +39,7 @@ __all__ = [
     "AsyncClient",
     "AuthenticationError",
     "Client",
+    "ConflictError",
     "ConnectionError",
     "NotFoundError",
     "OrchestratorError",

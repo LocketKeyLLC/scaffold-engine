@@ -14,6 +14,7 @@ import httpx
 
 from .errors import (
     AuthenticationError,
+    ConflictError,
     ConnectionError,
     NotFoundError,
     OrchestratorError,
@@ -77,6 +78,8 @@ def raise_for_status(resp: httpx.Response) -> None:
         raise PermissionError(f"Access forbidden (403): {detail}.")
     if code == 404:
         raise NotFoundError(f"Resource not found (404): {detail}.")
+    if code == 409:
+        raise ConflictError(f"State conflict (409): {detail}.")
     if code == 429:
         raise RateLimitError(f"Rate limited (429): {detail}.")
     if 400 <= code < 500:

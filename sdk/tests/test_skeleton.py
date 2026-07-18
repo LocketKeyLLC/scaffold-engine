@@ -14,6 +14,7 @@ from scaffold_client import (
     AsyncClient,
     AuthenticationError,
     Client,
+    ConflictError,
     ConnectionError,
     NotFoundError,
     OrchestratorError,
@@ -76,6 +77,7 @@ def test_base_url_trailing_slash_stripped():
         (401, AuthenticationError),
         (403, PermissionError),
         (404, NotFoundError),
+        (409, ConflictError),  # §17.607
         (422, RequestError),
         (429, RateLimitError),
         (500, OrchestratorError),

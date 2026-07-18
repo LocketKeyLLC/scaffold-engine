@@ -21994,6 +21994,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.607 Fix — Low audit findings: SDK ConflictError + CLI dead ref (closes the audit) (2026-07-18)
+
+The last two Low findings — SDK/CLI hygiene. **This closes the full 2026-07-17 whole-repo audit** (3 High §17.594, 14 Medium §17.596–600, 16 Low §17.601–607).
+
+- **`aiter_resume_job` docstring promised a nonexistent `ConflictError`** (`sdk/scaffold_client/`). The docstring said it raises `ConflictError` on a non-cancelled job, but the SDK had no such type and 409s surfaced as a generic `RequestError`. **Fix (make the docstring true):** add `ConflictError(ScaffoldError)`, map `409 → ConflictError` in `_transport._raise_for_status` (mirroring `404 → NotFoundError`), and export it from the package.
+- **CLI `_stream_research` referenced `AsyncClient._aiter_sse`** (`cli/scaffold_cli/main.py`), a method that doesn't exist — a dead fallback branch (only reached for non-`/research` paths). **Fix:** use the real `c._stream("POST", path, json=payload)`.
+
+**Verification:** `make test-sdk` = **143 passed** (+1: `409 → ConflictError` in the parametrized status-mapping test); `make test-cli` = **165 passed** (no regression).
+
 ### §17.606 Fix — Low audit findings: classify budget + human-node count + to_milvus key (2026-07-18)
 
 Three small correctness bugs.
