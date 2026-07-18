@@ -781,13 +781,17 @@ async def health():
         """
         try:
             async with async_session() as db:
-                row = await db.execute(
+                # §17.611 (audit #40) — cap the query, not just the connect
+                # handshake (connect_args timeout only covers connect). A locked
+                # system_alerts table would otherwise block unauthenticated
+                # /health indefinitely; the except below returns the fail-safe.
+                row = await asyncio.wait_for(db.execute(
                     text(
                         "SELECT kind, created_at FROM system_alerts "
                         "WHERE kind LIKE 'calibration.%' "
                         "ORDER BY created_at DESC LIMIT 1"
                     ),
-                )
+                ), timeout=2.0)
                 rec = row.first()
             if rec is None:
                 return {"status": "unknown", "last_check_at": None, "last_kind": None}
@@ -835,7 +839,8 @@ async def health():
             return {"disabled": True, "window_hours": 0}
         try:
             async with async_session() as db:
-                rows = await db.execute(
+                # §17.611 (audit #40) — per-query timeout (see _check_calibration).
+                rows = await asyncio.wait_for(db.execute(
                     text(
                         "SELECT payload->>'container_name' AS container, "
                         "COUNT(*) AS count, MAX(created_at) AS most_recent "
@@ -845,7 +850,7 @@ async def health():
                         "GROUP BY container "
                         "ORDER BY count DESC"
                     ),
-                )
+                ), timeout=2.0)
                 records = rows.mappings().all()
             by_container: dict[str, int] = {}
             most_recent: datetime | None = None
@@ -891,7 +896,8 @@ async def health():
             return {"disabled": True, "window_hours": 0}
         try:
             async with async_session() as db:
-                rows = await db.execute(
+                # §17.611 (audit #40) — per-query timeout (see _check_calibration).
+                rows = await asyncio.wait_for(db.execute(
                     text(
                         "SELECT payload->>'comm' AS comm, "
                         "COUNT(*) AS count, MAX(created_at) AS most_recent "
@@ -901,7 +907,7 @@ async def health():
                         "GROUP BY comm "
                         "ORDER BY count DESC"
                     ),
-                )
+                ), timeout=2.0)
                 records = rows.mappings().all()
             by_comm: dict[str, int] = {}
             most_recent: datetime | None = None
@@ -1088,19 +1094,27 @@ def _is_secret_field(name: str, value: object) -> bool:
     Three triggers, in priority order:
       1. The field type is ``SecretStr``.
       2. The field NAME contains a sensitive keyword (``key`` / ``secret``
-         / ``token`` / ``password`` / ``pass``).
+         / ``token`` / ``password`` / ``pass``) AND the value is a string.
       3. The field VALUE is a URL with embedded user:password credentials
          (e.g. ``postgresql+asyncpg://scaffold:abcd@host:5432/db``) —
          catches ``database_url`` and similar without false-positiving on
          credential-free URLs like ``http://172.18.0.1:11434``.
     We err on the side of over-redaction rather than leaking values
     via the public API.
+
+    §17.611 (audit #4) — the keyword rule is gated on ``isinstance(value, str)``:
+    a bare substring match previously redacted 10 non-secret INT fields (every
+    ``*_max_tokens``, ``tool_call_coax_min_tokens``, ``fetch_cache_max_keys``) to
+    ``(set)``, defeating /config's documented purpose (a dump safe to paste into
+    bug reports) for zero security benefit. Ints carry no credential, so only
+    string-valued keyword fields (github_token/huggingface_token) + SecretStr get
+    redacted.
     """
     from pydantic import SecretStr
     if isinstance(value, SecretStr):
         return True
     lname = name.lower()
-    if any(kw in lname for kw in _CONFIG_REDACT_KEYWORDS):
+    if isinstance(value, str) and any(kw in lname for kw in _CONFIG_REDACT_KEYWORDS):
         return True
     if isinstance(value, str) and _CONFIG_URL_CREDS_RE.match(value):
         return True

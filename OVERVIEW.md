@@ -2003,6 +2003,7 @@ A second full audit run as a **multi-agent workflow**: 66 agents — one correct
 - ✅ §17.608 rerank cap mismatch fixed: `max_pairs` plumbed through so `RERANK_MAX_CANDIDATES > 20` no longer silently disables reranking (2026-07-18 audit #1).
 - ✅ §17.609 web SSE lifecycle: terminal `close` frame + `sse-close` stops the reconnect-storm; heartbeats forwarded; stall counter uses true per-cycle time (2026-07-18 audit #2/#39/#9).
 - ✅ §17.610 cloud role-routed calls get retry/backoff via `_retry_provider_call` (+529 retryable, regex classifier); native-tool telemetry recorded; Anthropic mid-stream errors propagate (2026-07-18 audit #3/#29/#38).
+- ✅ §17.611 API/router quick-win cluster: /config int-redaction, /logs ordering, gt_list count, recent_jobs_costs window, artifact list projection, partial-results count, dead const, double-parse, dup query, node-action UUID guard, /health probe timeouts (2026-07-18 audit #4/5/8/10/17/18/21/22/23/37/40).
 
 **Process note:** mid-audit, running two full `make test` suites concurrently briefly stressed Milvus and produced spurious retrieval-golden failures — a diagnostic detour, not a code regression (the corpus gap was pre-existing; §17.595 fixed the real cause). One-command corpus-restore after a wipe: `docker exec scaffold-orchestrator python scripts/seed_corpus_remainder.py` (§17.595, seeds all 5 curated golden docs).
 
@@ -22025,6 +22026,24 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
 
 ---
+
+### §17.611 Fix — API/router quick-win cluster (11 audit findings) (2026-07-18)
+
+2026-07-18 audit batch 4 — eleven localized correctness/efficiency fixes across the router/observability surface.
+
+- **#4 `/config` over-redacted 10 non-secret int fields** (`app/main.py`). `_is_secret_field`'s bare substring keyword match redacted every `*_max_tokens` ("token"), `tool_call_coax_min_tokens`, and `fetch_cache_max_keys` ("key") to `(set)` — defeating the endpoint's "safe to paste into bug reports" purpose for zero benefit. **Fix:** gate the keyword rule on `isinstance(value, str)`; ints stop being redacted, SecretStr + string token/key fields still redact.
+- **#5 `GET /logs` ordered nodes lexically** (`app/routers/status.py`). `ORDER BY node_key` (TEXT `T1..Tn`) put `T10` before `T2`, so 10+-node jobs rendered out of order and LIMIT/OFFSET scrambled pages. **Fix:** `ORDER BY execution_order, node_key` (matches 6 sibling read paths).
+- **#8 `gt_list` pagination counted the whole collection** (`app/modules/gt_browser.py`). `_count_entries` ran unfiltered while the page applied domain + supersede filters, so `total`/`total_pages` overstated visible rows → phantom empty pages. **Fix:** count with the same `expr`; gt_stats keeps the unfiltered grand total.
+- **#10 `recent_jobs_costs` aggregated the entire `llm_call_logs` table** (`app/modules/observability_rollups.py`). The windowed predicate referenced jobs, so the nullable-side derived aggregate couldn't be pushed down — a "last hour" query scanned months of history. **Fix:** join-then-aggregate (`FROM jobs j LEFT JOIN llm_call_logs c ... WHERE j.created_at >= window GROUP BY j.id`) so the planner filters jobs first and probes `idx_llm_call_logs_job_id`.
+- **#17 `GET /jobs/{id}/artifacts` list returned full content of every artifact** (`app/routers/artifacts.py`). **Fix:** content-free list projection (`_ARTIFACT_LIST_COLS`); `content` is Optional so it defaults None, full content stays on `GET /artifacts/{id}`, size_bytes retained.
+- **#18 partial-results banner read "N of 0 steps"** (`pipelines/scaffold_router.py`). `total_nodes` was passed 0 and never reassigned. **Fix:** read `total_nodes` from the `pipeline_complete` payload.
+- **#21 dead `_TERMINAL_STATUSES` constant** with a false "drives /work" comment (`app/routers/status.py`) — removed (get_work hardcodes the set inline).
+- **#22 double `r.json()` parse** in `/cost`/`/logs`/`/health` (`pipelines/scaffold_router.py`) — parse once with a `try/except ValueError` + dict guard (3 sites).
+- **#23 threshold tick ran the identical unresolved-errors count twice** (`app/observability/thresholds.py`) — `refresh_gauges` now returns the count and `evaluate_thresholds` accepts it.
+- **#37 `/web` node-action POSTs passed an unvalidated job_id to node_editor** → asyncpg DataError → uncaught 500 on the auth-exempt routes (`app/modules/node_editor.py`). **Fix:** `_load_nodes` validates the UUID and returns `[]` on garbage, so every op emits its normal "not found" error dict + the graceful banner (single-point guard for all callers).
+- **#40 (contested) unauthenticated `/health` could hang** — three `system_alerts` DB probes lacked the per-query timeout the milvus/redis probes have (`connect_args` caps only the handshake) (`app/main.py`). **Fix:** wrap each in `asyncio.wait_for(..., timeout=2.0)`; the existing `except` returns the fail-safe.
+
+**Verification:** `make test` subset — config/main/status_logs/node_editor/gt_browser/observability/artifacts = **180 passed** (+1 regression: `_is_secret_field` int-keyword fields); scaffold_router pipeline tests (`--noconftest`) = **46 passed**; config endpoint = **12 passed**.
 
 ### §17.610 Fix — provider-agnostic retry/backoff for cloud role-routed calls + 2 provider bugs (2026-07-18)
 

@@ -3068,6 +3068,11 @@ class Pipeline:
                         if not compiled_output and payload.get("compiled_output_available"):
                             compiled_output = self._poll_compiled_output(job_id)
                         compile_status = payload.get("compile_status", "complete")
+                        # §17.611 (audit #18) — the real node count lives in the
+                        # pipeline_complete payload; both callers pass total_nodes=0
+                        # and never reassign it, so the partial-results banner read
+                        # "N of 0 steps". Read it here.
+                        total_nodes = int(payload.get("total_nodes") or total_nodes)
                         for fn in payload.get("failed_nodes", []) or []:
                             failed_nodes.append(fn)
                     except json.JSONDecodeError:
@@ -5563,7 +5568,12 @@ class Pipeline:
         )
         if r.status_code >= 400:
             return self._fmt(r)
-        data = r.json() if isinstance(r.json(), dict) else {}
+        try:  # §17.611 (audit #22) — parse once (requests doesn't cache .json())
+            data = r.json()
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
         nodes = data.get("nodes") or []
         total = data.get("node_count", len(nodes))
         job_status = data.get("job_status", "?")
@@ -5617,7 +5627,12 @@ class Pipeline:
             # is reachable but the /health endpoint errored — still
             # actionable.
             return self._fmt(r) + self._render_health_recovery_footer()
-        data = r.json() if isinstance(r.json(), dict) else {}
+        try:  # §17.611 (audit #22) — parse once (requests doesn't cache .json())
+            data = r.json()
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
         checks = data.get("checks", {})
         if not checks:
             return f"```json\n{json.dumps(data, indent=2)}\n```"
@@ -5732,7 +5747,12 @@ class Pipeline:
         )
         if r.status_code >= 400:
             return self._fmt(r)
-        data = r.json() if isinstance(r.json(), dict) else {}
+        try:  # §17.611 (audit #22) — parse once (requests doesn't cache .json())
+            data = r.json()
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
         cost = float(data.get("total_cost_usd") or 0.0)
         calls = int(data.get("call_count") or 0)
         prompt_tokens = int(data.get("total_prompt_tokens") or 0)

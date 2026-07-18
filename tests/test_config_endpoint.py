@@ -106,6 +106,18 @@ def test_is_secret_field_keyword_matches_name():
     assert _is_secret_field("webui_secret_key", "value")
 
 
+def test_is_secret_field_int_keyword_fields_not_redacted():
+    """§17.611 (audit #4) — int-valued fields whose NAME merely contains a
+    keyword substring ('max_TOKENS', 'max_KEYS') must NOT be redacted: an int
+    carries no credential, and redacting it defeats /config's documented purpose
+    (a dump safe to paste into bug reports). String secrets still redact."""
+    assert not _is_secret_field("research_max_tokens", 4096)
+    assert not _is_secret_field("tool_call_coax_min_tokens", 2048)
+    assert not _is_secret_field("fetch_cache_max_keys", 1000)
+    assert _is_secret_field("github_token", "ghp_xxx")
+    assert _is_secret_field("huggingface_token", "hf_xxx")
+
+
 def test_is_secret_field_url_with_credentials_is_redacted():
     """database_url has the form scheme://user:pass@host/db — the
     URL-credentials pattern catches it without flagging clean URLs."""

@@ -41,6 +41,16 @@ _TERMINAL = ("done", "failed", "skipped")
 # ---------------------------------------------------------------------------
 
 async def _load_nodes(db: AsyncSession, job_id: str) -> list[dict]:
+    # §17.611 (audit #37) — a non-UUID job_id would raise asyncpg DataError
+    # against the UUID `job_id` column, propagating as an uncaught HTTP 500 (the
+    # /web node-action POST routes are auth-exempt, so a crafted garbage id hit
+    # a raw 500 + error_logs row). Return empty so every op emits its normal
+    # "not found" error dict and the web layer renders the graceful banner.
+    from uuid import UUID
+    try:
+        UUID(str(job_id))
+    except (ValueError, TypeError):
+        return []
     rows = (await db.execute(
         text(
             "SELECT node_key, status, depends_on, execution_order, "

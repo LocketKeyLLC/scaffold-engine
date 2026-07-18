@@ -29,10 +29,10 @@ router = APIRouter()
 # which silently dropped umbrella jobs from /status counts and 422'd
 # ?status=aggregating. Importing the canonical enum makes drift impossible;
 # see tests/test_status_endpoint.py::test_status_enum_parity.
-# Terminal statuses a job can no longer progress from — drives /work.
-_TERMINAL_STATUSES: frozenset[str] = frozenset(
-    {"completed", "failed", "cancelled"}
-)
+# §17.611 (audit #21) — removed the dead `_TERMINAL_STATUSES` frozenset. It was
+# referenced nowhere and its "drives /work" comment was false (get_work hardcodes
+# NOT IN ('completed','failed','cancelled') inline), so editing it wouldn't have
+# propagated — a single-source-of-truth foot-gun with no runtime effect.
 
 
 # ── Pydantic response models ──────────────────────────────────────────
@@ -339,7 +339,11 @@ async def get_logs(
                    last_verification_reason
             FROM dag_nodes
             WHERE job_id = :job_id
-            ORDER BY node_key
+            -- §17.611 (audit #5) — order by the canonical integer execution_order
+            -- (node_key tiebreak), matching get_dag/execution_handler. node_key is
+            -- TEXT (T1..Tn); lexical order put T10/T11 before T2, so jobs with 10+
+            -- nodes rendered out of order AND the LIMIT/OFFSET scrambled pages.
+            ORDER BY execution_order, node_key
             LIMIT :limit OFFSET :offset
         """),
         {"job_id": job_id, "limit": limit, "offset": offset},

@@ -24,6 +24,18 @@ _ARTIFACT_COLS = (
     "mime_type, size_bytes, metadata, created_at"
 )
 
+# §17.611 (audit #17) — the LIST view omits the (potentially large) content
+# column: persist_job_artifacts writes the whole compiled_output as one
+# job-level artifact plus one 'code' artifact per CodeGen node, so selecting
+# content for every row materialized + serialized every deliverable body when
+# the list only needs metadata. `content` is Optional (defaults None); full
+# content stays available via GET /artifacts/{artifact_id}. size_bytes is kept
+# so callers still see each artifact's size.
+_ARTIFACT_LIST_COLS = (
+    "id, job_id, node_id, artifact_type, title, file_path, "
+    "mime_type, size_bytes, metadata, created_at"
+)
+
 
 def _require_uuid(raw: str, field: str) -> str:
     try:
@@ -40,7 +52,7 @@ async def list_job_artifacts(
     job_id = _require_uuid(job_id, "job_id")
     rows = (await db.execute(
         text(
-            f"SELECT {_ARTIFACT_COLS} FROM artifacts "
+            f"SELECT {_ARTIFACT_LIST_COLS} FROM artifacts "
             "WHERE job_id = :jid "
             "ORDER BY node_id NULLS FIRST, created_at"
         ),

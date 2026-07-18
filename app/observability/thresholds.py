@@ -49,7 +49,7 @@ def _reset_embedding_snapshot() -> None:
     _prev_embedding_snapshot.clear()
 
 
-async def refresh_gauges(db) -> None:
+async def refresh_gauges(db) -> int | None:
     """Read snapshot counts and push them to Prometheus gauges.
 
     Cheap: each query is indexed and bounded by status. Fails open — a
@@ -80,6 +80,9 @@ async def refresh_gauges(db) -> None:
     except Exception as exc:
         logger.debug("refresh_research_sessions_running_failed: err=%s", exc)
 
+    # §17.611 (audit #23) — return this count so tick() can hand it to
+    # evaluate_thresholds instead of re-running the byte-identical query.
+    unresolved_count: int | None = None
     try:
         row = await db.execute(
             text(
@@ -89,31 +92,41 @@ async def refresh_gauges(db) -> None:
             ),
             {"w": settings.alert_eval_window_minutes},
         )
-        _metrics.unresolved_errors_window.set(int(row.scalar() or 0))
+        unresolved_count = int(row.scalar() or 0)
+        _metrics.unresolved_errors_window.set(unresolved_count)
     except Exception as exc:
         logger.debug("refresh_unresolved_errors_failed: err=%s", exc)
+    return unresolved_count
 
 
-async def evaluate_thresholds(db) -> dict[str, Any]:
+async def evaluate_thresholds(db, *, unresolved_count: int | None = None) -> dict[str, Any]:
     """Evaluate thresholds, fire alerts where breached, return a summary
-    dict for tests + structured logging. Never raises."""
+    dict for tests + structured logging. Never raises.
+
+    §17.611 (audit #23) — ``unresolved_count`` lets ``tick()`` pass the value
+    already computed by ``refresh_gauges`` so the identical count query isn't
+    run twice per tick. When None (standalone call), it is queried here.
+    """
     window = settings.alert_eval_window_minutes
     summary: dict[str, Any] = {"window_minutes": window, "fired": []}
 
     # 1. Unresolved errors
-    try:
-        row = await db.execute(
-            text(
-                "SELECT COUNT(*) FROM error_logs "
-                "WHERE resolved = FALSE "
-                "  AND created_at >= NOW() - make_interval(mins => :w)"
-            ),
-            {"w": window},
-        )
-        unresolved = int(row.scalar() or 0)
-    except Exception as exc:
-        logger.debug("threshold_unresolved_query_failed: err=%s", exc)
-        unresolved = 0
+    if unresolved_count is not None:
+        unresolved = unresolved_count
+    else:
+        try:
+            row = await db.execute(
+                text(
+                    "SELECT COUNT(*) FROM error_logs "
+                    "WHERE resolved = FALSE "
+                    "  AND created_at >= NOW() - make_interval(mins => :w)"
+                ),
+                {"w": window},
+            )
+            unresolved = int(row.scalar() or 0)
+        except Exception as exc:
+            logger.debug("threshold_unresolved_query_failed: err=%s", exc)
+            unresolved = 0
     summary["unresolved_errors"] = unresolved
     if unresolved >= settings.alert_unresolved_errors_threshold > 0:
         result = await _alerts.emit(
@@ -305,8 +318,8 @@ async def tick() -> None:
         return
     try:
         async with async_session() as db:
-            await refresh_gauges(db)
-            summary = await evaluate_thresholds(db)
+            unresolved = await refresh_gauges(db)
+            summary = await evaluate_thresholds(db, unresolved_count=unresolved)
             if summary.get("fired"):
                 logger.info(
                     'event="threshold_eval_fired" count=%d window_m=%d',

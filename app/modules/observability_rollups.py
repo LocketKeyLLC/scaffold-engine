@@ -211,31 +211,30 @@ async def recent_errors(
 # trail or lead a job's lifecycle. ``LEFT JOIN`` so jobs with zero
 # logged calls (planning-only, or pre-J.3.a) still appear with zeros.
 
+#
+# §17.611 (audit #10) — join-then-aggregate. The prior form aggregated the
+# ENTIRE, unbounded, never-pruned llm_call_logs table in a derived subquery
+# before hash-joining to the small windowed jobs set (the window predicate
+# referenced jobs, so Postgres could not push it into the nullable-side
+# subquery). A "last hour" query therefore scanned months of call history and
+# degraded linearly with total LLM volume. Filtering jobs by the window FIRST
+# and probing llm_call_logs via idx_llm_call_logs_job_id keeps cost O(window),
+# matching the sibling llm_rollup / cost_rollup / _NODE_QUALITY_SQL readers.
 _JOBS_COSTS_SQL = """
     SELECT
         j.id            AS job_id,
         j.status        AS job_status,
         j.created_at    AS job_created_at,
-        COALESCE(c.calls, 0)            AS calls,
-        COALESCE(c.cost_usd, 0)         AS cost_usd,
-        COALESCE(c.prompt_tokens, 0)    AS prompt_tokens,
-        COALESCE(c.completion_tokens, 0) AS completion_tokens,
-        COALESCE(c.latency_ms, 0)       AS latency_ms
+        COUNT(c.job_id)                         AS calls,
+        COALESCE(SUM(c.cost_usd), 0)            AS cost_usd,
+        COALESCE(SUM(c.prompt_tokens), 0)       AS prompt_tokens,
+        COALESCE(SUM(c.completion_tokens), 0)   AS completion_tokens,
+        COALESCE(SUM(c.latency_ms), 0)          AS latency_ms
     FROM jobs j
-    LEFT JOIN (
-        SELECT
-            job_id,
-            COUNT(*)                            AS calls,
-            COALESCE(SUM(cost_usd), 0)          AS cost_usd,
-            COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens,
-            COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
-            COALESCE(SUM(latency_ms), 0)        AS latency_ms
-        FROM llm_call_logs
-        WHERE job_id IS NOT NULL
-        GROUP BY job_id
-    ) c ON c.job_id = j.id
+    LEFT JOIN llm_call_logs c ON c.job_id = j.id
     WHERE j.created_at >= NOW() - make_interval(mins => :window_minutes)
-    ORDER BY c.cost_usd DESC NULLS LAST, j.created_at DESC
+    GROUP BY j.id
+    ORDER BY cost_usd DESC NULLS LAST, j.created_at DESC
     LIMIT :limit
 """
 

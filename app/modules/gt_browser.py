@@ -107,9 +107,14 @@ def _join_expr(*parts: str) -> str:
     return " && ".join(p for p in parts if p)
 
 
-def _count_entries(col) -> int:
-    """Accurate row count via count(*) query (vs col.num_entities which lags flush)."""
-    res = col.query(collection_name=COLLECTION_NAME, filter="", output_fields=["count(*)"])
+def _count_entries(col, expr: str = "") -> int:
+    """Accurate row count via count(*) query (vs col.num_entities which lags flush).
+
+    §17.611 (audit #8) — accepts the SAME filter ``expr`` the listing applies so
+    ``total``/``total_pages`` reflect the VISIBLE rows. The default ``expr=""``
+    (unfiltered grand total) is retained for gt_stats.
+    """
+    res = col.query(collection_name=COLLECTION_NAME, filter=expr, output_fields=["count(*)"])
     if res and isinstance(res, list):
         return int(res[0].get("count(*)", 0))
     return 0
@@ -133,13 +138,16 @@ async def gt_list(
     def _sync() -> dict:
         col = _get_client()
         offset = (page - 1) * per_page
-        total = _count_entries(col)
 
         expr = _join_expr(
             "entry_id != ''",
             _domain_expr_clause(domain) if domain else "",
             _supersede_clause(include_history),
         )
+        # §17.611 (audit #8) — count with the SAME filter as the page, else
+        # total/total_pages overstate visible rows (superseded versions in the
+        # default view, or a domain filter) and paginate phantom empty pages.
+        total = _count_entries(col, expr)
 
         results = col.query(
             collection_name=COLLECTION_NAME,
