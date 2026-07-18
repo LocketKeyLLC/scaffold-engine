@@ -1,8 +1,16 @@
-"""§17.350 — Seed the three content gaps that survived §17.158→§17.210
-partial recovery, blocking the last three ``test_golden_retrieval`` cases.
+"""§17.350 / §17.595 — Seed the KB-content-dependent golden docs so
+``test_golden_retrieval`` is restorable offline via one idempotent script.
 
-Each gap is named in the corresponding pytest.mark.skip rationale in
-``tests/test_retrieval_golden.py``:
+§17.350 seeded the three hand-curated gaps (function-calling/prompt,
+hybrid/rag, TOON-spec/spec). §17.595 added the two docs that had been
+Wikipedia-sourced (chain-of-thought/prompt, quantization/llm) as curated
+stand-ins, because the live corpus loses them on the compose-down pattern
+and live re-ingest is fragile + slug-nondeterministic. Running this after a
+corpus wipe restores all five non-``eng`` golden cases (``eng`` retrieval
+comes from the bulk github/wiki corpus, not this script).
+
+The three original hand-curated gaps are named in the historical skip
+rationale in ``tests/test_retrieval_golden.py``:
 
   * ``_NEEDS_FUNCTION_CALLING_DOC`` — prompt partition needs a title
     containing 'function-calling'. Wikipedia has no such article (the
@@ -142,6 +150,76 @@ SEEDS: list[tuple[str, dict[str, Any]]] = [
                 "include_history=true opts into the full chain. Partition keys "
                 "enable per-domain partition-pruning at query time for "
                 "10-100× speedup on focused queries."
+            ),
+        },
+    ),
+    # §17.595 — the prompt/chain-of-thought and llm/quantization golden docs
+    # originally came from live Wikipedia ingests (§17.92:
+    # Chain-of-thought_prompting, Quantization_(signal_processing)). Those
+    # were lost with the corpus (compose-down pattern) and live re-ingest is
+    # fragile + produces non-deterministic slugs. Curated stand-ins here make
+    # `test_golden_retrieval` restorable offline via this one script. Titles
+    # carry the substrings the goldens assert ('prompt engineering', 'quantiz').
+    (
+        "prompt",
+        {
+            "title": "Chain-of-thought prompting — a prompt engineering technique",
+            "tags": ["chain-of-thought", "cot", "prompt engineering", "prompt", "reasoning", "llm"],
+            "source_url": "internal:scaffold-engine/docs/chain-of-thought.md",
+            "content": (
+                "Chain-of-thought (CoT) prompting is a prompt engineering "
+                "technique that elicits intermediate reasoning steps from a large "
+                "language model before it commits to a final answer. Instead of "
+                "asking for the answer directly, the prompt instructs the model to "
+                "'think step by step' (zero-shot CoT) or supplies worked examples "
+                "that each show the reasoning trace (few-shot CoT). Making the "
+                "intermediate steps explicit measurably improves accuracy on "
+                "multi-step arithmetic, commonsense, and symbolic-reasoning tasks, "
+                "because the model allocates more forward-pass computation to the "
+                "sub-problems and conditions each step on the previously generated "
+                "ones. Variants extend the idea: self-consistency samples several "
+                "independent chains and majority-votes the final answers; "
+                "least-to-most decomposes a hard problem into an ordered sequence "
+                "of easier sub-questions; tree-of-thought explores and backtracks "
+                "over a branching space of partial reasoning. CoT is most effective "
+                "on sufficiently large models (an emergent capability) and pairs "
+                "well with tool use — the model reasons about which tool to call, "
+                "then reads the result back into the chain. Downsides: longer "
+                "outputs cost more tokens and latency, and a fluent-looking chain "
+                "can still reach a wrong answer (reasoning is not a correctness "
+                "guarantee). In scaffold-engine, CoT-style prompts back the "
+                "research decompose/gap-analysis stages and the node verifier's "
+                "rationale before its pass/fail verdict."
+            ),
+        },
+    ),
+    (
+        "llm",
+        {
+            "title": "Quantization for LLMs: shrinking model size with int8/int4",
+            "tags": ["quantization", "quantize", "int8", "int4", "gguf", "llm", "inference"],
+            "source_url": "internal:scaffold-engine/docs/quantization.md",
+            "content": (
+                "Quantization reduces the memory footprint and inference cost of a "
+                "large language model by storing its weights (and sometimes "
+                "activations) in a lower-precision numeric format than the 16- or "
+                "32-bit floats used for training. Mapping fp16 weights to 8-bit "
+                "integers roughly halves model size; 4-bit halves it again, so a "
+                "7-billion-parameter model that needs ~14 GB at fp16 fits in "
+                "~4 GB at int4 — the difference between needing a datacenter GPU "
+                "and running on a laptop or CPU. The mapping stores a scale (and "
+                "optionally a zero-point) per group of weights so the original "
+                "range is approximately recoverable at compute time. Post-training "
+                "quantization (PTQ) converts an already-trained model directly — "
+                "GPTQ, AWQ, and llama.cpp's GGUF k-quants are common PTQ schemes; "
+                "quantization-aware training (QAT) instead simulates the rounding "
+                "during fine-tuning so the model adapts to the precision loss. The "
+                "trade-off is a small, usually acceptable drop in output quality "
+                "(perplexity rises slightly) in exchange for large gains in speed "
+                "and reduced VRAM/RAM. scaffold-engine runs CPU-only inference via "
+                "Ollama, which serves quantized GGUF builds (e.g. q4_K_M) so 7B "
+                "models stay within host memory — the same rationale that keeps "
+                "the embedder and reranker CPU-tractable."
             ),
         },
     ),
